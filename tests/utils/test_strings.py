@@ -1,8 +1,7 @@
-"""String utility tests for snake/camel/Pascal case conversion and Django lookup-path flattening.
+"""String utility tests for Pascal case conversion and Django lookup-path flattening.
 
-Case conversion is a pure function; GraphQL names it produces are asserted live
-via introspection in ``examples/fakeshop/test_query/test_schema_composition_api.py``
-and filter lookup camelCase in ``examples/fakeshop/test_query/test_library_api.py``.
+Case conversion is a pure function; the GraphQL type names it produces are asserted
+live via introspection in ``examples/fakeshop/test_query/test_schema_composition_api.py``.
 """
 
 from collections.abc import Callable
@@ -15,10 +14,8 @@ from typing_extensions import override
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils.strings import (
     flatten_lookup_path,
-    graphql_camel_name,
     pascal_case,
     pascal_case_or_raise,
-    snake_case,
 )
 from tests._idioms import ClaimsClass, ClassReadRaises
 
@@ -43,58 +40,6 @@ class _HostileString(str):
         raise RuntimeError("hostile string")
 
 
-def test_snake_case_round_trips_camel_case() -> None:
-    assert snake_case("name") == "name"
-    assert snake_case("isPrivate") == "is_private"
-    assert snake_case("createdDate") == "created_date"
-
-
-@pytest.mark.parametrize(
-    ("camel", "snake"),
-    [
-        ("HTTPServer", "http_server"),
-        ("HTTPServer2API", "http_server2_api"),
-        ("field2Value", "field2_value"),
-        ("_legacyId", "_legacy_id"),
-        ("double_Underscore", "double__underscore"),
-        ("trailing_", "trailing_"),
-    ],
-)
-def test_snake_case_pins_acronym_digit_and_underscore_edges(camel: str, snake: str) -> None:
-    assert snake_case(camel) == snake
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "http_server",
-        "field2",
-        "field2_value",
-        "field_2",
-        "version_2_value",
-        "_legacy_id",
-        "double__underscore",
-        "a_a_a",
-        "trailing_",
-        "__x_foo",
-        "___x_foo",
-        "__x_a",
-        "__x_1",
-        "__x_y_z",
-        "a_x",
-        "x_a",
-        "a__x",
-        "a__x_a",
-        "a__xa",
-        "a__b__c",
-        "a__b_c",
-        "a_b__c",
-    ],
-)
-def test_graphql_camel_name_round_trips_normalized_snake_case(name: str) -> None:
-    assert snake_case(graphql_camel_name(name)) == name
-
-
 def test_pascal_case_handles_snake_case_inputs() -> None:
     assert pascal_case("status") == "Status"
     assert pascal_case("is_active") == "IsActive"
@@ -106,9 +51,8 @@ def test_pascal_case_handles_snake_case_inputs() -> None:
     # GraphQL type-name stems (operator bags, range inputs, choice enums).
     assert pascal_case("field_2") == "Field_2"
     assert pascal_case("my_HTTP_response") == "MyHttpResponse"
-    # Leading / trailing underscore runs are preserved verbatim -- the Pascal
-    # dual of ``graphql_camel_name``'s edge rule. Collapsing them made
-    # ``price`` / ``price_`` / ``_price`` members of one set mint the same
+    # Leading / trailing underscore runs are preserved verbatim: collapsing them
+    # would make ``price`` / ``price_`` / ``_price`` members of one set mint the same
     # generated type-name stem (operator bag / range / enum), and two shapes
     # under one name cannot share a schema.
     assert pascal_case("_leading") == "_Leading"
@@ -142,29 +86,8 @@ def test_flatten_lookup_path_flattens_every_lookup_sep() -> None:
 
 def test_string_helpers_normalize_hostile_string_subclasses() -> None:
     """Hostile subclass overrides cannot escape through helper internals."""
-    assert snake_case(_HostileString("isPrivate")) == "is_private"
     assert pascal_case(_HostileString("is_private")) == "IsPrivate"
-    assert graphql_camel_name(_HostileString("is_private")) == "isPrivate"
     assert flatten_lookup_path(_HostileString("category__name")) == "category_name"
-
-
-def test_graphql_camel_name_escapes_adjacent_uppercase_segments() -> None:
-    """Adjacent one-letter snake segments keep a reversible separator marker."""
-    assert graphql_camel_name("a_a_a") == "aA__xA"
-    assert snake_case(graphql_camel_name("a_a_a")) == "a_a_a"
-    assert snake_case("aA__xA") != snake_case("aAA")
-
-
-def test_snake_case_distinguishes_x_token_from_adjacent_uppercase_escape() -> None:
-    """__x only functions as an adjacent-segment escape after an uppercase character."""
-    # After an uppercase segment, __x is the adjacent one-letter separator
-    assert snake_case("aA__xA") == "a_a_a"
-    assert snake_case("fooX__xBar") == "foo_x_bar"
-
-    # At start or after leading underscores, __x is literal and not an escape
-    assert snake_case("__xFoo") == "__x_foo"
-    assert snake_case("___xFoo") == "___x_foo"
-    assert snake_case("__xA") == "__x_a"
 
 
 def test_pascal_case_or_raise_raises_on_empty_and_delegates_on_valid() -> None:
@@ -186,12 +109,7 @@ def test_pascal_case_or_raise_raises_on_empty_and_delegates_on_valid() -> None:
 
 @pytest.mark.parametrize(
     "helper",
-    [
-        snake_case,
-        pascal_case,
-        graphql_camel_name,
-        flatten_lookup_path,
-    ],
+    [pascal_case, flatten_lookup_path],
 )
 def test_string_helpers_reject_non_string_inputs(helper: Callable[[str], object]) -> None:
     """Malformed helper inputs fail with the package's typed configuration error."""
@@ -203,12 +121,7 @@ def test_string_helpers_reject_non_string_inputs(helper: Callable[[str], object]
 
 @pytest.mark.parametrize(
     "helper",
-    [
-        snake_case,
-        pascal_case,
-        graphql_camel_name,
-        flatten_lookup_path,
-    ],
+    [pascal_case, flatten_lookup_path],
 )
 @pytest.mark.parametrize(
     ("value", "type_name"),
@@ -239,21 +152,3 @@ def test_string_helpers_reject_a_value_that_is_not_really_a_string(
         # basedpyright: a non-string input is the bad value the helper must reject
         helper(value)  # pyright: ignore[reportArgumentType]
     assert str(excinfo.value) == f"String helper input must be a string; got {type_name}."
-
-
-def test_snake_case_preserves_lru_cache_controls() -> None:
-    """The normalization boundary keeps the ``lru_cache`` cache-control surface and public name."""
-    assert snake_case.__name__ == "snake_case"
-    assert snake_case.__qualname__ == "snake_case"
-    snake_case.cache_clear()
-    assert snake_case.cache_parameters() == {"maxsize": 2048, "typed": False}
-    before = snake_case.cache_info()
-
-    assert snake_case("isPrivate") == "is_private"
-    after_miss = snake_case.cache_info()
-    assert after_miss.misses == before.misses + 1
-
-    assert snake_case("isPrivate") == "is_private"
-    after_hit = snake_case.cache_info()
-    assert after_hit.hits == after_miss.hits + 1
-    assert snake_case.__wrapped__("isPrivate") == "is_private"

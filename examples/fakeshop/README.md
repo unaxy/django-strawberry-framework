@@ -439,8 +439,8 @@ viewer can see, as its nested spelling `books: { titleStarts: ... }` does.
 ```
 
 `available` and `checked_out` are the enum values generated from the model's
-`TextChoices`. Lookup names camel-case on the wire, so the `icontains` you declared
-is `iContains` in the query. The `shelf: { topic: ... }` branch is `BookFilter.shelf` reaching into
+`TextChoices`. Lookup names follow the schema's naming config, so the `icontains` you
+declared is `iContains` in the query under the default config. The `shelf: { topic: ... }` branch is `BookFilter.shelf` reaching into
 `ShelfFilter`. The `shelf__code` path shorthand in `BookOrder.Meta.fields` also
 renders as a flat `shelfCode: ASC` on the same input type.
 

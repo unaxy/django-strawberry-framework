@@ -271,34 +271,6 @@ def test_factory_skips_related_order_with_none_target() -> None:
     assert "BookOrderNoneInputType" in OrderArgumentsFactory.input_object_types
 
 
-def test_factory_rejects_related_orders_with_colliding_graphql_names() -> None:
-    """The order family shares the generated GraphQL-name collision guard."""
-
-    class ShelfOrder(OrderSet):
-        class Meta:
-            model = library_models.Shelf
-            fields = ["code"]
-
-    class BranchCollisionOrder(OrderSet):
-        foo_bar = RelatedOrder(ShelfOrder, field_name="shelves")
-        fooBar = RelatedOrder(  # noqa: N815 - intentional camel-case collision fixture.
-            ShelfOrder,
-            field_name="alt_shelves",
-        )
-
-        class Meta:
-            model = library_models.Branch
-            fields = ["name"]
-
-    factory = OrderArgumentsFactory(BranchCollisionOrder)
-    with pytest.raises(ConfigurationError) as excinfo:
-        _ = factory.arguments
-    message = str(excinfo.value)
-    assert "'foo_bar'" in message
-    assert "'fooBar'" in message
-    assert "GraphQL input field name 'fooBar'" in message
-
-
 # ---------------------------------------------------------------------------
 # Empty-orderset guard -- a zero-field OrderSet must fail loud at the factory
 # boundary (a ConfigurationError naming the set), never reach schema build as a

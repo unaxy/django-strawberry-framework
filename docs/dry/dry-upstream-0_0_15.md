@@ -28,7 +28,7 @@ How to read the entries:
 Every item is a candidate, not a plan. Each one still gets the research pass, a root-cause fix and a live test before
 it lands with its tick. An unticked item whose research note says "yours" waits on a maintainer decision.
 
-Progress: 34 of 39 landed; 5 yours (28, 29, 30, 32, 33).
+Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
 
 ## Fixes behaviour (our copy is wrong today)
 
@@ -799,7 +799,7 @@ Progress: 34 of 39 landed; 5 yours (28, 29, 30, 32, 33).
     its value, `MEMBER_NULL` is refused); three of its four rows fail on the casefold.
     CHANGELOG: CHANGELOGTODO.md entry 902.
 
-- [ ] 28. (S12) `graphql_camel_name` pins input names instead of letting the `NameConverter` decide
+- [x] 28. (S12) `graphql_camel_name` pins input names instead of letting the `NameConverter` decide
   - Our code:
     - `utils/inputs.py::build_strawberry_input_class`;
     - `forms/inputs.py::_simple_triple` and `::_field_triple_and_spec`;
@@ -828,6 +828,88 @@ Progress: 34 of 39 landed; 5 yours (28, 29, 30, 32, 33).
       overriding `get_graphql_name` / `from_field` still respells pinned names. That exposed item 37.
     - If you want parity (names matching the output types and `auto_camel_case=False`), item 37's read-back is the
       prerequisite; then the swap is a pure wire decision over about 10 to 15 test files.
+  - Landed (maintainer chose the swap): every generated input field is built with no `name=`, so the executing
+    schema's `NameConverter` names it as it names output fields; only the Python-keyword escapes (`in`, `and`, `or`,
+    `not`) keep `strawberry.field(name=...)`. `utils/strings.py::graphql_camel_name` and `::snake_case` are deleted,
+    `LOOKUP_NAME_MAP` holds python attrs only, and `lookup_leaf_names` composes no GraphQL name. The bind-time
+    `InputFieldSpec.graphql_name` is `utils/inputs.py::predicted_input_field_name` (Strawberry's default converter);
+    `published_input_specs` (item 37) reads the real one per request. The four bind-time GraphQL-name collision
+    guards are gone; `schema.py::_refuse_field_name_collisions` (item 4) refuses a pair per schema. Wire: 31 fakeshop
+    input fields and one hashed serializer input type rename under the default config (all digit boundaries:
+    `isbn_13` -> `isbn13`, `address_2` -> `address2`), every generated input follows `auto_camel_case=False` and
+    custom converters. `_shape_token` still hashes the (predicted) name, so only that one derived type renames.
+    Card `TODO-BETA-077-0.1.7` closes with it; the converter wrapper it prescribed is not built (the per-schema
+    refusal replaces it). Live rows:
+    `examples/fakeshop/test_query/test_library_api.py::test_snake_case_schema_names_generated_filter_and_order_fields_in_snake_case`,
+    `::test_snake_case_schema_keeps_the_keyword_lookup_and_logic_key_spellings`,
+    `::test_snake_case_schema_writes_a_generated_relation_under_its_snake_name`;
+    `examples/fakeshop/test_query/test_input_shapes_api.py::test_digit_boundary_columns_the_default_converter_names_alike_refuse_the_schema`,
+    `::test_digit_boundary_columns_publish_and_write_both_without_auto_camel_case_over_http`;
+    `examples/fakeshop/test_query/test_filter_declarations_api.py::test_filter_members_the_default_converter_names_alike_refuse_the_schema`;
+    `examples/fakeshop/test_query/test_model_mutation_flows_api.py::test_consumer_and_generated_fields_key_each_refusal_to_the_executing_schema`,
+    `::test_unnamed_raw_relation_list_is_charged_before_any_write`. CHANGELOG: CHANGELOGTODO.md entry 903.
+  - Review (2026-11-02; three read-only passes against card `TODO-BETA-077-0.1.7`: runtime, tests, contracts). No
+    runtime defect: publish, decode, error keys (model, form, serializer, nested), the resource budget, transform
+    chains, range and list filters, `DjangoListField` arguments and several schemas over one class set all agree under
+    the default config, `auto_camel_case=False`, a keyword-respelling and an upper-casing converter (8,892 fakeshop
+    input fields). Open at review, closed below:
+    - Tests: `mutations/inputs.py` builds the model flavor's bind-time name as
+      `field.graphql_name or predicted_input_field_name(python_name)`; mutating it to `or python_name` survives every
+      row (runtime always reads `published_input_specs`). Pin it at spec level as forms and serializers do, or delete
+      the prediction there if nothing reads it before the read-back
+    - Tests: no row builds a schema under a custom `NameConverter` and sends a generated filter or order input field
+      (card DoD 2); the custom-converter rows cover mutation inputs and an empty `DjangoListField` `orderBy` only
+    - Tests: the deleted `tests/orders/test_factories.py::test_factory_rejects_related_orders_with_colliding_graphql_names`
+      became a leaf-column row in `tests/types/test_definition_order.py`, so the `RelatedOrder` collision shape is no
+      longer pinned, and no live order-collision row exists (filter and model have one); the form / serializer
+      collision rows are package-tier only
+    - Contract: on a plain `strawberry.Schema`, `field_2` beside `field2` on a `FilterSet` / `OrderSet` publishes one
+      field and silently drops the other (bind time refused it under any schema). `docs/README.md` says only that a
+      plain schema "runs no such check"; state the drop (card Scope 5: document or refuse), and in the GLOSSARY rows
+    - Contract: the per-schema refusal (`schema.py::_refuse_field_name_collisions`) names the generated type
+      (`P5filterInputType`) and advises "give one an explicit name=", which a consumer cannot do on a generated filter,
+      order, form or serializer field; name the set class and its `Meta.fields` / `exclude` entry, as the deleted
+      bind-time guards did
+    - Docs: README and GLOSSARY say `in` / `and` / `or` / `not` keep their spellings "under every config"; a converter
+      overriding `get_graphql_name` respells them (`In`, `And`), and runtime decodes them correctly. Reword
+    - Docs: CHANGELOGTODO.md entry 903 names only the digit boundary; the old caser also differed on other shapes
+      (`a_b_c` was `aB__xC`, now `aBC`; `URL_name` was `URL__xName`, now `URLName`; `_x` was `_x`, now `X`). The
+      hashed serializer input type rename is stated generically; name
+      `PatronProfileSerializerAddress_u2b828be281257a1c0Favorite_ugenre982b97c775a8d68dPartialInput` ->
+      `PatronProfileSerializerAddress_u235621b729422e33eFavorite_ugenre982b97c775a8d68dPartialInput`
+    - Docs: `docs/dry/DRY.md` still reads `LOOKUP_NAME_MAP (Django lookup -> GraphQL spelling)`; the map is lookup ->
+      python attr. `ATTENTION.md` names the deleted `snake_case(...)` (maintainer marker doc, sweep or leave)
+    - Card: KANBAN.md cites `utils/strings.py::graphql_camel_name` in card `TODO-BETA-077-0.1.7`, the only
+      `check_citations` failure, so the commit is blocked on it. Its DoD 1 ("default SDL byte-for-byte unchanged") and
+      Scope 2 (the converter wrapper) are false once this lands. The contracts pass recommends deleting the card (a done
+      card needs a spec; the remaining scope is the rejected wrapper) and dropping its card-070 Related reference:
+      maintainer's call
+    - Not item 28: the edited `test_library_api.py` rows that still fail (`test_update_sending_the_primary_key_*` x6,
+      `test_model_create_edition_refuses_the_model_spelling_isbn_10_over_http`) fail identically at `3cfaceb9` on
+      graphql-core 3.3.1's unknown-field wording; only the quoted name differs
+  - Review items closed (2026-11-02):
+    - The model flavor's bind-time name is read where a request has no executable schema
+      (`utils/inputs.py::published_input_specs` keeps the bind's names for a direct-call stub), so it stays, pinned
+      at spec level by `tests/mutations/test_inputs.py::test_mutation_input_field_specs_record_the_bind_time_wire_name`
+    - Live: `examples/fakeshop/test_query/test_library_api.py::test_custom_converter_names_generated_filter_and_order_fields_end_to_end`
+      (an upper-casing converter, `IN` / `OR` included),
+      `::test_related_order_members_the_default_converter_names_alike_refuse_the_schema`,
+      `::test_related_order_members_publish_and_order_apart_without_auto_camel_case_over_http`,
+      `examples/fakeshop/test_query/test_filter_declarations_api.py::test_a_path_member_beside_a_declared_filter_the_converter_names_alike_names_the_path`
+    - The per-schema refusal names what the consumer can change: `build_strawberry_input_class(sources=...)` records
+      each generated class's `utils/inputs.py::GeneratedFieldSources` (declaration, members), and
+      `utils/inputs.py::field_name_collision_remedy` words the tail (two generated fields: the set / model / form /
+      serializer and both members; a declared field beside a generated one: its `name=` or the member to drop; two
+      declared fields: rename or `name=`). `GeneratedInputFieldSpec.member` carries the set member. Operator-bag and
+      range inputs carry no sources (only a converter naming two lookups alike reaches them)
+    - README, GLOSSARY (`filterset`, `orderset`, `input-type-generation`, `strawberry_config`, `djangoschema`) and
+      spec-027 state the plain-schema drop and the `get_graphql_name` respelling of the keyword names; CHANGELOGTODO
+      903 names every caser difference and the hashed serializer type rename; `docs/dry/DRY.md` and `ATTENTION.md`
+      swept
+    - Not item 28: the 7 `test_library_api.py` rows above,
+      `test_filter_declarations_api.py::test_a_required_deferred_filter_annotation_refuses_omission` and
+      `test_input_shapes_api.py::test_a_validating_nullable_boolean_form_field_requires_a_boolean_over_http[omitted|null]`
+      fail identically at `8a7cd8cb` on graphql-core 3.3.1's wording
 
 - [ ] 29. (S6) Consumer per-frame masking → `SchemaExtension.on_stream_result`
   - Our code: `consumers.py::_stop_aware_results #"mask_execution_result(result, policy)"` (~3 lines plus the local

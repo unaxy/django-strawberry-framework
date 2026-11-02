@@ -127,7 +127,7 @@ schema = DjangoSchema(query=Query, mutation=Mutation, config=strawberry_config()
 
 The two [`FilterSet`][glossary-filterset]s and two [`OrderSet`][glossary-orderset]s are inlined so the snippet registers a `DjangoType` for every model its fields and sidecars reach; `finalize_django_types()` raises `ConfigurationError` for a relation whose target model has no registered type, rather than substituting a stub. The live products sidecars in `apps/products/filters.py` / `apps/products/orders.py` span all four models and add the `check_<field>_permission` gates GOAL's `filters.py` shows.
 
-**Read.** Every connection accepts `first` / `last` / `before` / `after`, plus a `filter:` and `orderBy:` argument synthesized from the type's sidecars (lookup names are camel-cased on the wire: `icontains` is `iContains`). The request runs the type's `get_queryset` first, then filter, then order, then a pk tiebreak, then the optimizer plan for the selected `edges { node }` tree, then the cursor slice. An anonymous caller sees no private row through any path: root connection, nested relation, or node refetch.
+**Read.** Every connection accepts `first` / `last` / `before` / `after`, plus a `filter:` and `orderBy:` argument synthesized from the type's sidecars (lookup names follow the schema's naming config: `icontains` is `iContains` by default). The request runs the type's `get_queryset` first, then filter, then order, then a pk tiebreak, then the optimizer plan for the selected `edges { node }` tree, then the cursor slice. An anonymous caller sees no private row through any path: root connection, nested relation, or node refetch.
 
 ```graphql
 {

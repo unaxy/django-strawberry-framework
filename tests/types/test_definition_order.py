@@ -42,6 +42,8 @@ from strawberry.types.lazy_type import StrawberryLazyReference
 from typing_extensions import override
 
 from django_strawberry_framework import (
+    DjangoConnection,
+    DjangoConnectionField,
     DjangoSchema,
     DjangoType,
     auto,
@@ -49,6 +51,8 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.filters import FilterSet
+from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.base import _build_annotations
 from django_strawberry_framework.utils import truth
@@ -678,6 +682,8 @@ def test_camel_case_field_collision_raises_at_default_schema_build() -> None:
     message = str(exc.value)
     assert message.startswith("CamelCollideType: fields 'foo_bar' and 'fooBar' both publish ")
     assert "'fooBar'" in message
+    # Two declared fields keep the consumer's own levers.
+    assert message.endswith("Rename one, give one an explicit name=, or drop one from the type.")
 
 
 def test_camel_case_field_pair_is_two_fields_without_auto_camel_case() -> None:
@@ -691,6 +697,87 @@ def test_camel_case_field_pair_is_two_fields_without_auto_camel_case() -> None:
     )
     assert result.errors is None, result.errors
     assert set(_introspected_field_types(result, "t")) == {"foo_bar", "fooBar"}
+
+
+def _camel_collide_set_schema(
+    model: type[models.Model],
+    family: str,
+    config: StrawberryConfig,
+) -> DjangoSchema:
+    """A schema whose one type over ``model`` filters or orders by ``foo_bar`` and ``fooBar``."""
+    registry.clear()
+    set_meta = type("Meta", (), {"model": model, "fields": ["foo_bar", "fooBar"]})
+    set_base = FilterSet if family == "filter" else OrderSet
+    set_cls = type(f"CamelCollide{family.title()}", (set_base,), {"Meta": set_meta})
+    node_meta = type(
+        "Meta",
+        (),
+        {
+            "model": model,
+            "fields": ("id",),
+            "interfaces": (relay.Node,),
+            "filterset_class" if family == "filter" else "orderset_class": set_cls,
+        },
+    )
+    node_cls = type("CamelCollideSetNode", (DjangoType,), {"Meta": node_meta})
+    finalize_django_types()
+
+    @strawberry.type
+    class Query:
+        nodes: DjangoConnection[node_cls] = DjangoConnectionField(node_cls)
+
+    return DjangoSchema(query=Query, config=config)
+
+
+@pytest.mark.parametrize(
+    ("family", "input_type"),
+    [("filter", "CamelCollideFilterInputType"), ("order", "CamelCollideOrderInputType")],
+)
+def test_generated_set_input_pair_is_refused_only_where_the_schema_names_it_alike(
+    family: str,
+    input_type: str,
+) -> None:
+    """A filter / order input field pair the converter names alike is refused per schema.
+
+    Generated input fields carry no ``name=``, so ``foo_bar`` and ``fooBar`` both
+    publish ``fooBar`` under the default config and the build names the generated
+    input type, the set and the two members; under ``auto_camel_case=False`` they
+    are two fields.
+    """
+
+    class CamelCollideSetModel(models.Model):
+        foo_bar: "models.IntegerField[float | int | str | Combinable, int]" = models.IntegerField()
+        fooBar: "models.IntegerField[float | int | str | Combinable, int]" = models.IntegerField()  # noqa: N815 - intentional collision fixture
+
+        class Meta:
+            managed = False
+            app_label = "test_field_surface"
+
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _camel_collide_set_schema(CamelCollideSetModel, family, strawberry_config())
+    message = str(exc.value)
+    assert message.startswith(f"{input_type}: fields 'foo_bar' and 'fooBar' both publish ")
+    assert "'fooBar'" in message
+    family_label = "FilterSet" if family == "filter" else "OrderSet"
+    assert message.endswith(
+        f"{family_label} 'CamelCollide{family.title()}' generates them from members 'foo_bar' "
+        "and 'fooBar'. Rename one member or drop one via Meta.fields / Meta.exclude.",
+    )
+
+    schema = _camel_collide_set_schema(
+        CamelCollideSetModel,
+        family,
+        strawberry_config(auto_camel_case=False),
+    )
+    result = schema.execute_sync(
+        f'{{ t: __type(name: "{input_type}") {{ inputFields {{ name }} }} }}',
+    )
+    assert result.errors is None, result.errors
+    assert result.data is not None
+    data: dict[str, object] = result.data
+    input_fields = require(require(data["t"], is_object_dict)["inputFields"], is_object_list)
+    names = {require(field, is_object_dict)["name"] for field in input_fields}
+    assert {"foo_bar", "fooBar"} <= names
 
 
 def test_custom_name_converter_collision_raises_at_schema_build() -> None:

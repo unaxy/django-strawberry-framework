@@ -253,7 +253,7 @@ def _build_input_fields(
         # affordance the converter ignores today.
         return convert_order_field_to_input_annotation(None, None), top_name
 
-    # The per-field emission scaffold (python-attr flatten -> camel-case ->
+    # The per-field emission scaffold (python-attr flatten ->
     # optional kwargs -> related lazy-ref with the ``RelatedOrder(None, ...)``
     # placeholder skip vs leaf -> triple + ``FieldSpec``) is single-sited in
     # ``utils/inputs.py::emit_set_input_field_triples``; the

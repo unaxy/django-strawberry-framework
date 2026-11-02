@@ -799,7 +799,7 @@ def test_active_input_permission_mixin_field_paths_and_branches() -> None:
                 field_specs={
                     (_OtherSet, "sub_field"): GeneratedInputFieldSpec(
                         "sub_field",
-                        "subField",
+                        "sub_field",
                         "sub_field",
                     ),
                 },

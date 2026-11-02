@@ -97,7 +97,7 @@ from django_strawberry_framework.forms.sets import (
 )
 from django_strawberry_framework.mutations.inputs import CREATE, PARTIAL
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.scalars import Upload, strawberry_config
+from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.converters import convert_choices_to_enum
 from django_strawberry_framework.utils._narrowing import enum_value, list_of, require
@@ -456,7 +456,7 @@ def _item_model_form() -> type[forms.ModelForm[product_models.Item]]:
 
 def test_create_input_required_and_optional_shapes() -> None:
     """``<FormClass>Input``: required fields non-optional, optional fields ``| None`` + UNSET."""
-    cre, _ = build_form_input_class(_item_model_form(), operation_kind=CREATE)
+    cre, specs = build_form_input_class(_item_model_form(), operation_kind=CREATE)
     assert cre.__name__ == "ItemModelFormInput"
     fields = _field_map(cre)
 
@@ -464,9 +464,11 @@ def test_create_input_required_and_optional_shapes() -> None:
     assert not _is_optional(fields["name"])
     assert _inner_type(fields["name"]) is str
 
-    # The FK ``category`` -> ``category_id`` / ``categoryId``, required.
+    # The FK ``category`` -> ``category_id``, required; the schema's converter names it
+    # (no ``name=``), and the spec records the default converter's ``categoryId``.
     assert not _is_optional(fields["category_id"])
-    assert fields["category_id"].graphql_name == "categoryId"
+    assert fields["category_id"].graphql_name is None
+    assert next(s for s in specs if s.input_attr == "category_id").graphql_name == "categoryId"
 
     # The non-model required ``confirm`` is required in create.
     assert not _is_optional(fields["confirm"])
@@ -2577,28 +2579,6 @@ def test_relation_id_attr_collision_is_fail_loud() -> None:
     assert "collide" in message
 
 
-def test_camel_case_graphql_name_collision_is_fail_loud() -> None:
-    """Two fields whose names default-camel-case to ONE GraphQL name raise.
-
-    They raise rather than silently dropping one input.
-
-    ``foo_bar`` and ``fooBar`` produce DISTINCT input attrs (so the input-attr guard
-    passes) but the SAME ``graphql_name`` ``fooBar``; Strawberry would collapse the two
-    onto one schema field. The graphql-name guard catches and names them, mirroring the
-    per-schema guard ``schema.py::_refuse_field_name_collisions``.
-    """
-
-    class CamelCollideForm(forms.Form):
-        foo_bar = forms.IntegerField()
-        fooBar = forms.IntegerField()  # noqa: N815 - intentional collision fixture
-
-    with pytest.raises(ConfigurationError) as exc:
-        build_form_input_class(CamelCollideForm, operation_kind=FORM)
-    message = str(exc.value)
-    assert "fooBar" in message
-    assert "collide" in message
-
-
 def test_extra_field_shadowing_reverse_relation_stays_scalar() -> None:
     """An extra ModelForm field reusing a reverse-accessor name stays on the scalar path.
 
@@ -2701,42 +2681,6 @@ def test_guard_partial_required_column_less_fields_catches_dropped_gfk_extra() -
     effective = resolve_effective_form_fields(TaggedItemForm, exclude=("content_object",))
     with pytest.raises(ConfigurationError, match="content_object"):
         guard_partial_required_column_less_fields(TaggedItemForm, effective)
-
-
-def test_digit_boundary_form_fields_survive_distinct_in_sdl() -> None:
-    """``field_2`` / ``field2`` both appear on the generated form input (shared pin path).
-
-    Package ``graphql_camel_name`` keeps them distinct; ``build_strawberry_input_class``
-    pins every wire name so Strawberry's converter cannot collapse ``field_2`` onto
-    ``field2``. Forms route through that shared builder - this locks the form flavor.
-    """
-
-    class DigitForm(forms.Form):
-        field_2 = forms.IntegerField()
-        field2 = forms.IntegerField()
-
-    cre, specs = build_form_input_class(DigitForm, operation_kind=FORM)
-    assert {(s.input_attr, s.graphql_name) for s in specs} == {
-        ("field_2", "field_2"),
-        ("field2", "field2"),
-    }
-
-    def _probe(inp: object) -> int:
-        del inp  # Strawberry derives the argument whose SDL name the test reads; never runs
-        return 1
-
-    _probe.__annotations__ = {"inp": cre, "return": int}
-
-    @strawberry.type
-    class Query:
-        probe: int = strawberry.field(resolver=_probe)
-
-    schema = strawberry.Schema(query=Query, config=strawberry_config())
-    sdl = schema.as_str()
-    block = sdl[sdl.index("input DigitFormInput") :]
-    block = block[: block.index("}")]
-    assert "field_2:" in block
-    assert "field2:" in block
 
 
 @pytest.mark.parametrize("to_field_name", [None, "name"])

@@ -4260,7 +4260,7 @@ _HOUSE_SHAPES = {
     "flat-hop-in": _HouseShape("publishers", "{editionsPublisherId: {in: [GID]}}"),
     "nested-hop-exact": _HouseShape("publishers", "{editions: {publisher: {id: {exact: GID}}}}"),
     "nested-hop-in": _HouseShape("publishers", "{editions: {publisher: {id: {in: [GID]}}}}"),
-    "flat-hop-forward-key-in": _HouseShape("publishers", "{editionsPublisher_2: {in: [GID]}}"),
+    "flat-hop-forward-key-in": _HouseShape("publishers", "{editionsPublisher2: {in: [GID]}}"),
     "printing-flat-hop-exact": _HouseShape("printings", "{editionPublisherId: {exact: GID}}"),
     "printing-flat-hop-in": _HouseShape("printings", "{editionPublisherId: {in: [GID]}}"),
     "printing-nested-hop-exact": _HouseShape(
@@ -4271,15 +4271,15 @@ _HOUSE_SHAPES = {
         "printings",
         "{edition: {publisher: {id: {in: [GID]}}}}",
     ),
-    "forward-key-exact": _HouseShape("printings", "{publisher_2: {exact: GID}}"),
-    "forward-key-in": _HouseShape("printings", "{publisher_2: {in: [GID]}}"),
+    "forward-key-exact": _HouseShape("printings", "{publisher2: {exact: GID}}"),
+    "forward-key-in": _HouseShape("printings", "{publisher2: {in: [GID]}}"),
     "forward-key-not": _HouseShape(
         "printings",
-        "{not: {publisher_2: {exact: GID}}}",
+        "{not: {publisher2: {exact: GID}}}",
         negated=True,
     ),
-    "hop-forward-key-exact": _HouseShape("printings", "{editionPublisher_2: {exact: GID}}"),
-    "nested-forward-key-exact": _HouseShape("printings", "{edition: {publisher_2: {exact: GID}}}"),
+    "hop-forward-key-exact": _HouseShape("printings", "{editionPublisher2: {exact: GID}}"),
+    "nested-forward-key-exact": _HouseShape("printings", "{edition: {publisher2: {exact: GID}}}"),
     "to-field-exact": _HouseShape("printings", "{licensor: {exact: GID}}"),
     "to-field-in": _HouseShape("printings", "{licensor: {in: [GID]}}"),
     "to-field-not": _HouseShape("printings", "{not: {licensor: {exact: GID}}}", negated=True),
@@ -4298,7 +4298,7 @@ _HOUSE_SHAPES = {
     ),
     "window-to-many-exact": _HouseShape("window", "{coPublishers: {exact: [GID]}}"),
     "window-to-field-exact": _HouseShape("window", "{licensor: {exact: GID}}"),
-    "window-forward-key-in": _HouseShape("window", "{publisher_2: {in: [GID]}}"),
+    "window-forward-key-in": _HouseShape("window", "{publisher2: {in: [GID]}}"),
 }
 
 #: The run size each seeded house's one printing carries, so a printing row names its house.
@@ -6157,7 +6157,7 @@ _UNSTORABLE_FILTER_ROWS: dict[str, tuple[str, JSONObject, str]] = {
     "in-member-text-pk": (
         (
             "query($v: [String!]) { allLibraryPrintingsConnection("
-            "filter: { editionIsbn_13: { in: $v } }) { edges { node { runSize } } } }"
+            "filter: { editionIsbn13: { in: $v } }) { edges { node { runSize } } } }"
         ),
         {"v": ["978", f"a{_LONE_SURROGATE}"]},
         "edition__isbn_13__in",
@@ -16039,6 +16039,223 @@ def test_snake_case_page_info_only_page_reports_has_next_page(page: str) -> None
     assert json_at(payload, *path, "page_info", "has_next_page") is True, payload
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("head", ["book-title", "edition-isbn"])
+def test_snake_case_schema_names_generated_filter_and_order_fields_in_snake_case(
+    head: str,
+) -> None:
+    """Under ``auto_camel_case=False`` generated filter and order fields are snake case.
+
+    No generated input field carries ``name=``: the schema's converter names the
+    lookups (``i_contains``), the relation head (``shelf_id``) and a column with a
+    digit boundary (``isbn_13``), as it names the output fields; the keyword
+    lookup ``in`` and the logic key ``or`` keep their spellings.
+    """
+    if head == "book-title":
+        shelf = _seed_shelf()
+        _seed_genre_with_books("Alpha", shelf, ("alpha one", "alpha two", "beta"))
+        document = (
+            '{ all_library_books(filter: {or: [{title: {i_contains: "ALPHA"}}, '
+            f'{{title: {{exact: "beta"}}}}], shelf_id: {{in: [{shelf.pk}]}}}}, '
+            "order_by: [{title: DESC}]) { title } }"
+        )
+        expected: JSONObject = {
+            "all_library_books": [
+                {"title": "beta"},
+                {"title": "alpha two"},
+                {"title": "alpha one"},
+            ],
+        }
+    else:
+        publisher = models.Publisher.objects.create(name="Snake Press", house_code="SNAKE")
+        for run_size, isbn in enumerate(("978-1", "978-2", "978-3"), start=1):
+            edition = models.Edition.objects.create(isbn_13=isbn, publisher=publisher)
+            models.Printing.objects.create(edition=edition, run_size=run_size)
+        document = (
+            "{ all_library_printings_connection(filter: {or: ["
+            '{edition_isbn_13: {exact: "978-1"}}, {edition: {isbn_13: {in: ["978-3"]}}}]}, '
+            "order_by: [{edition: {isbn_13: DESC}}]) { edges { node { run_size } } } }"
+        )
+        expected = {
+            "all_library_printings_connection": {
+                "edges": [{"node": {"run_size": 3}}, {"node": {"run_size": 1}}],
+            },
+        }
+
+    assert response_json(_post_holder(_snake_case_schema(), document)) == {"data": expected}
+
+
+@pytest.mark.django_db
+def test_snake_case_schema_keeps_the_keyword_lookup_and_logic_key_spellings() -> None:
+    """A snake-case lookup bag publishes ``i_contains``; the set keeps ``and`` / ``or`` / ``not``."""
+    payload = response_json(
+        _post_holder(
+            _snake_case_schema(),
+            '{ bag: __type(name: "BookFilterTitleFilterInputType") { inputFields { name } } '
+            'set: __type(name: "BookFilterInputType") { inputFields { name } } }',
+        ),
+    )
+
+    assert [json_str(row, "name") for row in json_list(payload, "data", "bag", "inputFields")] == [
+        "exact",
+        "i_contains",
+    ]
+    assert {"and", "or", "not"} <= {
+        json_str(row, "name") for row in json_list(payload, "data", "set", "inputFields")
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("outcome", ["written", "refused"])
+@pytest.mark.parametrize("flavor", ["form", "serializer"])
+def test_snake_case_schema_writes_a_generated_relation_under_its_snake_name(
+    flavor: str,
+    outcome: str,
+) -> None:
+    """Form and serializer inputs take a generated relation as ``<name>_id`` under snake case.
+
+    ``PatronProfileGenreForm.patron`` and ``ShelfSerializer.branch`` carry no ``name=``,
+    so the project ``Mutation`` served under ``auto_camel_case=False`` publishes them as
+    ``patron_id`` and ``branch_id``: a free key writes, and a refused key's ``FieldError``
+    names the field as that schema published it.
+    """
+    schema = DjangoSchema(
+        query=config_schema.Query,
+        mutation=config_schema.Mutation,
+        config=strawberry_config(auto_camel_case=False),
+    )
+    if flavor == "form":
+        owner = models.Patron.objects.create(name="SnakeProfileOwner")
+        models.PatronProfile.objects.create(patron=owner, address_2="Suite 1")
+        free = models.Patron.objects.create(name="SnakeProfileFree")
+        mutation, input_type, field = (
+            "create_patron_profile_via_form",
+            "PatronProfileGenreFormInput",
+            "patron_id",
+        )
+        data: JSONObject = {
+            field: saved_pk(free.pk if outcome == "written" else owner.pk),
+            "address_2": "Suite 2",
+        }
+    else:
+        branch = models.Branch.objects.create(name="SnakeBranch", city="Boston")
+        mutation, input_type, field = (
+            "create_shelf_via_serializer",
+            "ShelfSerializerInput",
+            "branch_id",
+        )
+        data = {"code": "SnakeShelf", field: branch.pk if outcome == "written" else 999999}
+
+    payload = response_json(
+        _post_holder(
+            schema,
+            f"mutation($d: {input_type}!) {{ {mutation}(data: $d) {{ errors {{ field path }} }} }}",
+            variables={"d": data},
+        ),
+    )
+
+    errors = [] if outcome == "written" else [{"field": field, "path": [field]}]
+    assert payload == {"data": {mutation: {"errors": errors}}}, payload
+    if flavor == "form":
+        assert models.PatronProfile.objects.filter(address_2="Suite 2").exists() is (
+            outcome == "written"
+        )
+    else:
+        assert models.Shelf.objects.filter(code="SnakeShelf").exists() is (outcome == "written")
+
+
+def _related_order_pair_schema(*, snake: bool) -> DjangoSchema:
+    """A holder schema ordering branches by two ``RelatedOrder`` members, ``foo_bar`` / ``fooBar``.
+
+    ``foo_bar`` orders through ``shelves``, ``fooBar`` through ``alt_shelves``; the
+    default converter names both ``fooBar``.
+    """
+
+    class PairShelfOrder(OrderSet):
+        class Meta:
+            model = models.Shelf
+            fields = ["code"]
+
+    class PairBranchOrder(OrderSet):
+        foo_bar = RelatedOrder(PairShelfOrder, field_name="shelves")
+        fooBar = RelatedOrder(  # noqa: N815 - the camel-case member is the collision under test
+            PairShelfOrder,
+            field_name="alt_shelves",
+        )
+
+        class Meta:
+            model = models.Branch
+            fields = ["name"]
+
+    class PairBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("id", "name")
+            orderset_class = PairBranchOrder
+            name = "PairBranchType"
+
+    @strawberry.type
+    class Query:
+        branches: list[PairBranchType] = DjangoListField(PairBranchType)
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config(auto_camel_case=not snake))
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+def test_related_order_members_the_default_converter_names_alike_refuse_the_schema() -> None:
+    """``RelatedOrder`` members ``foo_bar`` and ``fooBar`` both publish ``fooBar`` by default.
+
+    Generated order fields carry no ``name=``, so the schema's ``NameConverter`` names
+    each and the build refuses the pair, naming the order input type, the set and both
+    members.
+    """
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _related_order_pair_schema(snake=False)
+
+    assert str(exc.value) == (
+        "PairBranchOrderInputType: fields 'foo_bar' and 'fooBar' both publish the GraphQL "
+        "field name 'fooBar' under this schema's name converter, so one would silently "
+        "replace the other. OrderSet '_related_order_pair_schema.<locals>.PairBranchOrder' "
+        "generates them from members 'foo_bar' and 'fooBar'. Rename one member or drop one "
+        "via Meta.fields / Meta.exclude."
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.parametrize(
+    ("member", "expected"),
+    [("foo_bar", ["Annex", "Main"]), ("fooBar", ["Main", "Annex"])],
+)
+def test_related_order_members_publish_and_order_apart_without_auto_camel_case_over_http(
+    member: str,
+    expected: list[str],
+) -> None:
+    """Under ``auto_camel_case=False`` both members publish, each ordering by its own relation.
+
+    ``Annex`` holds shelf ``a`` and ``Main`` shelf ``b``; their alternate shelves run the
+    other way, so ``foo_bar`` (``shelves``) and ``fooBar`` (``alt_shelves``) order the
+    branches apart.
+    """
+    main = models.Branch.objects.create(name="Main", city="Boston")
+    annex = models.Branch.objects.create(name="Annex", city="Boston")
+    models.Shelf.objects.create(code="a", branch=annex)
+    models.Shelf.objects.create(code="b", branch=main)
+    models.Shelf.objects.create(code="c", branch=annex).alt_branches.add(main)
+    models.Shelf.objects.create(code="d", branch=main).alt_branches.add(annex)
+
+    payload = response_json(
+        _post_holder(
+            _related_order_pair_schema(snake=True),
+            f"{{ branches(order_by: [{{{member}: {{code: ASC}}}}]) {{ name }} }}",
+        ),
+    )
+
+    assert payload == {"data": {"branches": [{"name": name} for name in expected]}}, payload
+
+
 @pytest.mark.django_db(transaction=True)
 async def test_snake_case_page_info_only_keyset_page_reports_has_next_page_async() -> None:
     """The async keyset page asks the same two checks as the sync one."""
@@ -19236,7 +19453,7 @@ def test_nul_in_a_text_keyed_lookup_id_is_not_found_over_http(write: str, lookup
 @pytest.mark.parametrize(
     ("isbn", "house_code", "error"),
     [
-        ("97800\x0000002", "NP", {"field": "isbn_13", **_NUL_ERROR, "path": ["isbn_13"]}),
+        ("97800\x0000002", "NP", {"field": "isbn13", **_NUL_ERROR, "path": ["isbn13"]}),
         (
             "9780000000002",
             "NP\x00",
@@ -19271,7 +19488,7 @@ def test_model_create_edition_with_a_nul_is_refused_before_any_write_over_http(
             "createEdition",
             "EditionInput",
             {
-                "isbn_13": isbn,
+                "isbn13": isbn,
                 "imprint": "New",
                 "publisherId": global_id_for(library_schema.PublisherType, house_code),
             },
@@ -19303,7 +19520,7 @@ def test_model_create_edition_relates_a_retired_house_code_over_http() -> None:
             "createEdition",
             "EditionInput",
             {
-                "isbn_13": "9780000000009",
+                "isbn13": "9780000000009",
                 "imprint": "New",
                 "publisherId": global_id_for(library_schema.PublisherType, "RETIRED-9"),
             },
@@ -19382,8 +19599,8 @@ def test_node_id_holding_a_code_the_column_validator_refuses_resolves_over_http(
 @pytest.mark.parametrize(
     ("edition_filter", "error_key"),
     [
-        ('{ isbn_13: { exact: "978\\u0000" } }', "edition__isbn_13"),
-        ('{ isbn_13: { in: ["978\\u0000"] } }', "edition__isbn_13__in"),
+        ('{ isbn13: { exact: "978\\u0000" } }', "edition__isbn_13"),
+        ('{ isbn13: { in: ["978\\u0000"] } }', "edition__isbn_13__in"),
         ('{ imprint: { iContains: "K\\u0000" } }', "edition__imprint__icontains"),
     ],
     ids=["exact", "in", "icontains"],
@@ -20535,7 +20752,7 @@ def test_serializer_to_field_relation_update_stores_the_target_key_over_http(
     new = models.Genre.objects.create(name="ToFieldNew")
     patron = models.Patron.objects.create(name="ToFieldUpdatePatron")
     models.PatronProfile.objects.create(patron=patron, favorite_genre=old)
-    data: dict[str, object] = {"address_2": "Suite 2"}
+    data: dict[str, object] = {"address2": "Suite 2"}
     if value == "genre":
         data["favoriteGenreId"] = global_id_for(library_schema.GenreType, new.pk)
     elif value == "null":
@@ -20578,13 +20795,13 @@ def test_narrowed_serializer_update_over_relay_target_writes_the_genre_over_http
     models.PatronProfile.objects.create(patron=patron, favorite_genre=old)
     input_type = _mutation_data_input_type_name("updatePatronProfileGenreViaSerializer")
     assert input_type != "PatronProfileSerializerPartialInput"
-    assert _input_field_names(input_type) == {"address_2", "favoriteGenreId"}
+    assert _input_field_names(input_type) == {"address2", "favoriteGenreId"}
     assert _input_field_type(input_type, "favoriteGenreId") == {
         "kind": "SCALAR",
         "name": "ID",
         "ofType": None,
     }
-    data: dict[str, object] = {"address_2": "Suite 9"}
+    data: dict[str, object] = {"address2": "Suite 9"}
     if value == "genre":
         data["favoriteGenreId"] = global_id_for(library_schema.GenreType, new.pk)
     elif value == "null":
@@ -20726,7 +20943,7 @@ def test_model_to_field_relation_update_stores_the_target_key_over_http(
         models.Genre.objects.create(name=str(new.pk))
     patron = models.Patron.objects.create(name="ToFieldModelUpdatePatron")
     models.PatronProfile.objects.create(patron=patron, favorite_genre=old)
-    data: dict[str, object] = {"address_2": "Suite 3"}
+    data: dict[str, object] = {"address2": "Suite 3"}
     if value in ("genre", "genre_beside_one_named_like_its_id"):
         data["favoriteGenreId"] = global_id_for(library_schema.GenreType, new.pk)
     elif value == "null":
@@ -20775,7 +20992,7 @@ def test_profile_update_out_of_range_id_is_not_found_over_http(operation: str, f
         operation,
         variables={
             "id": global_id_for(library_schema.PatronProfileType, 2**70),
-            "d": {"address_2": "changed"},
+            "d": {"address2": "changed"},
         },
     )
     assert response.status_code == 200
@@ -20819,7 +21036,7 @@ def test_form_to_field_relation_update_keeps_an_omitted_genre_over_http(value: s
         patron=patron,
         favorite_genre=None if value == "omitted_unset" else old,
     )
-    data: dict[str, object] = {"address_2": "Suite 4"}
+    data: dict[str, object] = {"address2": "Suite 4"}
     if value == "genre":
         data["favoriteGenreId"] = global_id_for(library_schema.GenreType, new.pk)
     elif value == "null":
@@ -20872,7 +21089,7 @@ def test_form_to_field_relation_update_refuses_an_omitted_dangling_genre_over_ht
     new = models.Genre.objects.create(name="DanglingNew")
     patron = models.Patron.objects.create(name="DanglingFormUpdatePatron")
     models.PatronProfile.objects.create(patron=patron, address_2="Suite 1", favorite_genre=gone)
-    data: dict[str, object] = {"address_2": "Suite 4"}
+    data: dict[str, object] = {"address2": "Suite 4"}
     if value == "genre":
         data["favoriteGenreId"] = global_id_for(library_schema.GenreType, new.pk)
     elif value == "null":
@@ -20979,7 +21196,7 @@ def test_update_input_never_carries_the_primary_key_over_http(flavor: str) -> No
     _field, input_type = _PROFILE_UPDATES[flavor]
     names = _input_field_names(input_type)
     assert "patronId" not in names
-    assert "address_2" in names
+    assert "address2" in names
 
 
 @pytest.mark.django_db
@@ -21002,7 +21219,7 @@ def test_update_sending_the_primary_key_is_a_validation_error_over_http(
         models.PatronProfile.objects.create(patron=other, address_2="Suite 9")
     before = _profiles()
 
-    payload = _post_profile_update(flavor, patron, {"address_2": "Suite 2", "patronId": other.pk})
+    payload = _post_profile_update(flavor, patron, {"address2": "Suite 2", "patronId": other.pk})
 
     assert payload["data"] is None
     message = json_str(payload, "errors", 0, "message")
@@ -21024,7 +21241,7 @@ def test_update_keeps_the_primary_key_and_writes_only_its_row_over_http(flavor: 
     models.PatronProfile.objects.create(patron=patron, address_2="Suite 1")
     models.PatronProfile.objects.create(patron=other, address_2="Suite 9")
 
-    payload = _post_profile_update(flavor, patron, {"address_2": "Suite 2"})
+    payload = _post_profile_update(flavor, patron, {"address2": "Suite 2"})
 
     assert "errors" not in payload, payload
     field, _input_type = _PROFILE_UPDATES[flavor]
@@ -21057,10 +21274,10 @@ _KEYED_CREATE_ERRORS: dict[str, list[JSONObject]] = {
     ],
     "taken_isbn": [
         {
-            "field": "isbn_13",
+            "field": "isbn13",
             "messages": ["Edition with this Isbn 13 already exists."],
             "codes": ["unique"],
-            "path": ["isbn_13"],
+            "path": ["isbn13"],
         },
     ],
 }
@@ -21069,7 +21286,7 @@ _KEYED_CREATE_ERRORS: dict[str, list[JSONObject]] = {
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("input_type", "key"),
-    [("PatronProfileInput", "patronId"), ("EditionInput", "isbn_13")],
+    [("PatronProfileInput", "patronId"), ("EditionInput", "isbn13")],
 )
 def test_model_create_requires_a_client_assigned_primary_key_over_http(
     input_type: str,
@@ -21186,7 +21403,7 @@ def test_model_create_patron_profile_names_its_patron_by_the_key_over_http(key: 
         result = _post_keyed_create(
             "createPatronProfile",
             "PatronProfileInput",
-            {"patronId": patron_key, "address_2": "Suite 2"},
+            {"patronId": patron_key, "address2": "Suite 2"},
         )
 
     if key == "free":
@@ -21209,7 +21426,7 @@ def test_model_create_edition_takes_its_isbn_key_from_the_client_over_http(key: 
 
     The ISBN text is the primary key and has no default: a free ISBN creates the edition,
     INSERTed without first trying an UPDATE, and a taken one is the ``unique`` error on
-    ``isbn_13`` with the stored edition intact. An ISBN a competing writer saves after the
+    ``isbn13`` with the stored edition intact. An ISBN a competing writer saves after the
     uniqueness check is the ``constraint`` error, rolled back with the competing edition,
     never overwritten.
     """
@@ -21228,7 +21445,7 @@ def test_model_create_edition_takes_its_isbn_key_from_the_client_over_http(key: 
             "createEdition",
             "EditionInput",
             {
-                "isbn_13": isbn,
+                "isbn13": isbn,
                 "imprint": "New",
                 "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
             },
@@ -21294,7 +21511,7 @@ def test_model_create_edition_keys_isbn_10_errors_to_the_published_isbn10_over_h
     """``createEdition`` keys every ``isbn_10`` error to ``isbn10``, the name ``EditionInput`` publishes.
 
     ``EditionLegacyIsbn`` declares ``isbn_10`` without ``name=``, so the schema's own
-    converter names it ``isbn10`` while the package caser spells it ``isbn_10``. An
+    converter names it ``isbn10``, as it names the generated ``isbn13``. An
     explicit ``null`` (``full_clean()``'s error) and a save-time ``ValidationError`` keyed
     ``isbn_10`` each answer ``field`` / ``path`` ``isbn10``, a name the client could have
     sent, and nothing is written.
@@ -21302,7 +21519,7 @@ def test_model_create_edition_keys_isbn_10_errors_to_the_published_isbn10_over_h
     isbn_10, expected = _ISBN10_REFUSALS[refusal]
     publisher = models.Publisher.objects.create(name="LegacyIsbnPress", house_code="LI")
     data = {
-        "isbn_13": "9780000000003",
+        "isbn13": "9780000000003",
         "isbn10": isbn_10,
         "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
     }
@@ -21325,7 +21542,7 @@ def test_model_create_edition_writes_isbn10_to_its_isbn_10_column_over_http() ->
         "createEdition",
         "EditionInput",
         {
-            "isbn_13": "9780000000003",
+            "isbn13": "9780000000003",
             "isbn10": "0-00",
             "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
         },
@@ -21346,7 +21563,7 @@ def test_model_create_edition_refuses_the_model_spelling_isbn_10_over_http() -> 
         f"mutation($d: EditionInput!) {{ createEdition(data: $d) {{ {_KEYED_CREATE_SELECTION} }} }}",
         variables={
             "d": {
-                "isbn_13": "9780000000003",
+                "isbn13": "9780000000003",
                 "isbn_10": "0-00",
                 "publisherId": global_id_for(library_schema.PublisherType, publisher.house_code),
             },
@@ -21361,13 +21578,13 @@ def test_model_create_edition_refuses_the_model_spelling_isbn_10_over_http() -> 
 
 @pytest.mark.django_db
 def test_model_create_edition_input_publishes_the_unnamed_isbn10_over_http() -> None:
-    """``EditionInput`` publishes the unnamed ``isbn_10`` as ``isbn10`` beside the generated fields."""
+    """``EditionInput`` publishes the unnamed ``isbn_10`` as ``isbn10``, named like the generated fields."""
     assert _input_field_names("EditionInput") == {
         "isbn10",
-        "isbn_13",
+        "isbn13",
         "imprint",
         "publisherId",
-        "publisher_2Id",
+        "publisher2Id",
     }
 
 
@@ -21490,7 +21707,7 @@ def test_form_create_patron_profile_names_its_patron_by_the_key_over_http(key: s
         result = _post_keyed_create(
             "createPatronProfileViaForm",
             "PatronProfileGenreFormInput",
-            {"patronId": patron_key, "address_2": "Suite 2"},
+            {"patronId": patron_key, "address2": "Suite 2"},
         )
 
     if key == "free":
@@ -21548,7 +21765,7 @@ def test_form_name_keyed_genre_update_refuses_a_genre_named_empty_over_http(
     patron = models.Patron.objects.create(name="EmptyNameFormUpdatePatron")
     stored = kept if value == "supplied_existing" else empty
     models.PatronProfile.objects.create(patron=patron, address_2="Suite 1", favorite_genre=stored)
-    data: dict[str, object] = {"address_2": "Suite 4"}
+    data: dict[str, object] = {"address2": "Suite 4"}
     if value == "supplied_existing":
         data["favoriteGenreId"] = global_id_for(library_schema.GenreType, empty.pk)
 
@@ -21614,7 +21831,7 @@ def test_form_name_keyed_genre_update_keeps_or_replaces_the_genre_over_http(valu
     patron = models.Patron.objects.create(name="EmptyNameFormKeepPatron")
     stored = {"omitted_unset": None, "omitted_genre": old}.get(value, empty)
     models.PatronProfile.objects.create(patron=patron, favorite_genre=stored)
-    data: dict[str, object] = {"address_2": "Suite 4"}
+    data: dict[str, object] = {"address2": "Suite 4"}
     if value == "genre_over_empty":
         data["favoriteGenreId"] = global_id_for(library_schema.GenreType, new.pk)
     elif value == "null_over_empty":
@@ -22164,6 +22381,44 @@ def test_form_and_serializer_errors_key_to_the_names_a_custom_converter_publishe
     )
     assert not models.Shelf.objects.filter(code__in=written).exists()
     assert not models.Branch.objects.filter(name="UpNested").exists()
+
+
+@pytest.mark.django_db
+def test_custom_converter_names_generated_filter_and_order_fields_end_to_end() -> None:
+    """A custom ``NameConverter`` names every generated filter and order input field.
+
+    Under ``_UpperCaseNames`` the project ``Query`` publishes the lookups
+    (``ICONTAINS``), the relation head (``SHELFID``), the keyword lookup and logic key
+    (``IN``, ``OR``: a converter overriding ``get_graphql_name`` respells their pinned
+    names too) and the order field (``TITLE``) upper-cased, and a request sending those
+    names filters and orders by them.
+    """
+    shelf = _seed_shelf()
+    _seed_genre_with_books(
+        "Alpha",
+        shelf,
+        (
+            "alpha one",
+            "alpha two",
+            "beta",
+            "gamma",
+        ),
+    )
+    schema = DjangoSchema(
+        query=config_schema.Query,
+        config=strawberry_config(name_converter=_UpperCaseNames()),
+    )
+    document = (
+        '{ ALLLIBRARYBOOKS(FILTER: {OR: [{TITLE: {ICONTAINS: "ALPHA"}}, '
+        f'{{TITLE: {{EXACT: "beta"}}}}], SHELFID: {{IN: [{shelf.pk}]}}}}, '
+        "ORDERBY: [{TITLE: DESC}]) { TITLE } }"
+    )
+
+    assert response_json(_post_holder(schema, document)) == {
+        "data": {
+            "ALLLIBRARYBOOKS": [{"TITLE": "beta"}, {"TITLE": "alpha two"}, {"TITLE": "alpha one"}],
+        },
+    }
 
 
 class _UpperCaseArguments(NameConverter):
@@ -26969,7 +27224,7 @@ def _profile_form_update_race() -> _UpdateRace:
         "errors { field messages codes } } }",
         {
             "id": global_id_for(library_schema.PatronProfileType, patron.pk),
-            "d": {"address_2": "Renamed"},
+            "d": {"address2": "Renamed"},
         },
         stored,
         lambda: models.PatronProfile._base_manager.filter(pk=patron.pk).delete(),
@@ -27170,7 +27425,7 @@ def _profile_race(shape: str) -> _UpdateRace:
         address_2="Kept",
         favorite_genre=stored_genre,
     )
-    data: dict[str, object] = {"address_2": "Renamed"}
+    data: dict[str, object] = {"address2": "Renamed"}
     if shape == "names":
         data["favoriteGenreId"] = global_id_for(library_schema.GenreType, named_genre.pk)
 

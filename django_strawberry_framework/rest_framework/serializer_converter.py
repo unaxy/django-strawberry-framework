@@ -44,9 +44,10 @@ serializer field whose kind (scalar / file / relation) disagrees with the kind o
 column it writes (``serializer_field_fits_kind``).
 
 **The reverse map + the ``source`` axis (spec-039 Decision 7).** The generated
-input GraphQL name comes from the DECLARED serializer field name via the id-like
-suffix rule (``category`` / ``category_id`` -> ``categoryId``, ``category_pk`` ->
-``categoryPk`` - no doubled ``...IdId`` / ``...PkId``), NOT from ``source``. The
+input attr comes from the DECLARED serializer field name via the id-like suffix
+rule (``category`` / ``category_id`` -> ``category_id``, ``category_pk`` ->
+``category_pk`` - no doubled ``..._id_id`` / ``..._pk_id``), NOT from ``source``;
+the schema's ``NameConverter`` names the field from it. The
 backing ``models.Field`` is resolved through the field's ``source`` (one-segment
 or equal to the declared name). A dotted ``source`` / ``source="*"`` on a
 model-column-converting field raises ``ConfigurationError``, and so does a relation
@@ -119,13 +120,16 @@ from django_strawberry_framework.utils.inputs import FILE as FILE  # noqa: PLC04
 from django_strawberry_framework.utils.inputs import RELATION_MULTI as RELATION_MULTI  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE as RELATION_SINGLE  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.inputs import SCALAR as SCALAR  # noqa: PLC0414 - explicit re-export
-from django_strawberry_framework.utils.inputs import FieldConversionBase, InputFieldSpec
+from django_strawberry_framework.utils.inputs import (
+    FieldConversionBase,
+    InputFieldSpec,
+    predicted_input_field_name,
+)
 from django_strawberry_framework.utils.querysets import to_python_value
 from django_strawberry_framework.utils.relations import (
     non_pk_relation_key_attname,
     written_model_field,
 )
-from django_strawberry_framework.utils.strings import graphql_camel_name
 
 from .accessors import (
     child_relation_of,
@@ -801,32 +805,29 @@ def _reject_kind_mismatch(field: DRFField, column: ModelField, kind: str) -> Non
     )
 
 
-def serializer_field_graphql_name(field_name: str, kind: str) -> tuple[str, str]:
-    """Return ``(input_attr, graphql_name)`` for a serializer field by the id-like-suffix rule.
+def serializer_field_input_attr(field_name: str, kind: str) -> str:
+    """Return a serializer field's input attr by the id-like-suffix rule.
 
-    The GraphQL name comes from the DECLARED serializer field name (NOT
-    ``source``). For a relation the ``036`` ``<name>_id`` scheme applies, but with
-    the id-like-suffix dedupe (spec-039 Decision 7 - the renamed-fields rule):
+    The attr comes from the DECLARED serializer field name (NOT ``source``), and the
+    schema's ``NameConverter`` names the field from it (``category_id`` ->
+    ``categoryId`` by default). For a relation the ``036`` ``<name>_id`` scheme
+    applies, but with the id-like-suffix dedupe (spec-039 Decision 7 - the
+    renamed-fields rule):
 
-    - a non-relation scalar / file field camel-cases its declared name with no
-      suffix (``full_name`` -> ``fullName``);
+    - a non-relation scalar / file field keeps its declared name (``full_name``);
     - a single relation whose declared name already ENDS in an id-like suffix
-      (``_id`` / ``_pk``) keeps that name (``category_id`` -> input attr
-      ``category_id`` / ``categoryId``; ``category_pk`` -> ``category_pk`` /
-      ``categoryPk``) so no doubled ``...IdId`` / ``...PkId`` is produced;
+      (``_id`` / ``_pk``) keeps that name (``category_id``, ``category_pk``) so no
+      doubled ``..._id_id`` / ``..._pk_id`` is produced;
     - a single relation whose declared name has no id-like suffix gets the
-      ``<name>_id`` scheme (``category`` -> ``category_id`` / ``categoryId``);
+      ``<name>_id`` scheme (``category`` -> ``category_id``);
     - a multi relation keeps the plain declared name (it is already a collection
-      of ids - ``cats`` -> ``cats`` / ``cats``), matching ``relation_input_annotation``.
+      of ids - ``cats``), matching ``relation_input_annotation``.
     """
-    if kind == RELATION_MULTI:
-        return field_name, graphql_camel_name(field_name)
-    if kind == RELATION_SINGLE:
-        # No doubled ``...IdId`` / ``...PkId``: a declared name already ending in an
+    if kind == RELATION_SINGLE and not field_name.endswith(("_id", "_pk")):
+        # No doubled ``..._id_id`` / ``..._pk_id``: a declared name already ending in an
         # id-like suffix keeps that name; otherwise the ``036`` ``<name>_id`` scheme.
-        input_attr = field_name if field_name.endswith(("_id", "_pk")) else f"{field_name}_id"
-        return input_attr, graphql_camel_name(input_attr)
-    return field_name, graphql_camel_name(field_name)
+        return f"{field_name}_id"
+    return field_name
 
 
 def serializer_field_description(field: DRFField) -> str | None:
@@ -1009,7 +1010,7 @@ def serializer_only_relation_annotation(
     )
     many = kind == RELATION_MULTI
     field_name = _bound_field_name(field)
-    input_attr, _ = serializer_field_graphql_name(field_name, kind)
+    input_attr = serializer_field_input_attr(field_name, kind)
     return annotate_queryset_relation(
         getattr(related_field, "queryset", None),
         many=many,
@@ -1450,7 +1451,7 @@ def resolve_serializer_field(
     column, anything but a ``FileField`` over a file column) is refused
     (``_reject_kind_mismatch``), and so is a relation over ``pk`` where the primary key is
     a scalar, which has no backing column but writes one. Every
-    branch names the field through ``serializer_field_graphql_name`` over the DECLARED
+    branch names the field through ``serializer_field_input_attr`` over the DECLARED
     name, never ``source``. A column-less field uses
     ``convert_serializer_field`` (the model-less table) for the kind, and the
     relation / file annotations are finalized here (where ``Upload`` and the
@@ -1532,13 +1533,13 @@ def resolve_serializer_field(
                 require(column, is_concrete_field),
                 type_name,
             )
-        python_attr, graphql_name = serializer_field_graphql_name(field_name, kind)
+        python_attr = serializer_field_input_attr(field_name, kind)
     else:
         conversion = convert_serializer_field(field)
         kind = conversion.kind
         if kind == FILE:
             annotation = Upload
-            python_attr, graphql_name = serializer_field_graphql_name(field_name, kind)
+            python_attr = serializer_field_input_attr(field_name, kind)
         elif kind in (RELATION_SINGLE, RELATION_MULTI):
             # ``pk`` is the one source ``Options.get_field`` misses that still writes a model
             # field: over a scalar primary key it writes no relation at all, and over a
@@ -1551,18 +1552,17 @@ def resolve_serializer_field(
                 field,
                 kind,
             )
-            graphql_name = graphql_camel_name(python_attr)
         else:
             # A serializer-only ``ChoiceField`` / ``MultipleChoiceField`` /
             # ``ListField(child=ChoiceField)`` is upgraded to a generated GraphQL enum here
             # (the build site owns ``type_name``); every other scalar keeps its converter
             # annotation.
             annotation = _serializer_only_scalar_annotation(field, conversion, type_name)
-            python_attr, graphql_name = serializer_field_graphql_name(field_name, kind)
+            python_attr = serializer_field_input_attr(field_name, kind)
 
     spec = InputFieldSpec(
         input_attr=python_attr,
-        graphql_name=graphql_name,
+        graphql_name=predicted_input_field_name(python_attr),
         target_name=field_name,
         kind=kind,
         source=source,

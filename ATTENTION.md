@@ -2,12 +2,10 @@
 
 ## Status
 
-Revisit this topic after local-diff group **#10** is complete.
-
-The immediate correctness fix is currently staged in the optimizer-walker group. This file is a
-follow-up marker, not part of that staged commit. The remaining question is whether schema naming
-configuration should become available earlier than Strawberry schema construction so the framework
-can validate custom-name collisions during `finalize_django_types()`.
+The correctness fix landed in the optimizer walker, and the follow-up question this marker kept
+open (whether naming configuration should reach `finalize_django_types()` so custom-name collisions
+can be refused there) is answered per schema: [`DjangoSchema`][glossary-djangoschema] refuses, at
+construction, two fields its own `NameConverter` names alike. Nothing here is pending.
 
 ## Why this needs attention
 
@@ -21,9 +19,10 @@ The package advertises four behaviors that meet at the same boundary:
    names to build `.only()`, `select_related()`, and `prefetch_related()` plans, including windowed
    planning for synthesized relation connections.
 
-Those promises require one reliable GraphQL-name-to-Python-name boundary. The old walker treated
-`snake_case(selection.name)` as that boundary. That works for ordinary default-camel-cased names,
-but it is not a general inverse of Strawberry's naming process.
+Those promises require one reliable GraphQL-name-to-Python-name boundary. The old walker reversed
+each selected name with the package's own snake caser (since removed) and used that as the
+boundary. That works for ordinary default-camel-cased names, but it is not a general inverse of
+Strawberry's naming process.
 
 ## The underlying issue
 
@@ -64,7 +63,7 @@ The old reverse-only lookup caused several related optimizer failures:
   performed an unnecessary join.
 - An explicitly named `strawberry.field(...)` could be invisible to optimizer planning even though
   consumer overrides are a documented package feature.
-- Selection merging used `snake_case(selection.name)` as its identity. Two distinct GraphQL fields
+- Selection merging used the reversed name as its identity. Two distinct GraphQL fields
   such as `secondaryAddress` and `secondary_address` therefore collapsed into one selection, and
   one ORM field could disappear from the plan.
 - A custom schema `NameConverter`, accepted through `strawberry_config(...)`, could produce names
@@ -75,20 +74,18 @@ failures were extra queries, broken optimizer guarantees, and possible false `st
 errors for supported fields. The nested-connection case directly contradicted the documented
 one-batched-query-per-relation behavior.
 
-## The staged fix
+## The fix
 
-[`optimizer/walker.py`][walker] now owns one shared selection-name resolver for both model fields
-and synthesized relation connections:
+The optimizer never reverses a GraphQL name.
+`django_strawberry_framework/optimizer/selections.py::ast_to_converted_selections` stamps each
+converted field selection with the Python name the executing schema published the selected field
+from (Strawberry files the `StrawberryField` on each GraphQL field under `DEFINITION_BACKREF`), read
+back through `django_strawberry_framework/optimizer/selections.py::selection_python_name`, and
+`django_strawberry_framework/optimizer/walker.py::_resolve_selection_target` matches that name
+against the type's synthesized relation connections, then its model fields, returning the real
+Django field name for ORM planning.
 
-1. Keep the existing `snake_case(...)` dictionary lookup as the fast path for ordinary names.
-2. On a miss, read the finalized Strawberry fields from the resolved `DjangoType`.
-3. Resolve their actual GraphQL names through the active schema `NameConverter` carried by execution
-   `info`.
-4. Fall back to Strawberry's default forward camelizer only for unregistered or synthetic internal
-   planner calls where no authoritative Strawberry field exists.
-5. Return the real Django field name, never a guessed reverse name, for ORM planning.
-
-The same forward-resolution path now covers:
+The same forward path covers:
 
 - scalar projection;
 - forward and reverse relation planning;
@@ -97,33 +94,28 @@ The same forward-resolution path now covers:
 - explicit `strawberry.field(name=...)` names; and
 - custom schema name converters.
 
-Selection merging now keys on the exact GraphQL field name. Aliases of the same field still merge
+Selection merging keys on the exact GraphQL field name. Aliases of the same field still merge
 because their `selection.name` is identical, while distinct GraphQL names remain distinct even when
-`snake_case(...)` would collapse them.
+a reverse caser would map them to one Python name.
 
 The fix does **not** rename public GraphQL fields, change the default camel-casing convention, or
 change the `DjangoType` declaration API. It makes optimizer planning follow the schema Strawberry
 actually built.
 
-## The remaining limitation
+## Collisions under a custom converter
 
-`finalize_django_types()` runs before `strawberry.Schema(...)` exists. Therefore it cannot see the
-schema's eventual custom `NameConverter`.
+`finalize_django_types()` runs before any schema exists, so it refuses only two fields with one
+Python name. Two fields one schema's `NameConverter` names alike, including a pair only a custom
+converter collides (one mapping both `primary_address` and `shipping_address` to `address`), are
+refused when that `DjangoSchema` is built
+(`django_strawberry_framework/schema.py::_refuse_field_name_collisions`), with a
+`ConfigurationError` naming the type and both fields. Strawberry itself would keep one and
+silently drop the other, which is what a plain `strawberry.Schema` does.
 
-The finalizer can proactively detect Python-name collisions and collisions produced by Strawberry's
-default camelizer. A collision created only by a custom converter cannot be detected at that phase.
-Strawberry detects it later while constructing the schema and raises its schema-build duplicate-field
-error.
-
-For example, if a custom converter maps both `primary_address` and `shipping_address` to `address`,
-the framework cannot attribute that collision during finalization because it has not yet received the
-converter. The schema still fails loudly; the difference is the timing and quality of the error.
-
-There is one related internal boundary: a direct call to the private
-`optimizer.walker.plan_optimizations(..., info=None)` cannot know an active custom schema converter.
-The public `DjangoOptimizerExtension` path always supplies execution `info`, and
-`plan_optimizations` is deliberately not re-exported as consumer API, so this does not limit an
-advertised feature.
+A direct call to the private `optimizer.walker.plan_optimizations(..., info=None)` has no converted
+selections from an executing schema to read names from. The public `DjangoOptimizerExtension` path
+always supplies execution `info`, and `plan_optimizations` is deliberately not re-exported as
+consumer API, so this does not limit an advertised feature.
 
 ## Real-world example 1: how I thought it worked
 
@@ -180,21 +172,18 @@ deferred and the connection was unplanned, even though the query and schema were
 
 ## Real-world example 2: how it actually works now
 
-The same schema and query keep their existing public names. The optimizer first attempts its ordinary
-fast lookup. When that misses, it asks the finalized Strawberry fields what GraphQL names the active
-schema converter assigned:
+The same schema and query keep their existing public names. Each selected field carries the Python
+name the executing schema published it from, and planning matches that name:
 
 ```text
-address_line_2
-    -> StrawberryField(python_name="address_line_2")
-    -> "addressLine2"
-    -> selected name matches
+addressLine2
+    -> published from StrawberryField(python_name="address_line_2")
+    -> model field address_line_2
     -> .only("address_line_2")
 
-delivery_attempt_2_connection
-    -> synthesized StrawberryField
-    -> "deliveryAttempt2Connection"
-    -> selected name matches
+deliveryAttempt2Connection
+    -> published from the synthesized delivery_attempt_2_connection field
+    -> relation connection over delivery_attempt_2
     -> Prefetch("delivery_attempt_2", to_attr="_dst_delivery_attempt_2_connection")
 ```
 
@@ -206,24 +195,21 @@ If two selected fields are explicitly named `secondaryAddress` and `secondary_ad
 remain two independent selections. Exact GraphQL identity controls merging, so both underlying ORM
 columns appear in the plan.
 
-## Questions to revisit after #10
+## Questions answered
 
-1. Should `finalize_django_types()` accept the intended `StrawberryConfig` or `NameConverter` so
-   custom-converter collision errors can be framework-attributed earlier?
-2. Would threading schema configuration into finalization create an undesirable ordering or lifecycle
-   dependency?
-3. Should the public documentation explicitly state that custom-only name collisions are detected at
-   Strawberry schema construction rather than framework finalization?
-4. Is the current private-call fallback sufficient, or should `plan_optimizations` accept an explicit
-   converter for internal tooling and isolated tests?
-5. Should a live GraphQL acceptance test pin the custom-converter path in addition to the focused
-   walker regression tests?
+1. Custom-converter collisions are framework-attributed at `DjangoSchema` construction, per schema,
+   rather than at finalization, so finalization takes no `StrawberryConfig` and gains no lifecycle
+   dependency on one.
+2. The public documentation states it ([`DjangoSchema`][glossary-djangoschema]).
+3. Live rows pin the custom-converter path (`examples/fakeshop/test_query/test_globalid_naming_api.py`
+   and the custom-converter rows of `examples/fakeshop/test_query/test_library_api.py`).
 
 <!-- LINK DEFINITIONS -->
 
 <!-- Root -->
 
 <!-- docs/ -->
+[glossary-djangoschema]: docs/GLOSSARY.md#djangoschema
 [glossary-djangotype]: docs/GLOSSARY.md#djangotype
 [glossary-optimizer]: docs/GLOSSARY.md#djangooptimizerextension
 [glossary-strawberry-config]: docs/GLOSSARY.md#strawberry_config

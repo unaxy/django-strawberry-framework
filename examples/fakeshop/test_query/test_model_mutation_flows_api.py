@@ -548,20 +548,30 @@ class _PrintingUnnamedBoundWith:
     bound_with: list[str] | None = strawberry.field(default=UNSET)
 
 
-def _config(name: str) -> tuple[StrawberryConfig, tuple[str, str, str], str]:
+def _config(
+    name: str,
+) -> tuple[StrawberryConfig, tuple[str, str, str], str, tuple[str, str]]:
+    """``(config, consumer names, consumer bound_with name, generated publisher / edition ids)``."""
     if name == "default":
-        return StrawberryConfig(), ("isbn13", "isbn10", "publisher2Id"), "boundWith"
+        return (
+            StrawberryConfig(),
+            ("isbn13", "isbn10", "publisher2Id"),
+            "boundWith",
+            ("publisherId", "editionId"),
+        )
     if name == "snake":
         return (
             StrawberryConfig(auto_camel_case=False),
             ("isbn_13", "isbn_10", "publisher_2_id"),
             "bound_with",
+            ("publisher_id", "edition_id"),
         )
     assert name == "custom"
     return (
         StrawberryConfig(name_converter=_UnderscorePrefixConverter()),
         ("n_isbn13", "n_isbn10", "n_publisher2Id"),
         "n_boundWith",
+        ("n_publisherId", "n_editionId"),
     )
 
 
@@ -606,21 +616,26 @@ def _edition_schema(config: StrawberryConfig) -> DjangoSchema:
         "valid",
     ],
 )
-def test_unnamed_consumer_fields_key_each_refusal_to_the_executing_schema(
+def test_consumer_and_generated_fields_key_each_refusal_to_the_executing_schema(
     naming: str,
     refusal: str,
 ) -> None:
-    """Each independent decode, validation and save refusal uses its schema's published input name."""
+    """Unnamed consumer fields and generated fields alike take the executing schema's names.
+
+    The generated ``publisher`` relation is sent under the name the schema's converter
+    published (``publisherId``, ``publisher_id``, ``n_publisherId``), and each decode,
+    validation and save refusal is keyed to that schema's published input name.
+    """
     publisher = library_models.Publisher.objects.create(name="P-Unnamed", house_code="PU")
     library_models.Edition.objects.create(isbn_13="978-dup", publisher=publisher)
-    config, published, _ = _config(naming)
+    config, published, _, (publisher_id, _) = _config(naming)
     schema = _edition_schema(config)
     isbn_13, isbn_10, publisher_2_id = published
     introspection = _post(schema, '{ __type(name: "EditionInput") { inputFields { name } } }')
     assert {
         json_at(field, "name")
         for field in json_list(introspection, "data", "__type", "inputFields")
-    } == {*published, "imprint", "publisherId"}
+    } == {*published, "imprint", publisher_id}
     data, field, code = {
         "unique": ({isbn_13: "978-dup"}, isbn_13, "unique"),
         "null": ({isbn_13: "978-null", isbn_10: None}, isbn_10, "null"),
@@ -636,7 +651,7 @@ def test_unnamed_consumer_fields_key_each_refusal_to_the_executing_schema(
         "mutation($d: EditionInput!){ write(data:$d){ result{ __typename } errors{ field "
         "path codes } } }"
     )
-    variables = {"d": {"publisherId": publisher.pk, **data}}
+    variables = {"d": {publisher_id: publisher.pk, **data}}
     if refusal == "save":
         with _refuse_save(library_models.Edition, "isbn_10"):
             payload = _post(schema, document, variables)
@@ -706,17 +721,22 @@ def _printing_schema(config: StrawberryConfig) -> DjangoSchema:
 @pytest.mark.parametrize("naming", ["default", "snake", "custom"])
 @pytest.mark.parametrize("width", [1, 2], ids=["at-bound", "over-bound"])
 def test_unnamed_raw_relation_list_is_charged_before_any_write(naming: str, width: int) -> None:
-    """Raw ISBN relation lists keep their relation budget under every naming configuration."""
+    """Raw ISBN relation lists keep their relation budget under every naming configuration.
+
+    The generated ``edition`` relation and the consumer ``bound_with`` list are both
+    sent under the executing schema's names; the budget charges the list by its input
+    attr, so every configuration refuses the over-bound list before any write.
+    """
     publisher = library_models.Publisher.objects.create(name="P-Bound", house_code="PB")
     for isbn in ("978-a", "978-b"):
         library_models.Edition.objects.create(isbn_13=isbn, publisher=publisher)
-    config, _, bound_with = _config(naming)
+    config, _, bound_with, (_, edition_id) = _config(naming)
     schema = _printing_schema(config)
     with CaptureQueriesContext(connection) as captured:
         payload = _post(
             schema,
             "mutation($d: PrintingInput!){ write(data:$d){ result{ id } errors{ field } } }",
-            {"d": {"editionId": "978-a", bound_with: ["978-a", "978-b"][:width]}},
+            {"d": {edition_id: "978-a", bound_with: ["978-a", "978-b"][:width]}},
         )
     table = connection.ops.quote_name(library_models.Printing._meta.db_table)
     writes = [
@@ -926,7 +946,7 @@ def test_explicit_null_on_a_nullable_foreign_key_clears_the_stored_relation(chan
                 "id": edition.pk,
                 "d": {
                     "imprint": "updated",
-                    **({"publisher_2Id": None} if change == "explicit-null" else {}),
+                    **({"publisher2Id": None} if change == "explicit-null" else {}),
                 },
             },
         )

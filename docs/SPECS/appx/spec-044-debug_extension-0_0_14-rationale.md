@@ -138,7 +138,7 @@ Alternatives considered (and rejected):
 - **A `time` string field mirroring Django's raw log entry.** Rejected:
   duplicates `duration` in a worse type; anyone needing Django's exact
   string can reformat.
-- **Deriving the camelCase keys through `utils/strings.graphql_camel_name`.**
+- **Deriving the camelCase keys through a package casing helper.**
   Rejected: the six keys are a **wire contract** — a graphene migrant's
   existing DevTools formatter parses these exact bytes — so they must not be
   a function of a casing helper's future acronym/underscore behavior. They

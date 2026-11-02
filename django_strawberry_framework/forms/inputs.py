@@ -44,7 +44,7 @@ The shape is the ``036`` discipline adapted to forms (spec-038 Decision 7):
   two distinct shapes on one name raise ``ConfigurationError`` at finalization -
   for free from the ``utils/inputs.py`` materialize ledger.
 
-The materialize / build / camel-name / token-name mechanics are single-sited in
+The materialize / build / token-name mechanics are single-sited in
 ``utils/inputs.py`` / ``mutations/inputs.py``; this module is a thin domain
 wrapper, in the spirit of ``mutations/inputs.py``.
 """
@@ -86,6 +86,7 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.inputs import (
+    GeneratedFieldSources,
     InputFieldSpec,
     build_strawberry_input_class,
     guard_dropped_required,
@@ -94,6 +95,7 @@ from django_strawberry_framework.utils.inputs import (
     make_input_namespace,
     name_set_input_type_name,
     optional_input_field,
+    predicted_input_field_name,
     resolve_effective_fields,
 )
 from django_strawberry_framework.utils.relations import (
@@ -104,7 +106,6 @@ from django_strawberry_framework.utils.relations import (
     is_stored_column,
     non_pk_relation_key_attname,
 )
-from django_strawberry_framework.utils.strings import graphql_camel_name
 
 from .converter import (
     FILE,
@@ -1225,18 +1226,6 @@ def _choice_narrowing_identity(
     return writes_list, tuple(value for value, _label in pairs)
 
 
-def _simple_triple(name: str, annotation: object, kind: str) -> tuple[str, str, object, str]:
-    """Return ``(input_attr, graphql_name, annotation, kind)`` for a NON-relation form field.
-
-    The scalar / file arms of ``_field_triple_and_spec`` all share one shape: the
-    input attr IS the form field's own name, and the wire name is its camelCase
-    (only a relation remaps to ``<name>_id``). Single-sources that
-    ``python_attr = name; graphql_name = graphql_camel_name(name)`` pair so it is
-    spelled once rather than in every non-relation arm.
-    """
-    return name, graphql_camel_name(name), annotation, kind
-
-
 def _field_triple_and_spec(
     name: str,
     field: forms.Field,
@@ -1248,7 +1237,7 @@ def _field_triple_and_spec(
 
     A ``ModelForm`` field with a backing column (one ``require_column_kind_agreement``
     already admitted) routes through ``model_column_input_annotation`` (keyed on the
-    resolved ``models.Field``): a relation column -> ``<name>_id`` / ``categoryId`` + the Relay-vs-raw-pk
+    resolved ``models.Field``): a relation column -> ``<name>_id`` + the Relay-vs-raw-pk
     id type, ``relation_single`` / ``relation_multi``; a file/image column ->
     ``Upload`` (``file``); else the read-side scalar / choice-enum (``scalar``),
     except a choice field admitting fewer of a choice column's values than it
@@ -1290,22 +1279,19 @@ def _field_triple_and_spec(
     )
     if narrowing is not None:
         pairs, writes_list = narrowing
-        python_attr, graphql_name, annotation, kind = _simple_triple(
+        python_attr, kind = name, SCALAR
+        annotation = _form_choice_annotation(
             name,
-            _form_choice_annotation(
-                name,
-                pairs,
-                writes_list=writes_list,
-                type_name=type_name,
-                form_class=form_class,
-            ),
-            SCALAR,
+            pairs,
+            writes_list=writes_list,
+            type_name=type_name,
+            form_class=form_class,
         )
     elif typed_column is not None:
         # ModelForm field with a backing model column: the shared column mapper
         # types the GraphQL id / Upload / scalar; kind comes from
         # ``model_column_write_kind``; related_model stays here for the reverse map.
-        python_attr, graphql_name, annotation = model_column_input_annotation(
+        python_attr, annotation = model_column_input_annotation(
             typed_column,
             type_name,
             primary_of=registry.get,
@@ -1323,7 +1309,7 @@ def _field_triple_and_spec(
         # ``form_field_required``, so the partial input still widens a column-backed one.
         conversion = convert_form_field(field)
         if conversion.kind == FILE:
-            python_attr, graphql_name, annotation, kind = _simple_triple(name, Upload, FILE)
+            python_attr, annotation, kind = name, Upload, FILE
         elif conversion.kind in (RELATION_SINGLE, RELATION_MULTI):
             # ``convert_form_field`` answers a relation kind only for a
             # ``ModelChoiceField`` (the multi variant subclasses it).
@@ -1332,18 +1318,13 @@ def _field_triple_and_spec(
                 require_instance(field, _MODEL_CHOICE_FIELD),
                 form_class,
             )
-            graphql_name = graphql_camel_name(python_attr)
             kind = conversion.kind
         else:
-            python_attr, graphql_name, annotation, kind = _simple_triple(
-                name,
-                conversion.annotation,
-                conversion.kind,
-            )
+            python_attr, annotation, kind = name, conversion.annotation, conversion.kind
 
     spec = InputFieldSpec(
         input_attr=python_attr,
-        graphql_name=graphql_name,
+        graphql_name=predicted_input_field_name(python_attr),
         target_name=name,
         kind=kind,
         related_model=related_model,
@@ -1352,35 +1333,41 @@ def _field_triple_and_spec(
     return python_attr, annotation, spec, field_required
 
 
-def _guard_input_attr_collisions(form_class: FormClass, field_specs: list[InputFieldSpec]) -> None:
-    """Raise if two form fields collide on the generated input attr OR GraphQL name.
+def _form_input_sources(
+    form_class: FormClass,
+    field_specs: list[InputFieldSpec],
+) -> GeneratedFieldSources:
+    """Name the form a generated input is built from, and each field's form field."""
+    return GeneratedFieldSources(
+        subject=f"Form {truth.name(form_class)!r}",
+        field_noun="form fields",
+        rename_clause="Rename one of the form fields,",
+        members={spec.input_attr: spec.target_name for spec in field_specs},
+    )
 
-    Two distinct ways two form fields collapse to one generated input field, both
-    of which ``build_strawberry_input_class`` would resolve by SILENTLY dropping
-    one - so both fail loud here (the package's fail-loud contract):
 
-    * ``input_attr`` clash - a relation field ``foo`` remaps to input attr
-      ``foo_id`` (the ``036`` scheme), so a form declaring BOTH a relation ``foo``
-      AND a field literally named ``foo_id`` produces two specs with
-      ``input_attr == "foo_id"``; the second overwrites the first in the
-      annotations dict.
-    * ``graphql_name`` clash - two distinct field names that default-camel-case to
-      ONE GraphQL name (``foo_bar`` + ``fooBar`` -> ``fooBar``). The python attrs
-      differ (so the input-attr check above passes), but Strawberry collapses the
-      two onto one schema field. Every generated name is pinned, so this holds
-      under any schema config; a field the schema's converter names is refused
-      per schema instead (``schema.py::_refuse_field_name_collisions``).
+def _guard_input_attr_collisions(
+    sources: GeneratedFieldSources,
+    field_specs: list[InputFieldSpec],
+) -> None:
+    """Raise if two form fields collide on the generated input attr.
 
-    The seen-dict walk + the two collision arms are single-sited in
+    A relation field ``foo`` remaps to input attr ``foo_id`` (the ``036`` scheme),
+    so a form declaring BOTH a relation ``foo`` AND a field literally named
+    ``foo_id`` produces two specs with ``input_attr == "foo_id"``;
+    ``build_strawberry_input_class`` would resolve that by SILENTLY dropping one,
+    so it fails loud here (the package's fail-loud contract). Two field names the
+    executing schema's ``NameConverter`` names alike (``foo_bar`` / ``fooBar`` by
+    default) are refused per schema (``schema.py::_refuse_field_name_collisions``).
+
+    The seen-dict walk + the collision arms are single-sited in
     ``utils/inputs.py::iter_input_field_collisions``; the form
     flavor raises on the FIRST collision (the serializer aggregates instead),
     with byte-stable wording via the threaded form nouns.
     """
     for message in iter_input_field_collisions(
         field_specs,
-        subject=f"Form {truth.name(form_class)!r}",
-        field_noun="form fields",
-        rename_clause="Rename one of the form fields,",
+        sources=sources,
         name_of=lambda spec: spec.target_name,
     ):
         raise ConfigurationError(message)
@@ -1470,19 +1457,15 @@ def build_form_input_class(
         # Requiredness: the create input honors the converter/form required flag;
         # the partial input forces a model-backed field optional but a column-less
         # extra field keeps its converted ``required``. The widening tail
-        # (``T | None`` + ``UNSET`` default + ``name=`` alias) is single-sited
+        # (``T | None`` + ``UNSET`` default) is single-sited
         # in ``utils/inputs.py::optional_input_field``.
         required = False if (is_partial and column is not None) else field_required
-        annotation, field_kwargs = optional_input_field(
-            annotation,
-            python_attr=python_attr,
-            graphql_name=spec.graphql_name,
-            widen=not required,
-        )
+        annotation, field_kwargs = optional_input_field(annotation, widen=not required)
         triples.append((python_attr, annotation, field_kwargs))
 
-    _guard_input_attr_collisions(form_class, field_specs)
-    input_cls = build_strawberry_input_class(type_name, triples)
+    sources = _form_input_sources(form_class, field_specs)
+    _guard_input_attr_collisions(sources, field_specs)
+    input_cls = build_strawberry_input_class(type_name, triples, sources=sources)
     return input_cls, field_specs
 
 

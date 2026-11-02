@@ -92,7 +92,7 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
     require_one_segment_source,
     resolve_serializer_field,
     serializer_field_description,
-    serializer_field_graphql_name,
+    serializer_field_input_attr,
     serializer_only_relation_annotation,
 )
 from django_strawberry_framework.scalars import Upload
@@ -535,30 +535,22 @@ def test_unknown_custom_field_subclass_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# id-like suffix rule (declared-name driven, no doubled IdId / PkId)
+# id-like suffix rule (declared-name driven, no doubled _id_id / _pk_id)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("declared", "expected_attr", "expected_graphql"),
-    [
-        ("category", "category_id", "categoryId"),
-        ("category_id", "category_id", "categoryId"),
-        ("category_pk", "category_pk", "categoryPk"),
-    ],
+    ("declared", "expected_attr"),
+    [("category", "category_id"), ("category_id", "category_id"), ("category_pk", "category_pk")],
 )
-def test_id_like_suffix_rule(declared: str, expected_attr: str, expected_graphql: str) -> None:
-    """A single relation's declared name drives the input attr / GraphQL name (no doubling)."""
-    attr, graphql = serializer_field_graphql_name(declared, RELATION_SINGLE)
-    assert attr == expected_attr
-    assert graphql == expected_graphql
+def test_id_like_suffix_rule(declared: str, expected_attr: str) -> None:
+    """A single relation's declared name drives the input attr (no doubling)."""
+    assert serializer_field_input_attr(declared, RELATION_SINGLE) == expected_attr
 
 
 def test_multi_relation_keeps_plain_name() -> None:
     """A multi relation keeps the plain declared name (already a collection of ids)."""
-    attr, graphql = serializer_field_graphql_name("cats", RELATION_MULTI)
-    assert attr == "cats"
-    assert graphql == "cats"
+    assert serializer_field_input_attr("cats", RELATION_MULTI) == "cats"
 
 
 # ---------------------------------------------------------------------------

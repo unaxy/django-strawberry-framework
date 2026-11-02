@@ -252,29 +252,6 @@ def test_filter_arguments_factory_rejects_flattened_field_collision() -> None:
     assert "ShelfFlattenCollide" in message
 
 
-def test_filter_arguments_factory_rejects_graphql_name_collision() -> None:
-    """Distinct python attrs that camel-case alike must not share one GraphQL field."""
-
-    class ShelfGraphqlCollide(FilterSet):
-        foo_bar = CharFilter(field_name="code", lookup_expr="exact")
-        fooBar = CharFilter(  # noqa: N815 - intentional camel-case collision fixture.
-            field_name="topic",
-            lookup_expr="exact",
-        )
-
-        class Meta:
-            model = library_models.Shelf
-            fields = []
-
-    factory = FilterArgumentsFactory(ShelfGraphqlCollide)
-    with pytest.raises(ConfigurationError) as excinfo:
-        _ = factory.arguments
-    message = str(excinfo.value)
-    assert "'foo_bar'" in message
-    assert "'fooBar'" in message
-    assert "GraphQL input field name 'fooBar'" in message
-
-
 def test_filter_arguments_factory_idempotent_repeated_arguments() -> None:
     """Repeated reads of `.arguments` return the same input class object."""
 

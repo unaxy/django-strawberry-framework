@@ -407,7 +407,7 @@ def test_build_serializer_inputs_materializes_one_shot_narrowing(
 def test_create_input_required_and_optional_shapes() -> None:
     """``<Serializer>Input``: required fields non-optional, optional fields ``| None`` + UNSET."""
     _register_products_types()
-    cre, _, _, _ = _build_serializer_inputs(_item_serializer())
+    cre, cshape, _, _ = _build_serializer_inputs(_item_serializer())
     assert cre.__name__ == "ItemSerInput"
     fields = _field_map(cre)
 
@@ -415,9 +415,14 @@ def test_create_input_required_and_optional_shapes() -> None:
     assert not _is_optional(fields["name"])
     assert _inner_type(fields["name"]) is str
 
-    # The FK ``category`` -> ``category_id`` / ``categoryId``, required.
+    # The FK ``category`` -> ``category_id``, required; the schema's converter names it
+    # (no ``name=``), and the spec records the default converter's ``categoryId``.
     assert not _is_optional(fields["category_id"])
-    assert fields["category_id"].graphql_name == "categoryId"
+    assert fields["category_id"].graphql_name is None
+    assert (
+        next(s for s in cshape.field_specs if s.input_attr == "category_id").graphql_name
+        == "categoryId"
+    )
 
     # ``is_private`` has a model default, so DRF reports it ``required=False`` -> optional + UNSET.
     assert _is_optional(fields["is_private"])
@@ -1019,18 +1024,6 @@ def test_relation_id_attr_collision_is_fail_loud() -> None:
     message = str(exc.value)
     assert "category_id" in message
     assert "collide" in message
-
-
-def test_camel_case_graphql_name_collision_is_fail_loud() -> None:
-    """Two fields whose names default-camel-case to ONE GraphQL name raise."""
-
-    class CamelCollideSer(serializers.Serializer[object]):
-        foo_bar = serializers.IntegerField()
-        fooBar = serializers.IntegerField()  # noqa: N815 - intentional collision fixture
-
-    with pytest.raises(ConfigurationError) as exc:
-        _build_serializer_inputs(CamelCollideSer)
-    assert "collide" in str(exc.value)
 
 
 def test_writable_source_collisions_excludes_star_and_flags_duplicates() -> None:

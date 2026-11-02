@@ -684,7 +684,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_related_declaration_keys.py  # The permission walk's related-declaration read holds a collection to attribute-name keys.
     ├── test_relations.py         # Relation utility tests for kinds, many-side detection, instance accessors, and package re-exports.
     ├── test_sessions.py          # Behavioral tests for the session-engine resolver and connection actor lease.
-    ├── test_strings.py           # String utility tests for snake/camel/Pascal case conversion and Django lookup-path flattening.
+    ├── test_strings.py           # String utility tests for Pascal case conversion and Django lookup-path flattening.
     ├── test_truth.py             # Tests for ``django_strawberry_framework/utils/truth.py``: identity reads a consumer cannot fake.
     ├── test_typing.py            # Typing utility tests for async-callable detection and Strawberry, Python, and GraphQL unwrapping.
     ├── test_widgets.py           # Tests for the form-data keys a widget reads (``utils/widgets.py``).
@@ -1057,7 +1057,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
     ├── test_related_declaration_keys.py  # The permission walk's related-declaration read holds a collection to attribute-name keys.
     ├── test_relations.py         # Relation utility tests for kinds, many-side detection, instance accessors, and package re-exports.
     ├── test_sessions.py          # Behavioral tests for the session-engine resolver and connection actor lease.
-    ├── test_strings.py           # String utility tests for snake/camel/Pascal case conversion and Django lookup-path flattening.
+    ├── test_strings.py           # String utility tests for Pascal case conversion and Django lookup-path flattening.
     ├── test_truth.py             # Tests for ``django_strawberry_framework/utils/truth.py``: identity reads a consumer cannot fake.
     ├── test_typing.py            # Typing utility tests for async-callable detection and Strawberry, Python, and GraphQL unwrapping.
     ├── test_widgets.py           # Tests for the form-data keys a widget reads (``utils/widgets.py``).

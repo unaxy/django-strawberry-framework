@@ -115,7 +115,7 @@ from .utils import truth
 from .utils._narrowing import is_mapping, mapping_get
 from .utils.errors import coded_error_extensions
 from .utils.execution_mode import OperationMode, async_execution
-from .utils.inputs import generated_type_name_collision
+from .utils.inputs import field_name_collision_remedy, generated_type_name_collision
 from .utils.policies import copy_policy
 from .utils.private_state import PrivateAuthority, PrivateMembership
 from .utils.typing import call_forwarded
@@ -869,7 +869,8 @@ class DjangoSchema(strawberry.Schema):
     **Two fields this schema names alike are refused.** Strawberry keeps one of
     two distinct fields its ``NameConverter`` gives one GraphQL name and drops the
     other with no error; this class raises ``ConfigurationError`` naming the type
-    and both fields (:func:`_refuse_field_name_collisions`). The name is this
+    and both fields and, for two generated input fields, the declaration and the
+    members they are generated from (:func:`_refuse_field_name_collisions`). The name is this
     schema's, so ``foo_bar`` beside ``fooBar`` is refused under the default
     ``auto_camel_case=True`` and served as two fields under
     ``auto_camel_case=False``.
@@ -1410,7 +1411,10 @@ def _refuse_field_name_collisions(schema: strawberry.Schema) -> None:
     two names neither of those does. One ``DjangoType`` (or merged mutation
     input) can be served by schemas of different configs, so the check runs
     here, per schema, over the same fields the conversion walked: the schema's
-    own ``get_fields`` with ``strawberry.Private`` ones skipped.
+    own ``get_fields`` with ``strawberry.Private`` ones skipped. The refusal names
+    what the consumer can change (``utils/inputs.py::field_name_collision_remedy``):
+    a generated input field takes no ``name=``, so two of them name the set,
+    mutation, form or serializer and the members they are generated from.
     """
     name_converter = schema.config.name_converter
     for type_name, concrete in schema.schema_converter.type_map.items():
@@ -1428,8 +1432,8 @@ def _refuse_field_name_collisions(schema: strawberry.Schema) -> None:
             raise ConfigurationError(
                 f"{type_name}: fields {prior.python_name!r} and {field.python_name!r} both "
                 f"publish the GraphQL field name {truth.text(graphql_name)!r} under this schema's name "
-                "converter, so one would silently replace the other. Rename one, give one an "
-                "explicit name=, or drop one from the type.",
+                "converter, so one would silently replace the other. "
+                f"{field_name_collision_remedy(prior, field)}",
             )
 
 

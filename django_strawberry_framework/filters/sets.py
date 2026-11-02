@@ -303,9 +303,7 @@ _QUERYSET: type[models.QuerySet[models.Model, object]] = models.QuerySet
 # Every operator-bag lookup attr ``LOOKUP_NAME_MAP`` can generate; with the attrs the
 # field's own bag carries (a transform chain's ``year_gt``), a mapping whose keys all
 # name one is an operator bag (``FilterSet._operator_bag_items``).
-_LOOKUP_PYTHON_ATTRS: frozenset[str] = frozenset(
-    python_attr for python_attr, _graphql_name in LOOKUP_NAME_MAP.values()
-)
+_LOOKUP_PYTHON_ATTRS: frozenset[str] = frozenset(LOOKUP_NAME_MAP.values())
 
 
 def _lookups_for_field(
