@@ -22,6 +22,7 @@ import enum
 import keyword
 from collections import OrderedDict
 from dataclasses import dataclass
+from itertools import takewhile
 from types import GenericAlias, MappingProxyType
 from typing import TYPE_CHECKING, Annotated
 
@@ -559,19 +560,18 @@ _CLEANING_METHODS: tuple[str, ...] = ("to_python", "clean", "_coerce")
 def _keeps_cleaning_of(form_class: type[object], kind_class: type[object]) -> bool:
     """Whether no class from ``form_class`` up to ``kind_class`` defines its own cleaning.
 
-    Read in each class's own namespace along the real MRO (``_CLEANING_METHODS``).
+    ``kind_class`` is on ``form_class``'s real MRO (``_cleaned_kind`` reads it from there);
+    each class before it is read in its own namespace (``_CLEANING_METHODS``).
     django-filter's ``BaseCSVField`` is passed over: its ``clean`` cleans each member through
     the classes after it, so a member keeps the kind ``kind_class`` names, while a consumer
     member class cleaning its own way is seen past it.
     """
-    for klass in truth.mro(form_class):
-        if klass is kind_class:
-            return True
-        if klass is not BaseCSVField and any(
-            name in truth.class_dict(klass) for name in _CLEANING_METHODS
-        ):
-            return False
-    return True
+    below_kind = takewhile(lambda klass: klass is not kind_class, truth.mro(form_class))
+    return not any(
+        klass is not BaseCSVField
+        and any(name in truth.class_dict(klass) for name in _CLEANING_METHODS)
+        for klass in below_kind
+    )
 
 
 def _cleaned_kind(form_field: object) -> object | None:
