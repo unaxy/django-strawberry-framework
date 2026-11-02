@@ -150,9 +150,9 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
   - Behaviour change: fixes the `Meta.fields = "__all__"` build failure on any model with a `GeneratedField`.
   - Risk / blockers:
     - Nullability reads `GeneratedField.null`, and the field has no write side.
-    - Coordinate with spec-051, which plans the filter-side `GeneratedField` unwrap.
-  - Owner: spec-051 Slice 2. The maintainer left the conversion to the builder flow; it landed here as that slice
-    (spec-051's Status line records it).
+    - Coordinate with spec-052, which plans the filter-side `GeneratedField` unwrap.
+  - Owner: spec-052 Slice 2. The maintainer left the conversion to the builder flow; it landed here as that slice
+    (spec-052's Status line records it).
   - Landed: one computed column per `GeneratedField`, `utils/relations.py::generated_column`: a clone of
     `output_field` bound to the outer name, model and `db_column`, carrying the outer `choices`, `blank` and
     `help_text`, with `null = field.null or output_field.null` (the clone Django's own `GeneratedField.check`
@@ -786,14 +786,14 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
       Strawberry renames nothing; strawberry-django and graphene-django prefix nothing for case.
     - Every name we publish passes upstream's check, and lower-case `true` / `false` / `null` are prefixed by both.
       Fakeshop hits the reserved arm 0 times (its only `MEMBER_` names are the digit arm's `MEMBER_1/2/3`).
-    - The casefold has no recorded reason beyond commit d3829b25's message; spec-051 calls it "a sanitizer choice,
+    - The casefold has no recorded reason beyond commit d3829b25's message; spec-052 calls it "a sanitizer choice,
       not a validity rule".
     - Recommendation: ask `assert_enum_value_name` on the exact name and drop the casefold (`NULL` / `TRUE` /
       `FALSE` / `Null` choices publish bare: a wire change for those values). The alternative keeps the wire and
       writes the casefold's reason into spec-001 and the glossary.
   - Landed (maintainer chose the swap): the reserved arm asks `assert_enum_value_name` through
     `types/converters.py::_graphql_refuses_enum_value` and `_GRAPHQL_RESERVED_ENUM_VALUES` is gone; spec-001 and
-    spec-051 restated. Live row `test_converter_outputs_api.py::test_reserved_choice_values_publish_and_serialize_all_members`
+    spec-052 restated. Live row `test_converter_outputs_api.py::test_reserved_choice_values_publish_and_serialize_all_members`
     `[graphql-literal-case]` fails on the casefold; removing the arm fails it and `[graphql-reserved]`. The input
     side is `::test_a_literal_cased_choice_member_writes_its_stored_value` (a bare `NULL` / `Null` literal writes
     its value, `MEMBER_NULL` is refused); three of its four rows fail on the casefold.
@@ -838,7 +838,7 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
     input fields and one hashed serializer input type rename under the default config (all digit boundaries:
     `isbn_13` -> `isbn13`, `address_2` -> `address2`), every generated input follows `auto_camel_case=False` and
     custom converters. `_shape_token` still hashes the (predicted) name, so only that one derived type renames.
-    Card `TODO-BETA-078-0.1.7` closes with it; the converter wrapper it prescribed is not built (the per-schema
+    Card `DONE-051-0.0.15` closes with it; the converter wrapper it prescribed is not built (the per-schema
     refusal replaces it). Live rows:
     `examples/fakeshop/test_query/test_library_api.py::test_snake_case_schema_names_generated_filter_and_order_fields_in_snake_case`,
     `::test_snake_case_schema_keeps_the_keyword_lookup_and_logic_key_spellings`,
@@ -848,7 +848,7 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
     `examples/fakeshop/test_query/test_filter_declarations_api.py::test_filter_members_the_default_converter_names_alike_refuse_the_schema`;
     `examples/fakeshop/test_query/test_model_mutation_flows_api.py::test_consumer_and_generated_fields_key_each_refusal_to_the_executing_schema`,
     `::test_unnamed_raw_relation_list_is_charged_before_any_write`. CHANGELOG: CHANGELOGTODO.md entry 903.
-  - Review (2026-11-02; three read-only passes against card `TODO-BETA-078-0.1.7`: runtime, tests, contracts). No
+  - Review (2026-11-02; three read-only passes against card `DONE-051-0.0.15`: runtime, tests, contracts). No
     runtime defect: publish, decode, error keys (model, form, serializer, nested), the resource budget, transform
     chains, range and list filters, `DjangoListField` arguments and several schemas over one class set all agree under
     the default config, `auto_camel_case=False`, a keyword-respelling and an upper-casing converter (8,892 fakeshop
@@ -879,10 +879,10 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
       `PatronProfileSerializerAddress_u235621b729422e33eFavorite_ugenre982b97c775a8d68dPartialInput`
     - Docs: `docs/dry/DRY.md` still reads `LOOKUP_NAME_MAP (Django lookup -> GraphQL spelling)`; the map is lookup ->
       python attr. `ATTENTION.md` names the deleted `snake_case(...)` (maintainer marker doc, sweep or leave)
-    - Card: KANBAN.md cites `utils/strings.py::graphql_camel_name` in card `TODO-BETA-078-0.1.7`, the only
+    - Card: KANBAN.md cites `utils/strings.py::graphql_camel_name` in card `DONE-051-0.0.15`, the only
       `check_citations` failure, so the commit is blocked on it. Its DoD 1 ("default SDL byte-for-byte unchanged") and
       Scope 2 (the converter wrapper) are false once this lands. The contracts pass recommends deleting the card (a done
-      card needs a spec; the remaining scope is the rejected wrapper) and dropping its card-071 Related reference:
+      card needs a spec; the remaining scope is the rejected wrapper) and dropping its card-072 Related reference:
       maintainer's call
     - Not item 28: the edited `test_library_api.py` rows that still fail (`test_update_sending_the_primary_key_*` x6,
       `test_model_create_edition_refuses_the_model_spelling_isbn_10_over_http`) fail identically at `3cfaceb9` on
@@ -1025,8 +1025,8 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
   - Reason to keep ours: n/a. This is a feature gap, not a copy.
   - Behaviour change: adds new scalars.
   - Risk / blockers: needs GDAL; it is a new KANBAN card, not a refactor. Item 22 covers the license.
-  - Research (yours): a project, already owned by card `BACKLOG-STABLE-077-1.1.0` (GIS / GeoDjango geo scalars,
-    Backlog, depends on card 055's pluggable field-conversion registry). Nothing lands in this sweep.
+  - Research (yours): a project, already owned by card `BACKLOG-STABLE-078-1.1.0` (GIS / GeoDjango geo scalars,
+    Backlog, depends on card 056's pluggable field-conversion registry). Nothing lands in this sweep.
     - Upstream: `strawberry_django/fields/types.py`'s GEOS block is 105 lines: 8 coordinate-array scalars registered
       process-globally, 7 `field_type_map` rows, no geometry filter lookups. Its shape loses SRID and Z, its
       `Geometry` scalar cannot parse its own output, and its serializers pass wrong types through.
@@ -1038,7 +1038,7 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
       Django 5.2.16 lacks 6.1's nested-geometry input guard, so a raw-string geometry input is a native-parser risk.
     - Plan if promoted: decide satellite package vs documented recipe (the card's open question; the recipe is the
       escape hatch plus `strawberry_config(extra_scalar_map=...)`, a guides-card page). An in-tree build lands after
-      card 055 in three slices: strict read/write scalars (own statements, or an adapted block with
+      card 056 in three slices: strict read/write scalars (own statements, or an adapted block with
       `LICENSE.strawberry-django`, which item 22 now ships), geometry-operand filter lookups (about 24 of the 29
       Django GIS lookups), then distance / `relate` composite inputs. It needs an env-gated `FAKESHOP_GIS=1`
       SpatiaLite alias with its own app, a GDAL + SpatiaLite CI tier, and absence tested as `ImproperlyConfigured`.

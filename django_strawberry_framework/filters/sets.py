@@ -3242,11 +3242,11 @@ class FilterSet(
                         target._lifecycle.guard,
                     ):
                         _ = target._filter_table()
-            # TODO(spec-061 Slice 1): Meta.search_fields - wire
+            # TODO(spec-062 Slice 1): Meta.search_fields - wire
             # `construct_search(all_filters)` from
             # `django_strawberry_framework.filters.inputs.LOOKUP_PREFIXES` here.
             # The prefix map and `construct_search` are spec-027 Decision 2's;
-            # spec-061 owns the consumer surface.
+            # spec-062 owns the consumer surface.
 
             # The two-condition cache-write gate (own `related_filters` +
             # no unresolved string lazy targets) is single-sited in

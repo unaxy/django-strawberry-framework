@@ -2298,7 +2298,7 @@ def _synthesized_signature(
     ``_helper_referenced_filtersets`` / ``_helper_referenced_ordersets`` orphan
     ledgers, so ``finalize_django_types`` orphan validation stays honest - no
     separate ``.add(...)`` is needed or wanted. The ``search:`` argument is NOT
-    generated (search is the planned spec-061 surface).
+    generated (search is the planned spec-062 surface).
     """
     # Imported at call time (schema build), not module scope: a module-level
     # import would make bare ``import django_strawberry_framework`` (which pulls

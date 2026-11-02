@@ -2756,7 +2756,7 @@ def test_filter_convert_and_normalize_ride_shared_kind_table(
 ) -> None:
     """Convert and normalize walk one most-specific-first filter-class table.
 
-    Two independent ``isinstance`` chains could drift apart (spec-054 C3), so
+    Two independent ``isinstance`` chains could drift apart (spec-055 C3), so
     both zip ``_FILTER_INPUT_KIND_TYPES`` into ``convert_with_mro`` prechecks;
     ``object`` is last (the catch-all arm).
     """

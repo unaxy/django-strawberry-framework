@@ -311,7 +311,7 @@ Survey verdicts recorded so nothing is re-tried blind:
   TypeVars: 348, 2 and 81 errors), `scripts/_kanban_lib.py::_JSONRow` (5), `DjangoType.get_queryset`'s queryset
   (108), `_ConnectionT` (37), `is_marked_coroutine_function` (3), `AsyncDjangoGraphQLView.run` and
   `operation_state.py`'s two returns (no single honest type), a resolver-less `strawberry.field(...)` (declared
-  `-> Any` upstream). The package root's `__getattr__ -> Any` waits on spec-060:
+  `-> Any` upstream). The package root's `__getattr__ -> Any` waits on spec-061:
   `examples/fakeshop/apps/products/fields.py` derives from the planned `AdvancedFieldSet`, which reaches it only through that `Any`, and an `object` return trips
   the locked `reportUntypedBaseClass`
 - Trust-boundary guards that read the guarded value through `utils/_narrowing.py` (`read_attr`, `list_of`) instead of
@@ -345,7 +345,7 @@ Survey verdicts recorded so nothing is re-tried blind:
   `optimizer.py::_generate_selection_resolve_info` does (index key only on a list-valued relation), thread it through
   `optimizer/walker.py::_hook_info`, `_build_child_queryset` and `optimizer/nested_planner.py`, pin both paths at depth
   1 and 2 in `examples/fakeshop/test_query/`, and rewrite the `docs/README.md` sentence and its glossary entry. Carded
-  as `TODO-ALPHA-053-0.0.15`
+  as `TODO-ALPHA-054-0.0.15`
 
 ### Upstream drafts (the maintainer posts)
 

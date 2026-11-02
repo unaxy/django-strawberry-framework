@@ -2003,7 +2003,7 @@ each is in the [rationale][rationale-risks].
   This card does not build them; the live tier consumes `TestClient` to post its
   GraphQL envelopes, and an async smoke ([Risks](#risks-and-open-questions))
   would drive that card's `AsyncTestClient` from the toolbar's own test module.
-- **The migration guide itself** — [`TODO-BETA-072-0.1.8`][kanban]; this card
+- **The migration guide itself** — [`TODO-BETA-073-0.1.8`][kanban]; this card
   hands it the one-row settings-string mapping
   (`strawberry_django.middlewares.debug_toolbar.DebugToolbarMiddleware` →
   `django_strawberry_framework.middleware.debug_toolbar.DebugToolbarMiddleware`,
@@ -2101,7 +2101,7 @@ each is in the [rationale][rationale-risks].
       with `middleware/debug_toolbar.py` included, each branch mapped to a named
       test owner.
 - [ ] The migration-guide handoff row content is recorded for
-      [`TODO-BETA-072-0.1.8`][kanban] (the one settings-string swap, behavior
+      [`TODO-BETA-073-0.1.8`][kanban] (the one settings-string swap, behavior
       unchanged) ([Goal 3](#goals)).
 - [ ] Slice 2 doc updates land per [Doc updates](#doc-updates): the GLOSSARY
       entry body, the regenerated

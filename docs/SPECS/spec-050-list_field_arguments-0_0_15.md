@@ -15,7 +15,7 @@ and [`spec-047`][spec-047] (the execution resource policy and raw-list bound).
 
 Release: [`django_strawberry_framework.__version__`][package-init] reads `"0.0.15"`, the open
 `0.0.15` development line, and this card's glossary rows read `shipped (0.0.15)`.
-[`TODO-ALPHA-054-0.0.15`][kanban] cuts the `0.0.15` release: the
+[`TODO-ALPHA-055-0.0.15`][kanban] cuts the `0.0.15` release: the
 [`CHANGELOG.md`][changelog] release notes and the release-status flips.
 
 ## Key glossary references
@@ -48,7 +48,7 @@ Release: [`django_strawberry_framework.__version__`][package-init] reads `"0.0.1
 - [`strawberry_config`][glossary-strawberry_config] - the supported schema naming boundary;
   error payloads use the argument spelling the executable schema published.
 - [Joint version cut][glossary-joint-version-cut] - the release rule under which
-  `TODO-ALPHA-054-0.0.15` cuts the `0.0.15` release this card ships in.
+  `TODO-ALPHA-055-0.0.15` cuts the `0.0.15` release this card ships in.
 - The [visibility boundary][glossary-visibility-boundary] and its
   [sealed execution queryset][glossary-sealed-execution-queryset] - the shared seam whose
   `require_unevaluated` and `carry_result_cache` options the list field's seals use.
@@ -324,7 +324,7 @@ flat list with direct offset arguments and a Relay connection with cursors.
   construction built to defeat a check is a robustness row where one is cheap and never a
   reason for another admission layer (Decision 19).
 - **Release notes.** The `0.0.15` [`CHANGELOG.md`][changelog] notes belong to
-  `TODO-ALPHA-054-0.0.15`'s release cut.
+  `TODO-ALPHA-055-0.0.15`'s release cut.
 
 ## Borrowing posture
 
@@ -1690,7 +1690,7 @@ receives `offset`), while here a consumer resolver never receives a list argumen
 (Decision 1); and there a resolver returning `None` is replaced by the model's default
 manager, while here `None` stays `None`, and `orderBy` or a positive `offset` over it is
 rejected as `queryset_required` / `order_required` (Decision 8). The written migration guide
-belongs to card [`TODO-BETA-072-0.1.8`][kanban].
+belongs to card [`TODO-BETA-073-0.1.8`][kanban].
 
 ### Decision 12 — graphql-core workarounds have a dependency-owned lifecycle
 
@@ -3260,13 +3260,13 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
 
 - The other upstream parity gaps and an `extensions.code` on connection pagination rejections
   belong to [`TODO-ALPHA-051-0.0.15`][kanban].
-- Debug-extension extraction belongs to [`TODO-ALPHA-052-0.0.15`][kanban].
+- Debug-extension extraction belongs to [`TODO-ALPHA-053-0.0.15`][kanban].
 - The boundary/DRY squeeze and the `0.0.15` release cut belong to
-  [`TODO-ALPHA-054-0.0.15`][kanban].
+  [`TODO-ALPHA-055-0.0.15`][kanban].
 - The complete migration/adoption guide, including the mapping table in Decision 11,
-  belongs to [`TODO-BETA-072-0.1.8`][kanban].
+  belongs to [`TODO-BETA-073-0.1.8`][kanban].
 - Beta-release verification and the final parity claim belong to
-  [`TODO-ALPHA-058-0.1.0`][kanban].
+  [`TODO-ALPHA-059-0.1.0`][kanban].
 - Filtering/search arguments on `DjangoListField`, response envelopes, list `totalCount`,
   and nested raw-list windows are uncarded and not implied by this surface.
 

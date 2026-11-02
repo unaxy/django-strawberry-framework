@@ -919,9 +919,9 @@ today. Each has an owning card on the [board][kanban]; the first two also have a
 design record, and the aggregation card lists authoring its spec as still open:
 
 - `Meta.fields_class` and [`FieldSet`][glossary-fieldset], for per-field redaction,
-  denial gates, and computed fields ([spec-060][spec-060]).
+  denial gates, and computed fields ([spec-061][spec-061]).
 - [`Meta.search_fields`][glossary-metasearch_fields], for a generated `search:`
-  argument across scalar and relation paths ([spec-061][spec-061]).
+  argument across scalar and relation paths ([spec-062][spec-062]).
 - `Meta.aggregate_class` and [`AggregateSet`][glossary-aggregateset], for per-type
   `count` / `min` / `max` / custom stats over the filtered queryset (spec pending).
 
@@ -1123,8 +1123,8 @@ FAKESHOP_PG_DSN=postgres://fakeshop:fakeshop@127.0.0.1:5432/fakeshop uv run pyte
 [spec-043]: ../../docs/SPECS/spec-043-test_client-0_0_14.md
 [spec-045]: ../../docs/SPECS/spec-045-visibility_boundary-0_0_14.md
 [spec-046]: ../../docs/SPECS/spec-046-transport_security-0_0_14.md
-[spec-060]: ../../docs/SPECS/spec-060-fieldset-0_1_1.md
-[spec-061]: ../../docs/SPECS/spec-061-search_fields-0_1_2.md
+[spec-061]: ../../docs/SPECS/spec-061-fieldset-0_1_1.md
+[spec-062]: ../../docs/SPECS/spec-062-search_fields-0_1_2.md
 
 <!-- docs/builder/ -->
 

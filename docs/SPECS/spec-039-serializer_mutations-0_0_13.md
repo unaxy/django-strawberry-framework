@@ -1449,7 +1449,7 @@ supported `source` scope:
   already id-like** (`*_id` / `*_pk`). So a relation field `category` → `category_id`
   (suffix appended, the package convention for FK `category`), `category_id` →
   `category_id` (already id-like, **no** doubled `…_id_id`), and `category_pk` →
-  `category_pk` (**no** `…_pk_id`). The field carries no `name=`: the executing schema's
+  `category_pk` (**no** `…_pk_id`). The field carries no `name=` ([`spec-051`][spec-051]): the executing schema's
   `NameConverter` names it from the attr (`categoryId` / `categoryPk` under the default
   config, `category_id` / `category_pk` under `auto_camel_case=False`). This matters
   because DRF migrants routinely name write-only related-id fields `<name>_id` already
@@ -3989,6 +3989,7 @@ re-keying / opt-in-gated-fingerprint branches are package-tested.
 [spec-038]: spec-038-form_mutations-0_0_12.md
 [spec-039-rationale]: appx/spec-039-serializer_mutations-0_0_13-rationale.md
 [spec-040]: spec-040-auth_mutations-0_0_13.md
+[spec-051]: spec-051-input_field_naming-0_0_15.md
 
 <!-- docs/builder/ -->
 

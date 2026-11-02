@@ -881,7 +881,7 @@ def _build_loan_filter_test_schema(
     """Build a per-test schema exposing a ``.using('shard_b')`` Loan LIST field with ``LoanFilter``.
 
     The shard-alias twin of ``_build_test_schema`` for the row-preserving
-    relational-leaf predicate proof (spec-061 Part 1): the
+    relational-leaf predicate proof (spec-062 Part 1): the
     resolver applies the PRODUCTION ``LoanFilter`` (whose deep
     ``book__loans__patron__email`` leaf compiles to restriction subqueries, one per
     declared hop) over a queryset pinned to ``shard_b``, so every hop's subquery must
