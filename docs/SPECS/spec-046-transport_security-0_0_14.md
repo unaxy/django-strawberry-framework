@@ -1341,7 +1341,15 @@ wrappers, three named checks — the Host half is
 own boundary rather than a property of Channels' Origin validator. That structural
 guarantee is the whole reason the seam is safe to offer — and it is a guarantee about the
 *wrappers* only: the outbound-frame gate rides on the package's own consumer, so an injected
-consumer opts out of it exactly as it opts out of the admission hooks.
+consumer opts out of it exactly as it opts out of the admission hooks. Upstream's consumer
+runs an Origin check of its own inside the handshake, after all three wrappers
+(`AsyncBaseHTTPView._check_websocket_origin`: a missing `Origin` or one matching the raw
+`Host` header is admitted, anything else is put to the `is_websocket_origin_allowed` hook).
+The package consumer answers that hook `True`: Channels' validator has already admitted the
+`Origin`, and a raw-header comparison would refuse a `Host` that Django's `get_host()`
+admits (a trailing dot, `X-Forwarded-Host`, a server-supplied name). An injected consumer
+keeps upstream's answer, so it may refuse a cross-origin handshake the router admitted and
+can never admit one the router refused.
 
 **Where the revalidation hooks in, and why not `get_context`.** Strawberry's
 `GraphQLWSConsumer.get_context` is called **once per connection**, inside
@@ -1518,6 +1526,8 @@ by the [live-first coverage mandate][glossary-live-first-coverage-mandate].
 
 **The WebSocket composition** (`tests/test_routers.py`):
 `::test_websocket_handshake_origin_directions` (matching / mismatched / missing Origin),
+`::test_an_allowed_origin_on_another_allowed_host_connects` (an `Origin` Channels admits on a
+host other than `Host` connects; upstream's consumer-side hook defers to that verdict),
 `::test_websocket_branch_wraps_origin_validator_outside_the_auth_stack` (the origin validator
 sits outside the auth stack, the walk gains an outer layer for the package's Host validator,
 and the `"http"` value is not an `OriginValidator`),
@@ -2244,7 +2254,9 @@ DjangoWebSocketHostValidator(
 **Host and Origin stay two separate checks.** Host answers *which server authority the client
 addressed*; Origin answers *which browser origin initiated the socket*. Passing one must never
 substitute for passing the other, and the router's docstring names the specific check that
-delivers each. Channels' validator is left untouched.
+delivers each. Channels' validator is left untouched, and the package consumer answers
+upstream's own consumer-side Origin hook in its favour
+([Decision 11](#decision-11--a-websocket-consumer-classfactory-injection-seam-with-a-revalidating-package-default)).
 
 **Where it lives, and why not in `routers.py`.** In `consumers.py`, beside the consumer
 factory: that module is already the WebSocket-transport module, it is already `channels`-free

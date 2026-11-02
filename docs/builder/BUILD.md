@@ -518,7 +518,7 @@ A record that names its in-scope commits by content and calls the one containing
 
 ## Floor verification
 
-Every command in the gate above runs in the shared `.venv`. **The shared `.venv` is not the supported floor** — it tracks the newest supported versions, so a green sweep in it proves only that the build works on a version many consumers are not running. The supported floor is Django **5.2.16** on Python **3.10** with strawberry-graphql **0.322.2**, and the soft dependencies at channels[daphne] **4.3.2**, cryptography **44.0.0**, django-debug-toolbar **7.0.0** and djangorestframework **3.17.0** (each the `>=` bound of its `[dependency-groups].dev` row).
+Every command in the gate above runs in the shared `.venv`. **The shared `.venv` is not the supported floor** — it tracks the newest supported versions, so a green sweep in it proves only that the build works on a version many consumers are not running. The supported floor is Django **5.2.16** on Python **3.10** with strawberry-graphql **0.328.0**, and the soft dependencies at channels[daphne] **4.3.2**, cryptography **44.0.0**, django-debug-toolbar **7.0.0** and djangorestframework **3.17.0** (each the `>=` bound of its `[dependency-groups].dev` row).
 
 **Never state `.venv`'s own versions from memory or from a number written down in a document.** They move on every dependency bump; a floor number does not. When a pass needs to know what the shared environment carries, read it — `uv pip list` — and cite the reading.
 
@@ -541,7 +541,7 @@ Build it under a scratch path outside the repo, and install with an explicit `--
 ```shell
 uv venv <scratch>/dsf-floor --python 3.10
 uv pip install --python <scratch>/dsf-floor/bin/python -e . --group dev
-uv pip install --python <scratch>/dsf-floor/bin/python 'django==5.2.16' 'strawberry-graphql==0.322.2'
+uv pip install --python <scratch>/dsf-floor/bin/python 'django==5.2.16' 'strawberry-graphql==0.328.0'
 uv pip install --python <scratch>/dsf-floor/bin/python 'channels[daphne]==4.3.2' 'cryptography==44.0.0' 'django-debug-toolbar==7.0.0' 'djangorestframework==3.17.0'
 <scratch>/dsf-floor/bin/python -m pytest <focused scope> --no-cov
 ```

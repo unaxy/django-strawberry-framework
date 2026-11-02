@@ -156,7 +156,7 @@ class _ExpireAfterWrite(SchemaExtension):
         self,
         _next: Callable[..., object],
         root: object,
-        info: GraphQLResolveInfo,
+        info: GraphQLResolveInfo[object],
         *args: object,
         **kwargs: object,
     ) -> object:

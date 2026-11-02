@@ -5,7 +5,7 @@ selections are not request-observable. Cache-key and window behavior through a r
 ``examples/fakeshop/test_query/test_library_api.py``.
 """
 
-import copy
+import dataclasses
 from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated
@@ -17,7 +17,6 @@ from graphql.language.ast import (
     FieldNode,
     FragmentDefinitionNode,
     FragmentSpreadNode,
-    InlineFragmentNode,
     OperationDefinitionNode,
 )
 from strawberry import Info
@@ -53,7 +52,7 @@ from django_strawberry_framework.optimizer.selections import (
 )
 from django_strawberry_framework.utils._narrowing import is_list, read_attr, require
 from django_strawberry_framework.utils.strings import snake_case
-from tests._info import make_info
+from tests._info import make_info, raw_info_of
 
 if TYPE_CHECKING:
     from django_strawberry_framework.optimizer.selections import FragmentVisitKey
@@ -64,17 +63,6 @@ def _operation(doc: DocumentNode) -> OperationDefinitionNode:
     operation = doc.definitions[0]
     assert isinstance(operation, OperationDefinitionNode)
     return operation
-
-
-def _ast_selections(
-    selections: Iterable[object],
-) -> list[FieldNode | InlineFragmentNode | FragmentSpreadNode]:
-    """Materialize ``selections``, proving each is one of a selection set's three node kinds."""
-    members: list[FieldNode | InlineFragmentNode | FragmentSpreadNode] = []
-    for selection in selections:
-        assert isinstance(selection, (FieldNode, InlineFragmentNode, FragmentSpreadNode))
-        members.append(selection)
-    return members
 
 
 def _as_strawberry_info(stand_in: object) -> Info[object, object]:
@@ -161,8 +149,7 @@ def test_resolve_unvisited_fragment_resolves_once_then_dedups() -> None:
     assert resolve_unvisited_fragment(spread, {}, set()) is None
     # A spread whose ``name`` is falsy -> None (defensive; graphql-core
     # validation would normally reject a nameless spread before the optimizer).
-    nameless = copy.copy(spread)
-    nameless.name = None
+    nameless = dataclasses.replace(spread, name=None)
     assert isinstance(nameless, FragmentSpreadNode)
     assert resolve_unvisited_fragment(nameless, fragments, set()) is None
 
@@ -421,8 +408,8 @@ def test_ast_to_converted_selections_memoized_per_execution() -> None:
     disabled and every call converts fresh (unchanged direct-caller behavior).
     """
     doc = parse("{ items { name } books { title } }")
-    field_nodes = _ast_selections(_operation(doc).selection_set.selections)
-    info = make_info()._raw_info
+    field_nodes = _field_nodes(_operation(doc).selection_set.selections)
+    info = raw_info_of(make_info())
     single = field_nodes[:1]
 
     frame = begin_execution_frame({}, nested=False)
@@ -606,25 +593,32 @@ def test_connection_predicates_match_python_names_not_wire_names() -> None:
 
 
 def test_ast_to_converted_selections_converts_anonymous_and_named_fragments() -> None:
-    """``ast_to_converted_selections`` converts field nodes, named/anonymous fragments, and spreads."""
+    """``ast_to_converted_selections`` converts field nodes, named/anonymous fragments, and spreads.
+
+    A resolve info's field nodes are field nodes, so the fragments sit under one.
+    """
     doc = parse(
-        "query Q($incl: Boolean!) { "
+        "query Q($incl: Boolean!) { root { "
         "  item(id: 1) @include(if: $incl) { name } "
         "  ... on Book { title } "
         "  ... { isbn } "
         "  ...Frag "
-        "} "
+        "} } "
         "fragment Frag on Author { penName }",
     )
     operation = doc.definitions[0]
     assert isinstance(operation, OperationDefinitionNode)
-    field_nodes = _ast_selections(operation.selection_set.selections)
-    info = make_info(
-        fragments="fragment Frag on Author { penName }",
-        variables={"incl": True},
-    )._raw_info
+    field_nodes = _field_nodes(operation.selection_set.selections)
+    info = raw_info_of(
+        make_info(
+            fragments="fragment Frag on Author { penName }",
+            variables={"incl": True},
+        ),
+    )
 
-    converted = ast_to_converted_selections(info, field_nodes)
+    (root,) = ast_to_converted_selections(info, field_nodes)
+    assert isinstance(root, SelectedField)
+    converted = root.selections
     assert len(converted) == 4
 
     # 1. SelectedField with arguments, directives, and children
@@ -650,6 +644,7 @@ def test_ast_to_converted_selections_converts_anonymous_and_named_fragments() ->
     assert isinstance(inline_anon, InlineFragment)
     assert inline_anon.type_condition is None
     assert len(inline_anon.selections) == 1
+    assert isinstance(inline_anon.selections[0], SelectedField)
     assert inline_anon.selections[0].name == "isbn"
 
     # 4. FragmentSpread (spreads to definition in info.fragments)
@@ -747,7 +742,9 @@ class _UnionQuery:
         self,
         info: Info[object, object],
     ) -> Annotated[_Shelf | _Desk, strawberry.union("Place")]:
-        _CAPTURED.append(ast_to_converted_selections(info._raw_info, info._raw_info.field_nodes))
+        _CAPTURED.append(
+            ast_to_converted_selections(raw_info_of(info), raw_info_of(info).field_nodes),
+        )
         return _Shelf()
 
 

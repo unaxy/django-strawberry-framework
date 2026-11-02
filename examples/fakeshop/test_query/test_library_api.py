@@ -10594,17 +10594,13 @@ def test_genre_connection_total_count_skip_include_no_count() -> None:
 def test_anonymous_inline_fragment_under_connection_field_resolves() -> None:
     """An anonymous inline fragment under a connection field resolves cleanly.
 
-    Strawberry's ``convert_selections`` (reached via the optimizer's ``apply_to``
-    AND via ``info.selected_fields`` inside Strawberry's own
-    ``ListConnection.resolve_connection`` -> ``should_resolve_list_connection_edges``)
-    reads ``type_condition.name.value``, so on an anonymous inline fragment
-    (``... { f }``, ``type_condition=None``) anywhere under a
-    ``DjangoConnectionField`` it raises ``AttributeError: 'NoneType' object has no
-    attribute 'name'``. The package routes its own conversion through the
-    anonymous-safe ``ast_to_converted_selections`` adapter and primes
-    ``info.selected_fields`` with it before the connection resolver runs, so both
-    shapes - the anonymous fragment directly under the connection field and one
-    nested down at the ``node`` level - resolve and return the seeded genre names.
+    ``... { f }`` converts to an ``InlineFragment`` with ``type_condition=None``, the
+    one shell that names no type. The package's conversion
+    (``ast_to_converted_selections``, primed into ``info.selected_fields`` before the
+    connection resolver runs) carries that shell through the fragment-aware
+    substrate, so both shapes - the anonymous fragment directly under the connection
+    field and one nested down at the ``node`` level - resolve and return the seeded
+    genre names.
     """
     _seed_genres("Alpha", "Beta", "Gamma")
     expected = ["Alpha", "Beta", "Gamma"]
@@ -10652,14 +10648,10 @@ def test_anonymous_inline_fragment_under_connection_field_resolves() -> None:
 def test_anonymous_inline_fragment_with_total_count_resolves() -> None:
     """``totalCount`` alongside an anonymous inline fragment resolves and counts.
 
-    Pins the second ``convert_selections`` crash site: the
-    ``totalCount`` fast path reads ``info.selected_fields`` (Strawberry's crashing
-    ``convert_selections``) via ``_total_count_requested``, and Strawberry's own
-    ``should_resolve_list_connection_edges`` reads it too. The single prime of
-    ``info.selected_fields`` in ``DjangoConnection.resolve_connection`` routes BOTH
-    reads through the anonymous-safe conversion, so a connection query carrying an
-    anonymous inline fragment AND ``totalCount`` resolves: the count still fires
-    (== 3) and the edges still resolve.
+    The ``totalCount`` read and the page read both walk the one stamped conversion
+    ``DjangoConnection.resolve_connection`` primes into ``info.selected_fields``, so
+    a connection query carrying an anonymous inline fragment AND ``totalCount``
+    resolves: the count still fires (== 3) and the edges still resolve.
     """
     _seed_genres("Alpha", "Beta", "Gamma")
 
@@ -10696,11 +10688,9 @@ def test_anonymous_inline_fragment_sibling_of_edges_resolves() -> None:
     selection, with ``first: 2`` paginating; the anonymous ``InlineFragment`` shell
     carries ``name=None``.
 
-    The package routes its conversion through the anonymous-safe
-    ``ast_to_converted_selections`` adapter (``type_condition=None`` instead of
-    dereferencing the missing condition) and the walker descends fragment shells via
-    ``is_fragment`` before reading any name, so the COUNT still fires through the
-    fragment (``totalCount == 3``) while the page stays bounded to ``first: 2``.
+    The walker descends fragment shells via ``is_fragment`` before reading any
+    name, so the COUNT still fires through the fragment (``totalCount == 3``) while
+    the page stays bounded to ``first: 2``.
     """
     _seed_genres("Alpha", "Beta", "Gamma")
 

@@ -10,7 +10,6 @@ Consumer-visible policy enforcement and masking live in
 
 from __future__ import annotations
 
-import asyncio
 import gc
 import inspect
 import weakref
@@ -30,7 +29,9 @@ from django import forms
 from django.db import connection
 from django.db.models import IntegerField, Model, TextField
 from django_filters import CharFilter
-from graphql import ExecutionContext, FieldNode, GraphQLError, NameNode, print_ast
+from graphql import FieldNode, GraphQLError, NameNode, print_ast
+from graphql.execution import Executor
+from graphql.execution.executor import CollectedErrors
 from graphql.pyutils import Path
 from strawberry import relay
 from strawberry.exceptions import DuplicatedTypeName
@@ -217,7 +218,7 @@ def test_schema_init_with_none_and_iterable_extensions() -> None:
 
 def test_schema_init_with_none_execution_context_class_falls_back() -> None:
     schema = DjangoSchema(query=DummyQuery, execution_context_class=None)
-    assert schema.execution_context_class is DjangoMutationExecutionContext
+    assert read_attr(schema, "execution_context_class") is DjangoMutationExecutionContext
 
 
 def test_consumer_extension_entries_shapes() -> None:
@@ -332,16 +333,6 @@ def test_marked_mutation_class_is_none_off_a_marked_root_mutation_field() -> Non
     assert ctx_mut._marked_mutation_class(mut_type, [_field_node("doesNotExist")]) is None
 
 
-def test_execution_errors_fallback() -> None:
-    ctx = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
-    assert ctx._execution_errors() == []
-
-    # basedpyright: each graphql-core shape is planted on the bare context under test; the
-    # installed release declares only one of them
-    ctx.collected_errors = object()  # pyright: ignore[reportAttributeAccessIssue]
-    assert ctx._execution_errors() == []
-
-
 def test_schema_policy_resolution_and_validation() -> None:
     s1 = DjangoSchema(
         query=DummyQuery,
@@ -376,18 +367,18 @@ def test_execute_mutation_field_sync_exception_rolls_back() -> None:
     ctx = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
     mutation_type = MagicMock()
     ctx.schema = MagicMock(mutation_type=mutation_type)
-    ctx.errors = []
+    ctx.collected_errors = CollectedErrors()
 
     with (
         patch.object(ctx, "_marked_mutation_class", return_value=DummyMutationCls),
         patch.object(
-            ExecutionContext,
+            Executor,
             "execute_field",
             side_effect=RuntimeError("sync field crash"),
         ),
         pytest.raises(RuntimeError, match="sync field crash"),
     ):
-        ctx.execute_field(mutation_type, None, [MagicMock()], _MUTATION_ROOT_PATH)
+        ctx.execute_field(mutation_type, None, [MagicMock()], _MUTATION_ROOT_PATH, None)
 
 
 class FlipFlopErrorList:
@@ -457,16 +448,15 @@ def test_sync_window_hostile_error_container_rolls_back_and_leaks_no_transaction
     ctx = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
     mutation_type = MagicMock()
     ctx.schema = MagicMock(mutation_type=mutation_type)
-    # basedpyright: each graphql-core shape is planted on the bare context under test; the
-    # installed release declares only one of them
+    # basedpyright: a hostile error container stands in for graphql-core's ``CollectedErrors``
     ctx.collected_errors = SimpleNamespace(errors=FlipFlopErrorList())  # pyright: ignore[reportAttributeAccessIssue]
 
     with (
         patch.object(ctx, "_marked_mutation_class", return_value=_ModelLessMutationMeta),
-        patch.object(ExecutionContext, "execute_field", side_effect=_write_the_rollback_probe_row),
+        patch.object(Executor, "execute_field", side_effect=_write_the_rollback_probe_row),
         pytest.raises(RuntimeError, match="hostile len"),
     ):
-        ctx.execute_field(mutation_type, None, [MagicMock()], _MUTATION_ROOT_PATH)
+        ctx.execute_field(mutation_type, None, [MagicMock()], _MUTATION_ROOT_PATH, None)
 
     assert not connection.in_atomic_block
     assert not _rollback_probe_row_exists()
@@ -498,8 +488,7 @@ async def test_async_window_hostile_error_container_rolls_back_and_leaks_no_tran
     ctx = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
     mutation_type = MagicMock()
     ctx.schema = MagicMock(mutation_type=mutation_type)
-    # basedpyright: each graphql-core shape is planted on the bare context under test; the
-    # installed release declares only one of them
+    # basedpyright: a hostile error container stands in for graphql-core's ``CollectedErrors``
     ctx.collected_errors = SimpleNamespace(errors=FlipFlopErrorList())  # pyright: ignore[reportAttributeAccessIssue]
 
     def _write_in_the_window_worker(*args: object, **kwargs: object) -> Awaitable[object]:
@@ -507,13 +496,14 @@ async def test_async_window_hostile_error_container_rolls_back_and_leaks_no_tran
 
     with (
         patch.object(ctx, "_marked_mutation_class", return_value=_ModelLessMutationMeta),
-        patch.object(ExecutionContext, "execute_field", side_effect=_write_in_the_window_worker),
+        patch.object(Executor, "execute_field", side_effect=_write_in_the_window_worker),
     ):
         pending = ctx.execute_field(
             mutation_type,
             None,
             [MagicMock()],
             _MUTATION_ROOT_PATH,
+            None,
         )
         assert inspect.isawaitable(pending)
         with pytest.raises(RuntimeError, match="hostile len"):
@@ -532,12 +522,7 @@ async def test_execute_mutation_field_async_exception_rolls_back() -> None:
     ctx = DjangoMutationExecutionContext.__new__(DjangoMutationExecutionContext)
     mutation_type = MagicMock()
     ctx.schema = MagicMock(mutation_type=mutation_type)
-    ctx.errors = []
-
-    def _is_awaitable(val: object) -> bool:
-        return asyncio.iscoroutine(val) or hasattr(val, "__await__")
-
-    ctx.is_awaitable = _is_awaitable
+    ctx.collected_errors = CollectedErrors()
 
     async def async_failing_resolve(*_args: object, **_kwargs: object) -> NoReturn:
         raise RuntimeError("async field crash")
@@ -545,7 +530,7 @@ async def test_execute_mutation_field_async_exception_rolls_back() -> None:
     with (
         patch.object(ctx, "_marked_mutation_class", return_value=DummyMutationCls),
         patch.object(
-            ExecutionContext,
+            Executor,
             "execute_field",
             return_value=async_failing_resolve(),
         ),
@@ -555,6 +540,7 @@ async def test_execute_mutation_field_async_exception_rolls_back() -> None:
             None,
             [MagicMock()],
             _MUTATION_ROOT_PATH,
+            None,
         )
         assert inspect.isawaitable(pending)
         with pytest.raises(RuntimeError, match="async field crash"):

@@ -28,6 +28,9 @@ seam (spec-046 Decision 11): by default ``consumers.py``'s revalidating
 project injects. All three wrappers are the ROUTER's either way, so an injected
 consumer cannot escape the Host check, the Origin check, or authentication - and
 those are two separate checks, in that order, neither standing in for the other.
+Upstream's consumer-side Origin hook is answered in Channels' favour by the
+package consumer (``consumers.py``, "The Host boundary"); an injected consumer
+keeps upstream's own answer.
 
 ``channels`` is a SOFT dependency (spec-041 Decision 5): importing this module
 is channels-free, and the router class materializes lazily through the PEP 562

@@ -855,7 +855,7 @@ def _cursor_argument(arguments: Mapping[str, object], name: str) -> str | None:
 
 def _connection_window_slice_from_arguments(
     arguments: Mapping[str, object],
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
 ) -> ConnectionWindowBounds | None:
     """Resolve the window bounds from one argument payload.
 
@@ -914,7 +914,7 @@ def _connection_window_slice_from_arguments(
 
 def _keyset_window_slice_from_arguments(
     arguments: Mapping[str, object],
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     *,
     columns: tuple[CursorColumn, ...],
     fingerprint: str,
@@ -976,7 +976,7 @@ def _keyset_window_slice_from_arguments(
 
 def _divergent_key_windows(
     response_key_arguments: Mapping[str | None, Mapping[str, object]],
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     keyset_context: CursorState | None = None,
 ) -> _WindowPass:
     """Resolve one window per payload for a nested connection selection.
@@ -1168,7 +1168,7 @@ def plan_connection_relation(
     relation_field_name: str,
     field_map: Mapping[str, FieldMeta],
     prefix: JoinPrefix,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     runtime_prefixes: tuple[tuple[str, ...], ...],
     type_cls: type[DjangoType] | None,
     model: type[models.Model],

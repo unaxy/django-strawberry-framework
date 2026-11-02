@@ -145,6 +145,7 @@ if TYPE_CHECKING:
 
     from strawberry.extensions.context import ExtensionContextManagerBase
     from strawberry.types import ExecutionContext
+    from strawberry.types.execution import StreamExecutionResult
     from typing_extensions import TypeIs
 
 #: The value type of whichever context variable a binding sets and resets.
@@ -990,11 +991,9 @@ class DjangoExtensionsRunner(SchemaExtensionsRunner):
 
     @override
     # basedpyright: returns _BoundScope, not the base's StreamResultContextManager
-    def on_stream_result(self, result: object) -> Any:  # pyright: ignore[reportExplicitAny, reportAny]
+    def on_stream_result(self, result: StreamExecutionResult) -> Any:  # pyright: ignore[reportExplicitAny, reportAny]
         """Return the streaming-result scope, bound so the runner's contract is complete."""
-        # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result
-        # aliases in an ImportError fallback, so StreamExecutionResult carries Unknown
-        return _BoundScope(self._scope(), self._operation_states, super().on_stream_result(result))  # pyright: ignore[reportUnknownMemberType]
+        return _BoundScope(self._scope(), self._operation_states, super().on_stream_result(result))
 
     @contextlib.contextmanager
     def resumed(self) -> Generator[None, None, None]:

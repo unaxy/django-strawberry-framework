@@ -1225,15 +1225,15 @@ def _format_graphql(content: str) -> str | None:
             text = pad(level) + (f"{node.alias.value}: " if node.alias else "") + node.name.value
             if node.arguments:
                 text += arguments(node.arguments, level)
-            text += directives(node.directives)
+            text += directives(node.directives or ())
             if node.selection_set:
                 text += " " + selection_set(node.selection_set, level)
             return text
         if isinstance(node, FragmentSpreadNode):
-            return f"{pad(level)}...{node.name.value}{directives(node.directives)}"
+            return f"{pad(level)}...{node.name.value}{directives(node.directives or ())}"
         if isinstance(node, InlineFragmentNode):
             cond = f" on {node.type_condition.name.value}" if node.type_condition else ""
-            head = f"{pad(level)}...{cond}{directives(node.directives)}"
+            head = f"{pad(level)}...{cond}{directives(node.directives or ())}"
             return head + " " + selection_set(node.selection_set, level)
         return pad(level) + print_ast(node)
 
@@ -1250,10 +1250,20 @@ def _format_graphql(content: str) -> str | None:
             head = node.operation.value + (f" {node.name.value}" if node.name else "")
             if node.variable_definitions:
                 head += "(" + ", ".join(print_ast(v) for v in node.variable_definitions) + ")"
-            return head + directives(node.directives) + " " + selection_set(node.selection_set, 0)
+            return (
+                head
+                + directives(node.directives or ())
+                + " "
+                + selection_set(node.selection_set, 0)
+            )
         if isinstance(node, FragmentDefinitionNode):
             head = f"fragment {node.name.value} on {node.type_condition.name.value}"
-            return head + directives(node.directives) + " " + selection_set(node.selection_set, 0)
+            return (
+                head
+                + directives(node.directives or ())
+                + " "
+                + selection_set(node.selection_set, 0)
+            )
         return print_ast(node)  # type-system / unhandled defs -> graphql-core inline printer
 
     try:

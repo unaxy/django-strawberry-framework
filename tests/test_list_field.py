@@ -161,7 +161,7 @@ from tests._idioms import (
     json_list,
     pickle_roundtrip,
 )
-from tests._info import make_info
+from tests._info import make_info, raw_info_of
 
 _M = TypeVar("_M", bound=models.Model)
 _Node = TypeVar("_Node", bound=BaseExpression)
@@ -1484,7 +1484,7 @@ def test_list_field_optimizer_adapter_unwrap_rewrap_and_early_returns() -> None:
     # 1. Non-adapted queryset stays non-adapted
     qs = Category.objects.all()
     # The default probe field returns ``String``: no ``DjangoType`` to resolve a model from.
-    info_unresolved = make_info(field_name="cats")._raw_info
+    info_unresolved = raw_info_of(make_info(field_name="cats"))
     out1 = ext._optimize(qs, info_unresolved)
     assert not unwrap_async_queryset_adapter(out1)[1]
     assert out1 is qs

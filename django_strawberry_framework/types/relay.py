@@ -232,7 +232,7 @@ _RELAY_ID_ATTR_SLOT = "_dsf_relay_id_attr"
 # candidates - the only case the ``"pk"`` fallback answers. Upstream raises the
 # same class (same ``cls``, ``rich_message`` and ``suggestion``) for MORE than
 # one candidate and exposes neither the candidate list nor a count, so the
-# message is the only discriminator; identical from the 0.322.2 floor through
+# message is the only discriminator; identical from the 0.328.0 floor through
 # the locked release. Matched fail-closed: any other message (more than one
 # candidate, or a reworded zero case) is refused, never read as ``"pk"``.
 _NO_NODE_ID_MESSAGE = "No field annotated with `NodeID` found in "

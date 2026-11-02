@@ -23,7 +23,7 @@ attribute's name, where a placeholder ``None`` would only fail on some reads and
 """
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, TypeAlias, TypeGuard
+from typing import TYPE_CHECKING, TypeAlias, TypeGuard, TypeVar
 
 import strawberry
 from graphql import (
@@ -31,14 +31,18 @@ from graphql import (
     FragmentDefinitionNode,
     FragmentSpreadNode,
     GraphQLResolveInfo,
+    GraphQLResolveInfoHelpers,
     InlineFragmentNode,
     OperationDefinitionNode,
     OperationType,
-    is_output_type,
+    get_named_type,
+    is_composite_type,
+    is_leaf_type,
     parse,
 )
-from graphql.pyutils import Path, is_awaitable
+from graphql.pyutils import Path, gather_with_cancel
 from strawberry.annotation import StrawberryAnnotation
+from strawberry.execution import optimized_is_awaitable
 from strawberry.schema.config import StrawberryConfig
 from strawberry.types.field import StrawberryField
 from typing_extensions import override
@@ -46,26 +50,36 @@ from typing_extensions import override
 from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Sequence
+
     from graphql import (
         GraphQLEnumType,
         GraphQLInterfaceType,
+        GraphQLList,
+        GraphQLNonNull,
         GraphQLObjectType,
         GraphQLScalarType,
         GraphQLType,
         GraphQLUnionType,
-        GraphQLWrappingType,
     )
 
-    #: graphql-core's ``GraphQLOutputType``, with the wrapping member it leaves bare
-    #: parametrized by ``GraphQLWrappingType``'s own bound.
-    _GraphQLOutputType: TypeAlias = (
+    _GraphQLNullableOutputType: TypeAlias = (
         GraphQLScalarType
         | GraphQLObjectType
         | GraphQLInterfaceType
         | GraphQLUnionType
         | GraphQLEnumType
-        | GraphQLWrappingType[GraphQLType]
+        | GraphQLList[GraphQLType]
     )
+    #: graphql-core's ``GraphQLOutputType``, with the list member it leaves bare
+    #: parametrized by ``GraphQLList``'s own bound.
+    _GraphQLOutputType: TypeAlias = (
+        _GraphQLNullableOutputType | GraphQLNonNull[_GraphQLNullableOutputType]
+    )
+
+
+_ContextT = TypeVar("_ContextT")
+_RootT = TypeVar("_RootT")
 
 
 @strawberry.type
@@ -126,9 +140,28 @@ class _Query:
 _DEFAULT_SCHEMA = strawberry.Schema(query=_Query)
 
 
-def _is_output_type(value: object) -> "TypeGuard[_GraphQLOutputType]":
-    """Whether ``value`` is a GraphQL output type (graphql-core's ``is_output_type``, as a guard)."""
-    return is_output_type(value)
+def _is_output_type(value: "GraphQLType") -> "TypeGuard[_GraphQLOutputType]":
+    """Whether ``value`` is an output type: graphql-core's ``is_output_type``, as a guard.
+
+    Asked of the named type: a scalar, an enum, an object, an interface or a union
+    under any list / non-null wrapping.
+    """
+    named = get_named_type(value)
+    return is_leaf_type(named) or is_composite_type(named)
+
+
+def _is_awaitable(value: object) -> "TypeGuard[Awaitable[object]]":
+    """Strawberry's own resolver predicate, as its executor hands it to a resolve info."""
+    return optimized_is_awaitable(value)
+
+
+def _gather(values: "Sequence[Awaitable[object]]") -> "Awaitable[list[object]]":
+    """graphql-core's own resolver gather, as its executor hands it to resolvers."""
+    return gather_with_cancel(*values)
+
+
+def _track(_values: "Sequence[object]") -> None:
+    """Track nothing: the helper's info belongs to no running executor."""
 
 
 def response_path(*keys: str | int) -> Path:
@@ -204,12 +237,24 @@ def make_info(
         fragment_map,
         None,
         operation_node,
-        dict(variables or {}),
+        # basedpyright: Strawberry's executor hands resolvers the coerced dict
+        # (``StrawberryGraphQLCoreExecutionContext.build_resolve_info``), not graphql-core's
+        # ``VariableValues``
+        dict(variables or {}),  # pyright: ignore[reportArgumentType]
         context,
-        is_awaitable,
+        _is_awaitable,
+        None,
+        GraphQLResolveInfoHelpers(gather=_gather, track=_track),
     )
     field = StrawberryField(python_name=resolved_name, type_annotation=StrawberryAnnotation(str))
     return schema.config.info_class(_raw_info=raw_info, _field=field)
+
+
+def raw_info_of(info: strawberry.Info[_ContextT, _RootT]) -> GraphQLResolveInfo[object]:
+    """The graphql-core resolve info ``info`` wraps."""
+    raw_info: GraphQLResolveInfo[object] | None = getattr(info, "_raw_info", None)
+    assert raw_info is not None, "a Strawberry Info wraps its graphql-core info at _raw_info"
+    return raw_info
 
 
 def _first_root_field(
@@ -242,4 +287,4 @@ class _UnreadInfo(strawberry.Info[object, object]):
 def unread_info() -> strawberry.Info[object, object]:
     """Build an ``Info`` the path under test must never read (``tests/test_info.py`` proves it)."""
     built = make_info()
-    return _UnreadInfo(_raw_info=built._raw_info, _field=built._field)
+    return _UnreadInfo(_raw_info=raw_info_of(built), _field=built._field)

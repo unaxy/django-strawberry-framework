@@ -62,7 +62,7 @@ from django.db.backends.sqlite3 import base as sqlite_base
 from django.db.models import Model, QuerySet
 from django.db.models.signals import post_save
 from django.utils.functional import SimpleLazyObject
-from graphql.execution.execute import ExecutionContext as CoreExecutionContext
+from graphql.execution import Executor as CoreExecutionContext
 from strawberry import relay
 from typing_extensions import Self, override
 
@@ -80,7 +80,6 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.mutations.permissions import DjangoModelPermission
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.schema import DjangoMutationExecutionContext
 from django_strawberry_framework.utils import querysets as querysets_module
 from django_strawberry_framework.utils import write_transaction as write_transaction_module
 from django_strawberry_framework.utils._narrowing import (
@@ -311,8 +310,9 @@ async def test_concurrent_async_windows_each_hold_an_outermost_transaction_of_th
         _self: object,
         _parent_type: object,
         _source: object,
-        _field_nodes: object,
+        _field_details_list: object,
         _path: object,
+        _position_context: object,
     ) -> None:
         observations.append(await sync_to_async(_window_observation, thread_sensitive=True)())
         if len(observations) == 2:
@@ -346,8 +346,9 @@ def test_concurrent_async_windows_on_two_event_loops_each_hold_their_own_transac
         _self: object,
         _parent_type: object,
         _source: object,
-        _field_nodes: object,
+        _field_details_list: object,
         _path: object,
+        _position_context: object,
     ) -> None:
         observation = await sync_to_async(_window_observation, thread_sensitive=True)()
         with observation_lock:
@@ -392,8 +393,9 @@ async def test_async_execution_context_exits_transaction_on_raised_base_exceptio
         _self: object,
         _parent_type: object,
         _source: object,
-        _field_nodes: object,
+        _field_details_list: object,
         _path: object,
+        _position_context: object,
     ) -> NoReturn:
         await sync_to_async(_capture_worker_connection, thread_sensitive=True)()
         raise RuntimeError("execution exploded outside GraphQL error handling")
@@ -428,8 +430,9 @@ def test_sync_execution_context_exits_transaction_on_raised_base_exception(
         _self: object,
         _parent_type: object,
         _source: object,
-        _field_nodes: object,
+        _field_details_list: object,
         _path: object,
+        _position_context: object,
     ) -> NoReturn:
         raise RuntimeError("execution exploded outside GraphQL error handling")
 
@@ -1104,31 +1107,6 @@ async def test_every_success_payload_under_steady_pings_is_a_committed_row() -> 
 
     assert reported == names
     assert await _committed() == set(names)
-
-
-def test_execution_errors_reads_both_graphql_core_error_shapes() -> None:
-    """``_execution_errors`` bridges the graphql-core 3.2.10 errors relocation.
-
-    graphql-core < 3.2.10 exposes the located-error list as
-    ``ExecutionContext.errors``; 3.2.10 moved it behind a ``CollectedErrors``
-    container at ``collected_errors.errors``. The installed version exercises
-    only one shape at runtime, so both are pinned here explicitly.
-    """
-    context = object.__new__(DjangoMutationExecutionContext)
-
-    class _Collected:
-        errors = ["located"]
-
-    # basedpyright: each graphql-core shape is planted on the bare context under test; the
-    # installed release declares only one of them
-    context.collected_errors = _Collected()  # pyright: ignore[reportAttributeAccessIssue]
-    assert context._execution_errors() == ["located"]
-
-    # basedpyright: each graphql-core shape is planted on the bare context under test; the
-    # installed release declares only one of them
-    del context.collected_errors  # pyright: ignore[reportAttributeAccessIssue]
-    context.errors = ["legacy"]  # pyright: ignore[reportAttributeAccessIssue]
-    assert context._execution_errors() == ["legacy"]
 
 
 # ===========================================================================

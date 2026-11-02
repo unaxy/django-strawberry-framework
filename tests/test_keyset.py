@@ -100,7 +100,7 @@ from django_strawberry_framework.utils.connections import (
 )
 from tests._definition import make_definition
 from tests._idioms import saved_pk
-from tests._info import make_info
+from tests._info import make_info, raw_info_of
 from tests._soft_dependency import simulated_absence
 
 if TYPE_CHECKING:
@@ -630,7 +630,7 @@ def test_resolve_relay_max_results_precedence() -> None:
     assert resolve_relay_max_results(_capped_info(), None) == 50
 
     # The graphql-core info a resolver's wrapper holds: its schema wraps the Strawberry schema.
-    assert resolve_relay_max_results(_capped_info()._raw_info, None) == 50
+    assert resolve_relay_max_results(raw_info_of(_capped_info()), None) == 50
     # basedpyright: the slotless object is the input under test (the default applies);
     # resolve_relay_max_results types info as EitherInfo | None
     assert resolve_relay_max_results(object(), None) == 100  # pyright: ignore[reportArgumentType]

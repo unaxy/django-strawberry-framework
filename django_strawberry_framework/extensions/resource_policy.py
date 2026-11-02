@@ -108,14 +108,16 @@ from graphql import (
     VariableNode,
     Visitor,
     get_named_type,
-    is_input_type,
+    is_composite_type,
+    is_input_object_type,
+    is_leaf_type,
     visit,
 )
 from graphql.language.lexer import Lexer
 from graphql.language.source import Source
 from graphql.language.token_kind import TokenKind
 from graphql.utilities import value_from_ast_untyped
-from graphql.utilities.type_info import TypeInfo, TypeInfoVisitor, get_field_def
+from graphql.utilities.type_info import TypeInfo, TypeInfoVisitor
 from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.file_uploads import Upload
 from strawberry.relay import GlobalID
@@ -1148,7 +1150,7 @@ def _page_bound(
     reaching that counter answers both the ``min`` that would clamp it and the
     reflected ``__radd__`` the running total is accumulated through.
     """
-    for argument in node.arguments:
+    for argument in node.arguments or ():
         argument_def = field_def.args.get(argument.name.value)
         if argument_def is None or published_python_name(argument_def) not in _PAGE_SIZE_ARGUMENTS:
             continue
@@ -1260,10 +1262,13 @@ def _type_system_directives(definition: Node) -> Iterator[DirectiveNode]:
 
 def _declared_input_type(graphql_schema: GraphQLSchema, type_node: TypeNode) -> GraphQLType | None:
     """Return the input type a variable definition declares, or ``None`` when it names none."""
-    # basedpyright: graphql-core 3.2 overloads ``type_from_ast`` on the bare generic
+    # basedpyright: graphql-core overloads ``type_from_ast`` on the bare generic
     # ``GraphQLList``, so the function reads as partially Unknown
     declared = graphql.type_from_ast(graphql_schema, type_node)  # pyright: ignore[reportUnknownMemberType]
-    return declared if is_input_type(declared) else None
+    # graphql-core's ``is_input_type``, asked of the named type: a scalar, an enum or an
+    # input object under any list / non-null wrapping.
+    named = get_named_type(declared)
+    return declared if is_leaf_type(named) or is_input_object_type(named) else None
 
 
 class _DocumentWalk:
@@ -1532,7 +1537,11 @@ class _DocumentWalk:
             # resolves the introspection meta-fields, so ``__schema`` opens a charged
             # subtree like any other field; ``None`` (a parent that is not a composite
             # type, only an unvalidated document's shape) ends the shaped branch.
-            field_def = None if parent is None else get_field_def(graphql_schema, parent, node)
+            field_def = (
+                graphql_schema.get_field(parent, node.name.value)
+                if is_composite_type(parent)
+                else None
+            )
             # A generated top-level mutation field carries its bind-time spec
             # map, which classifies the write input's fields for the whole
             # argument walk below; ``begin_mutation_field`` keeps the per-field

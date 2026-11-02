@@ -2805,8 +2805,9 @@ whose plan under `allLibraryBooks` runs a database-reading hook that
 `django_strawberry_framework/optimizer/extension.py::DjangoOptimizerExtension.resolve` builds
 off the loop.
 `examples/fakeshop/test_query/test_library_api.py::test_async_library_root_evaluating_in_its_body_is_refused_on_the_loop`
-pins the boundary Decision 5 states, and the arm's `QuerySet`-only scope is
-`examples/fakeshop/test_query/test_list_field_async_api.py::test_async_completion_adapts_only_a_queryset`.
+pins the boundary Decision 5 states, and graphql-core 3.3, which retired the arm, completes
+an asynchronous iterable asynchronously:
+`examples/fakeshop/test_query/test_list_field_async_api.py::test_async_completion_prefers_the_asynchronous_protocol`.
 The package tier pins what no request isolates: both retirement sentinels and a
 plain root's plan hop happening only when a plan is built
 (`tests/optimizer/test_extension.py::test_resolve_hops_a_sync_root_under_the_async_executor_only_to_build_a_plan`).

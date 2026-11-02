@@ -151,7 +151,7 @@ class _Capture(NamedTuple):
 
     selections: Iterable[ConvertedSelection]
     model: type[models.Model]
-    info: GraphQLResolveInfo | None
+    info: GraphQLResolveInfo[object] | None
     source_type: type[DjangoType] | None
 
 
@@ -185,7 +185,7 @@ def _capture_walk_inputs(
     def _recorder(
         selected_fields: Iterable[ConvertedSelection],
         model: type[models.Model],
-        info: GraphQLResolveInfo | None = None,
+        info: GraphQLResolveInfo[object] | None = None,
         *,
         source_type: type[DjangoType] | None = None,
     ) -> OptimizationPlan:

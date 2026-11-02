@@ -116,7 +116,7 @@ from django_strawberry_framework.utils.querysets import _COMBINED_WHAT
 from django_strawberry_framework.utils.strings import snake_case
 from tests._definition import make_definition
 from tests._idioms import saved_pk
-from tests._info import make_info
+from tests._info import make_info, raw_info_of
 
 from ._link_models import LnkPairChild, LnkParent, LnkSlugChild
 from ._spelling_models import SpCard, SpGenre, SpParent
@@ -198,7 +198,7 @@ def _global_id() -> SimpleNamespace:
     return _sel("id", python_name=_RELAY_ID_PYTHON_NAME)
 
 
-def _as_partial_resolve_info(stand_in: object) -> GraphQLResolveInfo:
+def _as_partial_resolve_info(stand_in: object) -> GraphQLResolveInfo[object]:
     """Hand a partial info to a planner entry point that takes a graphql-core resolve info."""
     # basedpyright: an info missing slots every real resolve info carries (an operation, a
     # schema config) is the input under test: the planner's defensive arms must tolerate it;
@@ -1304,7 +1304,7 @@ def test_plan_does_not_elide_forward_fk_when_target_has_custom_get_queryset() ->
         plan = plan_optimizations(
             [_sel("category", selections=[_sel("id")])],
             Item,
-            info=make_info()._raw_info,
+            info=raw_info_of(make_info()),
         )
     finally:
         registry.clear()
@@ -1663,7 +1663,7 @@ def test_has_custom_id_resolver_fallback_matches_definition_path() -> None:
 def test_plan_downgrades_select_related_when_target_has_custom_get_queryset() -> None:
     """A custom target ``get_queryset`` downgrades forward FK joins to ``Prefetch``."""
     registry.clear()
-    info = make_info()._raw_info
+    info = raw_info_of(make_info())
     seen_querysets: list[QuerySet[Category]] = []
     seen_infos: list[object] = []
 
@@ -1704,8 +1704,8 @@ def test_plan_downgrades_select_related_when_target_has_custom_get_queryset() ->
     assert prefetch.queryset.model is Category
     assert seen_querysets[-1].model is Category
     hook_info = seen_infos[-1]
+    assert read_attr(hook_info, "_raw_info") is info
     assert isinstance(hook_info, strawberry.Info)
-    assert hook_info._raw_info is info
     assert hook_info.field_name == "field"
 
 
@@ -1754,7 +1754,7 @@ def test_plan_prefetches_many_side_with_custom_target_get_queryset() -> None:
         plan = plan_optimizations(
             [_sel("items", selections=[_sel("name")])],
             Category,
-            info=make_info()._raw_info,
+            info=raw_info_of(make_info()),
         )
     finally:
         registry.clear()
@@ -1798,7 +1798,7 @@ def test_plan_refuses_sliced_hook_result_for_plain_list_relation() -> None:
             plan_optimizations(
                 [_sel("items", selections=[_sel("name")])],
                 Category,
-                info=make_info()._raw_info,
+                info=raw_info_of(make_info()),
             )
     finally:
         registry.clear()
@@ -1828,7 +1828,7 @@ def test_connection_child_seam_still_admits_a_sliced_hook_result() -> None:
             return queryset.order_by("pk")[:1]
 
     field = FieldMeta.from_django_field(Category._meta.get_field("items"))
-    info = make_info()._raw_info
+    info = raw_info_of(make_info())
     admitted = _build_connection_child_queryset(
         field,
         SlicedItemType,
@@ -1860,7 +1860,7 @@ def test_child_builder_spends_the_passed_definition_not_a_class_reread() -> None
     seam.
     """
     field = FieldMeta.from_django_field(Category._meta.get_field("items"))
-    info = make_info()._raw_info
+    info = raw_info_of(make_info())
 
     class DivergedItemType:
         # The carried definition disagrees with the passed one: the threat
@@ -2041,7 +2041,7 @@ def test_plan_propagates_uncacheable_nested_custom_get_queryset() -> None:
         plan = plan_optimizations(
             [_sel("items", selections=[_sel("entries", selections=[_sel("value")])])],
             Category,
-            info=make_info()._raw_info,
+            info=raw_info_of(make_info()),
         )
     finally:
         registry.clear()
@@ -2350,7 +2350,7 @@ def test_plan_force_select_hint_downgrades_for_custom_target_get_queryset() -> N
             optimizer_hints = {"category": OptimizerHint.select_related()}
 
     del CategoryType, ItemType
-    info = make_info()._raw_info
+    info = raw_info_of(make_info())
     try:
         plan = plan_optimizations(
             [_sel("category", selections=[_sel("name")])],
@@ -2360,7 +2360,7 @@ def test_plan_force_select_hint_downgrades_for_custom_target_get_queryset() -> N
     finally:
         registry.clear()
 
-    assert [hook_info._raw_info for hook_info in calls] == [info]
+    assert [raw_info_of(hook_info) for hook_info in calls] == [info]
     assert plan.select_related == ()
     assert plan.cacheable is False
     assert plan.only_fields == ("category_id",)
@@ -3061,7 +3061,7 @@ def test_walker_resolves_relation_targets_through_definition_metadata(
 # ---------------------------------------------------------------------------
 
 
-def _fake_info(relay_max_results: int = 100) -> GraphQLResolveInfo:
+def _fake_info(relay_max_results: int = 100) -> GraphQLResolveInfo[object]:
     """Build the root resolve info of a query whose schema config carries ``relay_max_results``.
 
     ``SliceMetadata.from_arguments`` reads the configured ``relay_max_results`` when
@@ -3069,7 +3069,7 @@ def _fake_info(relay_max_results: int = 100) -> GraphQLResolveInfo:
     identity, so every resolver key planned under this info starts at the root field
     ``field``.
     """
-    return make_info(config=StrawberryConfig(relay_max_results=relay_max_results))._raw_info
+    return raw_info_of(make_info(config=StrawberryConfig(relay_max_results=relay_max_results)))
 
 
 def _conn_sel(
@@ -4986,7 +4986,7 @@ def test_visibility_target_window_flips_cacheable_false() -> None:
                 ),
             ],
             Genre,
-            info=make_info()._raw_info,
+            info=raw_info_of(make_info()),
             source_type=GenreType,
         )
         assert plan.cacheable is False
@@ -5032,7 +5032,7 @@ def test_distinct_child_queryset_left_unplanned_for_correct_total_count() -> Non
                 ),
             ],
             Genre,
-            info=make_info()._raw_info,
+            info=raw_info_of(make_info()),
             source_type=GenreType,
         )
         # Distinct target -> per-parent fallback: no window prefetch, no resolver key.
@@ -5105,7 +5105,7 @@ def test_distinct_fallback_does_not_leak_child_resolver_keys_into_parent() -> No
                 ),
             ],
             genre_model,
-            info=make_info()._raw_info,
+            info=raw_info_of(make_info()),
             source_type=genre_type,
         )
         # Falls back per-parent: no window prefetch and NO child metadata absorbed.
@@ -5283,14 +5283,14 @@ def test_window_subquery_wrap_preserves_only_mask_and_child_select_related() -> 
 # assertion lives in the fakeshop live suite.
 
 
-def _op_info(operation: OperationType) -> GraphQLResolveInfo:
+def _op_info(operation: OperationType) -> GraphQLResolveInfo[object]:
     """Build the root resolve info of a one-field ``operation``.
 
     ``_introduces_projection_for_operation`` reads ``info.operation.operation``; this
     factory exercises the QUERY / MUTATION / SUBSCRIPTION arms. Resolver keys planned
     under it start at the root field ``field``, as under ``_fake_info``.
     """
-    return make_info(operation=operation)._raw_info
+    return raw_info_of(make_info(operation=operation))
 
 
 @pytest.mark.parametrize(
@@ -5369,7 +5369,7 @@ def _mutation_payload_selection(slot: str = "node") -> SelectedField:
 
 
 def _mutation_refetch_selections(
-    info: GraphQLResolveInfo,
+    info: GraphQLResolveInfo[object],
     slot: str = "node",
 ) -> Sequence[Selection | SimpleNamespace]:
     """Derive the re-fetch child selections through the PRODUCTION extractor.
@@ -5624,7 +5624,9 @@ def test_connection_parent_link_columns_record_under_every_operation(
     [_op_info(OperationType.QUERY), None],
     ids=["query-info", "missing-info"],
 )
-def test_query_identical_selection_still_projects_only(info: GraphQLResolveInfo | None) -> None:
+def test_query_identical_selection_still_projects_only(
+    info: GraphQLResolveInfo[object] | None,
+) -> None:
     """The SAME selection under QUERY (and ``None``) introduces a projection.
 
     Contrasts ``test_mutation_to_one_relation_widens_only_a_consumer_projection``: a
@@ -6036,7 +6038,7 @@ def test_connection_custom_get_queryset_builds_base_child_queryset_once() -> Non
                 ),
             ],
             Genre,
-            info=make_info()._raw_info,
+            info=raw_info_of(make_info()),
             source_type=GenreType,
         )
         assert calls == 1
@@ -6200,7 +6202,7 @@ def test_unsafe_child_queryset_left_unplanned_under_both_strategies(
                 ),
             ],
             Genre,
-            info=make_info()._raw_info,
+            info=raw_info_of(make_info()),
             source_type=GenreType,
         )
         assert not any(
@@ -6254,7 +6256,7 @@ def test_combined_child_queryset_is_planned_as_its_primary_key_set(strategy_name
                 ),
             ],
             Genre,
-            info=make_info()._raw_info,
+            info=raw_info_of(make_info()),
             source_type=GenreType,
         )
         windows = [

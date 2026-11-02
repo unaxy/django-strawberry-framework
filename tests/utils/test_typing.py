@@ -51,7 +51,7 @@ from django_strawberry_framework.utils.typing import (
     unwrap_non_null,
     unwrap_return_type,
 )
-from tests._info import make_info
+from tests._info import make_info, raw_info_of
 
 
 def test_typing_exports_all() -> None:
@@ -340,7 +340,7 @@ def test_strawberry_schema_from_info_reads_both_info_flavors() -> None:
     schema = info.schema
     assert isinstance(schema, strawberry.Schema)
     assert strawberry_schema_from_info(info) is schema
-    assert strawberry_schema_from_info(info._raw_info) is schema
+    assert strawberry_schema_from_info(raw_info_of(info)) is schema
     assert strawberry_schema_from_info(SimpleNamespace(schema=None)) is None
 
 

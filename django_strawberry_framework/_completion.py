@@ -9,58 +9,190 @@ import textwrap
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import FunctionType, MappingProxyType
-from typing import TYPE_CHECKING, NamedTuple, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, NamedTuple, ParamSpec, TypeVar
 
-from graphql.execution.execute import ExecutionContext
+from strawberry.schema.schema import StrawberryGraphQLCoreExecutionContext
 from typing_extensions import override
 
-from . import _graphql_core_patches as patches
 from .utils import truth
 from .utils._narrowing import is_list_or_tuple
 from .utils.operation_lease import OperationLease
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterable, Awaitable, Callable, Generator, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable
+    from typing import Protocol, TypeAlias
 
-    from graphql import FieldNode, GraphQLList, GraphQLObjectType, GraphQLResolveInfo
+    from graphql import (
+        GraphQLEnumType,
+        GraphQLInterfaceType,
+        GraphQLList,
+        GraphQLNonNull,
+        GraphQLObjectType,
+        GraphQLResolveInfo,
+        GraphQLScalarType,
+        GraphQLType,
+        GraphQLUnionType,
+    )
+    from graphql.execution.collect_fields import FieldDetailsList, GroupedFieldSet
+    from graphql.execution.incremental.incremental_executor import DeliveryGroupMap
     from graphql.pyutils import AwaitableOrValue, Path
 
-    from ._graphql_core_patches import _GraphQLOutputType
+    _GraphQLNullableOutputType: TypeAlias = (
+        GraphQLScalarType
+        | GraphQLObjectType
+        | GraphQLInterfaceType
+        | GraphQLUnionType
+        | GraphQLEnumType
+        | GraphQLList[GraphQLType]
+    )
+    #: graphql-core's ``GraphQLOutputType``, with the list member it leaves bare
+    #: parametrized by ``GraphQLList``'s own bound.
+    _GraphQLOutputType: TypeAlias = (
+        _GraphQLNullableOutputType | GraphQLNonNull[_GraphQLNullableOutputType]
+    )
+    #: What graphql-core settles in the background during the open window: siblings of a
+    #: field whose synchronous failure bubbled, awaited (``drain_settling``) before it closes.
+    _Settling: TypeAlias = list[asyncio.Future[list[object]]]
+
+    class _ListCompletion(Protocol):
+        """The two list-completion methods of Strawberry's execution context.
+
+        graphql-core declares their ``item_type`` as ``GraphQLOutputType``, whose list
+        member is the bare generic ``GraphQLList``; read through this view the methods
+        carry ``_GraphQLOutputType`` instead and nothing Unknown.
+        """
+
+        async def complete_async_iterator_value(
+            self,
+            item_type: _GraphQLOutputType,
+            field_details_list: FieldDetailsList,
+            info: GraphQLResolveInfo[object],
+            path: Path,
+            async_iterator: AsyncIterator[object],
+            position_context: DeliveryGroupMap | None,
+        ) -> list[object]: ...
+
+        def complete_iterable_value(
+            self,
+            item_type: _GraphQLOutputType,
+            field_details_list: FieldDetailsList,
+            info: GraphQLResolveInfo[object],
+            path: Path,
+            items: Iterable[object],
+            position_context: DeliveryGroupMap | None,
+        ) -> AwaitableOrValue[list[object]]: ...
 
     _ExecuteFields = Callable[
         [
-            ExecutionContext,
+            StrawberryGraphQLCoreExecutionContext,
             GraphQLObjectType,
             object,
             Path | None,
-            dict[str, list[FieldNode]],
+            GroupedFieldSet,
+            DeliveryGroupMap | None,
         ],
         AwaitableOrValue[dict[str, object]],
     ]
+    _CompleteAsyncIteratorValue = Callable[
+        [
+            StrawberryGraphQLCoreExecutionContext,
+            _GraphQLOutputType,
+            FieldDetailsList,
+            GraphQLResolveInfo[object],
+            Path,
+            AsyncIterator[object],
+            DeliveryGroupMap | None,
+        ],
+        Awaitable[list[object]],
+    ]
+    _CompleteIterableValue = Callable[
+        [
+            StrawberryGraphQLCoreExecutionContext,
+            _GraphQLOutputType,
+            FieldDetailsList,
+            GraphQLResolveInfo[object],
+            Path,
+            Iterable[object],
+            DeliveryGroupMap | None,
+        ],
+        AwaitableOrValue[list[object]],
+    ]
 
-_owner: ContextVar[OperationLease[ExecutionContext] | None] = ContextVar(
+#: The lease on the execution context whose generated-mutation window is open; read by
+#: identity only.
+_owner: ContextVar[OperationLease[object] | None] = ContextVar(
     "completion_owner",
     default=None,
 )
 
+#: The lease on the open window's settle list.
+_settling: "ContextVar[OperationLease[_Settling] | None]" = ContextVar(
+    "completion_settling",
+    default=None,
+)
+
+#: Strawberry's execution context, read as ``_ListCompletion``: where the two audited
+#: list-completion methods are read from.
+_LIST_COMPLETION: "type[_ListCompletion]" = StrawberryGraphQLCoreExecutionContext
+
+
+def _as_list_completion(view: "_ListCompletion") -> "_ListCompletion":
+    """Return ``view`` - a ``super()`` proxy - read as ``_ListCompletion``.
+
+    A declared parameter is the one read the checker keeps at the declared type; an
+    annotated assignment narrows back to the proxy's own class, whose two methods
+    carry graphql-core's bare list.
+    """
+    return view
+
 
 @contextmanager
-def owned_completion(context: ExecutionContext) -> "Generator[None]":
-    """Mark only this generated-mutation context's async completion window."""
+def owned_completion(context: object) -> "Generator[_Settling]":
+    """Mark only this generated-mutation context's async completion window.
+
+    Yields the window's settle list, which the owner drains (``drain_settling``) before
+    the window closes.
+    """
     _ = _completion_methods()
+    settling: _Settling = []
     lease = OperationLease(context)
+    settling_lease = OperationLease(settling)
     token = _owner.set(lease)
+    settling_token = _settling.set(settling_lease)
     try:
-        yield
+        yield settling
     finally:
+        settling_lease.close()
         lease.close()
+        _settling.reset(settling_token)
         _owner.reset(token)
+
+
+async def drain_settling(settling: "_Settling") -> None:
+    """Await every sibling the owned window settled in the background.
+
+    A bubbling synchronous error leaves its already-started siblings to graphql-core's
+    background settling, which would otherwise outlive the window's transaction. They run
+    to completion here, across any cancellation of the awaiting task; a cancellation
+    cancels them first and is re-raised once they have ended.
+    """
+    cancelled = False
+    while settling:
+        future = settling.pop()
+        while not future.done():
+            try:
+                _ = await asyncio.wait((future,))
+            except asyncio.CancelledError:  # noqa: PERF203 - cleanup must outlast repeated cancellation
+                cancelled = True
+                _ = future.cancel()
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 async def _gather_with_cancel(*awaitables: "Awaitable[object]") -> list[object]:
     """Join siblings before propagating failure; cancel them only on caller cancellation.
 
-    graphql-core 3.3's own ``gather_with_cancel`` cancels every sibling on the first
+    graphql-core's own ``gather_with_cancel`` cancels every sibling on the first
     failure; this join cancels none on an ordinary failure, which must not cancel a
     shared DataLoader future that a surviving branch also awaits. The shielded drain
     keeps repeated caller cancellation from ending the owning mutation window before
@@ -96,20 +228,22 @@ async def _gather_with_cancel(*awaitables: "Awaitable[object]") -> list[object]:
 
 
 # Complete stable support census (docstring-free syntax, not version-only approval):
-# 3.2.0, 3.2.1, 3.2.2, 3.2.3, 3.2.4, 3.2.5, 3.2.6, 3.2.7, 3.2.8,
-# 3.2.9 share one pair; 3.2.10-3.2.13 share the CollectedErrors list body.
-# Comments, formatting and private docstrings do not affect the audited dependency.
+# 3.3.1. Comments, formatting and private docstrings do not affect the audited dependency.
 _AUDITED = MappingProxyType(
     {
         "execute_fields": frozenset(
             {
-                "ac08e0c8950cb9e537af7ee8c0d3c19f022e94000de2631ecd6edd53f28e38e2",
+                "ffacf6dd0fb4c965f6580b17059bd7ef16d91481cba02a89fbbe0cefd966a3e3",
             },
         ),
-        "complete_list_value": frozenset(
+        "complete_async_iterator_value": frozenset(
             {
-                "a9b89d6f1051eb73f349bb2bd575871d895626c9205b313d82d496067968bb5c",
-                "0c89fe9a284dfc9edd7d0cb10a4190caadd7e1d1b90d08751a8be1fa2cfba0aa",
+                "c84708d97b2c7fb397f313c52b17d3b4488c429cf43984477b14acb0c76ee347",
+            },
+        ),
+        "complete_iterable_value": frozenset(
+            {
+                "7a51dcb90237e6258d6ffec70e7179d5bb0e798b89201edec67bb4c0322613bc",
             },
         ),
     },
@@ -139,14 +273,14 @@ def _syntax_shape(node: object) -> object:
     return node
 
 
-# The installed graphql-core 3.2.0-3.2.13 ExecutionContext methods run as installed: the
-# rebuilt function keeps their code object and swaps only its gather global, under the
-# audited digest allowlist. No upstream source is stored here.
+# The installed graphql-core 3.3.1 Executor methods run as installed: the rebuilt
+# function keeps their code object and swaps only its gather global, under the audited
+# digest allowlist. No upstream source is stored here.
 @functools.lru_cache(maxsize=8)
 def _completion_method(method: "Callable[_P, _R]") -> "Callable[_P, _R]":
     """Rebuild the installed upstream method with only its gather dependency replaced.
 
-    The selected body retains upstream field ordering, error paths and version's
+    The selected body retains upstream field ordering, error paths and the release's
     error-collection protocol. No global in graphql-core is changed. The rebuilt
     function runs the installed method's own code object.
     """
@@ -180,9 +314,9 @@ def _completion_method(method: "Callable[_P, _R]") -> "Callable[_P, _R]":
         raise RuntimeError(
             f"Cannot start async generated-mutation completion: unaudited graphql-core "
             f"{method_name} implementation. Use a supported release or audit its completion "
-            "implementation. APPLY_UPSTREAM_PATCHES does not disable this transaction boundary",
+            "implementation",
         )
-    namespace = dict(method.__globals__, gather=_gather_with_cancel)
+    namespace = dict(method.__globals__, gather_with_cancel=_gather_with_cancel)
     adapted = FunctionType(
         method.__code__,
         namespace,
@@ -198,29 +332,27 @@ def _completion_method(method: "Callable[_P, _R]") -> "Callable[_P, _R]":
 
 
 class _CompletionMethods(NamedTuple):
-    """The two installed methods, audited lazily for an owned mutation window."""
+    """The three installed methods that join siblings, audited lazily for an owned window."""
 
     execute_fields: "_ExecuteFields"
-    complete_list_value: "patches._CompleteListValue"
+    complete_async_iterator_value: "_CompleteAsyncIteratorValue"
+    complete_iterable_value: "_CompleteIterableValue"
 
 
 def _completion_methods() -> _CompletionMethods:
-    try:
-        list_method = patches._upstream_captures().complete_list_value
-    except RuntimeError as error:
-        raise RuntimeError(
-            "Cannot start async generated-mutation completion: graphql-core completion "
-            "dependencies are unavailable. Use a supported graphql-core release; "
-            "APPLY_UPSTREAM_PATCHES does not disable this transaction boundary",
-        ) from error
     return _CompletionMethods(
-        _completion_method(ExecutionContext.execute_fields),
-        _completion_method(list_method),
+        _completion_method(StrawberryGraphQLCoreExecutionContext.execute_fields),
+        _completion_method(_LIST_COMPLETION.complete_async_iterator_value),
+        _completion_method(_LIST_COMPLETION.complete_iterable_value),
     )
 
 
-class CompletionExecutionContext(ExecutionContext):
+class CompletionExecutionContext(StrawberryGraphQLCoreExecutionContext):
     """Use the installed engine's completion with owned concurrent-child cleanup."""
+
+    def _owns_completion(self) -> bool:
+        lease = _owner.get()
+        return lease is not None and lease.held() is self
 
     @override
     def execute_fields(
@@ -228,44 +360,95 @@ class CompletionExecutionContext(ExecutionContext):
         parent_type: "GraphQLObjectType",
         source_value: object,
         path: "Path | None",
-        fields: "dict[str, list[FieldNode]]",
+        grouped_field_set: "GroupedFieldSet",
+        position_context: "DeliveryGroupMap | None",
     ) -> "AwaitableOrValue[dict[str, object]]":
         """Supervise concurrent completion only inside its generated mutation owner."""
-        lease = _owner.get()
-        if lease is not None and lease.held() is self:
+        if self._owns_completion():
             return _completion_methods().execute_fields(
                 self,
                 parent_type,
                 source_value,
                 path,
-                fields,
+                grouped_field_set,
+                position_context,
             )
-        return super().execute_fields(parent_type, source_value, path, fields)
+        return super().execute_fields(
+            parent_type,
+            source_value,
+            path,
+            grouped_field_set,
+            position_context,
+        )
 
     @override
-    def complete_list_value(
+    async def complete_async_iterator_value(
         self,
-        return_type: "GraphQLList[_GraphQLOutputType]",
-        field_nodes: "list[FieldNode]",
-        info: "GraphQLResolveInfo",
+        item_type: "_GraphQLOutputType",
+        field_details_list: "FieldDetailsList",
+        info: "GraphQLResolveInfo[object]",
         path: "Path",
-        result: "AsyncIterable[object] | Iterable[object]",
-    ) -> "AwaitableOrValue[list[object]]":
-        """Preserve the independently gated QuerySet and AsyncIterable adapter."""
-        lease = _owner.get()
-        if lease is None or lease.held() is not self:
-            # Upstream leaves GraphQLWrappingType bare; this is the same runtime signature.
-            upstream = cast("patches._BoundCompleteListValue", super().complete_list_value)
-            return upstream(return_type, field_nodes, info, path, result)
-        complete_list_value = _completion_methods().complete_list_value
-        if patches._patch_is_installed():
-            return patches._complete_list_value_with_adapter(
-                self,
-                return_type,
-                field_nodes,
+        async_iterator: "AsyncIterator[object]",
+        position_context: "DeliveryGroupMap | None",
+    ) -> list[object]:
+        """Join an async iterator's items under the owner's sibling rule."""
+        if not self._owns_completion():
+            return await _as_list_completion(super()).complete_async_iterator_value(
+                item_type,
+                field_details_list,
                 info,
                 path,
-                result,
-                complete_list_value,
+                async_iterator,
+                position_context,
             )
-        return complete_list_value(self, return_type, field_nodes, info, path, result)
+        return await _completion_methods().complete_async_iterator_value(
+            self,
+            item_type,
+            field_details_list,
+            info,
+            path,
+            async_iterator,
+            position_context,
+        )
+
+    @override
+    def complete_iterable_value(
+        self,
+        item_type: "_GraphQLOutputType",
+        field_details_list: "FieldDetailsList",
+        info: "GraphQLResolveInfo[object]",
+        path: "Path",
+        items: "Iterable[object]",
+        position_context: "DeliveryGroupMap | None",
+    ) -> "AwaitableOrValue[list[object]]":
+        """Join an iterable's items under the owner's sibling rule."""
+        if self._owns_completion():
+            return _completion_methods().complete_iterable_value(
+                self,
+                item_type,
+                field_details_list,
+                info,
+                path,
+                items,
+                position_context,
+            )
+        return _as_list_completion(super()).complete_iterable_value(
+            item_type,
+            field_details_list,
+            info,
+            path,
+            items,
+            position_context,
+        )
+
+    @override
+    def settle_in_background(self, awaitables: "list[Awaitable[object]]") -> None:
+        """Record what the owned window settles in the background, so the window awaits it."""
+        settling_lease = _settling.get() if self._owns_completion() else None
+        settling = None if settling_lease is None else settling_lease.held()
+        if settling is None:
+            super().settle_in_background(awaitables)
+            return
+        known = set(self.background_futures)
+        super().settle_in_background(awaitables)
+        settling.extend(self.background_futures - known)

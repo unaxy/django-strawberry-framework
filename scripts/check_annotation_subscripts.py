@@ -141,7 +141,10 @@ SUBSCRIPTABLE: dict[str, bool | tuple[int, int]] = {
     # graphql-core and Strawberry: ``Generic`` classes and ``typing`` aliases.
     "graphql.GraphQLList": True,
     "graphql.GraphQLNonNull": True,
+    "graphql.GraphQLResolveInfo": True,
+    "graphql.execution.Executor": True,
     "graphql.pyutils.AwaitableOrValue": True,
+    "graphql.type.definition.GraphQLResolveInfo": True,
     "strawberry.Info": True,
     "strawberry.LazyType": True,
     "strawberry.Parent": True,

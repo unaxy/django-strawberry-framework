@@ -80,25 +80,17 @@ classifiers = [
 ]
 dependencies = [
     "Django>=5.2.16",
-    # 0.322.2 is the first release whose ``SliceMetadata.from_arguments`` ends a
-    # ``first`` + ``before`` page at the cursor (``end = min(end, start + first)``);
-    # 0.316.0 through 0.322.1 start that page one row before the cursor and ignore
-    # ``after``, and ``utils/connections.py::page_arguments`` turns every
-    # ``before`` page without ``first``/``last`` into ``first=cap``. The floor also
-    # keeps per-operation extension isolation (spec-044 Decision 6, from 0.316.0):
-    # earlier releases cache class-created sync extensions on
-    # ``Schema._sync_extensions``, so concurrent requests share one instance's
-    # engine-owned ``execution_context``.
-    "strawberry-graphql>=0.322.2",
-    # Strawberry allows ``graphql-core<3.4.0``, but 3.3.0 rewrites execution into
-    # ``graphql.execution.executor`` and drops ``ExecutionContext`` from
-    # ``graphql.execution.execute``, which ``schema.py`` imports and
-    # ``_graphql_core_patches`` patches. Every 3.2.x release (3.2.0 through 3.2.13)
-    # carries each graphql-core name the package imports; the floor is Strawberry's own.
-    # Raising the cap: docs/graphql-core-3_3-upgrade.md; it waits on the 3.3.0 validation
-    # leak https://github.com/graphql-python/graphql-core/issues/287 (open fix:
-    # https://github.com/graphql-python/graphql-core/pull/288).
-    "graphql-core>=3.2.0,<3.3",
+    # 0.328.0 is the first release on graphql-core 3.3, whose ``Executor`` the
+    # package's execution context builds on. Every earlier fix the floor once held
+    # for (the ``first`` + ``before`` page bound of 0.322.2, per-operation extension
+    # isolation from 0.316.0) is in it.
+    "strawberry-graphql>=0.328.0",
+    # 3.3.1 is the first release without the validation leak
+    # (https://github.com/graphql-python/graphql-core/issues/287): 3.3.0 re-raises
+    # one module-level ``validation_aborted_error`` for every request that stops
+    # validation, appending each request's frames to its traceback. The cap is
+    # Strawberry's own; ``_completion.py`` audits each release's completion source.
+    "graphql-core>=3.3.1,<3.4",
     "django-filter>=25.2",
     # ``typing_extensions.override`` marks every method that overrides a base
     # (``typing.override`` is 3.12+); 4.4.0 is the release that added it.

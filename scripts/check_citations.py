@@ -866,9 +866,11 @@ def enclosing_symbol(path: Path, line: int) -> str | None:
     ``path::QualifiedName`` citation of that symbol uses.
     """
     spans = {span for found in module_spans(path).values() for span in found}
+    # The name breaks a tie between spans sharing their lines (the aliases of one
+    # import statement), so the answer never depends on set iteration order.
     holding = sorted(
         (span for span in spans if span[0] <= line <= span[1]),
-        key=lambda span: (-span[0], span[1]),
+        key=lambda span: (-span[0], span[1], span[2]),
     )
     return holding[0][2] if holding else None
 

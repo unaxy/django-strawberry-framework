@@ -12,7 +12,7 @@ recovery path), extensions-map merge precedence and result-map replacement
 (upstream sentinels: those rows run a plain ``strawberry.Schema`` and no
 package line, so no package change can fail them), the async shared-wrapper
 overlap restore, nested same-thread attribution, concurrent sync instance
-isolation at the ``strawberry-graphql==0.322.2`` floor, the post-execution
+isolation at the ``strawberry-graphql==0.328.0`` floor, the post-execution
 diagnostic non-interference degrade, the cursor-construction capture-interval
 boundary, the fail-closed ``settings.DEBUG`` gate's inert
 path (no acquire / no snapshot; spec-048 Decision 5), a DELETED ``DEBUG``
@@ -973,7 +973,7 @@ def test_nested_sync_operations_share_the_log_and_cross_attribute(
 # Every supported Strawberry release builds fresh extension instances per sync
 # operation, and the floor is where that is proved: maintainers run this same
 # test - selected by node id, never a copied script - in an isolated
-# ``strawberry-graphql==0.322.2`` environment:
+# ``strawberry-graphql==0.328.0`` environment:
 #
 # ruff: disable[ERA001]
 #   uv run pytest -o addopts="-v -n0" \

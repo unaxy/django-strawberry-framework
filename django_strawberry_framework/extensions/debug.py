@@ -18,7 +18,7 @@ the diagnostic cannot amplify a large operation into an enormous response.
 
 The opt-in is passing the **class** in ``DjangoSchema``'s
 ``extensions=`` list (one fresh instance per operation - requires the
-package's ``strawberry-graphql>=0.322.2`` floor)::
+package's ``strawberry-graphql>=0.328.0`` floor)::
 
     _optimizer = DjangoOptimizerExtension()
     schema = DjangoSchema(
@@ -893,9 +893,7 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
         no-``debug``-key contract). The diagnostic's own failures degrade
         inside ``_build_payload`` and never raise from here.
         """
-        # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result
-        # aliases in an ImportError fallback, so ExecutionContext.result carries Unknown
-        result = state.execution_context.result  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        result = state.execution_context.result
         if isinstance(result, GraphQLExecutionResult):
             state.payload = _build_payload(state.snapshots or [], result)
 
