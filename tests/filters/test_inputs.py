@@ -3973,6 +3973,12 @@ def _value_leaves(filterset: type[FilterSet]) -> dict[object, object]:
             id="json-form-on-the-column",
         ),
         pytest.param(
+            lambda: ListFilter(field_name="payload", lookup_expr="in"),
+            "in_",
+            list[strawberry.scalars.JSON] | None,
+            id="package-list-with-no-column-form",
+        ),
+        pytest.param(
             lambda: NumberFilter(field_name="payload__n", lookup_expr="isnull"),
             "is_null",
             bool | None,
@@ -3996,7 +4002,9 @@ def test_a_filter_over_a_json_column_is_typed_by_what_its_form_cleans(
     refused) and a ``coerce`` callable that is no class (its kind unknown, so not refused).
     Deliberate controls, passing before the rule too: a bare ``Filter`` on the
     column keeps ``JSON`` (it passes values through), a ``forms.JSONField`` form on a key
-    keeps ``JSON`` (it is exempt from the encoder refusal), and ``isnull`` stays ``Boolean``.
+    keeps ``JSON`` (it is exempt from the encoder refusal), a package ``ListFilter`` keeps
+    ``[JSON!]`` (django-filter builds no ``gte`` filter for the column, so no comparison form
+    cleans its members), and ``isnull`` stays ``Boolean``.
     """
     assert _value_leaves(_payload_set(declare())) == {lookup: expected}
 
