@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 398 done, 86 to do. The CHANGELOG entries filed here moved to
+Progress: 399 done, 87 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2301,6 +2301,22 @@ Progress: 398 done, 86 to do. The CHANGELOG entries filed here moved to
   refuses a label in prose (case-sensitive; a code span is exempt unless it holds a bare label) and in def / class
   names (read at underscores and camel-case boundaries), with planted rows; START says so. Spec headings, the board,
   the glossary and BACKLOG keep the labels as spec structure and published names
+- [x] 620. fixed: a `DjangoModelFormMutation` write over a `null=True` column whose own form field cleans a bound
+  `None` to a value (an `ArrayField`'s `SimpleArrayField` / `SplitArrayField` to `[]` or `[None] * size`, a checkbox
+  `BooleanField` to `False`, an `HStoreField` to `{}`, a consumer `CharField` over a `JSONField` to `""`) stores
+  `NULL` for an explicit `null` and keeps a stored `NULL` on an update omitting the field, as the model flavor and
+  `SerializerMutation` do on a `blank=True` column, where it wrote that value. `forms/resolvers.py::
+  _coerced_null_fields` names those columns too (it skipped every `null=True` one), keeping a text column's `""`
+  (`empty_strings_allowed` and the value `""`: Django's empty value, Waiting 262's question);
+  `_modelform_write_step` refuses the `null=False` ones as before and writes `NULL` into the rest through the new
+  `_store_nulls` (`Field.save_form_data`), before the temporal check and the save. A `clean_<field>` or `clean()`
+  answering exactly the field's own cleaning cannot be told from it and stores `NULL` too (spec-038's own-cleaning
+  rule, as on a `null=False` column); a consumer `save()` runs after and writes any value. Live rows through a new
+  fakeshop scalars `NullableScalarSpecimenFlagForm` (checkbox `flag`, `CharField` `payload`, text `label`) and its
+  `createNullableScalarSpecimenViaForm` / `updateNullableScalarSpecimenViaForm` in `test_scalars_mutation_api.py`
+  (sync and async), package rows for the `ArrayField` shapes on PostgreSQL, a text form field cleaning to a
+  non-empty value, a consumer hook, and a `null=False` refusal ahead of a filling `save()`; spec-038, GLOSSARY and
+  the `test_query` README say so
 
 ## Outside review of the fixes
 
@@ -2341,9 +2357,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 620. **SKIP for now** (upstream-seam refactor in flight: F4, partial-update rebinding in `forms/resolvers.py`). (robustness) On a `null=True` `ArrayField`, a `ModelForm` explicit `null`, or an update omitting the field
-  over a stored NULL, writes `[]` instead of NULL, with the default `SimpleArrayField` and a `SplitArrayField` alike.
-  Found verifying 553
 - [ ] 621. **SKIP for now** (upstream-seam refactor in flight: F4, partial-update rebinding in `forms/resolvers.py`). (robustness) A `get_form` hook binding `QueryDict(urlencode(data))` turns a `SplitDateTimeField`'s datetime
   into text, which `SplitDateTimeWidget.decompress` cannot split: the request answers a top-level `AttributeError` (it
   silently stored NULL before 553's binding). Found verifying 553
@@ -2453,6 +2466,16 @@ tracker number are recorded there; open remainders and new defects are filed as 
   overrode. docs/README.md's filter section lists "a transform you register with an `IntegerField` output" as a
   supported integer transform; the same class registered as Django's own `ExtractHour` filters. Found fact-finding
   387
+- [ ] 710. (robustness) A `DjangoModelFormMutation` create omitting a `null=True` column that has no default writes
+  whatever its form field cleans the absent key to (an `ArrayField`'s `[]`, a checkbox `False`, an `HStoreField`'s
+  `{}`, a consumer `TypedChoiceField`'s `empty_value`, a consumer `CharField` over a `JSONField`'s `""`) where the
+  model flavor and `SerializerMutation` store `NULL`: Django's `construct_instance` skips an omitted field only when
+  the column has a default. Found fixing 620
+- [ ] 711. A `DjangoModelFormMutation` update omitting a consumer `forms.CharField` over a `JSONField` rewrites the
+  stored JSON as its Python `str()` (`{"a": 1}` reads back `"{'a': 1}"`, `[1, 2]` as `"[1, 2]"`, `5` as `"5"`):
+  `forms/resolvers.py::_reconstruct_partial_data` binds `model_to_dict`'s value and the field cleans it as text;
+  spec-038 Decision 8 step 4 says omitted scalars are preserved (fakeshop's `NullableScalarSpecimenFlagForm`
+  `payload` reaches it live). Found verifying 620
 
 ## To do: holes found re-checking the fixes
 
@@ -2726,6 +2749,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `TextField.formfield` sets no `empty_value=None` (`CharField.formfield` does), so a `title`-only `updateBookViaForm` on a
   book whose `subtitle` (`TextField(blank=True, null=True)`) is NULL writes `''`; spec-038 Decision 8 step 4 says omitted
   scalars are preserved, while the reconstruction binds the stored value and lets the form clean it as a provided one
+  The same holds for an explicit `null` on such a column (it writes `''`, as a `CharField` over a `null=True`
+  `CharField` does): 620 stores `NULL` for every other `null=True` column whose form field cleans the `None` to a
+  value, and keeps a text column's `""` by one clause in `forms/resolvers.py::_coerced_null_fields`
+  (`field.null and field.empty_strings_allowed and value == ""`), so deciding "keep NULL" is deleting that clause
 - [ ] 108. A serializer-only source over the default `create()` / `update()` (`gs = PrimaryKeyRelatedField(many=True,
   source="genres_id")`) builds; create raises a masked TypeError and update is a silent no-op. Refuse a column-less
   writable source at class creation, as item 103 does for an `attname` source, or leave it to DRF's default `create()` /

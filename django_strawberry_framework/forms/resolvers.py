@@ -134,8 +134,12 @@ and the form-specific invariants this module owns:
   to a storable value instead of ``None`` (a ``BooleanField``'s ``False``, a ``blank=True``
   text or text-choice column's ``""``, a ``JSONField``'s ``""``) is that column's
   field-keyed ``null`` error, as on the model flavor, and nothing is written
-  (``_coerced_null_fields``). The ``ModelForm``
-  save adds the one failure a valid ``ModelForm`` reaches on its own: a
+  (``_coerced_null_fields``). On a ``null=True`` column, that cleaning (a checkbox
+  ``BooleanField``'s ``False``, an ``ArrayField``'s ``[]``) of an explicit ``null``, or of
+  an update omitting the field over a stored ``NULL``, is written as ``NULL``, the value
+  the model flavor stores on a ``blank=True`` column; a text column
+  (``empty_strings_allowed``) keeps a ``""``, Django's empty value for it.
+  The ``ModelForm`` save adds the one failure a valid ``ModelForm`` reaches on its own: a
   ``null=False`` column cleaned to an empty value no model validation reads and it
   cannot store (``None``, refused by the database's ``NOT NULL`` ``IntegrityError``, or ``""`` on
   a column that stores no empty string: a non-text choice column, refused by
@@ -609,6 +613,9 @@ def _reconstruct_partial_data(
       stored value is exactly what ``ModelChoiceField.prepare_value`` produces for a provided FK,
       with no related-object fetch. A non-empty stored key that resolves to no row needs
       no fetch either: the bound form's own lookup refuses it as ``invalid_choice``.
+      A column storing ``NULL`` binds ``None``, which the write step stores back as
+      ``NULL`` where the form field cleans it to a value other than a text column's ``""``
+      (``_coerced_null_fields``).
     - **Every other single ``ModelChoiceField`` FK / OneToOne** is reconstructed from
       the related object via ``ModelChoiceField.prepare_value``, NOT ``model_to_dict``. The bound
       form validates it with ``queryset.get(<to_field_name or "pk">=value)``, so the
@@ -1405,32 +1412,41 @@ def _is_unstorable_blank(field: _FieldAny, value: object) -> bool:
 
 
 def _coerced_null_fields(form: _ModelFormAny) -> list[_FieldAny]:
-    """Return the ``null=False`` columns whose explicit ``null`` their form field stored as a value.
+    """Return the columns whose bound ``None`` their own form field cleaned to a stored value.
 
     ``form.data`` is what ``get_form`` bound (after any override of the hook), read under
-    the field's prefixed name (``_bound_form_value``). It holds ``None`` under a
-    ``null=False`` column's form field only for an explicit ``null``: an update
-    reconstructs an omitted field from the located row, which never stores ``NULL`` there,
-    and an upload is bound through ``files=``, never ``data=``. The column's form field may
-    clean that ``None`` to a value instead of ``None``: ``CheckboxInput`` reads it as
-    ``False``, and the ``CharField`` / ``TypedChoiceField`` of a text column (a consumer
-    ``CharField`` over a ``JSONField`` or ``HStoreField`` column, which store ``""`` too)
-    clean it to its ``empty_value`` ``""``. ``ModelForm._post_clean`` writes that value onto
-    ``form.instance`` and the save would succeed, storing a value the client never sent.
-    Such a column is named here, from the instance the save would write, so the write never
-    runs.
+    the field's prefixed name (``_bound_form_value``). It holds ``None`` under a column's
+    form field for an explicit ``null`` and, on a ``null=True`` column, for an update
+    omitting the field over a stored ``NULL``, which the reconstruction binds as the row
+    holds it (``_reconstruct_partial_data``); a ``null=False`` column stores no ``NULL``,
+    a create omitting the field binds nothing, and an upload is bound through ``files=``,
+    never ``data=``. The column's form field may clean that ``None`` to a value instead of
+    ``None``: ``CheckboxInput`` reads it as ``False``, the ``CharField`` /
+    ``TypedChoiceField`` of a text column (a consumer ``CharField`` over a ``JSONField`` or
+    ``HStoreField`` column, which store ``""`` too) clean it to its ``empty_value`` ``""``,
+    and PostgreSQL's ``SimpleArrayField`` / ``SplitArrayField`` and ``HStoreField`` form
+    fields to an empty list or mapping (a ``SplitArrayField`` keeping trailing nulls to a
+    list of ``size`` ``None`` elements). ``ModelForm._post_clean`` writes that value onto
+    ``form.instance``, so the save would store a value the client never sent. Such a column
+    is named here, from the instance the save would write: the caller refuses a
+    ``null=False`` one with its ``null`` error and stores ``NULL`` in a ``null=True`` one.
 
     Only the form field's own cleaning of the bound ``None`` is named. A different cleaned
     value is the consumer form's (a ``clean_<field>`` / ``clean()`` default) and is
-    written; a ``disabled`` field ignores the bound value; a form field that
-    ``Meta.fields`` / ``Meta.exclude`` leaves out of ``construct_instance`` never writes
-    the column. A ``None`` on the instance is left to the save-time diagnosis
+    written; one equal to the field's own cleaning (a ``clean_<field>`` or ``clean()``
+    answering ``[]`` for an array column's ``None``) cannot be told from it and is named,
+    so a consumer ``save()``, which runs after, is the place to write such a value. A
+    ``disabled`` field ignores the bound value; a form field that ``Meta.fields`` /
+    ``Meta.exclude`` leaves out of ``construct_instance`` never writes the column. A
+    ``None`` on the instance is left to the save-time diagnosis
     (``_unstorable_cleaned_fields``), as is a ``""`` the column cannot store
     (``_is_unstorable_blank``), whatever the column's ``blank``: a consumer ``save()`` may
     still fill either in (django-trac 13776 / 20205), and the diagnosis answers the same
-    ``null`` error. A ``null=True`` column stores the clear, and an M2M is not a concrete
-    column (an empty value clears it), so neither is named. A form field required by the
-    form never gets here: its own ``required`` error fails ``is_valid()`` first.
+    ``null`` error. A ``null=True`` text column (``empty_strings_allowed``) keeps a ``""``
+    its form field cleaned the ``None`` to, Django's empty value for it; any other value
+    there is named. An M2M is not a concrete column (an empty value clears it), so it is
+    never named. A form field required by the form never gets here: its own ``required``
+    error fails ``is_valid()`` first.
     """
     instance = form.instance
     options = form._meta
@@ -1439,7 +1455,7 @@ def _coerced_null_fields(form: _ModelFormAny) -> list[_FieldAny]:
     for field in instance._meta.concrete_fields:
         name = field.name
         form_field = form.fields.get(name)
-        if field.null or form_field is None or form_field.disabled or not field.editable:
+        if form_field is None or form_field.disabled or not field.editable:
             continue
         if field.primary_key or (options.fields is not None and name not in options.fields):
             continue
@@ -1450,10 +1466,25 @@ def _coerced_null_fields(form: _ModelFormAny) -> list[_FieldAny]:
         value = read_attr(instance, field.attname)
         if value is None or _is_unstorable_blank(field, value):
             continue
+        if field.null and field.empty_strings_allowed and value == "":
+            continue
         own_cleaning = call_method(form_field, "clean", read_attr(form[name], "data"))
         if cleaned_data.get(name) == own_cleaning:
             coerced_fields.append(field)
     return coerced_fields
+
+
+def _store_nulls(form: _ModelFormAny, fields: list[_FieldAny]) -> None:
+    """Store ``NULL`` in each ``null=True`` column of ``fields`` on the instance the save writes.
+
+    Each is a column ``_coerced_null_fields`` named: the bound ``None`` its form field
+    cleaned to a value is written as the ``None`` itself, through ``Field.save_form_data``,
+    the call ``construct_instance`` made with the cleaned value. A consumer ``save()`` runs
+    after it and may still write another value.
+    """
+    instance = form.instance
+    for field in fields:
+        field.save_form_data(instance, None)
 
 
 def _unstorable_temporal_errors(form: _ModelFormAny) -> dict[str, list[ValidationError]]:
@@ -1659,7 +1690,10 @@ def _modelform_write_step(
     ``validation_error_to_field_errors``), answers an update's explicit ``null`` on a
     required file field with its ``required`` error (``_required_file_clears``), refuses
     an explicit ``null`` a ``null=False`` column's own form field cleaned to a storable
-    value as that column's field-keyed ``null`` error (``_coerced_null_fields``), refuses a
+    value as that column's field-keyed ``null`` error (``_coerced_null_fields``), stores
+    ``NULL`` in a ``null=True`` column whose bound ``None`` (an explicit ``null``, an update
+    omitting the field over a stored ``NULL``) its own form field cleaned to a value
+    (``_store_nulls``), refuses a
     datetime or time the write alias cannot store as that column's ``invalid`` error
     (``_unstorable_temporal_errors``), then writes through
     ``_modelform_save_or_field_errors`` (the form's save, split around
@@ -1688,10 +1722,12 @@ def _modelform_write_step(
     if kept_files:
         return StepFailure(_form_errors_to_field_errors(kept_files, specs))
     coerced_fields = _coerced_null_fields(form)
-    if coerced_fields:
+    refused_fields = [field for field in coerced_fields if not field.null]
+    if refused_fields:
         return StepFailure(
-            _form_errors_to_field_errors(_column_null_errors(coerced_fields), specs),
+            _form_errors_to_field_errors(_column_null_errors(refused_fields), specs),
         )
+    _store_nulls(form, coerced_fields)
     temporal_errors = _unstorable_temporal_errors(form)
     if temporal_errors:
         return StepFailure(_form_errors_to_field_errors(temporal_errors, specs))

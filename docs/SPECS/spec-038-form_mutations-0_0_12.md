@@ -345,7 +345,10 @@ package-internal; Slice 4 is the live consumer surface.
     on `id` instead); an explicit `null` a `null=False` column's own form field cleaned
     to a storable value (a `BooleanField`'s `False`, a `blank=True` text or
     text-choice column's `""`) → that column's field-keyed `null` error, nothing
-    written; **write** via the form's save (`ModelForm`; an
+    written; the same cleaning on a `null=True` column (a checkbox's `False`, an
+    `ArrayField`'s `[]`; a text column keeps a `""`) of an explicit `null`, or of an update
+    omitting the field over a stored `NULL` → `NULL` stored; **write** via the form's
+    save (`ModelForm`; an
     update and a client-assigned-key create split around `commit=False`) /
     `perform_mutate` (plain form), **wrapped by the `036` save-time mappers**
     (`save_or_field_errors`; a `ModelForm` update `forced_save_or_field_errors`: an
@@ -1721,23 +1724,38 @@ write flavor rides.
    before it raised; any other exception (a `ValueError` included) propagates. **Before
    the save, the `ModelForm` refuses an explicit `null` its form field coerced to a
    storable value** ([`forms/resolvers.py`][forms-resolvers]`::_coerced_null_fields`):
-   for a form-declared, non-`disabled`, editable non-pk `null=False` column that
+   for a form-declared, non-`disabled`, editable non-pk column that
    `construct_instance` writes (its `Meta.fields` / `Meta.exclude` keep it) and whose
    bound `form.data` (what `get_form` bound, after any override, read under
-   `form.add_prefix(<field>)`) holds `None` (an explicit
-   `null`: an update reconstructs an omitted field from a row that stores no `NULL` in
-   it), a cleaned value equal to the form field's own cleaning of that `None`, on the
+   `form.add_prefix(<field>)`) holds `None` (an explicit `null`, or, on a `null=True`
+   column, an update omitting the field over a stored `NULL`, which the reconstruction
+   binds as the row holds it; a `null=False` column stores no `NULL`), a cleaned value
+   equal to the form field's own cleaning of that `None`, on the
    instance as neither `None` nor a `""` the column cannot store, means the save would
    succeed with a value the client never sent: `CheckboxInput` reads `None` as `False` on
    a `BooleanField`, and the `CharField` / `TypedChoiceField` of a text or
    text-choice column cleans it to `""` (a consumer `CharField` over a `JSONField` or an
    `HStoreField` column does too: both store `""`, the JSON string and the empty hstore,
-   so neither is the `""` the save-time diagnosis names). That column is the field-keyed error with the
+   so neither is the `""` the save-time diagnosis names), and PostgreSQL's
+   `SimpleArrayField` / `SplitArrayField` and `HStoreField` form fields clean it to `[]`
+   (a `SplitArrayField` keeping trailing nulls to `size` `None` elements) and `{}`. A
+   `null=False` such column is the field-keyed error with the
    field, code `null` and path the model flavor answers the same input with, and the
-   column's Django `error_messages["null"]` as the message, and nothing is written. A
+   column's Django `error_messages["null"]` as the message, and nothing is written.
+   **A `null=True` such column stores `NULL`**
+   ([`forms/resolvers.py`][forms-resolvers]`::_store_nulls`): the model field's
+   `save_form_data(instance, None)` replaces the cleaned value on the instance before the
+   save, so the column keeps the `NULL` the client sent or the row held, as the model
+   flavor writes it on a `blank=True` column, and a consumer `save()` running after it may
+   still write another value; a `null=True` text column (`empty_strings_allowed`) keeps a
+   `""` its form field cleaned the `None` to, Django's empty value for it, and any other
+   value there stores `NULL`. A
    cleaned value the consumer form supplies instead (a `clean_<field>` / `clean()`
-   default) is written, as is a `disabled` field's initial. A `null=True` column stores
-   the clear, an M2M empty value clears the relation, a file is bound through `files=`
+   default) is written, as is a `disabled` field's initial; one equal to the form field's
+   own cleaning (a `clean_<field>` or `clean()` answering `False` for a checkbox's
+   `None`) cannot be told from it and is read as that cleaning, so a consumer `save()` is
+   where such a value is written. An M2M empty value clears the relation, a
+   file is bound through `files=`
    (an explicit `null` on an update is the clear sentinel `False`), and a form-required field fails
    `is_valid()` with its own `required` error first, so none of them is checked. **Before
    the save, the `ModelForm` also refuses a temporal or duration value the database cannot store**
@@ -2193,7 +2211,9 @@ Rationale companion: [Decision 14][rationale-d14].
   `MultiWidget` write the value sent, split by the widget's `decompress` into its
   `<field>_0` / `<field>_1` keys, and keep the stored value when omitted. An explicit
   `null` is bound whole beside its parts, so the explicit-`null` check answers it as for
-  any field. A field whose widget reads one key binds under that key alone. A list a
+  any field: the column's `null` error on a `null=False` column, `NULL` stored on a
+  `null=True` one, as it is for an update omitting the field over a stored `NULL`. A
+  field whose widget reads one key binds under that key alone. A list a
   `get_form_kwargs` hook binds as a `QueryDict` value list, or under its own prefixed copy
   of the data, is read whole and split the same way; a `disabled` field is bound whole,
   so an omitted update keeps a stored list longer than `size`.
@@ -2328,8 +2348,31 @@ Rationale companion: [Decision 14][rationale-d14].
   Only the form field's own cleaning of the `null` is refused: a value a `clean_<field>`
   / `clean()` supplies, a `get_form` / `get_form_kwargs` override binding a value in
   place of the `null`, a `disabled` field, and a declared field `Meta.fields` /
-  `Meta.exclude` keeps out of `construct_instance` all write as the form resolves them. A
-  `null=True` column, an M2M, a file and a form-required field are never checked
+  `Meta.exclude` keeps out of `construct_instance` all write as the form resolves them,
+  except a value equal to the form field's own cleaning, which cannot be told from it. A
+  `null=True` column (next), an M2M, a file and a form-required field are never refused
+  ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
+  step 5).
+- **Explicit `null` coerced to a storable value on a `null=True` column.** The same
+  cleaning on a `null=True` non-text column (`empty_strings_allowed` false: a checkbox
+  `BooleanField`'s `False`, a consumer `CharField`'s `""` over a `JSONField`,
+  `SimpleArrayField`'s `[]`, `SplitArrayField`'s `[]` or, keeping trailing nulls, `size`
+  `None` elements, an `HStoreField` form field's `{}`), or on a text column any cleaning
+  but `""` (a `CharField(empty_value="n/a")`), of an explicit `null`, or of an update
+  omitting the field over a stored `NULL` (the reconstruction binds the row's `NULL` as
+  `None`), stores `NULL`, on create and update alike, as the model and serializer flavors
+  store it on a `blank=True` column: the value the form field had for the `None` is
+  replaced on the instance before the save. An update omitting the field over a stored
+  value keeps it, and an explicit `[]` is a value (`SplitArrayField` keeping trailing
+  nulls cleans it to `size` `None` elements, Django's own answer). A value the consumer
+  form resolves instead (above) is written; one a `clean_<field>` or `clean()` returns
+  equal to the form field's own cleaning cannot be told from it and stores `NULL`, so a
+  consumer `save()`, which runs after and may still write another value, is where such a
+  value is written. A `null=True` text column (`empty_strings_allowed`) keeps a `""` its
+  form field cleans `None` to, Django's empty value for it, and a create omitting the
+  field writes whatever the bound
+  form makes of the absent key (a checkbox's `False`, an `ArrayField` with no default's
+  `[]`)
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
   step 5).
 - **A prefixed form.** A form whose prefix comes from its class, a `get_form_kwargs`
@@ -2662,13 +2705,35 @@ behavior reachable through `/graphql/`, package tests own internals.
     and update, and a consumer `CharField` over a `blank=True` or `blank=False`
     `JSONField` sent `null` on create and update
     (`tests/forms/test_resolvers.py::test_modelform_optional_char_field_over_json_column_explicit_null_is_null_error`),
-    each return the column-keyed `null` envelope with nothing written (`isPrivate: null`
+    each return the column-keyed `null` envelope with nothing written, a model `save()` that
+    would fill the column never running
+    (`tests/forms/test_resolvers.py::test_modelform_null_coerced_on_a_not_null_column_is_refused_before_a_filling_save`;
+    `isPrivate: null`
     over HTTP through the prefixed item forms,
     `test_products_api.py::test_create_item_via_prefixed_form_explicit_null_is_a_field_error`,
     `test_products_api.py::test_update_item_via_prefixed_form_explicit_null_is_a_field_error`); a
     form-required `name: null` keeps the form's `required` error
     (`test_products_api.py::test_update_item_via_form_explicit_null_name_keeps_the_form_required_error`),
-    and a `null=True` column sent `null` stores `NULL`; an `isPrivate: null` the consumer form resolves (a
+    and a `null=True` column sent `null` stores `NULL`, as an update omitting it over a
+    stored `NULL` keeps it: live, a checkbox over `NullableScalarSpecimen.flag` sent
+    `null` on create and on update over `true`, `false` and `NULL`, or omitted over `NULL`,
+    stores `NULL`, sync and async, while `true` / `false` are written and an omission over
+    a value keeps it, a `CharField` over the JSON column `payload` the same way (a string
+    sent stored, one stored kept when omitted), and the text column `label` sent `null`
+    keeps `""`
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_checkbox_over_a_nullable_boolean_stores_null_for_null`,
+    `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_async_checkbox_over_a_nullable_boolean_stores_null_for_null`,
+    `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_char_field_over_a_nullable_json_column_stores_null_for_null`,
+    `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_text_column_under_the_flag_form_keeps_the_empty_string_for_null`);
+    a text column whose form field cleans `null` to a value other than `""` stores `NULL`
+    (`tests/forms/test_resolvers.py::test_modelform_null_a_text_column_form_field_cleans_to_a_non_empty_value_stores_null`),
+    a `clean_<field>` value written over it unless it equals the checkbox's own `False`
+    (`tests/forms/test_resolvers.py::test_modelform_null_a_consumer_form_resolves_on_a_nullable_column`),
+    and on PostgreSQL a `null=True` `ArrayField` under `SimpleArrayField` (a `default=None`
+    column too) and `SplitArrayField` with and without `remove_trailing_nulls`, sync and
+    async, with `[]` sent and an omission over a list kept as controls
+    (`tests/forms/test_resolvers.py::test_modelform_null_on_a_nullable_array_column_stores_null`);
+    an `isPrivate: null` the consumer form resolves (a
     `clean_is_private`, a `get_form_kwargs` override, a `disabled` field, a declared field
     `Meta.fields` / `Meta.exclude` leaves out) writes with empty `errors`
     (`::test_modelform_null_the_consumer_form_resolves_is_written`); a consumer
@@ -2912,7 +2977,9 @@ The completion contract.
    a `ModelForm` save refused over a `null=False` column cleaned to a value
    it cannot store (`None`, or `""` on a column that stores no empty string: a non-text choice column, an `ArrayField`) returns that column's
    field-keyed `null` error, as does, before the save, an explicit `null` its own form
-   field cleaned to a value such a `null=False` column stores (`False`, `""`);
+   field cleaned to a value such a `null=False` column stores (`False`, `""`), while the
+   same cleaning on a `null=True` column (a text column's `""` kept), of an explicit
+   `null` or of an update omitting the field over a stored `NULL`, stores `NULL`;
    the `ModelForm` payload object is re-fetched through the
    `036` optimizer path (G2: `select_related` / `prefetch_related` kept, no
    [`.only(...)`][glossary-only-projection] introduced); the **plain `DjangoFormMutation`

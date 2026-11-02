@@ -14,6 +14,12 @@ database cannot store is refused over a live request. ``ScalarSpecimenSplitStamp
 writes ``occurred_at`` through Django's ``SplitDateTimeField`` (the admin's form field for a
 ``DateTimeField``), whose ``SplitDateTimeWidget`` reads a date key and a time key, and
 ``PrefixedScalarSpecimenSplitStampForm`` reads them under the prefix ``specimen``.
+
+``NullableScalarSpecimenFlagForm`` writes the ``null=True`` ``flag`` column through a
+checkbox, whose widget reads an absent or ``None`` value as ``False``, and the ``null=True``
+``payload`` JSON column through a ``CharField``, which cleans ``None`` to ``""``, so an
+explicit ``null`` and an update omitting either over a stored ``NULL`` are read as the form
+field's own cleaning and store ``NULL``.
 """
 
 from __future__ import annotations
@@ -74,3 +80,23 @@ class PrefixedScalarSpecimenSplitStampForm(ScalarSpecimenSplitStampForm):
     """``ScalarSpecimenSplitStampForm`` under the class-level prefix ``specimen``."""
 
     prefix = "specimen"
+
+
+class NullableScalarSpecimenFlagForm(forms.ModelForm[models.NullableScalarSpecimen]):
+    """A ``NullableScalarSpecimen`` ``ModelForm`` writing ``flag`` through a checkbox.
+
+    ``flag`` is a ``BooleanField(null=True)``, whose own form field is a
+    ``NullBooleanField``; the declared ``BooleanField(required=False)`` is a checkbox
+    instead, whose ``CheckboxInput`` reads an explicit ``null`` as ``False``. ``payload`` is
+    a ``JSONField(null=True)`` written through a declared ``CharField(required=False)``,
+    which cleans an explicit ``null`` to ``""``, a JSON string the column would store. The
+    mutation stores ``NULL`` for either, as it does for an update omitting one over a
+    stored ``NULL``, while a value sent is written as sent.
+    """
+
+    flag = forms.BooleanField(required=False)
+    payload = forms.CharField(required=False)
+
+    class Meta:
+        model = models.NullableScalarSpecimen
+        fields = ("label", "flag", "payload")
