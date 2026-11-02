@@ -14,12 +14,12 @@ Each phase finishes completely (every agent it dispatched has reported) before t
 | Fact finders | `sonnet-high` | reproduce, read history, read upstream; run probes and tests; report facts |
 | Researcher | `opus-high` | reads the fact reports, looks upstream for a better fix, prototypes it, lists decisions |
 | Implementer | `opus-medium` | builds the change from the brief in a private clone |
-| Verifier | `opus-high` | attacks the change, expectation first; LAND / FIX / BLOCK |
+| Verifier | `opus-high`, or `sonnet-xhigh` for an easy item (phase 7) | attacks the change, expectation first; LAND / FIX / BLOCK |
 
 ## The phases (per item)
 
-1. **Pick.** The first unchecked item in this order: "To do: found along the way", "To do: holes found re-checking
-   the fixes", "To do: t3 robustness rows" (one area per item). Skip "Waiting on you" and everything below it.
+1. **Pick.** The first unchecked item in this order: "To do: found along the way", then "To do: holes found
+   re-checking the fixes". Skip an item carrying a **SKIP** note, and skip "Waiting on you" and everything below it.
    Check `git status` (other sessions work in this tree concurrently) and note `HEAD`. Then gate the item on the
    AGENTS defect rule and GOAL "Trust boundary" before any agent runs: it must name the contract row it breaks, a
    feasible project shape under supported public API, and the wire or configuration input that reaches it. Feasible: a
@@ -53,17 +53,25 @@ Each phase finishes completely (every agent it dispatched has reported) before t
    researcher's patch. Dispatch one `opus-medium` agent with test runs authorized. A STOP from the implementer (a
    decision proves wrong against the code) comes back to the coordinator, who decides from the rules and the
    evidence and sends the ruling to the same agent (`SendMessage`), never a new one.
-7. **Verify.** Dispatch one `opus-high` verifier with its own brief (template below). On FIX, rule on each finding
+7. **Verify.** Dispatch one `opus-high` verifier with its own brief (template below). An easy item may take a
+   `sonnet-xhigh` verifier instead: every decision was settled by the rules (none parked or ruled on after a STOP),
+   the change touches no public signature, export or settings key and moves no published wire shape, its production
+   diff stays inside one module, and the repro grid is a handful of rows. When in doubt, it is not easy. Each round of
+   one item keeps the verifier type it started with. On FIX, rule on each finding
    and send the list to the same implementer, then send the delta back to the same verifier. Repeat until LAND.
    A change that narrows what worked at the parent commit for a feasible shape is a FIX finding, never a LAND.
    A docs-only last fix may be checked by the coordinator instead of a new verifier round.
 8. **Land.** Apply the clone's `git diff HEAD --binary` to the shared checkout; it must apply cleanly and every
-   path it touches must have been clean. Edit the tracker in the same working tree: tick the item with a one-line
-   outcome, update the Progress counts, add out-of-scope questions under "Waiting on you" (an out-of-scope finding
-   becomes a new item only if it passes the phase 1 gate; otherwise it is a robustness row or a new card), and add
-   a "CHANGELOG entry for item N" item when consumers can see the change. Then make ONE commit holding the fix and
-   the tracker edit together (conventional subject, a body that states the new behaviour); never a separate tracker
-   commit after the fix. The tick names no hash, because a commit cannot name itself: the commit that ticks an item
+   path it touches must have been clean. Edit the tracker in the same working tree: move the item to the end of
+   "Done", ticked, with an outcome stating the new behaviour, the symbols it changed and the tests that pin it;
+   update the Progress counts; add out-of-scope questions under "Waiting on you" (an out-of-scope finding becomes a
+   new item only if it passes the phase 1 gate; otherwise it is a robustness row or a new card); new items and
+   questions take the next number unused in both the tracker and [CHANGELOGTODO.md][changelogtodo]. When consumers
+   can see the change, add a "CHANGELOG entry for item N" item under CHANGELOGTODO.md's "From bug_hunt-0_0_15_2" and
+   update its Progress line. Then make ONE commit holding the fix and the tracker edits together (conventional
+   subject, a body that states the new behaviour); never a separate tracker commit after the fix. When another
+   session has the tree dirty, commit from a private index (START "Concurrent sessions") so only the item's bytes
+   ride. The tick names no hash, because a commit cannot name itself: the commit that ticks an item
    is its fix (`git log -S '- [x] N.' -- docs/bug_hunt/` finds it). No push, no branches, no CHANGELOG edit.
 9. **Close.** Ask the implementer for `<id>-impl-feedback.md` (helpful / misleading / missing about the brief and the
    standing docs). Delete the item's clones, grids and patches; keep the reports, briefs and feedback. Print three
@@ -76,9 +84,11 @@ Each phase finishes completely (every agent it dispatched has reported) before t
   `git clone -q --no-local <repo> S/<id>-<role>` then `uv sync -q`; assert `django_strawberry_framework.__file__`
   lies inside it). The shared checkout is read-only to every agent; only the coordinator writes it, at landing.
 - Never touch `~/.t3/` (read-only), any `hunt-ws/`, or `~/dst-handoff/`. Never mention feedback.md / feedback2.md.
-- Pytest only `uv run pytest -q -p no:randomly --no-cov -n 2 <one file or node ids>`, never the full suite; the
-  full suite runs in GitHub Actions. Targeted runs and basedpyright / `check_public_types` start without waiting
-  for an idle machine.
+- Pytest only `uv run pytest -q -p no:randomly --no-cov -n 2 <node ids or a narrow -k>`, one run at a time, in the
+  foreground (never `run_in_background`), never the full suite and never a whole big live module such as
+  `examples/fakeshop/test_query/test_library_api.py`; anything costlier is listed as unverified, since the full suite
+  and coverage run in GitHub Actions after the commit. Targeted runs and basedpyright / `check_public_types` start
+  without waiting for an idle machine.
 
 - Downloads only PyPI wheels into a fresh empty dir; read them, never run them; Python reading them runs with `-I`.
 - No commits, branches or stash in any clone. Delete only files you created.
@@ -108,6 +118,7 @@ Each phase finishes completely (every agent it dispatched has reported) before t
 
 <!-- Root -->
 [agents]: ../../AGENTS.md
+[changelogtodo]: ../../CHANGELOGTODO.md
 [goal]: ../../GOAL.md
 [start]: ../../START.md
 

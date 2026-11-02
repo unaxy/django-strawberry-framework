@@ -2316,7 +2316,9 @@ Progress: 402 done, 86 to do. The CHANGELOG entries filed here moved to
   `createNullableScalarSpecimenViaForm` / `updateNullableScalarSpecimenViaForm` in `test_scalars_mutation_api.py`
   (sync and async), package rows for the `ArrayField` shapes on PostgreSQL, a text form field cleaning to a
   non-empty value, a consumer hook, and a `null=False` refusal ahead of a filling `save()`; spec-038, GLOSSARY and
-  the `test_query` README say so
+  the `test_query` README say so. Not yet run on PostgreSQL: the `ArrayField` rows
+  (`tests/forms/test_resolvers.py::test_modelform_null_on_a_nullable_array_column_stores_null`, 42 ids) ran locally
+  only through an SQLite `ArrayField` storage double; they need a `postgres.yml` run
 - [x] 621. fixed: a value a `MultiWidget`'s own `decompress` cannot split (it raises, or answers no list or tuple),
   such as a `SplitDateTimeField`'s datetime that a `get_form` / `get_form_kwargs` hook or a form's or filter
   `Meta.form`'s `__init__` rebinds as its text (`QueryDict(urlencode(data))`), is a `ConfigurationError` naming the
@@ -2399,11 +2401,32 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 524. **SKIP for now** (upstream-seam refactor in flight: F4, partial-update rebinding in `forms/resolvers.py`). (robustness) A `ModelForm` update that omits a field whose declared form field is lossier than its column
+- [ ] 524. (robustness) A `ModelForm` update that omits a field whose declared form field is lossier than its column
   (`forms.DateField` over a `DateTimeField`) rebinds the stored value through that field and rewrites the row: a
   stored `03:04:05` becomes the default-zone midnight, and a stored year-1 value under `Asia/Tokyo` answers an
   `invalid` `FieldError` keyed to a field the client did not send. Found fact-finding 547
-- [ ] 527. **SKIP for now** (upstream-seam refactor in flight: F6, `filters/base.py::_ColumnCleanedFilter`). (robustness) A declared `ListFilter` (or `RangeFilter`) whose `field_name` is a relation itself keeps
+
+  Fact finding done at d9f1c52b (FIX.md phases 1-2; next is phase 3, research). The built-in `forms.DateField` over
+  a `DateTimeField` is refused at schema build since 523 (`forms/inputs.py::_require_temporal_reader`), but the
+  mechanism is live and is 711's too: `forms/resolvers.py::_reconstruct_partial_data` binds
+  `model_to_dict(instance)` for every omitted scalar, `is_valid()` cleans it, and `construct_instance` writes
+  `clean(stored)`; nothing in `_modelform_write_step` after `is_valid()` tells an omitted column from a sent one. It
+  rewrites with a `DateField` subclass overriding `to_python` (midnight; year 1 under `Asia/Tokyo` the `invalid`
+  error, via `_unstorable_temporal_errors`), a consumer `forms.CharField` over a `JSONField` (`{"a": 1}` stored as
+  `"{'a': 1}"`, live through fakeshop `updateNullableScalarSpecimenViaForm`), and the default
+  `CharField(strip=True)` over a `TextField` (stored `"  padded  "` becomes `"padded"`, no consumer declaration
+  needed): 36 of 180 omitted-update cells, the same 36 plain Django rewrites when bound to `model_to_dict`; the model
+  flavor and `SerializerMutation` (`partial=True`) rewrite 0. Candidate fix, probed: after `is_valid()` write each
+  omitted column's stored value back onto `form.instance` with `Field.save_form_data`, from a snapshot taken before
+  binding (`construct_instance` mutates the located row in place), as `_store_nulls` does for `NULL`: 36 rewrites
+  became 0, the Tokyo refusal went away, no other cell moved; full-form validation still runs on the re-cleaned value
+  (its refusals of a stored value, README "One sharp edge", stay). Rejected seams: `changed_data` / `has_changed`
+  (40 false positives, a `None` / `""` false negative), `disabled`, `_meta.exclude` and `update_fields` (both skip
+  `unique_together` or `auto_now`). Open for the rules check: spec-038 Decision 8 step 4 says omitted scalars are
+  "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
+  field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
+  settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
+- [ ] 527. (robustness) A declared `ListFilter` (or `RangeFilter`) whose `field_name` is a relation itself keeps
   its elements uncleaned ("a relation's elements reach the ORM as sent"), so under `DjangoFilterBackend` a junk raw
   value (`?tag=x` on a ForeignKey to an integer key) answers Django's `ValueError`, a 500, where a column path
   (`tag__pk`) answers the form's 400; the schema build refuses such a declaration, so GraphQL cannot send it. Found
@@ -2412,11 +2435,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `DecimalField` with no `max_digits` (a serializer through an explicit `serializers.DecimalField(max_digits=None,
   decimal_places=None)`): PostgreSQL refuses the bind with a masked `DataError`, and SQLite stores it as `Infinity`
   or `0` without a word. Found verifying 591
-- [ ] 537. **SKIP for now** (upstream-seam refactor in flight: F11, filter scalar typing in `filters/inputs.py`). (robustness) `AllValuesMultipleFilter(field_name=<column>, method=...)` is refused at schema build ("exposes
+- [ ] 537. (robustness) `AllValuesMultipleFilter(field_name=<column>, method=...)` is refused at schema build ("exposes
   no form field") though its column alone would type it, as the same filter without `method=` is typed: its form field
   reads the per-request `model`, so the unbound copy builds none and the catch-all refuses before the column is
   consulted. Found implementing 517
-- [ ] 538. **SKIP for now** (upstream-seam refactor in flight: F11, filter scalar typing in `filters/inputs.py`). (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
+- [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
   its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
   valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
 - [ ] 656. A whole-array `ArrayFilter` over an `ArrayField` column (generated through `Meta.filter_overrides`, or
@@ -2501,7 +2524,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
   stored JSON as its Python `str()` (`{"a": 1}` reads back `"{'a': 1}"`, `[1, 2]` as `"[1, 2]"`, `5` as `"5"`):
   `forms/resolvers.py::_reconstruct_partial_data` binds `model_to_dict`'s value and the field cleans it as text;
   spec-038 Decision 8 step 4 says omitted scalars are preserved (fakeshop's `NullableScalarSpecimenFlagForm`
-  `payload` reaches it live). Found verifying 620
+  `payload` reaches it live). Found verifying 620. Same root cause as 524 (see its fact-finding note): fix the two in
+  one change; the same `str()` also hits a `payload` the client sends, which a rewrite-back of omitted columns alone
+  does not cover
 - [ ] 714. (robustness) A `FilterSet` with no `Meta.model` set as a Relay `DjangoType`'s `Meta.filterset_class` and
   served by `DjangoConnectionField` builds and publishes its filter input (a `RangeFilter` over `occurred_at` as
   `LooseOccurredAtRangeInputType` with `String` axes), but any value sent to it answers a masked `ConfigurationError`
