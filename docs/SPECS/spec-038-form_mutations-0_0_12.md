@@ -348,8 +348,13 @@ package-internal; Slice 4 is the live consumer surface.
     to a storable value (a `BooleanField`'s `False`, a `blank=True` text or
     text-choice column's `""`) → that column's field-keyed `null` error, nothing
     written; the same cleaning on a `null=True` column (a checkbox's `False`, an
-    `ArrayField`'s `[]`; a text column keeps a `""`) of an explicit `null`, or of an update
-    omitting the field over a stored `NULL` → `NULL` stored; **write** via the form's
+    `ArrayField`'s `[]`; a text column keeps a `""`) of an explicit `null` → `NULL`
+    stored; an update omitting a column keeps its stored value (`NULL` included) where
+    the form field's own cleaning of it would rewrite it, while a value a `get_form` /
+    `get_form_kwargs` hook binds, a `clean_<field>` / form `clean()` sets or a model
+    `clean()` sets is written, except one equal to the form field's own cleaning of the
+    stored value, which keeps the stored value (a consumer `save()` writes such a
+    value); **write** via the form's
     save (`ModelForm`; an
     update and a client-assigned-key create split around `commit=False`) /
     `perform_mutate` (plain form), **wrapped by the `036` save-time mappers**
@@ -378,8 +383,10 @@ package-internal; Slice 4 is the live consumer surface.
     update happy paths, the `form.errors` → envelope (incl. a `NON_FIELD_ERRORS`
     `clean()` error → `"__all__"`), the **decode split** (`categoryId` → `{"category":
     pk}` in `data=`, an `Upload` → `files=`), the **partial-update reconstruction**
-    (omitted scalar / FK / M2M / file preserved; `unique_item_per_category` on a
-    one-field change), the **plain-form `ok` + `errors` payload + `perform_mutate`
+    (omitted scalar / FK / M2M / file preserved, an omitted column a form field's
+    cleaning would rewrite kept as stored while a consumer hook's, `clean_<field>`'s,
+    form `clean()`'s or model `clean()`'s value other than that cleaning is written;
+    `unique_item_per_category` on a one-field change), the **plain-form `ok` + `errors` payload + `perform_mutate`
     default/override**, the visibility-scoped `update` locate (hidden row →
     not-found), write-auth denial vs success, sync + async, and the G2 plan-shape (the
     `ModelForm` re-fetch keeps `select_related` / `prefetch_related` and introduces no
@@ -1647,7 +1654,25 @@ write flavor rides.
      semantics — omitted scalars,
      FKs, M2Ms, and files are preserved; provided fields update — **and** the form
      validates the full merged set, so `unique_item_per_category` validates correctly
-     when only `name` changes (the unchanged `category` comes from the instance). It
+     when only `name` changes (the unchanged `category` comes from the instance). The
+     form validates each omitted field's cleaning of its stored value, so a field or
+     uniqueness refusal of that cleaned value still blocks the update; once the form
+     is valid, each omitted non-relation column `construct_instance` writes gets its
+     stored value back on the instance (`Field.save_form_data`) where the form field's
+     own cleaning rewrote it (a `CharField`'s `strip` of a text column, its text of a
+     `JSONField` value, its `""` for a stored `NULL`, a date a `DateField` subclass reads
+     off a `DateTimeField`)
+     (`django_strawberry_framework/forms/resolvers.py::_keep_omitted_columns`). A value a
+     `get_form` / `get_form_kwargs` hook binds (in a copy of the data or set in place
+     in the mapping it is handed, which the package reads before `get_form` runs), a
+     `clean_<field>` or form `clean()` sets, or a model `clean()` sets for an omitted
+     field is the consumer's and is written, as is anything a consumer `save()` writes
+     after; a value equal to the form field's own cleaning of the stored value cannot
+     be told from that cleaning and keeps the stored value, so a consumer `save()` is
+     where such a value is written. A `disabled` field whose initial is the stored value
+     keeps it, and under a `get_form` hook that hands the form another instance (a fresh
+     copy of the row), the value that instance holds for the omitted column is the one
+     kept. It
      matches the `036` model-driven `PartialInput` contract (consistent partial-update
      UX across both mutation flavors), not graphene-django's full-update form.
      - **Required extra (non-model) form fields.** The reconstruction only supplies
@@ -1739,7 +1764,9 @@ write flavor rides.
    bound `form.data` (what `get_form` bound, after any override, read under
    `form.add_prefix(<field>)`) holds `None` (an explicit `null`, or, on a `null=True`
    column, an update omitting the field over a stored `NULL`, which the reconstruction
-   binds as the row holds it; a `null=False` column stores no `NULL`), a cleaned value
+   binds as the row holds it and whose `NULL` the instance already holds again where
+   the form field's own cleaning made a value of it, step 4; a `null=False` column
+   stores no `NULL`), a cleaned value
    equal to the form field's own cleaning of that `None`, on the
    instance as neither `None` nor a `""` the column cannot store, means the save would
    succeed with a value the client never sent: `CheckboxInput` reads `None` as `False` on
@@ -1755,7 +1782,7 @@ write flavor rides.
    **A `null=True` such column stores `NULL`**
    ([`forms/resolvers.py`][forms-resolvers]`::_store_nulls`): the model field's
    `save_form_data(instance, None)` replaces the cleaned value on the instance before the
-   save, so the column keeps the `NULL` the client sent or the row held, as the model
+   save, so the column keeps the `NULL` the client sent, as the model
    flavor writes it on a `blank=True` column, and a consumer `save()` running after it may
    still write another value; a `null=True` text column (`empty_strings_allowed`) keeps a
    `""` its form field cleaned the `None` to, Django's empty value for it, and any other
@@ -2132,7 +2159,17 @@ Rationale companion: [Decision 14][rationale-d14].
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
   So a `name`-only update preserves the unprovided scalar (`description`), the FK
   (`category`, as its current pk), the M2M (`genres`, as the current pk list), and any
-  file field (omitted → kept via the bound form's `initial`); a provided **non-file**
+  file field (omitted → kept via the bound form's `initial`). An omitted column keeps
+  its stored value even where the form field's own cleaning would rewrite it (a
+  stripped `"  padded  "`, a `JSONField` value's text, `""` for a stored `NULL`, a
+  lossy `DateField` subclass's midnight): the form validates the cleaned value, so its
+  refusal still blocks the update, and the instance gets the stored value back before
+  the save. A value a `get_form` / `get_form_kwargs` hook binds, a `clean_<field>` /
+  form `clean()` sets or a model `clean()` sets for the omitted field is the
+  consumer's and is written, except one equal to the form field's own cleaning of the
+  stored value, which cannot be told from it and keeps the stored value (a consumer
+  `save()` is where such a value is written). A `get_form` hook's rebound instance's
+  own value for the omitted column is the one kept; a provided **non-file**
   optional field the consumer wants emptied is sent explicitly (e.g. `""` for a
   `CharField`). A hidden row is not-found before the form runs.
 - **File / image form fields: upload, preserve, clear.**
@@ -2229,7 +2266,7 @@ Rationale companion: [Decision 14][rationale-d14].
   and a one-key `DateTimeField` parses the text. An explicit
   `null` is bound whole beside its parts, so the explicit-`null` check answers it as for
   any field: the column's `null` error on a `null=False` column, `NULL` stored on a
-  `null=True` one, as it is for an update omitting the field over a stored `NULL`. A
+  `null=True` one, while an update omitting the field keeps the stored `NULL`. A
   field whose widget reads one key binds under that key alone. A list a
   `get_form_kwargs` hook binds as a `QueryDict` value list, or under its own prefixed copy
   of the data, is read whole and split the same way; a `disabled` field is bound whole,
@@ -2375,12 +2412,12 @@ Rationale companion: [Decision 14][rationale-d14].
   `BooleanField`'s `False`, a consumer `CharField`'s `""` over a `JSONField`,
   `SimpleArrayField`'s `[]`, `SplitArrayField`'s `[]` or, keeping trailing nulls, `size`
   `None` elements, an `HStoreField` form field's `{}`), or on a text column any cleaning
-  but `""` (a `CharField(empty_value="n/a")`), of an explicit `null`, or of an update
-  omitting the field over a stored `NULL` (the reconstruction binds the row's `NULL` as
-  `None`), stores `NULL`, on create and update alike, as the model and serializer flavors
-  store it on a `blank=True` column: the value the form field had for the `None` is
-  replaced on the instance before the save. An update omitting the field over a stored
-  value keeps it, and an explicit `[]` is a value (`SplitArrayField` keeping trailing
+  but `""` (a `CharField(empty_value="n/a")`), of an explicit `null` stores `NULL`, on
+  create and update alike, as the model and serializer flavors store it on a
+  `blank=True` column: the value the form field had for the `None` is replaced on the
+  instance before the save. An update omitting the field keeps its stored value, `NULL`
+  or another (`update` partial-update preservation, above), a text column's stored
+  `NULL` included, and an explicit `[]` is a value (`SplitArrayField` keeping trailing
   nulls cleans it to `size` `None` elements, Django's own answer). A value the consumer
   form resolves instead (above) is written; one a `clean_<field>` or `clean()` returns
   equal to the form field's own cleaning cannot be told from it and stores `NULL`, so a
@@ -2742,6 +2779,23 @@ behavior reachable through `/graphql/`, package tests own internals.
     `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_async_checkbox_over_a_nullable_boolean_stores_null_for_null`,
     `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_char_field_over_a_nullable_json_column_stores_null_for_null`,
     `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_text_column_under_the_flag_form_keeps_the_empty_string_for_null`);
+    an update omitting `label` and `payload` keeps a stored
+    `"  padded  "`, `NULL`, JSON object and JSON list as stored, sync and async
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_update_omitting_a_column_keeps_its_stored_value`,
+    `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_async_update_omitting_a_column_keeps_its_stored_value`;
+    at the unit tier a `DateField` subclass over a `DateTimeField` keeps the stored
+    datetime under `UTC` and, year 1, `Asia/Tokyo`, a `disabled` field and a hook's
+    fresh copy of the row keep the stored value, a hook's bound value (a copy or set in
+    place), a `clean_<field>`, a form `clean()` and a model `clean()` other than the form
+    field's own cleaning are written, an empty cleaned value a model `clean()` fills is
+    never converted, a stored `{}` / `[]` under the default `forms.JSONField` is kept
+    rather than refused as `null`, and a hook's rebound instance's own value is written:
+    `tests/forms/test_resolvers.py::test_update_omitting_a_datetime_under_a_lossy_date_field_keeps_it`,
+    `tests/forms/test_resolvers.py::test_update_omitting_a_note_writes_only_the_consumers_value`,
+    `tests/forms/test_resolvers.py::test_update_omitting_a_column_a_model_clean_sets_writes_the_models_value`,
+    `tests/forms/test_resolvers.py::test_update_omitting_an_empty_column_a_model_clean_fills_never_converts_it`,
+    `tests/forms/test_resolvers.py::test_update_omitting_an_empty_json_value_keeps_it`,
+    `tests/forms/test_resolvers.py::test_update_omitting_a_column_a_rebound_instance_holds_writes_its_value`);
     a text column whose form field cleans `null` to a value other than `""` stores `NULL`
     (`tests/forms/test_resolvers.py::test_modelform_null_a_text_column_form_field_cleans_to_a_non_empty_value_stores_null`),
     a `clean_<field>` value written over it unless it equals the checkbox's own `False`
@@ -2989,7 +3043,8 @@ The completion contract.
    `provided_data` and in the three shapes a provided field decodes to (an omitted field
    whose input shape disagrees with its column binds the built form's initial), with
    `files = provided_files`, then `form_class(**get_form_kwargs(…, instance=<located
-   row>))` — so omitted scalar / FK / M2M / file values are preserved and
+   row>))` — so omitted scalar / FK / M2M / file values are preserved (a scalar as
+   stored, not as the form field cleans it) and
    `unique_item_per_category` validates on a one-field change. The built form's data is
    re-keyed under the keys each field's widget reads (`form.add_prefix`, and a
    `MultiWidget`'s or `SplitArrayWidget`'s own keys, a split list padded to `size`), a list
@@ -3005,8 +3060,12 @@ The completion contract.
    it cannot store (`None`, or `""` on a column that stores no empty string: a non-text choice column, an `ArrayField`) returns that column's
    field-keyed `null` error, as does, before the save, an explicit `null` its own form
    field cleaned to a value such a `null=False` column stores (`False`, `""`), while the
-   same cleaning on a `null=True` column (a text column's `""` kept), of an explicit
-   `null` or of an update omitting the field over a stored `NULL`, stores `NULL`;
+   same cleaning on a `null=True` column (a text column's `""` kept) of an explicit
+   `null` stores `NULL`, and an update omitting a column keeps its stored value, `NULL`
+   included, where the form field's own cleaning would rewrite it (a consumer hook's,
+   `clean_<field>`'s, form `clean()`'s or model `clean()`'s value written, except one
+   equal to that cleaning, which keeps the stored value, and a hook's rebound
+   instance's own value written);
    the `ModelForm` payload object is re-fetched through the
    `036` optimizer path (G2: `select_related` / `prefetch_related` kept, no
    [`.only(...)`][glossary-only-projection] introduced); the **plain `DjangoFormMutation`

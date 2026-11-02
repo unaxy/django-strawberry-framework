@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 402 done, 86 to do. The CHANGELOG entries filed here moved to
+Progress: 404 done, 87 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2361,6 +2361,26 @@ Progress: 402 done, 86 to do. The CHANGELOG entries filed here moved to
   cells (507 and 516). Django marks only `in` and `range` as taking an iterable (`get_db_prep_lookup_value_is_iterable`),
   so no upstream seam names every list-consuming lookup. Whether to default `in`, refuse, or reinterpret is Waiting
   row 716, beside 316
+- [x] 524. fixed: a `DjangoModelFormMutation` update keeps each omitted non-relation column `construct_instance`
+  writes (editable, inside `Meta.fields`, outside `Meta.exclude`) at its stored value where the form field's own
+  cleaning of the reconstructed value rewrote it: a `CharField`'s strip of a text column, its text of a JSON value,
+  a lossy temporal subclass's midnight (and the Asia/Tokyo year-1 `invalid` refusal), `""` for a stored `NULL`, and
+  `None` for a stored `{}` / `[]` under the default `forms.JSONField` (refused as `null` before). The form and the
+  model still validate the cleaned value, so their refusals of a stored value stay. A value a `get_form` /
+  `get_form_kwargs` hook binds (in a copy or in place), a `clean_<field>` / form `clean()` sets, a model `clean()`
+  sets, or a hook's rebound instance holds is written; one equal to the field's own cleaning keeps the stored
+  value (a consumer `save()` writes it). `forms/resolvers.py::_omitted_column_values` snapshots before `is_valid()`,
+  `::_keep_omitted_columns` restores through `Field.save_form_data` where `::_holds_own_cleaning` reads the form
+  field's own cleaning (`Field._clean_bound_field`, `Field.to_python` behind an empty-value guard), and
+  `::_modelform_decode_step` carries the omitted names in the `_DecodedForm` 3-tuple. Live rows
+  `test_scalars_mutation_api.py::test_update_omitting_a_column_keeps_its_stored_value` /
+  `::test_async_update_omitting_a_column_keeps_its_stored_value`, package rows `tests/forms/test_resolvers.py`
+  `test_update_omitting_*`; README "One sharp edge", the GLOSSARY `DjangoModelFormMutation` term and spec-038
+  Decision 8 say so. Closes 711's omitted half and 262's omitted half
+- [x] 711. fixed with 524 for the omitted case: an update omitting `payload` through fakeshop
+  `updateNullableScalarSpecimenViaForm` keeps a stored JSON object or list
+  (`test_scalars_mutation_api.py::test_update_omitting_a_column_keeps_its_stored_value[json-object|json-list]`).
+  The `str()` of a `payload` the client sends is item 720
 
 ## Outside review of the fixes
 
@@ -2401,10 +2421,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 524. (robustness) A `ModelForm` update that omits a field whose declared form field is lossier than its column
-  (`forms.DateField` over a `DateTimeField`) rebinds the stored value through that field and rewrites the row: a
-  stored `03:04:05` becomes the default-zone midnight, and a stored year-1 value under `Asia/Tokyo` answers an
-  `invalid` `FieldError` keyed to a field the client did not send. Found fact-finding 547
 
   Fact finding done at d9f1c52b (FIX.md phases 1-2; next is phase 3, research). The built-in `forms.DateField` over
   a `DateTimeField` is refused at schema build since 523 (`forms/inputs.py::_require_temporal_reader`), but the
@@ -2520,18 +2536,26 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `{}`, a consumer `TypedChoiceField`'s `empty_value`, a consumer `CharField` over a `JSONField`'s `""`) where the
   model flavor and `SerializerMutation` store `NULL`: Django's `construct_instance` skips an omitted field only when
   the column has a default. Found fixing 620
-- [ ] 711. A `DjangoModelFormMutation` update omitting a consumer `forms.CharField` over a `JSONField` rewrites the
-  stored JSON as its Python `str()` (`{"a": 1}` reads back `"{'a': 1}"`, `[1, 2]` as `"[1, 2]"`, `5` as `"5"`):
-  `forms/resolvers.py::_reconstruct_partial_data` binds `model_to_dict`'s value and the field cleans it as text;
-  spec-038 Decision 8 step 4 says omitted scalars are preserved (fakeshop's `NullableScalarSpecimenFlagForm`
-  `payload` reaches it live). Found verifying 620. Same root cause as 524 (see its fact-finding note): fix the two in
-  one change; the same `str()` also hits a `payload` the client sends, which a rewrite-back of omitted columns alone
-  does not cover
 - [ ] 714. (robustness) A `FilterSet` with no `Meta.model` set as a Relay `DjangoType`'s `Meta.filterset_class` and
   served by `DjangoConnectionField` builds and publishes its filter input (a `RangeFilter` over `occurred_at` as
   `LooseOccurredAtRangeInputType` with `String` axes), but any value sent to it answers a masked `ConfigurationError`
   "'span' is not a filter input field; it would apply nothing": the build accepts what every request refuses.
   Found verifying 624
+- [ ] 717. (robustness) `forms/resolvers.py::_store_nulls` overwrites a model `clean()`'s value with `NULL` on a
+  `null=True` column whose form field cleaned the bound `None` (an explicit `null`, or an omitted stored `NULL` whose
+  restore a consumer value skipped) to a value, though `_coerced_null_fields`' docstring says a value other than
+  the field's own cleaning is written: a `CharField(required=False)` over a `null=True` `DecimalField` or JSON
+  column with a model `clean()` filling it when empty. Parity pin
+  `tests/forms/test_resolvers.py::test_update_omitting_an_empty_column_a_model_clean_fills_never_converts_it[null-true]`.
+  Found fixing 524
+- [ ] 719. (robustness) A `DjangoModelFormMutation` update omitting a `disabled` `DateTimeField` over a stored
+  datetime with microseconds writes it with the microseconds dropped: `BaseForm.get_initial_for_field` strips them,
+  so the field's initial is not the stored value and 524's restore does not apply; spec-038 Decision 8 says omitted
+  scalars are preserved. Found verifying 524
+- [ ] 720. A `DjangoModelFormMutation` whose consumer `forms.CharField` sits over a `JSONField` writes a `payload` the
+  client sends as its Python `str()` (`{"a": 1}` stored as `"{'a': 1}"`): the field cleans the decoded value as
+  text. Split from 711 (its omitted half closed with 524); fact finding owes what the form's published input type
+  is and whether the write is the consumer form's own choice
 
 ## To do: holes found re-checking the fixes
 
@@ -2805,14 +2829,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 219. Strawberry's own `ListConnection` (0.327.7 and 0.334.4) fails `assert last is not None` when `after + 1 + first`
   equals `sys.maxsize` (its `SliceMetadata` last-only sentinel) and overruns `islice`'s stop past it on an iterator source;
   the package now keeps its pages clear of both. Report it upstream?
-- [ ] 262. Decide whether a partial `ModelForm` update promises to keep an omitted NULL text column NULL: Django's
-  `TextField.formfield` sets no `empty_value=None` (`CharField.formfield` does), so a `title`-only `updateBookViaForm` on a
-  book whose `subtitle` (`TextField(blank=True, null=True)`) is NULL writes `''`; spec-038 Decision 8 step 4 says omitted
-  scalars are preserved, while the reconstruction binds the stored value and lets the form clean it as a provided one
-  The same holds for an explicit `null` on such a column (it writes `''`, as a `CharField` over a `null=True`
-  `CharField` does): 620 stores `NULL` for every other `null=True` column whose form field cleans the `None` to a
+- [ ] 262. Decide whether a partial `ModelForm` update's explicit `null` on a `null=True` text column stores `NULL`:
+  Django's `TextField.formfield` sets no `empty_value=None` (`CharField.formfield` does), so `subtitle: null` on a
+  book whose `subtitle` is `TextField(blank=True, null=True)` writes `''`, as a `CharField` over a `null=True`
+  `CharField` does. 620 stores `NULL` for every other `null=True` column whose form field cleans the `None` to a
   value, and keeps a text column's `""` by one clause in `forms/resolvers.py::_coerced_null_fields`
-  (`field.null and field.empty_strings_allowed and value == ""`), so deciding "keep NULL" is deleting that clause
+  (`field.null and field.empty_strings_allowed and value == ""`), so deciding "store NULL" is deleting that clause.
+  The omitted half closed with 524: an update omitting the column keeps its stored `NULL`
+
 - [ ] 108. A serializer-only source over the default `create()` / `update()` (`gs = PrimaryKeyRelatedField(many=True,
   source="genres_id")`) builds; create raises a masked TypeError and update is a silent no-op. Refuse a column-less
   writable source at class creation, as item 103 does for an `attname` source, or leave it to DRF's default `create()` /

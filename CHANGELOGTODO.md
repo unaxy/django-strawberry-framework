@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 167 to do.
+Progress: 0 done, 169 to do.
 
 ## From dry-0_0_15_3
 
@@ -663,6 +663,13 @@ Progress: 0 done, 167 to do.
   `<Set>OccurredAtRangeInputType`), so a `range` and a `date` `RangeFilter` over one column no longer collide with a
   `ConfigurationError`; a lone bound under a `lookup_expr` Django cannot walk is refused instead of filtering the
   column
+- [ ] 718. CHANGELOG entry for item 524: a `DjangoModelFormMutation` partial update no longer rewrites a column the
+  input omitted with the form field's cleaning of its stored value (a `CharField` stripped stored text, turned a
+  stored JSON object or list into its Python text and wrote `""` over a stored `NULL`; a `DateField` subclass over a
+  `DateTimeField` wrote midnight); a `blank=True` JSON column storing `{}` or `[]` under the default form field,
+  refused with a `null` error, now updates. The form still validates the cleaned value, and a value a hook,
+  `clean_<field>`, form `clean()` or model `clean()` sets is still written unless it equals the field's own
+  cleaning (write that one in `save()`)
 
 ## From dry-upstream-0_0_15
 

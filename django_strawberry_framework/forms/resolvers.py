@@ -136,10 +136,18 @@ and the form-specific invariants this module owns:
   text or text-choice column's ``""``, a ``JSONField``'s ``""``) is that column's
   field-keyed ``null`` error, as on the model flavor, and nothing is written
   (``_coerced_null_fields``). On a ``null=True`` column, that cleaning (a checkbox
-  ``BooleanField``'s ``False``, an ``ArrayField``'s ``[]``) of an explicit ``null``, or of
-  an update omitting the field over a stored ``NULL``, is written as ``NULL``, the value
-  the model flavor stores on a ``blank=True`` column; a text column
-  (``empty_strings_allowed``) keeps a ``""``, Django's empty value for it.
+  ``BooleanField``'s ``False``, an ``ArrayField``'s ``[]``) of an explicit ``null`` is
+  written as ``NULL``, the value the model flavor stores on a ``blank=True`` column; a
+  text column (``empty_strings_allowed``) keeps a ``""``, Django's empty value for it.
+  An update omitting a field keeps its column's stored value, ``NULL`` included, where
+  the form field's own cleaning of the reconstructed value rewrote it (a ``CharField``'s
+  ``strip`` of a text column, its text of a ``JSONField`` value, its ``""`` for a
+  ``NULL``): the form validated the cleaned value, and the instance gets the stored one
+  back before the save (``_keep_omitted_columns``). A value a ``get_form`` hook binds, a
+  ``clean_<field>`` or form ``clean()`` sets, or a model ``clean()`` sets for the field
+  is the consumer's and is written; one equal to the form field's own cleaning of the
+  stored value cannot be told from it and keeps the stored value, so a consumer
+  ``save()`` is where such a value is written.
   The ``ModelForm`` save adds the one failure a valid ``ModelForm`` reaches on its own: a
   ``null=False`` column cleaned to an empty value no model validation reads and it
   cannot store (``None``, refused by the database's ``NOT NULL`` ``IntegrityError``, or ``""`` on
@@ -217,6 +225,7 @@ from django_strawberry_framework.utils._narrowing import (
     list_of,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
@@ -228,7 +237,7 @@ from django_strawberry_framework.utils.errors import (
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.inputs import published_input_specs
-from django_strawberry_framework.utils.querysets import sync_pipeline_recourse
+from django_strawberry_framework.utils.querysets import sync_pipeline_recourse, to_python_value
 from django_strawberry_framework.utils.relations import (
     is_model_class,
     is_single_column_foreign_key,
@@ -272,8 +281,9 @@ if TYPE_CHECKING:
 
     # A form-flavor mutation class: the ``ModelForm`` or the model-less plain base.
     _FormMutationClass: TypeAlias = type[DjangoModelFormMutation | DjangoFormMutation]
-    # The form ``decode_step`` product: the form-keyed bound ``(data, files)`` pair.
-    _DecodedForm: TypeAlias = tuple[dict[str, object], dict[str, object]]
+    # The form ``decode_step`` product: the form-keyed bound ``(data, files)`` pair and
+    # the names of the fields an update's input omitted that the reconstruction bound.
+    _DecodedForm: TypeAlias = tuple[dict[str, object], dict[str, object], frozenset[str]]
 
     _FormT = TypeVar("_FormT", bound=forms.BaseForm)
     _FormT_co = TypeVar("_FormT_co", bound=forms.BaseForm, covariant=True)
@@ -614,9 +624,8 @@ def _reconstruct_partial_data(
       stored value is exactly what ``ModelChoiceField.prepare_value`` produces for a provided FK,
       with no related-object fetch. A non-empty stored key that resolves to no row needs
       no fetch either: the bound form's own lookup refuses it as ``invalid_choice``.
-      A column storing ``NULL`` binds ``None``, which the write step stores back as
-      ``NULL`` where the form field cleans it to a value other than a text column's ``""``
-      (``_coerced_null_fields``).
+      A column storing ``NULL`` binds ``None``; the write keeps the ``NULL`` where the form
+      field's own cleaning made a value of it (``_keep_omitted_columns``).
     - **Every other single ``ModelChoiceField`` FK / OneToOne** is reconstructed from
       the related object via ``ModelChoiceField.prepare_value``, NOT ``model_to_dict``. The bound
       form validates it with ``queryset.get(<to_field_name or "pk">=value)``, so the
@@ -787,7 +796,9 @@ def _modelform_decode_step(
     every relation branch), then - for update - reconstructs the full bound
     ``data=`` so a one-field change validates against the row's unchanged values.
     A plain form has no located instance, so reconstruction is skipped. Returns
-    ``(form_data, provided_files)`` for the write step, or a ``StepFailure``
+    ``(form_data, provided_files, omitted)`` for the write step, ``omitted`` naming the
+    fields the reconstruction bound from the located row (none on a create or a plain
+    form; ``_keep_omitted_columns`` reads it), or a ``StepFailure``
     on a decode failure or an omitted relation whose stored key resolves to no row
     (the shared skeleton maps it to the error envelope; no form is bound).
     """
@@ -800,11 +811,11 @@ def _modelform_decode_step(
     if decode_error is not None:
         return StepFailure([decode_error])
     if instance is None:
-        return provided_data, provided_files
+        return provided_data, provided_files, frozenset()
     form_data, unresolved = _reconstruct_partial_data(mutation_cls, instance, provided_data)
     if unresolved:
         return StepFailure(_form_errors_to_field_errors(unresolved, specs))
-    return form_data, provided_files
+    return form_data, provided_files, frozenset(form_data).difference(provided_data)
 
 
 def _choice_key_identity(model: type[models.Model], key: str | None) -> object:
@@ -1311,12 +1322,16 @@ def _bound_form_or_field_errors(
     is the ``mutation_cls`` instance whose ``get_form`` hook builds the form. On the
     ``ModelForm`` flavor the built form's ``instance`` must be a row of the mutation's
     model (or a subclass), or the request is a ``ConfigurationError`` before any bind or
-    ``is_valid()``, nothing written (``_require_backing_row``). The
+    ``is_valid()``, nothing written (``_require_backing_row``). On an update, a column
+    the input omitted keeps its stored value where the form's cleaning of it is the form
+    field's own (``_keep_omitted_columns``). The
     persist hook (``form.save`` vs ``perform_mutate``) stays at the caller so
     ModelForm can return ``form.instance`` while a plain ``Form`` has no instance
     slot.
     """
-    form_data, provided_files = decoded
+    form_data, provided_files, omitted = decoded
+    # Read before ``get_form``: a hook may set an omitted field in the mapping it is handed.
+    reconstructed = {name: form_data[name] for name in omitted}
     form = holder.get_form(info, data=form_data, files=provided_files, instance=instance)
     # ``_primary_type is None`` is the plain flavor, whose form has no row to write.
     if mutation_cls._primary_type is not None:
@@ -1327,9 +1342,117 @@ def _bound_form_or_field_errors(
     _assert_bound_choice_agreement(mutation_cls, form, form_data)
     if unbindable:
         return None, _form_errors_to_field_errors(unbindable, specs)
+    stored = _omitted_column_values(form, omitted)
     if not form.is_valid():
         return None, _form_errors_to_field_errors(form.errors.as_data(), specs)
+    _keep_omitted_columns(form, stored, reconstructed)
     return form, None
+
+
+def _omitted_column_values(
+    form: forms.BaseForm,
+    omitted: frozenset[str],
+) -> dict[_FieldAny, object]:
+    """Read the value ``form.instance`` holds in each scalar column of an omitted field.
+
+    Read before ``is_valid()``, whose ``construct_instance`` overwrites the instance in
+    place: the value the instance held when ``get_form`` built the form, the located row's
+    stored value or the one a hook's ``instance`` carries. Only a concrete column
+    ``construct_instance`` writes is read: an editable one the form declares a field for,
+    inside ``Meta.fields`` and outside ``Meta.exclude``, whose field the input omitted and
+    the reconstruction bound from the row (``_modelform_decode_step``). A relation is not:
+    the form field's own cleaning of a stored key is the row that key names, so its write
+    already keeps the column. A plain form, or a create, omits nothing.
+    """
+    if not omitted:
+        return {}
+    model_form = require_instance(form, _ModelFormAny)
+    instance = model_form.instance
+    options = model_form._meta
+    return {
+        field: field.value_from_object(instance)
+        for field in instance._meta.concrete_fields
+        if field.name in omitted
+        and field.name in form.fields
+        and field.editable
+        and not field.is_relation
+        and (options.fields is None or field.name in options.fields)
+        and (options.exclude is None or field.name not in options.exclude)
+    }
+
+
+def _keep_omitted_columns(
+    form: forms.BaseForm,
+    stored: Mapping[_FieldAny, object],
+    reconstructed: Mapping[str, object],
+) -> None:
+    """Write each omitted column's ``stored`` value back where the form field's cleaning made it.
+
+    The reconstruction binds an omitted field's stored value so the form validates the
+    whole row (``_reconstruct_partial_data``), and ``construct_instance`` writes the
+    form field's cleaning of it: a ``CharField``'s ``strip`` of a text column, a
+    ``CharField``'s text of a ``JSONField`` value, a date a ``DateField`` subclass reads
+    off a ``DateTimeField`` value, a ``CharField``'s ``""`` for a stored ``NULL``. The
+    client sent none of it, so the instance gets the stored value back, through
+    ``Field.save_form_data``, the call ``construct_instance`` made with the cleaned value.
+    The form and the model validated the cleaned value, so either one's refusal of it
+    still fails the update. ``reconstructed`` holds the value the reconstruction bound
+    for each omitted field, read before ``get_form`` ran, so a hook or form ``__init__``
+    setting the field in the bound mapping in place reads as the consumer's value. A
+    consumer ``save()`` runs after and may still write another value.
+    """
+    if not stored:
+        return
+    instance = require_instance(read_attr(form, "instance"), models.Model)
+    for field, value in stored.items():
+        if _holds_own_cleaning(form, instance, field, reconstructed[field.name]):
+            field.save_form_data(instance, value)
+
+
+def _holds_own_cleaning(
+    form: forms.BaseForm,
+    instance: models.Model,
+    field: _FieldAny,
+    reconstructed: object,
+) -> bool:
+    """Whether ``instance`` holds only the form field's own cleaning of ``reconstructed``.
+
+    Three readings agree: the field read the value the reconstruction bound
+    (``_bound_form_value``; a ``disabled`` field reads its initial, the row's value), so no
+    ``get_form`` hook bound its own; the cleaned value is what the field's
+    ``_clean_bound_field`` makes of it, the value ``Form._clean_fields`` stores before a
+    ``clean_<field>``, so no ``clean_<field>`` or form ``clean()`` set its own; and the
+    instance holds that cleaned value, as ``construct_instance`` wrote it or as
+    ``Model.clean_fields`` converted it (``Field.to_python``), so no model ``clean()`` set
+    its own. A value any of them set is the consumer's and is written, except one equal to
+    the form field's own cleaning of the stored value, which cannot be told from it and
+    keeps the stored value: a consumer ``save()``, which runs after, is where such a value
+    is written.
+
+    ``Model.clean_fields`` converts no empty value (it skips a ``blank=True`` column's, and
+    ``ModelForm`` excludes a ``blank=False`` column whose form field is not required and
+    cleaned empty), so an instance holding anything but an empty cleaned value holds a model
+    ``clean()``'s. Any other cleaned value of a column ``construct_instance`` writes already
+    passed that column's ``to_python`` in the same ``_post_clean``, or the form is invalid,
+    so the conversion repeated here is one Django made and cannot raise.
+    """
+    name = field.name
+    bound_field = form[name]
+    form_field = bound_field.field
+    read = (
+        read_attr(bound_field, "initial") if form_field.disabled else _bound_form_value(form, name)
+    )
+    if read != reconstructed:
+        return False
+    cleaned: object = form.cleaned_data.get(name)
+    if cleaned != call_method(form_field, "_clean_bound_field", bound_field):
+        return False
+    held: object = field.value_from_object(instance)
+    if held == cleaned:
+        return True
+    if cleaned in field.empty_values:
+        return False
+    return held == to_python_value(field, cleaned)
 
 
 def _unstorable_cleaned_fields(
@@ -1421,9 +1544,12 @@ def _coerced_null_fields(form: _ModelFormAny) -> list[_FieldAny]:
     the field's prefixed name (``_bound_form_value``). It holds ``None`` under a column's
     form field for an explicit ``null`` and, on a ``null=True`` column, for an update
     omitting the field over a stored ``NULL``, which the reconstruction binds as the row
-    holds it (``_reconstruct_partial_data``); a ``null=False`` column stores no ``NULL``,
-    a create omitting the field binds nothing, and an upload is bound through ``files=``,
-    never ``data=``. The column's form field may clean that ``None`` to a value instead of
+    holds it (``_reconstruct_partial_data``) and whose ``NULL`` the instance already holds
+    again where the form field's own cleaning made a value of it
+    (``_keep_omitted_columns``), so such a column is named only where consumer code set a
+    value that skipped the restore; a ``null=False`` column stores no ``NULL``, a create
+    omitting the field binds nothing, and an upload is bound through ``files=``, never
+    ``data=``. The column's form field may clean that ``None`` to a value instead of
     ``None``: ``CheckboxInput`` reads it as ``False``, the ``CharField`` /
     ``TypedChoiceField`` of a text column (a consumer ``CharField`` over a ``JSONField`` or
     ``HStoreField`` column, which store ``""`` too) clean it to its ``empty_value`` ``""``,
@@ -1480,10 +1606,12 @@ def _coerced_null_fields(form: _ModelFormAny) -> list[_FieldAny]:
 def _store_nulls(form: _ModelFormAny, fields: list[_FieldAny]) -> None:
     """Store ``NULL`` in each ``null=True`` column of ``fields`` on the instance the save writes.
 
-    Each is a column ``_coerced_null_fields`` named: the bound ``None`` its form field
-    cleaned to a value is written as the ``None`` itself, through ``Field.save_form_data``,
-    the call ``construct_instance`` made with the cleaned value. A consumer ``save()`` runs
-    after it and may still write another value.
+    Each is a column ``_coerced_null_fields`` named, an explicit ``null`` or an update
+    omitting the field over a stored ``NULL`` whose restore (``_keep_omitted_columns``) a
+    consumer-set value skipped: the bound ``None`` its form field cleaned to a value is
+    written as the ``None`` itself, through ``Field.save_form_data``, the call
+    ``construct_instance`` made with the cleaned value. A consumer ``save()`` runs after it
+    and may still write another value.
     """
     instance = form.instance
     for field in fields:
@@ -1690,12 +1818,14 @@ def _modelform_write_step(
     data (its ``instance`` a row of the mutation's model or a subclass, else a
     ``ConfigurationError``: ``_require_backing_row``), runs ``is_valid()`` once (a failure
     maps ``form.errors`` onto the envelope via the reused
-    ``validation_error_to_field_errors``), answers an update's explicit ``null`` on a
+    ``validation_error_to_field_errors``) and, on an update, keeps the stored value of each
+    column the input omitted where the form field's own cleaning rewrote it
+    (``_keep_omitted_columns``), answers an update's explicit ``null`` on a
     required file field with its ``required`` error (``_required_file_clears``), refuses
     an explicit ``null`` a ``null=False`` column's own form field cleaned to a storable
     value as that column's field-keyed ``null`` error (``_coerced_null_fields``), stores
-    ``NULL`` in a ``null=True`` column whose bound ``None`` (an explicit ``null``, an update
-    omitting the field over a stored ``NULL``) its own form field cleaned to a value
+    ``NULL`` in a ``null=True`` column whose explicit ``null`` (or omitted stored ``NULL``
+    whose restore a consumer-set value skipped) its own form field cleaned to a value
     (``_store_nulls``), refuses a
     datetime or time the write alias cannot store as that column's ``invalid`` error
     (``_unstorable_temporal_errors``), then writes through
@@ -1709,7 +1839,7 @@ def _modelform_write_step(
     ``ConfigurationError`` raised inside the pipeline transaction, so its write rolls back.
     """
     if instance is not None:
-        decoded = (decoded[0], _file_clears(decoded[1]))
+        decoded = (decoded[0], _file_clears(decoded[1]), decoded[2])
     bound = _bound_form_or_field_errors(
         mutation_cls,
         mutation_cls(),

@@ -38,8 +38,9 @@ widget's ``decompress`` cannot split the text of a datetime (``PostedSplitForm``
 ``ConfigurationError`` before ``is_valid()``. The ``NullableScalarSpecimen`` ``ViaForm``
 pair writes the ``null=True`` ``flag`` column through
 ``forms.NullableScalarSpecimenFlagForm``'s checkbox and the ``null=True`` ``payload`` JSON
-column through its ``CharField``, so an explicit ``null`` and an update omitting either
-over a stored ``NULL`` store ``NULL``.
+column through its ``CharField``, so an explicit ``null`` stores ``NULL``, while an update
+omitting ``label``, ``flag`` or ``payload`` keeps the stored value, ``NULL`` included, where
+the form field's own cleaning would rewrite it.
 
 ``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
 ``FilteredRelation("parent")`` alias named ``par``, filtered by
