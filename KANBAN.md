@@ -1,6 +1,6 @@
 # django-strawberry-framework Kanban
 
-Last refreshed: 2026-10-20
+Last refreshed: 2026-11-02
 
 This board summarizes what is shipped, what has recently landed, and what remains to finish based on the current code, tests, docs, and release-readiness notes. It is intentionally written as a project-management view: each card has a status, priority, scope, and a practical definition of done.
 
@@ -11,7 +11,7 @@ Editing this board: `KANBAN.md` is a rendered artifact, not a source. The source
 Every card uses the form `<STATUS>[-<MILESTONE>]-NNN-X.Y.Z`:
 
 - `<STATUS>` — the card workflow state: `BACKLOG` (unscheduled investigation / strategic-differentiation candidate), `TODO` (committed to a milestone, not yet active), `WIP` (actively being worked), or `DONE` (shipped). Updated when the card moves between workflow states. Blocking is not part of the workflow status; blocked cards render a derived `blocked` badge from unfinished `blocked_by` references and stay in their normal planning column.
-- `<MILESTONE>` *(optional)* — the development phase the card lives in while it's still pre-shipping: `ALPHA` (pre-`0.1.0`), `BETA` (post-`0.1.0` / pre-`1.0.0`), or `STABLE` (post-`1.0.0`). Used on `BACKLOG`, `TODO`, and `WIP` cards. The two release cards themselves are tagged with the phase they usher in: `TODO-ALPHA-057-0.1.0` is the alpha → beta cut-over and `TODO-STABLE-073-1.0.0` is the beta → stable cut-over. **Dropped when the card ships** — `DONE` cards use the bare `DONE-NNN-X.Y.Z` form (no milestone segment). The card's version tag (`X.Y.Z`) already encodes which phase the shipment belongs to, and the bare form keeps the shipped-card cluster compact and uniform across the package's history.
+- `<MILESTONE>` *(optional)* — the development phase the card lives in while it's still pre-shipping: `ALPHA` (pre-`0.1.0`), `BETA` (post-`0.1.0` / pre-`1.0.0`), or `STABLE` (post-`1.0.0`). Used on `BACKLOG`, `TODO`, and `WIP` cards. The two release cards themselves are tagged with the phase they usher in: `TODO-ALPHA-058-0.1.0` is the alpha → beta cut-over and `TODO-STABLE-074-1.0.0` is the beta → stable cut-over. **Dropped when the card ships** — `DONE` cards use the bare `DONE-NNN-X.Y.Z` form (no milestone segment). The card's version tag (`X.Y.Z`) already encodes which phase the shipment belongs to, and the bare form keeps the shipped-card cluster compact and uniform across the package's history.
 - `NNN` — a 3-digit sequence number indicating the order the card was completed (`DONE` cards) or is being tracked (everything else; scheduled cards are ordered by planned ship version, and backlog cards sort after the scheduled board). **Unlike status, milestone, and version, this number is not stable** — it is recomputed whenever a card's position in the shipping sequence changes (reordered, new card inserted between two existing cards, version-tag bumped). Use the card title, not the NNN, when referencing a card from long-lived documents.
 - `X.Y.Z` — the package version the card shipped in (`DONE` cards), is planned to ship in (scheduled cards), or is provisionally bucketed under (`BACKLOG` cards). Alpha cards span `0.0.6` through `0.0.15` leading up to `0.1.0`; Beta cards span `0.1.1` through `0.1.8` leading up to `1.0.0`. The `0.1.0` and `1.0.0` tags are reserved for the two release cards themselves. Backlog cards may use post-`1.0.0` buckets as ordering placeholders; they stay unscheduled until promoted to `TODO`.
 
@@ -29,11 +29,11 @@ A five-point T-shirt estimate of build effort — a planning estimate, not a com
 
 ## Progress to 1.0.0
 
-**64.9% complete** toward `1.0.0` - 50 of 77 cards done (62.5% size-weighted). Across all non-backlog cards (incl. post-`1.0.0`), 50 of 78 (64.1%, 61.5% size-weighted). Past the 50% mark. Backlog excluded; size-weighted by relative size (XS=1 .. XL=5).
+**64.1% complete** toward `1.0.0` - 50 of 78 cards done (61.8% size-weighted). Across all non-backlog cards (incl. post-`1.0.0`), 50 of 79 (63.3%, 60.8% size-weighted). Past the 50% mark. Backlog excluded; size-weighted by relative size (XS=1 .. XL=5).
 
 | Milestone | Cards done | Size-weighted |
 | --- | --- | --- |
-| Alpha (pre-0.1.0) | 50/60 (83.3%) | 81.2% |
+| Alpha (pre-0.1.0) | 50/61 (82.0%) | 79.9% |
 | Beta (pre-1.0.0) | 0/16 (0.0%) | 0.0% |
 | Stable (post-1.0.0) | 0/2 (0.0%) | 0.0% |
 
@@ -45,32 +45,33 @@ Every card on the board, in board order. Links jump to the card.
 | --- | --- | --- |
 | [`WIP-ALPHA-051-0.0.15`](#upstream_parity_gap_closure) | Upstream parity-gap closure | In progress |
 | [`TODO-ALPHA-052-0.0.15`](#extract_djangodebugextension_into_the_standalone_django_strawberry_debug_package) | Extract DjangoDebugExtension into the standalone django-strawberry-debug package | In progress |
-| [`TODO-ALPHA-053-0.0.15`](#boundary_hardening_and_system_wide_dry_squeeze) | Boundary hardening and system-wide DRY squeeze | In progress |
-| [`TODO-ALPHA-054-0.0.16`](#pluggable_field_conversion_registry) | Pluggable field-conversion registry | To Do - Alpha (0.1.0) |
-| [`TODO-ALPHA-055-0.0.16`](#apollo_federation_as_the_standalone_django_strawberry_federation_package) | Apollo Federation as the standalone django-strawberry-federation package | To Do - Alpha (0.1.0) |
-| [`TODO-ALPHA-056-0.0.17`](#alpha_documentation_debt_discharge) | Alpha documentation-debt discharge | To Do - Alpha (0.1.0) |
-| [`TODO-ALPHA-057-0.1.0`](#beta_release_cleanup_verification_alpha_beta) | Beta release (cleanup, verification, alpha → beta) | To Do - Alpha (0.1.0) |
-| [`TODO-ALPHA-078-0.0.17`](#owning_spec_for_the_nested_connection_fetch_strategy_seam) | Owning spec for the nested-connection fetch-strategy seam | To Do - Alpha (0.1.0) |
-| [`TODO-ALPHA-079-0.0.17`](#owning_spec_for_the_mutation_write_pipeline_transaction_locks_write_alias_authorization) | Owning spec for the mutation write pipeline (transaction, locks, write alias, authorization) | To Do - Alpha (0.1.0) |
-| [`TODO-ALPHA-080-0.0.17`](#scriptsarchive_specpy_mechanize_the_spec_and_build_plan_archive_sweep) | `scripts/archive_spec.py`: mechanize the spec and build-plan archive sweep | To Do - Alpha (0.1.0) |
-| [`TODO-BETA-058-0.1.1`](#graph_substrate_shared_graph_policy_and_dependency_planning) | Graph substrate: shared graph policy and dependency planning | To Do - Beta (1.0.0) |
-| [`TODO-BETA-059-0.1.1`](#fieldset_declarative_field_level_behavior_metafields_class) | `FieldSet` declarative field-level behavior (`Meta.fields_class`) | To Do - Beta (1.0.0) |
-| [`TODO-BETA-060-0.1.2`](#metasearch_fields_support) | `Meta.search_fields` support | To Do - Beta (1.0.0) |
-| [`TODO-BETA-061-0.1.2`](#postgres_full_text_search_filter_primitives) | Postgres full-text search filter primitives | To Do - Beta (1.0.0) |
-| [`TODO-BETA-062-0.1.3`](#aggregation_subsystem) | Aggregation subsystem | To Do - Beta (1.0.0) |
-| [`TODO-BETA-063-0.1.3`](#mutation_idempotency_keys) | Mutation idempotency keys | To Do - Beta (1.0.0) |
-| [`TODO-BETA-064-0.1.4`](#opt_in_node_sentinel_redaction_tier_metaredaction_mode) | Opt-in node-sentinel redaction tier (`Meta.redaction_mode`) | To Do - Beta (1.0.0) |
-| [`TODO-BETA-065-0.1.4`](#stable_choice_enum_naming_override) | Stable choice enum naming override | To Do - Beta (1.0.0) |
-| [`TODO-BETA-066-0.1.5`](#fakeshop_graphql_schema_activation) | Fakeshop GraphQL schema activation | To Do - Beta (1.0.0) |
-| [`TODO-BETA-067-0.1.5`](#product_catalog_layer_3_http_graphql_tests) | Product-catalog Layer 3 HTTP GraphQL tests | To Do - Beta (1.0.0) |
-| [`TODO-BETA-068-0.1.6`](#structural_optimization_templates_and_nested_sidecar_batching) | Structural optimization templates and nested sidecar batching | To Do - Beta (1.0.0) |
-| [`TODO-BETA-069-0.1.6`](#optimizer_explain_mode) | Optimizer explain mode | To Do - Beta (1.0.0) |
-| [`TODO-BETA-070-0.1.7`](#configurable_filterlogic_key_namespace_filter_keyand_keyor_keynot_key) | Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`) | To Do - Beta (1.0.0) |
-| [`TODO-BETA-071-0.1.8`](#migration_and_adoption_guides) | Migration and adoption guides | To Do - Beta (1.0.0) |
-| [`TODO-BETA-072-0.1.8`](#adversarial_non_live_test_suite) | Adversarial non-live test suite | To Do - Beta (1.0.0) |
-| [`TODO-STABLE-073-1.0.0`](#stable_release_api_freeze_cleanup_verification_beta_stable) | Stable release (API freeze, cleanup, verification, beta → stable) | To Do - Beta (1.0.0) |
-| [`TODO-STABLE-074-1.1.0`](#dynamic_schemas_from_datatype_specs_synthetic_unmanaged_models) | Dynamic schemas from dataType specs (synthetic unmanaged models) | To Do - Beta (1.0.0) |
-| [`TODO-BETA-077-0.1.7`](#generated_input_field_names_follow_the_schema_naming_config_auto_camel_case_nameconverter) | Generated input field names follow the schema naming config (`auto_camel_case`, `NameConverter`) | To Do - Beta (1.0.0) |
+| [`TODO-ALPHA-053-0.0.15`](#get_queryset_sees_its_own_relations_info_on_the_optimizers_prefetch_path) | `get_queryset` sees its own relation's `info` on the optimizer's prefetch path | In progress |
+| [`TODO-ALPHA-054-0.0.15`](#boundary_hardening_and_system_wide_dry_squeeze) | Boundary hardening and system-wide DRY squeeze | In progress |
+| [`TODO-ALPHA-055-0.0.16`](#pluggable_field_conversion_registry) | Pluggable field-conversion registry | To Do - Alpha (0.1.0) |
+| [`TODO-ALPHA-056-0.0.16`](#apollo_federation_as_the_standalone_django_strawberry_federation_package) | Apollo Federation as the standalone django-strawberry-federation package | To Do - Alpha (0.1.0) |
+| [`TODO-ALPHA-057-0.0.17`](#alpha_documentation_debt_discharge) | Alpha documentation-debt discharge | To Do - Alpha (0.1.0) |
+| [`TODO-ALPHA-058-0.1.0`](#beta_release_cleanup_verification_alpha_beta) | Beta release (cleanup, verification, alpha → beta) | To Do - Alpha (0.1.0) |
+| [`TODO-ALPHA-079-0.0.17`](#owning_spec_for_the_nested_connection_fetch_strategy_seam) | Owning spec for the nested-connection fetch-strategy seam | To Do - Alpha (0.1.0) |
+| [`TODO-ALPHA-080-0.0.17`](#owning_spec_for_the_mutation_write_pipeline_transaction_locks_write_alias_authorization) | Owning spec for the mutation write pipeline (transaction, locks, write alias, authorization) | To Do - Alpha (0.1.0) |
+| [`TODO-ALPHA-081-0.0.17`](#scriptsarchive_specpy_mechanize_the_spec_and_build_plan_archive_sweep) | `scripts/archive_spec.py`: mechanize the spec and build-plan archive sweep | To Do - Alpha (0.1.0) |
+| [`TODO-BETA-059-0.1.1`](#graph_substrate_shared_graph_policy_and_dependency_planning) | Graph substrate: shared graph policy and dependency planning | To Do - Beta (1.0.0) |
+| [`TODO-BETA-060-0.1.1`](#fieldset_declarative_field_level_behavior_metafields_class) | `FieldSet` declarative field-level behavior (`Meta.fields_class`) | To Do - Beta (1.0.0) |
+| [`TODO-BETA-061-0.1.2`](#metasearch_fields_support) | `Meta.search_fields` support | To Do - Beta (1.0.0) |
+| [`TODO-BETA-062-0.1.2`](#postgres_full_text_search_filter_primitives) | Postgres full-text search filter primitives | To Do - Beta (1.0.0) |
+| [`TODO-BETA-063-0.1.3`](#aggregation_subsystem) | Aggregation subsystem | To Do - Beta (1.0.0) |
+| [`TODO-BETA-064-0.1.3`](#mutation_idempotency_keys) | Mutation idempotency keys | To Do - Beta (1.0.0) |
+| [`TODO-BETA-065-0.1.4`](#opt_in_node_sentinel_redaction_tier_metaredaction_mode) | Opt-in node-sentinel redaction tier (`Meta.redaction_mode`) | To Do - Beta (1.0.0) |
+| [`TODO-BETA-066-0.1.4`](#stable_choice_enum_naming_override) | Stable choice enum naming override | To Do - Beta (1.0.0) |
+| [`TODO-BETA-067-0.1.5`](#fakeshop_graphql_schema_activation) | Fakeshop GraphQL schema activation | To Do - Beta (1.0.0) |
+| [`TODO-BETA-068-0.1.5`](#product_catalog_layer_3_http_graphql_tests) | Product-catalog Layer 3 HTTP GraphQL tests | To Do - Beta (1.0.0) |
+| [`TODO-BETA-069-0.1.6`](#structural_optimization_templates_and_nested_sidecar_batching) | Structural optimization templates and nested sidecar batching | To Do - Beta (1.0.0) |
+| [`TODO-BETA-070-0.1.6`](#optimizer_explain_mode) | Optimizer explain mode | To Do - Beta (1.0.0) |
+| [`TODO-BETA-071-0.1.7`](#configurable_filterlogic_key_namespace_filter_keyand_keyor_keynot_key) | Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`) | To Do - Beta (1.0.0) |
+| [`TODO-BETA-072-0.1.8`](#migration_and_adoption_guides) | Migration and adoption guides | To Do - Beta (1.0.0) |
+| [`TODO-BETA-073-0.1.8`](#adversarial_non_live_test_suite) | Adversarial non-live test suite | To Do - Beta (1.0.0) |
+| [`TODO-STABLE-074-1.0.0`](#stable_release_api_freeze_cleanup_verification_beta_stable) | Stable release (API freeze, cleanup, verification, beta → stable) | To Do - Beta (1.0.0) |
+| [`TODO-STABLE-075-1.1.0`](#dynamic_schemas_from_datatype_specs_synthetic_unmanaged_models) | Dynamic schemas from dataType specs (synthetic unmanaged models) | To Do - Beta (1.0.0) |
+| [`TODO-BETA-078-0.1.7`](#generated_input_field_names_follow_the_schema_naming_config_auto_camel_case_nameconverter) | Generated input field names follow the schema naming config (`auto_camel_case`, `NameConverter`) | To Do - Beta (1.0.0) |
 | [`DONE-050-0.0.15`](#djangolistfield_argument_surface_offset_limit_and_orderby) | `DjangoListField` argument surface: `offset` / `limit` and `orderBy` | Done |
 | [`DONE-049-0.0.14`](#dependency_and_ci_hardening_refresh_django_locks_add_audit_automation_least_privilege_ci) | Dependency and CI hardening: refresh Django locks, add audit automation, least-privilege CI | Done |
 | [`DONE-048-0.0.14`](#secure_output_and_error_defaults_drop_file_path_fail_closed_debug_prod_error_policy) | Secure output and error defaults: drop file path, fail-closed debug, prod error policy | Done |
@@ -142,12 +143,12 @@ The six code gaps left by the `0.1.0` parity audit after everything homeable was
 
 #### Scope
 
-- A `through=` class-creation guard: reject at type creation a `through=`-declared M2M whose through model carries required extra columns (non-null, no default, beyond the two FKs) wherever the relation is writable through generated inputs, with a [`ConfigurationError`](docs/GLOSSARY.md#configurationerror) naming the through model and the offending columns — today `django_strawberry_framework/mutations/resolvers.py::_assign_m2m` is a plain `.set()` and neither `django_strawberry_framework/mutations/inputs.py` nor `django_strawberry_framework/utils/relations.py` guards the declaration, so the failure happens at runtime inside Django's `.set()`, outside the [`FieldError` envelope](docs/GLOSSARY.md#fielderror-envelope). Fail-loud is package doctrine; this guard is also what makes the `through_defaults` refusal homed on TODO-BETA-071-0.1.8 safe.
+- A `through=` class-creation guard: reject at type creation a `through=`-declared M2M whose through model carries required extra columns (non-null, no default, beyond the two FKs) wherever the relation is writable through generated inputs, with a [`ConfigurationError`](docs/GLOSSARY.md#configurationerror) naming the through model and the offending columns — today `django_strawberry_framework/mutations/resolvers.py::_assign_m2m` is a plain `.set()` and neither `django_strawberry_framework/mutations/inputs.py` nor `django_strawberry_framework/utils/relations.py` guards the declaration, so the failure happens at runtime inside Django's `.set()`, outside the [`FieldError` envelope](docs/GLOSSARY.md#fielderror-envelope). Fail-loud is package doctrine; this guard is also what makes the `through_defaults` refusal homed on TODO-BETA-072-0.1.8 safe.
 - `GeneratedField` support: resolve type and nullability from the field's `output_field` in `django_strawberry_framework/types/converters.py::convert_field_output` (the upstream answer — 🍓 `strawberry_django/fields/types.py` #"GeneratedField" — and a direct fit for our converter table), and exclude the column from generated write inputs since it is database-computed. Today a Django 5.0+ `GeneratedField` reached through `Meta.fields = "__all__"` raises `ConfigurationError "Unsupported Django field type 'GeneratedField'"` at type creation, [`Meta.exclude`](docs/GLOSSARY.md#metaexclude) is the only escape, and nothing documents it — a migrating consumer with any generated column cannot declare the type at all.
 - Model `help_text` as the SDL field description: thread the model column's `help_text` into the generated field's GraphQL description. Today no model-column path exists — the only `help_text` handling is on the DRF serializer-input side (`django_strawberry_framework/rest_framework/serializer_converter.py`) and `django_strawberry_framework/types/base.py` synthesizes bare annotations — so a ⚛️ migrant takes a silent whole-schema SDL regression on every documented model. The spec decides always-on (⚛️ threads `str(field.help_text)` unconditionally) versus opt-in (🍓 gates it behind `FIELD_DESCRIPTION_FROM_HELP_TEXT`); an explicit consumer-declared description wins over `help_text` either way.
-- `django-choices-field` enum reuse: when a `TextChoicesField` / `IntegerChoicesField` declares a `choices_enum`, reuse the consumer's own enum instead of silently minting a second one from the raw choices (🍓 parity: `strawberry_django/fields/types.py` #"TextChoicesField"). Soft-dependency detection only — no hard dependency on `django-choices-field`; the `(model, field)` enum-reuse cache contract is unchanged. Coordinate with TODO-BETA-065-0.1.4, which owns `convert_choices_to_enum()` naming and that cache on the far side of the beta cut.
+- `django-choices-field` enum reuse: when a `TextChoicesField` / `IntegerChoicesField` declares a `choices_enum`, reuse the consumer's own enum instead of silently minting a second one from the raw choices (🍓 parity: `strawberry_django/fields/types.py` #"TextChoicesField"). Soft-dependency detection only — no hard dependency on `django-choices-field`; the `(model, field)` enum-reuse cache contract is unchanged. Coordinate with TODO-BETA-066-0.1.4, which owns `convert_choices_to_enum()` naming and that cache on the far side of the beta cut.
 - `FieldError` keying: every flavor keys an exposed field's `FieldError.field` to the GraphQL input field the client sent, and a field the input does not expose keeps its validator-side name. One builder (`django_strawberry_framework/utils/errors.py::build_error_key_map`) produces each flavor's map: the model flavor's from `django_strawberry_framework/utils/errors.py::model_field_error_names` (`keys_of=`, so `category` and `category_id` both reach `categoryId`), the one-level `django_strawberry_framework/utils/errors.py::save_time_error_key_map` for a Django `ValidationError` raised by `ModelForm` or serializer save-time code, the form field names for `form.errors`, and the serializer's recursive map over its nested specs. Validator-origin errors (`full_clean()`, `form.errors`, a save-time Django `ValidationError`) re-key through `django_strawberry_framework/utils/errors.py::validation_error_to_field_errors`, relation-decode errors are built under the GraphQL input name (`django_strawberry_framework/utils/errors.py::relation_field_error`), and DRF errors re-key at every depth (`django_strawberry_framework/rest_framework/resolvers.py::serializer_errors_to_field_errors`) — an FK suffix (`category` / `categoryId`) and a `Meta.input_class` rename have no casing relation, so the answer is a key map, not a casing function, and there is no casing setting. `examples/fakeshop/test_query/test_mutation_error_keys_api.py` pins the flavor-by-key-shape matrix over HTTP, including a multi-word snake_case cell on every flavor; the app-specific live suites also pin the input-name keying per flavor: model (`publisherName`, `houseCode`), `ModelForm` (the `categoryId` FK suffix), plain form (`statusKey`) and serializer (`shelfCode`). ⚛️ context: `graphene_django/settings.py` #"CAMELCASE_ERRORS", default on, in the exact `ErrorType` our `FieldError` mirrors.
-- Connection pagination rejections carry an audited `extensions.code`: every `django_strawberry_framework/utils/connections.py::PaginationArgumentError` carries `PAGINATION_INVALID` (`django_strawberry_framework/utils/errors.py::PAGINATION_INVALID_ERROR_CODE`), so a migrant's first contact reads as a policy. This discharges TODO-ALPHA-057-0.1.0's open question.
+- Connection pagination rejections carry an audited `extensions.code`: every `django_strawberry_framework/utils/connections.py::PaginationArgumentError` carries `PAGINATION_INVALID` (`django_strawberry_framework/utils/errors.py::PAGINATION_INVALID_ERROR_CODE`), so a migrant's first contact reads as a policy. This discharges TODO-ALPHA-058-0.1.0's open question.
 
 #### Definition of done
 
@@ -156,11 +157,11 @@ The six code gaps left by the `0.1.0` parity audit after everything homeable was
 - [ ] Model `help_text` appears as the SDL field description per the spec's on-by-default-or-opt-in decision; an explicit description wins; SDL snapshot coverage pins it.
 - [ ] A `TextChoicesField` / `IntegerChoicesField` with a declared `choices_enum` publishes the consumer's enum (one enum type, not two); absence of `django-choices-field` changes nothing.
 - [ ] `FieldError.field` keying is uniform across model, relation-decode, and serializer flavors; a live test pins a multi-word snake_case field on each flavor with a stock fakeshop shape (model `houseCode`, plain form `statusKey`, serializer `shelfCode`); `register` (the stock user model has no multi-word required field) and `ModelForm` (no stock form can fail validation on a multi-word field) are pinned at package tier.
-- [x] Connection pagination rejections ([`PaginationArgumentError`](docs/GLOSSARY.md#paginationargumenterror)) carry the audited `extensions.code` `PAGINATION_INVALID` (`django_strawberry_framework/utils/errors.py::PAGINATION_INVALID_ERROR_CODE`); TODO-ALPHA-057-0.1.0's open question is closed against this card.
-- [ ] TODO-BETA-071-0.1.8's upstream-settings disposition table gains its `CAMELCASE_ERRORS` row stating the keying story that ships (no toggle: keys are always the input name; `__all__` kept, not graphene's `_All__`) — ⚛️'s key is a toggle (`graphene_django/types.py` camelizes only when true, default on) and no equivalent knob exists here, so the row is owed under any outcome.
-- [ ] TODO-ALPHA-053-0.0.15's Slice 5 joint-cut sentence and its GLOSSARY-flip DoD were amended for every card on the line, and the dependency edge sequencing it behind this card was added, at the 2026-08-29 board review; verify both still hold at wrap.
+- [x] Connection pagination rejections ([`PaginationArgumentError`](docs/GLOSSARY.md#paginationargumenterror)) carry the audited `extensions.code` `PAGINATION_INVALID` (`django_strawberry_framework/utils/errors.py::PAGINATION_INVALID_ERROR_CODE`); TODO-ALPHA-058-0.1.0's open question is closed against this card.
+- [ ] TODO-BETA-072-0.1.8's upstream-settings disposition table gains its `CAMELCASE_ERRORS` row stating the keying story that ships (no toggle: keys are always the input name; `__all__` kept, not graphene's `_All__`) — ⚛️'s key is a toggle (`graphene_django/types.py` camelizes only when true, default on) and no equivalent knob exists here, so the row is owed under any outcome.
+- [ ] TODO-ALPHA-054-0.0.15's Slice 5 joint-cut sentence and its GLOSSARY-flip DoD were amended for every card on the line, and the dependency edge sequencing it behind this card was added, at the 2026-08-29 board review; verify both still hold at wrap.
 - [ ] Docs fold-in and card wrap: GLOSSARY terms via the DB, TREE regenerated, card flipped Done, KANBAN regenerated, `import_spec_terms` green.
-- [ ] Full suite green under `fail_under = 100`; live-first placement respected. No version triplet, GLOSSARY status flip or CHANGELOG entry — all three ride TODO-ALPHA-053-0.0.15's joint `0.0.15` cut, which lands last on this line.
+- [ ] Full suite green under `fail_under = 100`; live-first placement respected. No version triplet, GLOSSARY status flip or CHANGELOG entry — all three ride TODO-ALPHA-054-0.0.15's joint `0.0.15` cut, which lands last on this line.
 
 #### Files likely touched
 
@@ -179,19 +180,19 @@ The six code gaps left by the `0.1.0` parity audit after everything homeable was
 
 #### Why it matters
 
-- The beta line is defined as feature parity with both upstreams. These six are the entire remaining build-side delta after the `0.1.0` parity audit homed everything else: two type-creation failures a migrant cannot work around (`through=`, `GeneratedField`), a whole-schema SDL regression (`help_text`), a duplicate-enum surprise, an error keying that is uniform and pinned but still owes its `CAMELCASE_ERRORS` disposition row, and rejections that read as bugs. Closing them before `0.1.0` is what makes the parity claim on TODO-ALPHA-057-0.1.0 true rather than asserted.
+- The beta line is defined as feature parity with both upstreams. These six are the entire remaining build-side delta after the `0.1.0` parity audit homed everything else: two type-creation failures a migrant cannot work around (`through=`, `GeneratedField`), a whole-schema SDL regression (`help_text`), a duplicate-enum surprise, an error keying that is uniform and pinned but still owes its `CAMELCASE_ERRORS` disposition row, and rejections that read as bugs. Closing them before `0.1.0` is what makes the parity claim on TODO-ALPHA-058-0.1.0 true rather than asserted.
 
 #### Dependencies
 
-- Nothing blocks this card. The sequencing runs the other way: TODO-ALPHA-053-0.0.15's four-DRY-axes file list covers `mutations/{sets,inputs,resolvers,permissions}.py`, `rest_framework/*`, `utils/*`, `connection.py` and `types/base.py` — every file this card touches except `types/converters.py` — so that card must be sequenced behind this one, exactly as it is already sequenced behind the debug extraction on the same line. That dependency edge and note are owed on that card, not this one.
+- Nothing blocks this card. The sequencing runs the other way: TODO-ALPHA-054-0.0.15's four-DRY-axes file list covers `mutations/{sets,inputs,resolvers,permissions}.py`, `rest_framework/*`, `utils/*`, `connection.py` and `types/base.py` — every file this card touches except `types/converters.py` — so that card must be sequenced behind this one, exactly as it is already sequenced behind the debug extraction on the same line. That dependency edge and note are owed on that card, not this one.
 - This card lands first on the shared `0.0.15` line; the debug extraction and the DRY squeeze follow, and the DRY squeeze still lands last and owns the joint cut.
 
 #### Card references
 
-- Related: Its masked-rejections open question is discharged by this card. -> `TODO-ALPHA-057-0.1.0` - Beta release (cleanup, verification, alpha → beta)
-- Related: Owed the `CAMELCASE_ERRORS` row on its upstream-settings disposition table, and already carries the `through_defaults` refusal this card's `through=` guard is what makes safe. -> `TODO-BETA-071-0.1.8` - Migration and adoption guides
-- Related: Shares every file in this card's Files-likely-touched list except `types/converters.py`, so it is sequenced behind this card the same way it is sequenced behind the debug extraction. -> `TODO-ALPHA-053-0.0.15` - Boundary hardening and system-wide DRY squeeze
-- Related: Owns `convert_choices_to_enum()` naming and the enum-reuse cache on the far side of the beta cut; this card lands the enum-reuse behaviour that card then names. -> `TODO-BETA-065-0.1.4` - Stable choice enum naming override
+- Related: Its masked-rejections open question is discharged by this card. -> `TODO-ALPHA-058-0.1.0` - Beta release (cleanup, verification, alpha → beta)
+- Related: Owed the `CAMELCASE_ERRORS` row on its upstream-settings disposition table, and already carries the `through_defaults` refusal this card's `through=` guard is what makes safe. -> `TODO-BETA-072-0.1.8` - Migration and adoption guides
+- Related: Shares every file in this card's Files-likely-touched list except `types/converters.py`, so it is sequenced behind this card the same way it is sequenced behind the debug extraction. -> `TODO-ALPHA-054-0.0.15` - Boundary hardening and system-wide DRY squeeze
+- Related: Owns `convert_choices_to_enum()` naming and the enum-reuse cache on the far side of the beta cut; this card lands the enum-reuse behaviour that card then names. -> `TODO-BETA-066-0.1.4` - Stable choice enum naming override
 
 <a id="extract_djangodebugextension_into_the_standalone_django_strawberry_debug_package"></a>
 ### [TODO-ALPHA-052-0.0.15 - Extract DjangoDebugExtension into the standalone django-strawberry-debug package](KANBAN.html#extract_djangodebugextension_into_the_standalone_django_strawberry_debug_package)
@@ -247,14 +248,62 @@ The six code gaps left by the `0.1.0` parity audit after everything homeable was
 
 - Dependency: `DONE-044-0.0.14` - Response-extensions debug middleware
 
+<a id="get_queryset_sees_its_own_relations_info_on_the_optimizers_prefetch_path"></a>
+### [TODO-ALPHA-053-0.0.15 - `get_queryset` sees its own relation's `info` on the optimizer's prefetch path](KANBAN.html#get_queryset_sees_its_own_relations_info_on_the_optimizers_prefetch_path)
+
+- Priority: High
+- Parity: 🍓 strawberry-graphql-django (Required)
+- Status: To Do
+- Relative size: M
+- Labels: `optimizer`, `query-planning`
+
+#### Planning note
+
+When the optimizer prefetches a relation, the target type's `get_queryset` receives an `info` built for that relation (its own `field_name`, `selected_fields` and `return_type`), the same as when the relation's own resolver calls it, instead of the planning resolver's `info` it receives today.
+
+#### Scope
+
+- Slice 1 - per-relation hook info: adapt strawberry-django's `optimizer.py::_generate_selection_resolve_info` (MIT; `LICENSE.strawberry-django` already ships, the adapted block names its origin) to build a `GraphQLResolveInfo` per planned relation (its own field nodes, return type, parent type, and path, keyed `0` only under a list-valued relation), and thread it through `django_strawberry_framework/optimizer/walker.py::_hook_info`, `django_strawberry_framework/optimizer/walker.py::_build_child_queryset` and `django_strawberry_framework/optimizer/nested_planner.py`, so the target's `get_queryset` reads the relation's `field_name`, `python_name`, `return_type` and `selected_fields`.
+- Slice 2 - pins and docs: live tests in `examples/fakeshop/test_query/` asserting the hook observes the same `info` on the prefetch path and on the relation's own resolver path at depth 1 and 2; restate the `docs/README.md` sentence describing today's behaviour and its [`get_queryset` visibility hook](docs/GLOSSARY.md#get_queryset-visibility-hook) glossary entry; tick typing tracker item 35 (`docs/typing-0_0_15.md`).
+
+#### Definition of done
+
+- [ ] On every planned relation, a target `get_queryset` reads the relation's own `field_name`, `selected_fields`, `return_type` and path, equal to what the relation's resolver hands it when the relation is not planned.
+- [ ] Live tests pin both paths at depth 1 and 2; the full suite is green at `fail_under = 100` in GitHub Actions.
+- [ ] The adapted block names its strawberry-django origin; no type suppression is added.
+- [ ] `docs/README.md` and the glossary entry restated, KANBAN regenerated, typing tracker item 35 ticked.
+
+#### Files likely touched
+
+- `django_strawberry_framework/optimizer/walker.py`, `django_strawberry_framework/optimizer/nested_planner.py`
+- A new or existing `examples/fakeshop/test_query/` module
+- `docs/README.md`, `docs/GLOSSARY.md` (via DB), `docs/typing-0_0_15.md`
+
+#### Verified in upstream
+
+- 🍓 `strawberry_django/optimizer.py::_get_prefetch_queryset` runs the target type's `get_queryset` under `Info(_raw_info=info)`, where `info` is the per-selection `GraphQLResolveInfo` that `strawberry_django/optimizer.py::_generate_selection_resolve_info` builds for that relation (its own `field_nodes`, `return_type`, `parent_type` and a path keyed under the parent), never the planning resolver's.
+
+#### Why it matters
+
+- A consumer's `get_queryset` must not observe a different `info` depending on whether the optimizer prefetched the relation; today on the prefetch path it reads the planning resolver's `field_name` / `selected_fields`, so a hook branching on them filters differently under the optimizer.
+
+#### Dependencies
+
+- Nothing blocks this card. The sequencing runs the other way: the boundary-hardening / DRY-squeeze card's four-DRY-axes file list covers `optimizer/*`, which holds both `django_strawberry_framework/optimizer/walker.py` and `django_strawberry_framework/optimizer/nested_planner.py`, so that card must be sequenced behind this one, exactly as it is already sequenced behind the parity-gap closure and the debug extraction on the same line. That card carries the dependency edge and its note.
+- This card lands before the DRY squeeze on the shared `0.0.15` line; the DRY squeeze still lands last and owns the joint cut.
+
+#### Card references
+
+- Related: Its four-DRY-axes file list covers `optimizer/*`, so it is sequenced behind this card the same way it is sequenced behind the parity-gap closure and the debug extraction. -> `TODO-ALPHA-054-0.0.15` - Boundary hardening and system-wide DRY squeeze
+
 <a id="boundary_hardening_and_system_wide_dry_squeeze"></a>
-### [TODO-ALPHA-053-0.0.15 - Boundary hardening and system-wide DRY squeeze](KANBAN.html#boundary_hardening_and_system_wide_dry_squeeze)
+### [TODO-ALPHA-054-0.0.15 - Boundary hardening and system-wide DRY squeeze](KANBAN.html#boundary_hardening_and_system_wide_dry_squeeze)
 
 - Priority: High
 - Status: To Do
 - Relative size: XL
 - Labels: `internal`
-- Spec: [spec-053-boundary_dry_squeeze-0_0_15.md](docs/SPECS/spec-053-boundary_dry_squeeze-0_0_15.md)
+- Spec: [spec-054-boundary_dry_squeeze-0_0_15.md](docs/SPECS/spec-054-boundary_dry_squeeze-0_0_15.md)
 
 #### Dependencies
 
@@ -262,6 +311,7 @@ The six code gaps left by the `0.1.0` parity audit after everything homeable was
 - `DONE-050-0.0.15` - `DjangoListField` argument surface: `offset` / `limit` and `orderBy`
 - `WIP-ALPHA-051-0.0.15` - Upstream parity-gap closure
 - `TODO-ALPHA-052-0.0.15` - Extract DjangoDebugExtension into the standalone django-strawberry-debug package
+- `TODO-ALPHA-053-0.0.15` - `get_queryset` sees its own relation's `info` on the optimizer's prefetch path
 
 #### Scope
 
@@ -269,7 +319,7 @@ The six code gaps left by the `0.1.0` parity audit after everything homeable was
 - WP-B mechanical DRY batch (~450-550 lines): query-side delegate absorption into `sets_mixins.py`, write-side `PermissionClassesMixin` + metaclass merge, inputs micro-hoists, resolvers micro batch, root/optimizer/types small batch.
 - WP-C structural DRY batch (~500-600 lines): fold `_run_delete` and the plain-form pipeline onto the shared write skeleton, filter converter/normalizer dispatch table, `install_input_namespace()`, bind-drain merge, connection dispatch tails, `slot_child_selections()`, `iter_relation_path()`, budgeted-walk primitive, column-backed conversion sharing (mutations+forms only), finalizer error formatters, underscore alias deletion, `editable_input_fields` onto `resolve_effective_fields`.
 - WP-D contract-level DRY (~150 lines + doc debt): single-window planner scheme through `_divergent_key_windows`, walker `_resolve_field_map` dual-contract retirement (FieldMeta fallback), model relation decoder over the shared spine.
-- Slice 5: docs fold-in, the joint `0.0.15` release cut (shared with the other three `0.0.15` cards; this card lands last so it owns the cut, and verifies the version triplet, which already reads `0.0.15`), CHANGELOG entry, card wrap.
+- Slice 5: docs fold-in, the joint `0.0.15` release cut (shared with the other four `0.0.15` cards; this card lands last so it owns the cut, and verifies the version triplet, which already reads `0.0.15`), CHANGELOG entry, card wrap.
 - Widen `views.py::_canonicalizes_to_utf8` to catch `ValueError` and `UnicodeEncodeError` alongside `LookupError`. Pre-existing, fail-loud and not reachable from the wire, which is why it was left; a codec whose name canonicalizes but whose lookup raises escapes as an unrelated 500.
 - A shared "is this one of our views?" recognizer with `middleware/debug_toolbar.py` is now a decidable question: the constraint that forced `middleware/request_body.py` to recognize by marker attribute (it must not import `views.py`) was removed when the ordering marks moved to `_boundary_ordering.py`. `debug_toolbar` recognizes a package view by class through an *upstream* `BaseView` import, so a narrower shared recognition needs no `views.py` import either. Revisit only when a third middleware needs the same recognition, or when two need to agree about one callback - not as a DRY sweep for its own sake.
 - `middleware/request_body.py::_package_view_instance`'s docstring scopes its absolute to the outcomes the recognition decides: `None` means "not a callback this middleware can run a boundary for", a boundary the recognition accepted that raises anything but `HTTPException` leaves the hook uncaught, and no guard sits across the body cap's own errors.
@@ -299,7 +349,7 @@ The six code gaps left by the `0.1.0` parity audit after everything homeable was
 - The [`DjangoListField`](docs/GLOSSARY.md#djangolistfield) ordering text states the [`DjangoConnectionField`](docs/GLOSSARY.md#djangoconnectionfield) pk tiebreaker as conditional at every site: `docs/SPECS/spec-020-list_field-0_0_7.md` `### Decision 8`, the `Ordering contract` passage of `django_strawberry_framework/list_field.py::DjangoListField`'s docstring, and `docs/GLOSSARY.md`'s `DjangoListField` entry at #"**Ordering.**" say the pk is appended only when the order does not already end in a unique column, and that a keyset ([`Meta.cursor_field`](docs/GLOSSARY.md#metacursor_field)) connection appends none, matching `django_strawberry_framework/optimizer/plans.py::deterministic_order`. The `orderBy` recourse is accurate: spec-050 gives every `DjangoListField` published `offset` / `limit` / `orderBy` arguments.
 - `django_strawberry_framework/list_field.py`'s comment above the consumer-wrapper branch no longer characterizes `is_async_callable`; it points at `utils/typing.py::is_async_callable`, whose docstring states the full contract (`functools.partial` and raw `staticmethod` layers peeled to any nesting, metaclass `async def __call__` read).
 - `docs/GLOSSARY.md`'s [`SyncMisuseError`](docs/GLOSSARY.md#syncmisuseerror) entry (anchor `#syncmisuseerror`) names both `DjangoListField` raise paths: the sync default resolver among the surfaces where `django_strawberry_framework/utils/querysets.py::apply_type_visibility_sync` raises on a coroutine-returning `get_queryset`, and `django_strawberry_framework/utils/querysets.py::reject_async_iterable_in_sync_context`, which raises the same error when a `DjangoListField` or `DjangoConnectionField` resolver returns an async-only iterable under synchronous execution.
-- No build-phase name survives in shipped package source: the lead comment on `django_strawberry_framework/types/base.py` `_RELAY_NODE_GATE_INHERIT_TAIL` states the invariant (byte-identical at every compose site) without the pass name. `filters/sets.py` #"TODO(spec-060 Slice 1)" is a live staged-slice anchor, which AGENTS.md requires to name its doc and slice, and is not part of this vocabulary.
+- No build-phase name survives in shipped package source: the lead comment on `django_strawberry_framework/types/base.py` `_RELAY_NODE_GATE_INHERIT_TAIL` states the invariant (byte-identical at every compose site) without the pass name. `filters/sets.py` #"TODO(spec-061 Slice 1)" is a live staged-slice anchor, which AGENTS.md requires to name its doc and slice, and is not part of this vocabulary.
 - No `workstream [A-D]` token survives in live `.py`: 0 occurrences across `django_strawberry_framework/`, `tests/` and `examples/`. Each former site states its invariant by content, the spec-033 partition-marker and conditional `_dst_total_count` sites under their real names and the walker's under its upstream ticket (`optimizer/walker.py` #"the strawberry-django #697 bug class").
 - `tests/test_ci_governance.py`'s first docstring line names every corpus the module governs (CI workflows, Dependabot, install floors and first-party source), and `docs/TREE.md` renders that line under both render roots.
 - Every multi-line schema construction example in package docstrings registers the package scalars with `config=strawberry_config()`: `optimizer/extension.py` (module docstring and the singleton-in-a-factory method docstring) and `extensions/debug.py` (module docstring) build `DjangoSchema(..., config=strawberry_config(), ...)`, the canonical form in `docs/README.md`, and `extensions/resource_policy.py::DjangoResourcePolicyExtension` carries it on both its `DjangoSchema(...)` example and the plain-schema fallback. Count on `config=strawberry_config`, never on `config=strawberry_config()`: the empty parens miss `extra_scalar_map=` call sites.
@@ -368,6 +418,7 @@ The six code gaps left by the `0.1.0` parity audit after everything homeable was
 
 - Sequenced behind DONE-044-0.0.14, whose `0.0.14` joint cut has landed; this card's Slice 5 owns the `0.0.15` release cut.
 - Also sequenced behind TODO-ALPHA-052-0.0.15: the debug extraction lands first on this card's own `0.0.15` line and removes `extensions/debug.py`, so this card's import-linter leaf wording (contract 3) and its extras additions (Decision 5) build on the post-extraction tree - hold all slices until that card wraps.
+- Shares `optimizer/walker.py` and `optimizer/nested_planner.py` with the relation-info card, so this card is sequenced behind it; it lands last on the shared `0.0.15` line and owns the cut.
 
 #### Open question
 
@@ -380,13 +431,14 @@ The six code gaps left by the `0.1.0` parity audit after everything homeable was
 - Dependency: `TODO-ALPHA-052-0.0.15` - Extract DjangoDebugExtension into the standalone django-strawberry-debug package
 - Dependency: The list-field card lands first on the shared `0.0.15` line; this card lands last and its Slice-5 version-triplet cut waits for every `0.0.15` card. -> `DONE-050-0.0.15` - `DjangoListField` argument surface: `offset` / `limit` and `orderBy`
 - Dependency: Shares every file in the parity-gap card's Files-likely-touched list except `types/converters.py`, so this card is sequenced behind it (the edge that card's DoD owed, landed at the 2026-08-29 board review). -> `WIP-ALPHA-051-0.0.15` - Upstream parity-gap closure
+- Dependency: Shares `optimizer/walker.py` and `optimizer/nested_planner.py` with the relation-info card, so this card is sequenced behind it; it lands last on the shared `0.0.15` line and owns the cut. -> `TODO-ALPHA-053-0.0.15` - `get_queryset` sees its own relation's `info` on the optimizer's prefetch path
 
 ## To Do - Alpha (0.1.0)
 
-Cards required to reach feature parity with both upstreams (`⚛️ graphene-django` and `🍓 strawberry-graphql-django`). Cards target `0.0.x` patches on the road to **0.1.0**; the remaining alpha work spans three joint-cut lines - `0.0.15` (050-053, DRY squeeze owns the cut), `0.0.16` (054-055, federation owns the cut), and `0.0.17` (056 solo). The final card in this column is the `0.1.0` release itself (cleanup, verification, alpha → beta cut-over). Cards in NNN order = planned ship order; dependency and parallelism notes live on each card.
+Cards required to reach feature parity with both upstreams (`⚛️ graphene-django` and `🍓 strawberry-graphql-django`). Cards target `0.0.x` patches on the road to **0.1.0**; the remaining alpha work spans three joint-cut lines - `0.0.15` (050-054, DRY squeeze owns the cut), `0.0.16` (055-056, federation owns the cut), and `0.0.17` (057 solo). The final card in this column is the `0.1.0` release itself (cleanup, verification, alpha → beta cut-over). Cards in NNN order = planned ship order; dependency and parallelism notes live on each card.
 
 <a id="pluggable_field_conversion_registry"></a>
-### [TODO-ALPHA-054-0.0.16 - Pluggable field-conversion registry](KANBAN.html#pluggable_field_conversion_registry)
+### [TODO-ALPHA-055-0.0.16 - Pluggable field-conversion registry](KANBAN.html#pluggable_field_conversion_registry)
 
 - Priority: Medium-high
 - Parity: ⚛️ graphene-django (Required), 🍓 strawberry-graphql-django (Parity-adjacent)
@@ -439,13 +491,13 @@ Created 2026-08-29 from the DIV-033 discussion: turn the field-conversion escape
 
 #### Card references
 
-- Related: This registry decides how much of the GIS card a consumer-side recipe can cover. -> `BACKLOG-STABLE-076-1.1.0` - GIS / GeoDjango field-type support (geo scalars)
-- Related: The doc-debt card documents the new registry surface from its own solo `0.0.17` line; the `0.0.16` release state is owned by the federation card's cut. -> `TODO-ALPHA-056-0.0.17` - Alpha documentation-debt discharge
+- Related: This registry decides how much of the GIS card a consumer-side recipe can cover. -> `BACKLOG-STABLE-077-1.1.0` - GIS / GeoDjango field-type support (geo scalars)
+- Related: The doc-debt card documents the new registry surface from its own solo `0.0.17` line; the `0.0.16` release state is owned by the federation card's cut. -> `TODO-ALPHA-057-0.0.17` - Alpha documentation-debt discharge
 - Dependency: The parity-gap card's `GeneratedField` entry lands in the converter table this card migrates onto the registry; sequenced behind it. -> `WIP-ALPHA-051-0.0.15` - Upstream parity-gap closure
 - Related: The file-column read-side `Meta.exclude` row is pinned before this card's bundle migration un-shares that path from the scalar case, so the migration is measured against it. -> `DONE-037-0.0.11` - Upload scalar and file / image field mapping
 
 <a id="apollo_federation_as_the_standalone_django_strawberry_federation_package"></a>
-### [TODO-ALPHA-055-0.0.16 - Apollo Federation as the standalone django-strawberry-federation package](KANBAN.html#apollo_federation_as_the_standalone_django_strawberry_federation_package)
+### [TODO-ALPHA-056-0.0.16 - Apollo Federation as the standalone django-strawberry-federation package](KANBAN.html#apollo_federation_as_the_standalone_django_strawberry_federation_package)
 
 - Priority: Medium-high
 - Parity: 🍓 strawberry-graphql-django (Required)
@@ -459,7 +511,7 @@ Maintainer decision 2026-08-29 on the parity register's federation cut blocker: 
 
 #### Dependencies
 
-- `TODO-ALPHA-053-0.0.15` - Boundary hardening and system-wide DRY squeeze
+- `TODO-ALPHA-054-0.0.15` - Boundary hardening and system-wide DRY squeeze
 
 #### Scope
 
@@ -495,13 +547,13 @@ Maintainer decision 2026-08-29 on the parity register's federation cut blocker: 
 
 #### Card references
 
-- Dependency: Slice 1's public-seam audit runs against the import-linter boundary contracts this card lands. -> `TODO-ALPHA-053-0.0.15` - Boundary hardening and system-wide DRY squeeze
+- Dependency: Slice 1's public-seam audit runs against the import-linter boundary contracts this card lands. -> `TODO-ALPHA-054-0.0.15` - Boundary hardening and system-wide DRY squeeze
 - Related: The satellite pattern this card follows - with the inverse dependency posture: debug has no core dependency, federation requires one. -> `TODO-ALPHA-052-0.0.15` - Extract DjangoDebugExtension into the standalone django-strawberry-debug package
-- Related: Owes the federation note in the strawberry-graphql-django guide: upstream's federation subpackage maps to django-strawberry-federation. -> `TODO-BETA-071-0.1.8` - Migration and adoption guides
-- Related: The parity claim's federation carve-out cites this card's satellite package. -> `TODO-ALPHA-057-0.1.0` - Beta release (cleanup, verification, alpha → beta)
+- Related: Owes the federation note in the strawberry-graphql-django guide: upstream's federation subpackage maps to django-strawberry-federation. -> `TODO-BETA-072-0.1.8` - Migration and adoption guides
+- Related: The parity claim's federation carve-out cites this card's satellite package. -> `TODO-ALPHA-058-0.1.0` - Beta release (cleanup, verification, alpha → beta)
 
 <a id="alpha_documentation_debt_discharge"></a>
-### [TODO-ALPHA-056-0.0.17 - Alpha documentation-debt discharge](KANBAN.html#alpha_documentation_debt_discharge)
+### [TODO-ALPHA-057-0.0.17 - Alpha documentation-debt discharge](KANBAN.html#alpha_documentation_debt_discharge)
 
 - Priority: Medium
 - Status: To Do
@@ -514,8 +566,8 @@ Documentation-consistency debt accumulated across the alpha line, split off the 
 
 #### Dependencies
 
-- `TODO-ALPHA-054-0.0.16` - Pluggable field-conversion registry
-- `TODO-ALPHA-055-0.0.16` - Apollo Federation as the standalone django-strawberry-federation package
+- `TODO-ALPHA-055-0.0.16` - Pluggable field-conversion registry
+- `TODO-ALPHA-056-0.0.16` - Apollo Federation as the standalone django-strawberry-federation package
 
 #### Scope
 
@@ -553,8 +605,8 @@ Documentation-consistency debt accumulated across the alpha line, split off the 
 - `docs/GLOSSARY.md`'s `DjangoConnectionField` entry documents the already-sliced-`QuerySet` `GraphQLError`: a consumer `resolver=` returning an already-sliced `QuerySet` is rejected before visibility runs, on offset and keyset connections alike, by `django_strawberry_framework/connection.py::_guard_source_not_pre_sliced`, and the entry names the recourse (return an unsliced `QuerySet` or a `Manager`).
 - The shipped keyset-cursor feature has its documentation homes without a spec of its own: `docs/SPECS/spec-030-connection_field-0_0_9.md` owns its contract in the `Keyset cursors` section, `docs/GLOSSARY.md` carries a `## Meta.cursor_field` heading, and `CHANGELOG.md` `[0.0.14]` records it. The surface: `cursor_field` sits in `django_strawberry_framework/types/base.py::ALLOWED_META_KEYS`, is validated at class creation by `django_strawberry_framework/types/base.py::_validate_cursor_field` and at finalization, and runs through `django_strawberry_framework/keyset.py`.
 - `docs/SPECS/appx/spec-012-version_release_alignment-0_0_4-rationale.md` #"the two milestone rows now cite board cards" claims `docs/README.md`'s two milestone rows cite board cards `052` and `067` through reference-style links. Measured 2026-08-25: `docs/README.md` cites NO card number at all - neither its `0.1.0` row (#"beta release: feature parity") nor its `1.0.0` row (#"stable release: full") carries a card reference in any form. Both digits are wrong and so is the claim's subject, which is why this is the ONE site the 2026-08-25 card-renumber sweep left deliberately unshifted: moving `052` to `053` would have produced a differently-false sentence while implying the claim had been verified. The same sentence's history half (the literal ids `BETA-033-0.1.0` and `STABLE-042-1.0.0` it says were replaced) is correct as history and is not in scope.
-- `docs/SPECS/spec-058-graph_substrate-0_1_1.md` #"### Decision 10 - joint cut at" had a heading its own in-file links could not reach: the heading punctuates as "joint cut at `0.1.1`: release state" (colon) while both links to it spelled the slug `...-at-011--release-state-...` (the double hyphen a spaced em dash produces). Measured 2026-08-25 while re-syncing heading/anchor pairs through the card renumber. REPAIRED 2026-08-29 in the spec-stem rename sweep by moving the LINK side to match the heading, because the sweep changed the heading numeral and would otherwise have left the pair broken in a second way; the sibling `spec-060-search_fields-0_1_2.md` Decision 10 pair was repaired the same way. The general fix is still owed: this card scopes the spec-consistency checker, and `spec-060`'s Decision 11 heading/link pair (5 links) is the same defect, still open.
-- Bare card numerals that were ALREADY stale before the insert-at-052 renumber, so the renumber's +1 does not repair them - each needs a read against its live referent (a +6 after the 2026-08-29 board inserts), not a shift. Measured 2026-08-25, eight sites in two surfaces the renumber deliberately left alone because a numeral wrong in BOTH numberings is a separate defect. (a) Board DB, `Card.planning_note` - a column no renumber has ever swept, on `TODO-BETA-060-0.1.2` (`card-054-owned completion bookkeeping`, `Spec-054: Decision 7`) and `TODO-BETA-061-0.1.2` (`card 054's Meta.search_fields surface`, `card 054's spec text`, `glossary promotion out of card 054's intermediate status`); every one names the SEARCH card, which was 054 only before the 2026-08-08 graph-substrate insert and is 060 today. (b) Board DB, `CardItem` text on `TODO-BETA-061-0.1.2` - scope items and one `definition_of_done` item reading `Card 054 deliberately ships only unprefixed OR-of-icontains search`, `Card 054 ships Meta.search_fields to main`, and `its card-054 intermediate status`, all three the same search-card referent. (c) Two spec-body label/target mismatches the renumber preserved verbatim rather than half-correcting: `docs/SPECS/spec-055-fieldset-0_1_1.md #"Meta.search_fields"` renders the link text `spec-055` over a target resolving to `spec-056-search_fields-0_1_2.md`, and `docs/SPECS/spec-056-search_fields-0_1_2.md` pairs `spec-054` with `TODO-BETA-058-0.1.1` for the same `FieldSet` referent - DISCHARGED 2026-08-29 by the spec-stem rename sweep, which set each link text from its ref-id target and repointed the pair onto `spec-059`/`spec-060`; parts (a) and (b) remain open - a spec stem and a card id one apart, so exactly one of the pair is wrong. Verify each referent before editing: a blanket +1 over this population would make (a) and (b) wrong in a new direction.
+- `docs/SPECS/spec-059-graph_substrate-0_1_1.md` #"### Decision 10 - joint cut at" had a heading its own in-file links could not reach: the heading punctuates as "joint cut at `0.1.1`: release state" (colon) while both links to it spelled the slug `...-at-011--release-state-...` (the double hyphen a spaced em dash produces). Measured 2026-08-25 while re-syncing heading/anchor pairs through the card renumber. REPAIRED 2026-08-29 in the spec-stem rename sweep by moving the LINK side to match the heading, because the sweep changed the heading numeral and would otherwise have left the pair broken in a second way; the sibling `spec-061-search_fields-0_1_2.md` Decision 10 pair was repaired the same way. The general fix is still owed: this card scopes the spec-consistency checker, and `spec-061`'s Decision 11 heading/link pair (5 links) is the same defect, still open.
+- Bare card numerals that were ALREADY stale before the insert-at-052 renumber, so the renumber's +1 does not repair them - each needs a read against its live referent (a +6 after the 2026-08-29 board inserts), not a shift. Measured 2026-08-25, eight sites in two surfaces the renumber deliberately left alone because a numeral wrong in BOTH numberings is a separate defect. (a) Board DB, `Card.planning_note` - a column no renumber has ever swept, on `TODO-BETA-061-0.1.2` (`card-054-owned completion bookkeeping`, `Spec-054: Decision 7`) and `TODO-BETA-062-0.1.2` (`card 054's Meta.search_fields surface`, `card 054's spec text`, `glossary promotion out of card 054's intermediate status`); every one names the SEARCH card, which was 054 only before the 2026-08-08 graph-substrate insert and is 061 today. (b) Board DB, `CardItem` text on `TODO-BETA-062-0.1.2` - scope items and one `definition_of_done` item reading `Card 054 deliberately ships only unprefixed OR-of-icontains search`, `Card 054 ships Meta.search_fields to main`, and `its card-054 intermediate status`, all three the same search-card referent. (c) Two spec-body label/target mismatches the renumber preserved verbatim rather than half-correcting: `docs/SPECS/spec-055-fieldset-0_1_1.md #"Meta.search_fields"` renders the link text `spec-055` over a target resolving to `spec-056-search_fields-0_1_2.md`, and `docs/SPECS/spec-056-search_fields-0_1_2.md` pairs `spec-054` with `TODO-BETA-058-0.1.1` for the same `FieldSet` referent - DISCHARGED 2026-08-29 by the spec-stem rename sweep, which set each link text from its ref-id target and repointed the pair onto `spec-059`/`spec-060`; parts (a) and (b) remain open - a spec stem and a card id one apart, so exactly one of the pair is wrong. Verify each referent before editing: a blanket +1 over this population would make (a) and (b) wrong in a new direction.
 - Every `Decision N` reference in `tests/test_relay_connection.py` names its spec (`spec-032` or `spec-033`), so none falls back on the module docstring's `spec-032`.
 - `scripts/check_citations.py` resolves `spec-<NNN> Decision <N>` (also `spec-<NNN>-<stem>` and `Decisions`, wrapped or not) in the gated corpus against the `Decision <N>` headings of the spec found by number, and fails the run when the heading is missing. Pinned by `tests/test_check_citations.py::test_a_spec_decision_citation_must_name_a_decision_heading`. The gate catches only a citation to a non-existent Decision: it does not see an ordinal inside a Decision's item list, a citation by heading text, or a citation to a Decision that exists but does not state the claim. The durable instrument for those is the spec-side convention in `spec-033` Decision 6's introduction, where a citation naming the arm by content carries its own claim.
 - `docs/TREE.md` describes every post-ship optimizer module (`join_taxonomy`, `lateral_fetch`, `nested_fetch`, `nested_planner`, `predicates`, `selections`, `single_parent_fetch`) and `keyset.py` / `utils/connections.py` beside them, rendered by `scripts/build_tree_md.py` from each module's docstring; a docstring edit plus a regenerate is the only way the tail changes.
@@ -574,8 +626,8 @@ Documentation-consistency debt accumulated across the alpha line, split off the 
 - `docs/SPECS/spec-038-form_mutations-0_0_12.md` #"### Reference-package parity checkpoint" carries no verdict on `graphene_django/forms/types.py::DjangoFormInputObjectType`, the one graphene-django forms surface that otherwise-thorough table omits. Measured 2026-08-28: `DjangoFormInputObjectType` greps to 0 in that spec, so the omission is silent rather than deferred, and a reader auditing forms parity against it finds a gap with no disposition. The verdict that belongs in the table is a refusal, and the card's own design already supplies the reasoning: a standalone form-derived input object exists upstream so a hand-written Relay mutation can borrow a form's shape as a nested `data:` argument, which is a workaround for not having a form mutation flavor rather than a capability of one. Here `Meta.form_class` on [`DjangoModelFormMutation`](docs/GLOSSARY.md#djangomodelformmutation) / [`DjangoFormMutation`](docs/GLOSSARY.md#djangoformmutation) generates inputs bound to the mutation that validates them. Add the row so the absence reads as decided rather than missed.
 - The node-identity refusal is recorded for graphene-django's spelling and not for strawberry-graphql-django's, so half of it is invisible to a migrant searching the other name. Measured 2026-08-28: `lookup_field` resolves across `docs/SPECS/spec-039-serializer_mutations-0_0_13.md` at five sites including its out-of-scope entry, while a combined `key_attr` / `DEFAULT_PK_FIELD_NAME` grep over `docs/`, `BACKLOG.md`, `KANBAN.md` and `README.md` returns 0. Those are strawberry-graphql-django's spelling of the same idea - `strawberry_django/settings.py` `DEFAULT_PK_FIELD_NAME` plus `key_attr` on the relay node - and one argument rejects both: resolving a global ID against a configurable non-pk column makes node identity a function of settings, so the same opaque ID then means different rows in two deployments of the same schema. The answer is the pk, with a consumer-authored resolver where a natural key must be addressable. Add the second spelling beside the recorded one; a verdict that names only one upstream's word for a surface both ship is a half-recorded verdict.
 - BACKLOG.md's 'Moved out of this file' section states items 36/37/38 'move to `AGENTS.md` / `CONTRIBUTING.md`' (public-surface promotion discipline; shared queryset introspection helpers - note the shipped module is `utils/querysets.py`, plural, not the `utils/queryset.py` the note names; layered manual relation override test policy). Verified 2026-08-29: none of the three rules is present in either target file - the transfer never landed. Land the three rules (or record where each actually belongs) and correct the BACKLOG note.
-- Twelve live-source `(line NNN)` self-citations and the two `cookbook line(s)` sites have no owning card, because this card's line-number-citation item explicitly routes them to "a live-code batch, not a documentation pass" and no batch names them. Measured 2026-09-01 by the spec-035 residual cycle over the 433-file `.py` corpus with a per-file `re.sub(r"\s+", " ", text)` flatten (the only instrument that survives both a wrap and a `#` comment-continuation): `grep -rnoE '\(lines? [0-9]+' --include='*.py'` returns **9 in `tests/types/test_resolvers.py`** (`:1797, :1802, :1808, :1817, :1828, :1908, :1915, :1920, :1931`) and **3 in `tests/test_exceptions.py`** (`:459, :464, :481`), plus `tests/orders/test_sets.py:169` #"per cookbook line 280" and `tests/orders/test_factories.py:250` #"cookbook lines 124-130" whose upstream-prior-art ruling this card already carries. These cite a live package source file's own line numbers, which the `AGENTS.md` source-refs rule wants as `path::Symbol` or `#"substring"`, and they are actively rotting: `types/resolvers.py` has moved under at least three of them. **Routing rule, not a sweep:** each site folds into whichever `TODO-ALPHA-053-0.0.15` WP batch legitimately opens its file, and only the residue no batch opens belongs to this card - the same boundary this card's spec-016 source-refs item already draws. Precedent for the fix shape: the spec-035 residual cycle closed one citation of exactly this class in `tests/types/test_resolvers.py` (`git show 8c05f7fc:docs/builder/bld-035-final.md` D12) because that cycle already owned the file, replacing the line number with a `path::Symbol #"substring"` pair and proving the anchor resolves exactly once - do that, never a bare `path:NN` to `path::Symbol` mechanical rewrite, since three of these targets have moved and the symbol must be re-read against the live body first.
-- The `0.0.14` mutation write hardening (the completion-spanning transaction, the `DjangoSchema` requirement, `Meta.select_for_update`'s lock semantics, single-write-alias pinning, the retryable `conflict` envelope, the immutable authorized-pk snapshot, the phased alias guard, the strict-`bool` authorization contract and the point-in-time authorization rule) gets its owning spec on TODO-ALPHA-079-0.0.17. `spec-036`'s corrected Decisions 8, 10 and 15 stay the boundary of what `spec-036` claims.
+- Twelve live-source `(line NNN)` self-citations and the two `cookbook line(s)` sites have no owning card, because this card's line-number-citation item explicitly routes them to "a live-code batch, not a documentation pass" and no batch names them. Measured 2026-09-01 by the spec-035 residual cycle over the 433-file `.py` corpus with a per-file `re.sub(r"\s+", " ", text)` flatten (the only instrument that survives both a wrap and a `#` comment-continuation): `grep -rnoE '\(lines? [0-9]+' --include='*.py'` returns **9 in `tests/types/test_resolvers.py`** (`:1797, :1802, :1808, :1817, :1828, :1908, :1915, :1920, :1931`) and **3 in `tests/test_exceptions.py`** (`:459, :464, :481`), plus `tests/orders/test_sets.py:169` #"per cookbook line 280" and `tests/orders/test_factories.py:250` #"cookbook lines 124-130" whose upstream-prior-art ruling this card already carries. These cite a live package source file's own line numbers, which the `AGENTS.md` source-refs rule wants as `path::Symbol` or `#"substring"`, and they are actively rotting: `types/resolvers.py` has moved under at least three of them. **Routing rule, not a sweep:** each site folds into whichever `TODO-ALPHA-054-0.0.15` WP batch legitimately opens its file, and only the residue no batch opens belongs to this card - the same boundary this card's spec-016 source-refs item already draws. Precedent for the fix shape: the spec-035 residual cycle closed one citation of exactly this class in `tests/types/test_resolvers.py` (`git show 8c05f7fc:docs/builder/bld-035-final.md` D12) because that cycle already owned the file, replacing the line number with a `path::Symbol #"substring"` pair and proving the anchor resolves exactly once - do that, never a bare `path:NN` to `path::Symbol` mechanical rewrite, since three of these targets have moved and the symbol must be re-read against the live body first.
+- The `0.0.14` mutation write hardening (the completion-spanning transaction, the `DjangoSchema` requirement, `Meta.select_for_update`'s lock semantics, single-write-alias pinning, the retryable `conflict` envelope, the immutable authorized-pk snapshot, the phased alias guard, the strict-`bool` authorization contract and the point-in-time authorization rule) gets its owning spec on TODO-ALPHA-080-0.0.17. `spec-036`'s corrected Decisions 8, 10 and 15 stay the boundary of what `spec-036` claims.
 - **A failed generated mutation field nulls the whole response, hiding earlier fields that already committed.** Generated mutation payloads are non-null (`CreateItemPayload!`), so an error on a top-level generated mutation field - a completion failure, or a window whose connection was closed inside it (`django_strawberry_framework/schema.py::DjangoMutationExecutionContext._refuse_uncommitted_window`) - propagates to the `Mutation` root and the response carries `data: null`, although each serial field before it committed its own transaction. This is spec-correct non-null propagation, stated in `docs/README.md`'s `DjangoSchema` paragraph; the only fix is nullable generated payloads, a public-schema change for every consumer. Decide it with the owning spec for the `0.0.14` write hardening (the item above). Measured 2026-09-25.
 - `tests/test_ci_governance.py::test_every_staged_todo_anchor_names_an_open_spec` fails any `TODO(spec-<NNN> ...)` anchor in first-party source whose spec has no card on the board or whose card is `Done`, so a staged anchor cannot outlive the spec that staged it.
 - `docs/GLOSSARY.md`'s [`FieldError` envelope](docs/GLOSSARY.md#fielderror-envelope) entry describes the 2-member shape and never mentions `FieldError.codes` or `FieldError.path`, the two additive client-ergonomics members shipped at `0.0.13`. They are the whole point of the envelope for a client that wants to branch without parsing localized human text or the dotted `field` string, so their absence from the glossary is an ABSENT-surface gap rather than a wording nit. Edit via the DB and re-render, never by hand. Measured 2026-09-01 by the spec-036 residual cycle.
@@ -608,23 +660,23 @@ Documentation-consistency debt accumulated across the alpha line, split off the 
 
 #### Open question
 
-- Answered: `scripts/archive_spec.py` gets its own card, TODO-ALPHA-080-0.0.17, which scopes the three rewrite directions, the link-definition group relocation, the `SpecDoc` sync and a `--check` mode.
+- Answered: `scripts/archive_spec.py` gets its own card, TODO-ALPHA-081-0.0.17, which scopes the three rewrite directions, the link-definition group relocation, the `SpecDoc` sync and a `--check` mode.
 
 #### Card references
 
-- Dependency: This card lands on its own `0.0.17` line after the `0.0.16` cut, owns the solo `0.0.17` cut, and documents the registry surface. -> `TODO-ALPHA-054-0.0.16` - Pluggable field-conversion registry
-- Dependency: This card lands on its own `0.0.17` line after the `0.0.16` cut; the federation `[federation]` extra and carve-out citation land before it. -> `TODO-ALPHA-055-0.0.16` - Apollo Federation as the standalone django-strawberry-federation package
-- Related: Takes over this card's write-hardening owning-spec item. -> `TODO-ALPHA-079-0.0.17` - Owning spec for the mutation write pipeline (transaction, locks, write alias, authorization)
-- Related: Takes over this card's `scripts/archive_spec.py` open question. -> `TODO-ALPHA-080-0.0.17` - `scripts/archive_spec.py`: mechanize the spec and build-plan archive sweep
+- Dependency: This card lands on its own `0.0.17` line after the `0.0.16` cut, owns the solo `0.0.17` cut, and documents the registry surface. -> `TODO-ALPHA-055-0.0.16` - Pluggable field-conversion registry
+- Dependency: This card lands on its own `0.0.17` line after the `0.0.16` cut; the federation `[federation]` extra and carve-out citation land before it. -> `TODO-ALPHA-056-0.0.16` - Apollo Federation as the standalone django-strawberry-federation package
+- Related: Takes over this card's write-hardening owning-spec item. -> `TODO-ALPHA-080-0.0.17` - Owning spec for the mutation write pipeline (transaction, locks, write alias, authorization)
+- Related: Takes over this card's `scripts/archive_spec.py` open question. -> `TODO-ALPHA-081-0.0.17` - `scripts/archive_spec.py`: mechanize the spec and build-plan archive sweep
 
 <a id="beta_release_cleanup_verification_alpha_beta"></a>
-### [TODO-ALPHA-057-0.1.0 - Beta release (cleanup, verification, alpha → beta)](KANBAN.html#beta_release_cleanup_verification_alpha_beta)
+### [TODO-ALPHA-058-0.1.0 - Beta release (cleanup, verification, alpha → beta)](KANBAN.html#beta_release_cleanup_verification_alpha_beta)
 
 - Priority: High
 - Status: To Do
 - Relative size: M
 - Labels: `cleanup`, `internal`, `release`, `tests`
-- Spec: [spec-057-beta_release-0_1_0.md](docs/SPECS/spec-057-beta_release-0_1_0.md)
+- Spec: [spec-058-beta_release-0_1_0.md](docs/SPECS/spec-058-beta_release-0_1_0.md)
 
 #### Predicted files
 
@@ -633,7 +685,7 @@ Documentation-consistency debt accumulated across the alpha line, split off the 
 
 #### Dependencies
 
-- `TODO-ALPHA-056-0.0.17` - Alpha documentation-debt discharge
+- `TODO-ALPHA-057-0.0.17` - Alpha documentation-debt discharge
 
 #### Scope
 
@@ -645,14 +697,14 @@ Documentation-consistency debt accumulated across the alpha line, split off the 
 
 #### Definition of done
 
-- [ ] Every other Alpha card (`DONE-013-0.0.4` through `DONE-044-0.0.14` plus `DONE-024-0.0.7` and `DONE-045-0.0.14`) is in `DONE`. The alpha documentation-debt card (`TODO-ALPHA-056-0.0.17`) is `DONE` as well: its own gate is that every bullet it carries is discharged or explicitly deferred onto a named card.
+- [ ] Every other Alpha card (`DONE-013-0.0.4` through `DONE-044-0.0.14` plus `DONE-024-0.0.7` and `DONE-045-0.0.14`) is in `DONE`. The alpha documentation-debt card (`TODO-ALPHA-057-0.0.17`) is `DONE` as well: its own gate is that every bullet it carries is discharged or explicitly deferred onto a named card.
 - [ ] Full test pass under each supported `(Python, Django, Strawberry)` combination.
 - [ ] Coverage stays at 100% for the package source tree.
 - [ ] Version bumped to `0.1.0` in `django_strawberry_framework/__init__.py` `__version__` (hatchling derives the packaging version from it), with `tests/base/test_init.py::test_version` and the `docs/GLOSSARY.md` package-version line in step.
 - [ ] `CHANGELOG.md`'s `## [0.1.0]` section dated at the cut (`## [0.1.0] - YYYY-MM-DD`; the open development line carries a `## [<version>] - Unreleased` heading, never a bare `[Unreleased]` block) with a one-paragraph release summary plus the cumulative Added / Changed / Fixed / Removed sections covering `0.0.6` through the last shipped alpha patch.
 - [ ] `README.md`, `docs/README.md`, `CONTRIBUTING.md`, `docs/GLOSSARY.md`, and `docs/TREE.md` cross-checked against the actual shipped surface; "shipped" / "planned" status markers updated.
 - [ ] Audit pass against the parity findings: every ⚛️ and 🍓 card from the two upstream audits is either `DONE` or explicitly deferred with a recorded reason.
-- [ ] The beta parity claim carries a carve-out sentence for per-field read permissions: `0.1.0` ships no per-field read permission at all, where strawberry-graphql-django ships `IsAuthenticated` / `HasPerm` / `HasRetvalPerm` / `HasSourcePerm` with SQL pre-filtering and schema directives. The raise-only `check_<field>_permission` gates arrive with the [`FieldSet`](docs/GLOSSARY.md#fieldset) card at `0.1.1` (spec-059), and the full declarative capability is the post-`1.0.0` `declarative_row_and_field_permissions` row in `BACKLOG.md`. The absence is a missing capability, not the refused `fail_silently` extension shape.
+- [ ] The beta parity claim carries a carve-out sentence for per-field read permissions: `0.1.0` ships no per-field read permission at all, where strawberry-graphql-django ships `IsAuthenticated` / `HasPerm` / `HasRetvalPerm` / `HasSourcePerm` with SQL pre-filtering and schema directives. The raise-only `check_<field>_permission` gates arrive with the [`FieldSet`](docs/GLOSSARY.md#fieldset) card at `0.1.1` (spec-060), and the full declarative capability is the post-`1.0.0` `declarative_row_and_field_permissions` row in `BACKLOG.md`. The absence is a missing capability, not the refused `fail_silently` extension shape.
 - [ ] The beta parity claim carries a carve-out sentence for model `@property` auto-binding: strawberry-graphql-django auto-types `@model_property` / `@model_cached_property` and plain `property` / `cached_property` from their return annotation, and `0.1.0` binds none of them. The `FieldSet` card delivers resolver-computed fields with `Meta.depends_on` at `0.1.1` but requires a paired `resolve_<field>`, so a migrant's `@property` fields do not auto-bind at `0.1.0` or `0.1.1` either; the owners are the post-`1.0.0` `computed_fields_binding` and `computed_field_optimizer_hints` rows in `BACKLOG.md`.
 - [ ] The beta parity claim carries a carve-out sentence for the migration path itself: unregistered relation targets fail loudly at type finalization -- deliberate and argued in spec-009 as error-only, where graphene-django silently drops the field and strawberry-graphql-django falls back to a pk-only type -- and it is the first break many migrants hit, but the guides that would explain it are the Migration and adoption guides card at `0.1.8`. The `0.1.0` claim must state plainly that the migration path is documented later rather than reading as though the guides ship with the beta.
 - [ ] Tag the release in git and publish to PyPI.
@@ -685,10 +737,10 @@ Documentation-consistency debt accumulated across the alpha line, split off the 
 - Related: Every other Alpha card (`DONE-013-0.0.4` through `DONE-044-0.0.14` plus `DONE-024-0.0.7` and `DONE-045-0.0.14`) is in `DONE`. -> `DONE-044-0.0.14` - Response-extensions debug middleware
 - Related: Every other Alpha card (`DONE-013-0.0.4` through `DONE-044-0.0.14` plus `DONE-024-0.0.7` and `DONE-045-0.0.14`) is in `DONE`. -> `DONE-024-0.0.7` - Django Trac #37064 hardening + `safe_wrap_connection_method`
 - Related: Every other Alpha card (`DONE-013-0.0.4` through `DONE-044-0.0.14` plus `DONE-024-0.0.7` and `DONE-045-0.0.14`) is in `DONE`. -> `DONE-045-0.0.14` - Sealed get_queryset visibility-boundary policy artifacts
-- Dependency: The alpha documentation-debt card discharges before the 0.1.0 cut. -> `TODO-ALPHA-056-0.0.17` - Alpha documentation-debt discharge
+- Dependency: The alpha documentation-debt card discharges before the 0.1.0 cut. -> `TODO-ALPHA-057-0.0.17` - Alpha documentation-debt discharge
 
 <a id="owning_spec_for_the_nested_connection_fetch_strategy_seam"></a>
-### [TODO-ALPHA-078-0.0.17 - Owning spec for the nested-connection fetch-strategy seam](KANBAN.html#owning_spec_for_the_nested_connection_fetch_strategy_seam)
+### [TODO-ALPHA-079-0.0.17 - Owning spec for the nested-connection fetch-strategy seam](KANBAN.html#owning_spec_for_the_nested_connection_fetch_strategy_seam)
 
 - Priority: Medium
 - Status: To Do
@@ -697,7 +749,7 @@ Documentation-consistency debt accumulated across the alpha line, split off the 
 
 #### Planning note
 
-Goal: author one spec, through docs/SPECS/NEXT.md, whose subject is the pluggable nested-connection fetch-strategy seam. Today no spec owns it: its contracts are restated inside spec-033 Decision 4, spec-068 Decision 9 and the strategy-extension BACKLOG entries, so those documents describe a surface nothing defines. This card opens that spec; it does not change runtime behavior.
+Goal: author one spec, through docs/SPECS/NEXT.md, whose subject is the pluggable nested-connection fetch-strategy seam. Today no spec owns it: its contracts are restated inside spec-033 Decision 4, spec-069 Decision 9 and the strategy-extension BACKLOG entries, so those documents describe a surface nothing defines. This card opens that spec; it does not change runtime behavior.
 
 #### Dependencies
 
@@ -710,13 +762,13 @@ Goal: author one spec, through docs/SPECS/NEXT.md, whose subject is the pluggabl
 - Take over from spec-033 Decision 4: the strategy roster (windowed, lateral, auto) and auto's choice by the nested queryset's effective alias; the single-parent fast path; the invariant that every backend lands rows under the same package-reserved `to_attr` consumed by the same resolver probe; the single-column `parent_link_field` refusal of the correlated strategies and lateral's downgrade to the windowed body on a non-local or raw order term; `django_strawberry_framework/optimizer/nested_fetch.py::unwindowable_child_queryset_reason` as one strategy-independent gate; and partitioning through the join taxonomy.
 - Take over from spec-033 Decision 6 the refusal arm for a window the active strategy refused for every response key, and the hint-precedence paragraph for the strategy hint.
 - Resolve spec-033 Decision 11's "Public surface: none" against the released acceptance of consumer-authored `NestedConnectionStrategy` instances, and own the module list for the four seam modules.
-- Take over from spec-068 Decision 9 the strategy-interface contract: every strategy, built-in or BACKLOG candidate, consumes the sidecar normalization and the row-identity proof gate; spec-068 keeps the pipeline and cites this spec for the interface.
+- Take over from spec-069 Decision 9 the strategy-interface contract: every strategy, built-in or BACKLOG candidate, consumes the sidecar normalization and the row-identity proof gate; spec-069 keeps the pipeline and cites this spec for the interface.
 - Take over the strategy-extension rules restated by the BACKLOG entries `sqlite_correlated_json_nested_fetch`, `mti_aware_lateral_nested_fetch` and `backward_nested_keyset_pagination`: each extends this one seam and preserves its nested contracts rather than adding a parallel path.
 
 #### Definition of done
 
 - [ ] One spec under docs/SPECS has the fetch-strategy seam as its subject and states the contracts listed in Scope.
-- [ ] spec-033 Decision 4, Decision 6 and Decision 11 and spec-068 Decision 9 cite the new spec instead of restating the strategy contracts.
+- [ ] spec-033 Decision 4, Decision 6 and Decision 11 and spec-069 Decision 9 cite the new spec instead of restating the strategy contracts.
 - [ ] The BACKLOG strategy-extension entries point at the new spec as the owner of the interface they extend.
 - [ ] The GLOSSARY strategy paragraph and its terms-CSV row cite the new spec.
 - [ ] The public-versus-internal status of `NestedConnectionStrategy` is decided and matches the released notes.
@@ -725,7 +777,7 @@ Goal: author one spec, through docs/SPECS/NEXT.md, whose subject is the pluggabl
 #### Files likely touched
 
 - A new spec under docs/SPECS, numbered through docs/SPECS/NEXT.md.
-- docs/SPECS/spec-033-connection_optimizer-0_0_9.md and docs/SPECS/spec-068-structural_templates-0_1_6.md (citations replace restatements).
+- docs/SPECS/spec-033-connection_optimizer-0_0_9.md and docs/SPECS/spec-069-structural_templates-0_1_6.md (citations replace restatements).
 - BACKLOG.md, docs/GLOSSARY.md and the glossary terms CSV.
 
 #### Why it matters
@@ -743,11 +795,11 @@ Goal: author one spec, through docs/SPECS/NEXT.md, whose subject is the pluggabl
 #### Card references
 
 - Dependency: The seam and its strategy contracts were introduced under spec-033; the new spec takes them over and spec-033 then cites it. -> `DONE-033-0.0.9` - Connection-aware optimizer planning
-- Related: spec-068 Decision 9 (strategies consume the sidecar pipeline) is a constraint on this seam; the strategy-interface half moves onto this card's spec. -> `TODO-BETA-068-0.1.6` - Structural optimization templates and nested sidecar batching
-- Related: Sibling Alpha documentation-debt card for surfaces without an owning spec. -> `TODO-ALPHA-056-0.0.17` - Alpha documentation-debt discharge
+- Related: spec-069 Decision 9 (strategies consume the sidecar pipeline) is a constraint on this seam; the strategy-interface half moves onto this card's spec. -> `TODO-BETA-069-0.1.6` - Structural optimization templates and nested sidecar batching
+- Related: Sibling Alpha documentation-debt card for surfaces without an owning spec. -> `TODO-ALPHA-057-0.0.17` - Alpha documentation-debt discharge
 
 <a id="owning_spec_for_the_mutation_write_pipeline_transaction_locks_write_alias_authorization"></a>
-### [TODO-ALPHA-079-0.0.17 - Owning spec for the mutation write pipeline (transaction, locks, write alias, authorization)](KANBAN.html#owning_spec_for_the_mutation_write_pipeline_transaction_locks_write_alias_authorization)
+### [TODO-ALPHA-080-0.0.17 - Owning spec for the mutation write pipeline (transaction, locks, write alias, authorization)](KANBAN.html#owning_spec_for_the_mutation_write_pipeline_transaction_locks_write_alias_authorization)
 
 - Priority: Medium
 - Status: To Do
@@ -808,11 +860,11 @@ Goal: author one spec, through docs/SPECS/NEXT.md, whose subject is the shared w
 - Related: spec-039 Decision 8 and its row-locking section restate the alias guard, authorization phase, snapshot and lock semantics for the serializer flavor; they cite this card's spec instead. -> `DONE-039-0.0.13` - DRF serializer mutations (`SerializerMutation`)
 - Related: spec-040 Decision 5 restates the strict-bool authorization result contract the auth mutations share; it cites this card's spec instead. -> `DONE-040-0.0.13` - Auth mutations (login / logout / register)
 - Related: spec-047 Decision 9 describes the completion-spanning rollback the execution deadline relies on; that account moves onto this card's spec. -> `DONE-047-0.0.14` - Execution resource policy: central budget object + value-cardinality walker
-- Related: Its write-hardening item tracks this missing owning spec, and its nullable-payload item is decided with it. -> `TODO-ALPHA-056-0.0.17` - Alpha documentation-debt discharge
-- Related: Sibling owning-spec card for another shipped surface that no spec defines. -> `TODO-ALPHA-078-0.0.17` - Owning spec for the nested-connection fetch-strategy seam
+- Related: Its write-hardening item tracks this missing owning spec, and its nullable-payload item is decided with it. -> `TODO-ALPHA-057-0.0.17` - Alpha documentation-debt discharge
+- Related: Sibling owning-spec card for another shipped surface that no spec defines. -> `TODO-ALPHA-079-0.0.17` - Owning spec for the nested-connection fetch-strategy seam
 
 <a id="scriptsarchive_specpy_mechanize_the_spec_and_build_plan_archive_sweep"></a>
-### [TODO-ALPHA-080-0.0.17 - `scripts/archive_spec.py`: mechanize the spec and build-plan archive sweep](KANBAN.html#scriptsarchive_specpy_mechanize_the_spec_and_build_plan_archive_sweep)
+### [TODO-ALPHA-081-0.0.17 - `scripts/archive_spec.py`: mechanize the spec and build-plan archive sweep](KANBAN.html#scriptsarchive_specpy_mechanize_the_spec_and_build_plan_archive_sweep)
 
 - Priority: Medium
 - Status: To Do
@@ -863,7 +915,7 @@ Goal: replace the hand-run archive procedure in docs/SPECS/NEXT.md Step 8 (and i
 
 #### Card references
 
-- Related: Its documentation-debt item asks whether `scripts/archive_spec.py` should exist and whether it warrants its own card; this card is that card. -> `TODO-ALPHA-056-0.0.17` - Alpha documentation-debt discharge
+- Related: Its documentation-debt item asks whether `scripts/archive_spec.py` should exist and whether it warrants its own card; this card is that card. -> `TODO-ALPHA-057-0.0.17` - Alpha documentation-debt discharge
 - Related: The closing gate of its build cycle named `scripts/archive_spec.py` as a future maintainer card. -> `DONE-044-0.0.14` - Response-extensions debug middleware
 
 ## To Do - Beta (1.0.0)
@@ -871,13 +923,13 @@ Goal: replace the hand-run archive procedure in docs/SPECS/NEXT.md Step 8 (and i
 Cards that complete the django-graphene-filters Layer-3 richness on top of parity (`fields_class`, `aggregate_class`, `search_fields`, plus pre-stable cleanup). Each card targets its own `0.1.x` patch within the road to **1.0.0**. The final card in this column is the `1.0.0` release itself (API freeze, cleanup, verification, beta → stable cut-over). Cards in NNN order = planned ship order.
 
 <a id="graph_substrate_shared_graph_policy_and_dependency_planning"></a>
-### [TODO-BETA-058-0.1.1 - Graph substrate: shared graph policy and dependency planning](KANBAN.html#graph_substrate_shared_graph_policy_and_dependency_planning)
+### [TODO-BETA-059-0.1.1 - Graph substrate: shared graph policy and dependency planning](KANBAN.html#graph_substrate_shared_graph_policy_and_dependency_planning)
 
 - Priority: High
 - Status: To Do
 - Relative size: L
 - Labels: `internal`, `layer-3`, `optimizer`, `permissions`, `query-planning`
-- Spec: [spec-058-graph_substrate-0_1_1.md](docs/SPECS/spec-058-graph_substrate-0_1_1.md)
+- Spec: [spec-059-graph_substrate-0_1_1.md](docs/SPECS/spec-059-graph_substrate-0_1_1.md)
 
 #### Predicted files
 
@@ -889,11 +941,11 @@ Cards that complete the django-graphene-filters Layer-3 richness on top of parit
 
 #### Planning note
 
-The first of two graph foundation cards — the framework-internal graph-planning vocabulary (`GraphPathPlan`, `PredicatePlan`, `EdgeScope`, `FieldDependencyPlan`, `RowIdentityProof`) plus the operation-scoped dependency memo, extracted into one shared `django_strawberry_framework/graph/` package boundary **before** [`FieldSet`](docs/GLOSSARY.md#fieldset) (TODO-BETA-059-0.1.1), search (TODO-BETA-060-0.1.2), and [`AggregateSet`](docs/GLOSSARY.md#aggregateset) (TODO-BETA-062-0.1.3) freeze three private versions of the same machinery. Driven by a production audit of a five-root, graph-shaped schedule calendar; the general case is any multi-root dashboard whose roots traverse overlapping relation paths under per-viewer visibility. The consumer surface stays Meta-declared (`Meta.edge_scopes`; sidecar `Set` classes) — never stacked decorators, never a parallel imperative registration API; the plan objects themselves are internal vocabulary, not shipped API. The second foundation card (structural optimization templates + nested sidecar batching) is deliberately not this card.
+The first of two graph foundation cards — the framework-internal graph-planning vocabulary (`GraphPathPlan`, `PredicatePlan`, `EdgeScope`, `FieldDependencyPlan`, `RowIdentityProof`) plus the operation-scoped dependency memo, extracted into one shared `django_strawberry_framework/graph/` package boundary **before** [`FieldSet`](docs/GLOSSARY.md#fieldset) (TODO-BETA-060-0.1.1), search (TODO-BETA-061-0.1.2), and [`AggregateSet`](docs/GLOSSARY.md#aggregateset) (TODO-BETA-063-0.1.3) freeze three private versions of the same machinery. Driven by a production audit of a five-root, graph-shaped schedule calendar; the general case is any multi-root dashboard whose roots traverse overlapping relation paths under per-viewer visibility. The consumer surface stays Meta-declared (`Meta.edge_scopes`; sidecar `Set` classes) — never stacked decorators, never a parallel imperative registration API; the plan objects themselves are internal vocabulary, not shipped API. The second foundation card (structural optimization templates + nested sidecar batching) is deliberately not this card.
 
 #### Dependencies
 
-- `TODO-ALPHA-053-0.0.15` - Boundary hardening and system-wide DRY squeeze
+- `TODO-ALPHA-054-0.0.15` - Boundary hardening and system-wide DRY squeeze
 
 #### Scope
 
@@ -917,11 +969,11 @@ The first of two graph foundation cards — the framework-internal graph-plannin
 
 #### Architectural posture
 
-- **Amendment obligation** — per the spec's Decision 1, TODO-BETA-059-0.1.1, TODO-BETA-060-0.1.2, TODO-BETA-062-0.1.3, TODO-BETA-069-0.1.6, and TODO-BETA-072-0.1.8 must be amended to consume the substrate rather than reimplement it, and the amendments must land on those cards before any of them starts — not at this card's Slice 5. `RowIdentityProof` ships as metadata only; the enforcement gate belongs to the sibling structural-templates / nested-sidecar-batching card (TODO-BETA-068-0.1.6).
+- **Amendment obligation** — per the spec's Decision 1, TODO-BETA-060-0.1.1, TODO-BETA-061-0.1.2, TODO-BETA-063-0.1.3, TODO-BETA-070-0.1.6, and TODO-BETA-073-0.1.8 must be amended to consume the substrate rather than reimplement it, and the amendments must land on those cards before any of them starts — not at this card's Slice 5. `RowIdentityProof` ships as metadata only; the enforcement gate belongs to the sibling structural-templates / nested-sidecar-batching card (TODO-BETA-069-0.1.6).
 
 #### Why it matters
 
-- Five planned Layer 3 surfaces — `FieldSet` (TODO-BETA-059-0.1.1), search (TODO-BETA-060-0.1.2), aggregation (TODO-BETA-062-0.1.3), explain (TODO-BETA-069-0.1.6), and the adversarial suite (TODO-BETA-072-0.1.8) — each need path classification, row-preserving predicate composition, edge-scoped child visibility, or field-dependency vocabulary; without one substrate each ships a private twin and the divergent abstractions freeze at the `1.0.0` API surface.
+- Five planned Layer 3 surfaces — `FieldSet` (TODO-BETA-060-0.1.1), search (TODO-BETA-061-0.1.2), aggregation (TODO-BETA-063-0.1.3), explain (TODO-BETA-070-0.1.6), and the adversarial suite (TODO-BETA-073-0.1.8) — each need path classification, row-preserving predicate composition, edge-scoped child visibility, or field-dependency vocabulary; without one substrate each ships a private twin and the divergent abstractions freeze at the `1.0.0` API surface.
 - Row multiplication through to-many joins silently corrupts consumer permission filters today: a to-many hop inside an outer `Q` multiplies rows, and the audited production case hits it on every root. `PredicatePlan` makes correlated, row-preserving composition a public, refuse-on-misuse API.
 - Query growth for every shipped shape is bounded by selection, never by parent row count: `queries(1 parent) == queries(100 parents)`.
 - An operation-scoped dependency memo makes cross-root shared computation (viewer grants, audience sets) single-compute per request, with and without the optimizer extension.
@@ -936,22 +988,22 @@ The first of two graph foundation cards — the framework-internal graph-plannin
 
 #### Card references
 
-- Dependency: The boundary/DRY squeeze freezes optimizer subsystem boundaries; the `graph/` package must sit below them, and Slice 3's predicate relocation composes with the post-squeeze tree. -> `TODO-ALPHA-053-0.0.15` - Boundary hardening and system-wide DRY squeeze
-- Related: Amendment obligation: `FieldSet` normalizes `Meta.depends_on` into `FieldDependencyPlan` and consumes the substrate's field-dependency vocabulary instead of a private map shape. -> `TODO-BETA-059-0.1.1` - `FieldSet` declarative field-level behavior (`Meta.fields_class`)
-- Related: Amendment obligation: search path planning moves onto `GraphPathPlan` / `GraphPathPlanSet` (path classification + arm grouping); `LOOKUP_PREFIXES` rejection and permission dispatch stay card-local. -> `TODO-BETA-060-0.1.2` - `Meta.search_fields` support
-- Related: Amendment obligation: related / permissioned aggregation consumes `EdgeScope` for child visibility instead of a private child-visibility hook. -> `TODO-BETA-062-0.1.3` - Aggregation subsystem
-- Related: Amendment obligation: explain reads the substrate's plan objects (and the sibling card's operation plan map) rather than reconstructing plan state. -> `TODO-BETA-069-0.1.6` - Optimizer explain mode
-- Related: Amendment obligation: the adversarial suite gains graph-substrate targets (memo isolation, predicate compilation, edge-scope fail-closed paths). -> `TODO-BETA-072-0.1.8` - Adversarial non-live test suite
-- Related: The sibling foundation card: owns reproductions R1, R7, R8, and R10, the row-identity enforcement gate, and the structural/bound split this card's plan objects prepare. -> `TODO-BETA-068-0.1.6` - Structural optimization templates and nested sidecar batching
+- Dependency: The boundary/DRY squeeze freezes optimizer subsystem boundaries; the `graph/` package must sit below them, and Slice 3's predicate relocation composes with the post-squeeze tree. -> `TODO-ALPHA-054-0.0.15` - Boundary hardening and system-wide DRY squeeze
+- Related: Amendment obligation: `FieldSet` normalizes `Meta.depends_on` into `FieldDependencyPlan` and consumes the substrate's field-dependency vocabulary instead of a private map shape. -> `TODO-BETA-060-0.1.1` - `FieldSet` declarative field-level behavior (`Meta.fields_class`)
+- Related: Amendment obligation: search path planning moves onto `GraphPathPlan` / `GraphPathPlanSet` (path classification + arm grouping); `LOOKUP_PREFIXES` rejection and permission dispatch stay card-local. -> `TODO-BETA-061-0.1.2` - `Meta.search_fields` support
+- Related: Amendment obligation: related / permissioned aggregation consumes `EdgeScope` for child visibility instead of a private child-visibility hook. -> `TODO-BETA-063-0.1.3` - Aggregation subsystem
+- Related: Amendment obligation: explain reads the substrate's plan objects (and the sibling card's operation plan map) rather than reconstructing plan state. -> `TODO-BETA-070-0.1.6` - Optimizer explain mode
+- Related: Amendment obligation: the adversarial suite gains graph-substrate targets (memo isolation, predicate compilation, edge-scope fail-closed paths). -> `TODO-BETA-073-0.1.8` - Adversarial non-live test suite
+- Related: The sibling foundation card: owns reproductions R1, R7, R8, and R10, the row-identity enforcement gate, and the structural/bound split this card's plan objects prepare. -> `TODO-BETA-069-0.1.6` - Structural optimization templates and nested sidecar batching
 
 <a id="fieldset_declarative_field_level_behavior_metafields_class"></a>
-### [TODO-BETA-059-0.1.1 - `FieldSet` declarative field-level behavior (`Meta.fields_class`)](KANBAN.html#fieldset_declarative_field_level_behavior_metafields_class)
+### [TODO-BETA-060-0.1.1 - `FieldSet` declarative field-level behavior (`Meta.fields_class`)](KANBAN.html#fieldset_declarative_field_level_behavior_metafields_class)
 
 - Priority: High
 - Status: To Do
 - Relative size: M
 - Labels: `fieldsets`, `layer-3`, `public-api`
-- Spec: [spec-059-fieldset-0_1_1.md](docs/SPECS/spec-059-fieldset-0_1_1.md)
+- Spec: [spec-060-fieldset-0_1_1.md](docs/SPECS/spec-060-fieldset-0_1_1.md)
 
 #### Predicted files
 
@@ -965,7 +1017,7 @@ Strawberry port of django-graphene-filters' `AdvancedFieldSet` — the declarati
 #### Dependencies
 
 - `DONE-030-0.0.9` - `DjangoConnectionField` (Relay connection field)
-- `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
 
 #### Scope
 
@@ -975,30 +1027,30 @@ Strawberry port of django-graphene-filters' `AdvancedFieldSet` — the declarati
 - Composes with `DjangoType.Meta.fields`: declaring `Meta.fields = ("id", "name", ...)` on the owning type stays the source of truth for which model fields surface; `FieldSet` only customizes resolution / permission for fields already in [`Meta.fields`](docs/GLOSSARY.md#metafields) AND declares any computed fields via class-level annotations.
 - Optimizer cooperation: a `resolve_<field>` that touches ORM data (e.g. tiered date redaction reads `root.created_date`) must NOT defeat the optimizer's `only_fields` projection. The fieldset declares which model columns its resolvers depend on via `Meta.depends_on = {"resolve_created_date": ("created_date",), ...}` (or auto-introspection if reliably available); the optimizer adds those columns to the [`only()` projection](docs/GLOSSARY.md#only-projection) so the resolver does not trigger a deferred-field fetch.
 - Composability with [`apply_cascade_permissions`](docs/GLOSSARY.md#apply_cascade_permissions) (`DONE-034-0.0.10`): a `check_<field>_permission` gate that raises does NOT short-circuit cascade visibility; the cascade narrows the queryset first, then field-level gates run on whatever survives. A field denial does not leak existence — null fields and denials look identical to the client.
-- **Consume-the-substrate amendment** (TODO-BETA-058-0.1.1): normalize `Meta.depends_on` into `FieldDependencyPlan` rather than a private map shape — the concrete column tuple stays as shorthand, and the expanded dependency kinds (relation traversals, annotations, contextual prefetches, batch assemblers, selection-sensitive activation, strictness metadata) ship here as the vocabulary's first consumer. The two-halves rule holds: relation traversals extend `select_related` / `prefetch_related` **and** column reads extend the `only()` projection. Strictness observes undeclared computed relation access where the selection makes it detectable. Without this, `FieldSet` optimizes a simple computed display name but cannot safely optimize a computed field over related rows.
+- **Consume-the-substrate amendment** (TODO-BETA-059-0.1.1): normalize `Meta.depends_on` into `FieldDependencyPlan` rather than a private map shape — the concrete column tuple stays as shorthand, and the expanded dependency kinds (relation traversals, annotations, contextual prefetches, batch assemblers, selection-sensitive activation, strictness metadata) ship here as the vocabulary's first consumer. The two-halves rule holds: relation traversals extend `select_related` / `prefetch_related` **and** column reads extend the `only()` projection. Strictness observes undeclared computed relation access where the selection makes it detectable. Without this, `FieldSet` optimizes a simple computed display name but cannot safely optimize a computed field over related rows.
 
 #### Definition of done
 
-- [ ] Add `docs/SPECS/spec-059-fieldset-0_1_1.md` covering the `resolve_<field>` override contract, the `check_<field>_permission` denial-vs-redaction guidance, the computed-field annotation discipline (`display_name: str | None = strawberry.field(...)`), and the optimizer `depends_on` contract.
+- [ ] Add `docs/SPECS/spec-060-fieldset-0_1_1.md` covering the `resolve_<field>` override contract, the `check_<field>_permission` denial-vs-redaction guidance, the computed-field annotation discipline (`display_name: str | None = strawberry.field(...)`), and the optimizer `depends_on` contract.
 - [ ] Implement `django_strawberry_framework/fieldset/` (package, mirroring the `filters/` shape) with `base.py` (FieldSet class + metaclass), `factories.py` (resolver-binding factory), and a per-fieldset finalizer hook in `types/finalizer.py` phase 2.5.
 - [ ] `FieldSet` accepts `class Meta: model = Foo` only; field declarations are method-based (`resolve_<field>`, `check_<field>_permission`) plus class-level computed-field annotations. No `Meta.fields` on the FieldSet itself — the owning `DjangoType.Meta.fields` is the single source of truth for the model-field surface.
 - [ ] Optimizer `Meta.depends_on` contract: when a `resolve_<field>` reads model columns the owning type's `Meta.fields` does not surface, the FieldSet declares them via `Meta.depends_on`; the optimizer adds those columns to the `only_fields` projection.
-- [ ] Promote `Meta.fields_class` from `DEFERRED_META_KEYS` to `ALLOWED_META_KEYS` only when the resolver-binding pipeline applies end-to-end; this card owns the promotion (spec-059 Decision 8), and the table-driven binder generalization is owned by the aggregation card (`TODO-BETA-062-0.1.3`).
+- [ ] Promote `Meta.fields_class` from `DEFERRED_META_KEYS` to `ALLOWED_META_KEYS` only when the resolver-binding pipeline applies end-to-end; this card owns the promotion (spec-060 Decision 8), and the table-driven binder generalization is owned by the aggregation card (`TODO-BETA-063-0.1.3`).
 - [ ] Tests under `tests/fieldset/` mirror the source one-to-one. Live HTTP coverage under `examples/fakeshop/test_query/` exercises tiered visibility (staff vs perm-holder vs authenticated vs anonymous), redaction (non-staff sees `is_private = False`), denial (anonymous raises on `updated_date`), and a computed field (`display_name` resolves only for authenticated users).
 - [ ] Composability tests: `FieldSet` + [`FilterSet`](docs/GLOSSARY.md#filterset) (a field with a `check_<field>_permission` gate is still filterable by an authorized user); `FieldSet` + [`OrderSet`](docs/GLOSSARY.md#orderset) (same for ordering); `FieldSet` + `apply_cascade_permissions` (cascade narrows first, then field gates run — no existence leak).
 
 #### Foundation-slice seam
 
 - `DjangoTypeDefinition.fields_class` is the forward-reserved slot the collection phase will populate.
-- `Meta.fields_class` moves out of `DEFERRED_META_KEYS` only when the field-level permission / custom-resolver / computed-field machinery is applied end-to-end (no custom Strawberry field class is required for it; spec-059 Decision 11 pins resolver wrapping as the mechanism that carries the gate).
-- Phase-2.5 finalizer wiring follows the shipped `_bind_filtersets` / `_bind_ordersets` pattern. New helper `_bind_fieldsets` (or the equivalent dispatched form when `TODO-BETA-062-0.1.3` lands) binds each `Meta.fields_class` to its owning `DjangoTypeDefinition` so resolvers and gates are wired before schema construction.
+- `Meta.fields_class` moves out of `DEFERRED_META_KEYS` only when the field-level permission / custom-resolver / computed-field machinery is applied end-to-end (no custom Strawberry field class is required for it; spec-060 Decision 11 pins resolver wrapping as the mechanism that carries the gate).
+- Phase-2.5 finalizer wiring follows the shipped `_bind_filtersets` / `_bind_ordersets` pattern. New helper `_bind_fieldsets` (or the equivalent dispatched form when `TODO-BETA-063-0.1.3` lands) binds each `Meta.fields_class` to its owning `DjangoTypeDefinition` so resolvers and gates are wired before schema construction.
 - Per-field resolver attachment: the existing `_attach_relation_resolvers` already accepts a `skip_field_names` set so consumer-authored fields are not clobbered; FieldSet-bound `resolve_<field>` extends that skip-set so the FieldSet's resolver wins over the auto-generated scalar resolver.
-- Custom Strawberry field class — django-graphene-filters' `AdvancedFieldSet` works with a custom field type that carries the `check_<field>_permission` gate at resolve time. That question is settled without one: spec-059 pins **resolver wrapping** as the mechanism (Decision 11 — the wrapper captures the generated resolver and delegates to it as the cascade's step 3), upstream-parity and zero-config with zero overhead on unmanaged fields. Mapping the gate onto Strawberry's `strawberry.field(permission_classes=...)` is likewise rejected: `BasePermission.has_permission(source, info, **kwargs)` is class-per-policy with a fixed message contract, cannot host the gate-then-override cascade ordering, and would synthesize a permission class per managed field for no consumer benefit; a custom `DjangoModelField` field class is unnecessary machinery for the same reason.
+- Custom Strawberry field class — django-graphene-filters' `AdvancedFieldSet` works with a custom field type that carries the `check_<field>_permission` gate at resolve time. That question is settled without one: spec-060 pins **resolver wrapping** as the mechanism (Decision 11 — the wrapper captures the generated resolver and delegates to it as the cascade's step 3), upstream-parity and zero-config with zero overhead on unmanaged fields. Mapping the gate onto Strawberry's `strawberry.field(permission_classes=...)` is likewise rejected: `BasePermission.has_permission(source, info, **kwargs)` is class-per-policy with a fixed message contract, cannot host the gate-then-override cascade ordering, and would synthesize a permission class per managed field for no consumer benefit; a custom `DjangoModelField` field class is unnecessary machinery for the same reason.
 - Slot realized in `DONE-034-0.0.10`: `DjangoTypeDefinition.fields_class` is now declared as an inert `type | None = None` sidecar (spec-034 Decision 2 — the structural mirror of the shipped `filterset_class` / `orderset_class` slots). It has no populator yet and stays `None`; `Meta.fields_class` remains in `DEFERRED_META_KEYS` (still rejected at validation). This card's `_bind_fieldsets` is what populates the slot and promotes the key end-to-end.
 
 #### Architectural posture
 
-- Non-goal — node-level sentinel redaction. The upstream `django_graphene_filters/object_type.py::AdvancedDjangoObjectType.get_node` / `_make_sentinel` (`is_redacted=True`) masks a hidden non-null FK target in place instead of dropping the row. The package deliberately did **not** adopt this tier (spec-034 Decision 6 chose row-exclusion), and `FieldSet` does **not** revive it. The redaction taxonomy is two-tier: relation/row visibility = queryset narrowing (`apply_cascade_permissions`, which is why the fakeshop `view_<model>` hooks cascade rather than keep a row with a sentinel FK), field visibility = `FieldSet` (redact value / deny). There is no third node-sentinel tier — `FieldSet` redaction runs only on fields of rows that already survived the cascade; it never masks a relation target to keep an otherwise-hidden row visible. It is now tracked as an explicit, opt-in tier — `TODO-BETA-064-0.1.4` (`Meta.redaction_mode`) — for consumers who explicitly want strict django-graphene-filters node-sentinel parity; it stays opt-in (not the default) because it conflicts with the row-narrowing model.
+- Non-goal — node-level sentinel redaction. The upstream `django_graphene_filters/object_type.py::AdvancedDjangoObjectType.get_node` / `_make_sentinel` (`is_redacted=True`) masks a hidden non-null FK target in place instead of dropping the row. The package deliberately did **not** adopt this tier (spec-034 Decision 6 chose row-exclusion), and `FieldSet` does **not** revive it. The redaction taxonomy is two-tier: relation/row visibility = queryset narrowing (`apply_cascade_permissions`, which is why the fakeshop `view_<model>` hooks cascade rather than keep a row with a sentinel FK), field visibility = `FieldSet` (redact value / deny). There is no third node-sentinel tier — `FieldSet` redaction runs only on fields of rows that already survived the cascade; it never masks a relation target to keep an otherwise-hidden row visible. It is now tracked as an explicit, opt-in tier — `TODO-BETA-065-0.1.4` (`Meta.redaction_mode`) — for consumers who explicitly want strict django-graphene-filters node-sentinel parity; it stays opt-in (not the default) because it conflicts with the row-narrowing model.
 
 #### Why it matters
 
@@ -1013,24 +1065,24 @@ Strawberry port of django-graphene-filters' `AdvancedFieldSet` — the declarati
 
 #### Open question
 
-- Promotion-owner conflict RESOLVED at the 2026-08-29 board review, per the pinned preferred answer in `docs/SPECS/spec-059-fieldset-0_1_1.md` `## Risks and open questions` (Decision 8): this card owns the `Meta.fields_class` promotion, and the later table-driven dispatch generalization is owned by the aggregation card (the Layer-3 Meta key promotion card that briefly owned it was retired into the aggregation card at the same review). The `#### Definition of done` was reworded to match, and the spec text was reworded to name the aggregation card in the 2026-08-29 renumber sweep, so no residue remains. Originally measured by the spec-009 residual cycle (`docs/builder/bld-009-final.md` deferred-work catalog item 20).
+- Promotion-owner conflict RESOLVED at the 2026-08-29 board review, per the pinned preferred answer in `docs/SPECS/spec-060-fieldset-0_1_1.md` `## Risks and open questions` (Decision 8): this card owns the `Meta.fields_class` promotion, and the later table-driven dispatch generalization is owned by the aggregation card (the Layer-3 Meta key promotion card that briefly owned it was retired into the aggregation card at the same review). The `#### Definition of done` was reworded to match, and the spec text was reworded to name the aggregation card in the 2026-08-29 renumber sweep, so no residue remains. Originally measured by the spec-009 residual cycle (`docs/builder/bld-009-final.md` deferred-work catalog item 20).
 
 #### Card references
 
 - Dependency: `DjangoConnectionField` (`DONE-030-0.0.9`) - `FieldSet` composes on top of the shipped connection-field surface. -> `DONE-030-0.0.9` - `DjangoConnectionField` (Relay connection field)
 - Related: `DONE-034-0.0.10` - Permissions subsystem
-- Related: The table-driven Meta-key binder generalization this card's `_bind_fieldsets` would otherwise hard-code a third helper for is owned by the aggregation card (absorbed from the retired promotion card). -> `TODO-BETA-062-0.1.3` - Aggregation subsystem
-- Related: `TODO-BETA-064-0.1.4` - Opt-in node-sentinel redaction tier (`Meta.redaction_mode`)
-- Dependency: Amendment source: the graph substrate ships the shared planning vocabulary this card must consume instead of reimplementing (spec-058 Decision 1 — the amendment lands at the substrate card's creation, not at its Slice 5). -> `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- Related: The table-driven Meta-key binder generalization this card's `_bind_fieldsets` would otherwise hard-code a third helper for is owned by the aggregation card (absorbed from the retired promotion card). -> `TODO-BETA-063-0.1.3` - Aggregation subsystem
+- Related: `TODO-BETA-065-0.1.4` - Opt-in node-sentinel redaction tier (`Meta.redaction_mode`)
+- Dependency: Amendment source: the graph substrate ships the shared planning vocabulary this card must consume instead of reimplementing (spec-059 Decision 1 — the amendment lands at the substrate card's creation, not at its Slice 5). -> `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
 
 <a id="metasearch_fields_support"></a>
-### [TODO-BETA-060-0.1.2 - `Meta.search_fields` support](KANBAN.html#metasearch_fields_support)
+### [TODO-BETA-061-0.1.2 - `Meta.search_fields` support](KANBAN.html#metasearch_fields_support)
 
 - Priority: High
 - Status: To Do
 - Relative size: M
 - Labels: `connections`, `filters`, `public-api`, `search`
-- Spec: [spec-060-search_fields-0_1_2.md](docs/SPECS/spec-060-search_fields-0_1_2.md)
+- Spec: [spec-061-search_fields-0_1_2.md](docs/SPECS/spec-061-search_fields-0_1_2.md)
 
 #### Predicted files
 
@@ -1064,7 +1116,7 @@ Coverage-gap audit (2026-07-31): a cross-check of the spec against the to-many s
 
 - `DONE-027-0.0.8` - Filtering subsystem
 - `DONE-030-0.0.9` - `DjangoConnectionField` (Relay connection field)
-- `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
 
 #### Scope
 
@@ -1073,15 +1125,15 @@ Coverage-gap audit (2026-07-31): a cross-check of the spec against the to-many s
 - Composition with `filterset_class`: `search` and `filter` compose by intersection — the resulting queryset matches every declared filter AND the search OR-clause. The argument-factory machinery is shared between `filterset_class` and `search_fields`, so adding `search` does not duplicate the factory infrastructure.
 - Composition with `get_queryset`: search runs against the post-visibility queryset (visibility narrows first), so a user cannot search for hidden rows by guessing field values. Relational search is additionally visibility-AWARE: every hop restricts through related_rows_exist over the rows its type's own get_queryset shows (and a walked [RelatedFilter](docs/GLOSSARY.md#relatedfilter)(queryset=...)), so a hidden related row behaves exactly like no related row, so a visible parent can never match through a related row hidden on its own GraphQL surface.
 - Composition with the selection optimizer: search contributes NOTHING to the cached OptimizationPlan (no request value, no only/select_related/prefetch_related entry) and the plan contributes no predicate. An active search must leave selection-driven N+1 optimization observably unchanged (live search + selected-relations case paired against a no-search control on query count and select_related/prefetch_related work), and must compose onto a consumer .only() / .defer() queryset without widening or discarding the deferred field set or adding a selected column -- every arm's EXISTS is a WHERE condition, never an annotate()/alias() entry.
-- **Consume-the-substrate amendment** (TODO-BETA-058-0.1.1): search path planning moves onto `GraphPathPlan` / `GraphPathPlanSet` (path classification plus chain-keyed arm grouping) ; relational arms restrict through the filter side's `related_rows_exist` over each hop's visible rows, not `PredicatePlan`; search must not own the only correct graph compiler. `LOOKUP_PREFIXES` prefix rejection and the permission-dispatch plan stay card-local — they are search policy, not substrate. **Deferred R3 arm recorded here:** a hidden related row must not be able to qualify a visible root through search (the substrate card proves the edge-selection half; this card owns the search-qualification half). **Fixture dependency:** the `LoanType` visibility hook with `Meta.primary` and the secondary-type root-model re-entry surface are created by the substrate card — consume them, do not duplicate them.
+- **Consume-the-substrate amendment** (TODO-BETA-059-0.1.1): search path planning moves onto `GraphPathPlan` / `GraphPathPlanSet` (path classification plus chain-keyed arm grouping) ; relational arms restrict through the filter side's `related_rows_exist` over each hop's visible rows, not `PredicatePlan`; search must not own the only correct graph compiler. `LOOKUP_PREFIXES` prefix rejection and the permission-dispatch plan stay card-local — they are search policy, not substrate. **Deferred R3 arm recorded here:** a hidden related row must not be able to qualify a visible root through search (the substrate card proves the edge-selection half; this card owns the search-qualification half). **Fixture dependency:** the `LoanType` visibility hook with `Meta.primary` and the secondary-type root-model re-entry surface are created by the substrate card — consume them, do not duplicate them.
 - A `search_fields` path and the flat `filter:` leaf over the same path answer the same rows: search reads the path through `django_strawberry_framework/utils/permissions.py::walk_declared_relation_path` with `undeclared=True` (the walk `django_strawberry_framework/filters/sets.py::FilterSet._flat_leaf_walk` reads), resolves each declared hop's type as `django_strawberry_framework/filters/sets.py::FilterSet._branch_visibility_seed` does and applies its explicit `queryset=`, types each undeclared hop with `django_strawberry_framework/utils/querysets.py::relation_target_type` (scoping only when that type has its own `get_queryset`), and restricts each hop through `django_strawberry_framework/optimizer/predicates.py::related_rows_exist`. A root re-entry whose exact owner differs from the hop's resolved type applies both hooks. Shape to pin: `search_fields = ("note", "book__loans__patron__email")` on `LoanType` and `filter: { bookLoansPatronEmail: { iContains: ... } }` return the same loans for a viewer who cannot see the only matching inner loan, book or patron.
 
 #### Definition of done
 
-- [ ] `docs/SPECS/spec-060-search_fields-0_1_2.md` is the card's spec of record (written).
+- [ ] `docs/SPECS/spec-061-search_fields-0_1_2.md` is the card's spec of record (written).
 - [ ] Search-fields argument generation lives in `django_strawberry_framework/filters/` and reuses the same DRF-style Meta surface and argument-factory machinery as `filterset_class`.
 - [ ] Single `search: String` argument surfaces on `DjangoConnectionField` consumers and produces an OR'd `icontains` queryset filter across every declared field path, compiled row-preserving: direct paths as plain Q predicates, relation paths as their chain's correlated EXISTS through related_rows_exist over each hop's visible rows; no search-driven `.distinct()`; root `alias_map` free of membership joins; `totalCount` counts the row-preserving queryset directly.
-- [ ] Promote `Meta.search_fields` from `DEFERRED_META_KEYS` to `ALLOWED_META_KEYS` only when the pipeline applies it end-to-end; this card owns the promotion, and the table-driven binder generalization is owned by the aggregation card (`TODO-BETA-062-0.1.3`).
+- [ ] Promote `Meta.search_fields` from `DEFERRED_META_KEYS` to `ALLOWED_META_KEYS` only when the pipeline applies it end-to-end; this card owns the promotion, and the table-driven binder generalization is owned by the aggregation card (`TODO-BETA-063-0.1.3`).
 - [ ] Tests under `tests/filters/test_search_fields.py` covering single-field, relation-path, and combined-with-filterset cases.
 - [ ] Live HTTP coverage under `examples/fakeshop/test_query/` exercising a search across at least one relation path. Includes the library to-many proof: GenreType search over allLibraryGenresConnection (one genre, two matching books -> one edge, totalCount == 1, EXISTS in the emitted SQL, no search-driven SELECT DISTINCT).
 - [ ] SQL-shape regression tests pin the row-preserving compilation: root query `alias_map` excludes membership/child tables, `query.distinct is False`, an EXISTS per relational arm (to-one and to-many) and none for a direct-only declaration, and the `totalCount` SQL has no distinct-wrapper subquery.
@@ -1106,7 +1158,7 @@ Coverage-gap audit (2026-07-31): a cross-check of the spec against the to-many s
 #### Why it matters
 
 - `Meta.search_fields` is one of the five django-graphene-filters Layer-3 Meta keys explicitly listed in [`GOAL.md`][goal] alongside `filterset_class`, `orderset_class`, `aggregate_class`, and `fields_class`. Without it the package cannot claim full DGF parity at 1.0.0.
-- Currently `search_fields` is in `DEFERRED_META_KEYS` and rejected at validation time. The fakeshop products schema stages four commented `search_fields` tuples awaiting this card's activation slice; `TODO-BETA-066-0.1.5` (Fakeshop GraphQL schema activation) is now scoped to the `node` / `nodes` entry points plus the `totalCount` opt-in and no longer gates them.
+- Currently `search_fields` is in `DEFERRED_META_KEYS` and rejected at validation time. The fakeshop products schema stages four commented `search_fields` tuples awaiting this card's activation slice; `TODO-BETA-067-0.1.5` (Fakeshop GraphQL schema activation) is now scoped to the `node` / `nodes` entry points plus the `totalCount` opt-in and no longer gates them.
 
 #### Dependencies
 
@@ -1116,14 +1168,14 @@ Coverage-gap audit (2026-07-31): a cross-check of the spec against the to-many s
 #### Card references
 
 - Dependency: both dependencies have shipped: `DONE-027-0.0.8` (Filtering) and `DONE-030-0.0.9` (DjangoConnectionField) landed before this card. -> `DONE-027-0.0.8` - Filtering subsystem
-- Related: Promote `Meta.search_fields` from `DEFERRED_META_KEYS` to `ALLOWED_META_KEYS` only when the pipeline applies it end-to-end; this card owns the promotion, and the table-driven binder generalization is owned by `TODO-BETA-062-0.1.3`. -> `TODO-BETA-062-0.1.3` - Aggregation subsystem
+- Related: Promote `Meta.search_fields` from `DEFERRED_META_KEYS` to `ALLOWED_META_KEYS` only when the pipeline applies it end-to-end; this card owns the promotion, and the table-driven binder generalization is owned by `TODO-BETA-063-0.1.3`. -> `TODO-BETA-063-0.1.3` - Aggregation subsystem
 - Dependency: both dependencies have shipped: `DONE-027-0.0.8` (Filtering) and `DONE-030-0.0.9` (DjangoConnectionField) landed before this card. -> `DONE-030-0.0.9` - `DjangoConnectionField` (Relay connection field)
-- Related: Currently `search_fields` is in `DEFERRED_META_KEYS` and rejected at validation time. The fakeshop products schema stages four commented `search_fields` tuples awaiting this card's activation slice; `TODO-BETA-066-0.1.5` (Fakeshop GraphQL schema activation) is now scoped to the `node` / `nodes` entry points plus the `totalCount` opt-in and no longer gates them. -> `TODO-BETA-066-0.1.5` - Fakeshop GraphQL schema activation
+- Related: Currently `search_fields` is in `DEFERRED_META_KEYS` and rejected at validation time. The fakeshop products schema stages four commented `search_fields` tuples awaiting this card's activation slice; `TODO-BETA-067-0.1.5` (Fakeshop GraphQL schema activation) is now scoped to the `node` / `nodes` entry points plus the `totalCount` opt-in and no longer gates them. -> `TODO-BETA-067-0.1.5` - Fakeshop GraphQL schema activation
 - Related: a single `search: String` argument fanning out as an OR'd `icontains` across declared field paths; reuses `DONE-027-0.0.8`'s argument-factory machinery. Spec + tests + live HTTP + Meta-key promotion. -> `DONE-027-0.0.8` - Filtering subsystem
-- Dependency: Amendment source: the graph substrate ships the shared planning vocabulary this card must consume instead of reimplementing (spec-058 Decision 1 — the amendment lands at the substrate card's creation, not at its Slice 5). -> `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- Dependency: Amendment source: the graph substrate ships the shared planning vocabulary this card must consume instead of reimplementing (spec-059 Decision 1 — the amendment lands at the substrate card's creation, not at its Slice 5). -> `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
 
 <a id="postgres_full_text_search_filter_primitives"></a>
-### [TODO-BETA-061-0.1.2 - Postgres full-text search filter primitives](KANBAN.html#postgres_full_text_search_filter_primitives)
+### [TODO-BETA-062-0.1.2 - Postgres full-text search filter primitives](KANBAN.html#postgres_full_text_search_filter_primitives)
 
 - Priority: Medium
 - Status: To Do
@@ -1139,14 +1191,14 @@ Coverage-gap audit (2026-07-31): a cross-check of the spec against the to-many s
 
 #### Planning note
 
-Strawberry analogue of django-graphene-filters' Postgres full-text search family. The cookbook ships `AnnotatedFilter` (base) plus `SearchQueryFilter`, `SearchRankFilter`, and `TrigramFilter` in `django_graphene_filters/filters.py`, with matching `SearchQueryFilterInputType` / `SearchRankFilterInputType` / `TrigramFilterInputType` input shapes in `django_graphene_filters/input_types.py`. These add Postgres-only `searchQuery` / `searchRank` / `trigram` filter inputs to FilterSets on Postgres-backed models, layered on `django.contrib.postgres.search`. Distinct from [`Meta.search_fields`](docs/GLOSSARY.md#metasearch_fields) (basic OR'd `icontains`); this is the ranked / weighted / similarity full-text surface. Planned; gated on `TODO-BETA-060-0.1.2` (basic search lands first) and shares `DONE-027-0.0.8`'s filter-argument-factory machinery.
+Strawberry analogue of django-graphene-filters' Postgres full-text search family. The cookbook ships `AnnotatedFilter` (base) plus `SearchQueryFilter`, `SearchRankFilter`, and `TrigramFilter` in `django_graphene_filters/filters.py`, with matching `SearchQueryFilterInputType` / `SearchRankFilterInputType` / `TrigramFilterInputType` input shapes in `django_graphene_filters/input_types.py`. These add Postgres-only `searchQuery` / `searchRank` / `trigram` filter inputs to FilterSets on Postgres-backed models, layered on `django.contrib.postgres.search`. Distinct from [`Meta.search_fields`](docs/GLOSSARY.md#metasearch_fields) (basic OR'd `icontains`); this is the ranked / weighted / similarity full-text surface. Planned; gated on `TODO-BETA-061-0.1.2` (basic search lands first) and shares `DONE-027-0.0.8`'s filter-argument-factory machinery.
 
 Coverage-gap audit (2026-07-31): this card also owns the JOINT 0.1.2 release cut for the `Meta.search_fields` card's surface -- the version triplet, the CHANGELOG entry (explicit maintainer grant required), README / docs README shipped-surface wording, GOAL/TODAY release status, and the glossary promotion out of the search-fields card's intermediate status. That ownership previously lived only in the search-fields card's spec text, so it was invisible from this card; it is now a scope + definition-of-done bullet. Same audit: this card's spec bullet named the pre-convention `docs/spec-pg_full_text_search.md`; it now names the AGENTS.md spec-<NNN>-<topic>-<version> path.
 
 #### Dependencies
 
 - `DONE-027-0.0.8` - Filtering subsystem
-- `TODO-BETA-060-0.1.2` - `Meta.search_fields` support
+- `TODO-BETA-061-0.1.2` - `Meta.search_fields` support
 
 #### Scope
 
@@ -1183,22 +1235,22 @@ Coverage-gap audit (2026-07-31): this card also owns the JOINT 0.1.2 release cut
 #### Why it matters
 
 - The Postgres full-text family is part of django-graphene-filters' shipped filter surface; recreating it is in scope for cookbook parity (`GOAL.md` "Working reference").
-- `Meta.search_fields` (`TODO-BETA-060-0.1.2`) only covers OR'd `icontains`; ranked / weighted / similarity search is a distinct capability the cookbook ships and basic search does not.
+- `Meta.search_fields` (`TODO-BETA-061-0.1.2`) only covers OR'd `icontains`; ranked / weighted / similarity search is a distinct capability the cookbook ships and basic search does not.
 
 #### Dependencies
 
-- `TODO-BETA-060-0.1.2` (`Meta.search_fields`) -- basic search lands first; this is the advanced full-text surface.
+- `TODO-BETA-061-0.1.2` (`Meta.search_fields`) -- basic search lands first; this is the advanced full-text surface.
 - `DONE-027-0.0.8` (Filtering subsystem) -- the filter-argument-factory machinery is shared.
 
 #### Card references
 
-- Dependency: `TODO-BETA-060-0.1.2` (`Meta.search_fields`) -- basic search lands first; this is the advanced full-text surface. -> `TODO-BETA-060-0.1.2` - `Meta.search_fields` support
-- Related: `Meta.search_fields` (`TODO-BETA-060-0.1.2`) only covers OR'd `icontains`; ranked / weighted / similarity search is a distinct capability the cookbook ships and basic search does not. -> `TODO-BETA-060-0.1.2` - `Meta.search_fields` support
+- Dependency: `TODO-BETA-061-0.1.2` (`Meta.search_fields`) -- basic search lands first; this is the advanced full-text surface. -> `TODO-BETA-061-0.1.2` - `Meta.search_fields` support
+- Related: `Meta.search_fields` (`TODO-BETA-061-0.1.2`) only covers OR'd `icontains`; ranked / weighted / similarity search is a distinct capability the cookbook ships and basic search does not. -> `TODO-BETA-061-0.1.2` - `Meta.search_fields` support
 - Dependency: `DONE-027-0.0.8` (Filtering subsystem) -- the filter-argument-factory machinery is shared. -> `DONE-027-0.0.8` - Filtering subsystem
 - Related: The only cookbook filter-surface gap found in the 0.0.7 DRY-cycle kwarg-parity audit; every other `django_graphene_filters` filter primitive is already shipped in `DONE-027-0.0.8`. -> `DONE-027-0.0.8` - Filtering subsystem
 
 <a id="aggregation_subsystem"></a>
-### [TODO-BETA-062-0.1.3 - Aggregation subsystem](KANBAN.html#aggregation_subsystem)
+### [TODO-BETA-063-0.1.3 - Aggregation subsystem](KANBAN.html#aggregation_subsystem)
 
 - Priority: Medium-high
 - Status: To Do
@@ -1216,7 +1268,7 @@ Strawberry port of django-graphene-filters' `AdvancedAggregateSet` — declarati
 
 #### Dependencies
 
-- `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
 
 #### Scope
 
@@ -1233,7 +1285,7 @@ Strawberry port of django-graphene-filters' `AdvancedAggregateSet` — declarati
 - Sync / async `compute(self, info, queryset) -> <Output>` and `async def acompute(self, info, queryset) -> <Output>` — same dual-shape contract `FilterSet.apply_sync` / `apply_async` ships. Selection-set-aware: only the aggregate output fields the GraphQL query actually selects are computed; the optimizer plan-cache infrastructure drives the selected-fields detection so a 20-stat aggregate output type does not eagerly compute all 20 when the consumer asked for 3.
 - Output-type emission: each `AggregateSet` emits a `@strawberry.type`-decorated output class named `<AggregateSet>OutputType` (e.g. `ObjectTypeAggregateOutputType`) materialized in a per-module `aggregates.outputs` namespace — disjoint from `filters.inputs` / `orders.inputs`, mirroring the per-module namespace pattern.
 - Config knobs (parity watch-item, carried over from the django-graphene-filters parity review): DGF's aggregate subsystem ships tunable safety limits and an async opt-in as settings — `AGGREGATE_MAX_VALUES`, `AGGREGATE_MAX_UNIQUES`, and `ASYNC_AGGREGATES` (`django_graphene_filters/conf.py`). This card captures the `compute` / `acompute` split and the stat surface but not these config knobs; the spec must confirm they are in scope when `spec-aggregates` is authored, or consciously drop them.
-- **Consume-the-substrate amendment** (TODO-BETA-058-0.1.1): related and permissioned aggregation consumes `EdgeScope` for child visibility, `GraphPathPlan` for relation-path classification, and `FieldDependencyPlan` for dependency declaration — no aggregate-private child-visibility abstraction beside `get_child_queryset`. Child aggregates must carry row-identity and cardinality semantics: aggregate fan-out across a many-join is a planner error by default, never a silently multiplied result. **Deferred R3 arm recorded here:** a hidden child must not contribute to a count or an aggregate.
+- **Consume-the-substrate amendment** (TODO-BETA-059-0.1.1): related and permissioned aggregation consumes `EdgeScope` for child visibility, `GraphPathPlan` for relation-path classification, and `FieldDependencyPlan` for dependency declaration — no aggregate-private child-visibility abstraction beside `get_child_queryset`. Child aggregates must carry row-identity and cardinality semantics: aggregate fan-out across a many-join is a planner error by default, never a silently multiplied result. **Deferred R3 arm recorded here:** a hidden child must not contribute to a count or an aggregate.
 - Optional (absorbed from the retired promotion card): fold the finalizer's per-key binding (`_bind_filtersets` / `_bind_ordersets` / `_bind_fieldsets`) into one dispatched, table-driven form so promoting a Meta key is a data change rather than a new helper per key.
 
 #### Definition of done
@@ -1266,10 +1318,10 @@ Strawberry port of django-graphene-filters' `AdvancedAggregateSet` — declarati
 
 - Related: full subsystem, parallel to Ordering: reuses `DONE-027-0.0.8`'s six-layer architecture but emits `strawberry.type` output types (not input) and adds the sync/async `compute` / `acompute` split. New `aggregates/` subpackage + `docs/SPECS/spec-058-aggregates-0_1_3.md` + tests. -> `DONE-027-0.0.8` - Filtering subsystem
 - Related: `DONE-034-0.0.10` - Permissions subsystem
-- Dependency: Amendment source: the graph substrate ships the shared planning vocabulary this card must consume instead of reimplementing (spec-058 Decision 1 — the amendment lands at the substrate card's creation, not at its Slice 5). -> `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- Dependency: Amendment source: the graph substrate ships the shared planning vocabulary this card must consume instead of reimplementing (spec-059 Decision 1 — the amendment lands at the substrate card's creation, not at its Slice 5). -> `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
 
 <a id="mutation_idempotency_keys"></a>
-### [TODO-BETA-063-0.1.3 - Mutation idempotency keys](KANBAN.html#mutation_idempotency_keys)
+### [TODO-BETA-064-0.1.3 - Mutation idempotency keys](KANBAN.html#mutation_idempotency_keys)
 
 - Priority: High
 - Status: To Do
@@ -1334,7 +1386,7 @@ Promoted from BACKLOG.md item 23 as a Beta differentiator after the core mutatio
 - Dependency: Builds on the core DjangoMutation lifecycle and generated input envelope from DONE-036-0.0.11. -> `DONE-036-0.0.11` - Mutations + auto-generated Input types
 
 <a id="opt_in_node_sentinel_redaction_tier_metaredaction_mode"></a>
-### [TODO-BETA-064-0.1.4 - Opt-in node-sentinel redaction tier (`Meta.redaction_mode`)](KANBAN.html#opt_in_node_sentinel_redaction_tier_metaredaction_mode)
+### [TODO-BETA-065-0.1.4 - Opt-in node-sentinel redaction tier (`Meta.redaction_mode`)](KANBAN.html#opt_in_node_sentinel_redaction_tier_metaredaction_mode)
 
 - Priority: Medium
 - Parity: ⚛️ graphene-django (Required)
@@ -1349,7 +1401,7 @@ Promoted from BACKLOG.md item 23 as a Beta differentiator after the core mutatio
 
 #### Planning note
 
-Strawberry port of django-graphene-filters' node-level sentinel redaction — the third redaction tier the package deferred in spec-034 Decision 6 (row-exclusion) and re-confirmed as a [`FieldSet`](docs/GLOSSARY.md#fieldset) Non-goal (`TODO-BETA-059-0.1.1`). Upstream `django_graphene_filters/object_type.py::AdvancedDjangoObjectType` exposes it as public SDL: `is_redacted = graphene.Boolean(...)` (`:137`), `resolve_is_redacted` (`:151`), `_make_sentinel` (`:200`), and a `get_node` (`:251`) that returns a `pk=0` sentinel in place of a hidden row so a non-null FK to a hidden target still resolves. This card recreates that surface behind an explicit per-`DjangoType` opt-in so a django-graphene-filters consumer relying on `isRedacted` / sentinel masking can port verbatim, without disturbing the default row-narrowing model.
+Strawberry port of django-graphene-filters' node-level sentinel redaction — the third redaction tier the package deferred in spec-034 Decision 6 (row-exclusion) and re-confirmed as a [`FieldSet`](docs/GLOSSARY.md#fieldset) Non-goal (`TODO-BETA-060-0.1.1`). Upstream `django_graphene_filters/object_type.py::AdvancedDjangoObjectType` exposes it as public SDL: `is_redacted = graphene.Boolean(...)` (`:137`), `resolve_is_redacted` (`:151`), `_make_sentinel` (`:200`), and a `get_node` (`:251`) that returns a `pk=0` sentinel in place of a hidden row so a non-null FK to a hidden target still resolves. This card recreates that surface behind an explicit per-`DjangoType` opt-in so a django-graphene-filters consumer relying on `isRedacted` / sentinel masking can port verbatim, without disturbing the default row-narrowing model.
 
 #### Dependencies
 
@@ -1372,7 +1424,7 @@ Strawberry port of django-graphene-filters' node-level sentinel redaction — th
 - [ ] `Meta.redaction_mode` defaults to `"exclude"`; all existing schemas and tests stay unchanged under the default. The `"sentinel"` machinery is wired only when the mode is set.
 - [ ] Tests mirror the source one-to-one; live HTTP coverage exercises a hidden non-null FK target resolving to a `pk=0` sentinel with `isRedacted = true`, a normal row reading `isRedacted = false`, and `get_node` on a hidden id returning the sentinel in `"sentinel"` mode vs `null` in `"exclude"` mode.
 - [ ] Composability tests: `"sentinel"` mode + `apply_cascade_permissions` — the top-level cascade still narrows rows; sentinels appear only for relation targets of surviving rows (no row resurrection, no double counting).
-- [ ] Amend the `FieldSet` (`TODO-BETA-059-0.1.1`) Architectural-posture note so its node-sentinel "Non-goal" cross-references this card as the realized opt-in tier.
+- [ ] Amend the `FieldSet` (`TODO-BETA-060-0.1.1`) Architectural-posture note so its node-sentinel "Non-goal" cross-references this card as the realized opt-in tier.
 
 #### Verified in upstream
 
@@ -1396,10 +1448,10 @@ Strawberry port of django-graphene-filters' node-level sentinel redaction — th
 
 - Dependency: `DONE-034-0.0.10` (Permissions subsystem) — extends the `apply_cascade_permissions` / `get_queryset` cascade; this tier reconciles sentinels with cascade narrowing. -> `DONE-034-0.0.10` - Permissions subsystem
 - Dependency: `DONE-032-0.0.9` (Full Relay story) — overrides the shipped `get_node` node-resolution seam. -> `DONE-032-0.0.9` - Full Relay story (Node + Connection + Root + validation)
-- Related: Amends the `FieldSet` node-sentinel Non-goal note (`TODO-BETA-059-0.1.1`) — this card is the realized opt-in tier that note defers to. -> `TODO-BETA-059-0.1.1` - `FieldSet` declarative field-level behavior (`Meta.fields_class`)
+- Related: Amends the `FieldSet` node-sentinel Non-goal note (`TODO-BETA-060-0.1.1`) — this card is the realized opt-in tier that note defers to. -> `TODO-BETA-060-0.1.1` - `FieldSet` declarative field-level behavior (`Meta.fields_class`)
 
 <a id="stable_choice_enum_naming_override"></a>
-### [TODO-BETA-065-0.1.4 - Stable choice enum naming override](KANBAN.html#stable_choice_enum_naming_override)
+### [TODO-BETA-066-0.1.4 - Stable choice enum naming override](KANBAN.html#stable_choice_enum_naming_override)
 
 - Priority: Low-medium
 - Status: To Do
@@ -1448,7 +1500,7 @@ Strawberry port of django-graphene-filters' node-level sentinel redaction — th
 - Dependency: The parity-gap card lands the `django-choices-field` enum-reuse behaviour whose naming surface and cache contract this card stabilizes. -> `WIP-ALPHA-051-0.0.15` - Upstream parity-gap closure
 
 <a id="fakeshop_graphql_schema_activation"></a>
-### [TODO-BETA-066-0.1.5 - Fakeshop GraphQL schema activation](KANBAN.html#fakeshop_graphql_schema_activation)
+### [TODO-BETA-067-0.1.5 - Fakeshop GraphQL schema activation](KANBAN.html#fakeshop_graphql_schema_activation)
 
 - Priority: Medium
 - Status: To Do
@@ -1479,10 +1531,10 @@ The product-catalog root schema is already live: four [`DjangoConnectionField`](
 #### Card references
 
 - Dependency: The product-catalog root schema is already live; the remaining node / nodes entry points and totalCount opt-in build on the shipped Relay story (`DONE-032-0.0.9`). -> `DONE-032-0.0.9` - Full Relay story (Node + Connection + Root + validation)
-- Related: Historical gate, retyped related: the recut scope (node / nodes + totalCount) does not depend on the Meta-key promotion work, which the aggregation card absorbed at the 2026-08-29 board review. -> `TODO-BETA-062-0.1.3` - Aggregation subsystem
+- Related: Historical gate, retyped related: the recut scope (node / nodes + totalCount) does not depend on the Meta-key promotion work, which the aggregation card absorbed at the 2026-08-29 board review. -> `TODO-BETA-063-0.1.3` - Aggregation subsystem
 
 <a id="product_catalog_layer_3_http_graphql_tests"></a>
-### [TODO-BETA-067-0.1.5 - Product-catalog Layer 3 HTTP GraphQL tests](KANBAN.html#product_catalog_layer_3_http_graphql_tests)
+### [TODO-BETA-068-0.1.5 - Product-catalog Layer 3 HTTP GraphQL tests](KANBAN.html#product_catalog_layer_3_http_graphql_tests)
 
 - Priority: Medium
 - Status: To Do
@@ -1491,8 +1543,8 @@ The product-catalog root schema is already live: four [`DjangoConnectionField`](
 
 #### Dependencies
 
-- `TODO-BETA-062-0.1.3` - Aggregation subsystem
-- `TODO-BETA-066-0.1.5` - Fakeshop GraphQL schema activation
+- `TODO-BETA-063-0.1.3` - Aggregation subsystem
+- `TODO-BETA-067-0.1.5` - Fakeshop GraphQL schema activation
 
 #### Scope
 
@@ -1515,21 +1567,21 @@ The product-catalog root schema is already live: four [`DjangoConnectionField`](
 
 #### Open question
 
-- Does the redundant `view_<model>` branch in the four fakeshop permission hooks stay? Each hook's `elif user and user.has_perm("products.view_<model>")` arm evaluates to the same expression as the fall-through it precedes, so it cannot change the result and costs a permission-table read per request per type. It is **spec-conformant** - `spec-034` Slice 4 and Decision 6's consumer-recipe divergence both demand it - so collapsing it is a contract change, not a cleanup. Paths: **(a)** keep it and record in the spec *why* a redundant branch is deliberate, **(b)** collapse each hook and add a spec sentence saying the grant is deliberately not a branch, or **(c)** give the branch different behaviour, which reverses Decision 6's recorded divergence and belongs to `TODO-BETA-064-0.1.4` rather than here. **A collapse is now safe to attempt**: the spec-034 residual cycle's R3 landed parametrized staff rows in `examples/fakeshop/test_query/test_products_api.py` that assert the `view_<model>` actor explicitly for all four models, so a mistake in the collapse fails loudly. Recorded 2026-08-28 (R1c finding M1, escalated as contract-level).
+- Does the redundant `view_<model>` branch in the four fakeshop permission hooks stay? Each hook's `elif user and user.has_perm("products.view_<model>")` arm evaluates to the same expression as the fall-through it precedes, so it cannot change the result and costs a permission-table read per request per type. It is **spec-conformant** - `spec-034` Slice 4 and Decision 6's consumer-recipe divergence both demand it - so collapsing it is a contract change, not a cleanup. Paths: **(a)** keep it and record in the spec *why* a redundant branch is deliberate, **(b)** collapse each hook and add a spec sentence saying the grant is deliberately not a branch, or **(c)** give the branch different behaviour, which reverses Decision 6's recorded divergence and belongs to `TODO-BETA-065-0.1.4` rather than here. **A collapse is now safe to attempt**: the spec-034 residual cycle's R3 landed parametrized staff rows in `examples/fakeshop/test_query/test_products_api.py` that assert the `view_<model>` actor explicitly for all four models, so a mistake in the collapse fails loudly. Recorded 2026-08-28 (R1c finding M1, escalated as contract-level).
 
 #### Card references
 
-- Dependency: Depends on the activated product-catalog schema; these HTTP tests exercise the surface that card wires. -> `TODO-BETA-066-0.1.5` - Fakeshop GraphQL schema activation
-- Dependency: The acceptance sweep lands after the Layer-3 trio so it sees every activated Layer-3 surface; the aggregation card is the last of the trio. -> `TODO-BETA-062-0.1.3` - Aggregation subsystem
+- Dependency: Depends on the activated product-catalog schema; these HTTP tests exercise the surface that card wires. -> `TODO-BETA-067-0.1.5` - Fakeshop GraphQL schema activation
+- Dependency: The acceptance sweep lands after the Layer-3 trio so it sees every activated Layer-3 surface; the aggregation card is the last of the trio. -> `TODO-BETA-063-0.1.3` - Aggregation subsystem
 
 <a id="structural_optimization_templates_and_nested_sidecar_batching"></a>
-### [TODO-BETA-068-0.1.6 - Structural optimization templates and nested sidecar batching](KANBAN.html#structural_optimization_templates_and_nested_sidecar_batching)
+### [TODO-BETA-069-0.1.6 - Structural optimization templates and nested sidecar batching](KANBAN.html#structural_optimization_templates_and_nested_sidecar_batching)
 
 - Priority: High
 - Status: To Do
 - Relative size: L
 - Labels: `internal`, `optimizer`, `performance`, `query-planning`
-- Spec: [spec-068-structural_templates-0_1_6.md](docs/SPECS/spec-068-structural_templates-0_1_6.md)
+- Spec: [spec-069-structural_templates-0_1_6.md](docs/SPECS/spec-069-structural_templates-0_1_6.md)
 
 #### Predicted files
 
@@ -1540,11 +1592,11 @@ The product-catalog root schema is already live: four [`DjangoConnectionField`](
 
 #### Planning note
 
-The second of two graph foundation cards, sibling to the graph substrate (TODO-BETA-058-0.1.1). Where the substrate ships the shared planning vocabulary, this card ships the optimizer architecture that consumes it — four pillars: (1) the structural/bound plan split (`StructuralOptimizationTemplate` cacheable across requests, `BoundOptimizationPlan` request-local, `OptimizationPlan` produced by binding); (2) root-subtree structural cache keys replacing whole-operation AST keys; (3) nested sidecar batching — filtered/ordered/search-bearing nested connections stop executing per parent; (4) the operation plan map replacing last-wins introspection, plus `RowIdentityProof` enforcement at the window gate. Seated immediately ahead of explain (TODO-BETA-069-0.1.6), which renders the plan map and shares the `0.1.6` joint cut. No new consumer surface — every object is internal optimizer vocabulary; the observable contract is query counts, cache behavior, explain completeness, and strict-mode errors.
+The second of two graph foundation cards, sibling to the graph substrate (TODO-BETA-059-0.1.1). Where the substrate ships the shared planning vocabulary, this card ships the optimizer architecture that consumes it — four pillars: (1) the structural/bound plan split (`StructuralOptimizationTemplate` cacheable across requests, `BoundOptimizationPlan` request-local, `OptimizationPlan` produced by binding); (2) root-subtree structural cache keys replacing whole-operation AST keys; (3) nested sidecar batching — filtered/ordered/search-bearing nested connections stop executing per parent; (4) the operation plan map replacing last-wins introspection, plus `RowIdentityProof` enforcement at the window gate. Seated immediately ahead of explain (TODO-BETA-070-0.1.6), which renders the plan map and shares the `0.1.6` joint cut. No new consumer surface — every object is internal optimizer vocabulary; the observable contract is query counts, cache behavior, explain completeness, and strict-mode errors.
 
 #### Dependencies
 
-- `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
 
 #### Scope
 
@@ -1568,7 +1620,7 @@ The second of two graph foundation cards, sibling to the graph substrate (TODO-B
 
 #### Architectural posture
 
-- **Amendment obligations recorded at this card's creation** — explain (TODO-BETA-069-0.1.6) consumes the operation plan map and retires the legacy `DST_OPTIMIZER_PLAN` key; the adversarial suite (TODO-BETA-072-0.1.8) gains template-store, binding-boundary, and proof-gate targets. This card changes the introspection data, not its readers — the legacy key stays last-wins until explain rewires.
+- **Amendment obligations recorded at this card's creation** — explain (TODO-BETA-070-0.1.6) consumes the operation plan map and retires the legacy `DST_OPTIMIZER_PLAN` key; the adversarial suite (TODO-BETA-073-0.1.8) gains template-store, binding-boundary, and proof-gate targets. This card changes the introspection data, not its readers — the legacy key stays last-wins until explain rewires.
 - No request value — user, tenant, queryset, database alias, or argument value — is storable in any structural object (the substrate card's posture, extended verbatim); enforced structurally and tested adversarially. Pluggable nested-fetch strategies must consume the sidecar normalization and the `RowIdentityProof` gate — a strategy that self-certifies child row identity would reopen the window-safety hole in a new backend. The framework never injects `DISTINCT` to launder an unproven shape.
 
 #### Why it matters
@@ -1584,13 +1636,13 @@ The second of two graph foundation cards, sibling to the graph substrate (TODO-B
 
 #### Card references
 
-- Dependency: Gated on the substrate landing first: `EdgeScope` supplies the visibility-scoped child base the sidecar pipeline normalizes, `RowIdentityProof` is the vocabulary the window gate enforces, `FieldDependencyPlan` feeds the template's dependency graph, and the operation memo is the request-local tier the binding reuses. -> `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
-- Related: Amendment obligation: explain renders the operation plan map (every root exactly once, shared dependencies with hit counts, redacted scope values) and retires the legacy last-wins `DST_OPTIMIZER_PLAN` context key. -> `TODO-BETA-069-0.1.6` - Optimizer explain mode
-- Related: Amendment obligation: the adversarial suite gains structural-template targets (template-store keying/under-keying, the structural/bound binding boundary, proof-gate refusal paths, sidecar cache isolation). -> `TODO-BETA-072-0.1.8` - Adversarial non-live test suite
-- Related: Owns the fetch-strategy seam whose strategy interface this card's sidecar pipeline cites. -> `TODO-ALPHA-078-0.0.17` - Owning spec for the nested-connection fetch-strategy seam
+- Dependency: Gated on the substrate landing first: `EdgeScope` supplies the visibility-scoped child base the sidecar pipeline normalizes, `RowIdentityProof` is the vocabulary the window gate enforces, `FieldDependencyPlan` feeds the template's dependency graph, and the operation memo is the request-local tier the binding reuses. -> `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- Related: Amendment obligation: explain renders the operation plan map (every root exactly once, shared dependencies with hit counts, redacted scope values) and retires the legacy last-wins `DST_OPTIMIZER_PLAN` context key. -> `TODO-BETA-070-0.1.6` - Optimizer explain mode
+- Related: Amendment obligation: the adversarial suite gains structural-template targets (template-store keying/under-keying, the structural/bound binding boundary, proof-gate refusal paths, sidecar cache isolation). -> `TODO-BETA-073-0.1.8` - Adversarial non-live test suite
+- Related: Owns the fetch-strategy seam whose strategy interface this card's sidecar pipeline cites. -> `TODO-ALPHA-079-0.0.17` - Owning spec for the nested-connection fetch-strategy seam
 
 <a id="optimizer_explain_mode"></a>
-### [TODO-BETA-069-0.1.6 - Optimizer explain mode](KANBAN.html#optimizer_explain_mode)
+### [TODO-BETA-070-0.1.6 - Optimizer explain mode](KANBAN.html#optimizer_explain_mode)
 
 - Priority: High
 - Status: To Do
@@ -1610,7 +1662,7 @@ Promoted from BACKLOG.md item 7 as a pre-1.0 differentiator: expose the optimize
 
 #### Dependencies
 
-- `TODO-BETA-068-0.1.6` - Structural optimization templates and nested sidecar batching
+- `TODO-BETA-069-0.1.6` - Structural optimization templates and nested sidecar batching
 
 #### Scope
 
@@ -1619,7 +1671,7 @@ Promoted from BACKLOG.md item 7 as a pre-1.0 differentiator: expose the optimize
 - Include the ORM planning facts developers need to debug performance: `select_related`, `prefetch_related` / `Prefetch` chains, [`only()` projection](docs/GLOSSARY.md#only-projection), optimizer hints, FK-id elisions, and strictness decisions where available.
 - Provide a request-level activation surface such as a header or context flag; keep explain output off by default.
 - Guarantee explain mode is observational only: enabling it must not change SQL planning, resolver behavior, GraphQL data shape, or query results.
-- **Consume-the-substrate amendment** (TODO-BETA-058-0.1.1, TODO-BETA-068-0.1.6): render the operation plan map instead of the single last-wins `info.context.dst_optimizer_plan`, and retire that legacy context key once this card lands (the sibling card publishes the map alongside it precisely so this card owns the cutover). Each entry exposes root field / type / model, structural template fingerprint and cache hit or miss, request binding identity without secret values, select / prefetch / computed dependencies, direct and correlated predicate branches, contextual edge scopes, nested strategy and sidecar plan, row-identity proof, fallback reasons, estimated query families, strictness keys, database alias, and whether total count and page share a statement. Shared operation dependencies appear once with redacted keys and hit / miss counts; the map stays complete and deterministic under any async completion order.
+- **Consume-the-substrate amendment** (TODO-BETA-059-0.1.1, TODO-BETA-069-0.1.6): render the operation plan map instead of the single last-wins `info.context.dst_optimizer_plan`, and retire that legacy context key once this card lands (the sibling card publishes the map alongside it precisely so this card owns the cutover). Each entry exposes root field / type / model, structural template fingerprint and cache hit or miss, request binding identity without secret values, select / prefetch / computed dependencies, direct and correlated predicate branches, contextual edge scopes, nested strategy and sidecar plan, row-identity proof, fallback reasons, estimated query families, strictness keys, database alias, and whether total count and page share a statement. Shared operation dependencies appear once with redacted keys and hit / miss counts; the map stays complete and deterministic under any async completion order.
 - **Visibility bindings in the plan map:** each rendered plan-map entry includes a "visibility bindings" field fed by the structural-template sibling card's visibility binding slots: per slot and per root base queryset, which hook or declared rule bound, at which site, whether a bypass or a restriction decided the verdict, which cascade edges ran, and hit counts, with actor values redacted; visibility explain is a row kind of this payload and never a second response extension.
 
 #### Definition of done
@@ -1650,11 +1702,11 @@ Promoted from BACKLOG.md item 7 as a pre-1.0 differentiator: expose the optimize
 
 #### Card references
 
-- Related: Amendment source: the graph substrate ships the shared planning vocabulary this card must consume instead of reimplementing (spec-058 Decision 1 — the amendment lands at the substrate card's creation, not at its Slice 5). -> `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
-- Dependency: Amendment source: the sibling foundation card ships the structural/bound plan split, the operation plan map, and the row-identity enforcement gate this card consumes. -> `TODO-BETA-068-0.1.6` - Structural optimization templates and nested sidecar batching
+- Related: Amendment source: the graph substrate ships the shared planning vocabulary this card must consume instead of reimplementing (spec-059 Decision 1 — the amendment lands at the substrate card's creation, not at its Slice 5). -> `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- Dependency: Amendment source: the sibling foundation card ships the structural/bound plan split, the operation plan map, and the row-identity enforcement gate this card consumes. -> `TODO-BETA-069-0.1.6` - Structural optimization templates and nested sidecar batching
 
 <a id="configurable_filterlogic_key_namespace_filter_keyand_keyor_keynot_key"></a>
-### [TODO-BETA-070-0.1.7 - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)](KANBAN.html#configurable_filterlogic_key_namespace_filter_keyand_keyor_keynot_key)
+### [TODO-BETA-071-0.1.7 - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)](KANBAN.html#configurable_filterlogic_key_namespace_filter_keyand_keyor_keynot_key)
 
 - Priority: Low
 - Parity: ⚛️ graphene-django (Required)
@@ -1718,7 +1770,7 @@ Promoted from BACKLOG.md as the remaining django-graphene-filters configuration-
 - Dependency: `DONE-030-0.0.9` (`DjangoConnectionField`) — owns the `filter` argument (`CONNECTION_FILTER_KWARG`) that `FILTER_KEY` renames. -> `DONE-030-0.0.9` - `DjangoConnectionField` (Relay connection field)
 
 <a id="migration_and_adoption_guides"></a>
-### [TODO-BETA-071-0.1.8 - Migration and adoption guides](KANBAN.html#migration_and_adoption_guides)
+### [TODO-BETA-072-0.1.8 - Migration and adoption guides](KANBAN.html#migration_and_adoption_guides)
 
 - Priority: Medium
 - Status: To Do
@@ -1727,7 +1779,7 @@ Promoted from BACKLOG.md as the remaining django-graphene-filters configuration-
 
 #### Dependencies
 
-- `TODO-BETA-070-0.1.7` - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)
+- `TODO-BETA-071-0.1.7` - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)
 
 #### Scope
 
@@ -1765,10 +1817,10 @@ Promoted from BACKLOG.md as the remaining django-graphene-filters configuration-
 
 #### Card references
 
-- Dependency: The final configurable filter/logic key namespace (`TODO-BETA-070-0.1.7`) must ship first so both migration guides describe the released public surface. -> `TODO-BETA-070-0.1.7` - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)
+- Dependency: The final configurable filter/logic key namespace (`TODO-BETA-071-0.1.7`) must ship first so both migration guides describe the released public surface. -> `TODO-BETA-071-0.1.7` - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)
 
 <a id="adversarial_non_live_test_suite"></a>
-### [TODO-BETA-072-0.1.8 - Adversarial non-live test suite](KANBAN.html#adversarial_non_live_test_suite)
+### [TODO-BETA-073-0.1.8 - Adversarial non-live test suite](KANBAN.html#adversarial_non_live_test_suite)
 
 - Priority: Medium-high
 - Status: To Do
@@ -1782,8 +1834,8 @@ Promoted from BACKLOG.md as the remaining django-graphene-filters configuration-
 
 #### Dependencies
 
-- `TODO-BETA-068-0.1.6` - Structural optimization templates and nested sidecar batching
-- `TODO-BETA-070-0.1.7` - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)
+- `TODO-BETA-069-0.1.6` - Structural optimization templates and nested sidecar batching
+- `TODO-BETA-071-0.1.7` - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)
 
 #### Scope
 
@@ -1791,7 +1843,7 @@ Promoted from BACKLOG.md as the remaining django-graphene-filters configuration-
 - Add a row distinguishing `consumers.py::_attempt_close`'s `ABANDONED` record from `settle`'s cancel-and-await. The two boundaries are currently jointly pinned - the same pair of rows fails for either mutation - so neither is independently proven.
 - `tests/test_views.py::_strawberry_patch_opted_out` asserts `_patch_is_installed() is False` after restoring the originals, so the package-tier simulation is proven to un-install the patch.
 - Re-anchor failability manifest entry 6 onto the middleware-ordering audit's decision expression rather than its initialization line, if the manifest is ever re-derived. Anchoring an aggregate inside the guard under test is the trap: one measured attempt reported four rows rather than zero, which would have passed the acceptance rule while measuring a third of its boundary. A zero gets graded; a plausible count gets graded by nobody.
-- **Consume-the-substrate amendment** (TODO-BETA-058-0.1.1, TODO-BETA-068-0.1.6): add graph-substrate and structural-template attack targets — five-root operations; related-row existence leaks; selected-child leakage past a visible parent; same-related-row authorization false positives; custom-visibility outer fan-out; duplicate child rows under windows; whole-operation cache fragmentation; operation-memo scope isolation (viewer, tenant, database alias, cancellation); async plan-map ordering; structural-template under-keying (a referenced directive or pagination slot missing from the fingerprint must fail closed to a walk, never to a wrong reuse); the structural/bound binding boundary (no request value constructible into a structural object); proof-gate refusal paths; and snapshot consistency in the PostgreSQL tier.
+- **Consume-the-substrate amendment** (TODO-BETA-059-0.1.1, TODO-BETA-069-0.1.6): add graph-substrate and structural-template attack targets — five-root operations; related-row existence leaks; selected-child leakage past a visible parent; same-related-row authorization false positives; custom-visibility outer fan-out; duplicate child rows under windows; whole-operation cache fragmentation; operation-memo scope isolation (viewer, tenant, database alias, cancellation); async plan-map ordering; structural-template under-keying (a referenced directive or pagination slot missing from the fingerprint must fail closed to a walk, never to a wrong reuse); the structural/bound binding boundary (no request value constructible into a structural object); proof-gate refusal paths; and snapshot consistency in the PostgreSQL tier.
 - `tests/types/test_definition_order.py::test_filterset_class_resolves_across_module_boundary`'s module eviction is weaker than its comment claims. The row pops two fixture modules from `sys.modules` and re-imports them with `from tests.types.fixtures import branch_module, shelf_module`, under a comment asserting the pop makes the next import re-execute the module. Measured by the spec-010 residual cycle (2026-08-15): it does not - the parent package's still-set attribute satisfies the `from ... import`, so the stale module object comes back and `sys.modules` is never repopulated. The row passes today only because nothing imports those fixture modules first, a latent order dependence of exactly the class invisible below a full parallel run. The fix is one `importlib.import_module` per module plus a corrected comment - the same substitution that cycle's builder was forced into for its own rows, which is how the weakness was found.
 - `tests/types/test_definition_order.py::test_annotation_only_relation_override_keeps_generated_resolver` does NOT pin the collection-phase consumer-authored short-circuit - never cite it as though it does. Measured twice in the spec-010 residual cycle, by the builder's and the reviewer's failability runs independently: with the relation branch of the short-circuit in `types/base.py::_build_annotations` deleted, every assertion in that row still passes, because the synthesized placeholder resolves back to the same class and the row's `consumer_*` set assertions read state computed in `__init_subclass__` rather than in `_build_annotations`. The short-circuit is pinned instead by the four override-shape rows that cycle landed in the same file. If a discriminating assertion is ever wanted, it must observe `_build_annotations`' own effect (pending-relation suppression), not the resolved schema, which is identical either way.
 - `examples/fakeshop/test_query/test_multi_db.py::test_planned_prefetch_child_cascade_subquery_follows_a_routed_parent_onto_its_shard` (`FAKESHOP_SHARDED`-gated) pins the alias of a `Prefetch` child built under an active cascade. `django_strawberry_framework/permissions.py::apply_cascade_permissions` seeds every edge base on the root queryset's explicit alias, so under an unrouted root the cascade subqueries follow the outer query onto the parent's shard; `tests/test_permissions.py::test_unrouted_root_composes_unrouted_subqueries` and `tests/test_permissions.py::test_routed_hook_return_under_unrouted_root_fails_closed` pin the alias rule at the package tier.
@@ -1816,12 +1868,12 @@ Promoted from BACKLOG.md as the remaining django-graphene-filters configuration-
 #### Card references
 
 - Related: Root `tests/` historically mixed genuinely-unreachable-from-live cases with some that merely duplicated coverage already earned by the live `test_query/` suites (a first prune of redundant filter unit tests landed alongside `DONE-027-0.0.8`). -> `DONE-027-0.0.8` - Filtering subsystem
-- Dependency: The final configurable filter/logic key namespace (`TODO-BETA-070-0.1.7`) must ship first so the adversarial suite exercises the released public surface before the stable gate. -> `TODO-BETA-070-0.1.7` - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)
-- Related: Amendment source: the graph substrate ships the shared planning vocabulary this card must consume instead of reimplementing (spec-058 Decision 1 — the amendment lands at the substrate card's creation, not at its Slice 5). -> `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
-- Dependency: Amendment source: the sibling foundation card ships the structural/bound plan split, the operation plan map, and the row-identity enforcement gate this card consumes. -> `TODO-BETA-068-0.1.6` - Structural optimization templates and nested sidecar batching
+- Dependency: The final configurable filter/logic key namespace (`TODO-BETA-071-0.1.7`) must ship first so the adversarial suite exercises the released public surface before the stable gate. -> `TODO-BETA-071-0.1.7` - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)
+- Related: Amendment source: the graph substrate ships the shared planning vocabulary this card must consume instead of reimplementing (spec-059 Decision 1 — the amendment lands at the substrate card's creation, not at its Slice 5). -> `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- Dependency: Amendment source: the sibling foundation card ships the structural/bound plan split, the operation plan map, and the row-identity enforcement gate this card consumes. -> `TODO-BETA-069-0.1.6` - Structural optimization templates and nested sidecar batching
 
 <a id="stable_release_api_freeze_cleanup_verification_beta_stable"></a>
-### [TODO-STABLE-073-1.0.0 - Stable release (API freeze, cleanup, verification, beta → stable)](KANBAN.html#stable_release_api_freeze_cleanup_verification_beta_stable)
+### [TODO-STABLE-074-1.0.0 - Stable release (API freeze, cleanup, verification, beta → stable)](KANBAN.html#stable_release_api_freeze_cleanup_verification_beta_stable)
 
 - Priority: Critical
 - Status: To Do
@@ -1839,11 +1891,11 @@ planned; this is the final card in the Beta queue and gates the beta → stable 
 
 #### Dependencies
 
-- `TODO-BETA-072-0.1.8` - Adversarial non-live test suite
+- `TODO-BETA-073-0.1.8` - Adversarial non-live test suite
 
 #### Definition of done
 
-- [ ] Every other Beta card (`TODO-BETA-058-0.1.1` through `TODO-BETA-072-0.1.8`) is in `DONE`.
+- [ ] Every other Beta card (`TODO-BETA-059-0.1.1` through `TODO-BETA-073-0.1.8`) is in `DONE`.
 - [ ] API surface audit: top-level `__all__` confirmed stable; every public symbol documented; no `# experimental` markers in shipped code; no `_private` symbols accidentally referenced from docs.
 - [ ] SemVer policy committed in CHANGELOG header: every release after `1.0.0` follows MAJOR / MINOR / PATCH rules strictly; pre-`0.1.0` deprecation shims removed entirely.
 - [ ] Full async + sync coverage matrix validated; no `sync_to_async` workarounds remain on any resolver path.
@@ -1870,12 +1922,12 @@ planned; this is the final card in the Beta queue and gates the beta → stable 
 
 #### Card references
 
-- Related: Every other Beta card (`TODO-BETA-058-0.1.1` through `TODO-BETA-072-0.1.8`) is in `DONE`. -> `TODO-BETA-058-0.1.1` - Graph substrate: shared graph policy and dependency planning
-- Related: Every other Beta card (`TODO-BETA-058-0.1.1` through `TODO-BETA-072-0.1.8`) is in `DONE`. -> `TODO-BETA-072-0.1.8` - Adversarial non-live test suite
-- Dependency: The final Beta card discharges before the `1.0.0` cut - the dependency edge replaces prose, mirroring the beta release card's edge on the doc-debt card. -> `TODO-BETA-072-0.1.8` - Adversarial non-live test suite
+- Related: Every other Beta card (`TODO-BETA-059-0.1.1` through `TODO-BETA-073-0.1.8`) is in `DONE`. -> `TODO-BETA-059-0.1.1` - Graph substrate: shared graph policy and dependency planning
+- Related: Every other Beta card (`TODO-BETA-059-0.1.1` through `TODO-BETA-073-0.1.8`) is in `DONE`. -> `TODO-BETA-073-0.1.8` - Adversarial non-live test suite
+- Dependency: The final Beta card discharges before the `1.0.0` cut - the dependency edge replaces prose, mirroring the beta release card's edge on the doc-debt card. -> `TODO-BETA-073-0.1.8` - Adversarial non-live test suite
 
 <a id="dynamic_schemas_from_datatype_specs_synthetic_unmanaged_models"></a>
-### [TODO-STABLE-074-1.1.0 - Dynamic schemas from dataType specs (synthetic unmanaged models)](KANBAN.html#dynamic_schemas_from_datatype_specs_synthetic_unmanaged_models)
+### [TODO-STABLE-075-1.1.0 - Dynamic schemas from dataType specs (synthetic unmanaged models)](KANBAN.html#dynamic_schemas_from_datatype_specs_synthetic_unmanaged_models)
 
 - Priority: Low-medium
 - Status: To Do
@@ -1888,7 +1940,7 @@ Created 2026-08-29 from the DIV-033 discussion. Post-1.0 greenfield: neither gra
 
 #### Dependencies
 
-- `TODO-ALPHA-054-0.0.16` - Pluggable field-conversion registry
+- `TODO-ALPHA-055-0.0.16` - Pluggable field-conversion registry
 
 #### Scope
 
@@ -1918,11 +1970,11 @@ Created 2026-08-29 from the DIV-033 discussion. Post-1.0 greenfield: neither gra
 
 #### Card references
 
-- Dependency: Spec field entries resolve through the registry; the registry's callable-converter shape must be settled first. -> `TODO-ALPHA-054-0.0.16` - Pluggable field-conversion registry
-- Related: Same DIV-033 discussion; a geo-bearing external table would exercise both cards. -> `BACKLOG-STABLE-076-1.1.0` - GIS / GeoDjango field-type support (geo scalars)
+- Dependency: Spec field entries resolve through the registry; the registry's callable-converter shape must be settled first. -> `TODO-ALPHA-055-0.0.16` - Pluggable field-conversion registry
+- Related: Same DIV-033 discussion; a geo-bearing external table would exercise both cards. -> `BACKLOG-STABLE-077-1.1.0` - GIS / GeoDjango field-type support (geo scalars)
 
 <a id="generated_input_field_names_follow_the_schema_naming_config_auto_camel_case_nameconverter"></a>
-### [TODO-BETA-077-0.1.7 - Generated input field names follow the schema naming config (`auto_camel_case`, `NameConverter`)](KANBAN.html#generated_input_field_names_follow_the_schema_naming_config_auto_camel_case_nameconverter)
+### [TODO-BETA-078-0.1.7 - Generated input field names follow the schema naming config (`auto_camel_case`, `NameConverter`)](KANBAN.html#generated_input_field_names_follow_the_schema_naming_config_auto_camel_case_nameconverter)
 
 - Priority: Medium
 - Status: To Do
@@ -1986,7 +2038,7 @@ Under `StrawberryConfig(auto_camel_case=False)` or a custom `NameConverter`, out
 - Dependency: Filtering subsystem: `LOOKUP_NAME_MAP` and the logic keys this card unpins. -> `DONE-027-0.0.8` - Filtering subsystem
 - Dependency: Ordering subsystem: the order input fields this card unpins. -> `DONE-028-0.0.8` - Ordering subsystem
 - Dependency: `DjangoListField` argument surface: list arguments already follow the naming config; this card brings the inputs in line. -> `DONE-050-0.0.15` - `DjangoListField` argument surface: `offset` / `limit` and `orderBy`
-- Related: Configurable filter/logic key namespace also moves import-time wire names to schema-build time; land the two resolution points together. -> `TODO-BETA-070-0.1.7` - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)
+- Related: Configurable filter/logic key namespace also moves import-time wire names to schema-build time; land the two resolution points together. -> `TODO-BETA-071-0.1.7` - Configurable filter/logic key namespace (`FILTER_KEY`/`AND_KEY`/`OR_KEY`/`NOT_KEY`)
 
 ## Done
 
@@ -2037,9 +2089,9 @@ Promoted from the 0.1.0 parity register's largest unaccounted finding (offset/li
 #### Card references
 
 - Related: Shares the `0.0.15` line; both are pre-beta parity work, this card lands first. -> `WIP-ALPHA-051-0.0.15` - Upstream parity-gap closure
-- Related: Its archived-spec deferral sweep names spec-028's orphaned orderBy integration; adjudicated: carded here. -> `TODO-ALPHA-056-0.0.17` - Alpha documentation-debt discharge
-- Related: Owes the offset-mapping migration note: upstream offset surfaces map to this card's `DjangoListField` arguments; nested offset pagination maps to nested connections. -> `TODO-BETA-071-0.1.8` - Migration and adoption guides
-- Related: The parity claim's offset/limit cut blocker is closed by this card. -> `TODO-ALPHA-057-0.1.0` - Beta release (cleanup, verification, alpha → beta)
+- Related: Its archived-spec deferral sweep names spec-028's orphaned orderBy integration; adjudicated: carded here. -> `TODO-ALPHA-057-0.0.17` - Alpha documentation-debt discharge
+- Related: Owes the offset-mapping migration note: upstream offset surfaces map to this card's `DjangoListField` arguments; nested offset pagination maps to nested connections. -> `TODO-BETA-072-0.1.8` - Migration and adoption guides
+- Related: The parity claim's offset/limit cut blocker is closed by this card. -> `TODO-ALPHA-058-0.1.0` - Beta release (cleanup, verification, alpha → beta)
 
 <a id="dependency_and_ci_hardening_refresh_django_locks_add_audit_automation_least_privilege_ci"></a>
 ### [DONE-049-0.0.14 - Dependency and CI hardening: refresh Django locks, add audit automation, least-privilege CI](KANBAN.html#dependency_and_ci_hardening_refresh_django_locks_add_audit_automation_least_privilege_ci)
@@ -2491,12 +2543,12 @@ Security-audit remediation program, card 1 of 4. Amends spec-041 (channels_route
 - [x] Implement `django_strawberry_framework/routers.py` exposing [`DjangoGraphQLProtocolRouter`](docs/GLOSSARY.md#djangographqlprotocolrouter).
 - [x] `channels` is a soft dependency: top-level package import must not fail if `channels` is not installed. The helper wraps `channels` imports lazily and raises `ImportError` with an install hint when it is actually called.
 - [x] Tests under `tests/test_routers.py` exercise both the channels-present and channels-absent paths.
-- [x] Migration guide (`TODO-BETA-071-0.1.8`) gains a one-row entry in its "symbol equivalents" table mapping `AuthGraphQLProtocolTypeRouter` → `DjangoGraphQLProtocolRouter`, so the symbol rename is documented in one canonical location.
+- [x] Migration guide (`TODO-BETA-072-0.1.8`) gains a one-row entry in its "symbol equivalents" table mapping `AuthGraphQLProtocolTypeRouter` → `DjangoGraphQLProtocolRouter`, so the symbol rename is documented in one canonical location.
 
 #### Architectural posture
 
 - The router helper uses a **distinctly-ours symbol name**, `DjangoGraphQLProtocolRouter`, so the module is unambiguously ours and does not impersonate the upstream API. This respects the [`GOAL.md`][goal] non-goal "a thin wrapper around `strawberry-graphql-django`".
-- Migration ergonomics are preserved by the upstream-equivalent mapping in the migration guide (`TODO-BETA-071-0.1.8`), not by copying the symbol name. A migrant changes the import (`from strawberry_django.routers import AuthGraphQLProtocolTypeRouter` → `from django_strawberry_framework.routers import DjangoGraphQLProtocolRouter`) and passes the Django ASGI application the router requires (`django_application=get_asgi_application()`, called at the normal point in `asgi.py`; spec-046 Decision 3).
+- Migration ergonomics are preserved by the upstream-equivalent mapping in the migration guide (`TODO-BETA-072-0.1.8`), not by copying the symbol name. A migrant changes the import (`from strawberry_django.routers import AuthGraphQLProtocolTypeRouter` → `from django_strawberry_framework.routers import DjangoGraphQLProtocolRouter`) and passes the Django ASGI application the router requires (`django_application=get_asgi_application()`, called at the normal point in `asgi.py`; spec-046 Decision 3).
 
 #### Why it matters
 
@@ -2506,7 +2558,7 @@ Security-audit remediation program, card 1 of 4. Amends spec-041 (channels_route
 
 #### Card references
 
-- Related: Migration guide (`TODO-BETA-071-0.1.8`) gains a one-row entry in its "symbol equivalents" table mapping `AuthGraphQLProtocolTypeRouter` → `DjangoGraphQLProtocolRouter`, so the symbol rename is documented in one canonical location. -> `TODO-BETA-071-0.1.8` - Migration and adoption guides
+- Related: Migration guide (`TODO-BETA-072-0.1.8`) gains a one-row entry in its "symbol equivalents" table mapping `AuthGraphQLProtocolTypeRouter` → `DjangoGraphQLProtocolRouter`, so the symbol rename is documented in one canonical location. -> `TODO-BETA-072-0.1.8` - Migration and adoption guides
 
 <a id="auth_mutations_login_logout_register"></a>
 ### [DONE-040-0.0.13 - Auth mutations (login / logout / register)](KANBAN.html#auth_mutations_login_logout_register)
@@ -2826,7 +2878,7 @@ Source: 2026-06-11 comparative audit of `django_strawberry_framework/optimizer/`
 
 #### Planning note
 
-Strawberry port of graphene-django's `apply_cascade_permissions(cls, queryset, info)` from `django_graphene_filters.permissions`. The cookbook line `return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)` is the canonical consumer surface — a single composable helper that walks the model graph at call time, runs each owner type's `get_queryset(qs, info)` against the related queryset, and returns a queryset that respects per-type row-level visibility across every traversed FK / OneToOne edge. Integrates with the optimizer's `Prefetch` downgrade so cascaded relations stay N+1-safe; per-field permission hooks via the reserved [`Meta.fields_class`](docs/GLOSSARY.md#metafields_class) slot are deferred to the later [FieldSet](docs/GLOSSARY.md#fieldset) work (`TODO-BETA-059-0.1.1`), not shipped in this card.
+Strawberry port of graphene-django's `apply_cascade_permissions(cls, queryset, info)` from `django_graphene_filters.permissions`. The cookbook line `return apply_cascade_permissions(cls, queryset.filter(is_private=False), info)` is the canonical consumer surface — a single composable helper that walks the model graph at call time, runs each owner type's `get_queryset(qs, info)` against the related queryset, and returns a queryset that respects per-type row-level visibility across every traversed FK / OneToOne edge. Integrates with the optimizer's `Prefetch` downgrade so cascaded relations stay N+1-safe; per-field permission hooks via the reserved [`Meta.fields_class`](docs/GLOSSARY.md#metafields_class) slot are deferred to the later [FieldSet](docs/GLOSSARY.md#fieldset) work (`TODO-BETA-060-0.1.1`), not shipped in this card.
 
 #### Dependencies
 
@@ -2835,7 +2887,7 @@ Strawberry port of graphene-django's `apply_cascade_permissions(cls, queryset, i
 #### Scope
 
 - [`apply_cascade_permissions`](docs/GLOSSARY.md#apply_cascade_permissions)
-- reserved `Meta.fields_class` slot for per-field permission hooks; the per-field read-gate itself ships with the later FieldSet work (`TODO-BETA-059-0.1.1`), not in this card
+- reserved `Meta.fields_class` slot for per-field permission hooks; the per-field read-gate itself ships with the later FieldSet work (`TODO-BETA-060-0.1.1`), not in this card
 - Optimizer cooperation: cascaded relations downgrade to `Prefetch(queryset=...)` so visibility filters survive the join (carries the existing `get_queryset` → `Prefetch` downgrade contract across the cascade walk).
 - composable permission rules that remain visible from the owning type/query surface
 - Public callable surface: `apply_cascade_permissions(cls, queryset, info, fields=None)` returns a queryset; optional `fields=` argument scopes the cascade to specific FK names. Both sync and async variants ship; async variant uses `sync_to_async` around the cascade walker to stay event-loop-safe.
@@ -2880,12 +2932,12 @@ Strawberry port of graphene-django's `apply_cascade_permissions(cls, queryset, i
 - Open question — hidden-FK semantics: when a parent row references a hidden target, choose between excluding the parent row, nulling the FK field, or returning a sentinel. The upstream uses sentinels; the Strawberry side has to pick before the cascade lands. Pinned in `docs/SPECS/spec-034-permissions-0_0_10.md`.
 - Open question — cascade performance: subquery-per-FK (one extra round-trip per FK in the cascade) vs a single annotated pass (one query that joins every cascaded relation). The upstream is subquery-per-FK; benchmark both before committing.
 - Open question — M2M / reverse-relation visibility: the upstream cascade explicitly skips M2M and reverse FK. Decide whether to extend coverage here or defer to a sibling card; if deferring, name the follow-up card in the spec.
-- Open question — `check_permissions` API surface: does the existing per-field filter-denial `check_<field>_permission(self, request)` survive in its current form, get renamed to disambiguate from the new field-level read gate (`FieldSet.check_<field>_permission(info)` per `TODO-BETA-059-0.1.1`), or get deprecated in favor of a unified shape? Spec must answer before implementation.
+- Open question — `check_permissions` API surface: does the existing per-field filter-denial `check_<field>_permission(self, request)` survive in its current form, get renamed to disambiguate from the new field-level read gate (`FieldSet.check_<field>_permission(info)` per `TODO-BETA-060-0.1.1`), or get deprecated in favor of a unified shape? Spec must answer before implementation.
 
 #### Card references
 
 - Dependency: future `DjangoConnectionField` -> `DONE-030-0.0.9` - `DjangoConnectionField` (Relay connection field)
-- Related: `TODO-BETA-059-0.1.1` - `FieldSet` declarative field-level behavior (`Meta.fields_class`)
+- Related: `TODO-BETA-060-0.1.1` - `FieldSet` declarative field-level behavior (`Meta.fields_class`)
 
 <a id="connection_aware_optimizer_planning"></a>
 ### [DONE-033-0.0.9 - Connection-aware optimizer planning](KANBAN.html#connection_aware_optimizer_planning)
@@ -2974,7 +3026,7 @@ blocked on `DONE-030-0.0.9` ([`DjangoConnectionField`](docs/GLOSSARY.md#djangoco
 - [x] Permission-aware Node lookup: `node(id:)` returns `null` for hidden rows; no existence leak via error timing.
 - [x] Six schema-validation diagnostics from Goal 6 raise [`ConfigurationError`](docs/GLOSSARY.md#configurationerror) with the documented messages.
 - [x] `django_strawberry_framework.testing.relay` module exposes `global_id_for(type_cls, id, *, schema=None)` and `decode_global_id(gid, *, schema=None)`.
-- [x] The fakeshop `library` HTTP test suite gains Relay-shaped queries (refetch, paginated connection, cursor round-trip, `totalCount`). Fakeshop `products` activation lights up the full Relay surface as part of `TODO-BETA-066-0.1.5`.
+- [x] The fakeshop `library` HTTP test suite gains Relay-shaped queries (refetch, paginated connection, cursor round-trip, `totalCount`). Fakeshop `products` activation lights up the full Relay surface as part of `TODO-BETA-067-0.1.5`.
 - [x] 100% coverage across the new code paths; tests pin both happy paths and every validation failure.
 
 #### Files likely touched
@@ -2999,11 +3051,11 @@ blocked on `DONE-030-0.0.9` ([`DjangoConnectionField`](docs/GLOSSARY.md#djangoco
 - Dependency: blocked on `DONE-030-0.0.9` (`DjangoConnectionField`). When the connection field lands, this card unblocks and ships in the same release. The post-`1.0.0` "Relay magic" differentiators (type-rename GlobalID migrations, polymorphic connections, refetchable containers) live separately in [`BACKLOG.md`][backlog] item 39 — they extend this story rather than block it. -> `DONE-030-0.0.9` - `DjangoConnectionField` (Relay connection field)
 - Related: `filter: <Type>FilterInput` — generated from [`Meta.filterset_class`](docs/GLOSSARY.md#metafilterset_class) (composes with `DONE-027-0.0.8`) -> `DONE-027-0.0.8` - Filtering subsystem
 - Related: `orderBy: [<Type>OrderInput!]` — generated from [`Meta.orderset_class`](docs/GLOSSARY.md#metaorderset_class) (composes with `DONE-028-0.0.8`) -> `DONE-028-0.0.8` - Ordering subsystem
-- Related: `search: String` — generated from [`Meta.search_fields`](docs/GLOSSARY.md#metasearch_fields) (composes with `TODO-BETA-060-0.1.2` — note: search is `1.0.0` scope, ships after `0.1.0`; until then, search arg is absent) -> `TODO-BETA-060-0.1.2` - `Meta.search_fields` support
+- Related: `search: String` — generated from [`Meta.search_fields`](docs/GLOSSARY.md#metasearch_fields) (composes with `TODO-BETA-061-0.1.2` — note: search is `1.0.0` scope, ships after `0.1.0`; until then, search arg is absent) -> `TODO-BETA-061-0.1.2` - `Meta.search_fields` support
 - Related: `DONE-030-0.0.9` (`DjangoConnectionField`) — **hard dependency**; this card unblocks when DONE-030-0.0.9 lands. -> `DONE-030-0.0.9` - `DjangoConnectionField` (Relay connection field)
 - Related: `DONE-033-0.0.9` (Connection-aware optimizer planning) — ships in parallel; the Node entry points and the relation-as-Connection upgrade both rely on the walker recognizing `edges { node { ... } }`. -> `DONE-033-0.0.9` - Connection-aware optimizer planning
 - Related: `DONE-034-0.0.10` (Permissions subsystem) — soft dependency; the Node entry points respect `get_queryset` immediately and integrate with declared permissions when DONE-034-0.0.10 lands. -> `DONE-034-0.0.10` - Permissions subsystem
-- Related: The fakeshop `library` HTTP test suite gains Relay-shaped queries (refetch, paginated connection, cursor round-trip, `totalCount`). Fakeshop `products` activation lights up the full Relay surface as part of `TODO-BETA-066-0.1.5`. -> `TODO-BETA-066-0.1.5` - Fakeshop GraphQL schema activation
+- Related: The fakeshop `library` HTTP test suite gains Relay-shaped queries (refetch, paginated connection, cursor round-trip, `totalCount`). Fakeshop `products` activation lights up the full Relay surface as part of `TODO-BETA-067-0.1.5`. -> `TODO-BETA-067-0.1.5` - Fakeshop GraphQL schema activation
 
 <a id="django_model_based_globalid_encoding"></a>
 ### [DONE-031-0.0.9 - Django-model-based GlobalID encoding](KANBAN.html#django_model_based_globalid_encoding)
@@ -3098,7 +3150,7 @@ Promoted from BACKLOG.md item 40 and slotted after [`DjangoConnectionField`](doc
 
 #### Planning note
 
-Strawberry analogue of graphene-django's `AdvancedDjangoFilterConnectionField`. Wires the shipped Layer-3 sidecars into a Relay-shaped connection: accepts `filter:` from [`Meta.filterset_class`](docs/GLOSSARY.md#metafilterset_class) (`DONE-027-0.0.8`), `orderBy:` from [`Meta.orderset_class`](docs/GLOSSARY.md#metaorderset_class) (`DONE-028-0.0.8`), plus `first`/`after`/`last`/`before` cursor pagination and opt-in `totalCount`. The `search:` arg activates when `TODO-BETA-060-0.1.2` lands; [`FieldSet`](docs/GLOSSARY.md#fieldset) selection composition is layered in by `TODO-BETA-059-0.1.1`. Central read-side primitive — every Layer-3 argument composes through this field.
+Strawberry analogue of graphene-django's `AdvancedDjangoFilterConnectionField`. Wires the shipped Layer-3 sidecars into a Relay-shaped connection: accepts `filter:` from [`Meta.filterset_class`](docs/GLOSSARY.md#metafilterset_class) (`DONE-027-0.0.8`), `orderBy:` from [`Meta.orderset_class`](docs/GLOSSARY.md#metaorderset_class) (`DONE-028-0.0.8`), plus `first`/`after`/`last`/`before` cursor pagination and opt-in `totalCount`. The `search:` arg activates when `TODO-BETA-061-0.1.2` lands; [`FieldSet`](docs/GLOSSARY.md#fieldset) selection composition is layered in by `TODO-BETA-060-0.1.1`. Central read-side primitive — every Layer-3 argument composes through this field.
 
 #### Dependencies
 
@@ -3141,7 +3193,7 @@ Strawberry analogue of graphene-django's `AdvancedDjangoFilterConnectionField`. 
 - [`FilterSet`](docs/GLOSSARY.md#filterset) (`DONE-027-0.0.8`)
 - [`OrderSet`](docs/GLOSSARY.md#orderset) (`DONE-028-0.0.8`)
 - Relay/interface decisions
-- `FieldSet` — **deferred to `TODO-BETA-059-0.1.1`** (post-Alpha); field-selection composition is layered on after the connection field ships, not a 0.0.9 blocker.
+- `FieldSet` — **deferred to `TODO-BETA-060-0.1.1`** (post-Alpha); field-selection composition is layered on after the connection field ships, not a 0.0.9 blocker.
 - [`DjangoType`](docs/GLOSSARY.md#djangotype) consumer-DX cleanup pass (`DONE-029-0.0.9`) - schema-construction examples are current before `DjangoConnectionField` becomes the new consumer pattern.
 
 #### Card references
@@ -3149,9 +3201,9 @@ Strawberry analogue of graphene-django's `AdvancedDjangoFilterConnectionField`. 
 - Dependency: `FilterSet` (`DONE-027-0.0.8`) -> `DONE-027-0.0.8` - Filtering subsystem
 - Related: Connection-aware optimizer planning is its own follow-up slice (`DONE-033-0.0.9`); the foundation slice did not exercise nested connection prefetch shapes. -> `DONE-033-0.0.9` - Connection-aware optimizer planning
 - Dependency: `OrderSet` (`DONE-028-0.0.8`) -> `DONE-028-0.0.8` - Ordering subsystem
-- Related: once filters/orders are stable. FieldSet integration is deferred to `TODO-BETA-059-0.1.1` — `DjangoConnectionField` ships against the Layer-2 surface in 0.0.9 and gains field-selection composition when FieldSet lands. -> `TODO-BETA-059-0.1.1` - `FieldSet` declarative field-level behavior (`Meta.fields_class`)
+- Related: once filters/orders are stable. FieldSet integration is deferred to `TODO-BETA-060-0.1.1` — `DjangoConnectionField` ships against the Layer-2 surface in 0.0.9 and gains field-selection composition when FieldSet lands. -> `TODO-BETA-060-0.1.1` - `FieldSet` declarative field-level behavior (`Meta.fields_class`)
 - Dependency: `DjangoType` consumer-DX cleanup pass (`DONE-029-0.0.9`) - schema-construction examples are current before `DjangoConnectionField` becomes the new consumer pattern. -> `DONE-029-0.0.9` - `DjangoType` consumer-DX cleanup pass
-- Related: `TODO-BETA-060-0.1.2` - `Meta.search_fields` support
+- Related: `TODO-BETA-061-0.1.2` - `Meta.search_fields` support
 
 <a id="djangotype_consumer_dx_cleanup_pass"></a>
 ### [DONE-029-0.0.9 - `DjangoType` consumer-DX cleanup pass](KANBAN.html#djangotype_consumer_dx_cleanup_pass)

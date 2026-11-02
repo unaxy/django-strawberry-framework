@@ -1500,7 +1500,7 @@ toolbar middleware, the test-client family, and this card's own entries, the
 release-status doc moves, and the `CHANGELOG.md` `0.0.14` section under an
 explicit Slice-3 grant. The bump moved only after the extension and its docs
 were complete. `0.0.14` is a routine patch cut, not a milestone cut — the
-alpha → beta milestone chores belong to [`TODO-ALPHA-057-0.1.0`][kanban].
+alpha → beta milestone chores belong to [`TODO-ALPHA-058-0.1.0`][kanban].
 
 *Rejected cut owners (defer to another card, bump in Slice 1): [rationale companion, Decision 12][rationale-d12].*
 
@@ -2285,7 +2285,7 @@ through these gets its own targeted unit — named owner, never a blanket claim.
   shape.
 - **Fakeshop opting into the extension** (and replacing the probe URLconf
   with the shipped URLconf in the existing live tests) — the
-  fakeshop-activation beta card ([`TODO-BETA-066-0.1.5`][kanban]) is the
+  fakeshop-activation beta card ([`TODO-BETA-067-0.1.5`][kanban]) is the
   natural host
   ([Decision 11](#decision-11--test-strategy-split-live-http-behavior-from-package-tier-mechanics)).
 - **Further knobs** (enable predicates, slow-query thresholds, redaction) —

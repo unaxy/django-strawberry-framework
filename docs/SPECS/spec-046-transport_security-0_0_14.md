@@ -1709,9 +1709,9 @@ mechanism, same "read the base off the class the factory was handed so an upstre
 is tracked for free" property. This is **not** per-instance patching of upstream internals,
 and no upstream module is imported to do it. The same factory also overrides each handler's
 `handle` to contain an exception escaping upstream's message loop (a frame-shape escape closes
-`4400` / `"Failed to parse message"`, anything else `1011` / `"Internal error"`), and the
-legacy handler's `handle_stop` so a `stop` for an operation the connection is not running is a
-no-op.
+`4400` / `"Failed to parse message"`, anything else `1011` / `"Internal error"`). A `stop` for
+an operation the connection is not running is a no-op through upstream's own
+`cleanup_operation` at every supported Strawberry release.
 
 **One failure response, at both checkpoints.** On failed validation the package publishes the
 connection's revocation decision, suppresses the pending frame, closes the whole socket with

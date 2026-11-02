@@ -53,7 +53,7 @@ Field-level behavior wraps the generated resolver. Two alternatives lost.
   can host directly, and it charges every generated field for a feature most fields do not use.
 
 Resolver wrapping costs nothing on an unmanaged field, keeps the cascade in one body, and is
-upstream-parity. [`spec-059-fieldset-0_1_1.md`][spec-059] owns the mechanism.
+upstream-parity. [`spec-060-fieldset-0_1_1.md`][spec-060] owns the mechanism.
 
 ## ``### Borrow `StrawberryDjangoDefinition` ``
 
@@ -131,7 +131,7 @@ objection; the problem is the surface, not the name.
    `OptimizationPlan`.
 
 Annotation dependencies as an optimizer input belong to `FieldSet`'s `Meta.depends_on`
-(`TODO-BETA-059-0.1.1`).
+(`TODO-BETA-060-0.1.1`).
 
 ## ``### Borrow `DjangoListConnection` ``
 
@@ -199,7 +199,7 @@ pipeline refuses to run outside that window rather than commit behind a `data: n
 
 <!-- docs/SPECS/ -->
 [spec-009]: ../spec-009-rich_schema_architecture-0_0_4.md
-[spec-059]: ../spec-059-fieldset-0_1_1.md
+[spec-060]: ../spec-060-fieldset-0_1_1.md
 
 <!-- docs/builder/ -->
 

@@ -19,6 +19,7 @@ from asgiref.sync import sync_to_async
 from django.db import models as djmodels
 from django.db.models.manager import Manager
 from django.http import HttpRequest
+from graphql.pyutils import Path
 from strategy_schemas import make_django_type
 from strawberry import relay
 from strawberry.relay.utils import from_base64, to_base64
@@ -34,6 +35,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.connection import (
     DjangoConnection,
+    _build_relation_connection_resolver,
     _build_windowed_fallback,
     _connection_type_for,
     _consume_window,
@@ -212,6 +214,29 @@ def test_generated_name_graphql_collision_is_the_schema_converters(
         "CategoryType: fields 'itemsConnection' and 'items_connection' both publish the "
         "GraphQL field name 'itemsConnection'",
     )
+
+
+def test_the_relation_connection_resolver_refuses_a_list_index_as_its_response_key() -> None:
+    """The synthesized resolver keys its window by the field's response key, never an index.
+
+    graphql-core keys only list items by ``int``; a field's own path segment is
+    always its ``str`` response key, so an ``int`` there is a forged info, refused
+    before any window probe reads it.
+    """
+    item_type = _make_type("ItemType", Item, ("id", "name", "category"))
+    category_type = _make_type("CategoryType", Category, ("id", "name", "items"))
+    item_definition = registry.get_definition(item_type)
+    assert item_definition is not None
+    resolve = _build_relation_connection_resolver(
+        item_type,
+        "items",
+        "items",
+        category_type,
+        item_definition,
+    )
+    info = make_info(field_name="itemsConnection", path=Path(None, 0, None))
+    with pytest.raises(TypeError, match="expected an instance of str, got int"):
+        _ = resolve(Category(name="c"), info=info)
 
 
 # =============================================================================

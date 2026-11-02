@@ -19,7 +19,7 @@ Relay Node integration,relay-node-integration,the suppressed Relay pk the scalar
 Scalar field conversion,scalar-field-conversion,scalar_route / SCALAR_MAP; the GeneratedField arm and shared unwrap land here
 Specialized scalar conversions,specialized-scalar-conversions,the container arms a GeneratedField's output_field recurses through
 Choice enum generation,choice-enum-generation,convert_choices_to_enum; the choices_enum reuse short-circuits it; GeneratedField blank admission reads output_field.empty_strings_allowed
-Meta.choice_enum_names,metachoice_enum_names,naming override; card 065 owns naming on the far side
+Meta.choice_enum_names,metachoice_enum_names,naming override; card 066 owns naming on the far side
 DjangoFileType,djangofiletype,file wrapper whose generated resolver gains a description; refused as a GeneratedField output
 DjangoImageType,djangoimagetype,image wrapper; same as DjangoFileType
 Relation handling,relation-handling,forward relation fields get the column help_text via _attach_relation_resolvers (description skip set consumer_authored_fields)
@@ -39,5 +39,5 @@ OrderSet,orderset,a generated column is a real column so it orders; no help_text
 auto-typed annotations,auto-typed-annotations,an auto field routes through synthesis and gets the help_text
 Schema introspection management command,schema-introspection-management-command,inspect_django_type label gains a GeneratedField row (in-process call_command test)
 Schema export management command,schema-export-management-command,the Slice 3 SDL check runs export_schema over the fakeshop schema
-Joint version cut,joint-version-cut,card 053 owns the 0.0.15 bump; this card moves nothing
+Joint version cut,joint-version-cut,card 054 owns the 0.0.15 bump; this card moves nothing
 Live-first coverage mandate,live-first-coverage-mandate,every reachable behavior pinned through the fakeshop schema first; import-time refusals stay package tier

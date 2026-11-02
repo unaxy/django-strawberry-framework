@@ -5,7 +5,7 @@ separators, ``apps/kanban/models.py::Card.slug``) and carries no namespace
 prefix, so nothing structural stops two distinct titles from slugifying to one
 anchor ("`FieldSet`" and "Field set" both yield ``fieldset``), or a card slug
 from equalling a glossary term's stored ``anchor`` (the shipped instance: card
-059's original title "`FieldSet`" claimed ``#fieldset``, the glossary term's
+060's original title "`FieldSet`" claimed ``#fieldset``, the glossary term's
 anchor). A duplicate anchor makes deep links resolve to the wrong element; a
 cross-namespace collision makes ``#<anchor>`` ambiguous the moment any render
 surface carries both populations (``KANBAN.html`` already embeds the glossary

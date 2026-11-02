@@ -1,9 +1,10 @@
 # Spec: Upstream parity-gap closure — close the six build-side deltas the `0.1.0` parity audit left, before the beta cut
 
 Planned for `0.0.15` (card `WIP-ALPHA-051-0.0.15`); **this card shares the
-`0.0.15` line with three others (`DONE-050-0.0.15` list-field arguments;
-`TODO-ALPHA-052-0.0.15` debug extraction; `TODO-ALPHA-053-0.0.15` boundary
-hardening + DRY squeeze), so it owns no version bump** — card `053` lands
+`0.0.15` line with four others (`DONE-050-0.0.15` list-field arguments;
+`TODO-ALPHA-052-0.0.15` debug extraction; `TODO-ALPHA-053-0.0.15` the
+`get_queryset` relation info; `TODO-ALPHA-054-0.0.15` boundary hardening +
+DRY squeeze), so it owns no version bump** — card `054` lands
 last and carries the joint cut
 ([Decision 9](#decision-9--joint-0015-cut--this-card-bumps-nothing)).
 This card is a **parity card**: six small, test-pinned items against a named
@@ -89,9 +90,9 @@ and item 6 (`django_strawberry_framework/utils/errors.py::PAGINATION_INVALID_ERR
 on every `django_strawberry_framework/utils/connections.py::PaginationArgumentError`,
 pinned live in `examples/fakeshop/test_query/test_connection_pagination_api.py`).
 The cross-card rows the DoD owes are also already on the board: card
-`TODO-BETA-071-0.1.8`'s upstream-settings table carries the `CAMELCASE_ERRORS`
+`TODO-BETA-072-0.1.8`'s upstream-settings table carries the `CAMELCASE_ERRORS`
 row and its write-surface row carries the `through_defaults` refusal, and card
-`053`'s Slice 5 sentence, GLOSSARY-flip DoD and dependency edge on this card
+`054`'s Slice 5 sentence, GLOSSARY-flip DoD and dependency edge on this card
 are in place (placed at the 2026-08-29 board review, the date this card's own
 DoD row records), though the edge's note repeats a false file-overlap claim
 Slice 5 amends. Item 5's card row is current: its Scope row already describes
@@ -106,8 +107,8 @@ cut**).
 
 Permission caveat: `AGENTS.md` prohibits `CHANGELOG.md` edits without
 explicit permission; **this spec grants none.** The `0.0.15` release entry
-covering this card is written by card `053`'s Slice 5
-([`spec-053`][spec-053] Decision 11), which owns the joint cut for the line.
+covering this card is written by card `054`'s Slice 5
+([`spec-054`][spec-054] Decision 11), which owns the joint cut for the line.
 
 ---
 
@@ -194,7 +195,7 @@ whichever library migration is newest when it is built (Slice 2 took
 `examples/fakeshop/apps/library/migrations/0020_shelf_code_length_topic_length.py`,
 after `0019_distributor_display_name`). Slice 1 adds no migration and goes first (it is the only item that
 changes what a write path accepts); Slice 5 lands last. Each slice rebases
-onto whatever card `053` has landed
+onto whatever card `054` has landed
 on the shared seams by then ([Risks](#risks-and-open-questions)).
 
 - [ ] **Slice 1 — The `through=` guard**
@@ -423,8 +424,8 @@ on the shared seams by then ([Risks](#risks-and-open-questions)).
   - [ ] Re-run and re-read the shipped items against the tree: the key-map
         matrix and its three live rows (item 5), the `PAGINATION_INVALID`
         live pin (item 6); add nothing unless a row is missing.
-  - [ ] Verify the cross-card rows still hold: card `071`'s
-        `CAMELCASE_ERRORS` row and `through_defaults` refusal; card `053`'s
+  - [ ] Verify the cross-card rows still hold: card `072`'s
+        `CAMELCASE_ERRORS` row and `through_defaults` refusal; card `054`'s
         Slice 5 joint-cut sentence, its GLOSSARY-flip DoD, and its
         dependency edge on this card
         ([Decision 11](#decision-11--board-rows-cross-card-rows-are-verified-the-cards-own-stale-rows-are-amended)).
@@ -432,9 +433,9 @@ on the shared seams by then ([Risks](#risks-and-open-questions)).
         [Risks](#risks-and-open-questions) names: `CardItem` 1475, 1476,
         1477, 1481, 1482, 1483, 1484, 1491, 1492, 1496, 1500, 1501, 1502 and
         1504 on this card, and the `CardReference` note on each side of the
-        `051` / `053` dependency edge (129 on this card, 146 on card `053`);
-        append to card `053` the row flagging the SDL-visible `help_text`
-        change for its `CHANGELOG.md` bullet; correct [`spec-053`][spec-053]
+        `051` / `054` dependency edge (129 on this card, 146 on card `054`);
+        append to card `054` the row flagging the SDL-visible `help_text`
+        change for its `CHANGELOG.md` bullet; correct [`spec-054`][spec-054]
         Decision 11's "`051` touches every file in this card's WP list except
         `types/converters.py`" clause and its "so it cannot precede them"
         scope (its own Risks entry gates only Slice 5 on this card).
@@ -462,7 +463,7 @@ whole-schema SDL regression (`help_text`), one duplicate-enum surprise
 keying), and rejections that read as bugs (`PAGINATION_INVALID`). Two of the
 six have since been built under other work; the other four are each a few
 dozen lines in one or two seams. Closing them is what makes the parity claim
-on card `TODO-ALPHA-057-0.1.0` (the beta cut) true rather than asserted.
+on card `TODO-ALPHA-058-0.1.0` (the beta cut) true rather than asserted.
 
 ## Current state
 
@@ -586,12 +587,12 @@ on card `TODO-ALPHA-057-0.1.0` (the beta cut) true rather than asserted.
   `examples/fakeshop/test_query/test_connection_pagination_api.py`. The
   card's `connection.py` / `error_policy.py` file rows belong to this item
   and are spent.
-- **Cross-card rows** — present. Card `071`'s upstream-settings disposition
+- **Cross-card rows** — present. Card `072`'s upstream-settings disposition
   table carries the `CAMELCASE_ERRORS` row (no toggle; keys are always the
   input name; `__all__` kept) and its write-surface row the
   `through_defaults` refusal, whose migration is "a consumer-authored
-  mutation over the through model itself"; card `053`'s Slice 5 sentence
-  counts the line ("shared with the other three `0.0.15` cards"), its
+  mutation over the through model itself"; card `054`'s Slice 5 sentence
+  counts the line ("shared with the other four `0.0.15` cards"), its
   GLOSSARY-flip DoD covers them, and its dependency list carries this card
   (the edge's note repeats the false file-overlap claim; Slice 5 amends it).
 
@@ -616,7 +617,7 @@ on card `TODO-ALPHA-057-0.1.0` (the beta cut) true rather than asserted.
 ## Non-goals
 
 - **No `through_defaults` support.** A write that supplies through-row
-  extras is the refusal homed on card `071`, which stands on the replace-only
+  extras is the refusal homed on card `072`, which stands on the replace-only
   many-to-many contract; this card's guard does not change it. The guard
   turns one failure shape (a required column no insert can fill) into a
   declaration-time refusal; a through that passes the guard can still fail a
@@ -640,7 +641,7 @@ on card `TODO-ALPHA-057-0.1.0` (the beta cut) true rather than asserted.
   does not.
 - **No `GeneratedField` write path.** The column is database-computed;
   Django forbids writing it and so does this package.
-- **No enum naming changes.** Card `TODO-BETA-065-0.1.4` owns
+- **No enum naming changes.** Card `TODO-BETA-066-0.1.4` owns
   `convert_choices_to_enum` naming and the cache on the far side of the beta
   cut; this card lands the reuse behavior that card then names.
 - **No version triplet move, no GLOSSARY status flip, no `CHANGELOG.md`
@@ -711,7 +712,7 @@ pinned (the card's `Verified in upstream` list, re-read for this spec):
   pops a per-row `through_defaults` from each relation input item, builds or
   fetches the through row, sets the extras on it and saves it; without them
   its `im.full_clean()` / `im.save()` hits the same required column. That per-row
-  input shape is exactly what card `071` refuses and documents
+  input shape is exactly what card `072` refuses and documents
   (its remedy: a consumer-authored mutation over the through model); the
   guard is the package's own fail-loud doctrine applied to the shape the
   refusal leaves unwritable.
@@ -896,7 +897,7 @@ on rows already stored. That collision is data-dependent and stays the
   every write sending the relation a non-empty list would hit, whatever the
   rows hold.
 - *Accept a per-row `through_defaults` input* (🍓's `update_m2m` shape) —
-  homed as a refusal on card `071`: it makes a relation argument responsible
+  homed as a refusal on card `072`: it makes a relation argument responsible
   for rows in a third table and contradicts the replace-only many-to-many
   contract; a static per-mutation default cannot express per-row data either.
 - *Extend the predicate to unique-set collisions* — rejected above: the
@@ -1162,7 +1163,7 @@ of truth for everything else the SDL says about a column (type, nullability,
 choices). An opt-in would protect an installed base's existing SDL; this
 package has no such base to protect before the beta cut. The change is SDL-visible on any
 schema exposing a documented column, `auth.User.username` included, so card
-`053`'s `CHANGELOG.md` entry names it (Slice 5 cross-card row).
+`054`'s `CHANGELOG.md` entry names it (Slice 5 cross-card row).
 
 **Alternatives rejected**: 🍓's `FIELD_DESCRIPTION_FROM_HELP_TEXT` opt-in
 (a knob with one right value); ⚛️'s bare `str()` of whatever `help_text`
@@ -1260,7 +1261,7 @@ On a hit the field's `choices_enum` is the enum: wrapped with
 a consumer who already decorated it keeps their name and description), then
 registered in the same `(model, field_name)` cache through
 `django_strawberry_framework/registry.py::TypeRegistry` so sibling types see
-one enum and the card-`065` cache contract is unchanged.
+one enum and the card-`066` cache contract is unchanged.
 
 `strawberry.enum` decorates the consumer's class **in place**, so a
 package-applied definition would survive `TypeRegistry.clear()` and a rebuild
@@ -1295,7 +1296,7 @@ creation naming the column and the enum:
 The serializer-side
 `django_strawberry_framework/rest_framework/serializer_converter.py::_serializer_choice_enum`
 is untouched: a DRF `ChoiceField` carries choices, not a `choices_enum`, and
-its name-keyed cache is a documented separate key space (`spec-053`
+its name-keyed cache is a documented separate key space (`spec-054`
 Decision 8).
 
 `django-choices-field` joins `[dependency-groups].dev` in `pyproject.toml`
@@ -1305,7 +1306,7 @@ gets no `require_optional_module` guard (there is nothing to require —
 absence is the plain generated path, not an error), and gets **no**
 `[project.optional-dependencies]` extra: a consumer has the package installed
 by the time a model declares the field, so an extra would advertise an
-install the package never needs, and card `053`'s four-extra count stands.
+install the package never needs, and card `054`'s four-extra count stands.
 
 **Alternatives rejected**:
 
@@ -1327,7 +1328,7 @@ install the package never needs, and card `053`'s four-extra count stands.
   teardown contract exists to prevent.
 - *Adding a `choices` extra* — see above.
 - *Resolving GraphQL name collisions between a consumer enum and a generated
-  one* — card `065` owns naming; a collision is Strawberry's own duplicate
+  one* — card `066` owns naming; a collision is Strawberry's own duplicate
   type error today and stays so.
 
 ### Decision 7 — `FieldError` keying is the shipped key-map contract; no toggle
@@ -1358,29 +1359,29 @@ carries `extensions.code = "PAGINATION_INVALID"`
 listed in the production error policy's pass-through table; as a
 `GraphQLError` it passes the [structural error
 classification][glossary-structural-error-classification] untouched. Card
-`057`'s open question is closed against this card. Slice 5 re-reads the live
+`058`'s open question is closed against this card. Slice 5 re-reads the live
 pin and the policy row; no code.
 
 ### Decision 9 — Joint `0.0.15` cut — this card bumps nothing
 
 This card shares `0.0.15` with cards `050` (Done), `052`
-([`spec-052`][spec-052]) and `053` ([`spec-053`][spec-053]), so the line is a
+([`spec-052`][spec-052]), `053` and `054` ([`spec-054`][spec-054]), so the line is a
 [joint version cut][glossary-joint-version-cut] and the **last** card to
-land owns the bump. That is card `053`, by its own declared dependency on
-this card and on `052` (`spec-053` Decision 11); its Risks entry gates its
+land owns the bump. That is card `054`, by its own declared dependency on
+this card and on `052` (`spec-054` Decision 11); its Risks entry gates its
 Slice 5 on both. The
 version triplet (`django_strawberry_framework/__init__.py::__version__`,
 `tests/base/test_init.py`, the GLOSSARY package-version row) already reads
 `0.0.15` for the open line; this card's Slice 5 verifies it and moves
 nothing, writes no `CHANGELOG.md` entry, and flips no GLOSSARY status. New
 rows this card adds carry the planned-for-`0.0.15` status: card `050`
-flipped its own rows to `shipped (0.0.15)` at its wrap, but `spec-053`'s
+flipped its own rows to `shipped (0.0.15)` at its wrap, but `spec-054`'s
 Slice 5 DoD already owns the flip for every row on the line that does not
 yet read shipped, and the flip belongs to the cut that releases the version,
 so a second owner here would only make the flip order-dependent.
 
-**Alternative rejected**: cutting `0.0.15` here — would leave `052` and
-`053` shipping under a version already released, the exact failure the
+**Alternative rejected**: cutting `0.0.15` here — would leave `052`, `053`
+and `054` shipping under a version already released, the exact failure the
 joint-cut rule exists to prevent.
 
 ### Decision 10 — TODO anchors stage the unbuilt slices
@@ -1395,8 +1396,8 @@ slice lands whole. The sites are named in the
 
 ### Decision 11 — Board rows: cross-card rows are verified, the card's own stale rows are amended
 
-The card's DoD owes two rows on other cards: card `071`'s `CAMELCASE_ERRORS`
-disposition row and card `053`'s amended Slice 5 sentence, GLOSSARY-flip DoD
+The card's DoD owes two rows on other cards: card `072`'s `CAMELCASE_ERRORS`
+disposition row and card `054`'s amended Slice 5 sentence, GLOSSARY-flip DoD
 and dependency edge. Both are already on the board (placed at the
 2026-08-29 board review, the date this card's own DoD row records). Slice 5
 re-reads them against the final shape of this card and edits only on a
@@ -1410,9 +1411,9 @@ and escapes, the `help_text` scope, the `choices_enum` refusals, the
 rows, the sequencing notes, the spec path). Each departure is a scheduled
 amendment of a named `CardItem` or `CardReference`, listed with its reason
 in [Risks](#risks-and-open-questions) and owed by Slice 5 and the DoD; none
-is left for the spec to reinterpret silently. Card `053` gains one row
+is left for the spec to reinterpret silently. Card `054` gains one row
 flagging the SDL-visible `help_text` change for its `CHANGELOG.md` bullet,
-and `spec-053` Decision 11's file-overlap clause and "cannot precede them"
+and `spec-054` Decision 11's file-overlap clause and "cannot precede them"
 scope are corrected. Every card-body
 edit is made in the kanban DB and re-rendered, never in the generated
 exports.
@@ -1425,7 +1426,7 @@ exports.
 | 2 | `utils/relations.py`, `types/converters.py`, `filters/sets.py`, `filters/base.py`, `utils/_array_field.py`, `keyset.py`, `optimizer/plans.py`, `utils/querysets.py`, `management/commands/inspect_django_type.py`, library models + migration | one computed column per generated field, a conversion unwrap with three refusals, the filter column selected off upstream's merged `try_dbfield` map and output-class reads, the request-time and keyset reads, a label row, two fixture columns | MEDIUM — the filter side has its own field-class dispatch that the scalar route does not reach |
 | 3 | `types/base.py`, `types/finalizer.py`, `types/resolvers.py`, `mutations/inputs.py`, `forms/inputs.py`, `rest_framework/serializer_converter.py`, library models + migration | one accessor, a type-creation check, `description=` threaded into the Phase-2 attachers, the Phase-2.5 sibling and three input builders | MEDIUM — the scalar `strawberry.field(description=…)` assignment is the one new shape, and live SDL changes ([Risks](#risks-and-open-questions)) |
 | 4 | `types/converters.py`, `pyproject.toml` / `uv.lock`, library models + migration | a detection branch, two refusals, a registry teardown, a dev pin, a fixture column | LOW — dead branch when the package is absent |
-| 5 | docs, DB, board, `spec-053` | verification, card amendments, fold-in | mechanical |
+| 5 | docs, DB, board, `spec-054` | verification, card amendments, fold-in | mechanical |
 
 Parameterize-don't-average obligations:
 
@@ -1580,12 +1581,12 @@ validator. Existing owners that must not be duplicated:
   where the generated path is correct.
 - **A card row the build falsifies** — amended in the kanban DB in Slice 5
   (Decision 11), never reinterpreted in the spec.
-- **Concurrent sessions and card `053`**: `spec-053`'s Risks entry gates
+- **Concurrent sessions and card `054`**: `spec-054`'s Risks entry gates
   only its Slice 5 on this card (its Decision 11's "cannot precede them"
   reads as whole-card; Slice 5 corrects that scope), and its Status already
   shows C13, B3, C11 and D1–D3 landed
   on shared seams, so each slice re-verifies its target files against `HEAD`
-  and rebases onto what `053` has landed (collisions in
+  and rebases onto what `054` has landed (collisions in
   [Risks](#risks-and-open-questions)).
 - **ASCII-only in `.py`**; trailing-comma layout; ruff format + check after
   every edit (maintainer-invoked gates only); symbol-qualified doc references
@@ -1727,17 +1728,17 @@ schema cannot express or an import-time refusal the live schema cannot load.
   hint, no extra); GLOSSARY row under Choice enum generation.
 - Slice 5: `docs/TREE.md` regenerated (module docstrings change);
   `KANBAN.md` / `KANBAN.html` from the DB after the card amendments;
-  [`spec-053`][spec-053] Decision 11's file-overlap clause and "cannot
+  [`spec-054`][spec-054] Decision 11's file-overlap clause and "cannot
   precede them" scope corrected. **Not touched**: `CHANGELOG.md`, the version
   triplet, GLOSSARY statuses,
   `README.md` / `GOAL.md` / `TODAY.md` release-status prose (all ride
-  `spec-053` Slice 5).
+  `spec-054` Slice 5).
 
 ## Risks and open questions
 
 - **Card rows the spec departs from — scheduled amendments.** Slice 5 amends
   each of these rows in the kanban DB (on card `051` unless marked), then
-  re-renders, and corrects the `spec-053` sentence listed last. Preferred
+  re-renders, and corrects the `spec-054` sentence listed last. Preferred
   answer: amend all fourteen `CardItem` rows and both `CardReference` notes
   at wrap, each to the wording this spec ships. Fallback: if a row's text moved concurrently,
   amend the current text to the same facts and record the re-read in the
@@ -1793,32 +1794,32 @@ schema cannot express or an import-time refusal the live schema cannot load.
     and a `GeneratedField` has three escapes (exclusion, an annotation-only
     override, a `SCALAR_MAP` entry); restate as two declarations that fail
     as written.
-  - 1501 (dependencies_note): "card `053`'s four-DRY-axes file list covers …
+  - 1501 (dependencies_note): "card `054`'s four-DRY-axes file list covers …
     every file this card touches except `types/converters.py`" is false:
     beyond `types/converters.py`, this card touches
     `management/commands/inspect_django_type.py`, `pyproject.toml` and
     `uv.lock`, and its own files-touched rows name `auth/mutations.py` and
     `error_policy.py`, none of them on that list (`CardItem` 1090).
-    `pyproject.toml` is in card `053`'s files (`CardItem` 1088 names it for
+    `pyproject.toml` is in card `054`'s files (`CardItem` 1088 names it for
     the import-linter config and extras), but not in the four-axes list the
     row quotes. "must be sequenced behind this one" overstates:
-    `spec-053`'s Risks entry gates only its Slice 5 on this card.
+    `spec-054`'s Risks entry gates only its Slice 5 on this card.
   - 1502 (dependencies_note): "This card lands first" overstates for the
-    same reason; only card `053`'s Slice 5 waits for this card.
-  - `CardReference` 129 (this card → `053`) and 146 (`053` → this card),
-    the dependency edge's notes: both say card `053` shares every file in
+    same reason; only card `054`'s Slice 5 waits for this card.
+  - `CardReference` 129 (this card → `054`) and 146 (`054` → this card),
+    the dependency edge's notes: both say card `054` shares every file in
     this card's files-likely-touched list except `types/converters.py`,
-    false for the files named under 1501; restate the edge as "card `053`'s
+    false for the files named under 1501; restate the edge as "card `054`'s
     Slice 5 cut waits for this card", with no overlap claim.
-  - `spec-053` Decision 11 (not a board row, corrected in the same pass):
+  - `spec-054` Decision 11 (not a board row, corrected in the same pass):
     "`051` touches every file in this card's WP list except
-    `types/converters.py`" is quantified over card `053`'s list and false
+    `types/converters.py`" is quantified over card `054`'s list and false
     both ways (`types/converters.py` is not on that list and is the file
     this card changes most; most of the list, such as `orders/sets.py`,
     `sets_mixins.py`, `keyset.py`, `optimizer/*` and `types/relay.py`, this
     card never touches), and its "so it cannot precede them" reads as
     whole-card where its own Risks entry gates only Slice 5 on this card
-    (card `052` alone holds all of card `053`'s slices, per `CardItem`
+    (card `052` alone holds all of card `054`'s slices, per `CardItem`
     1111).
   - 1504 (note): names `docs/SPECS/spec-051-parity_gaps-0_0_15.md`; the spec
     is `docs/spec-051-parity_gap_closure-0_0_15.md` (until the next spec's
@@ -1830,33 +1831,33 @@ schema cannot express or an import-time refusal the live schema cannot load.
   1484 as above. Fallback: if the maintainer narrows, drop the input-side
   description (one kwargs line per builder) and keep the refusals, which
   guard a wire contract rather than add surface.
-- **Sequencing and collisions with card `053`.** `spec-053`'s Risks entry
+- **Sequencing and collisions with card `054`.** `spec-054`'s Risks entry
   gates only its Slice 5 on this card, and its Status shows C13, B3, C11
   and D1–D3 already landed on shared seams. Preferred answer: each slice of this card rebases
-  onto whatever `053` has landed when it starts; the later of two colliding
+  onto whatever `054` has landed when it starts; the later of two colliding
   items carries the other's change: whatever B5 folds into
-  `_attach_generated_resolvers` (053 Slice 2) must carry the `description=`
+  `_attach_generated_resolvers` (054 Slice 2) must carry the `description=`
   parameter both attachers gain (this card's Slice 3) if they are among
   what it folds, or this card threads it through the fold if the fold
-  lands first; C10's column-conversion sharing (053 Slice 3) and the
+  lands first; C10's column-conversion sharing (054 Slice 3) and the
   description kwargs in `build_mutation_input` / `forms/inputs.py` (this
   card's Slice 3) likewise; C8's `iter_relation_path` in
-  `utils/relations.py` (053 Slice 3) shares a module with
+  `utils/relations.py` (054 Slice 3) shares a module with
   `required_through_columns` (this card's Slice 1) but no function;
-  `spec-053` Decision 11's file-overlap clause is corrected in Slice 5
-  (first bullet). Fallback: if the maintainer re-orders so `053` wraps
+  `spec-054` Decision 11's file-overlap clause is corrected in Slice 5
+  (first bullet). Fallback: if the maintainer re-orders so `054` wraps
   first, the joint-cut ownership follows whichever card lands last and this card's Slice 5 takes the version
-  verification `053` would have done.
-- **The fifth soft dependency against card `053`'s "four extras" DoD.**
+  verification `054` would have done.
+- **The fifth soft dependency against card `054`'s "four extras" DoD.**
   Preferred answer: no extra for `django-choices-field` (Decision 6), so
-  `053`'s count stands and no cross-card row is owed for it. Fallback: if the
-  maintainer wants the extra, it lands in `053`'s A3 block and this card's
-  Slice 5 appends a row to card `053` changing "four extras" to five.
+  `054`'s count stands and no cross-card row is owed for it. Fallback: if the
+  maintainer wants the extra, it lands in `054`'s A3 block and this card's
+  Slice 5 appends a row to card `054` changing "four extras" to five.
 - **SDL-visible change on the live schema.** Slice 3 adds descriptions to
   `UserType.username` and `RegisterInput.username` (Django's lazy
   `help_text`) and to every documented column a consumer schema exposes.
-  Preferred answer: card `053`'s `CHANGELOG.md` entry names it, through a
-  row Slice 5 appends to card `053`. Fallback: if card `053` has already cut,
+  Preferred answer: card `054`'s `CHANGELOG.md` entry names it, through a
+  row Slice 5 appends to card `054`. Fallback: if card `054` has already cut,
   the maintainer adds the bullet to the released entry by hand (this spec
   grants no `CHANGELOG.md` permission).
 - **The scalar `strawberry.field(description=…)` assignment** (Decision 5)
@@ -1902,16 +1903,16 @@ schema cannot express or an import-time refusal the live schema cannot load.
 
 ## Out of scope (explicitly tracked elsewhere)
 
-- `through_defaults` support — refused on card `071` (migration and
+- `through_defaults` support — refused on card `072` (migration and
   adoption guides); its remedy is a consumer-authored mutation over the
   through model.
 - `convert_choices_to_enum` naming and the enum-reuse cache contract — card
-  `065`.
+  `066`.
 - The `0.0.15` version cut, `CHANGELOG.md` entry and GLOSSARY status flips —
-  card `053` ([`spec-053`][spec-053]).
+  card `054` ([`spec-054`][spec-054]).
 - The debug-extension extraction on the same line — card `052`
   ([`spec-052`][spec-052]).
-- The beta cut and the parity claim it asserts — card `057`; this card is
+- The beta cut and the parity claim it asserts — card `058`; this card is
   what makes the claim true.
 
 ## Definition of done
@@ -1956,10 +1957,10 @@ schema cannot express or an import-time refusal the live schema cannot load.
 - [ ] `CardItem` 1475, 1476, 1477, 1481, 1482, 1483, 1484, 1491, 1492,
       1496, 1500, 1501, 1502 and 1504 and `CardReference` 129 and 146
       amended in the kanban DB to the shipped wording and re-rendered; card
-      `053` carries the row flagging the SDL-visible `help_text` change;
-      `spec-053` Decision 11's file-overlap clause and "cannot precede them"
+      `054` carries the row flagging the SDL-visible `help_text` change;
+      `spec-054` Decision 11's file-overlap clause and "cannot precede them"
       scope corrected.
-- [ ] Card `071`'s `CAMELCASE_ERRORS` row and card `053`'s amended Slice 5
+- [ ] Card `072`'s `CAMELCASE_ERRORS` row and card `054`'s amended Slice 5
       sentence, GLOSSARY-flip DoD and dependency edge re-read and confirmed
       at wrap.
 - [ ] Version triplet verified at `0.0.15`, unmoved.
@@ -1971,7 +1972,7 @@ schema cannot express or an import-time refusal the live schema cannot load.
       regenerated; `import_spec_terms --check` green.
 - [ ] Full suite green under `fail_under = 100`; live-first placement
       respected. No version triplet move, GLOSSARY status flip or
-      `CHANGELOG.md` entry — all three ride card `053`'s joint `0.0.15` cut.
+      `CHANGELOG.md` entry — all three ride card `054`'s joint `0.0.15` cut.
 
 <!-- LINK DEFINITIONS -->
 
@@ -2024,7 +2025,7 @@ schema cannot express or an import-time refusal the live schema cannot load.
 
 <!-- docs/SPECS/ -->
 [spec-052]: SPECS/spec-052-debug_extraction-0_0_15.md
-[spec-053]: SPECS/spec-053-boundary_dry_squeeze-0_0_15.md
+[spec-054]: SPECS/spec-054-boundary_dry_squeeze-0_0_15.md
 
 <!-- docs/builder/ -->
 

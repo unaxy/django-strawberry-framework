@@ -935,8 +935,8 @@ class DjangoSchema(strawberry.Schema):
             "execution_context_class": execution_context_class,
             "config": config,
         }
-        # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result aliases
-        # in an ImportError fallback, so Schema.__init__'s signature carries Unknown; the other
+        # basedpyright: Strawberry's schema/_graphql_core.py aliases graphql-core's bare generic
+        # Executor, so Schema.__init__'s execution_context_class carries Unknown; the other
         # arguments are forwarded verbatim, and ``extensions`` carries the instances Strawberry
         # accepts at run time but leaves out of its annotation
         try:

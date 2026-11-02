@@ -1,10 +1,10 @@
 # Spec: Extract `DjangoDebugExtension` into the standalone `django-strawberry-debug` package — the framework keeps a `[debug]` extra and a guarded re-export
 
 Planned for `0.0.15` (card `TODO-ALPHA-052-0.0.15`); **this card shares the
-`0.0.15` line with three others (`050` list-field arguments, `051`
-parity-gap closure, and the boundary+DRY card `053`, which lands last and
-owns the version bump)**
-([Decision 7](#decision-7--joint-0015-cut--card-053-owns-the-version-bump)).
+`0.0.15` line with four others (`050` list-field arguments, `051`
+parity-gap closure, `053` the `get_queryset` relation info, and the
+boundary+DRY card `054`, which lands last and owns the version bump)**
+([Decision 7](#decision-7--joint-0015-cut--card-054-owns-the-version-bump)).
 This card moves the
 [`DjangoDebugExtension`][glossary-djangodebugextension] — the
 [response-extensions debug middleware][glossary-response-extensions-debug-middleware]
@@ -18,7 +18,7 @@ re-export in `extensions/__init__.py` so the shipped import path
 keeps working byte-for-byte.
 
 Why extraction is right **here** when the package-split investigation
-(card `053`, the boundary+DRY card) rejected splitting the optimizer: the
+(card `054`, the boundary+DRY card) rejected splitting the optimizer: the
 verdicts flow from the same evidence standard, applied to opposite facts.
 The optimizer is bidirectionally fused to the type system; the debug
 extension imports stdlib + Django + graphql-core + `typing_extensions`
@@ -47,8 +47,8 @@ extra, re-shape the live tier), Slice 3
 
 Permission caveat: `AGENTS.md` prohibits `CHANGELOG.md` edits without
 explicit permission; this spec grants no such permission at any slice. The
-`0.0.15` release entry belongs to card `053`'s joint cut
-([Decision 7](#decision-7--joint-0015-cut--card-053-owns-the-version-bump)).
+`0.0.15` release entry belongs to card `054`'s joint cut
+([Decision 7](#decision-7--joint-0015-cut--card-054-owns-the-version-bump)).
 
 ---
 
@@ -147,8 +147,8 @@ new repository; Slices 2–3 land here).
         in the same change.
   - [ ] The version triplet and the `CHANGELOG.md` entry are **not** touched
         here: the triplet already reads `0.0.15`, and the release notes ride
-        card `053`'s joint `0.0.15` cut
-        ([Decision 7](#decision-7--joint-0015-cut--card-053-owns-the-version-bump)).
+        card `054`'s joint `0.0.15` cut
+        ([Decision 7](#decision-7--joint-0015-cut--card-054-owns-the-version-bump)).
         Glossary status flips for this card's surface, and the release-status
         doc moves, stay deferred to that cut; the `README.md` edits above are
         the extraction's own install/feature wording, not release status.
@@ -215,10 +215,10 @@ evidence — is exactly right for this module, on the same evidence standard.
   (from 0.316.0).
 - Card `DONE-044-0.0.14` shipped the extension in the `0.0.14`
   [joint version cut][glossary-joint-version-cut].
-- The boundary+DRY card (`TODO-ALPHA-053-0.0.15`) is sequenced behind THIS
+- The boundary+DRY card (`TODO-ALPHA-054-0.0.15`) is sequenced behind THIS
   card and writes its import-linter contract for `extensions/debug` against
-  the post-extraction tree. All four `0.0.15` cards ship as one
-  release ([Decision 7](#decision-7--joint-0015-cut--card-053-owns-the-version-bump)).
+  the post-extraction tree. All five `0.0.15` cards ship as one
+  release ([Decision 7](#decision-7--joint-0015-cut--card-054-owns-the-version-bump)).
 
 ## Goals
 
@@ -447,19 +447,20 @@ debug-only; it does not travel with the feature. The `0.322.2` half is the
 framework's own connection page arithmetic, which the debug extension does
 not use.
 
-### Decision 7 — Joint `0.0.15` cut — card `053` owns the version bump
+### Decision 7 — Joint `0.0.15` cut — card `054` owns the version bump
 
 This card shares `0.0.15` with cards `050` (list-field arguments), `051`
-(parity-gap closure), and the boundary+DRY card `TODO-ALPHA-053-0.0.15`
-([`spec-053`][spec-053]), so the line is a
+(parity-gap closure), `053` (the `get_queryset` relation info), and the
+boundary+DRY card `TODO-ALPHA-054-0.0.15`
+([`spec-054`][spec-054]), so the line is a
 [joint version cut][glossary-joint-version-cut] and **no slice of this spec
 moves version state**. Under that rule the last card to land owns the bump,
-and the ordering is fixed rather than incidental: card `053` declares a
+and the ordering is fixed rather than incidental: card `054` declares a
 dependency on this card and writes its import-linter contracts against the
-post-extraction tree, so `053` is necessarily last. The version triplet
+post-extraction tree, so `054` is necessarily last. The version triplet
 (`django_strawberry_framework/__init__.py::__version__`,
 `tests/base/test_init.py`, the GLOSSARY package-version row) already reads
-`0.0.15` for the open development line; card `053`'s Slice 5 carries the
+`0.0.15` for the open development line; card `054`'s Slice 5 carries the
 release-status doc moves, the glossary status flips, and the `CHANGELOG.md`
 release notes — for every card on the line.
 
@@ -480,7 +481,7 @@ which has no `[project.optional-dependencies]` block — the `[debug]`
 extra is its first member), removed in the change that ships the slice.
 None are placed (Status: PLANNED). This card places **no** anchor on a
 version-triplet site — those belong to
-card `053`'s joint cut (Decision 7).
+card `054`'s joint cut (Decision 7).
 
 ## Implementation plan
 
@@ -562,7 +563,7 @@ Sequencing inside the card is strict: Slice 2 must not land until Slice 1's
   extra), `README.md` (feature list + install), `docs/README.md`,
   `docs/TREE.md` regen (`extensions/` subtree shrinks by the moved module),
   `KANBAN.md`/`KANBAN.html` (DB + regen). Glossary status flips,
-  `TODAY.md` and `CHANGELOG.md` ride card `053`'s cut (Decision 7).
+  `TODAY.md` and `CHANGELOG.md` ride card `054`'s cut (Decision 7).
 
 ## Risks and open questions
 
@@ -588,7 +589,7 @@ Sequencing inside the card is strict: Slice 2 must not land until Slice 1's
 
 ## Out of scope (explicitly tracked elsewhere)
 
-- The boundary+DRY card (`TODO-ALPHA-053-0.0.15`) — depends on this card;
+- The boundary+DRY card (`TODO-ALPHA-054-0.0.15`) — depends on this card;
   its contracts are written against the post-extraction tree, and it owns the
   joint `0.0.15` cut for the whole line (Decision 7).
 - The spec-044 follow-on list (async SQL capture, knobs, redaction) — moves
@@ -621,7 +622,7 @@ Sequencing inside the card is strict: Slice 2 must not land until Slice 1's
 - [ ] Slice 3 shipped: GLOSSARY/README/TREE fold-in, card flipped Done,
       `KANBAN.md`/`KANBAN.html` regenerated from the DB, `import_spec_terms`
       green — with no version triplet, status flip, or `CHANGELOG.md` edit,
-      all of which ride card `053`'s joint `0.0.15` cut (Decision 7).
+      all of which ride card `054`'s joint `0.0.15` cut (Decision 7).
 
 <!-- LINK DEFINITIONS -->
 
@@ -652,7 +653,7 @@ Sequencing inside the card is strict: Slice 2 must not land until Slice 1's
 
 <!-- docs/SPECS/ -->
 [spec-044]: spec-044-debug_extension-0_0_14.md
-[spec-053]: spec-053-boundary_dry_squeeze-0_0_15.md
+[spec-054]: spec-054-boundary_dry_squeeze-0_0_15.md
 
 <!-- docs/builder/ -->
 

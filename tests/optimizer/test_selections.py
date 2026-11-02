@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated
 
+import pytest
 import strawberry
 from django.utils.text import camel_case_to_spaces
 from graphql import parse
@@ -19,6 +20,7 @@ from graphql.language.ast import (
     FragmentDefinitionNode,
     FragmentSpreadNode,
     OperationDefinitionNode,
+    SelectionNode,
 )
 from strawberry import Info
 from strawberry.schema.config import StrawberryConfig
@@ -32,6 +34,7 @@ from django_strawberry_framework.optimizer._context import (
 )
 from django_strawberry_framework.optimizer.selections import (
     PYTHON_NAME_ATTR,
+    _stamp,
     ast_child_selections,
     ast_to_converted_selections,
     connection_has_next_page_selected,
@@ -130,6 +133,26 @@ def test_ast_child_selections_returns_children_or_empty() -> None:
     field_a, field_d = ast_child_selections(operation)
     assert {c.name.value for c in _field_nodes(ast_child_selections(field_a))} == {"b", "c"}
     assert ast_child_selections(field_d) == ()  # scalar leaf, no selection_set.
+
+
+def test_stamp_refuses_a_selection_node_the_parser_never_builds() -> None:
+    """A selection-set member other than a field or a fragment is a forged AST, refused.
+
+    graphql-core's parser builds only field, inline-fragment and fragment-spread
+    nodes into a selection set, so the field branch reads a ``FieldNode`` and any
+    other ``SelectionNode`` raises before a selection is stamped.
+    """
+
+    class _ForeignSelection(SelectionNode):
+        __slots__ = ()
+
+    selection = SelectedField(name="x", directives={}, arguments={}, selections=[])
+    with pytest.raises(
+        TypeError,
+        match="expected an instance of FieldNode, got _ForeignSelection",
+    ):
+        _stamp(raw_info_of(make_info()), [selection], [_ForeignSelection()], None)
+    assert not hasattr(selection, PYTHON_NAME_ATTR)
 
 
 def test_resolve_unvisited_fragment_resolves_once_then_dedups() -> None:

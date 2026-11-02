@@ -662,7 +662,7 @@ Alternatives rejected: [rationale][rationale-d1].
   test module, where its soft-dependency fixture lives.
 - **Fakeshop runtime surface.** No settings, URL, or app changes.
 - **Migration-guide prose.** The two import-diff rows and the three graphene
-  deltas are handed to [`TODO-BETA-071-0.1.8`][kanban]
+  deltas are handed to [`TODO-BETA-072-0.1.8`][kanban]
   ([Out of scope](#out-of-scope-explicitly-tracked-elsewhere)).
 
 Alternatives rejected: [rationale][rationale-d2].
@@ -1453,7 +1453,7 @@ fallback weighing is in the [rationale][rationale-risks].
   with its communicator tests (Decision 2).
 - **The debug-toolbar async smoke test** — the toolbar's own test module
   (Decision 2); this card ships the vehicle only.
-- **The migration guide itself** — [`TODO-BETA-071-0.1.8`][kanban]; this card
+- **The migration guide itself** — [`TODO-BETA-072-0.1.8`][kanban]; this card
   hands it two import-diff rows (`strawberry_django.test.client.TestClient` →
   `django_strawberry_framework.testing.TestClient`;
   `graphene_django.utils.testing.GraphQLTestCase` →
@@ -1506,7 +1506,7 @@ fallback weighing is in the [rationale][rationale-risks].
       naming the class it claims; assertions and `CaptureQueriesContext`
       counts are unchanged by the move (Decision 11).
 - [ ] The migration-guide handoff rows are recorded for
-      [`TODO-BETA-071-0.1.8`][kanban]
+      [`TODO-BETA-072-0.1.8`][kanban]
       ([Out of scope](#out-of-scope-explicitly-tracked-elsewhere)).
 - [ ] Slice 3 doc updates land per [Doc updates](#doc-updates).
 - [ ] **No slice bumps the version** — the joint `0.0.14` cut owns it

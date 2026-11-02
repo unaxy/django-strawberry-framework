@@ -1014,18 +1014,24 @@ def test_resolve_model_returns_none_when_type_not_in_schema() -> None:
     assert _resolve_model_from_return_type(info) is None
 
 
-def test_resolve_model_returns_none_when_definition_has_no_origin() -> None:
-    """When the schema's type definition lacks an ``origin`` (e.g. a scalar / interface), returns None."""
+def test_resolve_model_returns_none_when_the_origin_is_not_a_django_type() -> None:
+    """A return type whose definition's origin is a plain Strawberry type names no model."""
 
-    def _definition_without_origin(_name: str) -> SimpleNamespace:
-        return SimpleNamespace()
+    @strawberry.type
+    class Plain:
+        value: str
 
-    fake_strawberry_schema = SimpleNamespace(get_type_by_name=_definition_without_origin)
-    info = SimpleNamespace(
-        return_type=SimpleNamespace(name="SomeType"),
-        schema=SimpleNamespace(_strawberry_schema=fake_strawberry_schema),
-    )
-    assert _resolve_model_from_return_type(_as_partial_resolve_info(info)) is None
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def plain(self) -> Plain:
+            return Plain(value="")
+
+    schema = strawberry.Schema(query=Query)
+    plain_type = schema._schema.get_type("Plain")
+    assert isinstance(plain_type, GraphQLObjectType)
+    info = raw_info_of(make_info())._replace(return_type=plain_type, schema=schema._schema)
+    assert _resolve_model_from_return_type(info) is None
 
 
 # ---------------------------------------------------------------------------

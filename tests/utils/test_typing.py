@@ -22,6 +22,7 @@ from graphql import (
     GraphQLNonNull,
     GraphQLObjectType,
     GraphQLScalarType,
+    GraphQLSchema,
     GraphQLString,
     InlineFragmentNode,
     OperationDefinitionNode,
@@ -322,10 +323,15 @@ def test_strawberry_schema_from_info_and_schema() -> None:
     assert strawberry_schema_from_schema(inner) is inner
     null_schema = SimpleNamespace(_strawberry_schema=None)
     assert strawberry_schema_from_schema(null_schema) is null_schema
-    wrapped = SimpleNamespace(schema=SimpleNamespace(_strawberry_schema=inner))
-    assert strawberry_schema_from_info(wrapped) is inner
     assert strawberry_schema_from_info(SimpleNamespace(schema=SimpleNamespace())) is None
     assert strawberry_schema_from_info(SimpleNamespace()) is None
+
+
+def test_strawberry_schema_from_info_refuses_a_backref_that_is_not_a_strawberry_schema() -> None:
+    """Only Strawberry files ``_strawberry_schema``; any other value there is a defect, not a schema."""
+    forged = SimpleNamespace(schema=SimpleNamespace(_strawberry_schema=object()))
+    with pytest.raises(TypeError, match="expected an instance of Schema, got object"):
+        _ = strawberry_schema_from_info(forged)
 
 
 def test_strawberry_schema_from_info_reads_both_info_flavors() -> None:
@@ -344,47 +350,19 @@ def test_strawberry_schema_from_info_reads_both_info_flavors() -> None:
     assert strawberry_schema_from_info(SimpleNamespace(schema=None)) is None
 
 
-def test_schema_config_from_info_prefers_wrapped_then_direct() -> None:
-    """Plan-time ``_strawberry_schema.config`` wins over bare ``schema.config``."""
-    wrapped = SimpleNamespace(
-        schema=SimpleNamespace(
-            _strawberry_schema=SimpleNamespace(config=SimpleNamespace(relay_max_results=7)),
-            config=SimpleNamespace(relay_max_results=99),
-        ),
-    )
-    wrapped_config = schema_config_from_info(wrapped)
-    assert wrapped_config is not None
-    assert wrapped_config.relay_max_results == 7
-    direct = SimpleNamespace(schema=SimpleNamespace(config=SimpleNamespace(name_converter="nc")))
-    direct_config = schema_config_from_info(direct)
-    assert direct_config is not None
-    assert direct_config.name_converter == "nc"
-    assert schema_config_from_info(SimpleNamespace(schema=SimpleNamespace())) is None
-    assert schema_config_from_info(SimpleNamespace()) is None
-    assert schema_config_from_info(None) is None
+def test_schema_config_from_info_reads_the_strawberry_schema_behind_both_info_flavors() -> None:
+    """Both resolver ``info`` flavors over one schema answer that schema's ``config``.
 
-
-def test_schema_config_from_info_explicit_none_wrapped_falls_back_to_direct() -> None:
-    """An explicitly present ``_strawberry_schema=None`` falls through to ``schema.config``.
-
-    ``getattr`` cannot distinguish a missing attribute from an attribute whose
-    value is ``None``, so this pins the contract for the value-is-``None`` case:
-    the wrapped dig yields ``None`` and ``schema_config_from_info`` must still
-    reach the bare ``schema.config`` fallback rather than short-circuiting.
+    A graphql-core schema Strawberry did not build files no ``_strawberry_schema``, so it
+    has no config to answer, and neither has an info with no schema.
     """
-    info = SimpleNamespace(
-        schema=SimpleNamespace(
-            _strawberry_schema=None,
-            config=SimpleNamespace(relay_max_results=42),
-        ),
-    )
-    assert strawberry_schema_from_info(info) is None
-    config = schema_config_from_info(info)
-    assert config is not None
-    assert config.relay_max_results == 42
-    # And when both the wrapped dig and the direct config are absent, ``None``.
-    no_config = SimpleNamespace(schema=SimpleNamespace(_strawberry_schema=None))
-    assert schema_config_from_info(no_config) is None
+    info = make_info()
+    config = info.schema.config
+    assert schema_config_from_info(info) is config
+    assert schema_config_from_info(raw_info_of(info)) is config
+    assert schema_config_from_info(raw_info_of(info)._replace(schema=GraphQLSchema())) is None
+    assert schema_config_from_info(SimpleNamespace(schema=None)) is None
+    assert schema_config_from_info(None) is None
 
 
 def test_unwrap_container_type_accepts_exact_wrapper_depth() -> None:

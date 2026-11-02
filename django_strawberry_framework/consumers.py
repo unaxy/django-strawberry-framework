@@ -523,15 +523,10 @@ if TYPE_CHECKING:
             """Upstream's ``subscribe`` frame handler (upstream passes the frame positionally)."""
 
     class _GraphQLWSHandlerShape(_HandlerShape):
-        """The legacy ``graphql-ws`` handler's admission hooks and its task registry."""
-
-        tasks: Mapping[object, object]
+        """The legacy ``graphql-ws`` handler's admission hook."""
 
         async def handle_start(self, _message: Mapping[str, object], /) -> None:
             """Upstream's ``start`` frame handler (upstream passes the frame positionally)."""
-
-        async def handle_stop(self, _message: Mapping[str, object], /) -> None:
-            """Upstream's ``stop`` frame handler (upstream passes the frame positionally)."""
 
     class WebSocketAdapterShape:
         """The WebSocket adapter a package consumer installs: its consumer, its sends, its close."""
@@ -1513,7 +1508,7 @@ def _is_transport_ws_handler_base(base: object) -> TypeIs[type[_TransportWSHandl
 
 def _is_graphql_ws_handler_base(base: object) -> TypeIs[type[_GraphQLWSHandlerShape]]:
     """Whether ``base`` can be the legacy ``graphql-ws`` handler base (its hooks exist)."""
-    return _declares_hooks(base, ("handle", "handle_start", "handle_stop"))
+    return _declares_hooks(base, ("handle", "handle_start"))
 
 
 def _is_websocket_adapter_base(base: object) -> TypeIs[type[WebSocketAdapterShape]]:
@@ -1625,29 +1620,6 @@ def build_revalidating_consumer_class(
             if not await revalidate_operation_actor(self):
                 return
             await super().handle_start(message)
-
-        # ``message`` is upstream's ``StopMessage`` TypedDict; see above.
-        @override
-        async def handle_stop(self, message: Mapping[str, object]) -> None:
-            """Stop the named operation; a ``stop`` for an id not running is a no-op.
-
-            A client may name an operation this connection is not running: one
-            that already finished on its own, one it already stopped, or one it
-            never started. None of them is a malformed frame, so none of them may
-            end the connection - the same answer transport-ws's own
-            ``cleanup_operation`` gives an unknown ``complete``. Upstream's legacy
-            ``cleanup_operation`` indexes ``self.tasks`` unconditionally through
-            strawberry-graphql 0.327.1 and early-returns for an unknown id from
-            0.327.2, so the membership test here gives every supported release
-            the later answer. ``self.tasks`` is the registry to test: upstream
-            creates the operation's task entry in ``handle_start`` before the task
-            registers its result source, and removes both together. A frame with
-            no ``id``, or an unhashable one, still raises out of the loop and
-            takes the invalid-message close.
-            """
-            if message["id"] not in self.tasks:
-                return
-            await super().handle_stop(message)
 
         @override
         async def handle(self) -> None:
