@@ -142,7 +142,7 @@ def _isolate_registry() -> Iterator[None]:
     """Clear the global registry around every walker test (order-independence).
 
     ``plan_optimizations`` resolves a relation's target type - and that type's
-    ``get_queryset`` (the O6 ``Prefetch``-downgrade probe) - from the global registry,
+    ``get_queryset`` (the ``Prefetch``-downgrade probe) - from the global registry,
     so a test must not inherit registry state from a neighbour. The cardinality-
     dispatch tests below assert the no-custom-``get_queryset`` path (forward FK ->
     plain ``select_related``), which only holds when no real type is registered for the
@@ -1006,15 +1006,10 @@ def test_fragment_spread_from_multiple_sites_does_not_double_prefetch() -> None:
         "CategoryType",
         selections=[_sel("items")],
     )
-    # Both spreads reference "items". The walker descends into each
-    # fragment independently, but _merge_aliased_selections inside the
-    # fragment-level walk deduplicates.
+    # Both spreads select "items".
     plan = plan_optimizations([spread_a, spread_b], Category)
-    # Each fragment spread triggers a separate recursive _walk_selections
-    # call, so we get two entries for "items". This is the O2 behavior;
-    # O4 may refine deduplication when nested Prefetch objects land.
-    # Assert that the relation *is* in the plan and the count
-    # is at most 2 (one per spread).
+    # Fragment inlining flattens both spreads into two "items" selections,
+    # which _merge_aliased_selections merges into one branch: one prefetch.
     assert [prefetch.prefetch_to for prefetch in _prefetches(plan.prefetch_related)] == ["items"]
 
 
@@ -1164,7 +1159,7 @@ def test_plan_merges_aliased_selections() -> None:
 
 
 # ---------------------------------------------------------------------------
-# O5 - only() projection
+# only() projection
 # ---------------------------------------------------------------------------
 
 
@@ -1206,7 +1201,7 @@ def test_plan_collects_related_scalar_only_fields_from_fragment() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B2 - Forward-FK-id elision
+# Forward-FK-id elision
 # ---------------------------------------------------------------------------
 
 
@@ -1287,7 +1282,7 @@ def test_plan_does_not_elide_when_fragment_contains_relation_selection() -> None
 
 
 def test_plan_does_not_elide_forward_fk_when_target_has_custom_get_queryset() -> None:
-    """O6 visibility hooks win over FK-id elision."""
+    """Visibility hooks win over FK-id elision."""
     registry.clear()
     try:
 
@@ -1432,7 +1427,7 @@ def _listed_one_to_one_pk_plan(
 
 
 def test_plan_elides_forward_fk_into_a_relay_target_listing_its_one_to_one_pk() -> None:
-    """B2: listing a one-to-one primary key keeps a Relay ``{ id }``-only child elided.
+    """Listing a one-to-one primary key keeps a Relay ``{ id }``-only child elided.
 
     The relation resolver the framework installs under the listed key's name
     builds the ``patron`` field, never the GlobalID, so the target counts no
@@ -1453,7 +1448,7 @@ def _profile_postal_node_id(_cls: type[object], root: PatronProfile, *, info: ob
 
 
 def test_plan_does_not_elide_into_a_listed_one_to_one_pk_target_with_custom_resolve_id() -> None:
-    """B2: a consumer ``resolve_id`` on a target keyed by a listed relation keeps the join."""
+    """A consumer ``resolve_id`` on a target keyed by a listed relation keeps the join."""
     plan = _listed_one_to_one_pk_plan(
         {"resolve_id": classmethod(_profile_postal_node_id)},
     )
@@ -1661,7 +1656,7 @@ def test_has_custom_id_resolver_fallback_matches_definition_path() -> None:
 
 
 # ---------------------------------------------------------------------------
-# O6 - get_queryset + Prefetch downgrade
+# get_queryset + Prefetch downgrade
 # ---------------------------------------------------------------------------
 
 
@@ -1944,7 +1939,7 @@ def test_child_hook_without_resolve_info_fails_loudly() -> None:
 
 
 # ---------------------------------------------------------------------------
-# O4 - nested prefetch chains
+# Nested prefetch chains
 # ---------------------------------------------------------------------------
 
 
@@ -5688,9 +5683,9 @@ def test_mutation_id_only_relation_still_records_elision() -> None:
 
 
 # TODO(BACKLOG polymorphic_interface_connections - the abstract-return optimizer entry card): add
-# G3 walker narrowing pins here. The named test roster is spec-035's G3 deferred test plan; the
-# classifier they pin is spec-035 Decision 6, and they are unreachable until that card builds the
-# abstract-return production-entry contract (R1).
+# the fragment-narrowing walker pins here. The named test roster is spec-035's deferred test
+# plan; the classifier they pin is spec-035 Decision 6, and they are unreachable until that card
+# builds the abstract-return production-entry contract (R1).
 # Pseudocode: synthesize interface/union-like selection trees and registered
 # DjangoType definitions; assert sibling concrete fragments are skipped whole,
 # inherited-interface fragments still inline, same-named sibling relations do

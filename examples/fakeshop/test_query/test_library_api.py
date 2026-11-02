@@ -559,14 +559,13 @@ def test_library_optimizer_selects_book_shelf_in_http_query() -> None:
 
 @pytest.mark.django_db
 def test_library_evaluated_queryset_not_re_executed_over_http() -> None:
-    """G1 (spec-035): a resolver that evaluates its own queryset still runs ONE SQL query.
+    """A resolver that evaluates its own queryset still runs ONE SQL query (spec-035 Decision 3).
 
     ``all_library_branches_eager_eval`` does ``if not queryset: return []``,
     whose ``bool(queryset)`` populates ``_result_cache``. The optimizer's
     evaluated-queryset guard passes the already-executed queryset through
-    instead of cloning it and applying ``.only(...)`` - which, pre-G1, would
-    re-execute the SQL (two queries for one logical read). The guard makes it
-    one.
+    instead of cloning it and applying ``.only(...)``, a clone that would
+    re-execute the SQL (two queries for one logical read).
     """
     _seed_library_graph()
 
@@ -583,7 +582,7 @@ def test_library_evaluated_queryset_not_re_executed_over_http() -> None:
     assert response_json(response) == {
         "data": {"allLibraryBranchesEagerEval": [{"name": "Central"}]},
     }
-    # G1: exactly one query - the consumer's own ``bool(queryset)`` evaluation.
+    # Exactly one query - the consumer's own ``bool(queryset)`` evaluation.
     # Without the evaluated-queryset guard, the optimizer's ``.only()`` clone
     # would re-execute and this would be two. Filter to the branch table so
     # session reads cannot satisfy the count.
@@ -663,9 +662,8 @@ async def test_async_library_root_evaluating_in_its_body_is_refused_on_the_loop(
 def test_scalar_only_branch_list_projects_name_without_a_join_or_unused_column() -> None:
     """A scalar-only list applies ``only()``: one branch query, no JOIN, unused ``city`` omitted.
 
-    Replacement for the package ``skips_when_no_relations`` / O5 query-count
-    halves: live SQL, not a plan-slot tuple, pins that selecting ``name`` does
-    not join ``library_shelf`` and does not project ``city``.
+    Live SQL, not a plan-slot tuple, pins that selecting ``name`` does not join
+    ``library_shelf`` and does not project ``city``.
     """
     _seed_library_graph()
 
@@ -15202,7 +15200,7 @@ def test_nested_books_connection_has_next_page_without_edges() -> None:
 
     The Relay invariant ("``hasNextPage`` MUST resolve correctly even when the
     consumer didn't request ``edges``") asserted LIVE over /graphql/ on the
-    windowed nested path spec-033 introduces - the root-field live twin
+    windowed nested path spec-033 introduces - the root-field live test
     (``test_has_next_page_correct_when_edges_unrequested``) and the package window
     pins cover the other paths. Each genre carries 3 books; ``first: 2`` with no
     ``edges`` selected still reports ``hasNextPage`` True, and ``first: 3`` (an
@@ -16214,7 +16212,6 @@ def _seed_branch_with_shelf_codes(name: str, codes: tuple[str, ...]) -> None:
 def test_nested_or_related_branch_constrains_parent_live() -> None:
     """A ``RelatedFilter`` nested in ``or`` constrains the parent over /graphql/.
 
-    The live twin of ``test_apply_sync_nested_or_branch_applies_related_constraint``:
     ``_normalize_input`` strips related-branch keys from a child branch's form
     data, so without ``_q_for_branch`` re-deriving the related constraint,
     ``or: [{ shelves: {...} }]`` would silently widen to the whole parent set.
@@ -16247,7 +16244,6 @@ def test_nested_or_related_branch_constrains_parent_live() -> None:
 def test_many_side_related_filter_returns_each_parent_once_live() -> None:
     """A many-side related branch matching N shelves yields the parent ONCE.
 
-    The live twin of ``test_related_filter_on_many_side_relation_returns_each_parent_once``:
     ``_apply_related_constraints`` restricts the parent through a row-preserving
     subquery rather than a fan-out join, so a branch
     whose TWO shelves both match comes back exactly once - no duplicate node in
@@ -16280,8 +16276,7 @@ def test_many_side_related_filter_returns_each_parent_once_live() -> None:
 def test_related_filter_identical_direct_and_inside_logic_tree_live() -> None:
     """The same related branch answers identically direct and wrapped in ``and``.
 
-    The live twin of ``test_related_filter_answers_identically_direct_and_inside_logic_tree``:
-    the direct path constrains via ``_apply_related_constraints`` while the
+    The direct path constrains via ``_apply_related_constraints`` while the
     logic-tree path routes through ``_q_for_branch``; both build the same
     restriction subquery, so two aliases in ONE request - one
     direct, one wrapped in ``and`` - must return identical rows.
@@ -16345,8 +16340,7 @@ def _introspect_type(type_name: str) -> JSONObject:
 def test_book_genres_m2m_renders_as_list_shape_live() -> None:
     """``BookType.genres`` (forward M2M) renders as ``[GenreType!]!`` over HTTP.
 
-    The live twin of ``test_m2m_schema_shape_builds_with_real_library_models``:
-    the M2M relation surfaces as a non-null list of non-null ``GenreType`` -
+    The M2M relation surfaces as a non-null list of non-null ``GenreType`` -
     asserted through real introspection rather than ``schema._schema.type_map``.
     """
     genres_type = _field_type(_introspect_type("BookType"), "genres")
@@ -16383,7 +16377,6 @@ def test_shelf_books_relation_resolves_to_primary_book_type_over_http() -> None:
 def test_relay_genre_type_emits_node_interface_and_global_id_live() -> None:
     """A Relay-declared ``GenreType`` exposes the ``Node`` interface and ``id: ID!``.
 
-    The live twin of ``test_relay_declared_type_emits_node_interface_and_global_id``:
     ``GenreType`` declares ``interfaces = (relay.Node,)``, so introspection shows
     the ``Node`` interface and its ``id`` renders as the GlobalID scalar ``ID!``.
     """
@@ -16399,8 +16392,7 @@ def test_relay_genre_type_emits_node_interface_and_global_id_live() -> None:
 def test_mixed_relay_and_non_relay_no_interface_bleed_live() -> None:
     """A non-Relay ``ShelfType`` does NOT implement ``Node`` (no interface bleed).
 
-    The live twin of ``test_mixed_relay_and_non_relay_types_introspect_cleanly``:
-    the library schema ships Relay ``GenreType`` and non-Relay ``ShelfType``;
+    The library schema ships Relay ``GenreType`` and non-Relay ``ShelfType``;
     introspection proves ``Node`` lands on the Relay type only and ``ShelfType.id``
     is NOT the GlobalID scalar (no GlobalID bleed onto the plain type).
     """
@@ -16498,7 +16490,6 @@ def test_branches_via_list_field_default_resolver_applies_get_queryset_live() ->
 def test_scalar_or_branch_unions_matching_rows_live() -> None:
     """A scalar ``or`` over two leaf clauses returns the deduplicated union.
 
-    The live twin of ``test_filter_queryset_unions_or_branch``:
     ``or: [{ name }, { city }]`` ORs the two scalar leaves, so a branch matching
     EITHER arm appears and a branch matching neither is absent. The existing
     live suite covers ``and`` and ``not`` on branches but not a plain scalar
@@ -16533,7 +16524,6 @@ def test_scalar_or_branch_unions_matching_rows_live() -> None:
 def test_scalar_and_branch_intersects_matching_rows_live() -> None:
     """A pure two-scalar ``and`` intersects the leaf clauses.
 
-    The live twin of ``test_filter_queryset_intersects_and_branch``:
     ``and: [{ name }, { city }]`` ANDs the two scalar leaves, so only the branch
     matching BOTH survives while branches matching a single arm are excluded.
     ``test_library_books_filter_combines_and_or_not`` mixes a ``not`` clause and
@@ -16572,8 +16562,7 @@ def test_scalar_and_branch_intersects_matching_rows_live() -> None:
 def test_malformed_nested_branch_form_raises_filter_invalid_live() -> None:
     """A malformed filter nested inside ``and`` is validated per-branch, not dropped.
 
-    The live twin of ``test_q_for_branch_validates_child_form_and_raises_on_malformed_subbranch``:
-    the pipeline runs ``_validate_form_or_raise`` on every nested arm's instance
+    The pipeline runs ``_validate_form_or_raise`` on every nested arm's instance
     (``_probe_logic_arms``, which ``_q_for_branch`` then reuses), so a value
     failing the ``email_must_have_at_sign`` validator inside an ``and`` branch
     surfaces ``FILTER_INVALID`` with the nested field error - rather than
@@ -16620,9 +16609,9 @@ def test_malformed_nested_branch_form_raises_filter_invalid_live() -> None:
 def _seed_genre_book_loan_graph() -> None:
     """Seed two genres -> books -> loans for the consumer-prefetch tests.
 
-    G1 owns two books (one with a loan, one without); G2 owns one book with two
-    loans. The variety makes an N+1 regression explode the query count while the
-    correct flat plan stays constant.
+    Genre ``"G1"`` owns two books (one with a loan, one without); genre ``"G2"``
+    owns one book with two loans. The variety makes an N+1 regression explode the
+    query count while the correct flat plan stays constant.
     """
     branch = models.Branch.objects.create(name="Main", city="Boston")
     shelf = models.Shelf.objects.create(code="S-1", topic="permanent collection", branch=branch)
@@ -16663,8 +16652,7 @@ def _assert_genre_book_loan_shape(rows: list[object]) -> None:
 def test_consumer_descendant_prefetch_stays_flat_over_http() -> None:
     """A consumer ``prefetch_related("books__loans")`` cooperates with the optimizer.
 
-    The live twin of ``test_b8_consumer_descendant_prefetch_does_not_raise``: the
-    consumer descendant prefetch overlaps the optimizer's Genre -> books -> loans
+    The consumer descendant prefetch overlaps the optimizer's Genre -> books -> loans
     plan; Django raises "'books' lookup was already seen with a different
     queryset" for one lookup prefetched through two querysets. Over HTTP the
     operation must return the full nested graph AND stay flat -- one query each for genres, the
@@ -16699,8 +16687,7 @@ def test_consumer_descendant_prefetch_stays_flat_over_http() -> None:
 def test_consumer_exact_plus_descendant_prefetch_stays_flat_over_http() -> None:
     """A consumer ``prefetch_related("books", "books__loans")`` cooperates too.
 
-    The live twin of ``test_b8_consumer_exact_plus_descendant_prefetch_does_not_raise``:
-    declaring both the exact relation and a descendant of it must reconcile with
+    Declaring both the exact relation and a descendant of it must reconcile with
     the optimizer plan without colliding, returning the same intact graph at the
     same flat query count.
     """

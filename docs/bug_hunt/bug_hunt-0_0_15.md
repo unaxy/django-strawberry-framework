@@ -835,7 +835,7 @@ Progress: 229 done, 10 to do.
   `test_forward_resolver_nullable_dangling_fk_resolves_to_none`). Found hunting `types/resolvers.py` (Sep-3)
 - [x] 150. Low. `types/resolvers.py` reverse one-to-one: Sep-3 widened the catch so a plain `AttributeError` from a
   hostile descriptor also became `None`. Closed as not a bug: main catches the target's `DoesNotExist` only, so a
-  consumer's own `AttributeError` keeps raising (`test_o1_reverse_one_to_one_propagates_plain_attribute_error`). Found
+  consumer's own `AttributeError` keeps raising (`test_reverse_one_to_one_propagates_plain_attribute_error`). Found
   hunting `types/resolvers.py` (Sep-3)
 - [x] 151. Low. Nested forward FK / OneToOne resolvers (and the other relation resolvers) never called `check_deadline`
   before touching the database. Done as bug_hunt-0_0_15_2.md item 12 (`8d4f66bd`): every package seam that reaches the

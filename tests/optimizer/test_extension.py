@@ -268,7 +268,7 @@ def _force_unregister_after_finalize(type_cls: type[DjangoType]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# End-to-end query-count tests (O3 unskips the first two)
+# End-to-end query-count tests
 # ---------------------------------------------------------------------------
 
 
@@ -374,7 +374,7 @@ def test_optimizer_plans_merged_duplicate_root_field_nodes_plan_shape() -> None:
 
 @pytest.mark.django_db
 def test_optimizer_elides_forward_fk_id_only_selection_plan_shape() -> None:
-    """B2 plan-state inspection: ``category { id }`` produces an elision plan.
+    """Plan-state inspection: ``category { id }`` produces an elision plan.
 
     The behavioral half (1 SQL query, no JOIN, id round-trips) is pinned by
     ``examples/fakeshop/test_query/test_scalars_api.py::test_scalars_optimizer_fk_id_elision_for_self_fk_in_http_query``.
@@ -431,7 +431,7 @@ def test_optimizer_elides_forward_fk_id_only_selection_plan_shape() -> None:
 
 @pytest.mark.django_db
 def test_optimizer_elides_forward_fk_id_only_selection_for_each_alias_plan_shape() -> None:
-    """B2/O4 plan-state inspection: duplicate aliases each register their own elision key.
+    """Plan-state inspection: duplicate aliases each register their own elision key.
 
     The behavioral half (1 SQL query, no JOIN, both aliases return the same
     FK id) is pinned by
@@ -491,7 +491,7 @@ def test_optimizer_elides_forward_fk_id_only_selection_for_each_alias_plan_shape
 
 @pytest.mark.django_db
 def test_optimizer_does_not_elide_forward_fk_when_extra_scalar_selected_plan_shape() -> None:
-    """B2 plan-state inspection: extra target scalar forces ``select_related`` over elision.
+    """Plan-state inspection: extra target scalar forces ``select_related`` over elision.
 
     The behavioral half (1 SQL query via JOIN, extra scalar populates from
     the joined row) is pinned by
@@ -549,13 +549,13 @@ def test_optimizer_does_not_elide_forward_fk_when_extra_scalar_selected_plan_sha
 def test_optimizer_does_not_elide_forward_fk_when_target_has_custom_get_queryset_plan_shape() -> (
     None
 ):
-    """B2/O6 plan-state inspection: custom ``get_queryset`` forces ``Prefetch`` even on id-only.
+    """Plan-state inspection: custom ``get_queryset`` forces ``Prefetch`` even on id-only.
 
     The behavioral half (2 SQL queries, no JOIN on the root, prefetched
     SELECT with the consumer filter applied, inactive rows resolve to
     ``null`` on the source) is pinned by these HTTP tests in
     ``examples/fakeshop/test_query/test_scalars_api.py``:
-    ``test_scalars_optimizer_o6_downgrade_to_prefetch_for_custom_get_queryset_in_http_query``
+    ``test_scalars_optimizer_downgrade_to_prefetch_for_custom_get_queryset_in_http_query``
     and ``test_scalars_custom_get_queryset_filters_inactive_tag_to_null_in_http_query``.
     This test keeps the package-internal plan-state assertions: even though
     only ``id`` is selected on the FK target, the optimizer must NOT elide
@@ -651,7 +651,7 @@ def test_optimizer_passes_through_unregistered_return_type(
 
 
 # ---------------------------------------------------------------------------
-# G1 (spec-035): evaluated-queryset guard internals
+# Evaluated-queryset guard internals (spec-035 Decision 3)
 #
 # Wire SQL (one query, no re-execution) is
 # ``examples/fakeshop/test_query/test_library_api.py::test_library_evaluated_queryset_not_re_executed_over_http``.  # noqa: E501 - citation path cannot wrap
@@ -664,7 +664,7 @@ def test_optimizer_passes_through_unregistered_return_type(
 
 @pytest.mark.django_db
 def test_evaluated_root_queryset_does_not_record_a_plan_cache_miss() -> None:
-    """The G1 guard short-circuits before ``_get_or_build_plan``, so misses stay 0.
+    """The evaluated-queryset guard short-circuits before ``_get_or_build_plan``, so misses stay 0.
 
     The one statement an evaluated root costs is live: ``allLibraryBranchesEagerEval``
     and, with the consumer's own ``select_related`` relation served from its JOIN,
@@ -815,7 +815,7 @@ def test_builds_plan_is_true_only_when_apply_to_would_run_the_walker(
 
 @pytest.mark.django_db
 def test_resolve_async_passes_through_evaluated_queryset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Async mirror: the await -> ``_optimize`` wrapper inherits the G1 guard.
+    """Async mirror: the await -> ``_optimize`` wrapper inherits the evaluated-queryset guard.
 
     The async path (``_async_optimize`` awaits the resolver then calls
     ``_optimize_async``, which hands an evaluated queryset straight to
@@ -913,7 +913,7 @@ async def test_resolve_hops_a_sync_root_under_the_async_executor_only_to_build_a
 
 
 # ---------------------------------------------------------------------------
-# O3: type-tracing through graphql-core wrappers
+# Type-tracing through graphql-core wrappers
 # ---------------------------------------------------------------------------
 
 
@@ -1029,7 +1029,7 @@ def test_resolve_model_returns_none_when_definition_has_no_origin() -> None:
 
 
 # ---------------------------------------------------------------------------
-# O3: root-field gate
+# Root-field gate
 # ---------------------------------------------------------------------------
 
 
@@ -1065,7 +1065,7 @@ def test_resolve_passes_through_non_root_resolvers() -> None:
 
 
 # ---------------------------------------------------------------------------
-# O3: async resolver parity
+# Async resolver parity
 # ---------------------------------------------------------------------------
 
 
@@ -1101,7 +1101,7 @@ def test_resolve_handles_async_root_resolver() -> None:
 
 
 # ---------------------------------------------------------------------------
-# O3: defensive branches in _optimize
+# Defensive branches in _optimize
 # ---------------------------------------------------------------------------
 
 
@@ -1184,7 +1184,7 @@ def test_optimize_returns_original_queryset_for_empty_plan(
 
 
 # ---------------------------------------------------------------------------
-# O3: on_execute execution-frame lifecycle
+# on_execute execution-frame lifecycle
 # ---------------------------------------------------------------------------
 
 
@@ -1201,7 +1201,7 @@ def test_on_execute_sets_and_resets_context_var() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B1: plan cache
+# Plan cache
 # ---------------------------------------------------------------------------
 
 
@@ -1875,7 +1875,7 @@ def test_directive_var_family_no_directives() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B1: plan-cache key hygiene for nested pagination variables (spec-033
+# Plan-cache key hygiene for nested pagination variables (spec-033
 # Decision 7). Nested ``first``/``last``/``before``/``after`` variables are
 # baked into windowed prefetch plans, so their values must key the
 # cache; root pagination variables stay out (root slicing is post-plan).
@@ -2464,7 +2464,7 @@ def test_collect_cache_relevant_var_names_unifies_both_families_through_fragment
 
 
 # ---------------------------------------------------------------------------
-# B3: N+1 detection (strictness API)
+# N+1 detection (strictness API)
 # ---------------------------------------------------------------------------
 
 
@@ -3158,7 +3158,7 @@ def test_cache_key_includes_fragment_spread_directive_variable_value() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B6: Schema-build-time optimization audit
+# Schema-build-time optimization audit
 # ---------------------------------------------------------------------------
 
 
@@ -3399,7 +3399,7 @@ def test_check_schema_hidden_fields_not_flagged() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B4: the Meta.optimizer_hints option
+# The Meta.optimizer_hints option
 # ---------------------------------------------------------------------------
 
 
@@ -3428,7 +3428,7 @@ def test_optimizer_hints_non_hint_value_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B5: plan introspection via context
+# Plan introspection via context
 # ---------------------------------------------------------------------------
 
 
@@ -4308,7 +4308,7 @@ def test_empty_plan_still_stashed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# O5 - only() projection
+# only() projection
 # ---------------------------------------------------------------------------
 
 
@@ -4353,7 +4353,7 @@ def test_optimizer_applies_only_for_selected_scalars() -> None:
 
 
 # ---------------------------------------------------------------------------
-# O6 - get_queryset + Prefetch downgrade
+# get_queryset + Prefetch downgrade
 # ---------------------------------------------------------------------------
 
 
@@ -4480,13 +4480,13 @@ def test_optimizer_does_not_cache_custom_get_queryset_prefetch_plans() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B8: queryset optimization diffing
+# Queryset optimization diffing
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-def test_b8_consumer_select_related_does_not_mutate_cached_plan() -> None:
-    """A consumer's pre-applied ``select_related`` must not mutate B1's cached plan."""
+def test_consumer_select_related_does_not_mutate_cached_plan() -> None:
+    """A consumer's pre-applied ``select_related`` must not mutate the cached plan."""
     services.seed_data(1)
 
     class CategoryType(DjangoType):
@@ -4516,10 +4516,10 @@ def test_b8_consumer_select_related_does_not_mutate_cached_plan() -> None:
     finalize_django_types()
     schema = strawberry.Schema(query=Query, extensions=[lambda: ext])
 
-    # First request warms the plan cache. B5 stashes the POST-diff plan
-    # (consumer already applied ``select_related("category")``, so that
-    # directive is empty on the introspection stash) while B1's cache keeps
-    # the pre-diff plan.
+    # First request warms the plan cache. The introspection stash holds the
+    # POST-diff plan (consumer already applied ``select_related("category")``,
+    # so that directive is empty there) while the plan cache keeps the
+    # pre-diff plan.
     ctx1 = SimpleNamespace()
     result1 = schema.execute_sync(
         "{ allItems { name category { name } } }",
@@ -4548,7 +4548,7 @@ def test_b8_consumer_select_related_does_not_mutate_cached_plan() -> None:
 
 
 @pytest.mark.django_db
-def test_b8_consumer_prefetch_object_suppresses_optimizer_entry() -> None:
+def test_consumer_prefetch_object_suppresses_optimizer_entry() -> None:
     """A consumer ``Prefetch("items", queryset=Item.objects.all())`` keeps its slot."""
     services.seed_data(1)
 
@@ -4593,9 +4593,9 @@ def test_b8_consumer_prefetch_object_suppresses_optimizer_entry() -> None:
         context_value=ctx,
     )
     assert result.errors is None
-    # B5 stashes the POST-diff plan (publish runs after B8 reconciliation) so
-    # introspection matches what was actually applied: consumer won, optimizer
-    # ``items`` Prefetch is gone from the stashed directives.
+    # The introspection stash holds the POST-diff plan (publish runs after the
+    # consumer-wins diff) so introspection matches what was actually applied:
+    # consumer won, optimizer ``items`` Prefetch is gone from the stashed directives.
     plan = _stashed_plan(ctx)
     assert [getattr(entry, "prefetch_to", entry) for entry in plan.prefetch_related] == []
     # The queryset that came out of ``_optimize`` carries exactly the
@@ -4606,19 +4606,18 @@ def test_b8_consumer_prefetch_object_suppresses_optimizer_entry() -> None:
     assert lookups == (consumer_pf,)
 
 
-# The two B8 behavior-only collision tests (descendant prefetch and
-# exact-plus-descendant) live in the fakeshop suite:
-# examples/fakeshop/test_query/test_library_api.py::
+# The consumer descendant and exact-plus-descendant prefetch collisions are
+# pinned live in examples/fakeshop/test_query/test_library_api.py::
 #   test_consumer_descendant_prefetch_stays_flat_over_http and
-#   test_consumer_exact_plus_descendant_prefetch_stays_flat_over_http.
-# Those run the real Genre -> books -> loans consumer prefetch through /graphql/
-# and add HTTP + flat-query-count pressure the synthetic in-process schema could
-# not. The plan/diff-asserting B8 tests below stay package-internal (they inspect
-# the optimized queryset's _prefetch_related_lookups, which HTTP cannot expose).
+#   test_consumer_exact_plus_descendant_prefetch_stays_flat_over_http,
+# which run the real Genre -> books -> loans consumer prefetch through /graphql/
+# under a flat query count. The plan/diff-asserting consumer-prefetch tests
+# below stay package-internal (they inspect the optimized queryset's
+# _prefetch_related_lookups, which HTTP cannot expose).
 
 
 @pytest.mark.django_db
-def test_b8_consumer_plain_string_upgraded_to_optimizer_prefetch() -> None:
+def test_consumer_plain_string_upgraded_to_optimizer_prefetch() -> None:
     """A consumer's plain ``"items"`` string is replaced by the optimizer's nested ``Prefetch``."""
     services.seed_data(1)
 
@@ -5004,8 +5003,8 @@ def test_optimize_delegates_to_the_shared_apply_to_core(monkeypatch: pytest.Monk
 
     Per spec-030 Decision 11 the plan-build-and-apply tail lives in
     ``DjangoOptimizerExtension.apply_to`` (shared with the connection field's
-    ``apply_connection_optimization``). The B1-B8 suite in this module
-    is the broad guard; this focused test pins that a non-connection
+    ``apply_connection_optimization``). The rest of this module is the
+    broad guard; this focused test pins that a non-connection
     root field still has its plan built and applied (``select_related`` lands)
     and that ``_optimize`` delegates to ``apply_to``.
     """
@@ -5355,7 +5354,7 @@ def test_cascading_target_downgrades_join_to_prefetch() -> None:
 
 @pytest.mark.django_db
 def test_plan_with_cascading_hook_uncacheable() -> None:
-    """A plan baking a cascading hook is ``cacheable = False``; B1 counters unaffected otherwise.
+    """A plan baking a cascading hook is ``cacheable = False``; other plans still cache.
 
     The shipped rule marks ANY plan baking a custom ``get_queryset`` uncacheable
     (it keys on the *presence* of a custom hook, not on whether the hook reads the
@@ -5366,8 +5365,8 @@ def test_plan_with_cascading_hook_uncacheable() -> None:
 
     The non-cascading half pins that this uncacheability does NOT contaminate
     ordinary plan caching: a SIBLING non-cascading schema run twice on its own
-    extension produces the normal ``miss-then-hit`` (``size == 1``, B1 counters
-    unaffected for non-cascading types). Separate extension instances keep the two
+    extension produces the normal ``miss-then-hit`` (``size == 1``, plan-cache
+    counters unaffected for non-cascading types). Separate extension instances keep the two
     counter streams independently observable.
     """
     services.seed_data(1)
@@ -5466,7 +5465,7 @@ def test_plan_with_cascading_hook_uncacheable() -> None:
 
 # TODO(BACKLOG polymorphic_interface_connections - the abstract-return optimizer entry card): add
 # the strictness no-false-fire package pin here if it needs real extension execution rather than
-# pure walker inspection. The test is named in spec-035's G3 deferred test plan; the narrowing it
+# pure walker inspection. The test is named in spec-035's deferred test plan; the narrowing it
 # exercises is spec-035 Decision 6, unreachable until that card builds the abstract-return
 # production-entry contract (R1).
 # Pseudocode: execute an abstract/interface-shaped query whose sibling fragment
@@ -5477,7 +5476,7 @@ def test_plan_with_cascading_hook_uncacheable() -> None:
 
 @pytest.mark.django_db
 def test_consumer_prefetch_preserves_nested_fk_id_elision() -> None:
-    """B8 + FK-id elision: a consumer-wins Prefetch drop must PRESERVE nested elisions.
+    """A consumer-wins ``Prefetch`` drop must PRESERVE nested FK-id elisions.
 
     A nested ``{ category { id } }`` selection under a consumer-won ``items``
     prefetch is an FK-id elision - it reads ``item.category_id`` off the
@@ -5532,7 +5531,7 @@ def test_consumer_prefetch_preserves_nested_fk_id_elision() -> None:
     assert all(cid for cid in ids)
 
 
-# B3 strictness reachability: ``_check_n1`` consults the in-force strictness
+# Strictness reachability: ``_check_n1`` consults the in-force strictness
 # BEFORE it decides to stay silent. Gating on the ``DST_OPTIMIZER_PLANNED`` stash
 # alone would leave an armed guard silently disarmed for three shapes - an
 # execution with no stashable context (pinned below), an operation whose root the

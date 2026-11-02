@@ -189,7 +189,7 @@ Use the real fakeshop service seeders (`services.seed_data(n)`) for database tes
 Resolver-focused tests in `tests/types/test_resolvers.py`:
 
 - The B2 stub/null tests key on branch-sensitive resolver keys, not bare field names.
-- `test_b2_forward_fk_id_elision_does_not_leak_across_parent_types` for the parent-type leak a bare field name allowed.
+- `test_forward_fk_id_elision_does_not_leak_across_parent_types` for the parent-type leak a bare field name allowed.
 - A runtime-path helper test that proves numeric list indexes are stripped and aliases/response keys are preserved.
 
 ## Definition of done

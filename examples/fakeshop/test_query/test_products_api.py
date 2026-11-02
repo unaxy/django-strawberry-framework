@@ -2360,10 +2360,10 @@ def test_update_item_id_absurd_huge_pk_is_not_found_no_overflow() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_g2_mutation_response_keeps_relation_with_bounded_query_count() -> None:
+def test_mutation_response_keeps_relation_with_bounded_query_count() -> None:
     """A mutation response selecting a relation has no N+1 and no lazy query.
 
-    The behavioral tier of ``spec-035`` G2 (a mutation plan introduces no projection): a
+    The behavioral tier of ``spec-035`` Decision 4 (a mutation plan introduces no projection): a
     ``createItem`` response selecting ``node { name category { name } }`` is wrapped
     in ``CaptureQueriesContext``. The post-write re-fetch is one optimizer-planned
     ``products_item`` queryset that keeps ``select_related`` / ``prefetch_related``
@@ -7159,8 +7159,8 @@ def test_create_item_via_serializer_multipart_upload_to_attachment(tmp_path: Pat
 
 
 @pytest.mark.django_db(transaction=True)
-def test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count() -> None:
-    """Serializer flavor of `spec-035` G2: the re-fetch keeps the relation, introduces no `.only()`.
+def test_serializer_mutation_response_keeps_relation_with_bounded_query_count() -> None:
+    """Serializer flavor of `spec-035` Decision 4: the re-fetch keeps the relation, no `.only()`.
 
     A `createItemViaSerializer` selecting `node { name category { name } }` is
     wrapped in `CaptureQueriesContext`. The post-write re-fetch is one

@@ -1223,7 +1223,7 @@ def test_scalars_optimizer_prefetch_related_on_reverse_self_fk_in_http_query() -
 def test_scalars_optimizer_fk_id_elision_for_self_fk_in_http_query() -> None:
     """``parent { id }`` is served from ``ScalarSpecimen.parent_id`` with no JOIN.
 
-    Pins the ``B2`` FK-id elision behavior end-to-end against a self-
+    Pins the FK-id elision behavior end-to-end against a self-
     referential FK. An id-only forward-FK selection should NOT issue a
     JOIN - Django already has the FK column (``parent_id``) on the source
     row, so the optimizer plans the query with ``only(..., "parent_id")``
@@ -1354,7 +1354,7 @@ def test_scalars_optimizer_fk_id_elision_query_count_is_flat_across_row_counts()
 def test_scalars_optimizer_no_fk_id_elision_when_extra_scalar_selected_in_http_query() -> None:
     """Selecting any target scalar beyond ``id`` forces the normal JOIN path.
 
-    Pins B2's "elision opt-out" rule end-to-end: as soon as the consumer
+    Pins the FK-id "elision opt-out" rule end-to-end: as soon as the consumer
     selects ANY target scalar besides ``id``, the optimizer must NOT elide
     the relation - it must plan ``select_related("parent")`` and issue a
     JOIN. Otherwise the resolver-time FK-id stub would carry only the id
@@ -1434,7 +1434,7 @@ def test_scalars_optimizer_no_fk_id_elision_when_typename_selected_in_http_query
 def test_scalars_optimizer_fk_id_elision_for_each_alias_in_http_query() -> None:
     """Duplicate aliases on an id-only forward FK both resolve from the source FK column.
 
-    Pins B2/O4 behavior end-to-end: selecting the same FK twice under two
+    Pins per-alias FK-id elision end-to-end: selecting the same FK twice under two
     GraphQL field aliases must still elide to a single FK-column SELECT
     with no JOIN, and both aliases must surface the same id value at
     resolve time. Exercised against the self-FK
@@ -1485,7 +1485,7 @@ def test_scalars_optimizer_fk_id_elision_does_not_leak_to_sibling_root_in_http_q
     The first root selects ``ScalarSpecimen.parent { id }`` and should use
     the FK-id elision path: one root SELECT, no JOIN, ``parent_id`` projected.
     The sibling root selects ``NullableScalarSpecimen.partner { label }`` and
-    therefore needs the real related row. This pins the same B2/O4 branch
+    therefore needs the real related row. This pins the same FK-id elision branch
     isolation contract through the real fakeshop `/graphql/` request path.
     """
     root = _seed_specimen(label="root")
@@ -1591,10 +1591,8 @@ def test_scalars_optimizer_fk_id_elision_does_not_leak_to_sibling_nested_branch_
 
 
 @pytest.mark.django_db
-def test_scalars_optimizer_o6_downgrade_to_prefetch_for_custom_get_queryset_in_http_query() -> (
-    None
-):
-    """O6 / B2: forward FK to a target with custom ``get_queryset`` downgrades to ``Prefetch``.
+def test_scalars_optimizer_downgrade_to_prefetch_for_custom_get_queryset_in_http_query() -> None:
+    """A forward FK to a target with custom ``get_queryset`` downgrades to ``Prefetch``.
 
     When the target type declares ``get_queryset(cls, queryset, info)``, the
     optimizer must NOT use ``select_related`` (which would JOIN raw without

@@ -17,8 +17,8 @@ input-position parser (``BigInt.parse_value``) is exercised end-to-end -
 both for the decimal-string literal form and the JSON-int literal form.
 
 ``ScalarSpecimenTagType`` declares a custom ``get_queryset(cls, queryset,
-info)`` classmethod filtering to ``active=True``. The optimizer's O6
-rule downgrades any forward-FK select_related into that type to a
+info)`` classmethod filtering to ``active=True``. The optimizer
+downgrades any forward-FK select_related into that type to a
 ``Prefetch(queryset=cls.get_queryset(...))`` so the consumer's filter
 survives plan execution. Visible in the live HTTP test by an inactive
 tag resolving to ``null`` on the source specimen.
@@ -65,7 +65,7 @@ class ScalarSpecimenTagType(DjangoType):
     """``DjangoType`` with a custom ``get_queryset`` filtering to ``active=True``.
 
     The classmethod is the consumer-facing API the optimizer detects via
-    ``has_custom_get_queryset`` to trigger O6: any forward FK whose target
+    ``has_custom_get_queryset`` to trigger the ``Prefetch`` downgrade: any forward FK whose target
     type declares ``get_queryset`` is planned as ``Prefetch(queryset)``
     rather than ``select_related`` so the filter survives end-to-end.
     """

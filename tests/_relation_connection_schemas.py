@@ -95,8 +95,8 @@ def _genres_list_schema(
     ``_dst_books_connection`` ``to_attr`` and the fast path fires.
     ``book_total_count`` opts ``BookType`` into ``Meta.connection`` so the
     nested connection carries ``totalCount``. ``strictness`` (``"off"`` /
-    ``"warn"`` / ``"raise"``) wires the B3 contract for the strictness
-    pins below; it is only meaningful with ``optimizer=True`` (no extension stashes
+    ``"warn"`` / ``"raise"``) arms the N+1 strictness check
+    for the pins below; it is only meaningful with ``optimizer=True`` (no extension stashes
     no sentinel - the no-op baseline).
     """
     make_django_type(
@@ -135,7 +135,7 @@ def _genres_filterable_book_schema(*, strictness: str = "raise") -> strawberry.S
     A ``filterset_class`` on ``BookType`` means a nested
     ``booksConnection(filter: ...)`` selection is a spec-033 Decision-6 sidecar
     fallback: the walker leaves it unplanned, so the resolver runs the
-    per-parent pipeline and (with strictness active) fires the B3 contract with
+    per-parent pipeline and (with strictness active) fires the N+1 strictness check with
     the filter/orderBy fallback reason.
     """
 

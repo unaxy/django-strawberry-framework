@@ -750,7 +750,7 @@ def test_fast_path_refuses_a_window_planned_under_other_bounds(strictness: str) 
 # The synthesized relation-connection resolver consults the union-published
 # optimizer sentinels via the PARAMETERIZED ``types/resolvers.py::_check_n1``
 # (kind="connection_to_attr") before the per-parent fallback pipeline. An
-# unplanned, unserved nested-connection access fires the B3 contract -
+# unplanned, unserved nested-connection access fires the N+1 strictness check -
 # ``OptimizerError`` under ``"raise"``, a logged warning under ``"warn"`` -
 # through the SAME machinery list relations use. The messages, paths and
 # warnings are pinned over HTTP on strictness-armed holder mounts in

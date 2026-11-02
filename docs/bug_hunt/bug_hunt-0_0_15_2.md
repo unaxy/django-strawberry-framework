@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 397 done, 87 to do. The CHANGELOG entries filed here moved to
+Progress: 398 done, 86 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2289,6 +2289,18 @@ Progress: 397 done, 87 to do. The CHANGELOG entries filed here moved to
   `byte-unchanged`, `moved verbatim`, `net-new`, `now-fixed`, `the original implementation`), with planted rows;
   START's rule and REVIEW.md's Comments axis say so. Every changed package file's docstring-stripped AST is
   unchanged
+- [x] 565. Optimizer plan labels (spec-002 O1-O6, spec-004 B1-B8, spec-035 G1-G3) no longer tag .py prose or test
+  names: the package was down to two G1 lines (dry-0_0_15_3 item 48 took the rest), and about 83 test and example
+  sites plus 14 test names remained. Banners drop the label, a cross-reference names its content ("the N+1
+  strictness check", "the evaluated-queryset guard", "fragment-narrowing"), a G1 / G2 beside spec-035 is the gated
+  `spec-035 Decision 3` / `Decision 4`, the G3 `TODO(BACKLOG ...)` anchors keep their first lines and pseudocode, and
+  the 14 tests (`test_b2_*`, `test_b8_*`, `test_g2_*`, `test_o1_*`, the scalars `o6` test) are renamed with every
+  citer swept (spec-003 / 035 / 036 / 039, `tests/optimizer/test_definition_order.py`, `bug_hunt-0_0_15.md`); ten
+  "live twin of <deleted test>" clauses in `test_library_api.py` are gone. The new gate
+  `tests/test_ci_governance.py::test_no_comment_docstring_name_or_package_string_carries_an_optimizer_plan_label`
+  refuses a label in prose (case-sensitive; a code span is exempt unless it holds a bare label) and in def / class
+  names (read at underscores and camel-case boundaries), with planted rows; START says so. Spec headings, the board,
+  the glossary and BACKLOG keep the labels as spec structure and published names
 
 ## Outside review of the fixes
 
@@ -2329,10 +2341,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 565. **SKIP for now** (upstream-seam refactor in flight: package-wide comment sweep, `optimizer/extension.py`). Optimizer plan labels (B1-B8, O2-O6, G1-G3) label 177 comment and docstring sites, 15 of them in the
-  package (`optimizer/extension.py`, `optimizer/plans.py`, `optimizer/walker.py`, `types/resolvers.py`) and most in
-  `tests/optimizer/test_extension.py` and `test_walker.py`; the clause after each label already states the behaviour,
-  so drop the label. Found fact-finding 500
 - [ ] 620. **SKIP for now** (upstream-seam refactor in flight: F4, partial-update rebinding in `forms/resolvers.py`). (robustness) On a `null=True` `ArrayField`, a `ModelForm` explicit `null`, or an update omitting the field
   over a stored NULL, writes `[]` instead of NULL, with the default `SimpleArrayField` and a `SplitArrayField` alike.
   Found verifying 553

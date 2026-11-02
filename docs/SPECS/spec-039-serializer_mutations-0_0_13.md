@@ -656,7 +656,7 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     write; the **request-context** `validate()` path; and the **G2 optimizer re-fetch
     query shape**, which splits across the two tiers because its halves are reachable
     differently: the **behavioral** half is earned live at
-    [`test_products_api.py`][test-products-api]`::test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count`
+    [`test_products_api.py`][test-products-api]`::test_serializer_mutation_response_keeps_relation_with_bounded_query_count`
     (the response keeps the relation, at a bounded absolute query count), while the
     **plan-object** half — that the optimizer's stash carries `select_related` /
     `prefetch_related` and introduces no `.only(...)` — is package-internal at
@@ -3410,7 +3410,7 @@ The completion contract.
    `save_or_field_errors` — never a top-level `GraphQLError`; the payload object is re-fetched through the `036` optimizer path (G2:
    `select_related` / `prefetch_related` kept, no [`.only(...)`][glossary-only-projection] introduced),
    pinned across two tiers — the behavioral half live at
-   [`test_products_api.py`][test-products-api]`::test_g2_serializer_mutation_response_keeps_relation_with_bounded_query_count`,
+   [`test_products_api.py`][test-products-api]`::test_serializer_mutation_response_keeps_relation_with_bounded_query_count`,
    the plan-object half package-internal at
    [`tests/rest_framework/test_resolvers.py`][test-rest-framework]`::test_serializer_refetch_introduces_no_projection`,
    since the optimizer's stash is introspection state no `/graphql/` response carries.

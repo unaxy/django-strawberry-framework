@@ -1149,7 +1149,7 @@ def _shelves_parent(child: type[FilterSet]) -> type[FilterSet]:
 
 
 def _seed_two_shelved_branches() -> None:
-    """Branch ``B1`` holds shelf ``S1`` (topic ``alpha``); ``B2`` holds ``S2`` (``beta``)."""
+    """Branch ``"B1"`` holds shelf ``S1`` (topic ``alpha``); ``"B2"`` holds ``S2`` (``beta``)."""
     _register_plain_types(library_models.Shelf, library_models.Branch)
     first = library_models.Branch.objects.create(name="B1")
     second = library_models.Branch.objects.create(name="B2")
