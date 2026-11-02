@@ -26,8 +26,11 @@ by field name or ``attname`` (its ``null`` error); a consumer ``ValidationError`
 raised before the row saves (mapped as raised); a refused save of a sibling row
 or a failure after the row saved (the ``"__all__"`` envelope); a retried save
 (its latest attempt is read); a ``ModelForm.save()`` override over a
-client-assigned key; and fields whose widget reads several form-data keys
-(PostgreSQL's ``SplitArrayField``, a consumer ``MultiValueField``).
+client-assigned key; fields whose widget reads several form-data keys
+(PostgreSQL's ``SplitArrayField``, a consumer ``MultiValueField``); and an update
+omitting a column through consumer code fakeshop's forms do not declare (a lossy
+``DateField`` subclass, a ``disabled`` field, a hook's bound value or fresh copy of the
+row, a ``clean_<field>``, a form or model ``clean()``, an ``HStoreField``-shaped column).
 """
 
 from __future__ import annotations
@@ -37,10 +40,11 @@ import datetime
 import decimal
 import functools
 import itertools
+import json
 from collections.abc import Callable, Generator, Iterator
 from enum import Enum
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, ClassVar, TypeAlias
 from urllib.parse import urlencode
 
 import pytest
@@ -57,6 +61,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import DataError, IntegrityError, connection, models, transaction
 from django.db.models.signals import pre_save
 from django.http import QueryDict
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils.datastructures import MultiValueDict
 from strawberry import relay
@@ -115,6 +120,11 @@ if TYPE_CHECKING:
     _Bool: TypeAlias = models.BooleanField[bool | Combinable, bool]
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
     _Text: TypeAlias = models.TextField[str | Combinable, str]
+    _JSON: TypeAlias = models.JSONField[object, object]
+    _NullStamp: TypeAlias = models.DateTimeField[
+        str | datetime.datetime | datetime.date | Combinable | None,
+        datetime.datetime | None,
+    ]
 
 
 def _json_at(value: object, *path: str | int) -> object:
@@ -537,7 +547,7 @@ def test_bound_form_validation_preserves_the_construction_hooks_returned_object(
         Submit,
         Submit(),
         unread_info(),
-        ({"keep": "k"}, {}),
+        ({"keep": "k"}, {}, frozenset()),
         instance=None,
         specs=Submit._input_field_specs,
     )
@@ -6733,3 +6743,414 @@ def test_get_form_whose_instance_is_a_row_of_the_model_writes(
     assert res.data == {"writeRow": {"node": {"name": "New"}, "errors": []}}
     assert _row_names(written) == [["New"]]
     assert _row_names(library_models.Patron) == patrons
+
+
+# ---------------------------------------------------------------------------
+# An update omitting a column keeps its stored value where the form's cleaning rewrote it
+# ---------------------------------------------------------------------------
+
+_PADDED = "  Padded  "
+_STAMP = datetime.datetime(2020, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
+
+
+class _KeptRow(models.Model):
+    """An unmanaged row: the ``title`` each update sends beside the columns it omits."""
+
+    title: _Text = models.TextField()
+    note: _Text = models.TextField(blank=True)
+    at: _NullStamp = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_kept_columns"
+
+
+class _DateOfStamp(forms.DateField):
+    """A ``DateField`` that reads a datetime as its date: lossy over a ``DateTimeField``."""
+
+    @override
+    def to_python(
+        self,
+        value: str | datetime.datetime | datetime.date | None,
+    ) -> datetime.date | None:
+        if isinstance(value, datetime.datetime):
+            return value.date()
+        return super().to_python(value)
+
+
+class _KeptNoteForm(forms.ModelForm[_KeptRow]):
+    class Meta:
+        model = _KeptRow
+        fields = ("title", "note")
+
+
+class _KeptStampForm(forms.ModelForm[_KeptRow]):
+    at = _DateOfStamp()
+
+    class Meta:
+        model = _KeptRow
+        fields = ("title", "at")
+
+
+class _LowerNoteForm(_KeptNoteForm):
+    def clean_note(self) -> str:
+        return str(object_result(self.cleaned_data.get, "note")).lower()
+
+
+class _NoteFromTitleForm(_KeptNoteForm):
+    @override
+    def clean(self) -> dict[str, object] | None:
+        cleaned = super().clean()
+        self.cleaned_data["note"] = f"about {self.cleaned_data['title']}"
+        return cleaned
+
+
+class _DisabledNoteForm(_KeptNoteForm):
+    note = forms.CharField(disabled=True, required=False)
+
+
+class _SlugRow(models.Model):
+    """An unmanaged row whose model ``clean()`` derives ``slug`` from ``title``."""
+
+    title: _Text = models.TextField()
+    slug: _Text = models.TextField()
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_kept_columns"
+
+    @override
+    def clean(self) -> None:
+        self.slug = str(self.title).lower().replace(" ", "-")
+
+
+class _SlugForm(forms.ModelForm[_SlugRow]):
+    class Meta:
+        model = _SlugRow
+        fields = ("title", "slug")
+
+
+class _Kind(models.TextChoices):
+    A = "a", "A"
+    B = "b", "B"
+
+
+class _KindRow(models.Model):
+    """An unmanaged row with a ``TextChoices`` column ``kind``."""
+
+    title: _Text = models.TextField()
+    kind: _Text = models.TextField(choices=_Kind.choices, default=_Kind.A)
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_kept_columns"
+
+
+class _KindForm(forms.ModelForm[_KindRow]):
+    class Meta:
+        model = _KindRow
+        fields = ("title", "kind")
+
+
+class _DefaultJsonRow(models.Model):
+    """An unmanaged row: a ``blank=True`` JSON column under its own default form field."""
+
+    title: _Text = models.TextField()
+    payload: _JSON = models.JSONField(blank=True, default=dict)
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_kept_columns"
+
+
+class _DefaultJsonForm(forms.ModelForm[_DefaultJsonRow]):
+    class Meta:
+        model = _DefaultJsonRow
+        fields = ("title", "payload")
+
+
+class _HStoreShapedField(models.JSONField):
+    """``contrib.postgres``'s ``HStoreField.to_python`` over SQLite: ``json.loads`` of a str.
+
+    ``""`` is no JSON, so ``to_python("")`` raises ``JSONDecodeError``, not a
+    ``ValidationError``.
+    """
+
+    @override
+    def to_python(self, value: object) -> object:
+        if isinstance(value, str):
+            return object_result(json.loads, value)
+        return value
+
+
+def _fill_empty_tags(row: models.Model) -> None:
+    # A model ``clean()`` that fills an empty ``tags`` in.
+    if not read_attr(row, "tags"):
+        vars(row)["tags"] = {"k": "v"}
+
+
+class _TagsRow(models.Model):
+    title: _Text = models.TextField()
+    tags = _HStoreShapedField(blank=True, default=dict)
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_kept_columns"
+
+    @override
+    def clean(self) -> None:
+        _fill_empty_tags(self)
+
+
+class _NullTagsRow(models.Model):
+    title: _Text = models.TextField()
+    tags = _HStoreShapedField(blank=True, null=True)
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_kept_columns"
+
+    @override
+    def clean(self) -> None:
+        _fill_empty_tags(self)
+
+
+def _tags_form(model: type[models.Model]) -> type[forms.BaseForm]:
+    # A ``CharField`` over the JSON column: it cleans a stored ``{}`` or ``NULL`` to ``""``.
+    return type(
+        f"{model.__name__}Form",
+        (forms.ModelForm,),
+        {
+            "tags": forms.CharField(required=False),
+            "Meta": type("Meta", (), {"model": model, "fields": ("title", "tags")}),
+        },
+    )
+
+
+class _KeptUpdate(DjangoModelFormMutation):
+    """The base (no ``Meta``) of each update below: its hook binds ``bind`` as ``hook`` says.
+
+    ``"copy"`` binds a copy of the package's data holding ``bind``, ``"in-place"`` sets
+    ``bind`` in the mapping the hook is handed, and ``"rebind"`` hands the form a fresh copy
+    of the located row.
+    """
+
+    bind: ClassVar[dict[str, object]] = {}
+    hook: ClassVar[str] = "copy"
+    #: Values the ``"rebind"`` hook sets on the fresh copy of the row it hands the form.
+    rebound: ClassVar[dict[str, object]] = {}
+
+    @override
+    def get_form_kwargs(
+        self,
+        info: strawberry.Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: models.Model | None = None,
+    ) -> dict[str, object]:
+        if self.hook == "in-place":
+            data.update(self.bind)
+        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
+        if self.hook == "copy":
+            kwargs["data"] = {**data, **self.bind}
+        if self.hook == "rebind" and instance is not None:
+            fresh = type(instance)._base_manager.get(pk=pk_of(instance))
+            vars(fresh).update(self.rebound)
+            kwargs["instance"] = fresh
+        return kwargs
+
+
+def _update_omitting(
+    model: type[models.Model],
+    form_class: type[forms.BaseForm],
+    stored: dict[str, object],
+    *,
+    title: str = "New",
+    bind: dict[str, object] | None = None,
+    hook: str = "copy",
+    rebound: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Update a row stored with ``stored``, sending only ``title``; return its stored columns.
+
+    The update succeeds with empty ``errors``; the row is read back through its base
+    manager, ``title`` included.
+    """
+    type(
+        f"{model.__name__}T",
+        (DjangoType,),
+        {"Meta": type("Meta", (), {"model": model, "fields": ("id", "title")})},
+    )
+    update = type(
+        "UpdateRow",
+        (_KeptUpdate,),
+        {
+            "bind": bind or {},
+            "hook": hook,
+            "rebound": rebound or {},
+            "Meta": type(
+                "Meta",
+                (),
+                {"form_class": form_class, "operation": "update", "permission_classes": []},
+            ),
+        },
+    )
+
+    @strawberry.type
+    class Mutation:
+        update_row = DjangoMutationField(update)
+
+    finalize_django_types()
+    schema = _schema(Mutation)
+    assert update._input_class is not None
+    columns = [field.attname for field in model._meta.concrete_fields if not field.primary_key]
+    with _blank_choice_table(model):
+        row = model._base_manager.create(title="Old", **stored)
+        res = schema.execute_sync(
+            f"mutation($id: ID!, $d: {update._input_class.__name__}!){{ "
+            "updateRow(id: $id, data: $d){ result{ title } errors{ field codes } } }",
+            variable_values={"id": str(pk_of(row)), "d": {"title": title}},
+        )
+        assert res.errors is None, res.errors
+        assert res.data == {"updateRow": {"result": {"title": title}, "errors": []}}
+        return dict(model._base_manager.values(*columns).get())
+
+
+@pytest.mark.filterwarnings("ignore:DateTimeField .* received a naive datetime:RuntimeWarning")
+@pytest.mark.parametrize(
+    ("time_zone", "stamp"),
+    [
+        pytest.param("UTC", _STAMP, id="utc"),
+        pytest.param(
+            "Asia/Tokyo",
+            datetime.datetime(1, 1, 1, 3, 4, 5, tzinfo=datetime.timezone.utc),
+            id="tokyo-year-one",
+        ),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_a_datetime_under_a_lossy_date_field_keeps_it(
+    time_zone: str,
+    stamp: datetime.datetime,
+) -> None:
+    """A ``DateField`` subclass over a ``DateTimeField`` keeps the omitted stored datetime.
+
+    The form field cleans the reconstructed datetime to its date, ``Model.clean_fields``
+    converts that date to local midnight (``DateTimeField.to_python``), and the instance
+    gets the stored datetime back: never midnight, and under ``Asia/Tokyo`` never the
+    ``invalid`` error year 1's local midnight would answer.
+    """
+    with override_settings(TIME_ZONE=time_zone):
+        row = _update_omitting(_KeptRow, _KeptStampForm, {"at": stamp})
+    assert row == {"title": "New", "note": "", "at": stamp}
+
+
+@pytest.mark.parametrize(
+    (
+        "form_class",
+        "bind",
+        "hook",
+        "note",
+    ),
+    [
+        pytest.param(_KeptNoteForm, {"note": "  bound  "}, "copy", "bound", id="hook-binds-note"),
+        pytest.param(
+            _KeptNoteForm,
+            {"note": "  bound  "},
+            "in-place",
+            "bound",
+            id="hook-sets-note-in-place",
+        ),
+        pytest.param(_LowerNoteForm, {}, "copy", "padded", id="clean-note"),
+        pytest.param(_NoteFromTitleForm, {}, "copy", "about New", id="form-clean"),
+        pytest.param(_DisabledNoteForm, {"note": "  bound  "}, "copy", _PADDED, id="disabled"),
+        pytest.param(_KeptNoteForm, {}, "rebind", _PADDED, id="rebound-instance"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_a_note_writes_only_the_consumers_value(
+    form_class: type[forms.BaseForm],
+    bind: dict[str, object],
+    hook: str,
+    note: str,
+) -> None:
+    """An omitted ``note`` keeps its stored value unless consumer code set another.
+
+    A ``get_form_kwargs`` binding its own ``note`` (in a copy of the data or set in place in
+    the mapping it is handed), a ``clean_note`` and a form ``clean()`` setting one are the
+    consumer's and are written. A ``disabled`` field ignores the hook's bound value and
+    cleans its initial, the stored value, so the stored value is kept; so is it under a hook
+    handing the form a fresh copy of the row.
+    """
+    row = _update_omitting(
+        _KeptRow,
+        form_class,
+        {"note": _PADDED},
+        bind=bind,
+        hook=hook,
+    )
+    assert row == {"title": "New", "note": note, "at": None}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_a_column_a_model_clean_sets_writes_the_models_value() -> None:
+    """A model ``clean()`` deriving the omitted ``slug`` is the consumer's and is written."""
+    row = _update_omitting(_SlugRow, _SlugForm, {"slug": "old"}, title="New Title")
+    assert row == {"title": "New Title", "slug": "new-title"}
+
+
+@pytest.mark.parametrize(
+    ("model", "stored", "tags"),
+    [
+        pytest.param(_TagsRow, {}, {"k": "v"}, id="null-false"),
+        pytest.param(_NullTagsRow, None, None, id="null-true"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_an_empty_column_a_model_clean_fills_never_converts_it(
+    model: type[models.Model],
+    stored: object,
+    tags: object,
+) -> None:
+    """An empty cleaned value ``Model.clean_fields`` skipped is never run through ``to_python``.
+
+    The ``CharField`` cleans the stored ``{}`` / ``NULL`` to ``""``, which a ``blank=True``
+    column's ``clean_fields`` skips, and the model ``clean()`` fills ``tags`` in: the
+    instance holds the model's value, which is written, and the
+    ``HStoreField``-shaped ``to_python``, which raises ``JSONDecodeError`` on ``""``, never
+    runs. On the ``null=True`` column the bound ``None`` the ``CharField`` cleaned to ``""``
+    is stored as ``NULL`` (``_store_nulls``).
+    """
+    row = _update_omitting(model, _tags_form(model), {"tags": stored})
+    assert row == {"title": "New", "tags": tags}
+
+
+@pytest.mark.parametrize("stored", [{}, []], ids=["empty-object", "empty-list"])
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_an_empty_json_value_keeps_it(stored: object) -> None:
+    """A stored empty JSON value under the default ``forms.JSONField`` is kept when omitted.
+
+    ``forms.JSONField`` cleans the reconstructed ``{}`` / ``[]``, both empty values, to
+    ``None``, which the ``null=False`` column cannot store; the instance gets the stored
+    value back, so the update writes instead of answering the column's ``null`` error.
+    """
+    row = _update_omitting(_DefaultJsonRow, _DefaultJsonForm, {"payload": stored})
+    assert row == {"title": "New", "payload": stored}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_a_column_a_rebound_instance_holds_writes_its_value() -> None:
+    """A hook's rebound instance's own value for the omitted ``kind`` is the one written.
+
+    The ``get_form_kwargs`` hook hands the form a fresh copy of the row holding
+    ``_Kind.B`` over the stored ``"a"``; the form validates the reconstructed ``"a"``, and
+    the instance gets back the value it held when the form was built, the hook's member.
+    """
+    row = _update_omitting(
+        _KindRow,
+        _KindForm,
+        {"kind": _Kind.A},
+        hook="rebind",
+        rebound={"kind": _Kind.B},
+    )
+    assert row == {"title": "New", "kind": "b"}

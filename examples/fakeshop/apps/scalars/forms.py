@@ -20,8 +20,10 @@ writes ``occurred_at`` through Django's ``SplitDateTimeField`` (the admin's form
 ``NullableScalarSpecimenFlagForm`` writes the ``null=True`` ``flag`` column through a
 checkbox, whose widget reads an absent or ``None`` value as ``False``, and the ``null=True``
 ``payload`` JSON column through a ``CharField``, which cleans ``None`` to ``""``, so an
-explicit ``null`` and an update omitting either over a stored ``NULL`` are read as the form
-field's own cleaning and store ``NULL``.
+explicit ``null`` is read as the form field's own cleaning and stores ``NULL``. An update
+omitting a field keeps its column's stored value, ``NULL`` included, where the form field's
+own cleaning would rewrite it (the ``label`` ``CharField``'s strip, the ``payload``
+``CharField``'s text of a JSON object or list).
 """
 
 from __future__ import annotations
@@ -109,8 +111,8 @@ class NullableScalarSpecimenFlagForm(forms.ModelForm[models.NullableScalarSpecim
     instead, whose ``CheckboxInput`` reads an explicit ``null`` as ``False``. ``payload`` is
     a ``JSONField(null=True)`` written through a declared ``CharField(required=False)``,
     which cleans an explicit ``null`` to ``""``, a JSON string the column would store. The
-    mutation stores ``NULL`` for either, as it does for an update omitting one over a
-    stored ``NULL``, while a value sent is written as sent.
+    mutation stores ``NULL`` for either, while a value sent is written as sent and an
+    update omitting one keeps its stored value as stored.
     """
 
     flag = forms.BooleanField(required=False)

@@ -43,7 +43,10 @@ keeps it. The text column ``label`` sent ``null`` keeps the ``""`` its form fiel
 ``null`` to. The same form writes the ``null=True`` JSON column ``payload`` through a
 ``CharField``, which cleans ``null`` to ``""``: an explicit ``payload: null`` on create and on
 update over a value or ``NULL``, and an update omitting it over ``NULL``, store ``NULL``, while
-a string sent is stored as that JSON string and one stored is kept when omitted.
+a string sent is stored as that JSON string and one stored is kept when omitted. An update
+omitting ``label`` and ``payload`` keeps each column's stored value where the form field's own
+cleaning would rewrite it: a ``"  padded  "`` label is not stripped, a ``NULL`` label is not
+written ``""``, and a JSON object or list is not written as its Python text, sync and async.
 """
 
 from __future__ import annotations
@@ -898,10 +901,10 @@ def test_checkbox_over_a_nullable_boolean_stores_null_for_null(
     """A checkbox over the ``null=True`` ``flag`` stores ``NULL`` for an explicit or kept ``null``.
 
     The declared ``forms.BooleanField(required=False)`` reads a bound ``None`` as ``False``.
-    An explicit ``flag: null`` on create, on update over ``true``, ``false`` or ``NULL``, and
-    an update omitting ``flag`` over a stored ``NULL`` store ``NULL``, as the model flavor
-    does, with empty ``errors``. ``true`` and ``false`` are written as sent, and an update
-    omitting ``flag`` over a stored ``true`` or ``false`` keeps it.
+    An explicit ``flag: null`` on create, on update over ``true``, ``false`` or ``NULL``
+    stores ``NULL``, as the model flavor does, with empty ``errors``, and an update omitting
+    ``flag`` over a stored ``NULL`` keeps it. ``true`` and ``false`` are written as sent,
+    and an update omitting ``flag`` over a stored ``true`` or ``false`` keeps it.
     """
     root, document = _flag_document(operation)
 
@@ -1018,12 +1021,12 @@ def test_char_field_over_a_nullable_json_column_stores_null_for_null(
 ) -> None:
     """A ``CharField`` over the ``null=True`` JSON ``payload`` stores ``NULL`` for ``null``.
 
-    The declared ``forms.CharField(required=False)`` cleans a bound ``None`` to ``""``, which
-    the ``JSONField`` would store as the JSON string; the column is no text column
+    The declared ``forms.CharField(required=False)`` cleans a bound ``None`` to ``""``,
+    which the ``JSONField`` would store as the JSON string; the column is no text column
     (``empty_strings_allowed`` is false), so an explicit ``payload: null`` on create and on
-    update over a value or ``NULL``, and an update omitting it over ``NULL``, store ``NULL``
-    with empty ``errors``. A string sent is stored as that JSON string, and an update
-    omitting ``payload`` over a stored string keeps it.
+    update over a value or ``NULL`` stores ``NULL`` with empty ``errors``, and an update
+    omitting it over ``NULL`` keeps it. A string sent is stored as that JSON string, and an
+    update omitting ``payload`` over a stored string keeps it.
     """
     root, document = _flag_document(operation)
     if operation == "create":
@@ -1044,3 +1047,67 @@ def test_char_field_over_a_nullable_json_column_stores_null_for_null(
     }
     rows = list(models.NullableScalarSpecimen.objects.values_list("label", "payload"))
     assert rows == [(label, expected)], rows
+
+
+#: ``(stored, ...)``: the ``label`` / ``payload`` the row an update omitting both starts from.
+_KEPT_COLUMNS = [
+    pytest.param({"label": "  padded  "}, id="padded-label"),
+    pytest.param({"label": None}, id="null-label"),
+    pytest.param({"label": "s", "payload": {"a": 1}}, id="json-object"),
+    pytest.param({"label": "s", "payload": [1, 2]}, id="json-list"),
+]
+
+
+def _kept_columns_variables(stored: Mapping[str, object]) -> dict[str, object]:
+    """Seed a row with ``stored`` and ``flag`` ``true``; the update sends ``flag: false`` only."""
+    specimen = models.NullableScalarSpecimen.objects.create(flag=True, **stored)
+    return {"id": str(specimen.pk), "data": {"flag": False}}
+
+
+def _assert_columns_kept(root: str, payload: JSONObject, stored: Mapping[str, object]) -> None:
+    """The update wrote ``flag`` and kept the omitted ``label`` and ``payload`` as stored."""
+    label = stored["label"]
+    assert payload == {
+        "data": {root: {"result": {"label": label, "flag": False}, "errors": []}},
+    }
+    rows = list(models.NullableScalarSpecimen.objects.values_list("label", "flag", "payload"))
+    assert rows == [(label, False, stored.get("payload"))], rows
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("stored", _KEPT_COLUMNS)
+def test_update_omitting_a_column_keeps_its_stored_value(stored: Mapping[str, object]) -> None:
+    """An update omitting ``label`` and ``payload`` keeps each column's stored value.
+
+    The reconstruction binds each omitted column's stored value, so the form validates
+    the whole row, and the form's own cleaning of it would rewrite the column: the
+    ``label`` ``CharField`` strips ``"  padded  "`` and cleans a stored ``NULL`` to ``""``,
+    the ``payload`` ``CharField`` turns a JSON object or list into its Python text. The
+    instance gets the stored value back before the save, so the row keeps it, ``NULL``
+    included; an explicit ``label: null`` still stores ``""``
+    (``test_text_column_under_the_flag_form_keeps_the_empty_string_for_null``).
+    """
+    root, document = _flag_document("update")
+
+    payload = response_json(post_graphql(document, variables=_kept_columns_variables(stored)))
+
+    _assert_columns_kept(root, payload, stored)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("stored", _KEPT_COLUMNS[:2])
+async def test_async_update_omitting_a_column_keeps_its_stored_value(
+    stored: Mapping[str, object],
+) -> None:
+    """The async pipeline keeps an omitted column's stored value the same way."""
+    root, document = _flag_document("update")
+    variables = await sync_to_async(_kept_columns_variables)(stored)
+    with override_settings(ROOT_URLCONF=__name__):
+        result = await AsyncTestClient().query(
+            document,
+            variables=variables,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+
+    await sync_to_async(_assert_columns_kept)(root, response_json(result.response), stored)
