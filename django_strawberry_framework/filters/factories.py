@@ -25,9 +25,10 @@ from typing_extensions import override
 from django_strawberry_framework.utils.inputs import (
     GeneratedInputArgumentsFactory,
     GeneratedInputFieldSpec,
+    MemberLever,
 )
 
-from .inputs import _build_input_fields, _build_logic_fields, _field_specs
+from .inputs import _build_input_fields, _build_logic_fields, _field_specs, filter_member_lever
 from .sets import FilterSet
 
 if TYPE_CHECKING:
@@ -82,3 +83,8 @@ class FilterArgumentsFactory(GeneratedInputArgumentsFactory[FilterSet]):
     ) -> list[tuple[str, object, dict[str, object]]]:
         """Filter input triples plus the ``and_`` / ``or_`` / ``not_`` operator bag."""
         return [*_build_input_fields(set_cls, owner_definition), *_build_logic_fields(type_name)]
+
+    @override
+    def _member_lever(self, set_cls: type[FilterSet], member: str) -> MemberLever:
+        """Tell a declared filter from a ``RelatedFilter`` flat copy and a ``Meta.fields`` entry."""
+        return filter_member_lever(set_cls, member)

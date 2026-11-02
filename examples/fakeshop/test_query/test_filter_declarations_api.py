@@ -4,7 +4,7 @@ import copy
 import logging
 import threading
 from collections import OrderedDict
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from functools import wraps
 
@@ -20,6 +20,7 @@ from django.urls import path
 from django_filters import CharFilter, Filter
 from graphql_client import JSONObject, graphql_payload
 from strawberry import relay
+from strawberry.schema.name_converter import HasGraphQLName, NameConverter
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -32,6 +33,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet, RangeFilter, RelatedFilter
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import consumer_module, consumer_query
 
@@ -703,8 +705,94 @@ def test_a_path_member_beside_a_declared_filter_the_converter_names_alike_names_
         "GraphQL field name 'shelvesCode' under this schema's name converter, so one would "
         "silently replace the other. FilterSet 'test_a_path_member_beside_a_declared_filter_"
         "the_converter_names_alike_names_the_path.<locals>.PathNamingFilter' generates them "
-        "from members 'shelves__code' and 'shelvesCode'. Rename one member or drop one via "
-        "Meta.fields / Meta.exclude."
+        "from members 'shelves__code' and 'shelvesCode'. Drop 'shelves__code' via Meta.fields "
+        "/ Meta.exclude, or rename or remove the declaration 'shelvesCode' (disable an "
+        "inherited one with `shelvesCode = None`)."
+    )
+
+
+class _UpperCaseNames(NameConverter):
+    """Upper-case every name, an explicit ``name=`` included."""
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        return super().get_graphql_name(obj).upper()
+
+
+class _StripTrailingE(NameConverter):
+    """Drop a trailing ``e``, which names the ``gt`` and ``gte`` lookups alike."""
+
+    @override
+    def get_graphql_name(self, obj: HasGraphQLName) -> str:
+        return super().get_graphql_name(obj).removesuffix("e")
+
+
+def _converter_schema(filterset_cls: type[FilterSet], converter: NameConverter) -> DjangoSchema:
+    class ConverterNode(DjangoType):
+        class Meta:
+            model = Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            filterset_class = filterset_cls
+
+    @strawberry.type
+    class Query:
+        branches: DjangoConnection[ConverterNode] = DjangoConnectionField(ConverterNode)
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config(name_converter=converter))
+
+
+def test_a_member_the_converter_names_like_a_logic_key_names_the_key_reserved() -> None:
+    """A filter the converter names like ``and`` is refused, naming the logic key reserved.
+
+    Under a converter that upper-cases every name, the declared ``AND`` and the logic
+    key ``and_`` (``name="and"``) both publish ``AND``; the key is the package's, so
+    the remedy names the member's own lever only.
+    """
+
+    class LogicNamingFilter(FilterSet):
+        AND = CharFilter(field_name="name", lookup_expr="exact")
+
+        class Meta:
+            model = Branch
+            fields = []
+
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _converter_schema(LogicNamingFilter, _UpperCaseNames())
+
+    assert str(exc.value).startswith(
+        "LogicNamingFilterInputType: fields 'AND' and 'and_' both publish the GraphQL field "
+        "name 'AND'",
+    )
+    assert str(exc.value).endswith(
+        "generates them from members 'AND' and 'and_'. 'and_' is a reserved logic key: rename "
+        "or remove the declaration 'AND' (disable an inherited one with `AND = None`).",
+    )
+
+
+def test_operator_bag_lookups_the_converter_names_alike_name_the_lookup_list() -> None:
+    """Two lookups of one head the converter names alike point at that head's lookup list.
+
+    ``gt`` and ``gte`` both publish ``gt`` under a converter that drops a trailing ``e``;
+    a lookup takes no declaration of its own, so the remedy names the ``Meta.fields``
+    lookup list of ``name``.
+    """
+
+    class BagNamingFilter(FilterSet):
+        class Meta:
+            model = Branch
+            fields = {"name": ["gt", "gte"]}
+
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _converter_schema(BagNamingFilter, _StripTrailingE())
+
+    assert str(exc.value) == (
+        "BagNamingFilterNameFilterInputType: fields 'gt' and 'gte' both publish the GraphQL "
+        "field name 'gt' under this schema's name converter, so one would silently replace "
+        "the other. FilterSet 'test_operator_bag_lookups_the_converter_names_alike_name_the_"
+        "lookup_list.<locals>.BagNamingFilter' generates them from lookups 'gt' and 'gte'. "
+        "Drop one from the Meta.fields lookup list of 'name'."
     )
 
 
@@ -714,7 +802,7 @@ def test_filter_members_the_default_converter_names_alike_refuse_the_schema(case
 
     Generated filter fields carry no ``name=``; the executing schema's ``NameConverter``
     names each, so the refusal names the generated filter input type, the set and the
-    two members to rename or drop.
+    two declared members to rename or remove.
     """
     first, second = ("field_2", "field2") if case == "digit-bags" else ("price_2", "price2")
     with pytest.raises(ConfigurationError) as exc:
@@ -725,5 +813,92 @@ def test_filter_members_the_default_converter_names_alike_refuse_the_schema(case
     )
     assert str(exc.value).endswith(
         f"FilterSet 'NamingFilter' generates them from members {first!r} and {second!r}. "
-        "Rename one member or drop one via Meta.fields / Meta.exclude.",
+        "Rename or remove one of the declarations (disable an inherited one with "
+        "`<name> = None`).",
+    )
+
+
+def _flat_copy_schema(
+    shelf_lookups: list[str],
+    declarations: Mapping[str, object],
+    converter: NameConverter | None = None,
+) -> DjangoSchema:
+    """A schema whose branch filter set expands ``RelatedFilter`` ``shelves`` into flat copies."""
+    registry.clear()
+    shelf_filter = type(
+        "FlatShelfFilter",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": Shelf, "fields": {"code": shelf_lookups}})},
+    )
+    flat_branch_filter = type(
+        "FlatBranchFilter",
+        (FilterSet,),
+        {
+            "shelves": RelatedFilter(shelf_filter, field_name="shelves"),
+            "Meta": type("Meta", (), {"model": Branch, "fields": ["name"]}),
+            **declarations,
+        },
+    )
+
+    class FlatShelfNode(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "code")
+
+    class FlatBranchNode(DjangoType):
+        class Meta:
+            model = Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            filterset_class = flat_branch_filter
+
+    del FlatShelfNode
+
+    @strawberry.type
+    class Query:
+        branches: DjangoConnection[FlatBranchNode] = DjangoConnectionField(FlatBranchNode)
+
+    finalize_django_types()
+    config = (
+        strawberry_config() if converter is None else strawberry_config(name_converter=converter)
+    )
+    return DjangoSchema(query=Query, config=config)
+
+
+def test_a_flat_copy_the_converter_names_like_a_declared_filter_names_its_relatedfilter() -> None:
+    """A ``RelatedFilter`` flat copy beside a declared filter names the branch and the setting.
+
+    ``shelves__code`` (the flat copy of ``shelves``' ``code``) publishes ``shelvesCode``,
+    the declared filter's name; no ``Meta.fields`` entry of the branch set lists the copy,
+    so its lever is the ``RelatedFilter`` or ``HIDE_FLAT_FILTERS``, which builds.
+    """
+    declarations = {"shelvesCode": CharFilter(field_name="name", lookup_expr="exact")}
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _flat_copy_schema(["exact"], declarations)
+
+    assert str(exc.value).endswith(
+        "FilterSet 'FlatBranchFilter' generates them from members 'shelvesCode' and "
+        "'shelves__code'. Rename or remove the declaration 'shelvesCode' (disable an "
+        "inherited one with `shelvesCode = None`), or rename the RelatedFilter 'shelves' that "
+        "'shelves__code' is the flat copy of, or hide flat copies with the HIDE_FLAT_FILTERS "
+        "setting.",
+    )
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}):
+        schema = _flat_copy_schema(["exact"], declarations)
+    assert "shelvesCode" in str(schema)
+
+
+def test_flat_copy_lookups_the_converter_names_alike_name_the_child_lookup_list() -> None:
+    """A flat copy's two lookups the converter names alike point at the child set's list.
+
+    ``shelves__code`` copies ``code``'s ``gt`` and ``gte`` lookups off the shelf set,
+    which a converter dropping a trailing ``e`` names alike; the branch set lists no
+    lookup of the copy, so the remedy names ``code`` on the shelf set.
+    """
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _flat_copy_schema(["gt", "gte"], {}, _StripTrailingE())
+
+    assert str(exc.value).endswith(
+        "FilterSet 'FlatBranchFilter' generates them from lookups 'gt' and 'gte'. Drop one "
+        "from the Meta.fields lookup list of 'code' on FlatShelfFilter.",
     )

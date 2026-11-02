@@ -438,8 +438,8 @@ def _resolve_by_slug(card_manager: _CardRows, value: object) -> models.Card:
     """Resolve a card by its derived slug (``slugify(title).replace('-', '_')``).
 
     ``slug`` is a pure function of ``title`` and is not stored, so it cannot be
-    reversed by a query. The board is tiny (63 cards), so a single linear scan of
-    ``(id, title)`` re-slugifying each title is fine and deterministic.
+    reversed by a query. The board is small, so a single linear scan of ``(id, title)``
+    re-slugifying each title is fine and deterministic.
     """
     target = str(value)
     rows: django_models.QuerySet[models.Card, tuple[int, str]] = card_manager.values_list(

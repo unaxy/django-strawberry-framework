@@ -1366,7 +1366,8 @@ def test_generated_write_input_pair_is_refused_only_where_the_schema_names_it_al
     remedy = {
         "model": (
             "DjangoMutation create input for CamelCollide generates them from model fields "
-            "'foo_bar' and 'fooBar'. Rename one of the model fields,"
+            "'foo_bar' and 'fooBar'. Declare one on Meta.input_class with a different explicit "
+            "name=,"
         ),
         "form": (
             "Form 'CamelCollideForm' generates them from form fields 'foo_bar' and 'fooBar'. "
@@ -1387,6 +1388,40 @@ def test_generated_write_input_pair_is_refused_only_where_the_schema_names_it_al
     sdl = str(_schema_taking(input_cls, strawberry_config(auto_camel_case=False)))
     assert "foo_bar: Int!" in sdl
     assert "fooBar: Int!" in sdl
+
+
+def test_a_python_keyword_column_is_refused_naming_the_column() -> None:
+    """A column named ``from`` cannot be a generated input attribute, so the build refuses it.
+
+    The input dataclass takes each attr as an ``__init__`` parameter, which a Python
+    keyword cannot be; the refusal names the column and the lever that leaves it out.
+    """
+    keyword_model = type(
+        "KeywordColumn",
+        (models.Model,),
+        {
+            "from": models.IntegerField(),
+            "Meta": type("Meta", (), {"app_label": _unique_app_label()}),
+            "__module__": __name__,
+        },
+    )
+
+    class KeywordColumnType(DjangoType, relay.Node):
+        class Meta:
+            model = keyword_model
+            fields = ("id",)
+
+    with pytest.raises(ConfigurationError) as exc:
+        _ = build_mutation_input(
+            keyword_model,
+            operation_kind=CREATE,
+            primary_type=KeywordColumnType,
+        )
+    assert str(exc.value) == (
+        "Generated input 'KeywordColumnInput' cannot carry a field for 'from': a Python "
+        "keyword is no input attribute. Leave it out of the generated input via Meta.fields / "
+        "Meta.exclude."
+    )
 
 
 # ---------------------------------------------------------------------------

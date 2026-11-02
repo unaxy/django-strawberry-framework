@@ -67,7 +67,7 @@ if TYPE_CHECKING:
 
     _IntColumn: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
 
-_CURRENT_SCHEMA: dict[str, DjangoSchema | None] = {"schema": None}
+_CURRENT_SCHEMA: dict[str, strawberry.Schema | None] = {"schema": None}
 
 
 @wraps(DjangoGraphQLView.as_view())
@@ -314,7 +314,7 @@ def test_a_validating_nullable_boolean_form_field_requires_a_boolean_over_http(
     assert called == written
 
 
-def _holder_payload(schema: DjangoSchema, document: str) -> JSONObject:
+def _holder_payload(schema: strawberry.Schema, document: str) -> JSONObject:
     """Return the payload of ``document`` posted to the holder ``schema`` over HTTP."""
     _CURRENT_SCHEMA["schema"] = schema
     try:
@@ -326,7 +326,10 @@ def _holder_payload(schema: DjangoSchema, document: str) -> JSONObject:
     return response_json(response)
 
 
-def _holder_input_fields(schema: DjangoSchema, type_name: str) -> dict[str, dict[str, object]]:
+def _holder_input_fields(
+    schema: strawberry.Schema,
+    type_name: str,
+) -> dict[str, dict[str, object]]:
     """Return ``{field name: type tree}`` for ``type_name`` as the holder ``schema`` serves it."""
     payload = _holder_payload(
         schema,
@@ -392,11 +395,14 @@ def test_one_to_one_to_a_relay_primary_is_a_global_id_over_http() -> None:
 
 def _digit_boundary_schema(
     config: StrawberryConfig | None = None,
-) -> tuple[DjangoSchema, type[models.Model]]:
+    *,
+    plain: bool = False,
+) -> tuple[strawberry.Schema, type[models.Model]]:
     """Serve a full create and one narrowed create per column over ``field_2`` beside ``field2``.
 
     ``field_2`` beside ``field2`` is legal Django but a naming no fakeshop domain model carries.
-    Returns the schema built under ``config`` and the model, whose table no migration creates.
+    Returns the schema built under ``config`` (a plain ``strawberry.Schema`` when ``plain``)
+    and the model, whose table no migration creates.
     """
 
     class DigitBoundary(models.Model):
@@ -445,7 +451,8 @@ def _digit_boundary_schema(
 
     del DigitBoundaryNode
     finalize_django_types()
-    return DjangoSchema(query=_HolderQuery, mutation=Mutation, config=config), DigitBoundary
+    schema_cls = strawberry.Schema if plain else DjangoSchema
+    return schema_cls(query=_HolderQuery, mutation=Mutation, config=config), DigitBoundary
 
 
 @pytest.mark.django_db
@@ -467,9 +474,46 @@ def test_digit_boundary_columns_the_default_converter_names_alike_refuse_the_sch
     )
     assert str(exc.value).endswith(
         "DjangoMutation create input for DigitBoundary generates them from model fields "
-        "'field_2' and 'field2'. Rename one of the model fields, or drop one via Meta.fields "
-        "/ Meta.exclude.",
+        "'field_2' and 'field2'. Declare one on Meta.input_class with a different explicit "
+        "name=, or drop one via Meta.fields / Meta.exclude.",
     )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("private_registry")
+def test_a_plain_schema_refuses_a_write_through_the_field_its_converter_dropped_over_http() -> (
+    None
+):
+    """A plain ``strawberry.Schema`` keeps one of ``field_2`` / ``field2`` and refuses the create.
+
+    A plain schema runs no collision check, so it publishes ``field2`` alone; the create
+    refuses before any write, naming the column the schema dropped and ``DjangoSchema``.
+    """
+    schema, digit_boundary = _digit_boundary_schema(plain=True)
+
+    assert _holder_input_fields(schema, "DigitBoundaryInput") == {
+        "field2": _non_null(_scalar("Int")),
+    }
+    with connection.schema_editor() as editor:
+        editor.create_model(digit_boundary)
+    try:
+        payload = _holder_payload(
+            schema,
+            "mutation { createDigitBoundary(data: {field2: 3}) { errors { field } } }",
+        )
+        stored = list(digit_boundary._default_manager.values_list("field_2", "field2"))
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(digit_boundary)
+
+    assert json_at(payload, "errors", 0, "message") == (
+        "DigitBoundaryInput: the executing schema publishes no field for 'field_2' (input "
+        "attribute 'field_2'): its name converter names it like another field of the type, "
+        "and a plain strawberry.Schema keeps only one of the two, so the mutation refuses to "
+        "write. Build the schema as DjangoSchema(...), which refuses the pair at construction "
+        "and names what to change."
+    ), payload
+    assert stored == []
 
 
 @pytest.mark.django_db(transaction=True)

@@ -703,8 +703,11 @@ Progress: 0 done, 167 to do.
   `NameConverter` names them too. `in`, `and`, `or` and `not` keep those spellings under either `auto_camel_case`
   setting; a converter overriding `get_graphql_name` respells them. Two generated fields the converter names alike
   (`field_2` beside `field2` by default) are refused when the `DjangoSchema` is built, naming the set, model, form or
-  serializer and the two members they are generated from; a plain `strawberry.Schema` publishes one of the two and
-  drops the other. The helpers `django_strawberry_framework.utils.snake_case` and
+  serializer and the two members they are generated from and, for a filter or order set, each member's own lever (a
+  declaration is renamed or removed, a `Meta.fields` entry dropped, a lookup dropped from its lookup list); a plain
+  `strawberry.Schema` publishes one of the two and drops the other, and a mutation writing through the dropped field
+  refuses before any write, naming it. A model column named a Python keyword (`from`) is refused with a
+  `ConfigurationError` naming it instead of a raw `SyntaxError`. The helpers `django_strawberry_framework.utils.snake_case` and
   `utils.strings.graphql_camel_name` are removed
 
 ## From test-compliance-review

@@ -761,7 +761,7 @@ def test_generated_set_input_pair_is_refused_only_where_the_schema_names_it_alik
     family_label = "FilterSet" if family == "filter" else "OrderSet"
     assert message.endswith(
         f"{family_label} 'CamelCollide{family.title()}' generates them from members 'foo_bar' "
-        "and 'fooBar'. Rename one member or drop one via Meta.fields / Meta.exclude.",
+        "and 'fooBar'. Drop one via Meta.fields / Meta.exclude.",
     )
 
     schema = _camel_collide_set_schema(

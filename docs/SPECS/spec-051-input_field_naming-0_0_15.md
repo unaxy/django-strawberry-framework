@@ -91,8 +91,9 @@ pins no input name and follows the config.
 
 - One naming rule per schema: every generated input field is named by the executing schema's
   `NameConverter`, exactly as its output fields and list arguments are.
-- Every runtime reader of a wire name (error keys, the resource budget, the filter and order
-  decode) agrees with what the executing schema published, under every config.
+- Every runtime reader of a published name agrees with what the executing schema published,
+  under every config: a write mutation's error keys key to the published names, and the
+  resource budget and the filter and order decode read no wire name at all (Decision 3).
 - A pair the converter names alike fails the deployment at construction, naming what the
   consumer can change.
 
@@ -129,12 +130,17 @@ several shapes (`isbn_13` -> `isbn_13` vs `isbn13`, `a_b_c` -> `aB__xC` vs `aBC`
 `URL_name` -> `URL__xName` vs `URLName`). The schema is the only object that knows its config,
 and it names the fields when it is built.
 
-**Wire change under the default config**: 31 fakeshop input fields rename at digit
-boundaries (`isbn_13` -> `isbn13`, `address_2` -> `address2`), and one hashed serializer input
-type renames because its shape token hashes the predicted name
+**Wire change under the default config**: every input field whose name the package caser
+spelled differently from Strawberry's converter renames to the converter's spelling. An
+underscore before a digit is dropped (`isbn_13` -> `isbn13`, `x_1_y` -> `x1Y`); the `__x`
+marker the caser put before a segment following a one-letter or upper-case one is gone
+(`a_b_c` -> `aBC`, `URL_name` -> `URLName`, `API_key` -> `APIKey`); a leading underscore is
+dropped (`_legacy_id` -> `LegacyId`). Every other default-config name is unchanged. On
+fakeshop that is 31 input fields, all at digit boundaries (`isbn_13` -> `isbn13`, `address_2`
+-> `address2`), and one hashed serializer input type, which renames because its shape token
+hashes the predicted name
 (`PatronProfileSerializerAddress_u2b828be281257a1c0Favorite_ugenre982b97c775a8d68dPartialInput`
 -> `PatronProfileSerializerAddress_u235621b729422e33eFavorite_ugenre982b97c775a8d68dPartialInput`).
-Every other default-config name is unchanged.
 
 **Alternative rejected**: keep the pins as a wire contract. That keeps the default SDL
 byte-for-byte, but leaves every snake-case schema mixing two conventions and every
@@ -149,8 +155,14 @@ keyword (`from`) escapes the same way in
 `django_strawberry_framework/filters/inputs.py::lookup_leaf_names`. These spellings hold under the
 default config and under `auto_camel_case=False`. A converter that overrides
 `get_graphql_name` respells an explicit name too (`IN`, `OR` under one that upper-cases every
-name), and the filter decode reads the respelled keys, because it reads the schema's names
-rather than the literal.
+name), and a filter under it still decodes: graphql-core coerces each published name to the
+input dataclass's Python attr, the decode reads only those attrs, and
+`django_strawberry_framework/filters/sets.py::FilterSet._normalize_input` writes the literal
+django-filter form keys the lookup table records
+(`django_strawberry_framework/filters/inputs.py::filter_lookup_table`). A filter error keys
+to those form paths, with the logic arms' literal names (`or_0__title`;
+`django_strawberry_framework/filters/inputs.py::LogicOperatorDescriptor.arm_key`), under every
+config.
 
 **Rationale**: the escape is the one name the package must supply, since the attr cannot be
 the wire name. Everything else is the converter's.
@@ -189,10 +201,18 @@ the remedy names what the consumer can change
 (`django_strawberry_framework/utils/inputs.py::field_name_collision_remedy`, fed by the
 `django_strawberry_framework/utils/inputs.py::GeneratedFieldSources` that
 `build_strawberry_input_class` records): for two generated fields, the set, model, form or
-serializer and the two members they are generated from, with `Meta.fields` / `Meta.exclude`
-(or a mutation's `Meta.input_class`) as the lever; for a generated field beside a declared
-one, the declared field's `name=` or the member to drop; for two declared fields, Strawberry's
-own levers. The check is the schema's: `field_2` beside `field2` is refused under the default
+serializer and the two members they are generated from, with the levers the flavor has
+(`Meta.fields` / `Meta.exclude`, and a model mutation's `Meta.input_class` field with an
+explicit `name=`). A filter or order set names each member's own lever, since
+`Meta.exclude` refuses a declared name
+(`django_strawberry_framework/sets_mixins.py::reject_unknown_exclude_names`): a declaration is
+renamed or removed (an inherited one disabled with `name = None`), a `Meta.fields` entry is
+dropped through `Meta.fields` / `Meta.exclude`, a `RelatedFilter` flat copy goes through its
+`RelatedFilter` or `HIDE_FLAT_FILTERS`, an operator-bag lookup is dropped from its
+`Meta.fields` lookup list, and a logic key (`and_`, `or_`, `not_`) is named as reserved, so
+only the other member's lever is offered. For a generated field beside a declared one, the
+declared field's `name=` or the member to drop; for two declared fields, Strawberry's own
+levers. The check is the schema's: `field_2` beside `field2` is refused under the default
 config and served as two fields under `auto_camel_case=False`.
 
 **Rationale**: the collision is a fact about one schema's converter, so it is decided when
@@ -203,7 +223,10 @@ converter existed.
 
 The card asked to document or refuse a plain `strawberry.Schema` built over generated inputs.
 It is documented: a plain schema runs no collision check, so it publishes one of two fields
-its converter names alike and drops the other. `docs/README.md` and the
+its converter names alike and drops the other. A write mutation whose input lost a field that
+way refuses before any write: `django_strawberry_framework/utils/inputs.py::published_input_specs`
+finds no published field for the dropped one and raises `ConfigurationError` naming it and
+pointing at `DjangoSchema`. `docs/README.md` and the
 [`FilterSet`][glossary-filterset], [`OrderSet`][glossary-orderset],
 [Input type generation][glossary-input-type-generation],
 [`strawberry_config`][glossary-strawberry_config] and [`DjangoSchema`][glossary-djangoschema]
@@ -211,7 +234,7 @@ glossary rows say so.
 
 **Rationale**: the read surface builds and resolves under a plain schema by design, and
 refusing there needs a hook into a class the package does not own. Generated mutations
-already refuse to execute under a plain schema.
+already refuse to write under a plain schema.
 
 ### Decision 6 — No converter wrapper
 
@@ -241,15 +264,22 @@ triplet, the release-status flips and the `CHANGELOG.md` entry. This card's chan
   declared filter is refused, naming the path member.
 - **`RelatedOrder` members.** Two related-order members the converter names alike are refused
   the same way, and order apart under `auto_camel_case=False`.
-- **Operator-bag and range inputs** carry no `GeneratedFieldSources`: only a converter that
-  names two lookups alike reaches them, and the refusal then names the type and both fields.
+- **Operator-bag lookups** carry `GeneratedFieldSources` too: only a converter that names two
+  lookups alike reaches them (`gt` / `gte` under one that drops a trailing `e`), and the
+  refusal names the head's `Meta.fields` lookup list (the child set's, for a flat copy).
+  Range inputs carry none; their bounds are the package's own names.
+- **A logic key.** A member the converter names like `and` / `or` / `not` is refused, naming
+  the key reserved and the member's own lever.
+- **A Python-keyword column.** A model field named `from` is no dataclass attribute; the
+  generated input refuses it with a `ConfigurationError` naming it, and `Meta.fields` /
+  `Meta.exclude` leaves it out.
 - **A direct-call stub** with no executable schema keeps the bind-time names
   (`published_input_specs` returns the bind tuple).
 - **One class, several schemas.** The same input class served by a default schema and a
   snake-case schema publishes under each schema's names, and each request reads its own.
 - **Type names** never follow the converter: `generated_input_type_name` and
-  `name_set_input_type_name` stay the package grammar, so the hashed serializer type in
-  Decision 1 is the only type that renames.
+  `name_set_input_type_name` stay the package grammar, so a hashed serializer type (Decision 1's
+  fakeshop one) is the only kind of type that renames.
 
 ## Test plan
 
@@ -263,6 +293,12 @@ Live tier (`/graphql/` over HTTP):
 - `examples/fakeshop/test_query/test_library_api.py::test_related_order_members_publish_and_order_apart_without_auto_camel_case_over_http`
 - `examples/fakeshop/test_query/test_input_shapes_api.py::test_digit_boundary_columns_the_default_converter_names_alike_refuse_the_schema`
 - `examples/fakeshop/test_query/test_input_shapes_api.py::test_digit_boundary_columns_publish_and_write_both_without_auto_camel_case_over_http`
+- `examples/fakeshop/test_query/test_input_shapes_api.py::test_a_plain_schema_refuses_a_write_through_the_field_its_converter_dropped_over_http`
+- `examples/fakeshop/test_query/test_library_api.py::test_a_declared_member_beside_a_listed_one_names_each_members_own_lever`
+- `examples/fakeshop/test_query/test_filter_declarations_api.py::test_a_member_the_converter_names_like_a_logic_key_names_the_key_reserved`
+- `examples/fakeshop/test_query/test_filter_declarations_api.py::test_operator_bag_lookups_the_converter_names_alike_name_the_lookup_list`
+- `examples/fakeshop/test_query/test_filter_declarations_api.py::test_a_flat_copy_the_converter_names_like_a_declared_filter_names_its_relatedfilter`
+- `examples/fakeshop/test_query/test_filter_declarations_api.py::test_flat_copy_lookups_the_converter_names_alike_name_the_child_lookup_list`
 - `examples/fakeshop/test_query/test_filter_declarations_api.py::test_filter_members_the_default_converter_names_alike_refuse_the_schema`
 - `examples/fakeshop/test_query/test_filter_declarations_api.py::test_a_path_member_beside_a_declared_filter_the_converter_names_alike_names_the_path`
 - `examples/fakeshop/test_query/test_model_mutation_flows_api.py::test_consumer_and_generated_fields_key_each_refusal_to_the_executing_schema`
@@ -274,6 +310,7 @@ Package tier (lines no real query reaches):
 - `tests/utils/test_inputs.py::test_optional_field_kwargs_defaults_none_and_names_only_a_keyword_escape`
 - `tests/mutations/test_inputs.py::test_mutation_input_field_specs_record_the_bind_time_wire_name`
 - `tests/mutations/test_inputs.py::test_generated_write_input_pair_is_refused_only_where_the_schema_names_it_alike`
+- `tests/mutations/test_inputs.py::test_a_python_keyword_column_is_refused_naming_the_column`
 - `tests/types/test_definition_order.py::test_generated_set_input_pair_is_refused_only_where_the_schema_names_it_alike`
 - `tests/types/test_definition_order.py::test_custom_name_converter_collision_raises_at_schema_build`
 - `tests/types/test_definition_order.py::test_camel_case_field_pair_is_two_fields_without_auto_camel_case`
@@ -286,8 +323,8 @@ Package tier (lines no real query reaches):
 - `docs/GLOSSARY.md`: the `filterset`, `orderset`, `input-type-generation`, `strawberry_config`
   and `djangoschema` rows.
 - [`spec-027`][spec-027], [`spec-028`][spec-028], [`spec-036`][spec-036],
-  [`spec-038`][spec-038], [`spec-039`][spec-039] and [`spec-044`][spec-044] restate their
-  naming sentences and point here.
+  [`spec-038`][spec-038] and [`spec-039`][spec-039] restate their naming sentences and point
+  here.
 - `CHANGELOGTODO.md` carries the change notes for the joint cut (Decision 7).
 
 ## Risks and open questions
@@ -307,8 +344,8 @@ Package tier (lines no real query reaches):
 - [ ] Under `auto_camel_case=False` every generated input field and lookup is snake case in
       SDL, and filters, orders and mutations work end to end under it; the keyword names keep
       their spelling.
-- [ ] Under the default config the SDL changes only where Decision 1 says: the digit-boundary
-      input fields and the one hashed serializer input type.
+- [ ] Under the default config the SDL changes only where Decision 1 says: the input fields the
+      package caser spelled differently and the hashed serializer input types over them.
 - [ ] A custom `NameConverter` names generated input fields as it names output fields.
 - [ ] Write-error keys and the resource budget agree with the published names under every
       config.
@@ -346,7 +383,6 @@ Package tier (lines no real query reaches):
 [spec-036]: spec-036-mutations-0_0_11.md
 [spec-038]: spec-038-form_mutations-0_0_12.md
 [spec-039]: spec-039-serializer_mutations-0_0_13.md
-[spec-044]: spec-044-debug_extension-0_0_14.md
 [spec-050]: spec-050-list_field_arguments-0_0_15.md
 
 <!-- docs/builder/ -->

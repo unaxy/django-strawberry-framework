@@ -177,13 +177,44 @@ class GeneratedFieldSources:
     (``"FilterSet 'BookFilter'"``, ``"Form 'ShelfForm'"``), ``field_noun``
     (``"members"``, ``"model fields"``) and ``rename_clause``. ``members`` maps each
     input attr to the member it is generated from (``publisher_2_id`` ->
-    ``publisher_2``).
+    ``publisher_2``). ``name_clause`` replaces ``rename_clause`` in the name refusal
+    when the flavor has a lever there that it lacks for an attr collision (a model
+    mutation's ``Meta.input_class``). ``levers`` maps each input attr of a set
+    family's input to the kind of member it is generated from (``MemberLever``),
+    so the remedy names the change that removes that member: a set refuses a
+    ``Meta.exclude`` naming a declaration.
     """
 
     subject: str
     field_noun: str
     rename_clause: str
     members: Mapping[str, str]
+    name_clause: str | None = None
+    levers: Mapping[str, MemberLever] | None = None
+
+
+@dataclass(frozen=True)
+class MemberLever:
+    """The kind of set member one generated input field comes from, which decides its remedy.
+
+    ``kind`` is one of ``DECLARED_MEMBER`` (a declaration on the set or an ancestor:
+    rename or remove it, or disable an inherited one with ``name = None``),
+    ``LISTED_MEMBER`` (a ``Meta.fields`` entry: ``Meta.fields`` / ``Meta.exclude``
+    drops it), ``LISTED_LOOKUP`` (an operator-bag lookup: the ``Meta.fields`` lookup
+    list ``via`` names drops it), ``EXPANDED_MEMBER`` (a ``RelatedFilter`` expansion's flat copy:
+    ``via`` names the branch) or ``RESERVED_KEY`` (a filter logic key, which no
+    declaration changes).
+    """
+
+    kind: str
+    via: str = ""
+
+
+DECLARED_MEMBER = "declared"
+LISTED_MEMBER = "listed"
+LISTED_LOOKUP = "lookup"
+EXPANDED_MEMBER = "expanded"
+RESERVED_KEY = "reserved"
 
 
 # The converter a schema built with Strawberry's default config names its fields with.
@@ -478,7 +509,10 @@ def published_input_specs(
 
     The bind tuple itself comes back when every name already agrees and when
     ``info`` carries no executable schema (a direct-call stub), which keeps the
-    bind's names. Never stored: the answer belongs to the executing schema.
+    bind's names. Never stored: the answer belongs to the executing schema. A spec
+    whose field the schema did not publish (a plain ``strawberry.Schema`` keeps one
+    of two fields its converter names alike) raises ``ConfigurationError`` naming
+    it, before any write.
     """
     # ``mutations/fields.py::_synthesized_mutation_signature`` names the input parameter ``data``.
     published = published_argument(info, "data")
@@ -506,8 +540,20 @@ def _specs_named_by(
     renamed: list[InputFieldSpec] = []
     changed = False
     for spec in specs:
-        # Every spec records a field of the input class the schema published.
-        wire_name, input_field = published[spec.input_attr]
+        entry = published.get(spec.input_attr)
+        if entry is None:
+            # Every spec records a field of the input class; only a plain
+            # ``strawberry.Schema`` publishes the class without one of them, keeping one
+            # of two fields its converter names alike, which ``DjangoSchema`` refuses.
+            raise ConfigurationError(
+                f"{input_object.name}: the executing schema publishes no field for "
+                f"{spec.target_name!r} (input attribute {spec.input_attr!r}): its name "
+                "converter names it like another field of the type, and a plain "
+                "strawberry.Schema keeps only one of the two, so the mutation refuses to "
+                "write. Build the schema as DjangoSchema(...), which refuses the pair at "
+                "construction and names what to change.",
+            )
+        wire_name, input_field = entry
         nested = spec.nested_specs
         if nested is not None:
             nested = tuple(_specs_named_by(graphql_type_of(input_field), nested))
@@ -1358,7 +1404,9 @@ def build_strawberry_input_class(
     A triple's ``name`` is passed through; every other field is named by the
     executing schema's ``NameConverter``. Duplicate Python attrs are rejected
     before namespace construction so a caller can never silently lose a field
-    even if it misses its domain-level collision guard. ``sources`` names the
+    even if it misses its domain-level collision guard, and so is a Python
+    keyword attr (a column named ``from``), which the dataclass ``__init__``
+    cannot take. ``sources`` names the
     declaration the fields are generated from, recorded for the built class so a
     schema refusing two fields it names alike names that declaration
     (``field_name_collision_remedy``).
@@ -1425,6 +1473,14 @@ def build_strawberry_input_class(
                 f"Generated input {name!r} declares input attribute {python_attr!r} more than "
                 "once; a later field would silently overwrite the earlier field.",
             )
+        if keyword.iskeyword(python_attr):
+            # The dataclass ``__init__`` takes each attr as a parameter, which a keyword
+            # cannot be; a lookup or logic key escapes before it reaches here.
+            raise ConfigurationError(
+                f"Generated input {name!r} cannot carry a field for {python_attr!r}: a "
+                "Python keyword is no input attribute. Leave it out of the generated input "
+                "via Meta.fields / Meta.exclude.",
+            )
         requested_name = kwargs.get("name")
         field_description = kwargs.pop("description", None)
         if (requested_name is not None and not truth.is_instance(requested_name, str)) or (
@@ -1478,19 +1534,28 @@ def field_name_collision_remedy(first: StrawberryField, second: StrawberryField)
     The remedy half of ``schema.py::_refuse_field_name_collisions``'s refusal. A
     generated field takes no ``name=``: two fields one declaration generates
     (``GeneratedFieldSources``) name that declaration, the members they are
-    generated from and the flavor's remedy; a generated field beside a declared one
-    (a model mutation's ``Meta.input_class`` field) names the declared field's
-    ``name=`` and the member to drop; two declared fields keep Strawberry's levers.
+    generated from and the flavor's remedy (a set family's per member kind,
+    ``_set_member_remedy``); a generated field beside a declared one (a model
+    mutation's ``Meta.input_class`` field) names the declared field's ``name=`` and
+    the member to drop; two declared fields keep Strawberry's levers.
     """
     first_sources = _sources_of(first)
     second_sources = _sources_of(second)
     if first_sources is not None and second_sources is first_sources:
-        return (
+        first_member = first_sources.members[first.python_name]
+        second_member = first_sources.members[second.python_name]
+        generated_from = (
             f"{first_sources.subject} generates them from {first_sources.field_noun} "
-            f"{first_sources.members[first.python_name]!r} and "
-            f"{first_sources.members[second.python_name]!r}. "
-            f"{first_sources.rename_clause} or drop one via Meta.fields / Meta.exclude."
+            f"{first_member!r} and {second_member!r}."
         )
+        levers = first_sources.levers
+        if levers is not None:
+            return f"{generated_from} " + _set_member_remedy(
+                (first_member, levers[first.python_name]),
+                (second_member, levers[second.python_name]),
+            )
+        clause = first_sources.name_clause or first_sources.rename_clause
+        return f"{generated_from} {clause} or drop one via Meta.fields / Meta.exclude."
     if first_sources is None and second_sources is None:
         return "Rename one, give one an explicit name=, or drop one from the type."
     # One side is generated, the other declared beside it; ``sorted`` is stable and
@@ -1507,6 +1572,56 @@ def field_name_collision_remedy(first: StrawberryField, second: StrawberryField)
         f"beside it: give {declared.python_name!r} a different explicit name=, or drop "
         f"{member!r} via Meta.fields / Meta.exclude."
     )
+
+
+def _set_member_remedy(first: tuple[str, MemberLever], second: tuple[str, MemberLever]) -> str:
+    """Say what removes one of two set members a schema's converter names alike.
+
+    Each member's change follows its kind (``MemberLever``): an exclude cannot remove
+    a declaration (``sets_mixins.py::reject_unknown_exclude_names``) and drops a whole
+    field, never one of its lookups. A logic key is reserved, so only the other
+    member's change is named; two members of one kind share one sentence.
+    """
+    if first[1] == second[1] and first[1].kind in _SHARED_MEMBER_REMEDIES:
+        return _SHARED_MEMBER_REMEDIES[first[1].kind].format(via=first[1].via)
+    reserved = "".join(
+        f"{member!r} is a reserved logic key: "
+        for member, lever in (first, second)
+        if lever.kind == RESERVED_KEY
+    )
+    clause = ", or ".join(
+        _MEMBER_LEVER_CLAUSES[lever.kind].format(member=member, via=lever.via)
+        for member, lever in (first, second)
+        if lever.kind != RESERVED_KEY
+    )
+    if not reserved:
+        clause = f"{clause[0].upper()}{clause[1:]}"
+    return f"{reserved}{clause}."
+
+
+# The change that removes one set member of each changeable kind (``_set_member_remedy``).
+_MEMBER_LEVER_CLAUSES: dict[str, str] = {
+    DECLARED_MEMBER: (
+        "rename or remove the declaration {member!r} (disable an inherited one with "
+        "`{member} = None`)"
+    ),
+    LISTED_MEMBER: "drop {member!r} via Meta.fields / Meta.exclude",
+    LISTED_LOOKUP: "drop {member!r} from the Meta.fields lookup list of {via}",
+    EXPANDED_MEMBER: (
+        "rename the RelatedFilter {via!r} that {member!r} is the flat copy of, or hide "
+        "flat copies with the HIDE_FLAT_FILTERS setting"
+    ),
+}
+
+# The remedy two members of one kind share (``_set_member_remedy``).
+_SHARED_MEMBER_REMEDIES: dict[str, str] = {
+    DECLARED_MEMBER: (
+        "Rename or remove one of the declarations (disable an inherited one with `<name> = None`)."
+    ),
+    LISTED_MEMBER: "Drop one via Meta.fields / Meta.exclude.",
+    LISTED_LOOKUP: "Drop one from the Meta.fields lookup list of {via}.",
+    RESERVED_KEY: "Both are reserved logic keys, so the name converter must name them apart.",
+}
 
 
 def materialize_generated_input_class(
@@ -2225,18 +2340,7 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
                 f"Declare at least one field via the {self._rename_noun}'s Meta.fields "
                 "(or add a RelatedOrder / RelatedFilter branch)."
             ),
-            # A member field's spec names the member; the filter family's logic keys
-            # (``and_`` / ``or_`` / ``not_``) are no member and name themselves.
-            sources=GeneratedFieldSources(
-                subject=f"{self._family_label} {truth.qualname(set_cls)!r}",
-                field_noun="members",
-                rename_clause="Rename one member",
-                members={
-                    attr: spec.member if spec is not None else attr
-                    for attr, _annotation, _kwargs in triples
-                    for spec in (self._field_specs.get((set_cls, attr)),)
-                },
-            ),
+            sources=self._root_sources(set_cls, triples),
         )
         claim_generated_type_name(
             input_cls,
@@ -2245,6 +2349,42 @@ class GeneratedInputArgumentsFactory(Generic[_FactorySetT]):
         )
         self.input_object_types[type_name] = input_cls
         self._collision_registry[type_name] = set_cls
+
+    def _root_sources(
+        self,
+        set_cls: type[_FactorySetT],
+        triples: Sequence[tuple[str, object, Mapping[str, object]]],
+    ) -> GeneratedFieldSources:
+        """Name the set and the member each field of its root input is generated from.
+
+        A member field's spec names the member and ``_member_lever`` its kind; the
+        filter family's logic keys (``and_`` / ``or_`` / ``not_``) are no member,
+        name themselves and are reserved.
+        """
+        members: dict[str, str] = {}
+        levers: dict[str, MemberLever] = {}
+        for attr, _annotation, _kwargs in triples:
+            spec = self._field_specs.get((set_cls, attr))
+            if spec is None:
+                members[attr], levers[attr] = attr, MemberLever(RESERVED_KEY)
+            else:
+                members[attr], levers[attr] = spec.member, self._member_lever(set_cls, spec.member)
+        return GeneratedFieldSources(
+            subject=f"{self._family_label} {truth.qualname(set_cls)!r}",
+            field_noun="members",
+            rename_clause="Rename one member",
+            members=members,
+            levers=levers,
+        )
+
+    def _member_lever(self, _set_cls: type[_FactorySetT], _member: str, /) -> MemberLever:
+        """Return the kind of member ``_member`` is on ``_set_cls`` (family hook).
+
+        The filter family tells a declared filter or ``RelatedFilter`` from a
+        ``RelatedFilter`` expansion's flat copy and a ``Meta.fields`` entry; the order
+        family a declared ``RelatedOrder`` from a ``Meta.fields`` entry.
+        """
+        raise NotImplementedError  # family hook
 
     def _build_input_triples(
         self,

@@ -16219,9 +16219,68 @@ def test_related_order_members_the_default_converter_names_alike_refuse_the_sche
         "PairBranchOrderInputType: fields 'foo_bar' and 'fooBar' both publish the GraphQL "
         "field name 'fooBar' under this schema's name converter, so one would silently "
         "replace the other. OrderSet '_related_order_pair_schema.<locals>.PairBranchOrder' "
-        "generates them from members 'foo_bar' and 'fooBar'. Rename one member or drop one "
-        "via Meta.fields / Meta.exclude."
+        "generates them from members 'foo_bar' and 'fooBar'. Rename or remove one of the "
+        "declarations (disable an inherited one with `<name> = None`)."
     )
+
+
+def _declared_beside_listed_order_schema(exclude: list[str] | None) -> DjangoSchema:
+    """A schema whose branch order set declares ``shelvesCode`` and lists ``shelves__code``."""
+    registry.clear()
+
+    class ListedShelfOrder(OrderSet):
+        class Meta:
+            model = models.Shelf
+            fields = ["code"]
+
+    meta_attrs: dict[str, object] = {"model": models.Branch, "fields": ["name", "shelves__code"]}
+    if exclude is not None:
+        meta_attrs["exclude"] = exclude
+    listed_branch_order = type(
+        "ListedBranchOrder",
+        (OrderSet,),
+        {
+            "shelvesCode": RelatedOrder(ListedShelfOrder, field_name="alt_shelves"),
+            "Meta": type("Meta", (), meta_attrs),
+        },
+    )
+
+    class ListedBranchType(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("id", "name")
+            orderset_class = listed_branch_order
+            name = "ListedBranchType"
+
+    @strawberry.type
+    class Query:
+        branches: list[ListedBranchType] = DjangoListField(ListedBranchType)
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+def test_a_declared_member_beside_a_listed_one_names_each_members_own_lever() -> None:
+    """A declared ``RelatedOrder`` and a ``Meta.fields`` path the converter names alike.
+
+    ``Meta.exclude`` refuses a declared name, so the remedy names a declaration's
+    rename or removal and the listed path's ``Meta.fields`` / ``Meta.exclude``; the
+    listed lever builds the schema.
+    """
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _declared_beside_listed_order_schema(None)
+
+    assert str(exc.value).endswith(
+        "generates them from members 'shelves__code' and 'shelvesCode'. Drop "
+        "'shelves__code' via Meta.fields / Meta.exclude, or rename or remove the "
+        "declaration 'shelvesCode' (disable an inherited one with `shelvesCode = None`).",
+    )
+    with pytest.raises(ConfigurationError, match=r"Meta\.exclude names declared RelatedOrder"):
+        _ = _declared_beside_listed_order_schema(["shelvesCode"])
+    schema = _declared_beside_listed_order_schema(["shelves__code"])
+    assert "shelvesCode" in str(schema)
 
 
 @pytest.mark.django_db
