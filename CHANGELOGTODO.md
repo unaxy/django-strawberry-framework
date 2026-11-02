@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 164 to do.
+Progress: 0 done, 165 to do.
 
 ## From dry-0_0_15_3
 
@@ -647,6 +647,10 @@ Progress: 0 done, 164 to do.
   a `DjangoMutation` create takes a client-assigned key (0.0.14 left it out: a text-key create committed `""`), and a
   `db_default` column is optional on create; input type names move where explicit `fields` now equal or differ from the
   canonical shape (a canonical `<Model>Input` over a client-assigned key gains it); `build_form_inputs` is removed
+- [ ] 712. CHANGELOG entry for item 620: a `DjangoModelFormMutation` over a `null=True` column whose form field cleans
+  `null` to a value (an `ArrayField`'s `[]`, a checkbox `False`, an `HStoreField`'s `{}`) stores `NULL` for an
+  explicit `null` and keeps a stored `NULL` on an update omitting the field, instead of writing that value; a text
+  column keeps its `""`
 
 ## From dry-upstream-0_0_15
 

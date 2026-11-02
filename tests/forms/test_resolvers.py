@@ -112,6 +112,7 @@ if TYPE_CHECKING:
 
     # Each field's descriptor types as django-stubs declares them (set type, get type), spelled
     # out because the checker runs without the django-stubs mypy plugin that would infer them.
+    _Bool: TypeAlias = models.BooleanField[bool | Combinable, bool]
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
     _Text: TypeAlias = models.TextField[str | Combinable, str]
 
@@ -3622,6 +3623,361 @@ def test_modelform_update_null_on_nullable_column_clears_it() -> None:
         assert res.data is not None
         assert res.data["updateRow"]["errors"] == []
         assert list(model_class.objects.values_list("pick", flat=True)) == [None]
+
+
+def _nullable_value_form(
+    model_class: type[models.Model],
+    form_field: forms.Field | None,
+    attrs: Mapping[str, object] | None = None,
+) -> type[forms.BaseForm]:
+    """A ``ModelForm`` over ``title`` and ``value``, declaring ``form_field`` when one is given."""
+    if form_field is not None:
+        return _keyed_row_form(model_class, "value", form_field, attrs=attrs)
+    return type(
+        "NullableValueForm",
+        (forms.ModelForm,),
+        {
+            "Meta": type("Meta", (), {"model": model_class, "fields": ("title", "value")}),
+            **(attrs or {}),
+        },
+    )
+
+
+def _assert_nullable_write(
+    column: models.Field[object, object],
+    form_field: forms.Field | None,
+    *,
+    operation: str,
+    data: dict[str, object],
+    stored: object,
+    mode: str,
+    expected: object,
+    attrs: Mapping[str, object] | None = None,
+) -> None:
+    """Write ``data`` through a form over the ``null=True`` column ``value``, then read it back.
+
+    ``stored`` is the update's row value (``None`` for a stored ``NULL``); a create ignores it.
+    """
+    model_class = _keyed_row_model("NullableValueRow", value=column)
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _nullable_value_form(model_class, form_field, attrs),
+            operation=operation,
+            data={"title": "New", **data},
+            stored=None if operation == "create" else {"value": stored},
+            mode=mode,
+        )
+        assert payload == {"result": {"title": "New"}, "errors": []}
+        assert list(model_class._base_manager.values_list("title", "value")) == [("New", expected)]
+
+
+#: ``(operation, data, stored)``: the inputs binding ``None`` under the field, over a row
+#: holding a value (``"value"``) or ``NULL`` (``"null"``).
+_NULL_BINDING_WRITES = [
+    pytest.param("create", {"value": None}, "value", id="create-null"),
+    pytest.param("update", {"value": None}, "value", id="update-null"),
+    pytest.param("update", {"value": None}, "null", id="update-null-over-null"),
+    pytest.param("update", {}, "null", id="update-omitted-over-null"),
+]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "operation",
+        "data",
+        "stored",
+        "expected",
+    ),
+    [
+        *(pytest.param(*row.values, None, id=row.id) for row in _NULL_BINDING_WRITES),
+        pytest.param("update", {"value": "sent"}, "null", "sent", id="update-value"),
+        pytest.param("update", {}, "value", "kept", id="update-omitted-over-value"),
+    ],
+)
+def test_modelform_null_a_text_column_form_field_cleans_to_a_non_empty_value_stores_null(
+    operation: str,
+    data: dict[str, object],
+    stored: str,
+    expected: str | None,
+) -> None:
+    """A text column's form field cleaning ``null`` to a value other than ``""`` stores ``NULL``.
+
+    A ``CharField(empty_value="n/a")`` over a ``null=True`` ``TextField`` cleans the bound
+    ``None`` to ``"n/a"``. Only Django's own empty value for a text column, ``""``, is
+    kept, so an explicit ``null``, or an update omitting the field over ``NULL``, stores
+    ``NULL``. A value sent is written and an update omitting the field over a stored value
+    keeps it.
+    """
+    _assert_nullable_write(
+        models.TextField(null=True, blank=True),
+        forms.CharField(required=False, empty_value="n/a"),
+        operation=operation,
+        data=data,
+        stored=None if stored == "null" else "kept",
+        mode="sync",
+        expected=expected,
+    )
+
+
+def _clean_value_to_true(_form: forms.BaseForm) -> bool:
+    """A ``clean_value`` resolving the field to ``True`` whatever was sent."""
+    return True
+
+
+def _clean_value_to_false(_form: forms.BaseForm) -> bool:
+    """A ``clean_value`` resolving the field to ``False``, the checkbox's cleaning of ``None``."""
+    return False
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "data",
+        "stored",
+        "clean_value",
+        "expected",
+    ),
+    [
+        pytest.param({"value": None}, False, _clean_value_to_true, True, id="null"),
+        pytest.param({}, None, _clean_value_to_true, True, id="omitted-over-null"),
+        pytest.param({"value": None}, True, _clean_value_to_false, None, id="own-cleaning"),
+    ],
+)
+def test_modelform_null_a_consumer_form_resolves_on_a_nullable_column(
+    data: dict[str, object],
+    stored: object,
+    clean_value: Callable[[forms.BaseForm], bool],
+    expected: object,
+) -> None:
+    """A ``clean_<field>`` value other than the field's own cleaning of ``None`` is written.
+
+    A checkbox over a ``null=True`` boolean: ``True`` from ``clean_value`` is written for an
+    explicit ``null`` and for an update omitting the field over ``NULL``. A hook answering
+    ``False``, exactly what the checkbox cleans ``None`` to, cannot be told from the field's
+    own cleaning, so the column stores ``NULL``.
+    """
+    _assert_nullable_write(
+        models.BooleanField(null=True, blank=True),
+        forms.BooleanField(required=False),
+        operation="update",
+        data=data,
+        stored=stored,
+        mode="sync",
+        expected=expected,
+        attrs={"clean_value": clean_value},
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_modelform_null_coerced_on_a_not_null_column_is_refused_before_a_filling_save(
+    operation: str,
+) -> None:
+    """A checkbox's ``False`` for ``null`` on a ``null=False`` column is refused before ``save()``.
+
+    The refusal runs before the save, so a model ``save()`` that would fill the column never
+    runs: the column's ``null`` error, nothing created, the stored row (``title`` ``Old``)
+    unchanged. Only a ``null=True`` column stores ``NULL`` in place of the checkbox's
+    cleaning.
+    """
+
+    class NotNullFlagRow(models.Model):
+        title: _Text = models.TextField()
+        value: _Bool = models.BooleanField(default=False)
+
+        class Meta:
+            app_label = "products"
+            managed = False
+
+        @override
+        def save(self, *args: object, **kwargs: object) -> None:
+            self.value = True
+            call_forwarded(super().save, args, kwargs)
+
+    model_class = NotNullFlagRow
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _keyed_row_form(model_class, "value", forms.BooleanField(required=False)),
+            operation=operation,
+            data={"title": "New", "value": None},
+            stored=None if operation == "create" else {"value": True},
+            mode="sync",
+        )
+        assert payload == {
+            "result": None,
+            "errors": [
+                {
+                    "field": "value",
+                    "messages": ["This field cannot be null."],
+                    "codes": ["null"],
+                    "path": ["value"],
+                },
+            ],
+        }
+        rows = list(model_class._base_manager.values_list("title", "value"))
+        assert rows == ([] if operation == "create" else [("Old", True)])
+
+
+def _nullable_array_column(
+    shape: str,
+) -> tuple[models.Field[object, object], forms.Field | None]:
+    """The ``null=True`` ``ArrayField`` of ``shape`` and the ``SplitArrayField`` declared over it.
+
+    ``None`` keeps the column's own ``SimpleArrayField``.
+    """
+    from django.contrib.postgres import fields as postgres_fields  # noqa: PLC0415 - needs the Postgres driver
+    from django.contrib.postgres import forms as postgres_forms  # noqa: PLC0415 - needs the Postgres driver
+
+    shapes: dict[str, Callable[[], tuple[models.Field[object, object], forms.Field | None]]] = {
+        "simple": lambda: (
+            postgres_fields.ArrayField(models.IntegerField(), null=True, blank=True),
+            None,
+        ),
+        "split-drop-nulls": lambda: (
+            postgres_fields.ArrayField(models.IntegerField(), null=True, blank=True),
+            postgres_forms.SplitArrayField(
+                forms.IntegerField(required=False),
+                size=3,
+                required=False,
+                remove_trailing_nulls=True,
+            ),
+        ),
+        "split-keep-nulls": lambda: (
+            postgres_fields.ArrayField(
+                models.IntegerField(null=True, blank=True),
+                null=True,
+                blank=True,
+            ),
+            postgres_forms.SplitArrayField(
+                forms.IntegerField(required=False),
+                size=3,
+                required=False,
+            ),
+        ),
+        "simple-default-none": lambda: (
+            postgres_fields.ArrayField(
+                models.IntegerField(),
+                null=True,
+                blank=True,
+                default=None,
+            ),
+            None,
+        ),
+    }
+    return shapes[shape]()
+
+
+#: ``(case, operation, data, stored)``: the inputs binding ``None`` under an array column.
+_NULL_ARRAY_BINDINGS: list[tuple[str, str, dict[str, object], list[int] | None]] = [
+    (
+        "create-null",
+        "create",
+        {"value": None},
+        None,
+    ),
+    (
+        "update-null",
+        "update",
+        {"value": None},
+        [5, 6],
+    ),
+    (
+        "update-null-over-null",
+        "update",
+        {"value": None},
+        None,
+    ),
+    (
+        "update-omitted-over-null",
+        "update",
+        {},
+        None,
+    ),
+]
+
+#: ``(shape, operation, data, stored, expected)`` over a ``null=True`` ``ArrayField``.
+_NULLABLE_ARRAY_WRITES = [
+    *(
+        pytest.param(shape, operation, data, stored, None, id=f"{shape}-{case}")
+        for shape in (
+            "simple",
+            "split-drop-nulls",
+            "split-keep-nulls",
+            "simple-default-none",
+        )
+        for case, operation, data, stored in _NULL_ARRAY_BINDINGS
+    ),
+    pytest.param("simple", "update", {}, [5, 6], [5, 6], id="simple-omitted-over-list"),
+    pytest.param("simple", "update", {"value": []}, None, [], id="simple-empty-list"),
+    pytest.param(
+        "split-drop-nulls",
+        "update",
+        {},
+        [5, 6],
+        [5, 6],
+        id="split-drop-nulls-omitted-over-list",
+    ),
+    pytest.param(
+        "split-drop-nulls",
+        "update",
+        {"value": []},
+        None,
+        [],
+        id="split-drop-nulls-empty-list",
+    ),
+    pytest.param(
+        "split-keep-nulls",
+        "update",
+        {"value": []},
+        None,
+        [None, None, None],
+        id="split-keep-nulls-empty-list",
+    ),
+]
+
+
+@pytest.mark.pg
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    (
+        "shape",
+        "operation",
+        "data",
+        "stored",
+        "expected",
+    ),
+    _NULLABLE_ARRAY_WRITES,
+)
+def test_modelform_null_on_a_nullable_array_column_stores_null(
+    shape: str,
+    operation: str,
+    data: dict[str, object],
+    stored: list[object] | None,
+    expected: list[object] | None,
+    mode: str,
+) -> None:
+    """A ``null=True`` ``ArrayField`` sent ``null``, or omitted over ``NULL``, stores ``NULL``.
+
+    ``SimpleArrayField`` cleans the bound ``None`` to ``[]`` and ``SplitArrayField`` to
+    ``[]`` (``remove_trailing_nulls``) or ``size`` nulls; the column keeps the ``NULL``.
+    An empty list sent is a value (``SplitArrayField`` keeping trailing nulls cleans it to
+    ``size`` nulls, Django's own answer), and an update omitting the field over a list
+    keeps the list.
+    """
+    column, form_field = _nullable_array_column(shape)
+    _assert_nullable_write(
+        column,
+        form_field,
+        operation=operation,
+        data=data,
+        stored=stored,
+        mode=mode,
+        expected=expected,
+    )
 
 
 class _CleanedPrivateForm(forms.ModelForm[product_models.Item]):

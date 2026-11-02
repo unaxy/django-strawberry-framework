@@ -28,6 +28,18 @@ The ``SplitForm`` pairs write ``occurred_at`` through a ``SplitDateTimeField``, 
 widget reads a date key and a time key: the datetime sent is stored on create and update
 and kept when omitted, unprefixed, under the form's prefix and beside a ``get_form``'s own
 prefixed copy.
+
+``createNullableScalarSpecimenViaForm`` / ``updateNullableScalarSpecimenViaForm`` write the
+``null=True`` ``NullableScalarSpecimen.flag`` through a checkbox
+(``NullableScalarSpecimenFlagForm``), which reads a bound ``None`` as ``False``: an explicit
+``flag: null`` on create and on update over ``true``, ``false`` or ``NULL``, and an update
+omitting ``flag`` over a stored ``NULL``, store ``NULL`` with empty ``errors``, sync and
+async, while ``true`` / ``false`` are written and an update omitting ``flag`` over a value
+keeps it. The text column ``label`` sent ``null`` keeps the ``""`` its form field cleans the
+``null`` to. The same form writes the ``null=True`` JSON column ``payload`` through a
+``CharField``, which cleans ``null`` to ``""``: an explicit ``payload: null`` on create and on
+update over a value or ``NULL``, and an update omitting it over ``NULL``, store ``NULL``, while
+a string sent is stored as that JSON string and one stored is kept when omitted.
 """
 
 from __future__ import annotations
@@ -671,3 +683,242 @@ def test_create_json_text_keeps_representable_unicode() -> None:
 
     assert payload == _MODEL_CREATE_SUCCESS
     assert models.ScalarSpecimen.objects.get(label="written").payload == value
+
+
+#: The checkbox ``flag`` form's create and update root fields and their input types.
+_FLAG_FORM = (
+    "createNullableScalarSpecimenViaForm",
+    "NullableScalarSpecimenFlagFormInput",
+    "updateNullableScalarSpecimenViaForm",
+    "NullableScalarSpecimenFlagFormPartialInput",
+)
+
+#: ``(operation, stored, data, expected)``: the stored ``flag`` an update starts from, the
+#: ``flag`` input sent (absent when ``data`` omits it) and the ``flag`` the row holds after.
+_FLAG_WRITES = [
+    pytest.param("create", None, {"flag": None}, None, id="create-null"),
+    pytest.param("update", True, {"flag": None}, None, id="update-null-over-true"),
+    pytest.param("update", False, {"flag": None}, None, id="update-null-over-false"),
+    pytest.param("update", None, {"flag": None}, None, id="update-null-over-null"),
+    pytest.param("update", None, {}, None, id="update-omitted-over-null"),
+    pytest.param("create", None, {"flag": True}, True, id="create-true"),
+    pytest.param("create", None, {"flag": False}, False, id="create-false"),
+    pytest.param("update", None, {"flag": True}, True, id="update-true-over-null"),
+    pytest.param("update", None, {"flag": False}, False, id="update-false-over-null"),
+    pytest.param("update", True, {}, True, id="update-omitted-over-true"),
+    pytest.param("update", False, {}, False, id="update-omitted-over-false"),
+]
+
+
+def _flag_document(operation: str) -> tuple[str, str]:
+    """Return the checkbox form mutation's root field and its document over ``$data``."""
+    create_field, create_input, update_field, update_input = _FLAG_FORM
+    if operation == "create":
+        arguments, root = f"$data: {create_input}!", create_field
+        call = f"{root}(data: $data)"
+    else:
+        arguments, root = f"$id: ID!, $data: {update_input}!", update_field
+        call = f"{root}(id: $id, data: $data)"
+    document = f"""
+        mutation Write({arguments}) {{
+          {call} {{
+            result {{ label flag }}
+            errors {{ field messages codes path }}
+          }}
+        }}
+    """
+    return root, document
+
+
+def _flag_variables(
+    operation: str,
+    data: Mapping[str, object],
+    *,
+    stored: bool | None,
+) -> dict[str, object]:
+    """Seed the row an update starts from (``label`` ``stored``) and build the variables.
+
+    Every write names ``label``, so an update's save writes the row whatever ``flag`` is.
+    """
+    if operation == "create":
+        return {"data": {"label": "written", **data}}
+    specimen = models.NullableScalarSpecimen.objects.create(label="stored", flag=stored)
+    return {"id": str(specimen.pk), "data": {"label": "renamed", **data}}
+
+
+def _assert_flag_written(root: str, payload: JSONObject, *, expected: bool | None) -> None:
+    """The write succeeded and the one row holds ``expected`` in ``flag``."""
+    label = "written" if root == _FLAG_FORM[0] else "renamed"
+    assert payload == {
+        "data": {root: {"result": {"label": label, "flag": expected}, "errors": []}},
+    }
+    rows = list(models.NullableScalarSpecimen.objects.values_list("label", "flag"))
+    assert rows == [(label, expected)], rows
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "operation",
+        "stored",
+        "data",
+        "expected",
+    ),
+    _FLAG_WRITES,
+)
+def test_checkbox_over_a_nullable_boolean_stores_null_for_null(
+    operation: str,
+    data: Mapping[str, object],
+    *,
+    stored: bool | None,
+    expected: bool | None,
+) -> None:
+    """A checkbox over the ``null=True`` ``flag`` stores ``NULL`` for an explicit or kept ``null``.
+
+    The declared ``forms.BooleanField(required=False)`` reads a bound ``None`` as ``False``.
+    An explicit ``flag: null`` on create, on update over ``true``, ``false`` or ``NULL``, and
+    an update omitting ``flag`` over a stored ``NULL`` store ``NULL``, as the model flavor
+    does, with empty ``errors``. ``true`` and ``false`` are written as sent, and an update
+    omitting ``flag`` over a stored ``true`` or ``false`` keeps it.
+    """
+    root, document = _flag_document(operation)
+
+    payload = response_json(
+        post_graphql(document, variables=_flag_variables(operation, data, stored=stored)),
+    )
+
+    _assert_flag_written(root, payload, expected=expected)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("operation", "value", "expected"),
+    [
+        pytest.param("create", None, "", id="create-null"),
+        pytest.param("update", None, "", id="update-null"),
+        pytest.param("update", "kept", "kept", id="update-value"),
+    ],
+)
+def test_text_column_under_the_flag_form_keeps_the_empty_string_for_null(
+    operation: str,
+    value: str | None,
+    expected: str,
+) -> None:
+    """``label: null`` on the ``null=True`` text column ``label`` stores ``""``, never ``NULL``.
+
+    The column's own ``CharField`` cleans ``None`` to ``""``, Django's empty value for a
+    text column, and the form flavor writes it as cleaned; a value sent is written.
+    """
+    root, document = _flag_document(operation)
+    if operation == "create":
+        variables: dict[str, object] = {"data": {"label": value, "flag": True}}
+    else:
+        specimen = models.NullableScalarSpecimen.objects.create(label="stored", flag=True)
+        variables = {"id": str(specimen.pk), "data": {"label": value}}
+
+    payload = response_json(post_graphql(document, variables=variables))
+
+    assert payload == {
+        "data": {root: {"result": {"label": expected, "flag": True}, "errors": []}},
+    }
+    rows = list(models.NullableScalarSpecimen.objects.values_list("label", "flag"))
+    assert rows == [(expected, True)], rows
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "operation",
+        "stored",
+        "data",
+        "expected",
+    ),
+    [
+        pytest.param("create", None, {"flag": None}, None, id="create-null"),
+        pytest.param("update", True, {"flag": None}, None, id="update-null-over-true"),
+        pytest.param("update", None, {}, None, id="update-omitted-over-null"),
+        pytest.param("update", True, {}, True, id="update-omitted-over-true"),
+    ],
+)
+async def test_async_checkbox_over_a_nullable_boolean_stores_null_for_null(
+    operation: str,
+    data: Mapping[str, object],
+    *,
+    stored: bool | None,
+    expected: bool | None,
+) -> None:
+    """The async pipeline stores ``NULL`` for the checkbox ``flag``'s ``null`` the same way."""
+    root, document = _flag_document(operation)
+    variables = await sync_to_async(_flag_variables)(operation, data, stored=stored)
+    with override_settings(ROOT_URLCONF=__name__):
+        result = await AsyncTestClient().query(
+            document,
+            variables=variables,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+
+    await sync_to_async(_assert_flag_written)(
+        root,
+        response_json(result.response),
+        expected=expected,
+    )
+
+
+#: ``(operation, stored, data, expected)``: the stored ``payload`` an update starts from, the
+#: ``payload`` input sent (absent when ``data`` omits it) and the ``payload`` the row holds.
+_PAYLOAD_WRITES = [
+    pytest.param("create", None, {"payload": None}, None, id="create-null"),
+    pytest.param("update", "x", {"payload": None}, None, id="update-null-over-value"),
+    pytest.param("update", None, {"payload": None}, None, id="update-null-over-null"),
+    pytest.param("update", None, {}, None, id="update-omitted-over-null"),
+    pytest.param("create", None, {"payload": "y"}, "y", id="create-string"),
+    pytest.param("update", None, {"payload": "y"}, "y", id="update-string-over-null"),
+    pytest.param("update", "x", {}, "x", id="update-omitted-over-string"),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "operation",
+        "stored",
+        "data",
+        "expected",
+    ),
+    _PAYLOAD_WRITES,
+)
+def test_char_field_over_a_nullable_json_column_stores_null_for_null(
+    operation: str,
+    stored: str | None,
+    data: Mapping[str, object],
+    expected: str | None,
+) -> None:
+    """A ``CharField`` over the ``null=True`` JSON ``payload`` stores ``NULL`` for ``null``.
+
+    The declared ``forms.CharField(required=False)`` cleans a bound ``None`` to ``""``, which
+    the ``JSONField`` would store as the JSON string; the column is no text column
+    (``empty_strings_allowed`` is false), so an explicit ``payload: null`` on create and on
+    update over a value or ``NULL``, and an update omitting it over ``NULL``, store ``NULL``
+    with empty ``errors``. A string sent is stored as that JSON string, and an update
+    omitting ``payload`` over a stored string keeps it.
+    """
+    root, document = _flag_document(operation)
+    if operation == "create":
+        variables: dict[str, object] = {"data": {"label": "written", "flag": True, **data}}
+    else:
+        specimen = models.NullableScalarSpecimen.objects.create(
+            label="stored",
+            flag=True,
+            payload=stored,
+        )
+        variables = {"id": str(specimen.pk), "data": {"label": "renamed", **data}}
+
+    payload = response_json(post_graphql(document, variables=variables))
+
+    label = "written" if operation == "create" else "renamed"
+    assert payload == {
+        "data": {root: {"result": {"label": label, "flag": True}, "errors": []}},
+    }
+    rows = list(models.NullableScalarSpecimen.objects.values_list("label", "payload"))
+    assert rows == [(label, expected)], rows

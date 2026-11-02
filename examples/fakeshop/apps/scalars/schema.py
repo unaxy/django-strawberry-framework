@@ -31,7 +31,10 @@ datetime or time the database cannot store is refused live on each. The ``SplitF
 pairs write ``occurred_at`` through ``forms.ScalarSpecimenSplitStampForm``'s
 ``SplitDateTimeField``, whose widget reads a date key and a time key: unprefixed, under the
 form's own prefix (``PrefixedSplitForm``), and from a copy a ``get_form`` keys under that
-prefix itself (``RekeyedSplitForm``).
+prefix itself (``RekeyedSplitForm``). The ``NullableScalarSpecimen`` ``ViaForm`` pair writes
+the ``null=True`` ``flag`` column through ``forms.NullableScalarSpecimenFlagForm``'s
+checkbox and the ``null=True`` ``payload`` JSON column through its ``CharField``, so an
+explicit ``null`` and an update omitting either over a stored ``NULL`` store ``NULL``.
 
 ``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
 ``FilteredRelation("parent")`` alias named ``par``, filtered by
@@ -614,6 +617,24 @@ class UpdateScalarSpecimenViaRekeyedSplitForm(DjangoModelFormMutation):
         )
 
 
+class CreateNullableScalarSpecimenViaForm(DjangoModelFormMutation):
+    """Create a ``NullableScalarSpecimen`` through ``forms.NullableScalarSpecimenFlagForm``."""
+
+    class Meta:
+        form_class = forms.NullableScalarSpecimenFlagForm
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateNullableScalarSpecimenViaForm(DjangoModelFormMutation):
+    """Update a ``NullableScalarSpecimen`` through ``forms.NullableScalarSpecimenFlagForm``."""
+
+    class Meta:
+        form_class = forms.NullableScalarSpecimenFlagForm
+        operation = "update"
+        permission_classes = []
+
+
 class CreateScalarSpecimenViaSerializer(SerializerMutation):
     """Create a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalSerializer``."""
 
@@ -638,7 +659,9 @@ class Mutation:
 
     The ``ScalarSpecimen`` create / update pairs write the temporal columns through each
     flavor (model, ``ModelForm``, serializer); the ``SplitForm`` pairs write
-    ``occurredAt`` through a ``SplitDateTimeField``.
+    ``occurredAt`` through a ``SplitDateTimeField``; the ``NullableScalarSpecimen``
+    ``ViaForm`` pair writes the ``null=True`` ``flag`` through a checkbox and ``payload``
+    through a ``CharField``.
     """
 
     create_media_specimen = DjangoMutationField(CreateMediaSpecimen)
@@ -661,6 +684,12 @@ class Mutation:
     )
     update_scalar_specimen_via_rekeyed_split_form = DjangoMutationField(
         UpdateScalarSpecimenViaRekeyedSplitForm,
+    )
+    create_nullable_scalar_specimen_via_form = DjangoMutationField(
+        CreateNullableScalarSpecimenViaForm,
+    )
+    update_nullable_scalar_specimen_via_form = DjangoMutationField(
+        UpdateNullableScalarSpecimenViaForm,
     )
     create_scalar_specimen_via_serializer = DjangoMutationField(CreateScalarSpecimenViaSerializer)
     update_scalar_specimen_via_serializer = DjangoMutationField(UpdateScalarSpecimenViaSerializer)
