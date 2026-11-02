@@ -940,6 +940,9 @@ def _generated_input_sources(
         subject=f"DjangoMutation {kind} input for {truth.name(model)}",
         field_noun="model fields",
         rename_clause="Rename one of the model fields,",
+        # A ``Meta.input_class`` field over one column replaces its generated field and
+        # takes an explicit ``name=``, which no migration needs.
+        name_clause="Declare one on Meta.input_class with a different explicit name=,",
         members={name.input_attr: name.model_field_name for name in names},
     )
 

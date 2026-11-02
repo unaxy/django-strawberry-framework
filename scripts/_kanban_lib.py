@@ -58,7 +58,7 @@ SQLITE_BUSY_TIMEOUT_MS = 5000
 # :func:`configure_django`). The package default is ``max_list_rows = 100`` and a
 # collection over it is truncated SILENTLY - the bound slices the result and
 # returns a short page with no error, which is correct for a served API and wrong
-# for an export that must reproduce the whole board. Card 52 crossed 100 items and
+# for an export that must reproduce the whole board. A card crossed 100 items and
 # one row vanished from both KANBAN.md and KANBAN.html while every freshness check
 # still reported "up to date", because a ``--check`` compares the renderer against
 # itself. This value only buys headroom; what makes it safe is

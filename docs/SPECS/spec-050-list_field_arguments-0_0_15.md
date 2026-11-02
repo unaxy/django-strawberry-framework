@@ -3259,7 +3259,7 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
 ## Out of scope (explicitly tracked elsewhere)
 
 - The other upstream parity gaps and an `extensions.code` on connection pagination rejections
-  belong to [`TODO-ALPHA-051-0.0.15`][kanban].
+  belong to [`WIP-ALPHA-052-0.0.15`][kanban].
 - Debug-extension extraction belongs to [`TODO-ALPHA-053-0.0.15`][kanban].
 - The boundary/DRY squeeze and the `0.0.15` release cut belong to
   [`TODO-ALPHA-055-0.0.15`][kanban].

@@ -24,8 +24,11 @@ from typing import TYPE_CHECKING, ClassVar
 from typing_extensions import override
 
 from django_strawberry_framework.utils.inputs import (
+    DECLARED_MEMBER,
+    LISTED_MEMBER,
     GeneratedInputArgumentsFactory,
     GeneratedInputFieldSpec,
+    MemberLever,
 )
 
 from .inputs import _build_input_fields, _field_specs
@@ -87,3 +90,9 @@ class OrderArgumentsFactory(GeneratedInputArgumentsFactory[OrderSet]):
         """Order input triples -- no operator bag (spec-028 Decision 8)."""
         del type_name  # the order side has no ``and_`` / ``or_`` / ``not_`` bag.
         return _build_input_fields(set_cls, owner_definition)
+
+    @override
+    def _member_lever(self, set_cls: type[OrderSet], member: str) -> MemberLever:
+        """Tell a declared ``RelatedOrder`` branch from a ``Meta.fields`` entry."""
+        declared = member in set_cls._declared_order_names()
+        return MemberLever(DECLARED_MEMBER if declared else LISTED_MEMBER)

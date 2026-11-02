@@ -76,7 +76,13 @@ from django_strawberry_framework.utils.input_values import (
     iter_input_items,
 )
 from django_strawberry_framework.utils.inputs import (
+    DECLARED_MEMBER,
+    EXPANDED_MEMBER,
+    LISTED_LOOKUP,
+    LISTED_MEMBER,
+    GeneratedFieldSources,
     GeneratedInputFieldSpec,
+    MemberLever,
     build_strawberry_input_class,
     emit_set_input_field_triples,
     make_set_input_namespace,
@@ -124,7 +130,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.inputs import SetInputNamespace
     from django_strawberry_framework.utils.typing import ModelField
 
-    from .sets import FilterSet, _LeafDeclaration
+    from .sets import ChildProjection, FilterSet, _LeafDeclaration
 
 # Module path the ``strawberry.lazy(...)`` marker references; pinned as a
 # single constant so the factory, ``_build_logic_fields``, and
@@ -2050,6 +2056,51 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
     return table
 
 
+def filter_member_lever(filterset_cls: type[FilterSet], head: str) -> MemberLever:
+    """Return the kind of member input head ``head`` of ``filterset_cls`` is.
+
+    A filter or ``RelatedFilter`` the set declares or inherits is a declaration;
+    a head a ``RelatedFilter`` expansion copies in is that branch's flat copy
+    (``_flat_copy_record``); any other head is a ``Meta.fields`` entry.
+    """
+    if head in filterset_cls.declared_filters:
+        return MemberLever(DECLARED_MEMBER)
+    record = _flat_copy_record(filterset_cls, head)
+    if record is not None:
+        return MemberLever(EXPANDED_MEMBER, via=record.branch)
+    return MemberLever(LISTED_MEMBER)
+
+
+def _flat_copy_record(filterset_cls: type[FilterSet], head: str) -> ChildProjection | None:
+    """Return the expansion record of input head ``head``'s flat copies, else ``None``.
+
+    A head a ``RelatedFilter`` expansion copies in holds the copies of one child
+    head's lookups (``filters/sets.py::_is_flat_copy``); any other head holds none.
+    """
+    from .sets import _expansion_record  # noqa: PLC0415 - import cycle
+
+    for _form_key, head_filter in filter_lookup_table(filterset_cls).heads.get(head, {}).values():
+        record = _expansion_record(head_filter)
+        if record is not None and record.holds_in(filterset_cls):
+            return record
+    return None
+
+
+def _lookup_lever(filterset_cls: type[FilterSet], head: str) -> MemberLever:
+    """Return the lever of an operator-bag lookup of input head ``head``.
+
+    The lookups come from a ``Meta.fields`` lookup list: the head's own on
+    ``filterset_cls``, or, for a ``RelatedFilter`` expansion's flat copy, the child
+    head's on the child set (``shelves__code`` copies ``code`` of the shelf set).
+    A declared filter is a head of its own, with its one lookup.
+    """
+    record = _flat_copy_record(filterset_cls, head)
+    if record is None:
+        return MemberLever(LISTED_LOOKUP, via=repr(head))
+    child_head = head.removeprefix(f"{record.branch}{LOOKUP_SEP}")
+    return MemberLever(LISTED_LOOKUP, via=f"{child_head!r} on {truth.qualname(record.filterset)}")
+
+
 def _build_input_fields(
     filterset_cls: type[FilterSet],
     owner_definition: DjangoTypeDefinition | None = None,
@@ -2152,7 +2203,18 @@ def _build_input_fields(
             bag_specs.append(
                 (lookup_python_attr, annotation, optional_field_kwargs(lookup_wire_name)),
             )
-        bag_class = build_input_class(bag_name, bag_specs)
+        lookup_lever = _lookup_lever(filterset_cls, top_name)
+        bag_class = build_input_class(
+            bag_name,
+            bag_specs,
+            sources=GeneratedFieldSources(
+                subject=f"FilterSet {truth.qualname(filterset_cls)!r}",
+                field_noun="lookups",
+                rename_clause="Rename one lookup",
+                members={lookup_leaf_names(lookup)[0]: lookup for lookup in lookup_bag},
+                levers={lookup_leaf_names(lookup)[0]: lookup_lever for lookup in lookup_bag},
+            ),
+        )
         # The ``FieldSpec`` source path is the head's permission gate path;
         # the form keys the normalizer emits come from the lookup table.
         return bag_class | None, lookup_table.gate_paths[top_name]

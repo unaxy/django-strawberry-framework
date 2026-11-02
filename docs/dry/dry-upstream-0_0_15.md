@@ -900,8 +900,8 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
       each generated class's `utils/inputs.py::GeneratedFieldSources` (declaration, members), and
       `utils/inputs.py::field_name_collision_remedy` words the tail (two generated fields: the set / model / form /
       serializer and both members; a declared field beside a generated one: its `name=` or the member to drop; two
-      declared fields: rename or `name=`). `GeneratedInputFieldSpec.member` carries the set member. Operator-bag and
-      range inputs carry no sources (only a converter naming two lookups alike reaches them)
+      declared fields: rename or `name=`). `GeneratedInputFieldSpec.member` carries the set member. Range inputs
+      carry no sources (their bounds are the package's own names)
     - README, GLOSSARY (`filterset`, `orderset`, `input-type-generation`, `strawberry_config`, `djangoschema`) and
       spec-027 state the plain-schema drop and the `get_graphql_name` respelling of the keyword names; CHANGELOGTODO
       903 names every caser difference and the hashed serializer type rename; `docs/dry/DRY.md` and `ATTENTION.md`
@@ -913,6 +913,19 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
       `test_form_construction_api.py::test_required_extra_field_omitted_on_update_is_coercion_error[omitted]`,
       the four `test_mti_composite_relations_api.py` composite-key refusals, two `test_scalars_filter_api.py` rows and
       `test_declared_temporal_bindability_api.py::test_a_declared_filter_past_a_transform_publishes_what_its_own_form_cleans`
+    - Second review pass (2026-11-02): a filter / order set's remedy names each member's own lever
+      (`utils/inputs.py::MemberLever`: a declaration is renamed or removed, since `Meta.exclude` refuses one; a
+      `Meta.fields` entry dropped; a `RelatedFilter` flat copy through its branch or `HIDE_FLAT_FILTERS`; an
+      operator-bag lookup, whose bag now records sources, from its `Meta.fields` lookup list; a logic key named
+      reserved); a model mutation's name refusal offers `Meta.input_class` with an explicit `name=` instead of a column
+      rename; a plain-schema mutation whose input lost a field refuses before any write naming it
+      (`utils/inputs.py::published_input_specs`) instead of a raw `KeyError`; a model field named a Python keyword
+      (`from`) is a `ConfigurationError` instead of a raw `SyntaxError`. Docs: spec-051 Decision 1's wire change lists
+      every caser difference, Decision 2 states the filter decode's attr-and-form-key mechanism, the spec-044 pointer
+      is gone, the `strawberry_config` glossary row names a keyword lookup transform's `name=`, the card item matches
+      CHANGELOGTODO 903, and four renumber leftovers (spec-050's parity-card id, review-0_0_15's dated `053`, BACKLOG's
+      migration-guides id, the `_kanban_lib.py` / kanban `services.py` card numerals) and START.md's `Card.uuid` line
+      are corrected
 
 - [ ] 29. (S6) Consumer per-frame masking → `SchemaExtension.on_stream_result`
   - Our code: `consumers.py::_stop_aware_results #"mask_execution_result(result, policy)"` (~3 lines plus the local
