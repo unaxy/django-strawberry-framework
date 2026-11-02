@@ -69,7 +69,7 @@ from django_strawberry_framework.utils.connections import (
 from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
 from tests._definition import make_definition
 from tests._idioms import json_at, json_list
-from tests._info import make_info
+from tests._info import make_info, raw_info_of
 from tests._relation_connection_schemas import (
     _genres_filterable_book_schema,
     _genres_list_schema,
@@ -675,11 +675,13 @@ def _page_info(
     assert parent_type is not None
     field = schema.get_field_for_type("books", parent_type.name)
     assert field is not None
-    raw_info = make_info(
-        context=context,
-        field_name="books",
-        selections=selections,
-    )._raw_info._replace(
+    raw_info = raw_info_of(
+        make_info(
+            context=context,
+            field_name="books",
+            selections=selections,
+        ),
+    )._replace(
         parent_type=parent_type,
         return_type=graphql_type_of(graphql_fields(parent_type)["books"]),
         schema=schema._schema,

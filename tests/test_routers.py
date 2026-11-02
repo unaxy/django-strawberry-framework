@@ -220,10 +220,10 @@ if TYPE_CHECKING:
 # themselves could never catch the hint drifting from the dev-group floor.
 _HINT_SUBSTRING = "channels>=4.3.2"
 # The Strawberry floor the hint recommends must be the floor the package METADATA
-# accepts: ``pyproject.toml`` requires ``strawberry-graphql>=0.322.2`` and the
-# minimum CI matrix node pins exactly ``0.322.2``, so an older floor here would be
+# accepts: ``pyproject.toml`` requires ``strawberry-graphql>=0.328.0`` and the
+# minimum CI matrix node pins exactly ``0.328.0``, so an older floor here would be
 # advice to install a version the install would reject.
-_STRAWBERRY_FLOOR_SUBSTRING = "strawberry-graphql>=0.322.2"
+_STRAWBERRY_FLOOR_SUBSTRING = "strawberry-graphql>=0.328.0"
 
 # Same discipline for the revocation close and the two new construction hints: a
 # RE-TYPED literal, never the imported constant, so a drift fails a test instead
@@ -3108,6 +3108,39 @@ async def test_a_websocket_host_denial_is_logged_where_django_logs_the_http_one(
     assert isinstance(record.exc_info[1], DisallowedHost)
     assert record.getMessage() == str(record.exc_info[1])
     assert host in record.getMessage()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_an_allowed_origin_on_another_allowed_host_connects() -> None:
+    """``Origin`` is Channels' decision alone, even when it names a host other than ``Host``.
+
+    Under ``ALLOWED_HOSTS = [".example.com"]`` a page on ``app.example.com`` may open
+    a socket to ``api.example.com``: Django admits the ``Host``, Channels'
+    ``AllowedHostsOriginValidator`` admits the ``Origin``, and the package consumer
+    answers upstream's own cross-origin hook (``is_websocket_origin_allowed``, asked
+    only when ``Origin`` is not the raw ``Host`` header's origin) ``True`` rather than
+    consulting a third list. The control leg keeps Channels' refusal live: a foreign
+    origin is still denied before any consumer exists.
+
+    WebSocket Host handshake is not the HTTP ``ALLOWED_HOSTS`` boundary. Live HTTP
+    sibling: ``examples/fakeshop/test_query/test_transport_api.py``
+    (``test_a_hostile_host_header_is_rejected_before_the_schema_runs``).
+    """
+    with override_settings(ALLOWED_HOSTS=[".example.com"]):
+        router = _router()
+        connected, detail = await _ws_handshake(
+            router,
+            host="api.example.com",
+            origin="http://app.example.com",
+        )
+        refused, refused_detail = await _ws_handshake(
+            router,
+            host="api.example.com",
+            origin="http://evil.example",
+        )
+
+    assert (connected, detail) == (True, _TRANSPORT_WS)
+    assert (refused, refused_detail) == (False, _DENIED_HANDSHAKE_CLOSE_CODE)
 
 
 @pytest.mark.parametrize(
@@ -6169,10 +6202,10 @@ class _UnrenderableFrame:
 
     ``stream``'s third element type is a raw graphql-core incremental-delivery frame
     (``@defer`` / ``@stream``), whose errors are nested inside incremental payloads
-    rather than on an ``errors`` attribute. The real shape is unreachable here -
-    incremental delivery needs graphql-core 3.3 and the installed floor is 3.2 - so
-    the stand-in reproduces the one property the gate turns on: reading ``errors``
-    off it raises, which is what would take the policy's fail-closed degrade.
+    rather than on an ``errors`` attribute. The real shape is unreachable here - the
+    schema refuses incremental execution - so the stand-in reproduces the one property
+    the gate turns on: reading ``errors`` off it raises, which is what would take the
+    policy's fail-closed degrade.
     """
 
     @property

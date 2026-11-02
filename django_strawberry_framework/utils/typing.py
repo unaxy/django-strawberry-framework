@@ -96,7 +96,7 @@ if TYPE_CHECKING:
     ForeignKeyField: TypeAlias = models.ForeignKey[Any, object]  # pyright: ignore[reportExplicitAny]
     #: Both resolver ``info`` flavors: the resolve-time Strawberry ``Info`` and the
     #: plan-time graphql-core ``GraphQLResolveInfo``.
-    EitherInfo: TypeAlias = Info[object, object] | GraphQLResolveInfo
+    EitherInfo: TypeAlias = Info[object, object] | GraphQLResolveInfo[object]
 
     #: What a ``GraphQLNonNull`` wraps: graphql-core's ``GraphQLNullableType``, with
     #: the list member it leaves bare parametrized by ``GraphQLList``'s own bound.
@@ -283,9 +283,9 @@ def published_argument(
         return None
     if get_arg_def(parameter_name) is None:
         return None
-    try:
-        raw_info = info._raw_info
-    except AttributeError:
+    # A direct-call stub carries no graphql-core info either.
+    raw_info: GraphQLResolveInfo[object] | None = getattr(info, "_raw_info", None)
+    if raw_info is None:
         return None
     published_args = graphql_fields(raw_info.parent_type)[raw_info.field_name].args
     for wire_name, graphql_argument in published_args.items():
@@ -461,28 +461,27 @@ def graphql_type_of(
 ) -> "GraphQLType":
     """Return a field / argument / input field definition's ``type``.
 
-    graphql-core 3.2 spells ``GraphQLOutputType`` / ``GraphQLInputType`` with the
-    bare generic ``GraphQLWrappingType``, so every ``definition.type`` read is
-    partially Unknown to the checker; this reads it once as the ``GraphQLType`` it is.
+    graphql-core spells ``GraphQLOutputType`` / ``GraphQLInputType`` with the bare
+    generic ``GraphQLList``, so every ``definition.type`` read is partially Unknown
+    to the checker; this reads it once as the ``GraphQLType`` it is.
     """
-    # basedpyright: graphql-core 3.2's GraphQLOutputType / GraphQLInputType unions list the
-    # bare generic GraphQLWrappingType, so the attribute reads as partially Unknown
+    # basedpyright: graphql-core's GraphQLOutputType / GraphQLInputType unions list the bare
+    # generic GraphQLList, so the attribute reads as partially Unknown
     return definition.type  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
 
-def return_type_of(info: "GraphQLResolveInfo") -> "GraphQLType":
+def return_type_of(info: "GraphQLResolveInfo[object]") -> "GraphQLType":
     """Return ``info.return_type`` as the ``GraphQLType`` it is (see ``graphql_type_of``)."""
-    # basedpyright: graphql-core 3.2's GraphQLOutputType union lists the bare generic
-    # GraphQLWrappingType, so the attribute reads as partially Unknown
+    # basedpyright: graphql-core's GraphQLOutputType union lists the bare generic GraphQLList,
+    # so the attribute reads as partially Unknown
     return info.return_type  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
 
 def inline_fragment_type_condition(node: "InlineFragmentNode") -> "NamedTypeNode | None":
     """Return an inline fragment's type condition, ``None`` for a typeless fragment.
 
-    graphql-core 3.2 types ``InlineFragmentNode.type_condition`` as a ``NamedTypeNode``,
-    but ``Parser.parse_fragment`` stores ``None`` on a fragment with no ``on`` clause
-    (``... @include(if: $x) { ... }``); this reads it as the optional node it is.
+    ``Parser.parse_fragment`` stores ``None`` on a fragment with no ``on`` clause
+    (``... @include(if: $x) { ... }``).
     """
     return node.type_condition
 

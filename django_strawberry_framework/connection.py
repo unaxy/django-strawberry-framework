@@ -1193,8 +1193,7 @@ def _resolve_keyset_connection(
         # is selected, so no row is fetched and the placeholder flags are
         # inert. ``totalCount`` is its own sibling selection and still
         # counts when requested. Upstream's wire-name check is not asked: it
-        # misses renamed fields, matches a fragment spread named ``edges`` and
-        # raises on an anonymous inline fragment.
+        # misses renamed fields and matches a fragment spread named ``edges``.
         conn = cls(
             edges=[],
             page_info=relay.PageInfo(
@@ -1366,14 +1365,28 @@ def _page_requested(info: Info[object, object]) -> bool:
     the wire names ``edges`` / ``pageInfo`` and answers ``False`` when a
     ``NameConverter`` respells both (``page_info`` under
     ``auto_camel_case=False``), which serves an empty page with
-    ``hasNextPage: false``; it also matches a fragment spread named ``edges`` and
-    raises on an anonymous inline fragment. Both the keyset page and the patched
-    offset check (``_strawberry_patches.py::_patched_should_resolve_list_connection_edges``)
+    ``hasNextPage: false``; it also matches a fragment spread named ``edges``. Both
+    the keyset page and the patched offset check
+    (``_strawberry_patches.py::_patched_should_resolve_list_connection_edges``)
     therefore ask this alone.
     """
     return _connection_field_requested(info, connection_page_selected)
 
 
+#: ``ListConnection``'s own definition, whose name and description ``DjangoConnection``
+#: publishes under.
+_LIST_CONNECTION_DEFINITION = get_object_definition(relay.ListConnection, strict=True)
+
+
+# Strawberry refuses a schema type whose definition is only inherited
+# (``strawberry/types/base.py::check_is_not_undecorated_subclass``), and a consumer's
+# ``DjangoConnection[ItemType]`` annotation is resolved as one. Strawberry's own
+# ``strawberry.type`` gives the base its definition, under ``ListConnection``'s name and
+# description, so every connection the schema publishes keeps its SDL.
+@strawberry.type(
+    name=_LIST_CONNECTION_DEFINITION.name,
+    description=_LIST_CONNECTION_DEFINITION.description,
+)
 # basedpyright: a ``Meta.interfaces`` node type becomes a ``relay.Node`` only at run time, so the
 # package's ``NodeType`` stays unbounded; it rejects the unbounded ``NodeType`` against
 # ``ListConnection``'s ``Node`` bound.
@@ -1484,12 +1497,10 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
         # the count selection does - a malformed pagination request answers with
         # its own error rather than with whichever bound fired second.
         check_deadline(info)
-        # Seed ``info.selected_fields`` with the package's anonymous-inline-fragment-safe
-        # conversion BEFORE either ``_total_count_requested`` or Strawberry's own
-        # ``ListConnection.resolve_connection`` reads it. Both reach the same
-        # crashing ``convert_selections`` via the cached property; priming the
-        # cache once here routes every later read through the package's safe
-        # adapter. Runs AFTER the guard so a ``first`` + ``last`` error still
+        # Seed ``info.selected_fields`` with the execution's one stamped conversion
+        # BEFORE Strawberry's own ``ListConnection.resolve_connection`` reads it, so
+        # a reader of that slot shares the memoized list instead of converting a
+        # second time. Runs AFTER the guard so a ``first`` + ``last`` error still
         # short-circuits before ``info``'s selections are touched
         # (``test_first_and_last_guard_on_generated_subclass``).
         prime_selected_fields(info)

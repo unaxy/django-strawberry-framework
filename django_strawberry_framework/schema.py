@@ -85,7 +85,7 @@ from asgiref.sync import AsyncToSync, async_to_sync, sync_to_async
 from django.db import DatabaseError, connections, transaction
 from django.db.transaction import TransactionManagementError
 from graphql import GraphQLError, located_error, parse
-from graphql.utilities.type_info import get_field_def
+from graphql.execution.executor import to_nodes
 from strawberry.exceptions import DuplicatedTypeName
 from strawberry.extensions.base_extension import SchemaExtension
 from strawberry.schema.schema_converter import GraphQLCoreConverter
@@ -93,11 +93,11 @@ from strawberry.types.base import StrawberryObjectDefinition
 from strawberry.types.field import StrawberryField
 from strawberry.types.graphql import OperationType
 from strawberry.types.private import is_private
+from strawberry.utils.await_maybe import await_maybe
 from typing_extensions import override
 
 from . import logger
-from ._completion import CompletionExecutionContext, owned_completion
-from ._graphql_core_patches import _is_awaitable
+from ._completion import CompletionExecutionContext, drain_settling, owned_completion
 from .error_policy import _PACKAGE_ERROR_POLICY, ErrorPolicy, resolve_error_policy
 from .exceptions import ConfigurationError
 from .extensions.error_policy import (
@@ -122,23 +122,20 @@ from .utils.typing import call_forwarded
 from .utils.write_transaction import managed_write_transaction, resolve_write_alias
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Iterable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
     from typing import Protocol, TypeAlias
 
     from django.db.transaction import Atomic
     from graphql import FieldNode, GraphQLObjectType
-    from graphql.execution.execute import ExecutionContext
-    from graphql.pyutils import AwaitableOrValue, Path
+    from graphql.execution import Executor
+    from graphql.execution.collect_fields import FieldDetailsList
+    from graphql.execution.incremental.incremental_executor import DeliveryGroupMap
+    from graphql.pyutils import AwaitableOrValue, Path, UndefinedType
     from strawberry.extensions.runner import SchemaExtensionsRunner
     from strawberry.schema.config import StrawberryConfig
+    from strawberry.schema.schema import StreamResult
     from strawberry.types import ExecutionContext as StrawberryExecutionContext
     from strawberry.types import ExecutionResult as StrawberryExecutionResult
-
-    #: What ``DjangoSchema.stream`` yields: Strawberry's ``ExecutionResult`` (or its
-    #: ``PreExecutionError`` subclass) per frame. The raw incremental-delivery frames
-    #: Strawberry's ``StreamResult`` also names exist only on graphql-core 3.3, which
-    #: the package's ``graphql-core<3.3`` pin excludes.
-    DjangoStreamResult: TypeAlias = AsyncGenerator[StrawberryExecutionResult, None]
 
     #: One ``extensions=`` entry as Strawberry resolves it: an instance answers for itself,
     #: and anything else (a class, a factory) is called once per operation for one.
@@ -170,11 +167,6 @@ _CLOSED_WINDOW_MESSAGE = (
     "The database connection was closed before the mutation's transaction could "
     "commit; nothing was written."
 )
-
-
-async def _settled(value: object, context: ExecutionContext) -> object:
-    """Return ``value``, awaited first when ``context.is_awaitable`` reads it as pending."""
-    return await value if _is_awaitable(value, context) else value
 
 
 def _close_thread_connections() -> None:
@@ -231,26 +223,30 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         self,
         parent_type: GraphQLObjectType,
         source: object,
-        field_nodes: list[FieldNode],
+        field_details_list: FieldDetailsList,
         path: Path,
-    ) -> AwaitableOrValue[object]:
+        position_context: DeliveryGroupMap | None,
+    ) -> AwaitableOrValue[object] | UndefinedType:
         """Wrap a marked top-level mutation field in its completion-spanning transaction."""
+        field_nodes = to_nodes(field_details_list)
         mutation_cls = self._marked_mutation_class(parent_type, field_nodes)
+        execute = functools.partial(
+            super().execute_field,
+            parent_type,
+            source,
+            field_details_list,
+            path,
+            position_context,
+        )
         if mutation_cls is None:
-            return super().execute_field(parent_type, source, field_nodes, path)
+            return execute()
 
         mutation_meta = truth.static_attr(mutation_cls, "_mutation_meta", None)
         model = getattr(mutation_meta, "model", None)
         alias = resolve_write_alias(model)
         if async_execution():
-            return self._execute_mutation_field_async(
-                alias,
-                parent_type,
-                source,
-                field_nodes,
-                path,
-            )
-        return self._execute_mutation_field_sync(alias, parent_type, source, field_nodes, path)
+            return self._execute_mutation_field_async(alias, field_nodes, path, execute)
+        return self._execute_mutation_field_sync(alias, field_nodes, path, execute)
 
     def _marked_mutation_class(
         self,
@@ -275,7 +271,7 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
             return None
         if not field_nodes:
             return None
-        field_def = get_field_def(self.schema, parent_type, field_nodes[0])
+        field_def = self.schema.get_field(parent_type, field_nodes[0].name.value)
         if field_def is None:
             return None
         extensions: object = field_def.extensions
@@ -288,20 +284,6 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         wrapped = getattr(base_resolver, "wrapped_func", None)
         return getattr(wrapped, MUTATION_CLASS_MARKER, None)
 
-    def _execution_errors(self) -> list[GraphQLError]:
-        """Return the execution's live error list across graphql-core versions.
-
-        graphql-core < 3.2.10 stores located errors directly as
-        ``ExecutionContext.errors`` (a plain list); 3.2.10 replaced that
-        attribute with a ``CollectedErrors`` container exposing the same list
-        as ``collected_errors.errors``. Both are append-only during execution,
-        so a before/after length comparison stays valid on either shape.
-        """
-        collected: object = getattr(self, "collected_errors", None)
-        if collected is not None:
-            return getattr(collected, "errors", [])
-        return getattr(self, "errors", [])
-
     def _rollback_for_new_errors(self, errors_before: int, alias: str) -> None:
         """Roll the window's transaction back when execution collected new errors.
 
@@ -311,8 +293,8 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         marks the transaction for rollback before it exits. A resolver failure
         is a *located* error, not an exception, so an exception-based rollback
         would miss it; the before/after length comparison over
-        ``_execution_errors`` stays valid on either of graphql-core's
-        error-container shapes because both are append-only during execution.
+        ``collected_errors.errors`` is valid because the list is append-only
+        during execution.
 
         An UNREADABLE container (a raising ``errors`` access or ``__len__``)
         cannot certify the window stayed error-free, so it fails closed: the
@@ -321,7 +303,7 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         failure surfaces, never a commit behind an uncertified window.
         """
         try:
-            errors_now = len(self._execution_errors())
+            errors_now = len(self.collected_errors.errors)
         except Exception:
             transaction.set_rollback(True, using=alias)
             raise
@@ -388,7 +370,7 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         atomic with that exception (rolled back), and a clean return exits under
         ``_exit_window``'s failure rules.
         """
-        errors_before = len(self._execution_errors())
+        errors_before = len(self.collected_errors.errors)
         atomic = transaction.atomic(using=alias)
         atomic.__enter__()
         try:
@@ -403,26 +385,23 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
     def _execute_mutation_field_sync(
         self,
         alias: str,
-        parent_type: GraphQLObjectType,
-        source: object,
         field_nodes: list[FieldNode],
         path: Path,
-    ) -> AwaitableOrValue[object]:
+        execute: Callable[[], AwaitableOrValue[object] | UndefinedType],
+    ) -> AwaitableOrValue[object] | UndefinedType:
         """Sync execution: one window on the calling thread around ``execute_field``.
 
         graphql-core completes the field's value inside that call, so it covers
         the whole resolve -> complete span.
         """
-        run = functools.partial(super().execute_field, parent_type, source, field_nodes, path)
-        return self._run_window(alias, field_nodes, path, run)
+        return self._run_window(alias, field_nodes, path, execute)
 
     async def _execute_mutation_field_async(
         self,
         alias: str,
-        parent_type: GraphQLObjectType,
-        source: object,
         field_nodes: list[FieldNode],
         path: Path,
+        execute: Callable[[], AwaitableOrValue[object] | UndefinedType],
     ) -> object:
         """Async execution: run the window on a thread that drives the completion.
 
@@ -462,14 +441,16 @@ class DjangoMutationExecutionContext(CompletionExecutionContext):
         is unchanged in every release from 3.8.1 (the minimum the Django floor
         requires) through 3.12.1.
         """
-        execute_field = super().execute_field
         cancelled = False
 
         async def complete() -> object:
             if cancelled:
                 raise asyncio.CancelledError
-            with owned_completion(self):
-                return await _settled(execute_field(parent_type, source, field_nodes, path), self)
+            with owned_completion(self) as settling:
+                try:
+                    return await await_maybe(execute())
+                finally:
+                    await drain_settling(settling)
 
         caller = getattr(AsyncToSync.executors, "current", None)
 
@@ -900,7 +881,7 @@ class DjangoSchema(strawberry.Schema):
         resource_policy: ResourcePolicy | Mapping[str, object] | None = None,
         error_policy: ErrorPolicy | Mapping[str, object] | None = None,
         extensions: Iterable[_ExtensionEntry] | None = None,
-        execution_context_class: type[ExecutionContext] | None = None,
+        execution_context_class: type[Executor[DeliveryGroupMap]] | None = None,
         config: StrawberryConfig | None = None,
         **kwargs: object,
     ) -> None:
@@ -1317,9 +1298,6 @@ class DjangoSchema(strawberry.Schema):
             )
             return degraded_result(policy)
 
-    # Each frame is a ``DjangoStreamResult`` frame on the pinned graphql-core; the element type is
-    # ``object`` because Strawberry's ``StreamResult`` also names the graphql-core 3.3 frame
-    # classes its import fallback leaves unresolved
     @override
     def _stream(
         self,
@@ -1327,7 +1305,7 @@ class DjangoSchema(strawberry.Schema):
         extensions_runner: SchemaExtensionsRunner,
         *args: object,
         **kwargs: object,
-    ) -> AsyncGenerator[object, None]:
+    ) -> StreamResult:
         """Stream the operation's frames with this operation bound in every task.
 
         The narrowest seam that already receives the exact runner and the raw
@@ -1344,44 +1322,13 @@ class DjangoSchema(strawberry.Schema):
         :class:`DjangoExtensionsRunner` owns and has nothing to say about
         anything else.
         """
-        # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result aliases
-        # in an ImportError fallback, so StreamResult carries Unknown
         upstream_args = (execution_context, extensions_runner, *args)
-        source = call_forwarded(super()._stream, upstream_args, kwargs)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
+        # basedpyright: Strawberry types ``_stream``'s ``execution_context_class`` as graphql-core's
+        # bare generic ``Executor``, so the method reads as partially Unknown
+        source = call_forwarded(super()._stream, upstream_args, kwargs)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
         if truth.is_instance(extensions_runner, DjangoExtensionsRunner):
-            # basedpyright: ``source`` carries the StreamResult Unknown from Strawberry's alias rebinding
-            return extensions_runner.resumed_stream(source)  # pyright: ignore[reportUnknownArgumentType]
-        # basedpyright: the StreamResult Unknown from Strawberry's alias rebinding, unchanged
-        return source  # pyright: ignore[reportUnknownVariableType]
-
-    @override
-    async def stream(
-        self,
-        query: str | None,
-        variable_values: dict[str, object] | None = None,
-        context_value: object = None,
-        root_value: object = None,
-        operation_name: str | None = None,
-        operation_extensions: dict[str, object] | None = None,
-        allowed_operation_types: Iterable[OperationType] | None = None,
-    ) -> DjangoStreamResult:
-        """Execute an operation and stream its result(s): Strawberry's ``stream``, typed.
-
-        Behavior is upstream's unchanged (``_stream`` above binds each frame); this
-        states the frame type the ``graphql-core<3.3`` pin leaves, ``DjangoStreamResult``.
-        """
-        # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result
-        # aliases in an ImportError fallback, so StreamResult carries Unknown and names the
-        # placeholder incremental classes that fallback defines and never instantiates
-        return await super().stream(  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportReturnType]
-            query,
-            variable_values,
-            context_value,
-            root_value,
-            operation_name,
-            operation_extensions,
-            allowed_operation_types,
-        )
+            return extensions_runner.resumed_stream(source)
+        return source
 
 
 def _is_resolvable_extension_entry(entry: object) -> bool:

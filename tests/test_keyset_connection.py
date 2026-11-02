@@ -104,7 +104,7 @@ from django_strawberry_framework.utils.connections import (
     UnwindowableConnection,
 )
 from django_strawberry_framework.utils.typing import graphql_fields, graphql_type_of
-from tests._info import make_info
+from tests._info import make_info, raw_info_of
 
 ISSUE_ORDER = ("-number", "id")
 
@@ -154,7 +154,7 @@ def _issue_connection_info(
     assert parent_type is not None
     field = schema.get_field_for_type("issues", parent_type.name)
     assert field is not None
-    raw_info = make_info(field_name="issues", selections=selections)._raw_info._replace(
+    raw_info = raw_info_of(make_info(field_name="issues", selections=selections))._replace(
         parent_type=parent_type,
         return_type=graphql_type_of(graphql_fields(parent_type)["issues"]),
         schema=schema._schema,
@@ -614,7 +614,7 @@ def test_keyset_window_slice_from_arguments_arms(
     state = declared_cursor_state_for_definition(issue_type.__django_strawberry_definition__)
     assert state is not None
     columns, fingerprint = state.columns, state.fingerprint
-    info = make_info(config=StrawberryConfig(relay_max_results=100))._raw_info
+    info = raw_info_of(make_info(config=StrawberryConfig(relay_max_results=100)))
     resolved_arguments = dict(arguments)
     if arguments.get("after") == "minted":
         # Encoding reads only the scalar carrier values; this probe needs no saved row.

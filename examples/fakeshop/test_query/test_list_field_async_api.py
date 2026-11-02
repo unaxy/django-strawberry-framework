@@ -374,14 +374,13 @@ def _both_protocols() -> _BothProtocols:
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_async_completion_adapts_only_a_queryset() -> None:
-    """The async executor's completion adapter leaves a non-queryset to upstream's preference.
+async def test_async_completion_prefers_the_asynchronous_protocol() -> None:
+    """The async executor completes a value offering both protocols through ``__aiter__``.
 
-    ``_graphql_core_patches.py::_patched_complete_list_value`` wraps a Django
-    ``QuerySet`` in the async-only adapter under the asynchronous executor and
-    nothing else, so a consumer value offering both iteration protocols completes
-    through the one graphql-core prefers, ``__iter__``: the field answers the
-    synchronous protocol's row, never the asynchronous one's.
+    graphql-core's asynchronous executor completes any list value exposing ``__aiter__``
+    through it, which is what keeps a Django ``QuerySet`` off the event loop; a consumer
+    value offering both protocols is completed the same way, so the field answers the
+    asynchronous protocol's row, never the synchronous one's.
     """
 
     @strawberry.type
@@ -391,7 +390,7 @@ async def test_async_completion_adapts_only_a_queryset() -> None:
     schema = DjangoSchema(query=_BothProtocolsQuery, config=strawberry_config())
     payload = await _post_async(schema, "{ f }")
     assert "errors" not in payload, payload
-    assert json_at(payload, "data", "f") == ["sync"]
+    assert json_at(payload, "data", "f") == ["async"]
 
 
 @pytest.mark.django_db(transaction=True)

@@ -360,6 +360,16 @@ server-side. Every other exception propagates: a projection bug that
 silently denied every handshake would be indistinguishable from correct
 ``ALLOWED_HOSTS`` enforcement, which is the worst available failure mode for a
 check whose entire value is that it rejects.
+
+Upstream's consumer runs an Origin check of its own inside the handshake, after
+both wrappers (``AsyncBaseHTTPView._check_websocket_origin``: a missing ``Origin``
+or one matching the raw ``Host`` header is admitted, anything else is put to the
+``is_websocket_origin_allowed`` hook). The package consumer answers that hook
+``True``: Channels has admitted the ``Origin`` and Django the ``Host`` by then,
+and a raw-header comparison would refuse a host ``get_host()`` admits (a
+trailing dot, ``X-Forwarded-Host``, a server-supplied name). An injected consumer
+keeps upstream's hook, so it may refuse a cross-origin handshake the router
+admitted and can never admit one the router refused.
 """
 
 from __future__ import annotations
@@ -1293,9 +1303,7 @@ class _StopAwareSchema:
         The seam ``graphql-transport-ws`` reads, for EVERY operation type rather
         than subscriptions alone. Forwarded verbatim, as ``subscribe`` is.
         """
-        # basedpyright: Strawberry's schema/_graphql_core.py rebinds its graphql-core 3.3 result
-        # aliases in an ImportError fallback, so ``BaseSchema.stream``'s result carries Unknown
-        return self._stoppable(await call_forwarded(self._schema.stream, args, kwargs))  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        return self._stoppable(await call_forwarded(self._schema.stream, args, kwargs))
 
     def _stoppable(self, source: AsyncGenerator[object, None]) -> AsyncGenerator[object, None]:
         """Wrap one upstream result source in the connection's stop-and-mask seam.
@@ -1788,6 +1796,21 @@ def build_revalidating_consumer_class(
             self.revalidation_window: float = revalidation_window
             self._revocation: _ConnectionRevocation = _ConnectionRevocation()
             super().__init__(*args, **kwargs)
+
+        @override
+        def is_websocket_origin_allowed(self, request: GraphQLWSConsumer, origin: str) -> bool:
+            """Admit the handshake: its ``Origin`` was decided before this consumer existed.
+
+            Upstream asks only for a handshake whose ``Origin`` is not the same origin as
+            its raw ``Host`` header, and every handshake reaching the package consumer
+            has passed Channels' ``AllowedHostsOriginValidator``, the one Origin check of
+            the router's composition (spec-046 Decision 19), so nothing is left to
+            decide. Answering here rather than through upstream's ``allowed_origins``
+            keeps a host Django's ``get_host()`` admits - a trailing dot,
+            ``X-Forwarded-Host``, a server-supplied name - from being refused by a
+            second, raw-header comparison.
+            """
+            return True
 
         @override
         async def disconnect(self, code: int) -> None:

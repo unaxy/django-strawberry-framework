@@ -82,15 +82,8 @@ APPLY_UPSTREAM_PATCHES_KEY = "APPLY_UPSTREAM_PATCHES"
 # row-elision workarounds. Disabling it at startup restores upstream's empty
 # renamed pages on package offset connections (the keyset page decides itself)
 # and unnecessary async offset row fetches for count-only/typename-only requests.
-# ``graphql_core`` independently owns async-iterable list completion with no
-# HTTP-view lifecycle coupling.
 UPSTREAM_PATCH_DEPENDENCIES = frozenset(
-    {
-        "cross_web",
-        "django",
-        "graphql_core",
-        "strawberry",
-    },
+    {"cross_web", "django", "strawberry"},
 )
 
 # Default nested-connection fetch strategy for ``DjangoOptimizerExtension``
@@ -429,7 +422,7 @@ def upstream_patches_enabled(dependency: str) -> bool:
 
     - ``bool`` - the global toggle: ``False`` stops the framework from
       monkey-patching any of its upstream dependencies (Django,
-      Strawberry, ``graphql-core``, and ``cross_web``) at startup.
+      Strawberry, and ``cross_web``) at startup.
     - ``Mapping[str, bool]`` keyed by ``UPSTREAM_PATCH_DEPENDENCIES``
       names - per-dependency opt-out: ``{"django": False}`` disables
       only the test-only Django teardown patch while the production
@@ -441,9 +434,8 @@ def upstream_patches_enabled(dependency: str) -> bool:
       connection-page and async row-elision fixes on both native and package
       connections. With it disabled at startup, renamed ``edges`` / ``pageInfo``
       can return empty offset pages (the keyset page decides itself), and async
-      offset count-only or typename-only selections may fetch node rows. ``graphql_core`` owns only
-      executor list completion. Disabling an applier does not uninstall patches
-      already installed in the running process.
+      offset count-only or typename-only selections may fetch node rows. Disabling an
+      applier does not uninstall patches already installed in the running process.
 
     Any other shape raises ``ConfigurationError`` (the
     ``_normalize_user_settings`` fail-loud precedent): a non-bool /

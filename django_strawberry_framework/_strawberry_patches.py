@@ -227,9 +227,7 @@ rows (empty ``edges``, ``hasNextPage: false``) unless
 custom converter, or ``auto_camel_case=False`` with only
 ``page_info { has_next_page }`` selected - a query that selects the page
 gets an empty one. The same check also answers ``True`` for a fragment
-spread merely named ``edges`` (a ``__typename``-only page fetches its rows),
-and it reads ``info.selected_fields``, whose conversion raises
-``AttributeError`` on an anonymous inline fragment (``... { edges { ... } }``).
+spread merely named ``edges`` (a ``__typename``-only page fetches its rows).
 The asynchronous branch never asks, so it never serves the empty page, but it
 slices rows nobody selected (see "Relay async row elision" below).
 :func:`apply` replaces ``ListConnection.resolve_connection`` with an adapted
@@ -241,8 +239,8 @@ rebound global. The patched check answers by ``connection.py::_page_requested`` 
 matched by the Python names they were declared under, as direct children of
 the connection through fragment wrappers, over the converted selections
 ``optimizer/selections.py::info_selections`` reads. Asking upstream first
-cannot be kept, because its ``True`` for a fragment named ``edges`` and its
-raise on an anonymous fragment both come before any fallback could answer.
+cannot be kept, because its ``True`` for a fragment named ``edges`` comes
+before any fallback could answer.
 Three Strawberry-facing pieces therefore sit side by side, and only one of them
 delegates. The connection-page check is *replaced*: the patched check never calls
 the captured ``should_resolve_list_connection_edges`` and copies none of its code,
@@ -320,8 +318,8 @@ same ``should_resolve_list_connection_edges`` body, the literal
 into ``strawberry.relay.types`` for ``ListConnection.resolve_connection``. No
 upstream issue tracks it. Retire the patched check (the rebind and the adapted
 copy's two direct calls; see "Five lifecycles" item 4) once upstream decides by
-the schema's own field names rather than wire literals, ignores fragment-spread
-names, and reads anonymous inline fragments.
+the schema's own field names rather than wire literals and ignores fragment-spread
+names.
 
 Five lifecycles
 ---------------
@@ -343,8 +341,7 @@ independent upstream *bugs* that do not retire together:
    utility traverses them.
 4. **The connection-page check** - retirable once upstream's
    ``should_resolve_list_connection_edges`` matches ``edges`` / ``pageInfo``
-   under any wire names, ignores fragment-spread names, and reads anonymous
-   inline fragments. While concern 5's adapted ``resolve_connection`` is
+   under any wire names and ignores fragment-spread names. While concern 5's adapted ``resolve_connection`` is
    installed, it calls :func:`_patched_should_resolve_list_connection_edges`
    directly in both branches and the rebound ``strawberry.relay.types`` global
    is called by nothing, so retiring this concern means deleting the rebind
@@ -463,7 +460,7 @@ branch retains its original slice-before-check ordering. Both branches call
 :func:`_patched_should_resolve_list_connection_edges` by name, never through the
 rebound ``strawberry.relay.types`` global, so that global is called by nothing
 while the copy is installed. The method matches the upstream body at Strawberry
-0.322.2 and 0.327.7; installation pins its dedented source SHA256, refusing
+0.328.0 and 0.339.1; installation pins its dedented source SHA256, refusing
 unreviewed drift. Source hashes avoid interpreter-dependent AST shapes.
 
 The adaptation names its upstream origin and ships Strawberry's MIT license as
@@ -578,7 +575,7 @@ if TYPE_CHECKING:
         def __code__(self) -> CodeType: ...
 
 
-# Every audited release (strawberry-graphql 0.322.2 - 0.327.7, cross_web 0.6.0 -
+# Every audited release (strawberry-graphql 0.328.0 - 0.339.1, cross_web 0.6.0 -
 # 0.7.0) provides all seven names; ``None`` is the drift sentinel for a release that
 # moves one, which ``_upstream_captures`` refuses before any patch installs or runs.
 BaseView: "type[_AnyBaseView] | None"
@@ -1043,9 +1040,8 @@ def _patched_should_resolve_list_connection_edges(info: "Info[object, object]") 
     ``strawberry/relay/utils.py::should_resolve_list_connection_edges`` matches
     the wire names ``edges`` / ``pageInfo``, so a ``NameConverter`` that respells
     both (``page_info`` under ``auto_camel_case=False``) makes it answer ``False``
-    for a query that selects the page; it answers ``True`` for a fragment spread
-    named ``edges``; and it raises on an anonymous inline fragment. Upstream is
-    therefore not asked: ``_page_requested`` matches the two fields by the Python
+    for a query that selects the page, and it answers ``True`` for a fragment spread
+    named ``edges``. Upstream is therefore not asked: ``_page_requested`` matches the two fields by the Python
     names they were declared under. The ``DjangoConnection`` offset page reaches
     this through ``connection.py::_consume_fallback``; the keyset page asks
     ``_page_requested`` itself, ungated.

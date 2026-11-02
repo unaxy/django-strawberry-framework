@@ -2,10 +2,10 @@
 
 import asyncio
 import inspect
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Iterable
 from dataclasses import dataclass, field
 from functools import wraps
-from typing import NoReturn, cast
+from typing import TYPE_CHECKING, NoReturn
 
 import graphql
 import pytest
@@ -18,8 +18,9 @@ from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
 from graphql import ExecutionResult as CoreResult
-from graphql import FieldNode, GraphQLError, GraphQLObjectType
-from graphql.execution import ExecutionContext as CoreExecutionContext
+from graphql import GraphQLError, GraphQLObjectType
+from graphql.execution.collect_fields import FieldDetailsList, GroupedFieldSet
+from graphql.execution.incremental.incremental_executor import DeliveryGroupMap
 from graphql.pyutils import AwaitableOrValue, Path
 from graphql_client import (
     JSONObject,
@@ -32,6 +33,7 @@ from graphql_client import (
 from strawberry.dataloader import DataLoader
 from strawberry.extensions import SchemaExtension
 from strawberry.http import GraphQLHTTPResponse
+from strawberry.schema.schema import StrawberryGraphQLCoreExecutionContext as CoreExecutionContext
 from strawberry.types.execution import ExecutionResult
 from typing_extensions import override
 
@@ -44,11 +46,13 @@ from django_strawberry_framework import (
     finalize_django_types,
 )
 from django_strawberry_framework import _completion as completion
-from django_strawberry_framework import _graphql_core_patches as patches
 from django_strawberry_framework.schema import DjangoMutationExecutionContext
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
+
+if TYPE_CHECKING:
+    from django_strawberry_framework._completion import _GraphQLOutputType
 
 
 @dataclass
@@ -164,8 +168,7 @@ class Observe(SchemaExtension):
     async def on_operation(self) -> AsyncIterator[None]:
         """Record upstream result and optionally perform async operation audit I/O."""
         yield
-        # Strawberry types the slot with graphql-core 3.3's incremental result, unknown on 3.2.
-        result = read_attr(self.execution_context, "result")
+        result = self.execution_context.result
         assert isinstance(result, CoreResult)
         CURRENT.state.engine_errors = result.errors or []
         CURRENT.state.operation_errors = messages(result)
@@ -280,6 +283,12 @@ def make_schema(shape: str) -> tuple[strawberry.Schema, str]:
 
         @strawberry.field
         @staticmethod
+        def refused() -> str:
+            """Fail synchronously on a non-null field once its asynchronous sibling started."""
+            raise GraphQLError("SYNC_FAILURE")
+
+        @strawberry.field
+        @staticmethod
         async def tolerated() -> str | None:
             CURRENT.state.started.set()
             raise GraphQLError("NULLABLE_FAILURE")
@@ -383,27 +392,41 @@ def make_schema(shape: str) -> tuple[strawberry.Schema, str]:
                 parent_type: GraphQLObjectType,
                 source_value: object,
                 path: Path | None,
-                fields: dict[str, list[FieldNode]],
+                grouped_field_set: GroupedFieldSet,
+                position_context: DeliveryGroupMap | None,
             ) -> AwaitableOrValue[dict[str, object]]:
                 CURRENT.state.custom_used = True
-                return super().execute_fields(parent_type, source_value, path, fields)
+                return super().execute_fields(
+                    parent_type,
+                    source_value,
+                    path,
+                    grouped_field_set,
+                    position_context,
+                )
 
         context = CustomContext
     elif CURRENT.state.context == "cooperative":
 
         class Tracing(CoreExecutionContext):
             @override
-            def complete_list_value(
+            def complete_iterable_value(
                 self,
-                return_type: "graphql.GraphQLList[patches._GraphQLOutputType]",
-                field_nodes: list[FieldNode],
-                info: graphql.GraphQLResolveInfo,
+                item_type: "_GraphQLOutputType",
+                field_details_list: FieldDetailsList,
+                info: graphql.GraphQLResolveInfo[object],
                 path: Path,
-                result: AsyncIterable[object] | Iterable[object],
+                items: Iterable[object],
+                position_context: DeliveryGroupMap | None,
             ) -> AwaitableOrValue[list[object]]:
                 CURRENT.state.custom_used = True
-                upstream = cast("patches._BoundCompleteListValue", super().complete_list_value)
-                return upstream(return_type, field_nodes, info, path, result)
+                return completion._as_list_completion(super()).complete_iterable_value(
+                    item_type,
+                    field_details_list,
+                    info,
+                    path,
+                    items,
+                    position_context,
+                )
 
         class CooperativeContext(DjangoMutationExecutionContext, Tracing):
             """An ordinary cooperative mixin following the mutation context."""
@@ -496,23 +519,18 @@ async def test_live_late_errors(
         after_drain = [error.message for error in CURRENT.state.engine_errors]
         names = [row.name async for row in Branch.objects.order_by("name")]
         assert response.status_code == 200
-        assert ("LATE_SYNTHETIC_EXCEPTION" in after_drain) == (
-            shape != "list_nonnull"
-            and tuple(int(part) for part in graphql.__version__.split(".")) < (3, 2, 10)
-        )
+        # Outside a mutation window graphql-core's ``gather_with_cancel`` cancels the
+        # late sibling; inside one the window's join lets it finish, so its error is
+        # recorded before the bubbling error nulls their shared ancestor.
+        late_is_collected = shape == "mutation"
+        assert ("LATE_SYNTHETIC_EXCEPTION" in after_drain) == late_is_collected
         assert "mutation-created" not in names
         errors = json_list(response_json(response), "errors")
         visible = [json_at(error, "message") for error in errors]
-        expected = [
+        expected = ["An unexpected error occurred."] if late_is_collected else []
+        expected.append(
             "INITIAL_DELIBERATE" if initial == "deliberate" else "An unexpected error occurred.",
-        ]
-        late_is_collected = (
-            shape != "list_nonnull"
-            and tuple(int(part) for part in graphql.__version__.split(".")) < (3, 2, 10)
-            and (shape == "mutation" or view_kind == "extension")
         )
-        if late_is_collected:
-            expected.append("An unexpected error occurred.")
         assert visible == expected
         expected_data: dict[str, JSONValue] = {
             "root": None,
@@ -854,25 +872,6 @@ async def test_live_standalone_error_extension(
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("mutation_shape", ["mutation", "mutation_list"])
-def test_live_owned_cleanup_with_optional_adapter_disabled(
-    private_registry: None,
-    monkeypatch: pytest.MonkeyPatch,
-    mutation_shape: str,
-) -> None:
-    """The mandatory transaction boundary survives disabling optional upstream adapters."""
-    monkeypatch.setattr(
-        CoreExecutionContext,
-        "complete_list_value",
-        patches._upstream_captures().complete_list_value,
-    )
-    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"APPLY_UPSTREAM_PATCHES": False}):
-        patches.apply()
-        assert not patches._patch_is_installed()
-        test_live_sync_bridge_mutation_orm(private_registry, "audit", "cleanup", mutation_shape)
-
-
-@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("shape", ["success", "nullable"])
 async def test_live_completed_siblings_keep_upstream_results(
     private_registry: None,
@@ -910,6 +909,40 @@ async def test_live_completed_siblings_keep_upstream_results(
 
 
 @pytest.mark.django_db(transaction=True)
+async def test_live_synchronous_failure_drains_the_started_sibling_inside_the_window(
+    private_registry: None,
+) -> None:
+    """A sibling graphql-core settles in the background still runs inside the transaction.
+
+    ``refused`` fails synchronously after ``survives`` has started, so graphql-core hands
+    ``survives`` to its background settling; the window awaits it before closing, so its
+    write runs inside the atomic block and is rolled back with the mutation's own row.
+    """
+    assert private_registry is None
+    CURRENT.state = CompletionState(work="success", shape="mutation")
+    CURRENT.state.started.set()
+    schema, _ = make_schema("mutation")
+    CURRENT.state.schema = schema
+    with override_settings(
+        ROOT_URLCONF=__name__,
+        DEBUG=False,
+        MIDDLEWARE=middleware_without_debug_toolbar(),
+    ):
+        result = await asyncio.wait_for(
+            AsyncTestClient(path="/graphql-async/").query(
+                'mutation { create(data: {name: "created"}) { result { survives refused } } }',
+                assert_no_errors=False,
+            ),
+            timeout=15,
+        )
+    response = response_json(result.response)
+    assert json_at(response, "data", "create", "result") is None
+    assert json_at(response, "errors", 0, "message") == "SYNC_FAILURE"
+    assert CURRENT.state.orm_atomic is True
+    assert not await Branch.objects.aexists()
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("nested_shape", ["root", "list_nonnull"])
 async def test_live_nested_query_keeps_its_own_completion_context(
     private_registry: None,
@@ -939,7 +972,9 @@ async def test_live_nested_query_keeps_its_own_completion_context(
     assert response_json(response) == {
         "data": {"create": {"result": {"nested": "nested-finished"}}},
     }
-    assert CURRENT.state.cancelled is False
+    # graphql-core's own ``gather_with_cancel`` cancelled the inner query's sibling;
+    # the outer mutation window's join would have let it finish.
+    assert CURRENT.state.cancelled is True
     assert await Branch.objects.filter(name="outer").aexists()
 
 

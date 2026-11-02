@@ -375,7 +375,7 @@ def _resolve_nodes_default(
     """Default ``Node.resolve_nodes``; order-preserving and missing-aware."""
 ```
 
-`info` is keyword-only on every resolver that takes it, because that is the shape Strawberry's Relay machinery calls (Decision 3). The signatures attached to the class must match Strawberry's `relay.Node` expectations as they exist at the `strawberry-graphql>=0.322.2` lower bound declared in `pyproject.toml #"strawberry-graphql>=0.322.2"`; the Django floor is `pyproject.toml #"Django>=5.2.16"`.
+`info` is keyword-only on every resolver that takes it, because that is the shape Strawberry's Relay machinery calls (Decision 3). The signatures attached to the class must match Strawberry's `relay.Node` expectations as they exist at the Strawberry lower bound declared in `pyproject.toml #"strawberry-graphql>=0.328.0"`; the Django floor is `pyproject.toml #"Django>=5.2.16"`.
 ## Implementation plan
 The slice is five steps, each naming the symbols it owns.
 1. **Validation + storage**

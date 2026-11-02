@@ -45,19 +45,19 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 from graphql import GraphQLError, GraphQLInterfaceType, GraphQLObjectType, get_named_type
-from graphql.execution.values import get_argument_values
+from graphql.execution.values import VariableValues, get_argument_values
 from graphql.language.ast import (
     DirectiveNode,
     FragmentSpreadNode,
     InlineFragmentNode,
     VariableNode,
 )
+
+# basedpyright: Strawberry annotates both helpers' ``info`` as graphql-core's bare generic
+# ``GraphQLResolveInfo``, so each reads as partially Unknown
 from strawberry.types.nodes import (
-    FragmentSpread,
-    InlineFragment,
-    SelectedField,
-    convert_arguments,
-    convert_directives,
+    convert_selections,  # pyright: ignore[reportUnknownVariableType]
+    get_variable_values,  # pyright: ignore[reportUnknownVariableType]
 )
 
 from django_strawberry_framework.utils._narrowing import is_dict, is_str, read_attr
@@ -82,9 +82,7 @@ if TYPE_CHECKING:
     )
     from graphql.type.definition import GraphQLField, GraphQLNamedType, GraphQLResolveInfo
     from strawberry.types.info import Info
-    from strawberry.types.nodes import (
-        Selection,
-    )
+    from strawberry.types.nodes import SelectedField, Selection
 
     from ._context import ConvertedMemoKey
 
@@ -103,7 +101,7 @@ if TYPE_CHECKING:
     FragmentVisitKey: TypeAlias = str | tuple[str, int]
 
 # ---------------------------------------------------------------------------
-# AST -> converted-selection adapter - the package-owned ``convert_selections``
+# AST -> converted-selection adapter - Strawberry's ``convert_selections``, stamped
 # ---------------------------------------------------------------------------
 
 #: The marker a converted field selection carries its arguments under, keyed by
@@ -164,7 +162,10 @@ def _coerced_python_arguments(
     ``graphql.execution.values.get_argument_values`` is the executor's own
     coercion (literal tokens to values, variables and defaults resolved) and keys
     its answer by the published name; ``published_python_name`` reads the
-    declaration each published argument was built from back off the schema.
+    declaration each published argument was built from back off the schema. It
+    reads only a ``VariableValues``' ``coerced`` dict, which is what Strawberry's
+    resolve info carries (``get_variable_values``); ``sources`` serves
+    ``replace_variables`` alone, so it is left empty.
 
     Empty when the arguments do not coerce: the executor raises that same error as
     the field's own error when it resolves the field, and a field a ``@skip`` /
@@ -173,7 +174,7 @@ def _coerced_python_arguments(
     the selection is planned with no arguments rather than failing its root.
     """
     try:
-        coerced = get_argument_values(field_def, node, variable_values)
+        coerced = get_argument_values(field_def, node, VariableValues({}, variable_values))
     except GraphQLError:
         return {}
     by_python_name: dict[str, object] = {}
@@ -219,66 +220,29 @@ def _published_field(parent: GraphQLNamedType | None, name: str) -> GraphQLField
 
 
 def ast_to_converted_selections(
-    info: GraphQLResolveInfo,
-    field_nodes: Sequence[AstSelection],
+    info: GraphQLResolveInfo[object],
+    field_nodes: Sequence[FieldNode],
 ) -> list[Selection]:
-    """Convert graphql-core ``field_nodes`` to converted selections, anonymous-safe.
+    """Convert ``field_nodes`` with Strawberry's ``convert_selections``, stamped by Python name.
 
-    Same contract as ``strawberry/types/nodes.py::convert_selections``, but builds
-    every inline-fragment shell with ``type_condition = None`` when the node has no
-    ``on TypeName`` condition, instead of unguardedly reading
-    ``node.type_condition.name.value`` (Strawberry's ``InlineFragment.from_node``
-    raises ``AttributeError: 'NoneType' object has no attribute 'name'`` on a valid
-    anonymous inline fragment ``... { f }``). The optimizer routes
-    ``info.field_nodes`` through here so its own fragment-aware substrate
-    (``is_fragment`` duck-types on ``type_condition``, which a ``None`` shell still
-    satisfies, so the shell flows through ``included_field_selections`` /
-    ``named_children`` / ``with_runtime_prefix``) handles the shape Strawberry
-    cannot represent - rather than depending on a Strawberry internal that
-    mishandles a spec-valid query.
-
-    The whole recursion is reimplemented (not just the top-level inline branch)
-    because an anonymous inline fragment can sit at any depth - e.g.
-    ``{ items { edges { node { ... { name } } } } }`` - and Strawberry's
-    ``SelectedField.from_node`` / ``FragmentSpread.from_node`` recurse back into
-    its own crashing ``convert_selections``. ``FragmentSpread`` definitions still
-    come from ``info.fragments`` (a named spread always carries a type condition);
-    only its body selections are re-converted here.
-
-    The result is built from Strawberry's own ``SelectedField`` / ``FragmentSpread``
-    / ``InlineFragment`` dataclasses (not ad-hoc shells) so the converted list is
-    drop-in compatible with BOTH the package's duck-typed substrate AND Strawberry's
-    own consumers that ``isinstance``-check against those classes (e.g.
-    ``strawberry.relay.utils.should_resolve_list_connection_edges`` reached via
-    ``ListConnection.resolve_connection`` when the package primes
-    ``info.selected_fields`` with this list). The only deviation from Strawberry is
-    that the anonymous inline-fragment branch passes ``type_condition=None`` instead
-    of dereferencing the missing condition.
-
-    The output must stay identical to ``convert_selections``: for every non-anonymous query
-    shape the output is byte-identical to ``convert_selections`` (verified
-    field-by-field, including nested argument and directive values, against the
-    stock converter). That identity is load-bearing because ``prime_selected_fields``
-    seeds this list into ``info.selected_fields``; any divergence here would corrupt
-    ``info.selected_fields`` for normal (non-anonymous) queries the moment a
-    connection primes it. If Strawberry's ``convert_selections`` gains a field or
-    changes a shape, change it here the same way.
+    The list is Strawberry's own - its ``SelectedField`` / ``FragmentSpread`` /
+    ``InlineFragment`` dataclasses, a typeless inline fragment (``... { f }``)
+    carrying ``type_condition=None`` - so it is what ``Info.selected_fields`` holds,
+    and ``prime_selected_fields`` can seed that slot with it. ``_stamp`` then walks
+    it beside the AST it came from, tracking the GraphQL type each selection set is
+    read on (the resolver's ``parent_type`` at the top, a field's named type below
+    it, a fragment's type condition inside it), and gives each field selection the
+    schema publishes the Python name of its field (``PYTHON_NAME_ATTR``, read
+    through ``selection_python_name``) and its arguments by Python name, coerced
+    by graphql-core (``PYTHON_ARGUMENTS_ATTR``, read through ``python_arguments``).
+    Both markers sit beside the dataclass fields, so what Strawberry's own readers
+    see is unchanged.
 
     Memoized per execution on the execution frame (see the comment above):
     within one ``on_execute`` lifecycle the same field-node group converts once,
     so the per-parent-row ``prime_selected_fields`` calls of a fallback
     connection pipeline reuse the first row's list instead of re-running the
     conversion for every parent.
-
-    The recursion also tracks the GraphQL type each selection set is read on (the
-    resolver's ``parent_type`` at the top, a field's named type below it, a
-    fragment's type condition inside it) so each field selection the schema
-    publishes carries the Python name of its field (``PYTHON_NAME_ATTR``, read
-    through ``selection_python_name``) and its arguments by Python name, coerced
-    by graphql-core (``PYTHON_ARGUMENTS_ATTR``, read through
-    ``python_arguments``). Those markers are attributes beside the dataclass
-    fields, so the fields Strawberry's consumers read stay identical to the output
-    described above.
     """
     memo = converted_selections_memo()
     memo_key: ConvertedMemoKey | None = None
@@ -291,88 +255,64 @@ def ast_to_converted_selections(
         if converted is not None:
             return converted
 
-    def _convert(
-        nodes: Iterable[AstSelection],
-        parent: GraphQLNamedType | None,
-    ) -> list[Selection]:
-        out: list[Selection] = []
-        for node in nodes:
-            if isinstance(node, InlineFragmentNode):
-                condition = inline_fragment_type_condition(node)
-                out.append(
-                    InlineFragment(
-                        # basedpyright: Strawberry types ``InlineFragment.type_condition`` as
-                        # ``str``; a typeless fragment has no condition to name, so it rejects the
-                        # ``None`` arm
-                        type_condition=(condition.name.value if condition is not None else None),  # pyright: ignore[reportArgumentType]
-                        directives=convert_directives(info, node.directives),
-                        selections=_convert(
-                            ast_child_selections(node),
-                            parent
-                            if condition is None
-                            else info.schema.get_type(condition.name.value),
-                        ),
-                    ),
-                )
-            elif isinstance(node, FragmentSpreadNode):
-                fragment = info.fragments[node.name.value]
-                out.append(
-                    FragmentSpread(
-                        name=node.name.value,
-                        type_condition=fragment.type_condition.name.value,
-                        directives=convert_directives(info, node.directives),
-                        selections=_convert(
-                            ast_child_selections(fragment),
-                            info.schema.get_type(fragment.type_condition.name.value),
-                        ),
-                    ),
-                )
-            else:
-                field_def = _published_field(parent, node.name.value)
-                selected = SelectedField(
-                    name=node.name.value,
-                    alias=getattr(node.alias, "value", None),
-                    directives=convert_directives(info, node.directives),
-                    arguments=convert_arguments(info, node.arguments),
-                    selections=_convert(
-                        ast_child_selections(node),
-                        None if field_def is None else get_named_type(graphql_type_of(field_def)),
-                    ),
-                )
-                field_python_name = None if field_def is None else published_python_name(field_def)
-                if field_python_name is not None:
-                    setattr(selected, PYTHON_NAME_ATTR, field_python_name)
-                if field_def is not None and field_def.args:
-                    setattr(
-                        selected,
-                        PYTHON_ARGUMENTS_ATTR,
-                        _coerced_python_arguments(field_def, node, info.variable_values),
-                    )
-                out.append(selected)
-        return out
-
-    converted = _convert(field_nodes, info.parent_type)
+    converted = convert_selections(info, field_nodes)
+    _stamp(info, converted, field_nodes, info.parent_type)
     if memo is not None and memo_key is not None:
         memo[memo_key] = converted
     return converted
 
 
-def prime_selected_fields(info: Info[object, object]) -> None:
-    """Pre-seed Strawberry ``Info.selected_fields`` with the anonymous-safe conversion.
+def _stamp(
+    info: GraphQLResolveInfo[object],
+    selections: Iterable[Selection],
+    nodes: Iterable[AstSelection],
+    read_on: GraphQLNamedType | None,
+) -> None:
+    """Mark each field selection under ``nodes`` with its Python name and arguments.
 
-    ``Info.selected_fields`` is a ``functools.cached_property`` that lazily calls
-    Strawberry's crashing ``convert_selections`` on first read. Strawberry's own
-    ``relay.utils.should_resolve_list_connection_edges`` reads it on the connection
-    resolve path (reached via ``ListConnection.resolve_connection``; the package's
-    own checks read ``info_selections``), so an anonymous inline fragment on a
-    connection query crashes inside Strawberry's resolver before the package can
-    intervene. Computing the conversion through ``ast_to_converted_selections`` and
-    storing it in the cached-property slot makes every later read return the
-    package's anonymous-safe list (built from Strawberry's own ``SelectedField`` /
-    ``FragmentSpread`` / ``InlineFragment`` dataclasses, so Strawberry's
-    ``isinstance``-based consumers keep working). Idempotent and a no-op when the
-    info has no field nodes or the cache is already populated (so a consumer that
-    legitimately read ``selected_fields`` first is never overwritten).
+    ``selections`` is ``nodes`` converted, one for one in order: ``convert_selections``
+    converts a selection set member by member, and a spread's body comes from the
+    same ``info.fragments`` entry. ``read_on`` is the type the selection set is read
+    on, ``None`` for one the schema does not publish, where no field resolves and
+    nothing is stamped.
+    """
+    for selection, node in zip(selections, nodes, strict=True):
+        if isinstance(node, InlineFragmentNode):
+            condition = inline_fragment_type_condition(node)
+            below = read_on if condition is None else info.schema.get_type(condition.name.value)
+            _stamp(info, selection.selections, ast_child_selections(node), below)
+        elif isinstance(node, FragmentSpreadNode):
+            fragment = info.fragments[node.name.value]
+            below = info.schema.get_type(fragment.type_condition.name.value)
+            _stamp(info, selection.selections, ast_child_selections(fragment), below)
+        else:
+            field_def = _published_field(read_on, node.name.value)
+            below = None
+            if field_def is not None:
+                python_name = published_python_name(field_def)
+                if python_name is not None:
+                    setattr(selection, PYTHON_NAME_ATTR, python_name)
+                if field_def.args:
+                    setattr(
+                        selection,
+                        PYTHON_ARGUMENTS_ATTR,
+                        _coerced_python_arguments(field_def, node, get_variable_values(info)),
+                    )
+                below = get_named_type(graphql_type_of(field_def))
+            _stamp(info, selection.selections, ast_child_selections(node), below)
+
+
+def prime_selected_fields(info: Info[object, object]) -> None:
+    """Seed Strawberry ``Info.selected_fields`` with the execution's stamped conversion.
+
+    ``Info.selected_fields`` is a ``functools.cached_property`` over Strawberry's
+    ``convert_selections``. Seeding its slot with ``info_selections`` makes every
+    later read of it - Strawberry's own ``relay.utils.should_resolve_list_connection_edges``
+    on the connection resolve path, a consumer extension - share the one memoized
+    list the package's readers walk, each field selection stamped, instead of
+    converting a second time. Idempotent and a no-op when the info has no field
+    nodes or the cache is already populated (so a consumer that legitimately read
+    ``selected_fields`` first is never overwritten).
 
     Must run BEFORE any ``info.selected_fields`` read on the connection path - the
     cached property computes once on first read, so priming only wins if it lands
@@ -382,14 +322,12 @@ def prime_selected_fields(info: Info[object, object]) -> None:
 
     NOTE - this COUPLES to two Strawberry internals: the raw info living at
     ``Info._raw_info`` and ``Info.selected_fields`` being a ``functools.cached_property``
-    backed by the ``info.__dict__["selected_fields"]`` slot. Both hold at the pinned
-    Strawberry version. If a future Strawberry renames ``_raw_info`` (or stops using
-    the dict-slot cache), this SILENTLY no-ops - ``getattr(info, "_raw_info", None)``
-    returns ``None``, nothing is seeded, and the connection-path crash returns rather
-    than failing loudly. The live anonymous-inline-fragment tests
-    (``test_anonymous_inline_fragment_*`` in the fakeshop ``test_query`` suite) are
-    the regression net that would catch such a Strawberry-internals rename on a
-    version bump.
+    backed by the ``info.__dict__["selected_fields"]`` slot. Both hold across the
+    supported Strawberry range. Were ``_raw_info`` renamed (or the dict-slot cache
+    dropped), this would SILENTLY no-op - ``getattr(info, "_raw_info", None)``
+    returns ``None`` and nothing is seeded - and the slot's readers would convert
+    unstamped on their own; ``tests/optimizer/test_selections.py``'s priming rows
+    pin the slot.
     """
     # Strawberry's own ``cached_property`` slot on the Info it handed us.
     namespace = info.__dict__  # truth: ok seeds Strawberry Info's cache slot, not an identity read
@@ -412,7 +350,7 @@ def info_selections(info: Info[object, object]) -> list[Selection]:
     """
     # Strawberry's ``Info`` keeps the graphql-core info at ``_raw_info``, whose
     # ``field_nodes`` is a list of ``FieldNode``s.
-    raw_info: GraphQLResolveInfo | None = getattr(info, "_raw_info", None)
+    raw_info: GraphQLResolveInfo[object] | None = getattr(info, "_raw_info", None)
     field_nodes: list[FieldNode] | None = getattr(raw_info, "field_nodes", None)
     if raw_info is None or not field_nodes:
         return []

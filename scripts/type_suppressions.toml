@@ -3,12 +3,10 @@
 # calls (`cast`) and the ignore comments per rule it holds; a count may only fall.
 
 "django_strawberry_framework/__init__.py::__getattr__" = { reportAny = 1, reportExplicitAny = 1 }
-"django_strawberry_framework/_completion.py::CompletionExecutionContext.complete_list_value" = { cast = 1 }
 "django_strawberry_framework/_cross_web_patches.py::_captured_upstream_body_getter" = { cast = 1 }
 "django_strawberry_framework/_cross_web_patches.py::apply" = { reportAttributeAccessIssue = 1 }
 "django_strawberry_framework/_django_patches.py::_disallowed_connection_methods" = { cast = 1 }
 "django_strawberry_framework/_django_patches.py::apply" = { reportAttributeAccessIssue = 1 }
-"django_strawberry_framework/_graphql_core_patches.py::_original_complete_list_value" = { cast = 1 }
 "django_strawberry_framework/_request_body.py::_measured_by_bounded_read" = { reportAttributeAccessIssue = 1 }
 "django_strawberry_framework/_strawberry_patches.py::_original_async_parse_multipart" = { cast = 1 }
 "django_strawberry_framework/_strawberry_patches.py::_original_parse_json" = { cast = 1 }
@@ -39,10 +37,8 @@
 "django_strawberry_framework/consumers.py::RevalidatingGraphQLWSConsumer.scope" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/consumers.py::_HandlerShape.schema" = { reportPropertyTypeMismatch = 1 }
 "django_strawberry_framework/consumers.py::_SchemaSeat.schema" = { reportPropertyTypeMismatch = 1 }
-"django_strawberry_framework/consumers.py::_StopAwareSchema.stream" = { reportUnknownArgumentType = 1, reportUnknownMemberType = 1 }
 "django_strawberry_framework/consumers.py::_refreshed_actor" = { reportArgumentType = 1 }
-"django_strawberry_framework/extensions/debug.py::DjangoDebugExtension._stash_payload_if_executed" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
-"django_strawberry_framework/extensions/operation_state.py::DjangoExtensionsRunner.on_stream_result" = { reportAny = 1, reportExplicitAny = 1, reportUnknownMemberType = 1 }
+"django_strawberry_framework/extensions/operation_state.py::DjangoExtensionsRunner.on_stream_result" = { reportAny = 1, reportExplicitAny = 1 }
 "django_strawberry_framework/extensions/operation_state.py::DjangoExtensionsRunner.operation" = { reportAny = 1, reportExplicitAny = 1 }
 "django_strawberry_framework/extensions/operation_state.py::_OperationBoundExtension._new_operation_state" = { cast = 1 }
 "django_strawberry_framework/extensions/operation_state.py::_OperationBoundExtension.execution_context" = { reportIncompatibleVariableOverride = 1 }
@@ -90,6 +86,7 @@
 "django_strawberry_framework/mutations/sets.py::DjangoMutation.check_permission" = { reportAny = 3, reportExplicitAny = 2 }
 "django_strawberry_framework/optimizer/extension.py::DjangoOptimizerExtension._optimize" = { cast = 1 }
 "django_strawberry_framework/optimizer/extension.py::_raw_resolve_info" = { cast = 1 }
+"django_strawberry_framework/optimizer/extension.py::get_variable_values" = { reportUnknownVariableType = 1 }
 "django_strawberry_framework/optimizer/field_meta.py::FieldMeta._from_field_shape" = { cast = 1 }
 "django_strawberry_framework/optimizer/lateral_fetch.py::_fetch_lateral_rows" = { reportArgumentType = 1 }
 "django_strawberry_framework/optimizer/lateral_fetch.py::_keyset_seek_quals_match" = { cast = 2 }
@@ -101,7 +98,7 @@
 "django_strawberry_framework/optimizer/plans.py::normalize_order_direction" = { cast = 1 }
 "django_strawberry_framework/optimizer/predicates.py::_correlation_steps" = { cast = 1 }
 "django_strawberry_framework/optimizer/selections.py::ast_child_selections" = { cast = 1 }
-"django_strawberry_framework/optimizer/selections.py::ast_to_converted_selections._convert" = { reportArgumentType = 1 }
+"django_strawberry_framework/optimizer/selections.py::convert_selections" = { reportUnknownVariableType = 2 }
 "django_strawberry_framework/optimizer/selections.py::included_field_selections" = { cast = 2 }
 "django_strawberry_framework/optimizer/selections.py::named_children" = { cast = 1 }
 "django_strawberry_framework/optimizer/selections.py::with_runtime_prefix" = { cast = 1 }
@@ -129,9 +126,8 @@
 "django_strawberry_framework/routers.py::DjangoGraphQLProtocolRouter.__init__" = { reportMissingSuperCall = 1 }
 "django_strawberry_framework/routers.py::_build_router_class_uncached.DjangoGraphQLProtocolRouter.__init__" = { reportArgumentType = 2, reportCallIssue = 1, reportUnknownArgumentType = 1 }
 "django_strawberry_framework/schema.py::DjangoSchema.__init__" = { reportArgumentType = 1, reportUnknownMemberType = 1 }
-"django_strawberry_framework/schema.py::DjangoSchema._stream" = { reportUnknownArgumentType = 2, reportUnknownMemberType = 1, reportUnknownVariableType = 2 }
+"django_strawberry_framework/schema.py::DjangoSchema._stream" = { reportUnknownArgumentType = 1, reportUnknownMemberType = 1 }
 "django_strawberry_framework/schema.py::DjangoSchema.extensions" = { reportIncompatibleUnannotatedOverride = 1, reportPropertyTypeMismatch = 1 }
-"django_strawberry_framework/schema.py::DjangoSchema.stream" = { reportReturnType = 1, reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/schema.py::_consumer_extension_entries" = { cast = 1 }
 "django_strawberry_framework/sets_mixins.py::expanded_once" = { cast = 1 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestClientBase._finish_response" = { cast = 1 }
@@ -222,7 +218,6 @@
 "examples/fakeshop/apps/products/serializers.py::RenamedRelationItemSerializer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/apps/products/services.py::discover_providers" = { reportAny = 1 }
 "examples/fakeshop/drf_serializers.py::ModelSerializerBase.Meta" = { reportIncompatibleVariableOverride = 1 }
-"examples/fakeshop/test_query/test_completion_lifecycle.py::make_schema.Tracing.complete_list_value" = { cast = 1 }
 "examples/fakeshop/test_query/test_connection_pagination_api.py::_TenantScopedGenreQuerySet.query" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_debug_extension_api.py::install_probe_schema.Query.broken_non_null" = { reportReturnType = 1 }
 "examples/fakeshop/test_query/test_debug_toolbar_api.py::_debug_toolbar_cache_state" = { reportUnknownMemberType = 2 }
@@ -265,6 +260,7 @@
 "tests/_idioms.py::STR_ENUM" = { cast = 1 }
 "tests/_idioms.py::UnreadableStateQuerySet.__dict__" = { reportGeneralTypeIssues = 1, reportIncompatibleVariableOverride = 1 }
 "tests/_idioms.py::bind_unparented" = { reportArgumentType = 1, reportUnknownMemberType = 1 }
+"tests/_info.py::make_info" = { reportArgumentType = 1 }
 "tests/_mti_relations.py::declare_mti_tag_models.MtiShop.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/_postgresql_stand_in.py::StoringOperations.adapt_datetimefield_value" = { reportIncompatibleMethodOverride = 1 }
 "tests/_postgresql_stand_in.py::StoringOperations.adapt_durationfield_value" = { reportIncompatibleMethodOverride = 1 }
@@ -362,7 +358,6 @@
 "tests/mutations/test_write_transaction.py::_HygieneWebsocketCommunicator.send_input" = { reportUnknownMemberType = 1 }
 "tests/mutations/test_write_transaction.py::_with_fake_barrier_connection" = { reportArgumentType = 1 }
 "tests/mutations/test_write_transaction.py::test_assert_no_target_drift_propagates_a_planted_eq_error" = { reportAttributeAccessIssue = 1 }
-"tests/mutations/test_write_transaction.py::test_execution_errors_reads_both_graphql_core_error_shapes" = { reportAttributeAccessIssue = 3 }
 "tests/mutations/test_write_transaction.py::test_field_fingerprint_reads_hostile_containers_through_their_base_slots._LyingDict.items" = { reportIncompatibleMethodOverride = 1 }
 "tests/mutations/test_write_transaction.py::test_field_fingerprint_reads_hostile_containers_through_their_base_slots._LyingDict.keys" = { reportIncompatibleMethodOverride = 1 }
 "tests/optimizer/test_extension.py::_DetonatingEqObject.__hash__" = { reportAssignmentType = 1 }
@@ -495,7 +490,6 @@
 "tests/test_error_policy.py::test_a_policy_argument_whose_class_read_raises_is_rejected" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::test_the_enabled_rejection_message_names_the_value" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::test_the_policy_is_frozen_so_a_plain_assignment_raises" = { reportAttributeAccessIssue = 1 }
-"tests/test_graphql_core_patches.py::test_captured_upstream_still_returns_a_residual_awaitable" = { reportArgumentType = 5 }
 "tests/test_keyset.py::_as_seek_nodes" = { reportReturnType = 1 }
 "tests/test_keyset.py::_encrypted_payload_cursor" = { reportArgumentType = 1 }
 "tests/test_keyset.py::test_resolve_relay_max_results_precedence" = { reportArgumentType = 1 }
@@ -560,7 +554,6 @@
 "tests/test_schema.py::test_a_refused_schema_streams_one_refusal_for_every_operation_name" = { reportArgumentType = 1 }
 "tests/test_schema.py::test_a_schema_that_cannot_be_hashed_is_still_constructible_and_bounded._UnhashableSchema" = { reportAssignmentType = 1 }
 "tests/test_schema.py::test_async_window_hostile_error_container_rolls_back_and_leaks_no_transaction" = { reportAttributeAccessIssue = 1 }
-"tests/test_schema.py::test_execution_errors_fallback" = { reportAttributeAccessIssue = 1 }
 "tests/test_schema.py::test_sync_window_hostile_error_container_rolls_back_and_leaks_no_transaction" = { reportAttributeAccessIssue = 1 }
 "tests/test_sets_mixins.py::test_a_longer_related_order_reaching_a_target_path_is_refused._ShelfOrder" = { reportArgumentType = 1 }
 "tests/test_sets_mixins.py::test_a_non_string_field_name_claims_no_relation._Owner" = { reportArgumentType = 2 }

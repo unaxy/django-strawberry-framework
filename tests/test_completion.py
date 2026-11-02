@@ -19,12 +19,13 @@ from unittest.mock import patch
 
 import pytest
 from graphql import ExecutionResult, GraphQLError
-from graphql.execution.execute import ExecutionContext
+from graphql.pyutils import gather_with_cancel
+from strawberry.schema.schema import StrawberryGraphQLCoreExecutionContext
 
 from django_strawberry_framework import _completion as completion
-from django_strawberry_framework import _graphql_core_patches as patches
 from django_strawberry_framework.error_policy import DEFAULT_ERROR_POLICY
 from django_strawberry_framework.extensions.error_policy import mask_execution_result
+from django_strawberry_framework.utils._narrowing import read_attr
 from tests._subprocess import run_in_fresh_process
 
 
@@ -35,8 +36,12 @@ def clear_completion_audit_cache() -> Iterator[None]:
     completion._completion_method.cache_clear()
 
 
-def execution_context() -> ExecutionContext:
-    return object.__new__(ExecutionContext)
+#: The three installed methods that join siblings, adapted for an owned mutation window.
+SITES = ("execute_fields", "complete_async_iterator_value", "complete_iterable_value")
+
+
+def execution_context() -> StrawberryGraphQLCoreExecutionContext:
+    return object.__new__(StrawberryGraphQLCoreExecutionContext)
 
 
 def test_owned_context_is_nested_revocable_and_not_retained() -> None:
@@ -62,13 +67,9 @@ def test_owned_context_is_nested_revocable_and_not_retained() -> None:
     assert completion._owner.get() is None
 
 
-@pytest.mark.parametrize("site", ["fields", "list"])
+@pytest.mark.parametrize("site", SITES)
 def test_adapted_method_preserves_code_metadata_and_private_globals(site: str) -> None:
-    original = (
-        ExecutionContext.execute_fields
-        if site == "fields"
-        else patches._upstream_captures().complete_list_value
-    )
+    original = read_attr(StrawberryGraphQLCoreExecutionContext, site)
     assert isinstance(original, FunctionType)
     adapted = completion._completion_method(original)
     assert isinstance(adapted, FunctionType)
@@ -83,12 +84,13 @@ def test_adapted_method_preserves_code_metadata_and_private_globals(site: str) -
     assert adapted.__doc__ == original.__doc__
     assert inspect.signature(adapted) == inspect.signature(original)
     assert adapted.__globals__ is not original.__globals__
-    assert adapted.__globals__["gather"] is completion._gather_with_cancel
-    assert original.__globals__["gather"] is asyncio.gather
+    assert adapted.__globals__["gather_with_cancel"] is completion._gather_with_cancel
+    assert original.__globals__["gather_with_cancel"] is gather_with_cancel
     adapted_globals: dict[str, object] = dict(adapted.__globals__)
     original_globals: dict[str, object] = dict(original.__globals__)
-    assert {key: value for key, value in adapted_globals.items() if key != "gather"} == {
-        key: value for key, value in original_globals.items() if key != "gather"
+    swapped = "gather_with_cancel"
+    assert {key: value for key, value in adapted_globals.items() if key != swapped} == {
+        key: value for key, value in original_globals.items() if key != swapped
     }
 
 
@@ -103,19 +105,15 @@ def test_unknown_or_unreadable_body_refuses_adaptation(*, unreadable: bool) -> N
         ),
         pytest.raises(RuntimeError, match=r"source-bearing|unaudited"),
     ):
-        completion._completion_method(ExecutionContext.execute_fields)
+        completion._completion_method(StrawberryGraphQLCoreExecutionContext.execute_fields)
 
 
-@pytest.mark.parametrize("site", ["fields", "list"])
+@pytest.mark.parametrize("site", SITES)
 def test_docstring_and_formatting_changes_preserve_the_audited_syntax(site: str) -> None:
-    original = (
-        ExecutionContext.execute_fields
-        if site == "fields"
-        else patches._upstream_captures().complete_list_value
-    )
+    original = read_attr(StrawberryGraphQLCoreExecutionContext, site)
     assert isinstance(original, FunctionType)
     function = ast.parse(textwrap.dedent(inspect.getsource(original.__code__))).body[0]
-    assert isinstance(function, ast.FunctionDef)
+    assert isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
     for node in ast.walk(function):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             documentation = ast.Expr(value=ast.Constant(value="Revised private documentation."))
@@ -132,7 +130,7 @@ def test_docstring_and_formatting_changes_preserve_the_audited_syntax(site: str)
 
 
 def test_wrapped_method_is_refused_instead_of_auditing_its_wrapped_body() -> None:
-    @functools.wraps(ExecutionContext.execute_fields)
+    @functools.wraps(StrawberryGraphQLCoreExecutionContext.execute_fields)
     def instrumented() -> None:
         """An APM wrapper is a different function even with upstream metadata."""
 
@@ -142,14 +140,6 @@ def test_wrapped_method_is_refused_instead_of_auditing_its_wrapped_body() -> Non
     ):
         completion._completion_method(instrumented)
     read_source.assert_not_called()
-
-
-def test_missing_optional_patch_capture_names_the_mandatory_boundary() -> None:
-    with (
-        patch.object(patches, "_original_complete_list_value", None),
-        pytest.raises(RuntimeError, match="APPLY_UPSTREAM_PATCHES does not disable"),
-    ):
-        completion._completion_methods()
 
 
 @pytest.mark.parametrize("change", ["unreadable", "different"])
@@ -162,7 +152,7 @@ def test_package_import_does_not_audit_mutation_completion(change: str) -> None:
             original = inspect.getsource
             def source(value):
                 if getattr(value, "co_name", getattr(value, "__name__", None)) in {{
-                    "execute_fields", "complete_list_value"
+                    "execute_fields", "complete_async_iterator_value", "complete_iterable_value"
                 }}:
                     if {change!r} == "unreadable":
                         raise OSError("sourceless deployment")
@@ -244,3 +234,40 @@ def test_snapshot_detaches_lists_preserving_error_identity(*, populated: bool) -
         assert snapshot.errors[0] is deliberate
     errors.append(GraphQLError("late", original_error=ValueError("late")))
     assert snapshot.errors == ([deliberate] if populated else [])
+
+
+async def test_drain_cancels_the_settled_sibling_and_outlasts_its_owner_cancellation() -> None:
+    release = asyncio.Event()
+    ended: list[bool] = []
+
+    async def sibling() -> list[object]:
+        try:
+            _ = await release.wait()
+        finally:
+            ended.append(True)
+        return []
+
+    settling: list[asyncio.Future[list[object]]] = [asyncio.ensure_future(sibling())]
+    draining = asyncio.create_task(completion.drain_settling(settling))
+    await asyncio.sleep(0)
+    _ = draining.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await draining
+    assert ended == [True]
+    assert settling == []
+
+
+async def test_settling_outside_an_owned_window_stays_upstream_background_work() -> None:
+    context = object.__new__(completion.CompletionExecutionContext)
+    context.background_futures = set()
+    ran: list[bool] = []
+
+    async def sibling() -> None:
+        ran.append(True)
+
+    with completion.owned_completion(execution_context()) as settling:
+        context.settle_in_background([sibling()])
+        assert settling == []
+    assert len(context.background_futures) == 1
+    await asyncio.gather(*context.background_futures)
+    assert ran == [True]

@@ -125,7 +125,7 @@ def _record_prefetch_path_keys(
     _record_path_resolver_keys(plan.prefetch_path_resolver_keys, lookup_path, keys)
 
 
-def _introduces_projection_for_operation(info: GraphQLResolveInfo | None) -> bool:
+def _introduces_projection_for_operation(info: GraphQLResolveInfo[object] | None) -> bool:
     """Return whether the plan may introduce a column projection for ``info``'s operation.
 
     Only a ``QUERY`` operation turns a queryset that carried no ``.only()`` /
@@ -149,7 +149,7 @@ def _introduces_projection_for_operation(info: GraphQLResolveInfo | None) -> boo
 def plan_optimizations(
     selected_fields: Iterable[ConvertedSelection],
     model: type[models.Model],
-    info: GraphQLResolveInfo | None = None,
+    info: GraphQLResolveInfo[object] | None = None,
     *,
     source_type: type[DjangoType] | None = None,
 ) -> OptimizationPlan:
@@ -352,7 +352,7 @@ def _resolve_optimizer_hints(definition: DjangoTypeDefinition | None) -> dict[st
     return definition.optimizer_hints or {}
 
 
-def _hook_info(info: GraphQLResolveInfo | None, target_type: type[DjangoType]) -> Info:
+def _hook_info(info: GraphQLResolveInfo[object] | None, target_type: type[DjangoType]) -> Info:
     """Return the Strawberry ``Info`` the resolver that owns ``info`` was handed.
 
     The plan walk reads graphql-core's ``GraphQLResolveInfo`` (the schema
@@ -397,7 +397,7 @@ _WALKER_ASYNC_RECOURSE = (
 def _build_child_queryset(
     field: FieldMeta,
     target_type: type[DjangoType] | None,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     *,
     has_custom_qs: bool,
     target_definition: DjangoTypeDefinition | None = None,
@@ -503,7 +503,7 @@ def _build_child_queryset(
 def _build_connection_child_queryset(
     field: FieldMeta,
     target_type: type[DjangoType] | None,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     *,
     has_custom_qs: bool,
     target_definition: DjangoTypeDefinition | None = None,
@@ -616,7 +616,7 @@ def _walk_selections(
     plan: OptimizationPlan,
     prefix: str = "",
     *,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     runtime_prefixes: tuple[tuple[str, ...], ...],
     lookup_prefix: str = "",
     source_type: type[DjangoType] | None = None,
@@ -812,7 +812,7 @@ def _dispatch_single_relation(
     prefix: str,
     lookup_prefix: str,
     full_path: str,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     runtime_paths: tuple[tuple[str, ...], ...],
     resolver_identities: tuple[str, ...],
 ) -> None:
@@ -864,7 +864,7 @@ def _plan_select_relation(
     plan: OptimizationPlan,
     prefix: str,
     full_path: str,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     runtime_paths: tuple[tuple[str, ...], ...],
     resolver_identities: tuple[str, ...],
     *,
@@ -938,7 +938,7 @@ def _plan_prefetch_relation(
     target_definition: DjangoTypeDefinition | None,
     plan: OptimizationPlan,
     prefix: str,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     runtime_paths: tuple[tuple[str, ...], ...],
     resolver_identities: tuple[str, ...],
     *,
@@ -1027,7 +1027,7 @@ def _record_prefetch_seal(
 
     def seal(
         seed: QuerySet[models.Model] | None,
-        info: GraphQLResolveInfo | None,
+        info: GraphQLResolveInfo[object] | None,
     ) -> QuerySet[models.Model]:
         return _build_child_queryset(
             django_field,
@@ -1109,7 +1109,7 @@ def _build_prefetch_child_queryset(
     target_type: type[DjangoType] | None,
     target_definition: DjangoTypeDefinition | None,
     parent_plan: OptimizationPlan,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     runtime_paths: tuple[tuple[str, ...], ...],
     *,
     has_custom_get_queryset: bool,
@@ -1136,7 +1136,7 @@ def _build_prefetch_child_queryset_from_base(
     sel: FieldSelection,
     django_field: FieldMeta,
     parent_plan: OptimizationPlan,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     runtime_paths: tuple[tuple[str, ...], ...],
     *,
     base_queryset: QuerySet[models.Model],
@@ -1190,7 +1190,7 @@ def _apply_hint(
     prefix: str,
     lookup_prefix: str,
     full_path: str,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     runtime_paths: tuple[tuple[str, ...], ...],
     resolver_identities: tuple[str, ...],
     consumer_assigned: bool = False,
@@ -1358,7 +1358,7 @@ def _scoped_hint_prefetch(
     type_name: str,
     target_type: type[DjangoType] | None,
     target_definition: DjangoTypeDefinition | None,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
 ) -> _PrefetchAny:
     """Return the consumer's hinted ``prefetch`` with its rows held to the target's visibility.
 
@@ -1800,7 +1800,7 @@ def _plan_connection_relation(
     plan: OptimizationPlan,
     prefix: str,
     lookup_prefix: str,
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
     runtime_prefixes: tuple[tuple[str, ...], ...],
     type_cls: type[DjangoType] | None,
     model: type[models.Model],

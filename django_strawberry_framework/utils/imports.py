@@ -53,7 +53,7 @@ __all__ = [
 CHANNELS_FLOOR = "4.3.2"
 
 # ``routers.py``'s broken-``strawberry.channels`` hint.
-STRAWBERRY_FLOOR = "0.322.2"
+STRAWBERRY_FLOOR = "0.328.0"
 
 # ``middleware/debug_toolbar.py``'s toolbar-absent hint.
 DEBUG_TOOLBAR_FLOOR = "7.0.0"

@@ -50,6 +50,9 @@ from graphql.type.definition import (
     GraphQLUnionType,
     get_named_type,
 )
+
+# basedpyright: Strawberry annotates ``info`` as graphql-core's bare generic ``GraphQLResolveInfo``
+from strawberry.types.nodes import get_variable_values  # pyright: ignore[reportUnknownVariableType]
 from typing_extensions import override
 
 from django_strawberry_framework.extensions.operation_state import (
@@ -714,14 +717,14 @@ def _doc_cache_entry(
 
 
 SelectionExtractor = Callable[
-    [list["Selection"], "GraphQLResolveInfo"],
+    [list["Selection"], "GraphQLResolveInfo[object]"],
     Sequence["ConvertedSelection"],
 ]
 
 
 def _root_child_selections(
     selections: "list[Selection]",
-    _info: "GraphQLResolveInfo",
+    _info: "GraphQLResolveInfo[object]",
 ) -> "list[Selection]":
     """Flatten children from every converted root field node.
 
@@ -745,7 +748,7 @@ def _root_child_selections(
 
 def _connection_node_child_selections(
     selections: "list[Selection]",
-    info: "GraphQLResolveInfo",
+    info: "GraphQLResolveInfo[object]",
 ) -> "list[SimpleNamespace]":
     """Return node-level selections from a Relay connection wrapper.
 
@@ -781,7 +784,7 @@ def mutation_payload_child_selections(slot: str) -> SelectionExtractor:
 
     def _extract(
         selections: "list[Selection]",
-        info: "GraphQLResolveInfo",
+        info: "GraphQLResolveInfo[object]",
     ) -> "list[SimpleNamespace]":
         node_children: list[SimpleNamespace] = []
         root_path = runtime_path_from_info(info)
@@ -885,7 +888,7 @@ class _OriginAndModel(NamedTuple):
     model: type[models.Model]
 
 
-def _resolve_model_from_return_type(info: "GraphQLResolveInfo") -> _OriginAndModel | None:
+def _resolve_model_from_return_type(info: "GraphQLResolveInfo[object]") -> _OriginAndModel | None:
     """Trace ``info.return_type`` through graphql-core wrappers to ``(origin, model)``.
 
     graphql-core wraps resolver return types in layers of
@@ -1016,7 +1019,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # intentionally instance-shared.
         super().__init__()
         # ``execution_context`` stays accepted for direct-construction
-        # compatibility only: at the ``strawberry-graphql>=0.322.2`` floor the
+        # compatibility only: at the ``strawberry-graphql>=0.328.0`` floor the
         # engine invokes class/factory entries in ``extensions=[...]`` with
         # ZERO arguments and assigns ``extension.execution_context`` afterward,
         # so Strawberry itself never passes this keyword (spec-044 Decision 6
@@ -1175,7 +1178,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         self,
         _next: Callable[..., object],
         root: object,
-        info: "GraphQLResolveInfo",
+        info: "GraphQLResolveInfo[object]",
         *args: object,
         **kwargs: object,
     ) -> object:
@@ -1198,8 +1201,8 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         loop, by the one predicate both colors ask (``_needs_sync_boundary``).
         The synchronous executor never hops. Either way this hook returns the
         planned queryset unevaluated; under the asynchronous executor list
-        completion fetches its rows off the loop
-        (``_graphql_core_patches.py::_patched_complete_list_value``).
+        completion fetches its rows off the loop (graphql-core completes a value
+        exposing ``__aiter__`` through it).
         """
         result = _next(root, info, *args, **kwargs)
         if read_attr(info.path, "prev") is not None:
@@ -1214,7 +1217,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
             return run_in_one_sync_boundary(self._optimize, result, info)
         return self._optimize(result, info)
 
-    def _optimize(self, result: object, info: "GraphQLResolveInfo") -> object:
+    def _optimize(self, result: object, info: "GraphQLResolveInfo[object]") -> object:
         """Apply the selection-tree walker's plan to a root-level ``QuerySet`` (middleware path).
 
         Steps:
@@ -1293,7 +1296,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         root_queryset = cast("models.QuerySet[models.Model]", inner_result)
         return finish(self.apply_to(resolved.origin, resolved.model, root_queryset, info))
 
-    async def _optimize_async(self, result: object, info: "GraphQLResolveInfo") -> object:
+    async def _optimize_async(self, result: object, info: "GraphQLResolveInfo[object]") -> object:
         """``_optimize`` for a root the asynchronous executor awaited.
 
         Building a plan runs consumer code: the walker applies each planned
@@ -1313,7 +1316,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
             return await run_in_one_sync_boundary(self._optimize, result, info)
         return self._optimize(result, info)
 
-    def _needs_sync_boundary(self, result: object, info: "GraphQLResolveInfo") -> bool:
+    def _needs_sync_boundary(self, result: object, info: "GraphQLResolveInfo[object]") -> bool:
         """Whether ``_optimize(result, info)`` would build a plan and so must leave the loop.
 
         Reads the same steps ``_optimize`` takes before planning - the adapter
@@ -1336,7 +1339,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
 
     def _builds_plan(
         self,
-        info: "GraphQLResolveInfo",
+        info: "GraphQLResolveInfo[object]",
         target_model: type[models.Model],
         origin: "type[DjangoType] | None",
         queryset: "models.QuerySet[models.Model, object]",
@@ -1368,7 +1371,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         target_type: "type[DjangoType] | None",
         target_model: type[models.Model],
         queryset: "models.QuerySet[_M]",
-        info: "GraphQLResolveInfo",
+        info: "GraphQLResolveInfo[object]",
         *,
         selection_extractor: SelectionExtractor = _root_child_selections,
     ) -> "models.QuerySet[_M]":
@@ -1416,14 +1419,9 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
             return queryset
 
         # The selection-tree walker expects the children of the root field, so we build
-        # the Strawberry-shaped selection list from ``field_nodes`` via the
-        # package-owned ``ast_to_converted_selections`` adapter rather than
-        # Strawberry's ``convert_selections``: the latter's
-        # ``InlineFragment.from_node`` reads ``type_condition.name.value`` and
-        # crashes on a valid anonymous inline fragment (``... { f }``,
-        # ``type_condition=None``). The adapter mirrors the conversion but
-        # builds a ``type_condition=None`` shell the fragment-aware substrate
-        # in ``selections.py`` flows through unchanged.
+        # the Strawberry-shaped selection list from ``field_nodes`` through
+        # ``ast_to_converted_selections``: Strawberry's ``convert_selections``, stamped
+        # with the Python names the walker resolves selections by.
         #
         # Deferred behind a thunk: the conversion + extraction allocate a
         # per-node ``SelectedField`` tree (with ``convert_arguments`` /
@@ -1462,7 +1460,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         self,
         selections: "Sequence[ConvertedSelection] | Callable[[], Sequence[ConvertedSelection]]",
         target_model: type[models.Model],
-        info: "GraphQLResolveInfo",
+        info: "GraphQLResolveInfo[object]",
         origin: "type[DjangoType] | None",
     ) -> "OptimizationPlan":
         """Return the cached plan for ``(info, target_model, origin)`` or build a new one.
@@ -1552,7 +1550,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
     def _publish_plan_to_context(
         self,
         plan: "OptimizationPlan",
-        info: "GraphQLResolveInfo",
+        info: "GraphQLResolveInfo[object]",
     ) -> None:
         """Stash the plan and (when strictness is active) the strictness sentinels on ``info.context``.
 
@@ -1677,7 +1675,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
 
     @staticmethod
     def _build_cache_key(
-        info: "GraphQLResolveInfo",
+        info: "GraphQLResolveInfo[object]",
         target_model: type[models.Model],
         origin: "type[DjangoType] | None" = None,
     ) -> "PlanCacheKey":
@@ -1735,7 +1733,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
                 fragments,
                 _pagination_wire_names(info.schema),
             )
-            variable_values: Mapping[str, object] = info.variable_values or {}
+            variable_values: Mapping[str, object] = dict[str, object](get_variable_values(info))
             # The name-keyed pagination collector deliberately over-collects, so
             # any GraphQL input shape (including an arbitrary custom-scalar
             # result) can reach this frozenset through a same-named argument on a
@@ -1821,10 +1819,10 @@ def apply_connection_optimization(
     )
 
 
-def _raw_resolve_info(info: "EitherInfo") -> "GraphQLResolveInfo":
+def _raw_resolve_info(info: "EitherInfo") -> "GraphQLResolveInfo[object]":
     """Return the graphql-core info behind ``info`` (a Strawberry ``Info`` or a raw one)."""
     # A Strawberry ``Info`` carries its raw info at ``_raw_info``; a raw info is itself.
-    return cast("GraphQLResolveInfo", getattr(info, "_raw_info", info))
+    return cast("GraphQLResolveInfo[object]", getattr(info, "_raw_info", info))
 
 
 async def apply_connection_optimization_async(

@@ -197,20 +197,20 @@ jobs:
         # (spec-049 Decision 5).
         #
         # The minimum-support nodes (Django 5.2.16 / Python 3.10) also
-        # force-install exactly strawberry-graphql==0.322.2 so the advertised
-        # floor (the first release that bounds a `first` + `before` connection
-        # page at its cursor, and past spec-044 Decision 6's per-operation
-        # extension isolation) is durably exercised on every push/PR,
+        # force-install exactly strawberry-graphql==0.328.0 so the advertised
+        # floor (the first release on graphql-core 3.3, past the `first` +
+        # `before` page bound and spec-044 Decision 6's per-operation extension
+        # isolation) is durably exercised on every push/PR,
         # coverage-free (the latest node keeps the coverage gate). They then
         # install every soft dependency at its floor (the step after it).
         # tests/test_ci_governance.py holds each floor literal in this file to
         # its pyproject.toml lower bound.
         include: >-
           ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && fromJSON('[
-            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "library-keyset"},
-            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "remainder"},
-            {"django": "5.2.16", "python": "3.10", "database": "multi DB", "fakeshop_sharded": "1", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "library-keyset"},
-            {"django": "5.2.16", "python": "3.10", "database": "multi DB", "fakeshop_sharded": "1", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "remainder"},
+            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.328.0", "compatibility_only": "1", "shard": "library-keyset"},
+            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.328.0", "compatibility_only": "1", "shard": "remainder"},
+            {"django": "5.2.16", "python": "3.10", "database": "multi DB", "fakeshop_sharded": "1", "strawberry": "0.328.0", "compatibility_only": "1", "shard": "library-keyset"},
+            {"django": "5.2.16", "python": "3.10", "database": "multi DB", "fakeshop_sharded": "1", "strawberry": "0.328.0", "compatibility_only": "1", "shard": "remainder"},
             {"django": "5.2.*", "python": "3.11", "database": "single DB", "fakeshop_sharded": "0", "shard": "library-keyset"},
             {"django": "5.2.*", "python": "3.11", "database": "single DB", "fakeshop_sharded": "0", "shard": "remainder"},
             {"django": "5.2.*", "python": "3.11", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
@@ -248,8 +248,8 @@ jobs:
             {"django": "latest", "python": "3.14", "database": "multi DB", "fakeshop_sharded": "1", "shard": "library-keyset"},
             {"django": "latest", "python": "3.14", "database": "multi DB", "fakeshop_sharded": "1", "shard": "remainder"}
           ]') || fromJSON('[
-            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "library-keyset"},
-            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.322.2", "compatibility_only": "1", "shard": "remainder"},
+            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.328.0", "compatibility_only": "1", "shard": "library-keyset"},
+            {"django": "5.2.16", "python": "3.10", "database": "single DB", "fakeshop_sharded": "0", "strawberry": "0.328.0", "compatibility_only": "1", "shard": "remainder"},
             {"django": "latest", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0", "coverage": "1", "shard": "library-keyset"},
             {"django": "latest", "python": "3.14", "database": "single DB", "fakeshop_sharded": "0", "coverage": "1", "shard": "remainder"}
           ]') }}

@@ -1167,12 +1167,9 @@ class _AsyncQuerySetRows:
 
     Exposes ONLY ``__aiter__`` (delegating to ``self._queryset.__aiter__()``)
     and deliberately omits ``__iter__`` so graphql-core cannot select synchronous
-    ORM iteration in an event-loop thread. Two owners wrap: ``DjangoListField``'s
-    async pipeline around its final sliced queryset, and the graphql-core list
-    completion patch (``_graphql_core_patches.py::_patched_complete_list_value``)
-    around any QuerySet a resolver hands a list field under the asynchronous
-    executor. It changes where the rows are fetched, never what a resolver body
-    does on the loop.
+    ORM iteration in an event-loop thread. ``DjangoListField``'s async pipeline
+    wraps its final sliced queryset in it. It changes where the rows are fetched,
+    never what a resolver body does on the loop.
     """
 
     __slots__: tuple[str, ...] = ("_queryset",)

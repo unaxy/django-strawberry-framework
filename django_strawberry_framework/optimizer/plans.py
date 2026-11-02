@@ -266,7 +266,7 @@ class PrefetchSeal:
     own_keys: tuple[str, ...]
     model: type[models.Model] | None
     seal: Callable[
-        [QuerySet[models.Model] | None, GraphQLResolveInfo | None],
+        [QuerySet[models.Model] | None, GraphQLResolveInfo[object] | None],
         QuerySet[models.Model],
     ]
 
@@ -2012,7 +2012,7 @@ def diff_plan_for_queryset(
     plan: OptimizationPlan,
     queryset: QuerySet[_M],
     *,
-    info: GraphQLResolveInfo | None = None,
+    info: GraphQLResolveInfo[object] | None = None,
 ) -> tuple[OptimizationPlan, QuerySet[_M]]:
     """Reconcile ``plan`` against optimizations already on ``queryset``.
 
@@ -2278,7 +2278,7 @@ def _diff_prefetch_related(
     plan_prefetch_related: Sequence[PrefetchLookup],
     queryset: QuerySet[_M],
     seals: Mapping[str, PrefetchSeal],
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
 ) -> tuple[list[PrefetchLookup], QuerySet[_M], frozenset[str], frozenset[str]]:
     """Reconcile optimizer ``prefetch_related`` against the queryset's existing lookups.
 
@@ -2363,7 +2363,7 @@ def _sealed_consumer_prefetch(
     path: str,
     seal: PrefetchSeal,
     exact_entries: Sequence[PrefetchLookup],
-    info: GraphQLResolveInfo | None,
+    info: GraphQLResolveInfo[object] | None,
 ) -> PrefetchLookup | None:
     """Return the consumer's rows for ``path`` sealed through the target type's hook.
 

@@ -63,7 +63,7 @@ from collections.abc import (
     Iterator,
     Mapping,
 )
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from dataclasses import fields as dataclass_fields
 from itertools import islice
 from types import MappingProxyType, SimpleNamespace
@@ -2960,11 +2960,10 @@ def test_argument_less_directives_are_read_once_however_often_their_fragment_exp
         f"{{ {spreads} }} fragment F on Query @a @include(if: true) @b {{ echo @c @d }}",
     )
     reads: list[str] = []
-    slot = truth.class_dict(DirectiveNode)["arguments"]
 
     def read_arguments(directive: DirectiveNode) -> object:
         reads.append(directive.name.value)
-        return call_method(slot, "__get__", directive, DirectiveNode)
+        return truth.instance_state(directive)["arguments"]
 
     resolved: list[str] = []
     resolve = GraphQLSchema.get_directive
@@ -4183,7 +4182,8 @@ def test_charge_document_refuses_a_selection_that_is_no_known_kind() -> None:
     document = parse("{ echo }")
     operation = document.definitions[0]
     assert isinstance(operation, OperationDefinitionNode)
-    operation.selection_set.selections = (_ExoticSelection(directives=()),)
+    selection_set = replace(operation.selection_set, selections=(_ExoticSelection(directives=()),))
+    document = replace(document, definitions=(replace(operation, selection_set=selection_set),))
 
     with pytest.raises(TypeError, match="expected an instance of FieldNode"):
         charge_document(DEFAULT_RESOURCE_POLICY, _PROBE_SCHEMA._schema, document)
