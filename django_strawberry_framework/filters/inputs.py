@@ -106,6 +106,7 @@ from .base import (
     _ColumnCleanedFilter,
     _compared_columns,
     _EnumMemberFilterMixin,
+    _filterset_lookup_lhs_path,
     _filterset_lookup_operand,
     _filterset_model_field,
     _filterset_value_field,
@@ -1643,14 +1644,19 @@ def _build_range_input_class(
     the arguments factory builds each filterset's input once per generation.
 
     The class name is qualified by the owning ``FilterSet`` and stemmed on the value path,
-    the ``field_name`` followed by the transforms the ``lookup_expr`` carries ahead of its
-    lookup -- ``f"{filterset_cls.__name__}{Pascal(value_path)}RangeInputType"``, so
-    ``RangeFilter(field_name="occurred_at", lookup_expr="year__range")`` and
-    ``RangeFilter(field_name="occurred_at__year", lookup_expr="range")`` both spell
-    ``OccurredAtYear`` and a ``range`` over the column itself ``OccurredAt``, two types
-    whose axes differ (``Int`` and ``DateTime``); a ``method=`` filter's bounds are its
-    column's, so its stem is the ``field_name`` -- mirroring the per-field operator-bag naming
-    (``ClassBasedTypeNameMixin.type_name_for``). Without this qualifier the name
+    the ``field_name`` followed by every transform Django's query applies ahead of the
+    lookup (``filters/base.py::_filterset_lookup_lhs_path``) --
+    ``f"{filterset_cls.__name__}{Pascal(value_path)}RangeInputType"``, so
+    ``RangeFilter(field_name="occurred_at", lookup_expr="year__range")``, a bare
+    ``lookup_expr="year"`` and ``RangeFilter(field_name="occurred_at__year",
+    lookup_expr="range")`` all spell ``OccurredAtYear`` and a ``range`` over the column
+    itself ``OccurredAt``, two types whose axes differ (``Int`` and ``DateTime``); a
+    ``method=`` filter's bounds are its column's, so its stem is the ``field_name``; a set
+    with no model, a path no query of the model resolves (an annotation, a
+    ``FilteredRelation`` alias) and a ``lookup_expr`` no walk accepts are stemmed on the
+    ``field_name`` and the ``lookup_expr`` parts ahead of the last -- mirroring the
+    per-field operator-bag naming (``ClassBasedTypeNameMixin.type_name_for``). Without
+    this qualifier the name
     derived from ``field_name`` alone, so two filtersets that share a
     ``field_name`` for a ``RangeFilter`` (e.g. both filter a ``price`` column)
     each mint a DISTINCT sub-input class under the SAME GraphQL type name, and
@@ -1667,13 +1673,19 @@ def _build_range_input_class(
     a schema serving both.
     """
     field_name = getattr(filter_instance, "field_name", "field") or "field"
-    # A ``method=`` filter's bounds are its column's (``_filterset_value_field``).
-    transforms = (
-        filter_instance.lookup_expr.split(LOOKUP_SEP)[:-1]
-        if read_attr(filter_instance, "method", None) is None
-        else []
-    )
-    value_path = LOOKUP_SEP.join((field_name, *transforms))
+    lookup_expr = filter_instance.lookup_expr
+    if read_attr(filter_instance, "method", None) is not None:
+        # A ``method=`` filter's bounds are its column's (``_filterset_value_field``).
+        value_path = field_name
+    else:
+        # Where no query of the model walks the path (no model, an alias or annotation only
+        # the queryset holds, an unwalkable ``lookup_expr``), the stem keeps the parts the
+        # ``lookup_expr`` spells ahead of the last.
+        value_path = _filterset_lookup_lhs_path(
+            filterset_cls,
+            field_name,
+            lookup_expr,
+        ) or LOOKUP_SEP.join((field_name, *lookup_expr.split(LOOKUP_SEP)[:-1]))
     cls_name = f"{truth.name(filterset_cls)}{_pascal_case(value_path)}RangeInputType"
     return build_input_class(
         cls_name,

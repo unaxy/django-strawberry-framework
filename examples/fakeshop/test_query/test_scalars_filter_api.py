@@ -27,9 +27,12 @@ that day, flat, under ``not`` and through ``partner`` nested and flat. ``parentD
 ``allScalarSpecimensByParentStamp`` crosses the ``FilteredRelation`` alias that root
 field's queryset holds, a path the schema build cannot resolve, so it keeps its declared
 ``DateTime``: one whose date in the default time zone (``TIME_ZONE``) leaves years
-1..9999 is ``FILTER_INVALID`` on every backend. The declared ``occurredYearAmong`` (``in``) and
-``occurredYearSpan`` (``range``) over ``occurred_at__year``, a path through the column's
-``year`` transform, are typed by the transform's ``IntegerField`` output (``[Int!]``,
+1..9999 is ``FILTER_INVALID`` on every backend. ``parentDaysSpan``, a ``RangeFilter`` over
+the same path with a bare ``date`` ``lookup_expr``, keeps its range form's ``String`` bounds
+and compares a lone bound through the parent's ``date``. The declared
+``occurredYearAmong`` (``in``) and ``occurredYearSpan`` (``range``) over
+``occurred_at__year``, a path through the column's ``year`` transform, are typed by the
+transform's ``IntegerField`` output (``[Int!]``,
 ``Int`` bounds) and filter by the year sent, flat, under ``not`` and through ``partner``
 nested and flat; a text year or one past ``Int``'s 32 bits is the scalar's own refusal.
 A holder schema (``generated_year_schema``) serves ``Meta.fields`` ``year`` / ``year__gt`` /
@@ -42,8 +45,10 @@ leaves take ``Int``, ``time`` / ``time__gt`` the ``time`` transform's ``Time`` a
 a ``Date``, on ``occurred_at``, and ``year`` / ``iso_year`` on the date column
 ``occurred_on`` take ``Int``; each filters by the value sent. Its declared ``ListFilter``
 (``year__in``) and ``RangeFilter`` (``year__range``, a lone bound included) take and filter
-by an ``Int`` year, and the same shapes with a ``method=`` keep the column's ``DateTime``,
-which reaches the method; the two ranges mint two range types.
+by an ``Int`` year, a lone bound of a ``RangeFilter`` with a bare ``year`` / ``date``
+``lookup_expr`` through that transform too (an end date keeping a row later that day), and
+the same shapes with a ``method=`` keep the column's ``DateTime``, which reaches the method;
+the two ranges mint two range types.
 On PostgreSQL a UTC offset the server refuses (16:00 or more either way, or, bound as
 text as Django's default psycopg cursor binds, a fraction of a second) is
 ``FILTER_INVALID`` the same way, where SQLite projects the datetime onto UTC and filters.
@@ -850,6 +855,57 @@ def test_datetime_crossing_a_filtered_relation_alias_outside_years_one_to_9999_i
     }
 
 
+_PARENT_DAYS_SPAN_TYPE_QUERY = """
+query {
+  span: __type(name: "ScalarSpecimenParentStampFilterParOccurredAtRangeInputType") {
+    inputFields { name type { name } }
+  }
+}
+"""
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("bounds", "labels"),
+    [
+        pytest.param({"start": "2021-06-15"}, ["child-of-alpha"], id="start"),
+        pytest.param({"end": "2020-06-15"}, ["child-of-beta"], id="end"),
+    ],
+)
+def test_range_through_a_filtered_relation_alias_compares_a_lone_bound_through_its_transform(
+    bounds: dict[str, str],
+    labels: list[str],
+) -> None:
+    """A lone bound of a bare-``date`` range over a ``FilteredRelation`` alias compares the day.
+
+    ``parentDaysSpan`` is a declared ``RangeFilter`` over ``par__occurred_at``, a path only
+    the resolver's queryset (its ``par`` alias) resolves, with the bare ``date`` transform as
+    its ``lookup_expr``. No query of the model holds the alias when the schema is built, so
+    the range type is stemmed on the ``field_name`` and its bounds are the range form's
+    ``String``; the lone bound is compared through the parent's ``date`` over the queryset
+    it runs on, so an end date keeps a parent stamped later that day.
+    """
+    alpha = _seed_specimen("alpha")
+    beta = _seed_specimen("beta", occurred_at=_DATETIME.replace(year=2020))
+    _seed_specimen("child-of-alpha", parent=alpha)
+    _seed_specimen("child-of-beta", parent=beta)
+
+    assert _assert_graphql_success(_PARENT_DAYS_SPAN_TYPE_QUERY) == {
+        "span": {
+            "inputFields": [
+                {"name": "start", "type": {"name": "String"}},
+                {"name": "end", "type": {"name": "String"}},
+            ],
+        },
+    }
+    assert response_json(
+        post_graphql(
+            _BY_PARENT_STAMP,
+            variables={"filter": {"parentDaysSpan": {"date": bounds}}},
+        ),
+    ) == {"data": {"allScalarSpecimensByParentStamp": [{"label": label} for label in labels]}}
+
+
 _YEAR_LEAF_TYPES_QUERY = """
 query {
   among: __type(name: "ScalarSpecimenFilterOccurredYearAmongFilterInputType") {
@@ -985,14 +1041,15 @@ urlpatterns = [path("graphql-test/", _holder_view)]
 def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
     """Serve sets whose leaves reach ``occurred_at``'s ``year`` through the ``lookup_expr``.
 
-    No shipped fakeshop set spells a transform in a ``lookup_expr``, so the holder declares
-    one over ``ScalarSpecimen``: ``Meta.fields`` ``year`` / ``year__exact`` (which
-    django-filter names as it names ``year``) / ``year__gt`` / ``year__in`` / ``iso_year`` /
-    ``iso_year__lte`` / ``time`` / ``time__gt`` / ``date`` and the null tests
-    ``year__isnull`` / ``date__isnull`` on ``occurred_at``, and ``year`` / ``iso_year`` on the
-    date column ``occurred_on``; a ``ListFilter`` (``year__in``) and a
-    ``RangeFilter`` (``year__range``); and the same list and range shapes with a ``method=``,
-    whose method receives the column's values.
+    The shipped sets spell a transform in a ``lookup_expr`` only in a few declared filters
+    (``apps/scalars/filters.py``), so the holder declares the rest over ``ScalarSpecimen``:
+    ``Meta.fields`` ``year`` / ``year__exact`` (which django-filter names as it names
+    ``year``) / ``year__gt`` / ``year__in`` / ``iso_year`` / ``iso_year__lte`` / ``time`` /
+    ``time__gt`` / ``date`` and the null tests ``year__isnull`` / ``date__isnull`` on
+    ``occurred_at``, and ``year`` / ``iso_year`` on the date column ``occurred_on``; a
+    ``ListFilter`` (``year__in``), a ``RangeFilter``
+    (``year__range``) and two through a bare ``year`` / ``date``; and the same list and
+    range shapes with a ``method=``, whose method receives the column's values.
     A ``NullableScalarSpecimen`` set reaches it through ``partner``, nested and flat, and
     carries the same two null tests over its own nullable ``occurred_at``, with a declared
     pass-through ``Filter`` (``year_unset``) for the first.
@@ -1002,6 +1059,8 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
     class GeneratedYearFilter(FilterSet):
         years_among = ListFilter(field_name="occurred_at", lookup_expr="year__in")
         years_span = RangeFilter(field_name="occurred_at", lookup_expr="year__range")
+        years_of = RangeFilter(field_name="occurred_at", lookup_expr="year")
+        days_of = RangeFilter(field_name="occurred_at", lookup_expr="date")
         years_of_stamps = ListFilter(
             field_name="occurred_at",
             lookup_expr="year__in",
@@ -1402,6 +1461,9 @@ query {
   stamps: __type(name: "GeneratedYearFilterOccurredAtRangeInputType") {
     inputFields { name type { name } }
   }
+  days: __type(name: "GeneratedYearFilterOccurredAtDateRangeInputType") {
+    inputFields { name type { name } }
+  }
 }
 """
 
@@ -1412,8 +1474,9 @@ def test_two_ranges_over_one_column_are_named_by_what_each_compares() -> None:
     """A ``year__range`` and a ``method=`` ``year__range`` over ``occurred_at`` are two types.
 
     Each is stemmed on its value path: ``OccurredAtYear`` with the ``year`` transform's
-    ``Int`` bounds, and ``OccurredAt`` with the column's ``DateTime`` bounds for the
-    ``method=`` range, whose method receives the column's values.
+    ``Int`` bounds (the bare ``year`` range's too), ``OccurredAtDate`` with the bare
+    ``date`` transform's ``Date`` bounds, and ``OccurredAt`` with the column's ``DateTime``
+    bounds for the ``method=`` range, whose method receives the column's values.
     """
     payload = response_json(post_graphql(_LOOKUP_EXPR_RANGE_TYPES_QUERY, url="/graphql-test/"))
 
@@ -1429,6 +1492,12 @@ def test_two_ranges_over_one_column_are_named_by_what_each_compares() -> None:
                 "inputFields": [
                     {"name": "start", "type": {"name": "DateTime"}},
                     {"name": "end", "type": {"name": "DateTime"}},
+                ],
+            },
+            "days": {
+                "inputFields": [
+                    {"name": "start", "type": {"name": "Date"}},
+                    {"name": "end", "type": {"name": "Date"}},
                 ],
             },
         },
@@ -1452,6 +1521,14 @@ _BETA_YEAR_STAMP = "2020-03-01T00:00:00+00:00"
         ),
         pytest.param({"yearsSpan": {"yearRange": {"start": 2021}}}, ["alpha"], id="range-start"),
         pytest.param({"yearsSpan": {"yearRange": {"end": 2020}}}, ["beta"], id="range-end"),
+        pytest.param({"yearsOf": {"year": {"start": 2021}}}, ["alpha"], id="bare-year-start"),
+        pytest.param({"yearsOf": {"year": {"end": 2020}}}, ["beta"], id="bare-year-end"),
+        pytest.param(
+            {"daysOf": {"date": {"start": "2021-06-15"}}},
+            ["alpha"],
+            id="bare-date-start",
+        ),
+        pytest.param({"daysOf": {"date": {"end": "2020-06-15"}}}, ["beta"], id="bare-date-end"),
         pytest.param(
             {"yearsOfStamps": {"yearIn": [_ALPHA_YEAR_STAMP]}},
             ["alpha"],
@@ -1475,8 +1552,10 @@ def test_lookup_expr_transform_leaf_filters_by_its_output_and_a_method_by_its_co
     """A transform in the ``lookup_expr`` is published and cleaned as its output; a method's not.
 
     ``yearsAmong`` / ``yearsSpan`` take the ``year`` transform's ``Int`` and filter by it,
-    a lone bound through ``year`` too. The ``method=`` shapes keep the column's
-    ``DateTime``, cleaned as one, so each datetime reaches the method.
+    a lone bound through ``year`` too. ``yearsOf`` / ``daysOf`` spell the bare ``year`` /
+    ``date`` transform as the ``lookup_expr``, so a lone bound compares that transform's
+    output (an end date keeps the row later that day). The ``method=`` shapes keep the
+    column's ``DateTime``, cleaned as one, so each datetime reaches the method.
     """
     _seed_year_partners()
 

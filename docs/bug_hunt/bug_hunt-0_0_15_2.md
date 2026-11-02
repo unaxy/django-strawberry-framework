@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 400 done, 86 to do. The CHANGELOG entries filed here moved to
+Progress: 401 done, 86 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2332,6 +2332,22 @@ Progress: 400 done, 86 to do. The CHANGELOG entries filed here moved to
   their one-key controls in `test_scalars_mutation_api.py`, a text-binding `Meta.form` in
   `test_filter_widget_binding_api.py`, package rows in `tests/utils/test_widgets.py` (text, any exception, a non-list
   answer, the `ValidationError` kept); spec-038, README, GLOSSARY and the `test_query` README say so
+- [x] 624. fixed: the `date__range` lone bound and the transform-output cleaning the item names were already right at
+  HEAD (7bd478bf); what remained was a package `RangeFilter` whose `lookup_expr` ends on a transform with Django's
+  implicit `exact` (`date`, `year`, `month`, `time`, `hour`, a consumer-registered one), whose lone bound hit the bare
+  column: `{end: "2021-12-31"}` under `date` left out the later rows of that day, and a lone `year` / `month` /
+  `time` / `hour` bound answered `FILTER_INVALID` (an aware `date` a masked error). The lone bound now applies through
+  every transform Django's query applies ahead of the lookup: `filters/base.py::_lookup_lhs_path` (Django's
+  `solve_lookup_type` split plus `utils/relations.py::lookup_transform_parts`, factored out of `_membership_path`)
+  over the queryset the filter runs on, so relation, multi-table, alias and annotation paths walk too; a
+  `lookup_expr` no walk accepts is refused with `LookupValidationError` instead of filtering the column. Two bounds
+  are unchanged (Waiting 316). The range input type is stemmed the same way
+  (`filters/base.py::_filterset_lookup_lhs_path` in `filters/inputs.py::_build_range_input_class`, the spelled
+  stem kept where no build-time query answers), so `range` and `date` over one column mint two names instead of
+  colliding at finalize; no shipped name moves. Live rows through the scalars `generated_year_schema` holder (bare
+  `year` / `date`, an end-date 09:30 row kept) and a new `ScalarSpecimenParentStampFilter.parent_days_span` over the
+  `par` `FilteredRelation` alias in `test_scalars_filter_api.py`, package rows for naming and the refusal; the
+  `RangeFilter`, `RangeField`, `ListFilter`, `ArrayFilter` docstrings and spec-027 say so
 
 ## Outside review of the fixes
 
@@ -2372,12 +2388,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 624. **SKIP for now** (upstream-seam refactor in flight: F6, `filters/base.py::_ColumnCleanedFilter`). A package `RangeFilter` whose `lookup_expr` carries a transform (`date__range`, `date__exact`, `date`)
-  applies a lone bound as `<field_name>__gte` / `__lte` without it: `RangeFilter(field_name="occurred_at",
-  lookup_expr="date__range")` sent `{end: "2021-12-31"}` compares the datetime with midnight and leaves out a
-  2021-12-31 09:30 row that both bounds include; spec-027's RangeFilter row says a lone bound applies as `gte` / `lte`
-  of the declared range. Its bounds are also cleaned by the column's own `gte` field whatever the transform, so a
-  `year` lookup refuses a year as "Enter a valid date/time.". Found verifying 508
 - [ ] 625. **SKIP for now** (upstream-seam refactor in flight: F6, `filters/base.py::_ColumnCleanedFilter`). (robustness) A package `ListFilter` declared with a lookup other than `in` (the default `exact`, `gte`)
   hands the list to a scalar lookup: a masked `ValidationError` / `TypeError` over a decimal or number column and
   silently no rows over text, even for one element. A consumer-declared bare `BaseCSVFilter` subclass does the same
@@ -2488,6 +2498,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `forms/resolvers.py::_reconstruct_partial_data` binds `model_to_dict`'s value and the field cleans it as text;
   spec-038 Decision 8 step 4 says omitted scalars are preserved (fakeshop's `NullableScalarSpecimenFlagForm`
   `payload` reaches it live). Found verifying 620
+- [ ] 714. (robustness) A `FilterSet` with no `Meta.model` set as a Relay `DjangoType`'s `Meta.filterset_class` and
+  served by `DjangoConnectionField` builds and publishes its filter input (a `RangeFilter` over `occurred_at` as
+  `LooseOccurredAtRangeInputType` with `String` axes), but any value sent to it answers a masked `ConfigurationError`
+  "'span' is not a filter input field; it would apply nothing": the build accepts what every request refuses.
+  Found verifying 624
 
 ## To do: holes found re-checking the fixes
 
@@ -2650,6 +2665,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   integer `gte` + `lte`, as django-filter's `RangeFilter` does: prototyped and verified, 668 two-bound cells change
   (448 masked errors and 220 wrong answers become the declared-`range` answer), no other cell changes; it would also
   make 315's "both bounds keep the declared lookup" false
+
+  spec-027's Edge case "A `RangeFilter` whose `lookup_expr` ends on a transform" states today's two-bound answer
+  ("Two bounds apply the declared `lookup_expr` as written"); deciding 316 restates it. Since 624 a lone bound walks
+  Django's own lookup split (`filters/base.py::_lookup_lhs_path`), which option (c)'s transform prefix can reuse
 - [ ] 281. A `GenericForeignKey` written beside its carriers: a serializer with writable `content_object` and writable
   `object_id` / `content_type` builds, and a request pairing a visible object's id with another row's `objectId` stores
   that row (a writable `object_id` alone is already a raw write); post-save attestation covers single-column FK /

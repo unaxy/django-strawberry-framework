@@ -93,8 +93,10 @@ name, never the ``price`` or ``flag`` column.
 a field: ``parent_day_of`` is a declared ``DateTimeFilter`` whose ``field_name``
 (``par__occurred_at``) crosses ``par``, the ``FilteredRelation("parent")`` alias the
 ``allScalarSpecimensByParentStamp`` resolver adds to its queryset, into the parent's
-``occurred_at`` column's ``date`` transform. It is the acceptance surface for a path only
-the queryset the filter runs on resolves.
+``occurred_at`` column's ``date`` transform. ``parent_days_span`` is a declared
+``RangeFilter`` over the same path whose ``lookup_expr`` is that bare ``date`` transform
+(``parentDaysSpan: { date: { start, end } }``), a lone bound compared through it. They are
+the acceptance surface for a path only the queryset the filter runs on resolves.
 """
 
 from __future__ import annotations
@@ -272,6 +274,7 @@ class ScalarSpecimenParentStampFilter(FilterSet):
         field_name="par__occurred_at",
         lookup_expr="date",
     )
+    parent_days_span = RangeFilter(field_name="par__occurred_at", lookup_expr="date")
 
     class Meta:
         model = models.ScalarSpecimen

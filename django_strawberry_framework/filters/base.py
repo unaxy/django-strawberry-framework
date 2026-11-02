@@ -704,6 +704,32 @@ def _model_lookup_operand(
     return _LookupOperand(column, _names_null_test(lookup_expr)) if operand is None else operand
 
 
+def _filterset_lookup_lhs_path(
+    filterset: type[BaseFilterSet] | BaseFilterSet | None,
+    field_name: str,
+    lookup_expr: str,
+) -> str | None:
+    """Return the path ``field_name`` and ``lookup_expr`` compare on ``filterset``'s model.
+
+    ``_lookup_lhs_path`` over a fresh ``Query`` of the model, which holds no annotation:
+    the names Django walks as a path, then each transform its query applies ahead of the
+    lookup, a bare trailing transform (``lookup_expr="date"``, an implicit ``exact``)
+    included. ``None`` for a filterset with no model, a path only the queryset a filter
+    runs on resolves (an annotation, a ``FilteredRelation`` alias: Django's
+    ``FieldError``), or a ``lookup_expr`` no walk from where the path ends accepts
+    (``LookupValidationError``: ``bogus``, or a ``range`` past a ``pk`` that is a
+    relation, which Django registers no ``range`` lookup on; ``RangeFilter.filter`` walks
+    the column the key stores instead).
+    """
+    model = _filterset_model(filterset)
+    if model is None:
+        return None
+    try:
+        return _lookup_lhs_path(Query(model), LOOKUP_SEP.join((field_name, lookup_expr)))
+    except (FieldError, LookupValidationError):
+        return None
+
+
 def _names_null_test(lookup_expr: str) -> bool:
     """Whether a ``lookup_expr`` no walk resolved names Django's null test: ``isnull``."""
     return lookup_expr == "isnull"
@@ -928,10 +954,11 @@ class _MembershipCSVTextInput(_MembershipCSVWidget, TextInput):
 class _ElementField(Field):
     """Form field of ``ListFilter`` / ``ArrayFilter``: each element is cleaned by ``element_field``.
 
-    ``element_field`` is the form field of the column's ``gte`` filter (an
-    ``ArrayField``'s ``base_field``'s for an array column), so an element the column cannot
-    hold is a form error rather than a value handed to the ORM, a text element is stripped
-    and a naive datetime element made aware, under any django-filter ``FilterSet`` parent.
+    ``element_field`` is the form field of the ``gte`` filter for the value each element
+    compares, the column's or a transform output's (an ``ArrayField``'s ``base_field``'s for
+    an array column), so an element that value cannot hold is a form error rather than a
+    value handed to the ORM, a text element is stripped and a naive datetime element made
+    aware, under any django-filter ``FilterSet`` parent.
     A ``None`` element stays ``None``, and a value that is not a list or tuple, or a field
     with no ``element_field`` (a filter bound to no ``FilterSet``, a relation, a column
     django-filter builds no filter for), passes through as sent for the filter to judge.
@@ -1005,10 +1032,11 @@ class ArrayFilter(_ElementCleanedFilter):
         at all (or send `None`, which short-circuits to the unfiltered
         queryset).
 
-    Each element is cleaned by the form field of the column's own ``gte`` filter, an
-    ``ArrayField`` column's ``base_field``'s (``_ElementField``), so an element the column
-    cannot hold is a form error rather than a value handed to the ORM, a text element is
-    stripped and a naive datetime element made aware. Raw form data (``DjangoFilterBackend``,
+    Each element is cleaned by the form field of the ``gte`` filter for the value it
+    compares, the column's or a transform output's, an ``ArrayField`` column's
+    ``base_field``'s (``_ElementField``), so an element that value cannot hold is a form
+    error rather than a value handed to the ORM, a text element is stripped and a naive
+    datetime element made aware. Raw form data (``DjangoFilterBackend``,
     a ``QueryDict``) reads ``?name=a,b`` as ``["a", "b"]`` and an empty ``?name=`` as no
     constraint (``_MembershipCSVWidget``); only a list or tuple is an explicit ``[]``.
     """
@@ -1197,9 +1225,9 @@ class RangeField(Field):
     the constraint instead of compiling ``col BETWEEN NULL AND NULL``.
 
     ``bound_field`` cleans each bound that is not ``None`` (``RangeFilter`` passes the
-    form field of its column's ``gte`` filter), so a bound the column cannot hold is a
-    form error rather than a value handed to the ORM. Without one the bounds pass
-    through as sent.
+    form field of the ``gte`` filter for the value its range compares, the column's or a
+    transform output's), so a bound that value cannot hold is a form error rather than a
+    value handed to the ORM. Without one the bounds pass through as sent.
     """
 
     # Class-level defaults ``forms.Field`` reads through the instance and never
@@ -1228,7 +1256,7 @@ class RangeField(Field):
 
         Args:
             bound_field: The form field that cleans one bound (``RangeFilter`` passes the
-                one its column's ``gte`` filter builds), or ``None``.
+                one the ``gte`` filter for the value its range compares builds), or ``None``.
             **kwargs: The options ``forms.Field`` takes.
 
         """
@@ -1259,15 +1287,19 @@ class RangeFilter(_ColumnCleanedFilter):
     (``IntegerRangeFilter``): Django's range-aware integer lookups read a bound past the
     column's range as widening or matching nothing, where ``BETWEEN`` would bind it raw and
     overflow the backend. A range with one bound left out or ``null`` applies that lone
-    bound: a start alone as ``<field>__gte``, an end alone as ``<field>__lte``
-    (django-filter's ``RangeFilter`` reads a one-sided range the same way). A range with
-    neither bound constrains nothing.
+    bound: a start alone as ``<field>__gte``, an end alone as ``<field>__lte``, through
+    every transform Django's query applies ahead of the lookup (``year__range`` and a bare
+    ``year`` both compare ``<field>__year__gte``). django-filter's ``RangeFilter`` picks
+    ``gte`` / ``lte`` the same way but on its ``field_name`` alone, replacing the whole
+    ``lookup_expr``. A range with neither bound constrains nothing.
 
-    Each bound is cleaned by the form field of the column's own ``gte`` filter
-    (``_column_form_field``), so a bound the column cannot hold (a non-finite decimal, a
-    number past django-filter's ``1e50`` cap) is a form error as it is on ``gte``, a
-    naive datetime bound is made aware and a text bound stripped; a bound off a choice
-    column's choices is compared like any other value.
+    Each bound is cleaned by the form field of the ``gte`` filter for the value the range
+    compares (``_column_form_field``): the column's, or the output's of the transforms
+    between it and the lookup (``year``'s ``IntegerField``, ``date``'s ``DateField``), so a
+    bound that value cannot hold (a non-finite decimal, a number past django-filter's
+    ``1e50`` cap) is a form error as it is on ``gte``, a naive datetime bound is made aware
+    and a text bound stripped; a bound off a choice column's choices is compared like any
+    other value.
     """
 
     field_class: type[RangeField] = RangeField
@@ -1285,9 +1317,9 @@ class RangeFilter(_ColumnCleanedFilter):
         A range input with one bound left out (or ``null``) reaches here as ``[start, None]`` /
         ``[None, end]``. The declared ``range`` lookup would compile it to ``BETWEEN x AND NULL``,
         which matches no row, so the lone bound applies on its own through `_apply_lookups`
-        (``distinct`` and ``exclude`` honoured), through the transforms the ``lookup_expr``
-        carries ahead of ``range`` (a ``year__range`` bound is a ``year__gte`` / ``year__lte``).
-        ``[None, None]`` returns ``qs`` unchanged. Two
+        (``distinct`` and ``exclude`` honoured), through every transform Django's query applies
+        ahead of the lookup (``_lookup_lhs_path``: a ``year__range`` bound and a bare ``year``
+        one are a ``year__gte`` / ``year__lte``). ``[None, None]`` returns ``qs`` unchanged. Two
         bounds of a ``range`` over an integer column apply as ``gte`` + ``lte`` in one
         predicate (``IntegerRangeFilter.filter``), so a bound past the column's range never
         reaches the backend; any other two-bound range keeps the declared lookup. A lone bound
@@ -1304,12 +1336,13 @@ class RangeFilter(_ColumnCleanedFilter):
             return qs
         resolved = _bound_resolved_field(self)
         path = _bound_field_name(self) if resolved is None else resolved.path
-        # A lone bound compares what the range compares: the transforms ahead of its lookup
-        # (``year__range``'s ``year``) stay on the path.
-        bound_path = LOOKUP_SEP.join((path, *self.lookup_expr.split(LOOKUP_SEP)[:-1]))
-        if end is None:
-            return _apply_lookups(self, qs, {f"{bound_path}__gte": start})
-        if start is None:
+        if start is None or end is None:
+            # A lone bound compares what the range compares: every transform Django's query
+            # applies ahead of the lookup stays on the path (``year__range``'s ``year``, a
+            # bare trailing ``year`` too).
+            bound_path = _lookup_lhs_path(qs.query, LOOKUP_SEP.join((path, self.lookup_expr)))
+            if end is None:
+                return _apply_lookups(self, qs, {f"{bound_path}__gte": start})
             return _apply_lookups(self, qs, {f"{bound_path}__lte": end})
         if self.lookup_expr == "range" and resolved is not None:
             if isinstance(resolved.field, models.IntegerField):
@@ -1351,11 +1384,13 @@ class ListFilter(_ElementCleanedFilter):
     Same contract as `graphene_django/filter/filters/list_filter.py::ListFilter`:
     an empty list short-circuits to `qs.none()` (or a new queryset over every
     row when `exclude=True`) instead of being normalized into a "no value
-    supplied" pass-through. Each element is cleaned by the form field of the
-    column's own ``gte`` filter (``_ElementField``), as the generated ``in`` cleans
-    its members, so an element the column cannot hold is a form error rather than a
-    value handed to the ORM, a text element is stripped and a naive datetime element
-    made aware; an element off a choice column's choices is a value like any other.
+    supplied" pass-through. Each element is cleaned by the form field of the ``gte``
+    filter for the value it compares, the column's or the output's of the transforms
+    between it and the lookup (``year__in``'s ``IntegerField``; ``_ElementField``), as the
+    generated ``in`` cleans its members, so an element that value cannot hold is a form
+    error rather than a value handed to the ORM, a text element is stripped and a naive
+    datetime element made aware; an element off a choice column's choices is a value like
+    any other.
     Over an integer column, an ``in`` drops each element outside the column's integer
     range on the queryset's database: it can identify no row, and bound raw it would
     overflow the backend. A fractional element names no row and is dropped too, never
@@ -2680,7 +2715,20 @@ def _membership_path(filter_instance: Filter, query: Query) -> str:
             filter_instance.lookup_expr,
         ),
     )
-    head, start, lookups = split_lookup(query, path)
+    return _lookup_lhs_path(query, path)
+
+
+def _lookup_lhs_path(query: Query, lookup: str) -> str:
+    """Return the path a filter argument ``lookup`` applies its final lookup to over ``query``.
+
+    ``lookup`` less its final lookup, split as ``Query.build_filter`` splits it
+    (``utils/querysets.py::split_lookup``): every name Django walks as a path stays, then
+    each transform ``Query.build_lookup`` applies to where that walk ends
+    (``utils/relations.py::lookup_transform_parts``), a final part that is no lookup there
+    being a trailing transform with an implicit ``exact``. A path Django refuses raises its
+    ``FieldError``.
+    """
+    head, start, lookups = split_lookup(query, lookup)
     # ``Query.build_lookup`` reads an empty leftover (a path ending on a field) as ``exact``.
     return LOOKUP_SEP.join(
         (*head, *lookup_transform_parts(start, LOOKUP_SEP.join(lookups) or "exact")),

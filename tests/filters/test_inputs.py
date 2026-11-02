@@ -3610,22 +3610,30 @@ def test_a_filter_through_an_array_len_is_typed_and_compares_the_length(
 
 
 @pytest.mark.parametrize(
-    ("transform", "bound"),
-    [pytest.param("year", int, id="year"), pytest.param("date", datetime.date, id="date")],
+    ("lookup_expr", "transform", "bound"),
+    [
+        pytest.param("year__range", "year", int, id="year"),
+        pytest.param("date__range", "date", datetime.date, id="date"),
+        pytest.param("year", "year", int, id="bare-year"),
+        pytest.param("date", "date", datetime.date, id="bare-date"),
+    ],
 )
 def test_two_ranges_over_one_column_mint_one_range_type_per_value_path(
+    lookup_expr: str,
     transform: str,
     bound: type,
 ) -> None:
-    """A ``range`` and a ``<transform>__range`` over one column are two range types in one set.
+    """A ``range`` and a range through a transform over one column are two range types in one set.
 
-    Each is stemmed on the ``field_name`` plus the ``lookup_expr``'s transforms, so the
-    column's ``DateTime`` bounds and the transform's output bounds never claim one name.
+    Each is stemmed on the ``field_name`` plus every transform Django's query applies ahead
+    of the lookup, a bare trailing ``year`` / ``date`` (Django's implicit ``exact``)
+    included, so the column's ``DateTime`` bounds and the transform's output bounds never
+    claim one name.
     """
 
     class TwoRangeFilter(FilterSet):
         stamps_span = RangeFilter(field_name="occurred_at", lookup_expr="range")
-        years_span = RangeFilter(field_name="occurred_at", lookup_expr=f"{transform}__range")
+        years_span = RangeFilter(field_name="occurred_at", lookup_expr=lookup_expr)
 
         class Meta:
             model = scalar_models.ScalarSpecimen
@@ -3649,6 +3657,72 @@ def test_two_ranges_over_one_column_mint_one_range_type_per_value_path(
         "TwoRangeFilterOccurredAtRangeInputType": datetime.datetime,
         f"TwoRangeFilterOccurredAt{transform.title()}RangeInputType": bound,
     }
+
+
+def _model_less_range_owner() -> type[FilterSet]:
+    class ModelLessRangeOwnerFilter(FilterSet):
+        pass
+
+    return ModelLessRangeOwnerFilter
+
+
+def _specimen_range_owner() -> type[FilterSet]:
+    class SpecimenRangeOwnerFilter(FilterSet):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    return SpecimenRangeOwnerFilter
+
+
+@pytest.mark.parametrize(
+    (
+        "owner",
+        "field_name",
+        "lookup_expr",
+        "name",
+    ),
+    [
+        pytest.param(
+            _model_less_range_owner,
+            "occurred_at",
+            "date",
+            "ModelLessRangeOwnerFilterOccurredAtRangeInputType",
+            id="no-model",
+        ),
+        pytest.param(
+            _specimen_range_owner,
+            "par__occurred_at",
+            "year__range",
+            "SpecimenRangeOwnerFilterParOccurredAtYearRangeInputType",
+            id="unresolved-path",
+        ),
+        pytest.param(
+            _specimen_range_owner,
+            "occurred_at",
+            "bogus__range",
+            "SpecimenRangeOwnerFilterOccurredAtBogusRangeInputType",
+            id="unwalkable-lookup",
+        ),
+    ],
+)
+def test_a_range_no_query_of_the_model_walks_is_stemmed_on_its_spelled_transforms(
+    owner: Callable[[], type[FilterSet]],
+    field_name: str,
+    lookup_expr: str,
+    name: str,
+) -> None:
+    """A range no build-time query of the model walks keeps the ``lookup_expr`` spelled ahead.
+
+    A set with no model, a path only a queryset alias resolves (Django's ``FieldError``) and
+    a ``lookup_expr`` no walk from the column accepts (``LookupValidationError``) answer no
+    value path, so the stem is the ``field_name`` and the ``lookup_expr`` parts ahead of the
+    last. The ``FilteredRelation`` alias is pinned live by ``test_scalars_filter_api.py``'s
+    ``parentDaysSpan`` rows; no shipped type serves a set with no model.
+    """
+    range_filter = RangeFilter(field_name=field_name, lookup_expr=lookup_expr)
+
+    assert _build_range_input_class(range_filter, int, owner()).__name__ == name
 
 
 def test_a_range_whose_axes_clean_two_kinds_is_refused_naming_the_filter() -> None:
