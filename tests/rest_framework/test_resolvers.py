@@ -425,6 +425,21 @@ def test_flattener_rekeys_root_segment_through_the_key_map() -> None:
     assert by_path == {"categoryId": ["bad relation"], "items.0.category": ["nested"]}
 
 
+def test_nested_specs_of_refuses_a_spec_recording_no_nested_map() -> None:
+    """A nested kind's spec carries its nested map; one recording none raises ``TypeError``."""
+    child = InputFieldSpec(input_attr="code", graphql_name="code", target_name="code", kind=SCALAR)
+    nested = InputFieldSpec(
+        input_attr="shelves",
+        graphql_name="shelves",
+        target_name="shelves",
+        kind=NESTED_MULTI,
+        nested_specs=(child,),
+    )
+    assert serializer_resolvers._nested_specs_of(nested) == (child,)
+    with pytest.raises(TypeError, match=r"input field spec 'shelves' \(nested_multi\) records no"):
+        serializer_resolvers._nested_specs_of(dataclasses.replace(nested, nested_specs=None))
+
+
 def test_flattener_recursively_rekeys_nested_child_fields() -> None:
     """Nested child fields are re-keyed to their GraphQL names at EVERY depth.
 

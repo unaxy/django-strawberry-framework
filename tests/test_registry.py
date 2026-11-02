@@ -2011,6 +2011,22 @@ def test_unregister_evicts_connection_type_cache_entry(fresh_registry: TypeRegis
         _connection_type_cache.pop(CategoryType, None)
 
 
+def test_unregister_refuses_a_connection_cache_that_is_not_an_identity_map(
+    fresh_registry: TypeRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The eviction reads ``connection._connection_type_cache`` by name; another shape raises."""
+
+    @_as_django_type
+    class ItemType:
+        pass
+
+    fresh_registry.register(Item, ItemType)
+    monkeypatch.setattr("django_strawberry_framework.connection._connection_type_cache", {})
+    with pytest.raises(TypeError, match="got dict"):
+        fresh_registry.unregister(ItemType)
+
+
 def test_unregister_tolerates_unimportable_connection_submodule(
     fresh_registry: TypeRegistry,
 ) -> None:

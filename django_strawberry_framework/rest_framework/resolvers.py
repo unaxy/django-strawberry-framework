@@ -436,9 +436,14 @@ def _nested_specs_of(spec: InputFieldSpec) -> tuple[InputFieldSpec, ...]:
 
     ``nested_specs`` is optional on the shared ``InputFieldSpec`` because only the
     serializer's ``nested_single`` / ``nested_multi`` kinds record one; a nested
-    kind's spec always carries it.
+    kind's spec always carries it, and a spec recording none raises ``TypeError``.
     """
-    return cast("tuple[InputFieldSpec, ...]", spec.nested_specs)
+    nested = spec.nested_specs
+    if nested is None:
+        raise TypeError(
+            f"input field spec {spec.input_attr!r} ({spec.kind}) records no nested specs",
+        )
+    return nested
 
 
 def _decode_input_object(

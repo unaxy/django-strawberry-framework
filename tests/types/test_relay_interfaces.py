@@ -3197,6 +3197,23 @@ def test_decode_model_label_to_non_node_primary_raises() -> None:
         decode_global_id(relay.GlobalID("products.category", "1"))
 
 
+def test_decode_refuses_a_strategy_stamped_on_a_non_node_type() -> None:
+    """A recorded strategy on a non-Relay type is a defect ``decode_global_id`` names, not a node."""
+
+    class CategoryPlain(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+
+    finalize_django_types()
+    _definition_of(CategoryPlain).effective_globalid_strategy = "model"
+    with pytest.raises(
+        ConfigurationError,
+        match="resolves to CategoryPlain, which records the 'model' GlobalID strategy but is not",
+    ):
+        decode_global_id(relay.GlobalID("products.category", "1"))
+
+
 def test_decode_malformed_base64_raises_configuration_error() -> None:
     """A malformed base64 / non-``type:id`` string raises ``ConfigurationError``, not a leak."""
     with pytest.raises(ConfigurationError, match="not a valid GlobalID"):

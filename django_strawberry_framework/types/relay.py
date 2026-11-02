@@ -1075,8 +1075,13 @@ def decode_global_id(
         )
 
     # A recorded strategy is only ever stamped on a Relay-Node-shaped type
-    # (``install_globalid_typename_resolver``), so the candidate is one.
-    return cast("type[_RelayDjangoType]", target_type), node_id
+    # (``install_globalid_typename_resolver``), so a candidate that is not one is a defect.
+    if not implements_relay_node(target_type):
+        raise ConfigurationError(
+            f"decode_global_id: {type_name!r} resolves to {truth.name(target_type)}, which records "
+            f"the {strategy!r} GlobalID strategy but is not a Relay Node.",
+        )
+    return target_type, node_id
 
 
 def _order_nodes(

@@ -1350,6 +1350,15 @@ class TestDeterministicOrder:
         assert ends_in_unique_column(("id",), object()) is False  # pyright: ignore[reportArgumentType]
         assert ends_in_unique_column(("id",), SimpleNamespace()) is False  # pyright: ignore[reportArgumentType]
 
+    def test_ends_in_unique_column_refuses_a_meta_that_is_not_options(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A model whose ``_meta`` is not Django's ``Options`` raises instead of being read as one."""
+        monkeypatch.setattr(Category, "_meta", SimpleNamespace(pk=None))
+        with pytest.raises(TypeError, match="got SimpleNamespace"):
+            ends_in_unique_column(("id",), Category)
+
 
 class TestEffectiveConnectionOrder:
     """The shared default-order precedence for BOTH connection order sites.

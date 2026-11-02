@@ -1904,6 +1904,7 @@ def _admitted_rows(
     declared_attr: str,
     related_filter: RelatedFilter,
     child_rows: models.QuerySet[models.Model],
+    request: object,
 ) -> models.QuerySet[models.Model]: ...
 
 
@@ -1913,6 +1914,7 @@ def _admitted_rows(
     declared_attr: str,
     related_filter: RelatedFilter,
     child_rows: models.QuerySet[models.Model] | None,
+    request: object,
 ) -> models.QuerySet[models.Model] | None: ...
 
 
@@ -1921,6 +1923,7 @@ def _admitted_rows(
     declared_attr: str,
     related_filter: RelatedFilter,
     child_rows: models.QuerySet[models.Model] | None,
+    request: object,
 ) -> models.QuerySet[models.Model] | None:
     """Return the child rows a declared branch admits: ``child_rows`` within the explicit ``queryset=``.
 
@@ -1928,13 +1931,13 @@ def _admitted_rows(
     (the branch's visibility-scoped, possibly filtered rows) is intersected with
     the declaration's explicit ``queryset=``; ``child_rows`` of ``None`` admits
     the explicit queryset alone, and with neither the branch admits no
-    restriction (``None``).
+    restriction (``None``). A callable ``queryset=`` is called with ``request``,
+    the filter set's own, as django-filter calls it for a ``ModelChoiceFilter``.
     """
-    # ``_has_explicit_queryset`` records that ``queryset=`` was passed; the
-    # ``ModelChoiceFilter`` contract types it as a queryset.
-    explicit = cast(
-        "models.QuerySet[models.Model] | None",
-        related_filter.extra.get("queryset") if related_filter._has_explicit_queryset else None,
+    # ``_has_explicit_queryset`` records that ``queryset=`` was passed; without it
+    # ``RelatedFilter.get_queryset`` answers the target's default rows instead.
+    explicit = (
+        related_filter.get_queryset(request) if related_filter._has_explicit_queryset else None
     )
     if child_rows is None:
         return explicit
@@ -1975,6 +1978,7 @@ def _restrict_through_branch(
     declared_attr: str,
     related_filter: RelatedFilter,
     child_rows: models.QuerySet[models.Model] | None,
+    request: object,
     via: Sequence[models.QuerySet[models.Model] | None] = (),
 ) -> models.QuerySet[_M]:
     """Keep the rows of ``queryset`` whose branch relation reaches an admitted child row.
@@ -1982,7 +1986,8 @@ def _restrict_through_branch(
     The one restriction a declared ``RelatedFilter`` branch applies to the set
     that declares it (``owner``, under ``declared_attr``), for a nested branch
     and a flat leaf walking the branch alike: ``_admitted_rows`` intersects
-    ``child_rows`` with the declaration's explicit ``queryset=``, then
+    ``child_rows`` with the declaration's explicit ``queryset=`` (a callable one
+    called with ``request``), then
     ``_restrict_to_related`` keeps the parents reaching a row of the result,
     through the ``via`` rows of each intermediate model a multi-relation
     ``field_name`` crosses. With neither ``child_rows`` nor an explicit
@@ -1995,7 +2000,7 @@ def _restrict_through_branch(
     keying off the declared name would name a non-existent relation and Django
     would raise ``FieldError``.
     """
-    admitted = _admitted_rows(owner, declared_attr, related_filter, child_rows)
+    admitted = _admitted_rows(owner, declared_attr, related_filter, child_rows, request)
     if admitted is None:
         return queryset
     return _restrict_to_related(queryset, _bound_field_name(related_filter), admitted, via)
@@ -6293,7 +6298,7 @@ class FilterSet(
         if isinstance(hop, UndeclaredHop):
             return _reaches_related(outer, hop.declared_attr, rows)
         owner, related_filter = _filter_declaration(hop)
-        admitted = _admitted_rows(owner, hop.declared_attr, related_filter, rows)
+        admitted = _admitted_rows(owner, hop.declared_attr, related_filter, rows, self.request)
         via = owner._via_rows(related_filter, self._apply_info, self._hop_visibility(), outer.db)
         return _reaches_related(outer, _bound_field_name(related_filter), admitted, via)
 
@@ -7029,6 +7034,7 @@ class FilterSet(
             queryset,
             child_qs_by_branch,
             info,
+            request,
             _flat_hop_visibility,
         )
         probed = _probed_arms.get(_branch_path)
@@ -7076,12 +7082,14 @@ class FilterSet(
         parent_qs: models.QuerySet[_M],
         child_qs_by_branch: Mapping[str, models.QuerySet[models.Model]],
         info: object,
+        request: object,
         hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
     ) -> models.QuerySet[_M]:
         """Constrain `parent_qs` by each active branch's intersected child qs.
 
         The explicit `RelatedFilter(queryset=...)`
-        constraint AND-intersects with the visibility-scoped child qs
+        constraint (a callable one called with ``request``)
+        AND-intersects with the visibility-scoped child qs
         from step 3, then the parent keeps the rows reaching an intersected
         child row through one correlated ``EXISTS`` per active branch
         (``_restrict_through_branch``, the restriction a flat leaf walking
@@ -7103,6 +7111,7 @@ class FilterSet(
                 field_name,
                 related_filter,
                 child_qs_by_branch.get(field_name),
+                request,
                 cls._via_rows(
                     related_filter,
                     info,
@@ -7136,6 +7145,7 @@ class FilterSet(
             queryset,
             child_qs_by_branch,
             info,
+            request,
             hop_visibility,
         )
         return data, request, constrained, FilterFormBindings(MappingProxyType(bindings))
@@ -7426,12 +7436,14 @@ class FilterSet(
                land in the same hop map. Without this step,
                ``_q_for_branch``'s sync derive (or a flat leaf's first-use
                derive) would raise ``SyncMisuseError`` mid-``.qs``.
-            4. Normalize the input and apply the related constraints via
-               ``_apply_common_prelude`` (shared with ``apply_sync``).
-            5. Route ``_probed_filterset`` (filterset build with the
+            4. Inside one ``run_in_one_sync_boundary`` worker, normalize the
+               input and apply the related constraints via
+               ``_apply_common_prelude`` (shared with ``apply_sync``), which
+               calls a callable ``RelatedFilter`` ``queryset=``: consumer code
+               that may read the ORM.
+            5. In the same worker, run ``_probed_filterset`` (filterset build with the
                nested-visibility and hop-visibility maps stashed, then perm
-               check + form validate, then the absent-leaf probe)
-               through ``run_in_one_sync_boundary`` so a consumer's
+               check + form validate, then the absent-leaf probe), so a consumer's
                ``check_*_permission`` hook that performs a blocking ORM read
                does not block the event loop. The probe asks each absent
                walking leaf whether its filter constrains on the value it
@@ -7483,26 +7495,33 @@ class FilterSet(
             _branch_path=_branch_path,
             flat_hop_visibility=flat_hop_visibility,
         )
-        data, request, constrained, form_bindings = cls._apply_common_prelude(
-            input_value,
-            queryset,
-            info,
-            child_qs_by_branch,
-            flat_hop_visibility,
-        )
-        filterset_instance, absent_hops, rows = await run_in_one_sync_boundary(
-            cls._probed_filterset,
-            input_value,
-            constrained,
-            data,
-            request,
-            info,
-            nested_qs_by_branch_id=nested_qs_by_branch_id,
-            flat_hop_visibility=flat_hop_visibility,
-            run_permissions=run_permissions,
-            branch_path=_branch_path,
-            form_bindings=form_bindings,
-        )
+
+        def constrained_probe() -> tuple[
+            Self,
+            tuple[RelationHop, ...],
+            models.QuerySet[_M] | None,
+        ]:
+            data, request, constrained, form_bindings = cls._apply_common_prelude(
+                input_value,
+                queryset,
+                info,
+                child_qs_by_branch,
+                flat_hop_visibility,
+            )
+            return cls._probed_filterset(
+                input_value,
+                constrained,
+                data,
+                request,
+                info,
+                nested_qs_by_branch_id=nested_qs_by_branch_id,
+                flat_hop_visibility=flat_hop_visibility,
+                run_permissions=run_permissions,
+                branch_path=_branch_path,
+                form_bindings=form_bindings,
+            )
+
+        filterset_instance, absent_hops, rows = await run_in_one_sync_boundary(constrained_probe)
         if rows is not None:
             return rows
         await cls._await_hop_visibility_async(

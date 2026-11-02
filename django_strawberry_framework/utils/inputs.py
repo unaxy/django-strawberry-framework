@@ -47,7 +47,12 @@ from weakref import WeakKeyDictionary
 import strawberry
 from graphql import GraphQLInputObjectType, get_named_type
 from strawberry.schema.name_converter import NameConverter
-from strawberry.types.base import StrawberryList, StrawberryOptional, get_object_definition
+from strawberry.types.base import (
+    StrawberryList,
+    StrawberryOptional,
+    get_object_definition,
+    has_object_definition,
+)
 from strawberry.types.enum import StrawberryEnumDefinition
 from strawberry.types.lazy_type import LazyType
 from typing_extensions import override
@@ -1507,9 +1512,12 @@ def build_strawberry_input_class(
     cls = type(name, (), namespace)
     if sources is not None:
         _generated_field_sources[cls] = sources
-    # basedpyright: strawberry.input's signature returns its argument's type unchanged, so the
-    # __strawberry_definition__ the decorator attaches is invisible without the cast
-    return cast("type[WithStrawberryObjectDefinition]", strawberry.input(cls, name=name))
+    input_cls = strawberry.input(cls, name=name)
+    # ``strawberry.input``'s signature returns its argument's type unchanged; Strawberry's own
+    # guard proves the definition the decorator attached.
+    if not has_object_definition(input_cls):
+        raise TypeError(f"strawberry.input attached no object definition to {name!r}")
+    return input_cls
 
 
 # The declaration each generated class's fields come from, keyed by the class

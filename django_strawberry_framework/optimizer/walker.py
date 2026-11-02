@@ -488,11 +488,12 @@ def _build_child_queryset(
         # the generated one never passes through: the plan applies it after the
         # parent's own seal has run.
         # ``has_custom_qs`` is True only for a resolved target type.
-        hook_type = cast("type[DjangoType]", target_type)
+        if target_type is None:
+            raise TypeError("a custom get_queryset verdict reached a relation with no target type")
         queryset = apply_type_visibility_sync(
-            hook_type,
+            target_type,
             queryset,
-            _hook_info(info, hook_type),
+            _hook_info(info, target_type),
             async_recourse=_WALKER_ASYNC_RECOURSE,
             model=target_definition.model if target_definition is not None else None,
             policy=policy,
@@ -760,25 +761,30 @@ def _walk_selections(
         )
 
         hint = hints_map.get(django_name)
-        if hint is not None and _apply_hint(
-            hint,
-            sel=sel,
-            django_field=django_field,
-            django_name=django_name,
+        if hint is not None:
             # Hints come only from a registered definition, so ``type_cls`` is set.
-            type_cls=cast("type[DjangoType]", type_cls),
-            target_type=target_type,
-            target_definition=target_definition,
-            plan=plan,
-            prefix=prefix,
-            lookup_prefix=lookup_prefix,
-            full_path=full_path,
-            info=info,
-            runtime_paths=runtime_paths,
-            resolver_identities=resolver_identities,
-            consumer_assigned=consumer_assigned,
-        ):
-            continue
+            if type_cls is None:
+                raise TypeError(
+                    f"optimizer hint on {django_name!r} without a registered DjangoType",
+                )
+            if _apply_hint(
+                hint,
+                sel=sel,
+                django_field=django_field,
+                django_name=django_name,
+                type_cls=type_cls,
+                target_type=target_type,
+                target_definition=target_definition,
+                plan=plan,
+                prefix=prefix,
+                lookup_prefix=lookup_prefix,
+                full_path=full_path,
+                info=info,
+                runtime_paths=runtime_paths,
+                resolver_identities=resolver_identities,
+                consumer_assigned=consumer_assigned,
+            ):
+                continue
 
         relation_plan_kind, _ = plan_relation(
             django_field,
@@ -1235,13 +1241,8 @@ def _apply_hint(
                 "resolver for the field (consumer-assigned relations may hint with "
                 "to_attr because their resolver owns the attribute contract).",
             )
-        # ``_apply_hint`` is only entered when ``_resolve_optimizer_hints``
-        # returned a non-empty hints map, which it cannot do for
-        # ``type_cls is None`` (it short-circuits to ``{}``). The hint
-        # error attribution can therefore read ``type_cls.__name__``
-        # unguarded; a future direct caller with ``type_cls=None`` will
-        # ``AttributeError`` loudly rather than rotting behind a silent
-        # ``"UnknownType"`` literal.
+        # ``_walk_selections`` refuses a hint without a registered ``type_cls``
+        # before entering here, so the hint error attribution names a real type.
         #
         # Validate the consumer-supplied Prefetch BEFORE mutating ``plan``:
         # ``_prefetch_hint_for_path`` may raise ``ConfigurationError`` for

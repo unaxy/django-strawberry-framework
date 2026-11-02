@@ -39,10 +39,12 @@ declares ``Model.pk`` ``Any``, and ``dict`` / ``list`` of an ``object`` match no
 overload; under the checker each answers in ``object`` terms, which the caller
 narrows like any other consumer value.
 
-``is_concrete_field`` and ``is_queryset`` are ``isinstance`` checks (like ``is_dict``, each
-name IS the class's own ``__instancecheck__``) whose claim is only what the check proves:
-a model ``Field`` (never a reverse ``ForeignObjectRel``), and a ``QuerySet`` whose rows are
-``object`` (a ``.values()`` queryset passes the same check, so no model-row claim is made).
+``is_concrete_field``, ``is_queryset``, ``is_options`` and ``is_identity_map`` are
+``isinstance`` checks (like ``is_dict``, each name IS the class's own ``__instancecheck__``)
+whose claim is only what the check proves: a model ``Field`` (never a reverse
+``ForeignObjectRel``), a ``QuerySet`` whose rows are ``object`` (a ``.values()`` queryset
+passes the same check, so no model-row claim is made), a model's ``Options``, and an
+identity map read with ``object`` keys and values.
 ``is_real_mapping`` / ``is_real_collection`` stand with ``is_str``: the
 ``issubclass(type(value), ABC)`` check asked of the real type.
 
@@ -71,15 +73,17 @@ from . import truth
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, ItemsView, Iterator
     from enum import Enum
-    from typing import Protocol, overload
+    from typing import Protocol, TypeAlias, overload
 
     from django.db.models import Model, QuerySet
+    from django.db.models.options import Options
     from typing_extensions import TypeIs
 
     from .typing import ConcreteField
 
     _KeyT = TypeVar("_KeyT")
     _ValueT = TypeVar("_ValueT")
+    _OptionsAny: TypeAlias = Options[Model]
 
     def is_dict(_value: object, /) -> TypeIs[dict[object, object]]:
         """Return whether the value is a ``dict`` (subclasses included)."""
@@ -128,6 +132,14 @@ if TYPE_CHECKING:
         The claim is ``object`` rows: a ``.values()`` queryset passes the same check, so
         a caller reads ``model`` / ``db`` and nothing about the rows.
         """
+        ...
+
+    def is_options(_value: object, /) -> TypeIs[_OptionsAny]:
+        """Return whether the value is a model's ``Options`` (its ``_meta``)."""
+        ...
+
+    def is_identity_map(_value: object, /) -> TypeIs[truth.IdentityMap[object, object]]:
+        """Return whether the value is a ``truth.IdentityMap``; the claim is ``object`` keys and values."""
         ...
 
     def dict_items(_value: dict[_KeyT, _ValueT], /) -> ItemsView[_KeyT, _ValueT]:
@@ -232,6 +244,7 @@ else:
     from operator import attrgetter, delitem, getitem, setitem
 
     from django.db import models
+    from django.db.models.options import Options
 
     is_dict = dict.__instancecheck__
     is_list = list.__instancecheck__
@@ -243,6 +256,8 @@ else:
     is_memoryview = memoryview.__instancecheck__
     is_concrete_field = models.Field.__instancecheck__
     is_queryset = models.QuerySet.__instancecheck__
+    is_options = Options.__instancecheck__
+    is_identity_map = truth.IdentityMap.__instancecheck__
     dict_items = dict.items
     dict_get = dict.get
     list_iter = list.__iter__
@@ -290,11 +305,13 @@ __all__ = (
     "is_exact_tuple",
     "is_exact_tuple_or_frozenset",
     "is_frozenset",
+    "is_identity_map",
     "is_iterable",
     "is_list",
     "is_list_or_tuple",
     "is_mapping",
     "is_memoryview",
+    "is_options",
     "is_queryset",
     "is_real_collection",
     "is_real_mapping",
