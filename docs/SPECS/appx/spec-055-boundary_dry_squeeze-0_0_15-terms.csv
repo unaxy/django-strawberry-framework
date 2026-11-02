@@ -31,7 +31,7 @@ Relation handling,relation-handling,relation decoder D3
 Relay Node integration,relay-node-integration,relation_id_scalar B3
 `Ordering`,ordering,orders input leaf
 `ConfigurationError`,configurationerror,raise type for hoisted validators
-Joint version cut,joint-version-cut,shares 0.0.15 with cards 050-052; this card lands last and owns the release cut
+Joint version cut,joint-version-cut,shares 0.0.15 with cards 050-053; this card lands last and owns the release cut
 Live-first coverage mandate,live-first-coverage-mandate,test plan discipline
 Cookbook parity,cookbook-parity,dead-delegate deletion gate (Risks)
-`DjangoDebugExtension`,djangodebugextension,spec-044 ships it; spec-052 extracts it - both sequencing dependencies
+`DjangoDebugExtension`,djangodebugextension,spec-044 ships it; spec-053 extracts it - both sequencing dependencies

@@ -669,7 +669,7 @@ Progress: 0 done, 167 to do.
 - [ ] 101. CHANGELOG entry for item 22: the debug-toolbar middleware and its GraphiQL bridge template are adapted from
   strawberry-graphql-django, itself based on django-graphiql-debug-toolbar; both projects' MIT license texts now ship
   beside the package's (`LICENSE.strawberry-django`, `LICENSE.django-graphiql-debug-toolbar`)
-- [ ] 102. CHANGELOG entry for item 5 (spec-051 Slice 2): a Django `GeneratedField` converts, filters, orders, pages
+- [ ] 102. CHANGELOG entry for item 5 (spec-052 Slice 2): a Django `GeneratedField` converts, filters, orders, pages
   by cursor and refetches as a `relay.NodeID` like the column its `output_field` describes (nullable when either the
   field or its output field says so; never in a write input), where any type, `FilterSet` or `"__all__"` selecting one
   used to fail to build; a file / image output, an output no conversion publishes and an array output with element

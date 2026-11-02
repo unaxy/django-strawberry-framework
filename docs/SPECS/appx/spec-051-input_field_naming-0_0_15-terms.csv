@@ -1,0 +1,19 @@
+term,anchor,notes
+`DjangoSchema`,djangoschema,constructs the per-schema refusal of two fields its converter names alike (Decision 4)
+`strawberry_config`,strawberry_config,auto_camel_case and name_converter name every generated input field (Decision 1)
+Input type generation,input-type-generation,model / form / serializer write inputs carry no name= (Decision 1)
+`FilterSet`,filterset,generated filter fields and lookups follow the config; plain-schema drop documented (Decision 5)
+`RelatedFilter`,relatedfilter,nested filter inputs named by the same converter
+`OrderSet`,orderset,generated order fields follow the config
+`RelatedOrder`,relatedorder,related-order member collision refused per schema
+`DjangoMutation`,djangomutation,model mutation errors key to the published names (Decision 3)
+`DjangoFormMutation`,djangoformmutation,form errors key to the published names
+`DjangoModelFormMutation`,djangomodelformmutation,model-form errors key to the published names
+`SerializerMutation`,serializermutation,serializer errors key to the published names; one hashed input type renames
+`FieldError` envelope,fielderror-envelope,field is the name the executing schema published
+Execution resource policy,execution-resource-policy,budget charges a generated relation list by its input attr
+`DjangoListField`,djangolistfield,list arguments already followed the naming config
+`ConfigurationError`,configurationerror,raise type of the per-schema collision refusal
+`Meta.fields`,metafields,collision remedy lever
+`Meta.exclude`,metaexclude,collision remedy lever
+Joint version cut,joint-version-cut,0.0.15 line; card 055 owns the cut (Decision 7)

@@ -481,7 +481,7 @@ The repo facts the router rests on:
   it there.
 - **A fakeshop ASGI surface.** No `asgi.py`, no `channels` in the example's runtime
   path, no live `/graphql/` Channels tests. A future fakeshop ASGI dogfooding pass
-  belongs with the fakeshop-activation card ([`TODO-BETA-067-0.1.5`][kanban]) if the
+  belongs with the fakeshop-activation card ([`TODO-BETA-068-0.1.5`][kanban]) if the
   maintainer wants it at all
   ([Decision 8](#decision-8--test-strategy-package-tests-only-communicator-driven-execution-eviction-simulated-absence)).
 - **Subscriptions machinery.** `GraphQLWSConsumer` speaks the `graphql-transport-ws`
@@ -1038,7 +1038,7 @@ With that, the test cannot poison channels-using neighbors under
 
 ### Decision 9 — Migration ergonomics live in the migration-guide row, not the symbol name
 
-The card's DoD hands [`TODO-BETA-072-0.1.8`][kanban] (Migration and adoption
+The card's DoD hands [`TODO-BETA-073-0.1.8`][kanban] (Migration and adoption
 guides) a one-row entry for its "symbol equivalents" table:
 `strawberry_django.routers.AuthGraphQLProtocolTypeRouter` →
 `django_strawberry_framework.routers.DjangoGraphQLProtocolRouter`, with the note
@@ -1611,10 +1611,10 @@ behavior; a Channels reshape is absorbed by updating one helper.
   ([`DONE-046-0.0.14`][kanban]). This spec states the shape they leave on
   `routers.py`; that spec states their contracts.
 - **Fakeshop ASGI activation / Channels acceptance lane** — the
-  fakeshop-activation card [`TODO-BETA-067-0.1.5`][kanban] if ever.
+  fakeshop-activation card [`TODO-BETA-068-0.1.5`][kanban] if ever.
 - **Subscriptions as a package surface** — no card; the router transports whatever
   the consumer's schema defines.
-- **The migration guide itself** — [`TODO-BETA-072-0.1.8`][kanban]; this card only
+- **The migration guide itself** — [`TODO-BETA-073-0.1.8`][kanban]; this card only
   hands it the one-row symbol mapping
   ([Decision 9](#decision-9--migration-ergonomics-live-in-the-migration-guide-row-not-the-symbol-name)).
 - **The `0.0.14` version bump and release-status flips** — the joint `0.0.14` cut
@@ -1682,7 +1682,7 @@ behavior; a Channels reshape is absorbed by updating one helper.
       suite and no `channels` import added to `utils/`
       ([Decision 11](#decision-11--the-package-request-contract-works-under-channels-request_from_info-learns-the-channels-context-shape-reads-auth-mutations-stay-deferred)).
 - [ ] The migration-guide handoff row content is recorded for
-      [`TODO-BETA-072-0.1.8`][kanban]
+      [`TODO-BETA-073-0.1.8`][kanban]
       (`AuthGraphQLProtocolTypeRouter` → `DjangoGraphQLProtocolRouter`, **not** a
       drop-in: `django_application` required, `websocket_url_pattern`, plus the
       URLconf entry for [`views.py::DjangoGraphQLView`][views])

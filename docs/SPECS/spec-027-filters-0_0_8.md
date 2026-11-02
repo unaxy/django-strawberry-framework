@@ -409,7 +409,7 @@ The pipeline is upstream's six layers, of which the package ships five: Layers 1
 - The Strawberry idiom is `Annotated["{TargetFilterSet}InputType", strawberry.lazy("django_strawberry_framework.filters.inputs")]` — a string forward reference combined with the module-path marker.
 - The `Annotated[...]` MUST directly wrap the forward-reference string. For list-typed fields (the `and_` / `or_` operators), push the `Annotated[...]` INSIDE the `list[...]`: `list[Annotated["Name", strawberry.lazy(...)]] | None`, NOT `Annotated[list["Name"], strawberry.lazy(...)] | None`.
 - The factory emits the `Annotated[...]` shape in field annotations so cycle-safe references between filtersets keep working; it does **not** write module globals. Materialization is the finalizer's: [`materialize_input_class(name, cls)`][filters] — two arguments; the destination module is always `django_strawberry_framework.filters.inputs` — is called once per built class at phase-2.5 subpass 4 (per [Decision 6](#decision-6--finalizer-phase-25-binding-seam--materialize-before-schema-ordering)), whose filter-side entry point is [`django_strawberry_framework/types/finalizer.py::_bind_filtersets`][finalizer] and whose materialize loop is the shared `_bind_sidecar_sets`.
-- Per-lookup Python attrs are spelled by `LOOKUP_NAME_MAP` in `inputs.py`, which marks each lookup's word boundary (`icontains` → `i_contains`) so the executing schema's `NameConverter` can name the field from it, as it names every output field: `iContains` under the default config, `i_contains` under `auto_camel_case=False`, a custom converter's spelling otherwise. The map enumerates every supported `django-filter` lookup as `lookup_name → python_attr`:
+- Per-lookup Python attrs are spelled by `LOOKUP_NAME_MAP` in `inputs.py`, which marks each lookup's word boundary (`icontains` → `i_contains`) so the executing schema's `NameConverter` can name the field from it, as it names every output field: `iContains` under the default config, `i_contains` under `auto_camel_case=False`, a custom converter's spelling otherwise ([`spec-051`][spec-051] owns the naming contract). The map enumerates every supported `django-filter` lookup as `lookup_name → python_attr`:
 
   | django-filter lookup | Python attr (dataclass field) |
   | --- | --- |
@@ -1020,6 +1020,7 @@ Every live suite in `test_query/` picks up the module-scoped autouse fixture [`e
 [spec-027-terms]: appx/spec-027-filters-0_0_8-terms.csv
 [spec-027]: spec-027-filters-0_0_8.md
 [spec-031]: spec-031-globalid_encoding-0_0_9.md
+[spec-051]: spec-051-input_field_naming-0_0_15.md
 <!-- docs/builder/ -->
 
 <!-- django_strawberry_framework/ -->

@@ -592,7 +592,7 @@ never by hand.
 - The execution resource policy — [`spec-047`][spec-047].
 - Transport security — [`spec-046`][spec-046].
 - Extracting the debug extension into its own distribution —
-  [`TODO-ALPHA-052-0.0.15`][kanban], which removes `extensions/debug.py` and changes the
+  [`TODO-ALPHA-053-0.0.15`][kanban], which removes `extensions/debug.py` and changes the
   dependency surface the audit reads.
 - Artifact signing, provenance attestation, and SLSA build levels — not carded. A publish
   workflow is the natural home and none exists.

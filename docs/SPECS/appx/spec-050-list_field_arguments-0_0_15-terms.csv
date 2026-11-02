@@ -15,7 +15,7 @@ Execution resource policy,execution-resource-policy,Existing request budget reus
 FieldSet,fieldset,Fieldset behavior stays connection/parity work and is not inferred onto raw lists
 finalize_django_types,finalize_django_types,Finalization binds the orderset sidecar and materializes the shared order input class
 get_queryset visibility hook,get_queryset-visibility-hook,Must run before ordering and slicing
-Joint version cut,joint-version-cut,Card 054 owns the shared 0.0.15 release state
+Joint version cut,joint-version-cut,Card 055 owns the shared 0.0.15 release state
 List offset order precondition,list-offset-order-precondition,Nonzero offset requires a materially active order; no pk tiebreaker or DISTINCT
 ListArgumentError,listargumenterror,Typed runtime rejection carrying the stable LIST_ARGUMENT_INVALID extensions
 Live-first coverage mandate,live-first-coverage-mandate,Determines test placement
