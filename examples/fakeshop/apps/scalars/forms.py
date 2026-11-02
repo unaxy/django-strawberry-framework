@@ -14,6 +14,8 @@ database cannot store is refused over a live request. ``ScalarSpecimenSplitStamp
 writes ``occurred_at`` through Django's ``SplitDateTimeField`` (the admin's form field for a
 ``DateTimeField``), whose ``SplitDateTimeWidget`` reads a date key and a time key, and
 ``PrefixedScalarSpecimenSplitStampForm`` reads them under the prefix ``specimen``.
+``as_posted_text`` re-encodes form data as the text a browser posts, the mapping the
+``ViaPosted`` mutations' ``get_form_kwargs`` binds over both forms.
 
 ``NullableScalarSpecimenFlagForm`` writes the ``null=True`` ``flag`` column through a
 checkbox, whose widget reads an absent or ``None`` value as ``False``, and the ``null=True``
@@ -24,9 +26,15 @@ field's own cleaning and store ``NULL``.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from django import forms
+from django.http import QueryDict
 
 from apps.scalars import models
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class MediaSpecimenImageForm(forms.ModelForm[models.MediaSpecimen]):
@@ -80,6 +88,17 @@ class PrefixedScalarSpecimenSplitStampForm(ScalarSpecimenSplitStampForm):
     """``ScalarSpecimenSplitStampForm`` under the class-level prefix ``specimen``."""
 
     prefix = "specimen"
+
+
+def as_posted_text(data: Mapping[str, object]) -> QueryDict:
+    """Re-encode form data as the immutable ``QueryDict`` an HTML form post binds.
+
+    Each value becomes its text, as a browser posts it: a ``datetime`` its ``str()``.
+    """
+    query = QueryDict(mutable=True)
+    for key, value in data.items():
+        query[key] = str(value)
+    return QueryDict(query.urlencode())
 
 
 class NullableScalarSpecimenFlagForm(forms.ModelForm[models.NullableScalarSpecimen]):

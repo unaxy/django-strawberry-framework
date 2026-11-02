@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 165 to do.
+Progress: 0 done, 166 to do.
 
 ## From dry-0_0_15_3
 
@@ -651,6 +651,11 @@ Progress: 0 done, 165 to do.
   `null` to a value (an `ArrayField`'s `[]`, a checkbox `False`, an `HStoreField`'s `{}`) stores `NULL` for an
   explicit `null` and keeps a stored `NULL` on an update omitting the field, instead of writing that value; a text
   column keeps its `""`
+- [ ] 713. CHANGELOG entry for item 621: a `DjangoModelFormMutation` or filter whose `get_form` / `get_form_kwargs`
+  hook or form `__init__` rebinds a multi-key widget field's value as text (a `SplitDateTimeField`'s datetime through
+  `QueryDict(urlencode(data))`) answers a `ConfigurationError` naming the field's keys before `is_valid()`, with
+  nothing written, instead of a raw `AttributeError`; a widget `decompress` answering no list is the same error
+  instead of `TypeError`
 
 ## From dry-upstream-0_0_15
 

@@ -99,14 +99,15 @@ and the form-specific invariants this module owns:
   reads its parts under that name's ``<key>_0`` .. keys. A bound ``data`` mapping holding
   bare field names and none of those keys is re-keyed: each value whole under
   ``form.add_prefix(name)``, its parts under the widget's keys (a ``MultiWidget`` splits a
-  value with its own ``decompress``; a ``SplitArrayWidget`` gets one element per index,
-  padded to its ``size`` with ``None``); a bound ``files`` mapping is re-keyed under the
-  prefix; one already holding a key the form reads is left as bound
-  (``_bind_under_form_keys``), a multi-key widget field's whole value it holds under
-  ``form.add_prefix(name)`` with none of the widget's part keys still getting its parts
-  beside it (``_bind_kept_parts``). A ``disabled`` field reads no data and is bound
-  whole. A list longer than a ``SplitArrayWidget``'s ``size``, which the widget would
-  truncate, is that field's ``max_length`` error before ``is_valid()``.
+  value with its own ``decompress``, and one it cannot split, such as a hook's text for a
+  ``SplitDateTimeField``'s datetime, is a ``ConfigurationError`` before ``is_valid()``; a
+  ``SplitArrayWidget`` gets one element per index, padded to its ``size`` with ``None``); a
+  bound ``files`` mapping is re-keyed under the prefix; one already holding a key the form
+  reads is left as bound (``_bind_under_form_keys``), a multi-key widget field's whole
+  value it holds under ``form.add_prefix(name)`` with none of the widget's part keys still
+  getting its parts beside it (``_bind_kept_parts``). A ``disabled`` field reads no data
+  and is bound whole. A list longer than a ``SplitArrayWidget``'s ``size``, which the
+  widget would truncate, is that field's ``max_length`` error before ``is_valid()``.
   Every later read or write of the bound values goes through the same keys
   (``_bound_form_value`` / ``_bind_form_values``). A
   failure maps ``form.errors`` onto the ``FieldError`` envelope via
@@ -960,8 +961,10 @@ def _widget_parts(
     widget reading one, each part under its own key for a ``MultiWidget`` /
     ``SplitArrayWidget``. A value the widget cannot read (a list longer than a
     ``SplitArrayWidget``'s ``size``) answers Django's ``ArrayMaxLengthValidator``
-    ``ValidationError`` instead. A ``disabled`` field reads no data (Django cleans its
-    initial), so its value is bound whole under that one key, never split nor refused.
+    ``ValidationError`` instead; one a ``MultiWidget``'s ``decompress`` cannot split (the
+    text a hook binds for a datetime) raises ``ConfigurationError``. A ``disabled`` field
+    reads no data (Django cleans its initial), so its value is bound whole under that one
+    key, never split nor refused.
     """
     key = form.add_prefix(name)
     field = form.fields[name]

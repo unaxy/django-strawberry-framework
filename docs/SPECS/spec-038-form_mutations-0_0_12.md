@@ -334,7 +334,9 @@ package-internal; Slice 4 is the live consumer surface.
     `form_class(**get_form_kwargs(info, data=, files=, instance=<row>))` (omitted
     fields preserved); **bind** each value under the keys its widget reads
     (`form.add_prefix`, a multi-key widget's own keys; a list longer than a
-    `SplitArrayWidget`'s `size` → that field's `max_length` error); **validate** via
+    `SplitArrayWidget`'s `size` → that field's `max_length` error; a value a
+    `MultiWidget`'s `decompress` cannot split → a `ConfigurationError` before
+    `is_valid()`, nothing written); **validate** via
     `form.is_valid()` — a failure maps
     `form.errors` onto the [`FieldError` envelope][glossary-fielderror-envelope] (each
     form field name re-keyed to the GraphQL input field the client sent, the form's
@@ -1524,7 +1526,14 @@ write flavor rides.
    a value that is no list with its own `decompress`, as its `get_context` does; a
    `SplitArrayWidget` gets one element per index, padded to its `size` with `None`, so an
    empty list is bound and never read as omitted); a `files` mapping is re-keyed under the
-   prefix alone. The form's own `__init__` sees the field-keyed mapping
+   prefix alone. `decompress` takes the field's value, which Django assumes valid (a
+   `datetime` for `SplitDateTimeWidget`), so a value it cannot split (it raises, or answers
+   no list or tuple), such as the text a hook or a form's `__init__` rebinds for a
+   datetime, is a `ConfigurationError` naming the key and the widget's part keys, raised
+   while the form is bound, before `is_valid()`, with nothing written; a `ValidationError`
+   it raises stays that field's error
+   (`django_strawberry_framework/utils/widgets.py::_decompressed`).
+   The form's own `__init__` sees the field-keyed mapping
    (`django_strawberry_framework/forms/resolvers.py::_bind_under_form_keys`; the keys a
    widget reads are `django_strawberry_framework/utils/widgets.py::widget_keys` /
    `django_strawberry_framework/utils/widgets.py::widget_entries`, the owner the filter
@@ -2209,7 +2218,14 @@ Rationale companion: [Decision 14][rationale-d14].
   padding, otherwise each padded `None` is cleaned by the base field). A
   `SplitDateTimeField` over a `DateTimeField` and a consumer `MultiValueField` over a
   `MultiWidget` write the value sent, split by the widget's `decompress` into its
-  `<field>_0` / `<field>_1` keys, and keep the stored value when omitted. An explicit
+  `<field>_0` / `<field>_1` keys, and keep the stored value when omitted. A
+  `get_form_kwargs` / `get_form` hook or a form `__init__` that rebinds the values as
+  their text (a `QueryDict` of each value's `str()`, as a browser posts it) hands
+  `decompress` text it cannot split: a `ConfigurationError` naming the key and the part
+  keys, before `is_valid()`, masked on the wire, nothing written (created, updated, or an
+  update omitting the field, whose stored value is bound); a hook keeps the package's
+  values (a `QueryDict` built with `setlist`) or binds the parts under the widget's keys,
+  and a one-key `DateTimeField` parses the text. An explicit
   `null` is bound whole beside its parts, so the explicit-`null` check answers it as for
   any field: the column's `null` error on a `null=False` column, `NULL` stored on a
   `null=True` one, as it is for an update omitting the field over a stored `NULL`. A
@@ -2765,7 +2781,14 @@ behavior reachable through `/graphql/`, package tests own internals.
     `SplitDateTimeField` over `ScalarSpecimen.occurred_at` writes the datetime sent and
     keeps it when omitted, unprefixed, under the form's prefix and beside a `get_form`'s
     own prefixed copy
-    (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_split_datetime_form_field_writes_the_datetime_sent`);
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_split_datetime_form_field_writes_the_datetime_sent`),
+    and a `get_form_kwargs` binding each value's text is the masked `ConfigurationError`
+    with nothing written through it on create, update and an update omitting it
+    (`::test_posted_text_over_a_split_datetime_widget_is_a_masked_configuration_error`)
+    while the same hook over the one-key `DateTimeField` stores the datetime
+    (`::test_posted_text_over_a_one_key_datetime_widget_is_parsed_and_stored`); a filter
+    form `__init__` doing the same over nested split widgets is the same masked error
+    (`examples/fakeshop/test_query/test_filter_widget_binding_api.py::test_split_datetime_widgets_bound_to_their_text_are_a_masked_configuration_error`);
     a consumer `MultiValueField` over a text column (no fakeshop form declares one) does
     the same unprefixed, prefixed, from a `MultiValueDict` a `get_form_kwargs` binds and
     beside a hook's own prefixed copy
@@ -2777,7 +2800,9 @@ behavior reachable through `/graphql/`, package tests own internals.
     `::test_modelform_split_array_widget_value_past_size_is_refused`,
     `::test_disabled_split_widget_field_keeps_its_stored_value_past_size`,
     `::test_omitted_initial_binds_under_the_split_widget_keys`), and the key and entry
-    walk on its own in `tests/utils/test_widgets.py`;
+    walk on its own in `tests/utils/test_widgets.py` (with a `decompress` that answers
+    no list, the text of a datetime, any other exception it raises, and a `decompress`
+    `ValidationError` kept);
     **the `get_form_kwargs` / `get_form` hook** — an override injecting `user` and one
     scoping a `ModelChoiceField.queryset` (input shape unchanged); **partial-update
     reconstruction at the unit tier** — omitted scalar / FK / M2M preserved from the
@@ -2968,7 +2993,8 @@ The completion contract.
    re-keyed under the keys each field's widget reads (`form.add_prefix`, and a
    `MultiWidget`'s or `SplitArrayWidget`'s own keys, a split list padded to `size`), a list
    longer than a `SplitArrayWidget`'s `size` being that field's `max_length` error before
-   `is_valid()`. `form.errors` maps
+   `is_valid()` and a value a `MultiWidget`'s `decompress` cannot split a
+   `ConfigurationError` before `is_valid()`, nothing written. `form.errors` maps
    onto the [`FieldError` envelope][glossary-fielderror-envelope] (each form field keyed
    to its input name, `NON_FIELD_ERRORS` → `"__all__"`, via the reused
    `validation_error_to_field_errors(ValidationError(form.errors.as_data()), key_map)`); **the write is wrapped by the `036` `save_or_field_errors`
