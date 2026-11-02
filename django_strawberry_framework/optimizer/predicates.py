@@ -9,7 +9,7 @@ only outer mutation. Predicate meaning stays with the caller: the FilterSet
 flat-leaf applicator (``filters/sets.py::FilterSet._apply_flat_leaves``) applies
 one original filter invocation inside the outer-side correlated root
 (``correlated_inner_root``, correlated on the outer pk), and the search-fields
-feature (docs/SPECS/spec-060-search_fields-0_1_2.md) builds its own same-value search
+feature (docs/SPECS/spec-061-search_fields-0_1_2.md) builds its own same-value search
 disjunctions. Keeping those semantics outside this module also keeps request
 values out of the selection optimizer's cross-request ``OptimizationPlan`` cache.
 

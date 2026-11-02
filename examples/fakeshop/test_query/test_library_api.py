@@ -2400,7 +2400,7 @@ def test_library_branches_filter_by_name_icontains() -> None:
 
 @pytest.mark.django_db
 def test_library_loans_filter_by_deep_to_many_email_is_row_preserving_over_http() -> None:
-    """The Medtrics deep to-many leaf is row-preserving over ``/graphql/`` (spec-060 Part 1).
+    """The Medtrics deep to-many leaf is row-preserving over ``/graphql/`` (spec-061 Part 1).
 
     ``LoanFilter`` gained the generated deep path ``book__loans__patron__email``
     (spelled ``bookLoansPatronEmail`` on the wire). Filtering the loans list on

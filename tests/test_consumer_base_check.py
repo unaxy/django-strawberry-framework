@@ -30,9 +30,6 @@ class _LegacyHandler:
     async def handle_start(self, _message: object) -> None:
         return None
 
-    async def handle_stop(self, _message: object) -> None:
-        return None
-
 
 class _Adapter:
     async def send_json(self, _message: object) -> None:

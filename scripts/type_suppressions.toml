@@ -26,7 +26,6 @@
 "django_strawberry_framework/connection.py::DjangoConnection" = { reportInvalidTypeArguments = 1 }
 "django_strawberry_framework/connection.py::DjangoConnectionField" = { cast = 1 }
 "django_strawberry_framework/connection.py::_ConnectionT" = { reportExplicitAny = 1 }
-"django_strawberry_framework/connection.py::_build_relation_connection_resolver._resolve" = { cast = 1 }
 "django_strawberry_framework/connection.py::_consume_fallback" = { cast = 1 }
 "django_strawberry_framework/connection.py::_edge_over" = { cast = 1 }
 "django_strawberry_framework/connection.py::_offset_edge_over" = { cast = 1 }
@@ -97,7 +96,6 @@
 "django_strawberry_framework/optimizer/plans.py::ends_in_unique_column" = { cast = 1 }
 "django_strawberry_framework/optimizer/plans.py::normalize_order_direction" = { cast = 1 }
 "django_strawberry_framework/optimizer/predicates.py::_correlation_steps" = { cast = 1 }
-"django_strawberry_framework/optimizer/selections.py::ast_child_selections" = { cast = 1 }
 "django_strawberry_framework/optimizer/selections.py::convert_selections" = { reportUnknownVariableType = 2 }
 "django_strawberry_framework/optimizer/selections.py::included_field_selections" = { cast = 2 }
 "django_strawberry_framework/optimizer/selections.py::named_children" = { cast = 1 }
@@ -174,8 +172,6 @@
 "django_strawberry_framework/utils/typing.py::graphql_type_of" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/utils/typing.py::is_marked_coroutine_function" = { reportDeprecated = 1, reportExplicitAny = 1 }
 "django_strawberry_framework/utils/typing.py::return_type_of" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
-"django_strawberry_framework/utils/typing.py::schema_config_from_info" = { cast = 1 }
-"django_strawberry_framework/utils/typing.py::strawberry_schema_from_info" = { cast = 1 }
 "django_strawberry_framework/views.py::AsyncDjangoGraphQLView.as_view" = { reportIncompatibleMethodOverride = 1 }
 "django_strawberry_framework/views.py::AsyncDjangoGraphQLView.run" = { reportAny = 1, reportExplicitAny = 1 }
 "django_strawberry_framework/write_mixins.py::make_meta_validating_metaclass.MetaValidatingMetaclass.__new__" = { cast = 1 }

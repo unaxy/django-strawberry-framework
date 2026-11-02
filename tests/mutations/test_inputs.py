@@ -1847,7 +1847,7 @@ def test_generated_input_over_a_foreign_object_model_binds_its_carriers() -> Non
 
 
 # ---------------------------------------------------------------------------
-# mutation_input_field_specs - bind-time reverse map (spec-053 D3)
+# mutation_input_field_specs - bind-time reverse map (spec-054 D3)
 # ---------------------------------------------------------------------------
 
 

@@ -2298,7 +2298,7 @@ def _synthesized_signature(
     ``_helper_referenced_filtersets`` / ``_helper_referenced_ordersets`` orphan
     ledgers, so ``finalize_django_types`` orphan validation stays honest - no
     separate ``.add(...)`` is needed or wanted. The ``search:`` argument is NOT
-    generated (search is the planned spec-060 surface).
+    generated (search is the planned spec-061 surface).
     """
     # Imported at call time (schema build), not module scope: a module-level
     # import would make bare ``import django_strawberry_framework`` (which pulls
@@ -2576,10 +2576,10 @@ def _build_relation_connection_resolver(
         # is a pure function of ``info.path.key`` - the resolve-time twin of
         # the response key the walker planned under; the shared attr is the
         # fallback. A field's own path segment is its response key, never a
-        # list index.
+        # list index (graphql-core keys only list items by ``int``).
         per_key_attr = relation_connection_to_attr(
             relation_field_name,
-            cast("str", info.path.key),
+            require_instance(info.path.key, str),
         )
         window_rows: object = getattr(root, per_key_attr, None)
         if window_rows is None:

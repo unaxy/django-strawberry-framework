@@ -5151,9 +5151,6 @@ async def test_control_frame_send_serializes_with_a_concurrent_revocation() -> N
         async def handle_start(self, _message: object) -> None:
             return None
 
-        async def handle_stop(self, _message: object) -> None:
-            return None
-
     class Adapter:
         def __init__(self, ws_consumer: object, *_args: object) -> None:
             self.ws_consumer = ws_consumer
@@ -7122,10 +7119,9 @@ async def test_a_stop_for_an_operation_the_connection_is_not_running_leaves_a_li
     own, the same id stopped a second time, and one never started. None is a
     malformed frame, so the socket must still serve an operation afterwards and
     must write nothing for the stops themselves - the next frame read is the new
-    operation's result. On legacy graphql-ws this is the package's own
-    ``handle_stop`` guard: upstream's ``cleanup_operation`` indexes ``self.tasks``
-    unconditionally through strawberry-graphql 0.327.1, so without the guard the
-    duplicate and never-started stops escape the loop and end the connection.
+    operation's result. Both protocols get this from upstream's own
+    ``cleanup_operation``, which pops the operation's entries and returns for an id
+    it is not running; the row pins that every supported release keeps it.
 
     Fakeshop has no ``config/asgi.py`` or WebSocket mount (rungs 1-3). Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``.

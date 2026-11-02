@@ -67,7 +67,7 @@ Two things about that shape are contract rather than illustration.
 
 **Node lookup is nullable.** `relay.py` #"Resolution is **nullable by contract**" dispatches `required=False` unconditionally, so a hidden row, a missing row, and an uncoercible pk all resolve to `null`. `ObjectTypeNode | None` is therefore the supported annotation spelling; a non-null annotation builds a schema that violates non-null on the first hidden or missing row.
 
-**Three of the `Meta` keys above are the destination, not today's declarable surface.** `aggregate_class`, `fields_class`, and `search_fields` sit in `types/base.py::DEFERRED_META_KEYS` and are refused at class creation with a [`ConfigurationError`][glossary-configurationerror] until the subsystem that consumes each one lands: `fields_class` with [`FieldSet`][glossary-fieldset] (`TODO-BETA-059-0.1.1`), `search_fields` with `Meta.search_fields` support (`TODO-BETA-060-0.1.2`), and `aggregate_class` with the aggregation subsystem (`TODO-BETA-062-0.1.3`), each promoting its key in the change that applies it end-to-end. `model`, `fields`, `interfaces`, `filterset_class`, and `orderset_class` are declarable, alongside further keys this target shape does not show; `types/base.py::ALLOWED_META_KEYS` is the enumeration.
+**Three of the `Meta` keys above are the destination, not today's declarable surface.** `aggregate_class`, `fields_class`, and `search_fields` sit in `types/base.py::DEFERRED_META_KEYS` and are refused at class creation with a [`ConfigurationError`][glossary-configurationerror] until the subsystem that consumes each one lands: `fields_class` with [`FieldSet`][glossary-fieldset] (`TODO-BETA-060-0.1.1`), `search_fields` with `Meta.search_fields` support (`TODO-BETA-061-0.1.2`), and `aggregate_class` with the aggregation subsystem (`TODO-BETA-063-0.1.3`), each promoting its key in the change that applies it end-to-end. `model`, `fields`, `interfaces`, `filterset_class`, and `orderset_class` are declarable, alongside further keys this target shape does not show; `types/base.py::ALLOWED_META_KEYS` is the enumeration.
 
 The exact class names may change, but the architectural goal is the same:
 
@@ -250,7 +250,7 @@ Take the semantics. Implement the output type generation in Strawberry-native te
 - computed field declarations
 - wrapper order: check, custom resolve, default resolve
 
-Take the behavior, but implement it by wrapping the generated resolver rather than by mutating Graphene fields. Wrapping is what keeps the gate/override cascade ordering expressible and costs nothing on unmanaged fields; `spec-059-fieldset-0_1_1.md` #"Custom field class vs `permission_classes` vs resolver wrapping" owns that mechanism.
+Take the behavior, but implement it by wrapping the generated resolver rather than by mutating Graphene fields. Wrapping is what keeps the gate/override cascade ordering expressible and costs nothing on unmanaged fields; `spec-060-fieldset-0_1_1.md` #"Custom field class vs `permission_classes` vs resolver wrapping" owns that mechanism.
 
 ### What to scrap from django-graphene-filters
 Do not port Graphene-specific internals.
@@ -376,7 +376,7 @@ class DjangoTypeDefinition:
     finalized: bool = False
 ```
 
-That is the load-bearing subset: `types/definition.py::DjangoTypeDefinition` also carries the selection and field-map slots, the consumer-provenance frozensets, the Relay and connection sidecars, a GraphQL-type-name property, and two memoized lookup methods. A sidecar slot is a plain `type | None`, validated to a concrete class at class creation (`types/base.py::_validate_filterset_class`). `aggregate_class` and `search_fields` have **no slot at all**: their `Meta` keys sit in `types/base.py::DEFERRED_META_KEYS` and are rejected at class creation, so each slot lands with the card that promotes its key (`TODO-BETA-062-0.1.3`, `TODO-BETA-060-0.1.2`). `fields_class` alone is reserved ahead of its key, for `TODO-BETA-059-0.1.1`.
+That is the load-bearing subset: `types/definition.py::DjangoTypeDefinition` also carries the selection and field-map slots, the consumer-provenance frozensets, the Relay and connection sidecars, a GraphQL-type-name property, and two memoized lookup methods. A sidecar slot is a plain `type | None`, validated to a concrete class at class creation (`types/base.py::_validate_filterset_class`). `aggregate_class` and `search_fields` have **no slot at all**: their `Meta` keys sit in `types/base.py::DEFERRED_META_KEYS` and are rejected at class creation, so each slot lands with the card that promotes its key (`TODO-BETA-063-0.1.3`, `TODO-BETA-061-0.1.2`). `fields_class` alone is reserved ahead of its key, for `TODO-BETA-060-0.1.1`.
 
 It is stored on the class as `__django_strawberry_definition__`. This mirrors Strawberry-Django's `__strawberry_django_definition__`, but keeps this package's namespace distinct.
 
@@ -481,7 +481,7 @@ class DjangoConnection(relay.ListConnection[NodeType]):
 
 The generated subclass is not a naming convenience — a bare generic alias loses the `resolve_connection` override at Strawberry's generic specialization, so the concrete subclass is what keeps package pagination dispatch reachable at all.
 
-**`aggregates` is the Graphene reference's shape and is still owed.** It belongs on the connection, computed from the filtered, searched, ordered queryset before pagination. It is unbuilt: `TODO-BETA-062-0.1.3` owns it, and it lands through the same generated-subclass mechanism `totalCount` uses rather than by widening the generic base.
+**`aggregates` is the Graphene reference's shape and is still owed.** It belongs on the connection, computed from the filtered, searched, ordered queryset before pagination. It is unbuilt: `TODO-BETA-063-0.1.3` owns it, and it lands through the same generated-subclass mechanism `totalCount` uses rather than by widening the generic base.
 
 ### Keep the current optimizer's strengths, and borrow its nested-prefetch lessons
 The package's optimizer:
@@ -636,7 +636,7 @@ Generated relation fields are produced by the finalizer, and their responsibilit
 - **visibility** — `utils/querysets.py::apply_type_visibility_sync` composes the target type's row-level `get_queryset` onto the relation queryset. It runs on the connection pipeline, on `list_field.py::DjangoListField`, and on the optimizer's prefetch child (`optimizer/walker.py::_build_child_queryset`); for a relation the optimizer did not plan (no optimizer, an unplanned path, a consumer's own prefetch), the generated resolver applies a custom target hook itself (`types/resolvers.py::_custom_visibility_type`)
 - **arguments** — `connection.py::DjangoConnectionField` synthesizes a resolver `__signature__` carrying the sidecar arguments, which is how `filter:` and `orderBy:` appear on a field nobody hand-wrote a signature for
 
-`types/definition.py::DjangoTypeDefinition` is what keeps this coherent: it holds the Django field name, the origin type, the relation metadata, and the sidecar bindings, and every seam above reads it. Field-level `fields_class` behavior wraps the generated resolver rather than replacing it (`spec-059-fieldset-0_1_1.md` owns that mechanism).
+`types/definition.py::DjangoTypeDefinition` is what keeps this coherent: it holds the Django field name, the origin type, the relation metadata, and the sidecar bindings, and every seam above reads it. Field-level `fields_class` behavior wraps the generated resolver rather than replacing it (`spec-060-fieldset-0_1_1.md` owns that mechanism).
 
 The load-bearing constraint on this layer: **generation happens at finalization and nowhere else.** A relation field cannot be generated at class creation, because its target may not exist yet, and it cannot be generated after `strawberry.type`, because the type is frozen by then. Phase 2 is the only window, which is why it is a permanent mechanism rather than a transitional one.
 
@@ -646,14 +646,14 @@ The load-bearing constraint on this layer: **generation happens at finalization 
 1. accepts a target `DjangoType`
 2. derives model and default queryset from the target type
 3. reads `filterset_class` and `orderset_class` from the target definition, and `aggregate_class` and `search_fields` once their subsystems ship
-4. adds `filter` and `orderBy` arguments, and `search` with `TODO-BETA-060-0.1.2`
+4. adds `filter` and `orderBy` arguments, and `search` with `TODO-BETA-061-0.1.2`
 5. applies row-level `get_queryset`
 6. applies filters
-7. applies search (`TODO-BETA-060-0.1.2`)
+7. applies search (`TODO-BETA-061-0.1.2`)
 8. applies ordering
-9. computes aggregates from the filtered pre-pagination queryset (`TODO-BETA-062-0.1.3`)
+9. computes aggregates from the filtered pre-pagination queryset (`TODO-BETA-063-0.1.3`)
 10. paginates as a Relay connection
-11. exposes `totalCount` when `Meta.connection` opts in, and `aggregates` with `TODO-BETA-062-0.1.3`
+11. exposes `totalCount` when `Meta.connection` opts in, and `aggregates` with `TODO-BETA-063-0.1.3`
 12. cooperates with `DjangoOptimizerExtension`
 
 It does **not** finalize. Constructing a connection field does not trigger finalization, for the reasons Layer 3 gives; a connection field constructed before every `DjangoType` module is imported would otherwise silently fix the schema's shape to whatever had been imported by then.
@@ -718,7 +718,7 @@ Borrow from Strawberry-Django:
 Prefer the Graphene package's list-of-order-objects semantics if matching existing clients matters.
 
 ### Layer 8: Aggregate system
-Use `django-graphene-filters` aggregate semantics through an [`AggregateSet`][glossary-aggregateset] base. `TODO-BETA-062-0.1.3` owns the layer.
+Use `django-graphene-filters` aggregate semantics through an [`AggregateSet`][glossary-aggregateset] base. `TODO-BETA-063-0.1.3` owns the layer.
 
 Public API:
 
@@ -753,7 +753,7 @@ Borrow from Strawberry-Django:
 ### Layer 9: FieldSet and field-level permissions
 Use `AdvancedFieldSet` semantics.
 
-Implementation should wrap the generated field resolver, not mutate the field object after the fact. Wrapping keeps the cascade below expressible in one place and costs nothing on a field no [`FieldSet`][glossary-fieldset] manages; `spec-059-fieldset-0_1_1.md` owns the mechanism and `TODO-BETA-059-0.1.1` owns the work.
+Implementation should wrap the generated field resolver, not mutate the field object after the fact. Wrapping keeps the cascade below expressible in one place and costs nothing on a field no [`FieldSet`][glossary-fieldset] manages; `spec-060-fieldset-0_1_1.md` owns the mechanism and `TODO-BETA-060-0.1.1` owns the work.
 
 Resolver order:
 
@@ -772,8 +772,8 @@ The layer consists of:
 
 - `DjangoType.get_queryset`
 - `permissions.py::apply_cascade_permissions`
-- optional sentinel redaction support for Relay node types (`TODO-BETA-064-0.1.4`)
-- an `is_redacted` generated field or mixin (`TODO-BETA-064-0.1.4`)
+- optional sentinel redaction support for Relay node types (`TODO-BETA-065-0.1.4`)
+- an `is_redacted` generated field or mixin (`TODO-BETA-065-0.1.4`)
 
 Open design point:
 
@@ -794,7 +794,7 @@ Its features:
 - `get_queryset`-aware prefetch downgrade
 - nested connection prefetch handling and connection-aware `edges.node` traversal (`optimizer/nested_planner.py`)
 - per-field opt-out (`OptimizerHint.SKIP`)
-- aggregate pre-pagination query reuse, with `TODO-BETA-062-0.1.3`
+- aggregate pre-pagination query reuse, with `TODO-BETA-063-0.1.3`
 
 Optimization does not depend on Graphene-style connection internals.
 
@@ -865,11 +865,11 @@ The layers live in **packages** where a subsystem spans more than one module (`f
 - `django_strawberry_framework/connection.py` — `DjangoConnection`, `DjangoConnectionField` (Layer 5)
 - `django_strawberry_framework/filters/` — `base.py` (Filter classes), `sets.py` (FilterSet), `factories.py` (GraphQL-arguments factory), `inputs.py` (input types + adapters)
 - `django_strawberry_framework/orders/` — `base.py` (Order classes), `sets.py` (OrderSet), `factories.py` (GraphQL-arguments factory), `inputs.py` (input types + the direction enum + adapters)
-- `django_strawberry_framework/permissions.py` — cascade visibility; migrating to a `permissions/` package at `TODO-BETA-064-0.1.4`, when opt-in node-sentinel redaction joins the cascade helpers
+- `django_strawberry_framework/permissions.py` — cascade visibility; migrating to a `permissions/` package at `TODO-BETA-065-0.1.4`, when opt-in node-sentinel redaction joins the cascade helpers
 - `django_strawberry_framework/optimizer/` — the root optimizer and nested-connection planning (Layer 11)
 - `django_strawberry_framework/management/commands/export_schema.py`
-- `django_strawberry_framework/aggregates/` — `base.py` (Sum/Count/Avg/Min/Max/GroupBy result types), `sets.py` (AggregateSet), `factories.py` (GraphQL-arguments factory) — planned by `TODO-BETA-062-0.1.3`
-- `django_strawberry_framework/fieldset/` — planned by `TODO-BETA-059-0.1.1`
+- `django_strawberry_framework/aggregates/` — `base.py` (Sum/Count/Avg/Min/Max/GroupBy result types), `sets.py` (AggregateSet), `factories.py` (GraphQL-arguments factory) — planned by `TODO-BETA-063-0.1.3`
+- `django_strawberry_framework/fieldset/` — planned by `TODO-BETA-060-0.1.1`
 
 ## Build order
 The phases below are the order in which the layers depend on one another. Each phase's own spec owns its contract; an unshipped phase names the card that owns it.
@@ -928,7 +928,7 @@ Acceptance tests:
 - permission hooks
 
 ### Phase 6: Aggregates
-Port aggregate classes and connection `aggregates`. Owned by `TODO-BETA-062-0.1.3`.
+Port aggregate classes and connection `aggregates`. Owned by `TODO-BETA-063-0.1.3`.
 
 Acceptance tests:
 
@@ -940,9 +940,9 @@ Acceptance tests:
 - permission hooks
 
 ### Phase 7: FieldSet and permissions
-- [`FieldSet`][glossary-fieldset] and `fields_class` — owned by `TODO-BETA-059-0.1.1`
+- [`FieldSet`][glossary-fieldset] and `fields_class` — owned by `TODO-BETA-060-0.1.1`
 - `apply_cascade_permissions`
-- optional sentinel redaction and `is_redacted` — owned by `TODO-BETA-064-0.1.4`, as an explicit opt-in tier rather than a default
+- optional sentinel redaction and `is_redacted` — owned by `TODO-BETA-065-0.1.4`, as an explicit opt-in tier rather than a default
 
 Acceptance tests port the field permission and nested permission tests from the Graphene package.
 
@@ -953,7 +953,7 @@ The optimizer understands:
 - `edges.node`
 - nested connection prefetch
 - custom queryset hooks
-- aggregate querysets, with `TODO-BETA-062-0.1.3`
+- aggregate querysets, with `TODO-BETA-063-0.1.3`
 
 ## Recommended decisions
 ### Decision 1: concrete relation target by default
@@ -982,10 +982,10 @@ Never silently skip exposed fields whose target type is missing. Raise at finali
 **Settled: yes, with exactly one primary per model.** Under [`Meta.primary`][glossary-metaprimary], multiple `DjangoType`s may register against the same model, and relation auto-resolution binds to the primary. Ambiguity is refused rather than guessed: duplicate-primary and flipped-primary-on-re-register are rejected at registration, and ambiguity-by-omission is caught at finalization. `spec-018-meta_primary-0_0_6.md` owns the contract and the error wording.
 
 ### Should sentinel redaction be required?
-No. It is an opt-in tier for Relay node types (`TODO-BETA-064-0.1.4`); cascade filtering stays the recommended privacy-first path.
+No. It is an opt-in tier for Relay node types (`TODO-BETA-065-0.1.4`); cascade filtering stays the recommended privacy-first path.
 
 ### Should filters/orders/aggregates copy Graphene names exactly?
-**Settled for filters and orders, still open for aggregates.** Both follow the rule stated here — keep the Graphene name unless a Strawberry idiom forces a change, and document any change as a deliberate migration break. `spec-027-filters-0_0_8.md` and `spec-028-orders-0_0_8.md` own their naming decisions. For aggregates (`TODO-BETA-062-0.1.3`) the rule is the guidance.
+**Settled for filters and orders, still open for aggregates.** Both follow the rule stated here — keep the Graphene name unless a Strawberry idiom forces a change, and document any change as a deliberate migration break. `spec-027-filters-0_0_8.md` and `spec-028-orders-0_0_8.md` own their naming decisions. For aggregates (`TODO-BETA-063-0.1.3`) the rule is the guidance.
 
 ## Success criteria
 The architecture is successful when the fakeshop and cookbook-shaped examples can express:
@@ -995,9 +995,9 @@ The architecture is successful when the fakeshop and cookbook-shaped examples ca
 - root and nested connection fields
 - nested filters
 - nested ordering
-- search — owed; `TODO-BETA-060-0.1.2`
-- aggregate output on connections — owed; `TODO-BETA-062-0.1.3`
-- field-level permission masking — owed; `TODO-BETA-059-0.1.1`
+- search — owed; `TODO-BETA-061-0.1.2`
+- aggregate output on connections — owed; `TODO-BETA-063-0.1.3`
+- field-level permission masking — owed; `TODO-BETA-060-0.1.1`
 - row-level permission filtering
 - cascade FK visibility
 - optimizer-compatible nested selections

@@ -124,9 +124,9 @@ class DjangoTypeDefinition:
           the generated Strawberry input class as a module global of
           ``django_strawberry_framework.orders.inputs``.
         - ``fields_class`` is the forward-reserved ``FieldSet`` sidecar
-          slot for spec-059. It intentionally stays
+          slot for spec-060. It intentionally stays
           ``None`` while ``Meta.fields_class`` remains in
-          ``DEFERRED_META_KEYS``; spec-059 promotes the key and
+          ``DEFERRED_META_KEYS``; spec-060 promotes the key and
           populates this slot when resolver binding applies end-to-end.
         - ``connection`` is the normalized ``Meta.connection`` value
           (``{"total_count": bool} | None``) populated by

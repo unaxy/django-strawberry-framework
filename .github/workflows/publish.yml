@@ -1,6 +1,6 @@
 name: Publish
 
-# Release publishing through PyPI Trusted Publishing (spec-057 Decision 8). A
+# Release publishing through PyPI Trusted Publishing (spec-058 Decision 8). A
 # version tag pushed by the maintainer builds the sdist and wheel; the upload job
 # then waits on the `pypi` environment's required reviewer and exchanges a
 # short-lived GitHub OIDC token for a PyPI upload credential. No PyPI API token

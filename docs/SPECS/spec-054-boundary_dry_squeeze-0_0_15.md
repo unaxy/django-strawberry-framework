@@ -1,8 +1,9 @@
 # Spec: Boundary hardening + system-wide DRY squeeze — enforce the optimizer/core seams inside one distribution, then compress ~1,100–1,300 duplicated lines across four verified axes
 
-Planned for `0.0.15` (card `TODO-ALPHA-053-0.0.15`); **this card shares the
-`0.0.15` line with three others (`050` list-field arguments, `051`
-parity-gap closure, `052` debug extraction) and, landing last, owns
+Planned for `0.0.15` (card `TODO-ALPHA-054-0.0.15`); **this card shares the
+`0.0.15` line with four others (`050` list-field arguments, `051`
+parity-gap closure, `052` debug extraction, `053` the `get_queryset`
+relation info) and, landing last, owns
 the joint version bump for the line**
 ([Decision 11](#decision-11--joint-0015-cut--slice-5-owns-the-version-bump)).
 This card is a **maintainability card**: it ships no new consumer feature
@@ -615,14 +616,17 @@ members of that selection, so no override can fill an empty one.
 ### Decision 11 — Joint `0.0.15` cut — Slice 5 owns the version bump
 
 This card shares `0.0.15` with cards `050` (list-field arguments), `051`
-(parity-gap closure), and the debug-extraction card
-`TODO-ALPHA-052-0.0.15` ([`spec-052`][spec-052]), so the line is a
+(parity-gap closure), the debug-extraction card
+`TODO-ALPHA-052-0.0.15` ([`spec-052`][spec-052]) and the `get_queryset`
+relation-info card `TODO-ALPHA-053-0.0.15`, so the line is a
 [joint version cut][glossary-joint-version-cut] and the **last** card to land
 owns the bump. That is this card, and not by accident: it declares
-dependencies on all three (the `052` edge because it writes its
+dependencies on all four (the `052` edge because it writes its
 `extensions.debug` contract against the post-extraction tree; the `051`
 edge because `051` touches every file in this card's WP list except
-`types/converters.py`), so it cannot precede them. The version triplet
+`types/converters.py`; the `053` edge because `053` rewrites
+`optimizer/walker.py` and `optimizer/nested_planner.py`, which this card's
+`optimizer/*` axis covers), so it cannot precede them. The version triplet
 (`django_strawberry_framework/__init__.py::__version__`,
 `tests/base/test_init.py`, the GLOSSARY package-version row) already reads
 `0.0.15` for the open development line; Slice 5 carries the release-status
@@ -633,7 +637,7 @@ release notes (`spec-052` Decision 7).
 ### Decision 12 — TODO anchors stage the unbuilt slices
 
 Per the repo's staging discipline, staged-but-unbuilt slices carry
-`TODO(spec-053 Slice N)` source anchors at the sites they will change,
+`TODO(spec-054 Slice N)` source anchors at the sites they will change,
 removed in the change that ships the slice. None are placed; the
 version-triplet sites need none, since they already read `0.0.15`.
 
@@ -816,12 +820,14 @@ symbol before closing each item): `ActiveInputPermissionMixin`
 - Any package split or new distribution — rejected, Decision 1.
 - Test-tree DRY, docstring-volume reduction, and process/ceremony changes —
   raised in the maintainer conversation, not carded here.
-- The beta-release cleanup card (`TODO-ALPHA-057-0.1.0` — it ushers in the
+- The beta-release cleanup card (`TODO-ALPHA-058-0.1.0` — it ushers in the
   beta and closes the Alpha column) — this
   card's squeeze does not absorb its verification scope.
 - The `DjangoDebugExtension` extraction — card `052`
   ([`docs/SPECS/spec-052-debug_extraction-0_0_15.md`][spec-052]), which this card
   depends on and shares the `0.0.15` line with.
+- The `get_queryset` relation-info fix — card `TODO-ALPHA-053-0.0.15`, which this
+  card depends on and shares the `0.0.15` line with.
 
 ## Definition of done
 

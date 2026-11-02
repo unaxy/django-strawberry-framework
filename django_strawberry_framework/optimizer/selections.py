@@ -48,6 +48,7 @@ from graphql import GraphQLError, GraphQLInterfaceType, GraphQLObjectType, get_n
 from graphql.execution.values import VariableValues, get_argument_values
 from graphql.language.ast import (
     DirectiveNode,
+    FieldNode,
     FragmentSpreadNode,
     InlineFragmentNode,
     VariableNode,
@@ -60,7 +61,12 @@ from strawberry.types.nodes import (
     get_variable_values,  # pyright: ignore[reportUnknownVariableType]
 )
 
-from django_strawberry_framework.utils._narrowing import is_dict, is_str, read_attr
+from django_strawberry_framework.utils._narrowing import (
+    is_dict,
+    is_str,
+    read_attr,
+    require_instance,
+)
 from django_strawberry_framework.utils.typing import (
     graphql_fields,
     graphql_type_of,
@@ -75,9 +81,9 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from graphql.language.ast import (
-        FieldNode,
         FragmentDefinitionNode,
         Node,
+        SelectionNode,
         SelectionSetNode,
     )
     from graphql.type.definition import GraphQLField, GraphQLNamedType, GraphQLResolveInfo
@@ -86,9 +92,6 @@ if TYPE_CHECKING:
 
     from ._context import ConvertedMemoKey
 
-    #: One graphql-core selection-set member: a selection set holds exactly these
-    #: three node kinds.
-    AstSelection: TypeAlias = FieldNode | InlineFragmentNode | FragmentSpreadNode
     #: One converted selection as this adapter reads it: a Strawberry
     #: ``SelectedField`` / ``FragmentSpread`` / ``InlineFragment`` or a
     #: ``SimpleNamespace`` clone the walker synthesizes in their shape.
@@ -265,7 +268,7 @@ def ast_to_converted_selections(
 def _stamp(
     info: GraphQLResolveInfo[object],
     selections: Iterable[Selection],
-    nodes: Iterable[AstSelection],
+    nodes: Iterable[SelectionNode],
     read_on: GraphQLNamedType | None,
 ) -> None:
     """Mark each field selection under ``nodes`` with its Python name and arguments.
@@ -274,7 +277,9 @@ def _stamp(
     converts a selection set member by member, and a spread's body comes from the
     same ``info.fragments`` entry. ``read_on`` is the type the selection set is read
     on, ``None`` for one the schema does not publish, where no field resolves and
-    nothing is stamped.
+    nothing is stamped. graphql-core's parser fills a selection set only with field,
+    inline-fragment and fragment-spread nodes; any other ``SelectionNode`` raises
+    ``TypeError``.
     """
     for selection, node in zip(selections, nodes, strict=True):
         if isinstance(node, InlineFragmentNode):
@@ -286,7 +291,8 @@ def _stamp(
             below = info.schema.get_type(fragment.type_condition.name.value)
             _stamp(info, selection.selections, ast_child_selections(fragment), below)
         else:
-            field_def = _published_field(read_on, node.name.value)
+            field_node = require_instance(node, FieldNode)
+            field_def = _published_field(read_on, field_node.name.value)
             below = None
             if field_def is not None:
                 python_name = published_python_name(field_def)
@@ -296,10 +302,14 @@ def _stamp(
                     setattr(
                         selection,
                         PYTHON_ARGUMENTS_ATTR,
-                        _coerced_python_arguments(field_def, node, get_variable_values(info)),
+                        _coerced_python_arguments(
+                            field_def,
+                            field_node,
+                            get_variable_values(info),
+                        ),
                     )
                 below = get_named_type(graphql_type_of(field_def))
-            _stamp(info, selection.selections, ast_child_selections(node), below)
+            _stamp(info, selection.selections, ast_child_selections(field_node), below)
 
 
 def prime_selected_fields(info: Info[object, object]) -> None:
@@ -362,7 +372,7 @@ def info_selections(info: Info[object, object]) -> list[Selection]:
 # ---------------------------------------------------------------------------
 
 
-def ast_child_selections(node: Node) -> tuple[AstSelection, ...]:
+def ast_child_selections(node: Node) -> tuple[SelectionNode, ...]:
     """Return the AST node's selection-set children as a tuple, or ``()``.
 
     Centralizes the ``getattr(node, "selection_set", None)`` plus
@@ -378,9 +388,7 @@ def ast_child_selections(node: Node) -> tuple[AstSelection, ...]:
     selection_set: SelectionSetNode | None = getattr(node, "selection_set", None)
     if selection_set is None:
         return ()
-    # graphql-core's parser fills a selection set only with these three node kinds
-    # (``Parser.parse_selection``); the node class types them as ``SelectionNode``.
-    return cast("tuple[AstSelection, ...]", tuple(selection_set.selections or ()))
+    return tuple(selection_set.selections or ())
 
 
 def resolve_unvisited_fragment(

@@ -16,7 +16,7 @@ Meta.primary,metaprimary,Model-label ids route to the primary; typed-field-over-
 Meta.name,metaname,Type-name ids decode via the graphql_type_name lookup honoring Meta.name
 Meta.filterset_class,metafilterset_class,Sidecar driving the synthesized relation connection's filter: argument
 Meta.orderset_class,metaorderset_class,Sidecar driving the synthesized relation connection's orderBy: argument
-Meta.search_fields,metasearch_fields,Planned for 0.1.2 (TODO-BETA-060-0.1.2); no connection generates a search: argument
+Meta.search_fields,metasearch_fields,Planned for 0.1.2 (TODO-BETA-061-0.1.2); no connection generates a search: argument
 Meta.optimizer_hints,metaoptimizer_hints,Typo-guard precedent for Meta.relation_shapes key-name validation
 Meta.fields_class,metafields_class,Named in Non-goals as a later-version surface
 FilterSet,filterset,Filter sidecar; its FILTER_INVALID GraphQLError precedent shapes GLOBALID_INVALID

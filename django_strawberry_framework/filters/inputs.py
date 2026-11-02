@@ -1125,7 +1125,7 @@ def publishes_json_value(filter_instance: Filter, filterset_cls: type[FilterSet]
 
 # Most-specific-first filter-class order. Convert and normalize both walk this
 # via ``convert_with_mro`` so a new primitive cannot be typed on one ladder and
-# coerced on the other (spec-053 C3). The consumer model-choice pair sits after
+# coerced on the other (spec-054 C3). The consumer model-choice pair sits after
 # the package relation primitives and before ``BaseCSVFilter`` (its ``in``
 # wrapper is both) and ``ChoiceFilter`` (which ``ModelChoiceFilter``
 # subclasses). ``MultipleChoiceFilter`` (with django-filter's
@@ -2175,7 +2175,7 @@ def construct_search(all_filters: Mapping[str, object]) -> dict[str, str]:
     """Translate ``LOOKUP_PREFIXES``-vocabulary keys into a ``{name: lookup}`` map.
 
     No package code calls it yet: the ``Meta.search_fields`` consumer surface is
-    spec-060's, and its wiring point is the ``TODO(spec-060 Slice 1)`` anchor in
+    spec-061's, and its wiring point is the ``TODO(spec-061 Slice 1)`` anchor in
     ``filters/sets.py``. It is the one consumer of ``LOOKUP_PREFIXES``. The
     prefix-translation tests in ``tests/filters/test_inputs.py`` exercise the
     helper directly.

@@ -36,7 +36,7 @@ import enum
 import functools
 import inspect
 import operator
-from typing import TYPE_CHECKING, Any, Final, TypeGuard, TypeVar, cast, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Final, TypeGuard, TypeVar, get_args, get_origin
 
 from asgiref.sync import iscoroutinefunction
 from graphql import GraphQLList, GraphQLNonNull
@@ -48,7 +48,7 @@ from typing_extensions import Never
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import truth
-from ._narrowing import read_attr
+from ._narrowing import optional_instance, read_attr
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
@@ -211,36 +211,31 @@ def strawberry_schema_from_info(info: object) -> "Schema | None":
 
     Centralizes the brittle Strawberry-private ``_strawberry_schema`` contract for
     the resolver-info path. Caller treats ``None`` as "no schema available,
-    nothing to look up."
+    nothing to look up." A ``_strawberry_schema`` other than a Strawberry
+    ``Schema`` raises ``TypeError``: only Strawberry files that slot.
     """
-    schema = getattr(info, "schema", None)
+    schema = read_attr(info, "schema", None)
     # A Strawberry ``Info`` already names the Strawberry ``Schema``.
     if isinstance(schema, Schema):
         return schema
     # A graphql-core ``GraphQLResolveInfo`` names the graphql-core schema, on which
     # Strawberry's ``Schema.__init__`` files itself as ``_strawberry_schema``.
-    return cast("Schema | None", getattr(schema, "_strawberry_schema", None))
+    return optional_instance(read_attr(schema, "_strawberry_schema", None), Schema)
 
 
 def schema_config_from_info(info: object) -> "StrawberryConfig | None":
     """Return StrawberryConfig from plan-time graphql-core or resolve-time Info.
 
-    Prefers ``info.schema._strawberry_schema.config`` (optimizer middleware /
-    nested planner shape, where ``info.schema`` is a bare ``GraphQLSchema``) and
-    falls back to ``info.schema.config`` (Strawberry ``Info``, whose ``schema`` is the
-    Strawberry ``Schema`` itself).
-    Returns ``None`` when neither shape carries a config; callers decide whether
-    that means "engine default" (``None`` into ``SliceMetadata``) or a terminal
-    numeric default (``resolve_relay_max_results``).
+    The config of the Strawberry ``Schema`` behind either info flavor
+    (``strawberry_schema_from_info``): ``info.schema`` itself on a Strawberry
+    ``Info``, ``info.schema._strawberry_schema`` on the optimizer middleware /
+    nested planner's graphql-core info. Returns ``None`` when the info has no
+    Strawberry schema; callers decide whether that means "engine default"
+    (``None`` into ``SliceMetadata``) or a terminal numeric default
+    (``resolve_relay_max_results``).
     """
-    schema = read_attr(info, "schema", None)
-    if schema is None:
-        return None
-    config = read_attr(strawberry_schema_from_info(info), "config", None)
-    if config is None:
-        config = read_attr(schema, "config", None)
-    # Both reads land on a Strawberry schema's ``config`` attribute.
-    return cast("StrawberryConfig | None", config)
+    schema = strawberry_schema_from_info(info)
+    return None if schema is None else schema.config
 
 
 def published_argument(

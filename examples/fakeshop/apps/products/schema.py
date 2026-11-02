@@ -19,8 +19,8 @@ filter / order / aggregate / fields / search / permissions surface, a
 1-to-1 port of the `django-graphene-filters` cookbook recipe - is
 tracked in `KANBAN.md` under the Layer-3 cards (spec-027
 filters, spec-028 orders, spec-030 `DjangoConnectionField`,
-spec-034 permissions, spec-059 fieldsets,
-spec-060 search, the aggregates card). The
+spec-034 permissions, spec-060 fieldsets,
+spec-061 search, the aggregates card). The
 shipped `filterset_class` + `orderset_class` + permissions surface is wired below;
 each `*Type` class still carries commented-out future-shape Meta keys
 and methods - uncomment each line as the corresponding card ships.
@@ -36,7 +36,7 @@ present `filters.py` / `orders.py` modules; `aggregate_class` /
 # ruff: disable[ERA001]
 # needs the aggregates card:
 # from apps.products import aggregates
-# needs spec-059:
+# needs spec-060:
 # from apps.products import fields as fieldsets
 # ruff: enable[ERA001]
 
@@ -91,11 +91,11 @@ class CategoryType(DjangoType):
         orderset_class = orders.CategoryOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
         # ruff: disable[ERA001]
-        # needs spec-060:
+        # needs spec-061:
         # search_fields = ("name", "description")
         # needs the aggregates card + aggregates.py:
         # aggregate_class = aggregates.CategoryAggregate
-        # needs spec-059 + fields.py:
+        # needs spec-060 + fields.py:
         # fields_class = fieldsets.CategoryFieldSet
         # ruff: enable[ERA001]
 
@@ -141,11 +141,11 @@ class ItemType(DjangoType):
         orderset_class = orders.ItemOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
         # ruff: disable[ERA001]
-        # needs spec-060:
+        # needs spec-061:
         # search_fields = ("name", "description", "category__name", "category__description")
         # needs the aggregates card + aggregates.py:
         # aggregate_class = aggregates.ItemAggregate
-        # needs spec-059 + fields.py:
+        # needs spec-060 + fields.py:
         # fields_class = fieldsets.ItemFieldSet
         # ruff: enable[ERA001]
 
@@ -191,11 +191,11 @@ class PropertyType(DjangoType):
         orderset_class = orders.PropertyOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
         # ruff: disable[ERA001]
-        # needs spec-060:
+        # needs spec-061:
         # search_fields = ("name", "description", "category__name", "category__description")
         # needs the aggregates card + aggregates.py:
         # aggregate_class = aggregates.PropertyAggregate
-        # needs spec-059 + fields.py:
+        # needs spec-060 + fields.py:
         # fields_class = fieldsets.PropertyFieldSet
         # ruff: enable[ERA001]
 
@@ -229,7 +229,7 @@ class EntryType(DjangoType):
             "id",
             "value",
             # Future: drop this entry to exercise field-level permission gating
-            # (spec-059 FieldSet read gates).
+            # (spec-060 FieldSet read gates).
             "description",
             "property",
             "item",
@@ -242,11 +242,11 @@ class EntryType(DjangoType):
         orderset_class = orders.EntryOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
         # ruff: disable[ERA001]
-        # needs spec-060:
+        # needs spec-061:
         # search_fields = ("value", "property__name", "item__name")
         # needs the aggregates card + aggregates.py:
         # aggregate_class = aggregates.EntryAggregate
-        # needs spec-059 + fields.py:
+        # needs spec-060 + fields.py:
         # fields_class = fieldsets.EntryFieldSet
         # ruff: enable[ERA001]
 

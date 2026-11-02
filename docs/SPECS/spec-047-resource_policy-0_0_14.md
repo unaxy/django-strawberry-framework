@@ -1091,7 +1091,7 @@ in `__version__` in `django_strawberry_framework/__init__.py`.
 
 **Decision.** The six boundaries below are not oversights and must not be re-derived. Three are
 transport-adjacent bounds this walker is the wrong layer to carry, and they are carried as scope
-on card `TODO-ALPHA-053-0.0.15`; one is the STAGE this walk runs at; two are audited exclusions
+on card `TODO-ALPHA-054-0.0.15`; one is the STAGE this walk runs at; two are audited exclusions
 that a later pass must not "fix". Each is a boundary of the shipped contract rather than a gap in
 it.
 

@@ -97,7 +97,7 @@ The target is not a full connection/query-field release. The target is to make `
 ## Non-goals
 
 - `DjangoConnectionField` and the Relay-shaped pagination surface. Tracked under `DONE-030-0.0.9` in [`KANBAN.md`][kanban].
-- Filter / search / aggregate input arguments on `DjangoListField`. Those are the Layer-3 read-side primitives tracked in `DONE-027-0.0.8` (filters), `TODO-BETA-060-0.1.2` (search), `TODO-BETA-062-0.1.3` (aggregates); the `orderBy` argument (over `DONE-028-0.0.8`'s ordersets) and `offset` / `limit` are [`spec-050`][spec-050]'s.
+- Filter / search / aggregate input arguments on `DjangoListField`. Those are the Layer-3 read-side primitives tracked in `DONE-027-0.0.8` (filters), `TODO-BETA-061-0.1.2` (search), `TODO-BETA-063-0.1.3` (aggregates); the `orderBy` argument (over `DONE-028-0.0.8`'s ordersets) and `offset` / `limit` are [`spec-050`][spec-050]'s.
 - Cascade permissions and field-level permissions. Tracked under `DONE-034-0.0.10`. `DjangoListField` needs no cascade-specific code: [`apply_cascade_permissions`][glossary-apply-cascade-permissions] is called from a type's own `cls.get_queryset(...)`, and the field applies that hook, so a cascading target narrows the list with no participation from this field (`examples/fakeshop/test_query/test_list_field_api.py::test_holder_item_list_field_drops_rows_under_a_hidden_category`).
 - Auto-upgrading reverse-FK / M2M many-side relation fields to `DjangoListField`. Relation many-side fields are already shipped as `list[T]` via generated resolvers (see [`Relation handling`][glossary-relation-handling]); `DjangoListField` is the **root** primitive, not a relation-side replacement. See [Decision 7](#decision-7--scope-boundary-vs-relation-list-fields).
 - [Multi-database][glossary-multi-database-cooperation] / sharding-aware queryset routing. Tracked under `DONE-023-0.0.7` (the multi-db cooperation contract). `DjangoListField` uses `model._default_manager.all()` which Django routes through the configured database router automatically; nothing in this card precludes the cooperation contract that lands alongside.
@@ -550,7 +550,7 @@ The HTTP test files' reload pattern (clear the global registry, reload app schem
 - `DjangoConnectionField` and Relay-shaped pagination: `DONE-030-0.0.9` in [`KANBAN.md`][kanban].
 - [`DjangoNodeField`][glossary-djangonodefield] (root-level Relay node lookup): `DONE-030-0.0.9`.
 - The `offset` / `limit` / `orderBy` argument surface: [`spec-050`][spec-050], `DONE-050-0.0.15`.
-- Filter / search / aggregate input arguments on the field: `DONE-027-0.0.8` / `TODO-BETA-060-0.1.2` / `TODO-BETA-062-0.1.3`.
+- Filter / search / aggregate input arguments on the field: `DONE-027-0.0.8` / `TODO-BETA-061-0.1.2` / `TODO-BETA-063-0.1.3`.
 - Cascade permissions and field-level permissions: `DONE-034-0.0.10`.
 - [Connection-aware optimizer planning][glossary-connection-aware-optimizer-planning]: `DONE-033-0.0.9`.
 - Multi-database / sharding-aware queryset routing: cooperation contract `DONE-023-0.0.7`; first-class sharding-aware planning post-`1.0.0` in [`BACKLOG.md`][backlog].

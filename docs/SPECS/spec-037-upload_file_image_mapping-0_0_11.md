@@ -1032,7 +1032,7 @@ batching) are recorded in the rationale companion under
   `DONE-038-0.0.12`; a form's `forms.FileField` / `forms.ImageField` maps to `Upload`.
 - **DRF serializer mutations** ([`SerializerMutation`][glossary-serializermutation]) —
   `DONE-039-0.0.13`; a serializer `FileField` maps to `Upload`.
-- **The broader products/fakeshop activation** — [`TODO-BETA-066-0.1.5`][kanban]. The
+- **The broader products/fakeshop activation** — [`TODO-BETA-067-0.1.5`][kanban]. The
   file/image surface's own live coverage is not part of it
   ([Decision 9](#decision-9--test-placement-the-live-tier-owns-the-fileimage-wire-contract)).
 - **Field-level read gates** — `FieldSet` / per-field permission hooks; file-metadata

@@ -436,7 +436,7 @@ uv run python manage.py audit_n1 --depth 5 --include-mutations --seed fakeshop
 
 **Difficulty**: 3/10 — No new compilation strategy; path validation at finalization plus one predicate builder. Row identity is preserved because it never crosses a to-many hop.
 
-**Source**: the five-root schedule-graph audit (2026-08-06), Finding 12. Deferred out of the graph substrate as a FilterSet-layer concern — see `docs/SPECS/spec-058-graph_substrate-0_1_1.md` (Non-goals and Out-of-scope both name this entry as the promotion target).
+**Source**: the five-root schedule-graph audit (2026-08-06), Finding 12. Deferred out of the graph substrate as a FilterSet-layer concern — see `docs/SPECS/spec-059-graph_substrate-0_1_1.md` (Non-goals and Out-of-scope both name this entry as the promotion target).
 
 **What we'd do**: ship a declarative compound filter for interval overlap, so a consumer declares the two bounding fields and the null rule once instead of rebuilding the predicate per model.
 
@@ -1756,7 +1756,7 @@ class OrderMatrix(DjangoMatrix):
 
 ### `apollo_federation_meta_surface`
 
-**Retired 2026-08-29** — carded as `TODO-ALPHA-055-0.0.16 - Apollo Federation as the standalone django-strawberry-federation package`. The filing was self-contradictory against this file's own charter: federation is a whole shipped `strawberry-graphql-django` subpackage, so it is a parity delta, not a capability neither inspiration ships. The row's Meta sketch (`federation = {"keys": [...], "shareable": [...], "tag": ...}`) carries forward as the satellite's declaration shape; the card is the source of truth.
+**Retired 2026-08-29** — carded as `TODO-ALPHA-056-0.0.16 - Apollo Federation as the standalone django-strawberry-federation package`. The filing was self-contradictory against this file's own charter: federation is a whole shipped `strawberry-graphql-django` subpackage, so it is a parity delta, not a capability neither inspiration ships. The row's Meta sketch (`federation = {"keys": [...], "shareable": [...], "tag": ...}`) carries forward as the satellite's declaration shape; the card is the source of truth.
 
 ---
 

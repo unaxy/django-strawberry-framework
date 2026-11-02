@@ -1440,7 +1440,7 @@ def _format_owner_set_model_mismatch_error(
     "or a base" clause, lookup purpose) are the ONLY divergence, so the
     sentence is spelled once and each ``_format_owner_*_model_mismatch_error``
     wrapper passes its words. Each family's message text is pinned byte for
-    byte (spec-053 Decision 7).
+    byte (spec-054 Decision 7).
     """
     # Class values render through the class-name renderer; a non-class
     # ``Meta.model`` (the string lazy-ref idiom on the raw-Meta order side,
