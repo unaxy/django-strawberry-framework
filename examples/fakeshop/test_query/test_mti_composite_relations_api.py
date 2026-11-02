@@ -33,8 +33,8 @@ from graphql_client import (
     JSONObject,
     RecordCompiledSql,
     graphql_payload,
-    json_at,
     json_list,
+    json_str,
     response_json,
 )
 from strawberry import relay
@@ -352,14 +352,12 @@ def _composite_update_variables(member: str | None) -> dict[str, object]:
 
 def _assert_composite_member_refusal(payload: JSONObject, member: str) -> None:
     """Pin the one validation error a composite update naming key ``member`` answers."""
-    sent = _composite_update_variables(member)["d"]
     assert payload["data"] is None, payload
-    assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
-        (
-            f"Variable '$d' got invalid value {sent!r}; "
-            f"Field '{member}' is not defined by type 'RpCompositeParentPartialInput'."
-        ),
-    ], payload
+    (error,) = json_list(payload, "errors")
+    assert json_str(error, "message").startswith(
+        "Variable '$d' has invalid value: Expected value of type "
+        f"'RpCompositeParentPartialInput' not to include unknown field '{member}'",
+    ), payload
 
 
 def _composite_rows() -> list[tuple[int, str, str]]:

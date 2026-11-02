@@ -884,9 +884,9 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
       Scope 2 (the converter wrapper) are false once this lands. The contracts pass recommends deleting the card (a done
       card needs a spec; the remaining scope is the rejected wrapper) and dropping its card-072 Related reference:
       maintainer's call
-    - Not item 28: the edited `test_library_api.py` rows that still fail (`test_update_sending_the_primary_key_*` x6,
-      `test_model_create_edition_refuses_the_model_spelling_isbn_10_over_http`) fail identically at `3cfaceb9` on
-      graphql-core 3.3.1's unknown-field wording; only the quoted name differs
+    - Not item 28: the edited `test_library_api.py` rows (`test_update_sending_the_primary_key_*` x6,
+      `test_model_create_edition_refuses_the_model_spelling_isbn_10_over_http`) asserted graphql-core 3.2's
+      unknown-field wording; they were brought up to 3.3.1's wording with the other wording rows below
   - Review items closed (2026-11-02):
     - The model flavor's bind-time name is read where a request has no executable schema
       (`utils/inputs.py::published_input_specs` keeps the bind's names for a direct-call stub), so it stays, pinned
@@ -906,10 +906,13 @@ Progress: 35 of 39 landed; 4 yours (29, 30, 32, 33).
       spec-027 state the plain-schema drop and the `get_graphql_name` respelling of the keyword names; CHANGELOGTODO
       903 names every caser difference and the hashed serializer type rename; `docs/dry/DRY.md` and `ATTENTION.md`
       swept
-    - Not item 28: the 7 `test_library_api.py` rows above,
-      `test_filter_declarations_api.py::test_a_required_deferred_filter_annotation_refuses_omission` and
-      `test_input_shapes_api.py::test_a_validating_nullable_boolean_form_field_requires_a_boolean_over_http[omitted|null]`
-      fail identically at `8a7cd8cb` on graphql-core 3.3.1's wording
+    - Not item 28: 25 live rows asserting graphql-core 3.2's validation wording were brought up to 3.3.1's
+      (pin `>=3.3.1,<3.4`): the 7 `test_library_api.py` rows above plus 7 more there (unknown filter / order field,
+      four pk-coercion paths), `test_filter_declarations_api.py::test_a_required_deferred_filter_annotation_refuses_omission`,
+      `test_input_shapes_api.py::test_a_validating_nullable_boolean_form_field_requires_a_boolean_over_http[omitted|null]`,
+      `test_form_construction_api.py::test_required_extra_field_omitted_on_update_is_coercion_error[omitted]`,
+      the four `test_mti_composite_relations_api.py` composite-key refusals, two `test_scalars_filter_api.py` rows and
+      `test_declared_temporal_bindability_api.py::test_a_declared_filter_past_a_transform_publishes_what_its_own_form_cleans`
 
 - [ ] 29. (S6) Consumer per-frame masking → `SchemaExtension.on_stream_result`
   - Our code: `consumers.py::_stop_aware_results #"mask_execution_result(result, policy)"` (~3 lines plus the local
