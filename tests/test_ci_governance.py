@@ -1172,8 +1172,13 @@ def test_the_anchor_sweep_accepts_an_anchor_naming_an_open_spec(tmp_path: Path) 
     assert _stale_staged_anchors([_plant(tmp_path, number, " Slice 1")], cards) == []
 
 
+#: The package directory whose non-statement strings the provenance and release
+#: sweeps also read.
+PACKAGE_ROOT = REPO_ROOT / "django_strawberry_framework"
+
 #: The process-provenance phrases START.md "Style the maintainer cares about" bans
-#: from comments, docstrings and test names, each with the pattern that finds it.
+#: from comments, docstrings, test names and error strings, each with the pattern
+#: that finds it.
 #: Every one reads as the history of a change in every hit the corpus has held, so
 #: the set carries no exclusion: a sentence that needs the words is rephrased.
 #: Words are joined by any whitespace, so a phrase a docstring wraps across lines,
@@ -1200,6 +1205,17 @@ PROVENANCE_PHRASES: tuple[tuple[str, str], ...] = (
     ("the previous implementation", r"the\s+previous\s+implementation"),
     ("task report", r"task\s+report"),
     ("finding-", r"finding-"),
+    ("pre-033", r"pre-\d{3}"),
+    ("pre-1.0", r"pre-1\.0"),
+    ("back-compat", r"back(?:wards?)?[-\s]+compat\w*"),
+    ("independently grew", r"independently\s+grew"),
+    ("grew separately", r"grew\s+separately"),
+    ("historically", r"historically"),
+    ("byte-unchanged", r"byte[-\s]+unchanged"),
+    ("moved verbatim", r"moved\s+verbatim"),
+    ("net-new", r"net[-\s]+new"),
+    ("now-fixed", r"now[-\s]+fixed"),
+    ("the original implementation", r"the\s+original\s+implementation"),
 )
 
 
@@ -1274,18 +1290,40 @@ def _prose_segments(source: str) -> list[tuple[int, str, str]]:
     return segments
 
 
-def _provenance_entries_in(paths: Iterable[Path]) -> tuple[list[str], int]:
-    """Return one formatted violation per gated phrase in ``paths``, and the segments read.
+def _swept_texts(path: Path, source: str, package_root: Path) -> list[tuple[int, str, str]]:
+    """Return ``(first line, kind, text)`` for every text the sweeps read in ``source``.
+
+    Every file contributes its comments, string statements and def/class names
+    (``_prose_segments``); a file under ``package_root`` also contributes its
+    runtime strings (``_runtime_strings``, kind ``string``), the value assigned to
+    ``__version__`` in the package's ``__init__.py`` excepted.
+    """
+    texts = _prose_segments(source)
+    if path.is_relative_to(package_root):
+        version_file = path == package_root / "__init__.py"
+        texts.extend(
+            (line, "string", text)
+            for line, text in _runtime_strings(source, version_file=version_file)
+        )
+    return texts
+
+
+def _provenance_entries_in(
+    paths: Iterable[Path],
+    package_root: Path = PACKAGE_ROOT,
+) -> tuple[list[str], int]:
+    """Return one formatted violation per gated phrase in ``paths``, and the texts read.
 
     Each violation names the file, the line the phrase starts on, the kind of text
-    it sits in and the phrase. The segment count is what lets the sweep tell a
-    clean corpus from one it could not read.
+    it sits in and the phrase. The text count is what lets the sweep tell a clean
+    corpus from one it could not read.
     """
     violations: list[str] = []
     read = 0
     for path in paths:
         display = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path
-        for first_line, kind, text in _prose_segments(path.read_text(encoding="utf-8")):
+        source = path.read_text(encoding="utf-8")
+        for first_line, kind, text in _swept_texts(path, source, package_root):
             read += 1
             for match in PROVENANCE_PATTERN.finditer(text):
                 phrase = PROVENANCE_PHRASES[int((match.lastgroup or "p0")[1:])][0]
@@ -1294,22 +1332,24 @@ def _provenance_entries_in(paths: Iterable[Path]) -> tuple[list[str], int]:
     return violations, read
 
 
-def test_no_comment_docstring_or_name_carries_a_provenance_phrase() -> None:
-    """No first-party comment, docstring or def/class name narrates a change's history.
+def test_no_comment_docstring_name_or_package_string_carries_a_provenance_phrase() -> None:
+    """No first-party comment, docstring, def/class name or package string narrates history.
 
-    START.md "Style the maintainer cares about": comments, docstrings and test
-    names state the invariant, never how the change came to be. That rule had no
-    gate, and the tree carried the history phrasing widely; this row is the gate
-    for the phrase set ``PROVENANCE_PHRASES`` names, over the corpus the census
-    rows above pin against git. A sentence a phrase lands in is restated as
-    behaviour: a counterfactual becomes a present-tense or conditional statement
-    the enclosing test asserts.
+    START.md "Style the maintainer cares about": comments, docstrings, test names
+    and error strings state the invariant, never how the change came to be. This
+    row is that rule's gate for the phrase set ``PROVENANCE_PHRASES`` names, over the corpus
+    the census rows above pin against git, plus every other ``str`` constant in
+    ``django_strawberry_framework/`` (runtime messages, as the release sweep below
+    reads them). A sentence a phrase lands in is restated as behaviour: a
+    counterfactual becomes a present-tense or conditional statement the enclosing
+    test asserts.
 
     Deliberate limits. Only those phrases are read; the wider history vocabulary
     ("now", "no longer", "the fix", plan labels, version banners) needs judgment
-    site by site and is not gated here. Only string statements are read: an error
-    message, an assigned constant or a fixture string may quote a phrase. A
-    statement built with ``+`` is not read (ruff B018 and basedpyright
+    site by site and is not gated here. Outside the package only string
+    statements are read: an error message, an assigned constant or a fixture
+    string in a test or script may quote a phrase. A statement built with ``+``
+    is not read (ruff B018 and basedpyright
     ``reportUnusedExpression`` refuse it), nor is a bytes statement, which is not
     prose, nor is a t-string statement. A trailing comment is never joined to the full-line comment below it:
     each is its own segment, so a phrase split across that pair is no match.
@@ -1317,7 +1357,8 @@ def test_no_comment_docstring_or_name_carries_a_provenance_phrase() -> None:
     corpus = _sweep_corpus()
     violations, read = _provenance_entries_in(corpus)
     assert REPO_ROOT / CENSUS_MODULE in corpus, "the sweep corpus does not hold this module"
-    assert read, "no comment, docstring or name was read; the sweep read nothing"
+    assert PACKAGE_ROOT / "__init__.py" in corpus, "the sweep corpus does not hold the package"
+    assert read, "no comment, docstring, name or string was read; the sweep read nothing"
     assert not violations, (
         "process-provenance phrase(s) in first-party prose:\n"
         + "\n".join(violations)
@@ -1399,6 +1440,11 @@ PLANTED_PROSE_SHAPES = [
     ),
     ("trailing-comment", "VALUE = 1  # pre-fix value\n", "1: comment: 'pre-fix'"),
     ("upper-case", "# PREVIOUSLY SET\nVALUE = 1\n", "1: comment: 'previously'"),
+    (
+        "back-compat-spelling",
+        'def run():\n    """Run.\n\n    Kept for backwards compatibility.\n    """\n',
+        "4: docstring: 'back-compat'",
+    ),
 ]
 
 
@@ -1419,21 +1465,52 @@ def test_the_provenance_sweep_reports_a_planted_shape(
     assert violations[0].startswith(f"{planted}:{expected}: "), violations[0]
 
 
+#: Planted package modules: a runtime message and an f-string message part, each
+#: with the line, kind and phrase the report must name.
+PLANTED_PACKAGE_PROSE_SHAPES = [
+    ("package-message", "MESSAGE = 'the value is previously set'\n", "1: string: 'previously'"),
+    (
+        "package-f-string",
+        "def run(value):\n    raise ValueError(f'{value} formerly ran')\n",
+        "2: string: 'formerly'",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [(body, expected) for _, body, expected in PLANTED_PACKAGE_PROSE_SHAPES],
+    ids=[name for name, _, _ in PLANTED_PACKAGE_PROSE_SHAPES],
+)
+def test_the_provenance_sweep_reports_a_planted_package_string(
+    tmp_path: Path,
+    body: str,
+    expected: str,
+) -> None:
+    """A phrase in a package runtime string is reported at its line, with kind ``string``."""
+    planted, root = _plant_package(tmp_path, "planted.py", body)
+    violations, _ = _provenance_entries_in([planted], root)
+    assert len(violations) == 1, violations
+    assert violations[0].startswith(f"{planted}:{expected}: "), violations[0]
+
+
 def test_the_provenance_sweep_reports_nothing_for_a_planted_permitted_form(
     tmp_path: Path,
 ) -> None:
     """The negative direction: a phrase in a plain string, or inside another word, is not read.
 
-    An error message may quote a phrase; ``reused`` and ``unused`` contain the
-    letters but not the words; a blank line between two comments ends the block,
-    a trailing comment never joins the full-line comment below it, and an
-    f-string's replacement field separates its parts, so a phrase split across
-    any of those breaks is two halves and no match.
+    An error message outside the package may quote a phrase; ``reused`` and
+    ``unused`` contain the letters but not the words, an upstream ``pre-1.10`` or
+    a ``pre-2024`` date is neither the 1.0 release nor a three-digit spec number; a
+    blank line between two comments ends the block, a trailing comment never
+    joins the full-line comment below it, and an f-string's replacement field
+    separates its parts, so a phrase split across any of those breaks is two
+    halves and no match.
     """
     planted = _plant_prose(
         tmp_path,
         "MESSAGE = 'the value used to be set'\n"
-        "# the reused token; unused tokens\n"
+        "# the reused token; unused tokens; pre-1.10 and pre-2024\n"
         "# are fine and exactly as\n"
         "\n"
         "# before is a new block\n"
@@ -1445,9 +1522,6 @@ def test_the_provenance_sweep_reports_nothing_for_a_planted_permitted_form(
     assert read == 5, read
     assert violations == [], violations
 
-
-#: The package directory whose non-statement strings the release sweep also reads.
-PACKAGE_ROOT = REPO_ROOT / "django_strawberry_framework"
 
 #: The release the package tracks; the sweep refuses it and every earlier one.
 PACKAGE_VERSION = django_strawberry_framework.__version__
@@ -1523,10 +1597,9 @@ def _release_entries_in(
 ) -> tuple[list[str], int]:
     """Return one formatted violation per release or release-carrying card id, and the texts read.
 
-    Every file contributes its comments, string statements and def/class names
-    (``_prose_segments``); a file under ``package_root`` also contributes its
-    runtime strings (``_runtime_strings``). Each violation names the file, the
-    line, the kind of text and the match.
+    The texts are ``_swept_texts``: every file's prose, plus a package file's
+    runtime strings. Each violation names the file, the line, the kind of text and
+    the match.
     """
     violations: list[str] = []
     read = 0
@@ -1535,14 +1608,8 @@ def _release_entries_in(
         source = path.read_text(encoding="utf-8")
         texts = [
             (first_line, kind, text.replace(" ", "_") if kind == "name" else text)
-            for first_line, kind, text in _prose_segments(source)
+            for first_line, kind, text in _swept_texts(path, source, package_root)
         ]
-        if path.is_relative_to(package_root):
-            version_file = path == package_root / "__init__.py"
-            texts.extend(
-                (line, "string", text)
-                for line, text in _runtime_strings(source, version_file=version_file)
-            )
         for first_line, kind, text in texts:
             read += 1
             pattern = RELEASE_NAME_PATTERN if kind == "name" else PROSE_RELEASE_PATTERN

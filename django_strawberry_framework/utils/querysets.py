@@ -320,7 +320,7 @@ class SyncMisuseError(ConfigurationError, RuntimeError):
     this subclass directly. Consumers who want a focused catch should
     also match the subclass. Exported through
     ``django_strawberry_framework`` (and re-exported from
-    ``django_strawberry_framework.types.relay`` for back-compat) so it
+    ``django_strawberry_framework.types.relay``) so it
     can be imported without reaching into this private ``utils`` module.
     """
 
@@ -342,7 +342,8 @@ def reject_async_in_sync_context(
 
     Native coroutines are closed and futures are cancelled before
     ``SyncMisuseError`` is raised; other awaitables have no standard cleanup
-    protocol. Native-coroutine error text is preserved for compatibility.
+    protocol. The error names a native coroutine ``a coroutine`` and any other
+    awaitable ``an awaitable``.
     Otherwise ``value`` is returned unchanged, so callers read
     ``x = reject_async_in_sync_context(x, ...)``.
     """
@@ -2323,7 +2324,7 @@ _EXACT_DICT_QUERY_ATTRS: tuple[str, ...] = (
 )
 # ``extra`` is deliberately ABSENT: the raw-SQL scan below validates it as an
 # exact ``dict`` with ``str`` keys AND its ``(sql, params)`` payloads, in
-# byte-identical wording, so listing it here only ran the weaker half of that
+# byte-identical wording, so listing it here would run the weaker half of that
 # same check a second time on every seal.
 _EXACT_SET_QUERY_ATTRS: tuple[str, ...] = (
     "annotation_select_mask",
@@ -3063,8 +3064,8 @@ def _query_container_defect(query: object) -> tuple[str, str] | None:
 def _query_ast_defect(query: object, walk: _GraphWalk) -> tuple[str, str] | None:
     """Return the first untrusted embedded AST node in ``query``, or ``None``.
 
-    The complete genuineness walk over EVERY compiler-reachable expression slot the
-    old inventory missed (spec-045 Decision 2): the ``where``
+    The complete genuineness walk over EVERY compiler-reachable expression slot
+    (spec-045 Decision 2): the ``where``
     and ``having`` trees and their leaf operands, ``annotations`` values (recursively,
     including nested ``Func`` / ``Case`` operands and inner ``Subquery`` graphs),
     the ``order_by`` / ``group_by`` / ``distinct_fields`` / ``select`` /
@@ -3837,7 +3838,7 @@ class _SealPolicy(Generic[_RowT_co]):
     - ``reject_sliced`` -- a sliced query (a ``LIMIT`` / ``OFFSET`` was taken) is
       a defect. Deliberately INDEPENDENT of ``require_model_rows``: the two
       answer different questions (what the rows ARE, versus whether this surface
-      will recompose onto them), and fusing them is what forced the cascade to
+      will recompose onto them), and fusing them would force the cascade to
       re-implement the slice rejection at both of its own entry points. Off one
       edge down only where something downstream answers for the slice: the
       optimizer walker's nested-connection child, whose own gate

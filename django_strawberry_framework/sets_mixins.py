@@ -44,9 +44,8 @@ metaclass + expansion lifecycle a third time:
 
 The cookbook's other shared helpers (``get_concrete_field_names``,
 ``InputObjectTypeFactoryMixin``, ``ObjectTypeFactoryMixin``) are intentionally
-NOT ported yet: the shipped sets do not use them today, and the package's
-100%-coverage gate would flag them as dead. They land with their consuming
-sets.
+NOT ported: no set uses them, and the package's 100%-coverage gate would flag
+them as dead. They land with their consuming sets.
 """
 
 from __future__ import annotations

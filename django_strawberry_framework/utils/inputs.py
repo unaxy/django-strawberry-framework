@@ -3,10 +3,9 @@
 The filter and order subsystems each build real Strawberry input classes as
 module globals (``strawberry.lazy(...)`` resolves through ``module.__dict__``),
 keep class-level factory caches, detect duplicate generated input names, and
-reset stale binding state during ``registry.clear()``. spec-027 and spec-028
-grew those mechanics as parallel copies; this module single-sites the NEUTRAL
-machinery so a fix to the materialization ledger, the BFS collision check, or
-the namespace-clear lifecycle lands once instead of being hand-mirrored.
+reset stale binding state during ``registry.clear()``. This module owns the
+NEUTRAL machinery for both (spec-027, spec-028), so the materialization ledger,
+the BFS collision check and the namespace-clear lifecycle have one definition.
 
 What lives here is mechanics only. Domain semantics stay at the call sites:
 ``filters/inputs.py`` keeps ``convert_filter_to_input_annotation`` /
@@ -14,8 +13,8 @@ What lives here is mechanics only. Domain semantics stay at the call sites:
 ``orders/inputs.py`` keeps ``convert_order_field_to_input_annotation`` /
 ``normalize_input_value`` and the ``Ordering`` enum. The two ``inputs`` modules
 re-export ``GeneratedInputFieldSpec`` / ``build_strawberry_input_class`` under their
-spec-named aliases (``FieldSpec`` / ``build_input_class``) so existing imports and the
-test suite keep addressing them on the family module. A set's generated input name is
+spec-named aliases (``FieldSpec`` / ``build_input_class``), so both names also import
+from the family module. A set's generated input name is
 ``sets_mixins.py::ClassBasedTypeNameMixin.type_name_for``, which the builders below
 call directly. Set-family Decision-9 ledgers ride ``make_set_input_namespace`` (heavy
 clear); write flavors ride
@@ -76,9 +75,8 @@ from .lazy import unwrap_lazy_object
 from .permissions import set_bound_definition
 
 # ``utils/strings.py`` is the owner of ``graphql_camel_name``;
-# re-imported here (the ``as`` form marks the explicit re-export) so existing
-# ``from ..utils.inputs import graphql_camel_name`` consumers keep their import
-# path.
+# re-imported here (the ``as`` form marks the explicit re-export) so
+# ``from ..utils.inputs import graphql_camel_name`` resolves too.
 from .strings import flatten_lookup_path
 from .strings import graphql_camel_name as graphql_camel_name  # noqa: PLC0414 - explicit re-export
 from .typing import (
@@ -231,7 +229,7 @@ def emit_set_input_field_triples(
     """Emit the per-field input triples + ``FieldSpec`` rows for one set class.
 
     The triple-emission scaffold the filter and order ``_build_input_fields``
-    grew separately: for each ``(top_name, entry)`` pair derive the python attr
+    share: for each ``(top_name, entry)`` pair derive the python attr
     (``flatten_lookup_path``) + camel-cased GraphQL name + the
     ``optional_field_kwargs`` shape, then branch:
 
@@ -282,9 +280,9 @@ def emit_set_input_field_triples(
     seen_attr: dict[str, str] = {}
     seen_graphql: dict[str, str] = {}
     # Provenance rows are staged and committed only after the whole set walks
-    # clean. Writing them as each field is emitted left the family's
-    # ``field_specs`` table half-populated when a later member collided - a
-    # schema build that failed loud but not cleanly.
+    # clean. Writing them as each field is emitted would leave the family's
+    # ``field_specs`` table half-populated when a later member collides - a
+    # schema build that fails loud but not cleanly.
     staged_specs: list[tuple[tuple[type[object], str], GeneratedInputFieldSpec]] = []
     for top_name, entry in entries:
         python_attr = flatten_lookup_path(top_name)
@@ -348,7 +346,7 @@ def emit_set_input_field_triples(
 # the serializer flavor extends with its ``NESTED_SINGLE`` / ``NESTED_MULTI``
 # pair (nested writes are DRF-only) and the model flavor with ``EXCLUDED``
 # (the spec-040 D6 capture seam). Each flavor's converter module re-exports
-# them so existing ``from .converter import SCALAR`` consumers keep their path.
+# them, so ``from .converter import SCALAR`` resolves in each flavor.
 SCALAR: str = "scalar"
 RELATION_SINGLE: str = "relation_single"
 RELATION_MULTI: str = "relation_multi"
@@ -595,7 +593,7 @@ def make_set_input_namespace(
     """Return the set-family ``(ledger, field_specs, materialize_fn, clear_fn)`` quartet.
 
     The heavy spec-027 / spec-028 Decision 9 sibling of ``make_input_namespace``.
-    Filter and order ``inputs`` modules grew the same four-part shape (a
+    Filter and order ``inputs`` modules share one four-part shape (a
     ``_materialized_names`` ledger, a ``_field_specs`` provenance table, a
     ``materialize_input_class`` wrapper, a ``clear_*_input_namespace`` that resets
     factory caches + ``_lifecycle`` binding). This single-sites it:
@@ -1070,9 +1068,9 @@ def normalize_field_name_sequence(
     (``rest_framework/inputs.py::resolve_effective_serializer_fields``) - passing
     their own ``flavor`` label. Each site normalizes a declared field sequence the same
     way; they differ only in the human flavor label interpolated into the two
-    ``ConfigurationError`` messages, so that single divergence is hoisted to the
+    ``ConfigurationError`` messages, so that single divergence is the
     ``flavor`` parameter -- mirroring how ``write_mixins.py::make_declaration_registry``
-    already parameterizes its reject wording by a flavor label. The
+    parameterizes its reject wording by a flavor label. The
     field-existence-basis check (a name not in the model's editable columns /
     the form's ``base_fields``) stays at each call site; this helper only validates
     the SHAPE of the declared sequence.
@@ -1241,9 +1239,8 @@ def resolve_effective_fields(
         basis = {name: field for name, field in basis.items() if name not in row_identity}
 
     def _reject_unknown(seq: tuple[str, ...], key: str) -> None:
-        # The identical unknown-name check both branches spelled separately; the
-        # pinned message stays byte-identical via the threaded ``fields`` /
-        # ``exclude`` key.
+        # The unknown-name check both branches run; the message names the
+        # threaded ``fields`` / ``exclude`` key.
         unknown = [name for name in seq if name not in basis]
         if unknown:
             raise ConfigurationError(
@@ -1960,8 +1957,8 @@ def _safe_import(module_path: str, attr: str) -> object:
     ``registry.clear()`` lifecycle relies on: a partial-load environment (one
     submodule reachable, another not) still clears whatever IS reachable. A
     ``None`` entry in ``sys.modules`` (the test-isolation way of simulating an
-    unimportable submodule) raises ``ImportError`` here, same as the previous
-    inline ``from .submodule import X`` guards. Delegates to
+    unimportable submodule) raises ``ImportError`` here, as an inline
+    ``from .submodule import X`` does. Delegates to
     ``utils/imports.py::import_attr_if_importable`` but preserves this wrapper's
     attr-lenient shape (a missing attr is ``None``, not ``AttributeError``) for
     the partial-load lifecycle callers.

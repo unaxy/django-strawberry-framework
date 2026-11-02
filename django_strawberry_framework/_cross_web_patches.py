@@ -295,9 +295,8 @@ def _validate_upstream_shape() -> "type[_DjangoHTTPRequestAdapter]":
 def _patched_body(self: "_DjangoHTTPRequestAdapter") -> bytes:
     """Return raw ``self.request.body`` bytes - the async adapter's contract.
 
-    The return contract is unchanged by spec-046: raw bytes, never a
-    decoded ``str``. What changed is what happens to them next, so the
-    reason for the raw bytes is worth stating exactly.
+    The return contract is raw bytes, never a decoded ``str``, for the
+    reasons below.
 
     **Why raw bytes.** Upstream's sync getter UTF-8-decodes inside a
     *property*. A ``UnicodeDecodeError`` raised there escapes

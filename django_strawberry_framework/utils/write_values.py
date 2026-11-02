@@ -578,7 +578,7 @@ def store_decoded(
 ) -> FieldError | None:
     """Store a successful ``(decoded, error)`` pair under ``spec.target_name``.
 
-    The leftover glue every form / serializer kind handler copied after a decode:
+    The step every form / serializer kind handler runs after a decode:
     a ``FieldError`` short-circuits the walk without writing the dest; otherwise
     the value lands under the flavor's bound-data key (form field name /
     serializer field name). FILE uses this with ``(upload, None)``; nested

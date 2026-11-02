@@ -928,8 +928,8 @@ def finalize_django_types() -> None:
         # ``consumer_authored_fields`` union -- BROADER than the relation pass's
         # ``consumer_assigned_relation_fields`` -- so an annotation-only
         # ``attachment: str`` override (already honored by ``_build_annotations``)
-        # also gets no generated file resolver (spec-037 Decision 3). Interface
-        # injection order below is unchanged; file columns are scalar object
+        # also gets no generated file resolver (spec-037 Decision 3). The interface
+        # injection below is unaffected by it: file columns are scalar object
         # wrappers and do not interact with relay.Node defaults.
         _attach_file_resolvers(
             type_cls,
@@ -1026,10 +1026,11 @@ def finalize_django_types() -> None:
     # pass's entries.
     # Without this, a re-call after a fixable later-phase failure (the documented
     # recover-in-place path) would hit a spurious distinct-class collision in
-    # ``materialize_generated_input_class`` that masks the original, now-fixed
-    # error. Parked module globals are overwritten in place by the next ``setattr``
-    # (the parked-globals lifecycle), so a ledger-only clear is safe. ``registry``
-    # is NOT cleared here - this resets only the emit ledgers, not declarations.
+    # ``materialize_generated_input_class`` that masks the original error even
+    # after the caller fixed it. Parked module globals are overwritten in place by
+    # the next ``setattr`` (the parked-globals lifecycle), so a ledger-only clear is
+    # safe. ``registry`` is NOT cleared here - this resets only the emit ledgers,
+    # not declarations.
     # The pre-bind generated-state reset uses owner-registered callables. The
     # phase filter selects emitted namespaces and per-pass caches, never declaration
     # registries or full-clear-only state. Optional subsystems remain absent unless
@@ -1438,8 +1439,8 @@ def _format_owner_set_model_mismatch_error(
     share. Family words (noun, sidecar key, article, dash around the
     "or a base" clause, lookup purpose) are the ONLY divergence, so the
     sentence is spelled once and each ``_format_owner_*_model_mismatch_error``
-    wrapper passes its words. Messages stay byte-identical to the family
-    originals (spec-053 Decision 7).
+    wrapper passes its words. Each family's message text is pinned byte for
+    byte (spec-053 Decision 7).
     """
     # Class values render through the class-name renderer; a non-class
     # ``Meta.model`` (the string lazy-ref idiom on the raw-Meta order side,

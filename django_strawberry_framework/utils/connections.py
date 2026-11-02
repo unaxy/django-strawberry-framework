@@ -1110,8 +1110,8 @@ def derive_keyset_window_bounds(
     - The arguments go through ``page_arguments`` first, as on the offset
       fork, so ``last: 0`` is the forward ``first: 0`` window. Backward shapes
       (``last`` with no ``first``, or any ``before:``) raise
-      ``UnwindowableConnection``: the reversed keyset window is not planned
-      in v1, and the per-parent / root keyset slicer resolves those shapes
+      ``UnwindowableConnection``: the reversed keyset window is never
+      planned, and the per-parent / root keyset slicer resolves those shapes
       correctly instead (the spec-033 Decision-5 fallback discipline).
     - ``first`` + ``last`` combined stays for the resolver's own
       mutual-exclusivity guard - here it is simply forward (``first`` wins

@@ -729,8 +729,8 @@ def _root_child_selections(
     into one resolver call but exposes every contributing ``FieldNode``
     in ``info.field_nodes``. After ``convert_selections``, the returned
     list has one entry per field node, and the walker needs the union
-    of their children. The previous shape (``selections[0].selections``)
-    silently dropped relations selected by the second node, so
+    of their children. Reading only ``selections[0].selections`` would
+    drop relations selected by the second node, so
     ``{ allItems { name } allItems { category { name } } }`` would
     skip planning ``category``. The walker's existing alias merging
     (``_merge_aliased_selections``) deduplicates within the flattened
@@ -1374,8 +1374,8 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
     ) -> "models.QuerySet[_M]":
         """Build and apply the plan to ``queryset`` given ``target_type`` / ``target_model``.
 
-        The plan-build-and-apply tail extracted from ``_optimize``
-        (spec-030 Decision 11). Takes the node type / model **directly** rather than
+        The plan-build-and-apply tail ``_optimize`` and ``apply_connection_optimization``
+        share (spec-030 Decision 11). Takes the node type / model **directly** rather than
         inferring them from ``info.return_type`` - the connection field's root return
         type is the connection type, not the node type, so the inference the
         middleware path uses would resolve the wrong model.

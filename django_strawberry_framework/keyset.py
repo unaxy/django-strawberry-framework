@@ -20,8 +20,8 @@ controls the SQL shape (``optimizer/lateral_fetch.py``).
 
 Contract highlights (each enforced in this module or at finalization):
 
-- **Opt-in, never a migration.** ``cursor_field`` unset keeps the shipped
-  offset behavior byte-identical. A ``cursor_field`` connection REJECTS
+- **Opt-in, never a migration.** ``cursor_field`` unset serves the
+  default offset cursors. A ``cursor_field`` connection REJECTS
   offset cursors (and vice versa - the prefixes differ), so the two cursor
   vocabularies can never be confused for one another silently.
 - **Opaque, tamper-evident payload.** The cursor body is authenticated-encrypted
@@ -64,7 +64,7 @@ Contract highlights (each enforced in this module or at finalization):
   at finalization by ``validate_cursor_field_columns``): NULL values poison
   tuple comparisons and their placement diverges across backends (SQLite
   sorts NULLs first ASC, Postgres last), while JSONField comparison semantics
-  are backend-specific. The v1 contract excludes both loudly instead of
+  are backend-specific. The keyset contract excludes both loudly instead of
   paginating wrongly. Every other effective order (a root ``orderBy:``, a
   hook or manager order under a nested window) is held to the same rules per
   column at query time; an order that fails them is refused with a keyset
@@ -346,7 +346,7 @@ def validate_cursor_field_columns(
 ) -> None:
     """Finalization-time column validation for a declared ``Meta.cursor_field``.
 
-    Enforces the v1 column contract (module docstring): every entry resolves
+    Enforces the column contract (module docstring): every entry resolves
     to a LOCAL CONCRETE NON-NULLABLE column, and the terminal entry is a
     unique total-order anchor (the pk or a ``unique=True`` column) - the
     BACKLOG contract requires the tiebreak DECLARED, not silently appended,
@@ -468,7 +468,7 @@ def _invalid_cursor_error(argument: str, info: EitherInfo | None) -> PaginationA
 
 
 def _is_supported_cursor_field(field: ConcreteField) -> bool:
-    """Whether ``field`` has portable keyset ordering semantics in the v1 contract."""
+    """Whether ``field`` has portable keyset ordering semantics."""
     return not isinstance(field, models.JSONField)
 
 
@@ -568,7 +568,7 @@ def encode_keyset_cursor(
 
     A ``None`` ordering value raises ``GraphQLError`` (same boundary language
     as the ``orderBy:`` nullable-column rejection in ``connection.py``): the
-    v1 contract forbids NULL cursor columns, and ``value_to_string(None)`` is
+    keyset contract forbids NULL cursor columns, and ``value_to_string(None)`` is
     not a safe encoding for Char/Text fields (it becomes the string ``"None"``).
     """
     values: list[str] = []

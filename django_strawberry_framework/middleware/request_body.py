@@ -48,8 +48,8 @@ for a request this middleware has actually run the boundary for - the narrow
 fact, and the load-bearing one, since that is the request whose body is proven
 measured. For every other request, including one whose callback this middleware
 did not recognize as a package view's, the exemption stays ``True`` and the view's
-own boundary-then-CSRF re-entry behaves exactly as it did before this module
-existed. Both arrangements enforce CSRF and both enforce the cap; they differ
+own boundary-then-CSRF re-entry runs exactly as it does without this
+middleware. Both arrangements enforce CSRF and both enforce the cap; they differ
 only in which class performs the check.
 
 Ordering is verified rather than documented: a chain that lists this middleware

@@ -385,7 +385,7 @@ class WindowedPrefetchStrategy:
     downgrade, never a correctness cliff. Under the ``"lateral"``/``"auto"``
     strategies ``LateralPrefetchStrategy`` handles the clean eligible shape at
     plan time, so this fast path is effectively a ``"windowed"``-strategy feature;
-    a lateral single-parent variant is out of v1 scope.
+    no lateral single-parent variant exists.
     """
 
     name: str = "windowed"

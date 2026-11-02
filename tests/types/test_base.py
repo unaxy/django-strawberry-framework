@@ -1767,7 +1767,7 @@ def test_meta_primary_false_does_not_register_primary() -> None:
             primary = False
 
     assert registry.primary_for(Item) is None
-    # Single-type backward-compat: ``get()`` still returns the lone type even
+    # Single-type case: ``get()`` returns the lone type even
     # without an explicit primary flag (Decision 4).
     assert registry.get(Item) is ItemType
 
@@ -2783,7 +2783,7 @@ def _make_path_optin_type(
     return type("PathOptInType", (DjangoType,), {"Meta": meta_cls, **(namespace or {})})
 
 
-def test_filesystem_path_fields_is_a_net_new_allowed_meta_key() -> None:
+def test_filesystem_path_fields_is_an_allowed_meta_key() -> None:
     """``Meta.filesystem_path_fields`` is ALLOWED and not a deferred-key promotion."""
     assert "filesystem_path_fields" in ALLOWED_META_KEYS
     assert "filesystem_path_fields" not in DEFERRED_META_KEYS

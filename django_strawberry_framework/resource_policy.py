@@ -610,7 +610,7 @@ class _RequestBudget:
 #: verdict stop being reachable at that instant rather than when the task
 #: finally ends.
 #:
-#: The published keys stay exactly as spec-047 shipped them, as a mirror a
+#: The published keys keep the shape spec-047 specifies, as a mirror a
 #: consumer can read; they are also the fallback wherever no budget is armed (a
 #: plain ``strawberry.Schema`` with no extension, whose consumer may publish a
 #: policy under the key, or a task the operation's binding does not reach),

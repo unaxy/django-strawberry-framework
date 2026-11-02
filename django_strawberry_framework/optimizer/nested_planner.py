@@ -934,7 +934,7 @@ def _keyset_window_slice_from_arguments(
       accounted-for and the per-parent pipeline raises the SAME error at
       the field's own locality.
     - ``UnwindowableConnection`` propagates for the valid backward shapes
-      (``last`` / ``before:``) the v1 keyset window does not plan - a real
+      (``last`` / ``before:``) the keyset window does not plan - a real
       per-parent access that must stay strictness-visible.
     """
     first = _int_argument(arguments, "first")
@@ -1298,7 +1298,7 @@ def plan_connection_relation(
     # aliases diverge, ``{None: arguments}`` for the shared window (unmerged
     # selections never grew ``_optimizer_response_key_arguments``).
     # ``keyed_windows`` stays the scheme-agnostic hand-off: ``None`` keeps the
-    # legacy shared ``to_attr``; a real key namespaces it. ``seek`` is the
+    # shared ``to_attr``; a real key namespaces it. ``seek`` is the
     # decoded keyset value seek, ``None`` under the offset vocabulary and for
     # keyset first pages alike.
     response_key_arguments: Mapping[str | None, Mapping[str, object]] = (
@@ -1570,7 +1570,7 @@ def plan_connection_relation(
     has_next_selected = connection_has_next_page_selected(sel)
     # (g) Hand one fully-resolved fetch request PER WINDOW to the active
     # strategy (the nested_fetch.py seam): the single-window scheme sends the
-    # legacy shared-``to_attr`` request; the divergent scheme sends one
+    # shared-``to_attr`` request; the divergent scheme sends one
     # request per response key under that key's namespaced ``to_attr`` (the
     # graph-node model - O(aliases) batched queries instead of
     # O(parents x aliases) per-parent fallbacks). A strategy returning

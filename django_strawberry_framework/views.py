@@ -44,7 +44,7 @@ deployment puts it: installed before its own ``CsrfViewMiddleware`` entry, it ru
 this module's boundary from ``process_view`` and the project's *configured* CSRF
 class - base or subclass - then runs in full behind it.
 
-A deployment that has not installed it keeps the arrangement that predates it:
+A deployment that has not installed it keeps the view-owned arrangement:
 both package views mark the callback ``as_view`` returns exempt from the CSRF
 middleware - once, on the shared mixin - and re-enter Django's own
 ``CsrfViewMiddleware`` from inside the view, after the boundary has run, through
@@ -283,7 +283,7 @@ def _form_encoding_is_utf8(request: HttpRequest) -> bool:
     """Whether Django will decode this form's non-file fields as UTF-8.
 
     Two INDEPENDENT conditions, joined with ``and``. They are deliberately not a
-    fallback chain: Django applies no such order, and reading them as one was a
+    fallback chain: Django applies no such order, and reading them as one is a
     bypass. What Django actually does, read out of
     ``django/http/request.py`` and ``django/http/multipartparser.py`` and
     confirmed by execution at both supported versions:
@@ -566,8 +566,8 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
     server side, because the wire deliberately cannot carry it. An allowed body
     is handed back as a rewound stream rather than as a pre-filled cache, so
     ``HttpRequest.body`` still runs in full: Strawberry receives the original bytes
-    byte-for-byte, and Django's own ``DATA_UPLOAD_MAX_MEMORY_SIZE`` ceiling still
-    fires where it always did. Whichever ceiling is lower still wins.
+    byte-for-byte, and Django's own ``DATA_UPLOAD_MAX_MEMORY_SIZE`` ceiling
+    fires inside that property. Whichever ceiling is lower wins.
 
     **Multipart, on a POST.** Bounded by the declared-size gate plus Django's own
     ``MultiPartParser``, and nothing else. The carve-out is POST-scoped - a
@@ -981,9 +981,8 @@ async def _async_run_after_csrf_check(
     at the package floor - the ``requires-python`` and ``Django>=`` pins in
     ``pyproject.toml``, both views, the full CSRF matrix and the untouched-parser
     witness - rather than by reading current and assuming backwards.
-    ``examples/fakeshop/test_query/test_transport_api.py``'s async CSRF rows are the
-    standing regression, and test-plan row 18 is the same file re-invoked at the
-    floor.
+    ``examples/fakeshop/test_query/test_transport_api.py``'s async CSRF rows pin it,
+    and the floor run re-invokes the same file.
 
     One consequence of ``decorator_from_middleware``'s shape is worth naming here
     rather than leaving for a reader to find: ``_pre_process_request`` is

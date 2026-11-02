@@ -337,7 +337,7 @@ def test_fast_path_disabled_by_setting_over_http() -> None:
 
 @pytest.mark.django_db
 def test_m2m_shape_keeps_window_over_http() -> None:
-    """A single-parent M2M (THROUGH_TABLE) connection keeps the window (v1 excludes M2M)."""
+    """A single-parent M2M (THROUGH_TABLE) connection keeps the window (M2M has no fast path)."""
     _seed_one_genre_with_books("Aurora", "Binti", "Circe")
 
     payload, captured = _capture_as_staff(

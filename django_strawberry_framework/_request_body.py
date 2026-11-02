@@ -368,13 +368,13 @@ def _measured_remaining(stream: object) -> int | _Probe:
     then goes straight to ``HttpRequest.body`` with **no package bound at
     all** - and on the 5.2.x series that property's only ceiling is the
     ``CONTENT_LENGTH`` this cap exists precisely not to trust. Answering it on
-    the strength of two numbers is therefore fail-open, and the previous
-    ``max(end - position, 0)`` did exactly that for both shapes of an
+    the strength of two numbers is therefore fail-open, and a bare
+    ``max(end - position, 0)`` does exactly that for both shapes of an
     incoherent pair: a ``tell()`` that over-reports (a wrapper answering in the
     coordinates of the whole message rather than of the body) and a
     ``seek(0, SEEK_END)`` that under-reports (a queue- or iterator-backed
     stream that can report a position but not take one, so it returns the
-    offset it was handed). Both left every byte unread and every byte allowed.
+    offset it was handed). Both leave every byte unread and every byte allowed.
 
     Verifying a zero costs exactly one ``read`` call, so the fail-safe
     direction is to verify it: anything at or below zero is ``UNMEASURABLE`` and

@@ -184,13 +184,13 @@ class FieldError:
     envelope member type: the form-based and DRF-serializer / auth
     flavors return this same class rather than a per-flavor mirror,
     so a client's error branch is written once. The type is ADDITIVE, not
-    frozen - a member may be added (``codes`` / ``path`` below were), never
+    frozen - a member may be added, never
     removed or retyped. Same wire contract as
     ``graphene_django/types.py::ErrorType`` (``field`` + ``messages``).
 
     **Additive client-ergonomics fields.** Two optional,
-    default-empty lists sit alongside the legacy ``field`` / ``messages`` (both kept
-    intact for compatibility), so a client can branch WITHOUT parsing localized human
+    default-empty lists sit alongside ``field`` / ``messages`` (the graphene-django
+    pair above), so a client can branch WITHOUT parsing localized human
     text or the dotted ``field`` string:
 
     - ``codes`` - the structured error codes. For a serializer failure these are DRF

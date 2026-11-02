@@ -245,7 +245,7 @@ def test_upstream_patches_enabled_false_when_set_false(
     settings: pytest_django.Settings,
     dependency: str,
 ) -> None:
-    """The plain global ``False`` keeps its pre-mapping semantics (back-compat)."""
+    """The plain global ``False`` turns every dependency's patches off."""
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": False}
     assert upstream_patches_enabled(dependency) is False
 

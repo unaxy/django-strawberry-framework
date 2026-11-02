@@ -158,7 +158,7 @@ class _CsrfOrderingExemption:
     subclass) then runs normally, after the boundary.
 
     Every other state answers yes to "does the view still have to supply the
-    ordering itself?", which is the arrangement that predates the boundary
+    ordering itself?", which is the arrangement without the boundary
     middleware: the exemption is true, the chain's CSRF middleware skips the
     callback, and the view runs the boundary and re-enters CSRF from inside the
     view. A request that travelled no such chain lands there, and so does one

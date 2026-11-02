@@ -47,8 +47,7 @@ from .sets import FilterSet, FilterSetMetaclass
 # `register_subsystem_clear` row below (owner
 # ``filters.helper_references``) so ``registry.clear()`` replays
 # the callback -- not via a cycle-safe local import inside
-# ``TypeRegistry.clear`` (that shape predates the registration
-# seam). The finalizer's phase 2.5 subpass 4 compares this set
+# ``TypeRegistry.clear``. The finalizer's phase 2.5 subpass 4 compares this set
 # against the set of `Meta.filterset_class`-wired filtersets and
 # raises `ConfigurationError` for orphans.
 _helper_referenced_filtersets: set[type[FilterSet]] = set()

@@ -858,7 +858,7 @@ class DjangoSchema(strawberry.Schema):
     ``extensions=`` carries the consumer's own extensions and nothing else, and
     the two arguments above are the only way to configure what enforces a
     request. Supplying ``DjangoResourcePolicyExtension(policy=...)`` as an entry
-    still works and is read as a declaration of that policy - the entry is
+    is read as a declaration of that policy - the entry is
     folded into the record rather than kept - and declaring the policy twice is
     refused here, as is a subclass of either enforcement extension -
     supplied as a class or as an instance, and whether or not it declares a
@@ -976,8 +976,8 @@ class DjangoSchema(strawberry.Schema):
     def extensions(self) -> tuple[object, ...]:
         """The CONSUMER extension configuration this schema was accepted with.
 
-        The package's own enforcement extensions are not in it and never were
-        an entry: they are built per operation from the accepted record
+        The package's own enforcement extensions are never an entry in it:
+        they are built per operation from the accepted record
         (:func:`_admitted_chain`), so an operation is bounded and masked whatever
         this answers with.
 

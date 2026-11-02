@@ -2,7 +2,7 @@
 
 Happy-path tables, connection-only ``PeriodicalType.issues``, file/image converter
 columns, dotted-path / ``--schema`` / unregistered-name / non-DjangoType failures,
-and ``Meta.name`` bare lookup (including the Python class-name back-compat) live
+and ``Meta.name`` bare lookup (including the Python class-name lookup) live
 in ``examples/fakeshop/tests/test_inspect_django_type.py``. What stays here has no
 fakeshop shape: argparse ``--schema`` help; a custom ``NameConverter`` (prefixing
 every SDL name would break the live GraphQL suite); empty-registry unfinalized /

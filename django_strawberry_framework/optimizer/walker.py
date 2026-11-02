@@ -159,7 +159,7 @@ def plan_optimizations(
     (``origin``). Threaded into the root ``_walk_selections`` call so the
     root ``_resolve_field_map(...)`` uses that type's ``field_map`` /
     ``optimizer_hints`` instead of ``registry.get(model)`` (which
-    returns the primary). Nested relation traversal stays unchanged -
+    returns the primary). Nested relation traversal ignores it -
     nested ``_walk_selections`` calls leave ``source_type`` ``None`` so
     nested targets continue to route through the primary.
     """
@@ -678,7 +678,7 @@ def _walk_selections(
                 append_unique(plan.only_fields, f"{prefix}{relay_id_column}")
                 continue
             python_name = _RELAY_ID_DECLARED_NAME
-        # Resolve the selection through the ONE consolidated resolver, by the
+        # Resolve the selection through the ONE selection resolver, by the
         # Python name the schema published its field from. It recognizes a
         # synthesized nested connection BEFORE the field namespace and BEFORE
         # the unknown-name guard below: ``books_connection`` /
@@ -1490,7 +1490,7 @@ def _selected_scalar_names(
     # django_field.related_model, never the resolver's root return type.
     # Nested relation targets correctly route through the primary via
     # registry.get(model), which is what the default _resolve_field_map(model)
-    # call already does. The scalar-only secondary-type regression is
+    # call already does. The scalar-only secondary-type case is
     # exercised through the root _walk_selections path, not through this
     # helper. (An audit invariant.)
     type_cls, _definition, field_map = _resolve_field_map(model)
@@ -1667,7 +1667,7 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
             # WINDOW PER RESPONSE KEY under per-key ``to_attr``s
             # (O(aliases) batched queries). The first occurrence's
             # ``arguments`` stays the merged selection's primary value (the
-            # pre-033 first-args-win contract for non-connection fields); the
+            # first-args-win contract for non-connection fields); the
             # per-response-key map is the side-channel ``_plan_connection_relation``
             # reads to select the scheme and derive each key's window.
             _record_response_key_arguments(merged, sel)
@@ -1743,7 +1743,7 @@ def _aliased_arguments_diverge(selection: FieldSelection) -> bool:
     ``b: books(first: 5)``). The scheme selector for
     ``_plan_connection_relation``: divergent aliases plan one window PER
     RESPONSE KEY (each under its own ``to_attr``), while agreeing
-    aliases share the single legacy window. Payloads are graphql-core-coerced,
+    aliases share one window. Payloads are graphql-core-coerced,
     so the literal ``first: 2`` and a variable resolving to ``2`` agree. Selections built
     outside ``_merge_aliased_selections`` (direct test/helper callers) carry
     no per-response-key map and never diverge.

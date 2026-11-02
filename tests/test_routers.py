@@ -5137,8 +5137,8 @@ async def test_control_frame_send_serializes_with_a_concurrent_revocation() -> N
 #: the same value on ``AsyncBaseHTTPView``). RE-TYPED, like every other floor
 #: constant in this module: if upstream changes the default the row below stops
 #: reaching the limit frame and says so, instead of silently pinning nothing. The
-#: router exposes no knob for it, which is exactly why the number matters - and why
-#: the guard it makes reachable was once recorded as untestable.
+#: router exposes no knob for it, which is exactly why the number matters: without
+#: it the guard it makes reachable cannot be driven at all.
 _UPSTREAM_SUBSCRIPTION_LIMIT = 100
 
 

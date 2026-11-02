@@ -2016,7 +2016,7 @@ def test_input_has_active_terms_independent_query_and_double_normalization() -> 
 
     # Outside any scope a public apply publishes nothing, so the helper pays the
     # full double normalization: a connection or hand-written resolver calling the
-    # public API behaves exactly as it did before the list field existed.
+    # public API opens no scope, so nothing is attested and nothing is reused.
     TrackedOrder.normalize_count = 0
     TrackedOrder.apply_sync(active_input, qs, info)
     assert TrackedOrder._input_has_active_terms(active_input) is True
