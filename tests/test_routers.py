@@ -2768,11 +2768,9 @@ async def test_schema_object_passes_through_unchanged_with_extensions_intact() -
 #: imported, the discipline every constant at the top of this module follows.
 _DENIED_HANDSHAKE_CLOSE_CODE = 1000
 
-#: Every ``META`` key the Host projection is allowed to produce, and the only ones
-#: ``HttpRequest.get_host`` / ``get_port`` / ``_get_raw_host`` read. RE-TYPED rather
-#: than derived from ``consumers.py::_HOST_META_KEYS_BY_HEADER``, so a projection
-#: that started collecting a fifth key fails a test instead of widening the
-#: expectation along with itself.
+#: The ``META`` keys ``HttpRequest._get_raw_host`` and ``get_port`` read for a request
+#: carrying no ``X-Forwarded-Port``: the slice of Django's adapter output the
+#: key-for-key row compares.
 _HOST_META_KEYS = frozenset(
     {
         "HTTP_HOST",
@@ -2781,6 +2779,12 @@ _HOST_META_KEYS = frozenset(
         "SERVER_PORT",
     },
 )
+
+#: Every header the Host request may carry, in ``HttpRequest.headers`` spelling.
+#: RE-TYPED rather than derived from ``consumers.py::_HOST_HEADER_NAMES``, so a filter
+#: that started passing a third header fails a test instead of widening the
+#: expectation along with itself.
+_HOST_HEADERS = frozenset({"Host", "X-Forwarded-Host"})
 
 #: A ``Host`` whose bytes are decodable as Latin-1 and NOT as UTF-8: ``0xe9`` alone
 #: is a valid Latin-1 ``e-acute`` and an invalid UTF-8 sequence. That asymmetry is
@@ -2841,11 +2845,11 @@ def _handshake_scope(
 
 
 def _http_scope_of(handshake: WebSocketScope) -> dict[str, object]:
-    """``handshake`` as the HTTP scope ``ASGIRequest.__init__`` demands.
+    """The WHOLE ``handshake`` as the HTTP scope ``ASGIRequest.__init__`` demands.
 
-    ``ASGIRequest.__init__`` reads ``method``, ``path``, ``query_string`` and ``type``;
-    ``_host_validation_request`` reads none of them, which is the asymmetry spec-046
-    Decision 19 cites for projecting into a plain ``HttpRequest`` instead. The
+    Every header, the query string and the client stay in, which is what separates
+    the oracle's input from the production one: ``_host_validation_request`` hands the
+    adapter a fresh scope holding only the Host headers and ``server``. The
     handshake's ``"ws"`` scheme becomes ``"http"``, the scheme an HTTP scope carries.
     """
     return {
@@ -2860,20 +2864,17 @@ def _django_asgi_host_meta(
     headers: Iterable[tuple[bytes, bytes]],
     server: tuple[str, int] | None = None,
 ) -> dict[str, object]:
-    """Ask DJANGO's own ASGI adapter what ``META`` this handshake produces.
+    """Ask DJANGO's own ASGI adapter what Host ``META`` the WHOLE handshake produces.
 
     The ``META`` oracle, standing beside ``_django_http_host_verdict``'s *verdict*
-    oracle: ``django/core/handlers/asgi.py::ASGIRequest.__init__`` is the code
-    ``consumers.py::_host_validation_request`` promises to reproduce "item by item",
-    so the honest assertion for each item is equality against that constructor's own
-    output for the same bytes - never a hand-typed table, which would agree with a
-    projection that had quietly reinvented header casing, duplicate reduction, the
-    transport codec, or Django's no-server literals.
+    oracle. ``consumers.py::_host_validation_request`` builds the same adapter over a
+    fresh scope it filters down to the Host headers and ``server``; this one builds it
+    over everything the handshake carries. The two agree on these keys only if the
+    filter keeps every Host input the adapter would read from the same bytes, so
+    the comparison proves the package's half, never the adapter against itself.
 
-    Narrowed to ``_HOST_META_KEYS`` because Django's adapter also projects the
-    request line, the cookie header, ``REMOTE_ADDR`` and every other header - none of
-    which participates in the Host decision, and none of which this boundary has any
-    business carrying.
+    Narrowed to ``_HOST_META_KEYS`` because the unfiltered adapter also projects the
+    request line, the cookie header, ``REMOTE_ADDR`` and every other header.
     """
     meta: dict[str, object] = ASGIRequest(
         _http_scope_of(_handshake_scope(headers, server)),
@@ -2964,55 +2965,93 @@ async def _ws_handshake(
             None,
             id="only-headers-that-do-not-participate",
         ),
+        pytest.param(
+            [
+                (b"x-forwarded-port", b"abc"),
+                (b"x-forwarded-proto", b"https"),
+                (b"x_forwarded_host", b"evil.example"),
+            ],
+            ("srv.example", 8000),
+            id="forwarded-port-proto-and-underscore-spelling",
+        ),
     ],
 )
 def test_the_host_projection_matches_djangos_asgi_adapter_key_for_key(
     headers: list[tuple[bytes, bytes]],
     server: tuple[str, int] | None,
 ) -> None:
-    """Each projection item, its own row.
+    """Each input the Host request keeps, its own row.
 
-    ``consumers.py::_host_validation_request`` promises to reproduce
-    ``ASGIRequest.__init__`` item by item, and the items are separable, so they get
-    separable rows. Two items sharing one row, or the no-``server`` fallback pinned
-    by nothing, is the shape the weakly-pinned rule exists to refuse.
+    ``consumers.py::_host_validation_request`` hands Django's adapter a filtered
+    copy of the handshake; ``_django_asgi_host_meta`` hands it the whole handshake.
+    Equality on the Host keys proves the filter loses nothing, one input per param:
 
-    One param per item, each asserted against Django's OWN constructor rather than a
-    typed-out expectation:
+    - ``odd-cased-header-name`` - the case fold on the header name; without it an
+      odd-cased ``Host`` never reaches the adapter.
+    - ``duplicate-host-headers`` - every occurrence kept, in order, so the adapter's
+      comma-join sees both and ambiguity fails closed.
+    - ``forwarded-host-only`` - ``x-forwarded-host`` in the allowlist. Whether it WINS
+      stays ``USE_X_FORWARDED_HOST``'s decision, made inside Django.
+    - ``latin-1-only-host-bytes`` - the value passed as bytes, untouched.
+    - ``no-host-and-no-server`` / ``server-only`` / ``host-and-server`` - the
+      ``scope["server"]`` passthrough, including its absence.
 
-    - ``odd-cased-header-name`` - the ``.lower()`` on the decoded name. ASGI says
-      names arrive lowercase; Django's adapter normalizes anyway, so this does too,
-      and dropping the normalization loses the header entirely.
-    - ``duplicate-host-headers`` - the comma-join. Two values become ``"a,b"``, which
-      is not a host, so ambiguity fails closed instead of one value being picked.
-    - ``forwarded-host-only`` - the ``x-forwarded-host`` entry in the key map.
-      Projected unconditionally; whether it WINS stays ``USE_X_FORWARDED_HOST``'s
-      decision, made inside Django.
-    - ``latin-1-only-host-bytes`` - the transport codec. ``0xe9`` decodes under
-      Latin-1 and raises under UTF-8, so this is the one input that can tell them
-      apart.
-    - ``no-host-and-no-server`` - the ``"unknown"`` / ``"0"`` fallback, whose value is
-      Django's literal and not the package's invention. This param is what makes that
-      arm *consulted* rather than merely executed.
-    - ``server-only`` / ``host-and-server`` - the ``scope["server"]`` arm, including
-      the ``str()`` on the port.
-
-    The subset assertion is the other half of the "item by item" promise, in the
-    negative direction: the projection must produce NOTHING beyond the four keys
-    ``get_host()`` reads, so a later edit that "completes" it with
-    ``HTTP_X_FORWARDED_PORT`` or the ``SECURE_PROXY_SSL_HEADER`` header - both
-    verdict-neutral whenever a host header is present, see
-    ``consumers.py::_host_validation_request`` for the hostless case - fails here
-    rather than silently widening a security boundary's input surface.
+    The headers assertion is the negative direction: the request carries no header
+    beyond ``Host`` / ``X-Forwarded-Host``, so a filter that also let
+    ``X-Forwarded-Port``, the ``SECURE_PROXY_SSL_HEADER`` header or an underscore
+    spelling through fails here rather than silently widening a security boundary's
+    input surface.
 
     WebSocket Host handshake is not the HTTP ``ALLOWED_HOSTS`` boundary. Live HTTP
     sibling: ``examples/fakeshop/test_query/test_transport_api.py``
     (``test_a_hostile_host_header_is_rejected_before_the_schema_runs``).
     """
-    projected = consumers_module._host_validation_request(_handshake_scope(headers, server)).META
+    request = consumers_module._host_validation_request(_handshake_scope(headers, server))
+    meta: dict[str, object] = request.META
+    projected = {key: value for key, value in meta.items() if key in _HOST_META_KEYS}
 
-    assert set(projected) <= _HOST_META_KEYS, projected
+    assert set(request.headers) <= _HOST_HEADERS, dict(request.headers)
     assert projected == _django_asgi_host_meta(headers, server)
+    assert request.scheme == "http"
+
+
+@pytest.mark.parametrize(
+    ("extra_headers", "query_string"),
+    [
+        pytest.param(
+            [(b"content-type", b"text/plain; charset*=nope''x")],
+            b"",
+            id="rfc-2231-content-type",
+        ),
+        pytest.param([(b"content-type", b"a" * 10_001)], b"", id="overlong-content-type"),
+        pytest.param([], b"\xff", id="non-utf-8-query-string"),
+    ],
+)
+def test_client_controlled_handshake_fields_never_reach_djangos_adapter(
+    extra_headers: list[tuple[bytes, bytes]],
+    query_string: bytes,
+) -> None:
+    """Fields Django's adapter parses eagerly stay out of the Host request.
+
+    ``ASGIRequest.__init__`` parses ``Content-Type`` and decodes ``query_string`` as
+    UTF-8 when it is built, and a crafted value raises ``BadRequest``, ``ValueError``
+    or ``UnicodeDecodeError`` depending on the Django release. The validator turns
+    only ``DisallowedHost`` into a denial, so any of those reaching the adapter would
+    escape the Host boundary as a server error. Each row carries an allowed ``Host``
+    and must still get Django's verdict for it, from a request holding nothing else.
+
+    WebSocket Host handshake is not the HTTP ``ALLOWED_HOSTS`` boundary. Live HTTP
+    sibling: ``examples/fakeshop/test_query/test_transport_api.py``
+    (``test_a_hostile_host_header_is_rejected_before_the_schema_runs``).
+    """
+    scope = _handshake_scope([(b"host", b"testserver"), *extra_headers])
+    scope["query_string"] = query_string
+
+    request = consumers_module._host_validation_request(scope)
+
+    assert request.get_host() == "testserver"
+    assert set(request.headers) == {"Host"}
+    assert request.META["QUERY_STRING"] == ""
 
 
 @pytest.mark.parametrize(
@@ -3262,8 +3301,8 @@ async def test_an_odd_cased_host_header_still_reaches_the_boundary() -> None:
     and one row cannot fail for two reasons and still say which.
 
     ASGI specifies lowercase header names, and Django's own adapter normalizes
-    anyway. Dropping the normalization here does not raise or mismatch - the header
-    simply never matches the key map, the handshake falls through to the
+    anyway. Dropping the case fold here does not raise or mismatch - the header
+    simply never passes the Host header filter, the handshake falls through to the
     ``"unknown"`` reconstruction, and a perfectly legitimate client is refused. So
     the assertion is that this handshake CONNECTS.
 
@@ -3434,8 +3473,8 @@ async def test_with_no_host_header_the_scope_server_supplies_djangos_fallback() 
     """``scope["server"]`` is Django's normal no-host-header fallback.
 
     ``_get_raw_host``'s third option reconstructs the host from ``SERVER_NAME`` /
-    ``SERVER_PORT``, so the projection supplies them from the ASGI ``server`` key
-    exactly as Django's request adapter does - including its ``"unknown"`` / ``"0"``
+    ``SERVER_PORT``, so the Host request hands the ASGI ``server`` key to Django's
+    request adapter, which supplies them - including its ``"unknown"`` / ``"0"``
     default, which is what every other row in this module exercises by carrying no
     ``server`` at all. Without this the boundary would raise ``KeyError`` on a
     handshake that omits ``Host``, and an unexpected exception is deliberately NOT
@@ -3511,7 +3550,7 @@ async def test_a_non_conformant_header_shape_propagates_instead_of_denying() -> 
     The row above injects the failure; this one is the naturally occurring shape, and
     the two fail independently. ASGI requires ``scope["headers"]`` to be a sequence
     of ``(bytes, bytes)`` pairs, so a server that hands over ``str`` names is
-    non-conformant - and the projection's ``raw_name.decode(...)`` raises
+    non-conformant - and the Host header filter's ``name.decode(...)`` raises
     ``AttributeError`` on it from inside the real production call, no patch involved.
 
     That must surface, not deny. Widening the ``except DisallowedHost`` to

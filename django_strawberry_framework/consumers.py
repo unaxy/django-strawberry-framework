@@ -300,7 +300,7 @@ message loop - which is why the containment is here.
 
 Importing this module is ``channels``-free, which is what lets ``routers.py``
 import it above its own guard: the module level reaches only for the standard
-library, Django's own ``HttpRequest`` / ``DisallowedHost`` (a HARD dependency, and
+library, Django's own ``ASGIRequest`` / ``DisallowedHost`` (a HARD dependency, and
 the whole point of the Host boundary below), this package's logger,
 ``exceptions.ConfigurationError``, the truthful readers in ``utils/truth.py`` and
 ``utils/_narrowing.py``, the error-policy masking helpers from
@@ -339,14 +339,14 @@ was no other owner for the question: a handshake carrying an allowed ``Origin`` 
 a hostile ``Host`` connected.
 
 It is a boundary that **calls Django** rather than a second implementation of one.
-``_host_validation_request`` projects the handshake's Host-related metadata into a
-minimal ``HttpRequest`` and the validator calls the public
-``HttpRequest.get_host()``; syntax checking, port removal, IPv4 / IPv6 handling,
-trailing-dot behavior, ``ALLOWED_HOSTS`` matching, wildcards and the
-``DEBUG``-with-empty-``ALLOWED_HOSTS`` localhost defaults all stay exclusively
-Django's. The package parses and matches no hostnames, adds no setting, and leaves
-Channels' validator untouched - WebSocket simply follows the same Django
-configuration HTTP already follows.
+``_host_validation_request`` builds Django's own ``ASGIRequest`` over the
+handshake's ``Host`` / ``X-Forwarded-Host`` headers and server address, and the
+validator calls the public ``HttpRequest.get_host()``; syntax checking, port
+removal, IPv4 / IPv6 handling, trailing-dot behavior, ``ALLOWED_HOSTS`` matching,
+wildcards and the ``DEBUG``-with-empty-``ALLOWED_HOSTS`` localhost defaults all
+stay exclusively Django's. The package parses and matches no hostnames, adds no
+setting, and leaves Channels' validator untouched - WebSocket simply follows the
+same Django configuration HTTP already follows.
 
 Host and Origin stay **two separate checks**, in that order: Host answers which
 server authority the client addressed, Origin answers which browser origin
@@ -379,10 +379,11 @@ import contextlib
 import logging
 import math
 import time
+from io import BytesIO
 from typing import TYPE_CHECKING, TypeVar, get_origin
 
 from django.core.exceptions import DisallowedHost
-from django.http import HttpRequest
+from django.core.handlers.asgi import ASGIRequest
 from typing_extensions import override
 
 from . import logger
@@ -1845,12 +1846,12 @@ def build_revalidating_consumer_class(
 # consumer exists, and knows nothing about GraphQL, sessions or revalidation.
 # ---------------------------------------------------------------------------
 
-#: The ASGI header names that participate in Django's Host decision, mapped to the
-#: ``META`` keys ``HttpRequest._get_raw_host`` reads them under. Both are projected
-#: unconditionally; which one WINS is ``USE_X_FORWARDED_HOST``'s decision, made by
-#: Django inside ``_get_raw_host`` - never by this projection - which is exactly
-#: what makes the WebSocket answer follow the HTTP one for free.
-_HOST_META_KEYS_BY_HEADER = {"host": "HTTP_HOST", "x-forwarded-host": "HTTP_X_FORWARDED_HOST"}
+#: The handshake headers Django's Host decision reads: ``HttpRequest._get_raw_host``
+#: consults ``X-Forwarded-Host`` (under ``USE_X_FORWARDED_HOST``) and ``Host``. Matched
+#: on the case-folded header name, never on the ``META`` key Django derives from it: an
+#: adapter that maps ``x_forwarded_host`` to that key too (Django 6.0.0's has no
+#: underscore skip) never receives the underscore spelling.
+_HOST_HEADER_NAMES = frozenset({"host", "x-forwarded-host"})
 
 #: The logger Django's HTTP handler reports a ``DisallowedHost`` on
 #: (``django/core/handlers/exception.py::response_for_exception`` names it
@@ -1860,69 +1861,43 @@ _HOST_META_KEYS_BY_HEADER = {"host": "HTTP_HOST", "x-forwarded-host": "HTTP_X_FO
 _DISALLOWED_HOST_LOGGER = logging.getLogger("django.security.DisallowedHost")
 
 
-def _host_validation_request(scope: WebSocketScope) -> HttpRequest:
-    """Project one handshake scope's Host metadata into a minimal Django request.
+def _host_validation_request(scope: WebSocketScope) -> ASGIRequest:
+    """Django's own ASGI request over the handshake's Host inputs, and nothing else.
 
-    The whole package-owned half of the Host boundary: everything after this is
-    ``HttpRequest.get_host()``. The projection reproduces
-    ``django/core/handlers/asgi.py::ASGIRequest.__init__``'s treatment of the
-    headers it covers, item by item, so that a WebSocket handshake and an HTTP
-    request carrying the same bytes get the same verdict:
+    ``ASGIRequest`` is the request Django's ASGI handler builds for every HTTP
+    request, so the header-to-``META`` mapping ``get_host()`` reads is HTTP's own:
+    name casing, the comma-join that makes two ``Host`` headers an invalid host, the
+    Latin-1 codec, and the ``"unknown"`` / ``"0"`` pair a scope without ``server``
+    reconstructs to.
 
-    - **casing is normalized, not trusted.** ASGI says header names arrive as
-      lowercase bytes; Django's own adapter still calls ``.upper()`` rather than
-      relying on it, and so does this (via ``.lower()`` on the decoded name).
-    - **duplicates are comma-joined**, the same reduction Django's adapter applies
-      (#"join(value) for name"). That is the load-bearing choice for an ambiguous
-      handshake: two ``Host`` headers become ``"a,b"``, which is not a valid host,
-      so ``get_host()`` refuses it instead of one of the two being silently picked.
-    - **header bytes are decoded Latin-1**, the Django/ASGI transport convention
-      that Django's adapter and Channels' ``OriginValidator`` both use.
-    - **``scope["server"]`` supplies ``SERVER_NAME`` / ``SERVER_PORT``**, with
-      Django's own ``"unknown"`` / ``"0"`` fallback when the scope carries no
-      server, because that pair is what ``_get_raw_host`` reconstructs the host
-      from when no host header is present at all.
+    The adapter gets a fresh scope, never the handshake's. Its constructor parses
+    client-controlled fields eagerly - ``Content-Type`` (``BadRequest`` or
+    ``ValueError``, by Django release) and a non-UTF-8 ``query_string``
+    (``UnicodeDecodeError``) - and only ``DisallowedHost`` may become a denial. The
+    fresh scope carries every ``Host`` / ``X-Forwarded-Host`` header in order and
+    ``scope["server"]``; ``method`` and ``path`` are there because the constructor
+    reads them, and ``get_host()`` reads neither. No ``scheme``: the adapter then
+    answers ``"http"``, and ``is_secure()`` is ``False`` for a ``ws`` or ``wss``
+    scope as well, so a hostless handshake's reconstructed port is unchanged.
 
-    A minimal ``HttpRequest`` rather than an ``ASGIRequest`` (Decision 19's
-    rejected alternative): ``ASGIRequest.__init__`` expects an HTTP scope - method,
-    path, query string, a body file - and does work this question does not need.
-    What ``get_host()`` reads is a handful of ``META`` keys, so those are what get
-    projected.
-
-    Two ``META`` keys are deliberately NOT projected:
-
-    - ``HTTP_X_FORWARDED_PORT`` (``USE_X_FORWARDED_PORT``), which
-      ``HttpRequest.get_port`` consults; and
-    - the header named by ``SECURE_PROXY_SSL_HEADER``, which ``HttpRequest.scheme``
-      consults and ``is_secure()`` answers from.
-
-    Both feed **only** the no-host-header branch of ``_get_raw_host``, and there
-    they decide one thing: whether the reconstructed host gets a ``":port"`` suffix.
-    So a handshake carrying a ``Host`` or ``X-Forwarded-Host`` header gets the
-    verdict HTTP would give it. A handshake carrying neither is validated against
-    the server's own name, and there the suffix can still move the verdict: a
-    malformed ``X-Forwarded-Port`` (``abc``) under ``USE_X_FORWARDED_PORT`` makes
-    ``example.com:abc``, which ``get_host()`` refuses where this projection allows
-    ``example.com``, and a ``SERVER_NAME`` ending in ``:<digits>`` can flip either
-    way. The authority checked is the server's own in every such case, so no
-    client-chosen host gets through; projecting the two keys (plus the scope's
-    ``scheme``) would buy agreement with HTTP on a hostless handshake at the cost of
-    a wider hand-built ``META``.
+    ``X-Forwarded-Port`` and the ``SECURE_PROXY_SSL_HEADER`` header stay out. They
+    move only a hostless handshake's reconstructed port, and carrying them would let a
+    client-supplied port admit a handshake the server's own address fails (a
+    ``scope["server"]`` port of ``None``).
     """
-    request = HttpRequest()
-    collected: dict[str, list[str]] = {}
-    for raw_name, raw_value in scope.get("headers", ()):
-        meta_key = _HOST_META_KEYS_BY_HEADER.get(raw_name.decode("latin1").lower())
-        if meta_key is not None:
-            collected.setdefault(meta_key, []).append(raw_value.decode("latin1"))
-    request.META.update({key: ",".join(values) for key, values in collected.items()})
-    if server := scope.get("server"):
-        request.META["SERVER_NAME"] = server[0]
-        request.META["SERVER_PORT"] = str(server[1])
-    else:
-        request.META["SERVER_NAME"] = "unknown"
-        request.META["SERVER_PORT"] = "0"
-    return request
+    return ASGIRequest(
+        {
+            "method": "GET",
+            "path": "/",
+            "headers": [
+                (name, value)
+                for name, value in scope.get("headers", ())
+                if name.decode("latin1").lower() in _HOST_HEADER_NAMES
+            ],
+            "server": scope.get("server"),
+        },
+        BytesIO(),
+    )
 
 
 class DjangoWebSocketHostValidator:

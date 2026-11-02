@@ -478,7 +478,6 @@
 "tests/test_consumer_base_check.py::test_base_whose_adapter_lacks_close_is_refused" = { reportArgumentType = 1 }
 "tests/test_consumer_base_check.py::test_base_with_every_hook_builds_the_consumer" = { reportArgumentType = 1 }
 "tests/test_consumers.py::test_host_validation_absent_headers_and_server_uses_defaults" = { reportArgumentType = 1 }
-"tests/test_consumers.py::test_host_validation_server_absent_vs_null" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::_HostileStrawberryResult.errors" = { reportIncompatibleVariableOverride = 1 }
 "tests/test_error_policy.py::_SneakyError.original_error" = { reportIncompatibleVariableOverride = 1 }
 "tests/test_error_policy.py::test_a_generator_or_iterator_error_list_is_masked_preserving_data" = { reportArgumentType = 1 }
