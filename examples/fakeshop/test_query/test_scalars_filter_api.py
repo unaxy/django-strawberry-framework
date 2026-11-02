@@ -2119,3 +2119,28 @@ def test_a_filter_over_the_json_column_compares_the_kind_its_form_cleans(
         {"allScalarSpecimens": [{"label": label} for label in labels]},
         variables={"filter": payload_filter},
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("value", "labels"),
+    [pytest.param({"k": 1}, ["object"], id="object"), pytest.param([1, 2], ["array"], id="array")],
+)
+def test_a_pass_through_filter_on_a_json_key_compares_a_structured_value(
+    value: object,
+    labels: list[str],
+) -> None:
+    """A ``JSON`` leaf takes an object or an array, compared whole against the key's value.
+
+    The object binds under the filter's one form-data key, never refused as a malformed
+    operator bag. ``array`` is a deliberate control: a list never reached that refusal.
+    """
+    _seed_specimen("object", payload={"n": {"k": 1}})
+    _seed_specimen("other-object", payload={"n": {"k": 2}})
+    _seed_specimen("array", payload={"n": [1, 2]})
+
+    _assert_graphql_data(
+        _BY_FILTER,
+        {"allScalarSpecimens": [{"label": label} for label in labels]},
+        variables={"filter": {"payloadAnyN": {"exact": value}}},
+    )

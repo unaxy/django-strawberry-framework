@@ -1,9 +1,11 @@
 """Consumer filters over a JSON column publish and compare the kind their own form cleans.
 
 Rung 3: the subject is consumer filter classes no fakeshop app would ship (an integer-cleaning
-``Filter`` and its CSV ``in``, a ``method=`` filter), declared over ``ScalarSpecimen.payload``
-and its key paths. The shipped filter classes over the same column are declared on fakeshop's
-``ScalarSpecimenFilter`` and live in ``test_scalars_filter_api.py``. All requests go over HTTP.
+``Filter`` and its CSV ``in``, ``method=`` filters, one cleaning a JSON document, a form field
+validating a date and cleaning its ISO text, a ``TypedMultipleChoiceFilter`` coercing to a
+``tuple``), declared over ``ScalarSpecimen.payload`` and its key paths. The shipped filter
+classes over the same column are declared on fakeshop's ``ScalarSpecimenFilter`` and live in
+``test_scalars_filter_api.py``. All requests go over HTTP.
 """
 
 from collections.abc import Sequence
@@ -18,12 +20,13 @@ from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
 from django.utils import timezone
-from django_filters import BaseInFilter, Filter, NumberFilter
+from django_filters import BaseInFilter, Filter, NumberFilter, TypedMultipleChoiceFilter
 from graphql import GraphQLInputObjectType, get_named_type
 from graphql_client import JSONObject, graphql_payload, json_object
 from strawberry import relay
 from strawberry.types import Info
 from strawberry.types.base import StrawberryObjectDefinition
+from typing_extensions import override
 
 from django_strawberry_framework import (
     DjangoConnection,
@@ -57,6 +60,33 @@ class IntsInFilter(BaseInFilter, IntFilter):
     """A consumer CSV filter whose form cleans each member as an integer."""
 
 
+class JSONFormFilter(Filter):
+    """A consumer filter whose form cleans a JSON document."""
+
+    field_class = forms.JSONField
+
+
+class IsoDateField(forms.DateField):
+    """A consumer form field validating a date and cleaning it to its ISO text."""
+
+    @override
+    def clean(self, value: str | None) -> str | None:
+        day = self.to_python(value)
+        self.validate(day)
+        self.run_validators(day)
+        return None if day is None else day.isoformat()
+
+
+class IsoDateFilter(Filter):
+    """A consumer filter comparing a date as the ISO text its form cleans."""
+
+    field_class = IsoDateField
+
+
+class IsoDatesInFilter(BaseInFilter, IsoDateFilter):
+    """A consumer CSV filter cleaning each member as the ISO text of a date."""
+
+
 @wraps(DjangoGraphQLView.as_view())
 def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     schema = _CURRENT["schema"]
@@ -74,6 +104,14 @@ def _holder() -> tuple[DjangoSchema, type[DjangoType]]:
         int_n = IntFilter(field_name="payload__n")
         ints_n = IntsInFilter(field_name="payload__n", lookup_expr="in")
         own_number = NumberFilter(field_name="payload", method="own_filter")
+        own_json = JSONFormFilter(method="own_json_filter")
+        iso_day = IsoDateFilter(field_name="payload__day")
+        iso_days = IsoDatesInFilter(field_name="payload__day", lookup_expr="in")
+        letters = TypedMultipleChoiceFilter(
+            field_name="payload__letters",
+            coerce=tuple,
+            choices=[("abc", "letters")],
+        )
 
         class Meta:
             model = models.ScalarSpecimen
@@ -86,6 +124,14 @@ def _holder() -> tuple[DjangoSchema, type[DjangoType]]:
             _value: object,
         ) -> QuerySet[models.ScalarSpecimen]:
             return queryset
+
+        def own_json_filter(
+            self,
+            queryset: QuerySet[models.ScalarSpecimen],
+            _name: str,
+            value: object,
+        ) -> QuerySet[models.ScalarSpecimen]:
+            return queryset.filter(payload__n=value)
 
     class JSONPayloadSpecimen(DjangoType):
         class Meta:
@@ -165,7 +211,7 @@ def _post(schema: DjangoSchema, where: JSONObject) -> JSONObject:
 
 
 def _seed() -> dict[str, models.ScalarSpecimen]:
-    """A number key, the same key as text, and another number."""
+    """A number key, the same key as text, another number and an object; a day and letters."""
     moment = timezone.now()
     return {
         label: models.ScalarSpecimen.objects.create(
@@ -178,7 +224,12 @@ def _seed() -> dict[str, models.ScalarSpecimen]:
             external_id=f"00000000-0000-0000-0000-00000000000{index}",
         )
         for index, (label, payload) in enumerate(
-            (("number", {"n": 5}), ("text", {"n": "5"}), ("other", {"n": 6})),
+            (
+                ("number", {"n": 5, "day": "2026-11-01", "letters": ["a", "b", "c"]}),
+                ("text", {"n": "5", "day": "2026-11-02", "letters": ["x"]}),
+                ("other", {"n": 6}),
+                ("object", {"n": {"k": 1}}),
+            ),
             start=1,
         )
     }
@@ -203,6 +254,10 @@ def _expected(
         pytest.param(("int_n", "exact"), "Int", id="consumer-integer-on-a-key"),
         pytest.param(("ints_n", "in_"), "Int", id="consumer-integer-csv-member"),
         pytest.param(("own_number", "exact"), "Decimal", id="decimal-method"),
+        pytest.param(("own_json", "exact"), "JSON", id="json-document-method"),
+        pytest.param(("iso_day", "exact"), "Date", id="date-validated-iso-text"),
+        pytest.param(("iso_days", "in_"), "Date", id="date-validated-iso-text-csv-member"),
+        pytest.param(("letters", "exact"), "String", id="tuple-coerced-choice"),
     ],
 )
 def test_a_consumer_json_filter_publishes_the_scalar_its_own_form_cleans(
@@ -212,7 +267,11 @@ def test_a_consumer_json_filter_publishes_the_scalar_its_own_form_cleans(
     """The JSON column converts nothing, so a consumer form's kind is the published one.
 
     A consumer ``IntegerField`` form publishes ``Int`` (each CSV member too), and a ``method=``
-    filter publishes its ``NumberFilter``'s ``Decimal``: the method owns what its value means.
+    filter publishes its form's scalar (a ``NumberFilter``'s ``Decimal``, a ``forms.JSONField``'s
+    ``JSON``): the method owns what its value means. A ``DateField`` subclass publishes ``Date``
+    (each CSV member too: django-filter's CSV field cleans each through it) and a
+    ``TypedMultipleChoiceFilter`` its choices' ``String``; neither is refused, since one cleans
+    ISO text and the other a ``tuple``, both kinds ``json.dumps`` encodes.
     """
     schema, _row_type = _holder()
     assert _leaf_type_name(schema, python_path) == type_name
@@ -224,6 +283,15 @@ def test_a_consumer_json_filter_publishes_the_scalar_its_own_form_cleans(
     [
         pytest.param(("int_n", "exact"), 5, ("number",), id="integer-matches-the-number"),
         pytest.param(("ints_n", "in_"), [5, 6], ("number", "other"), id="integer-csv"),
+        pytest.param(("own_json", "exact"), {"k": 1}, ("object",), id="json-document-method"),
+        pytest.param(("iso_day", "exact"), "2026-11-01", ("number",), id="iso-text-of-a-date"),
+        pytest.param(
+            ("iso_days", "in_"),
+            ["2026-11-01", "2026-11-02"],
+            ("number", "text"),
+            id="iso-text-of-each-date",
+        ),
+        pytest.param(("letters", "exact"), ["abc"], ("number",), id="tuple-as-a-json-array"),
     ],
 )
 def test_a_consumer_json_filter_compares_the_kind_its_form_cleans(
@@ -231,10 +299,13 @@ def test_a_consumer_json_filter_compares_the_kind_its_form_cleans(
     value: object,
     labels: tuple[str, ...],
 ) -> None:
-    """The cleaned integer ``5`` matches the JSON number, never the text ``"5"``.
+    """Each value reaches the column as the kind its form cleans.
 
-    Deliberate controls: each matched the same rows before the rule, which a ``JSON`` leaf
-    accepting ``5`` reached as well; the rule's proof is the published ``Int``.
+    The cleaned integer ``5`` matches the JSON number, never the text ``"5"``: those two rows
+    are deliberate controls, matching the same rows before the rule, which a ``JSON`` leaf
+    accepting ``5`` reached as well; the rule's proof is the published ``Int``. The object binds
+    under the method filter's one form-data key, each date reaches the key as its ISO text, and
+    the coerced ``("a", "b", "c")`` is compared as the JSON array ``["a", "b", "c"]``.
     """
     rows = _seed()
     schema, row_type = _holder()

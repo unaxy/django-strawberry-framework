@@ -220,6 +220,7 @@ from .inputs import (
     filter_lookup_table,
     leaf_gate_path,
     normalize_input_value,
+    publishes_json_value,
 )
 
 # Python-attr tokens of the logical operator keys (``and_`` / ``or_`` / ``not_``),
@@ -4891,20 +4892,20 @@ class FilterSet(
     ) -> Mapping[str, object]:
         """Return the form-data keys and values one active lookup of a leaf writes.
 
-        The value's form-data shape is ``inputs.py::normalize_input_value``'s: a
-        range patch writes its declared axis keys for the bounds it carries
-        (none for a range naming no bound), any other value writes the logical
-        ``form_key``, and a dict other than the range patch raises
-        (``_reject_dict_form_value``). The actual bound consumer form reads those
-        current values under its own widget keys and prefix (``form``). A lookup
-        writing no key remains unnamed (``_named_leaf_filters``) and absent
+        The value's form-data shape is ``inputs.py::normalize_input_value``'s: a range patch writes
+        its declared axis keys for the bounds it carries (none for a range naming no bound), any
+        other value writes the logical ``form_key``, and a dict other than the range patch raises
+        (``_reject_dict_form_value``) unless the filter publishes a ``JSON`` value
+        (``inputs.py::publishes_json_value``), which takes an object as one value. The actual bound
+        consumer form reads those current values under its own widget keys and prefix (``form``). A
+        lookup writing no key remains unnamed (``_named_leaf_filters``) and absent
         (``_leaf_absent``).
         """
         normalized = normalize_input_value(filter_instance, value, field_name=form_key)
         if isinstance(normalized, _RangeFormPatch):
             # Range-filter patch: the keys its widget reads, for one lookup.
             return normalized
-        if isinstance(normalized, dict):
+        if is_dict(normalized) and not publishes_json_value(filter_instance, cls):
             cls._reject_dict_form_value(filter_instance, form_key, value)
         # An element-binding integer ``__in`` is range-coerced (and
         # empty-aware) by ``IntegerInFilter`` at filter time, not here
@@ -5002,11 +5003,12 @@ class FilterSet(
         close. Only range-kind filters legitimately consume a multi-key patch,
         and their arm always builds the typed patch, so only it merges.
 
-        No generated input annotation for a non-range filter accepts an object.
-        Programmatic mappings and ordinary consumer JSON arguments can still
-        supply one to the public apply pipeline, so both receive this refusal. The
-        filter is named by its declared class (``_leaf_declaration``), never an
-        expanded copy's runtime-built ``Projected<Class>``.
+        No generated input annotation for a non-range filter accepts an object but a ``JSON``
+        value's (``inputs.py::publishes_json_value``), which the caller binds whole under its one
+        form-data key instead. Programmatic mappings and ordinary consumer JSON arguments can still
+        supply one to the public apply pipeline, so both receive this refusal. The filter is named
+        by its declared class (``_leaf_declaration``), never an expanded copy's runtime-built
+        ``Projected<Class>``.
         """
         raise ConfigurationError(
             f"FilterSet {truth.qualname(cls)}: filter {form_key!r} received a dict "

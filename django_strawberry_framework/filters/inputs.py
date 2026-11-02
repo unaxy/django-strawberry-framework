@@ -41,6 +41,7 @@ from django_filters import (
     TypedChoiceFilter,
 )
 from django_filters import RangeFilter as _DjangoRangeFilter
+from django_filters.fields import BaseCSVField
 from django_filters.filters import BaseCSVFilter, QuerySetRequestMixin
 from strawberry import relay
 
@@ -545,24 +546,72 @@ _CLEANED_KINDS: Mapping[type[forms.Field], object] = MappingProxyType(
 )
 
 
+#: The form fields cleaning each value through their ``coerce`` (``_cleaned_kind``).
+_COERCING_FORM_FIELDS: tuple[type[forms.Field], ...] = (
+    forms.TypedChoiceField,
+    forms.TypedMultipleChoiceField,
+)
+
+#: The methods whose own definition changes what a form field cleans (``_keeps_cleaning_of``).
+_CLEANING_METHODS: tuple[str, ...] = ("to_python", "clean", "_coerce")
+
+
+def _keeps_cleaning_of(form_class: type[object], kind_class: type[object]) -> bool:
+    """Whether no class from ``form_class`` up to ``kind_class`` defines its own cleaning.
+
+    Read in each class's own namespace along the real MRO (``_CLEANING_METHODS``).
+    django-filter's ``BaseCSVField`` is passed over: its ``clean`` cleans each member through
+    the classes after it, so a member keeps the kind ``kind_class`` names, while a consumer
+    member class cleaning its own way is seen past it.
+    """
+    for klass in truth.mro(form_class):
+        if klass is kind_class:
+            return True
+        if klass is not BaseCSVField and any(
+            name in truth.class_dict(klass) for name in _CLEANING_METHODS
+        ):
+            return False
+    return True
+
+
 def _cleaned_kind(form_field: object) -> object | None:
     """Return the Python kind ``form_field`` cleans one value to, ``None`` when its class does not say.
 
     A ``TypedChoiceField`` / ``TypedMultipleChoiceField`` cleans each value through its
     ``coerce``: a class names the kind (``coerce=Decimal``), any other callable none. Every
     other field answers by its class's row in ``_CLEANED_KINDS``; a consumer field no row
-    covers names none.
+    covers names none. So does a subclass defining its own cleaning below the class that names
+    the kind (``_keeps_cleaning_of``): a ``DateField`` subclass whose ``clean`` returns the
+    ISO text of the date it validates cleans text.
     """
-    if truth.is_one_of(form_field, (forms.TypedChoiceField, forms.TypedMultipleChoiceField)):
+    form_class: type[object] = truth.class_of(form_field)
+    coercing: type[forms.Field] | None = next(
+        (base for base in _COERCING_FORM_FIELDS if truth.is_subclass(form_class, base)),
+        None,
+    )
+    entry: tuple[type[object], object] | None
+    if coercing is not None:
         coerce = read_attr(form_field, "coerce", None)
-        return coerce if truth.is_type(coerce) else None
-    entry = truth.mro_entry(_CLEANED_KINDS, truth.class_of(form_field))
-    return None if entry is None else entry[1]
+        entry = (coercing, coerce if truth.is_type(coerce) else None)
+    else:
+        entry = truth.mro_entry(_CLEANED_KINDS, form_class)
+    if entry is None or not _keeps_cleaning_of(form_class, entry[0]):
+        return None
+    return entry[1]
 
 
 #: The kinds ``json.JSONEncoder`` encodes without calling ``default`` (the stdlib ``json``
-#: module's conversion table; ``bool`` is an ``int``).
-_JSON_NATIVE_KINDS: tuple[type[object], ...] = (str, int, float)
+#: module's conversion table; ``bool`` is an ``int``, a ``tuple`` encodes as an array). Every
+#: other class reaches ``default``, which raises ``TypeError`` with no encoder.
+_JSON_NATIVE_KINDS: tuple[type[object], ...] = (
+    str,
+    int,
+    float,
+    list,
+    tuple,
+    dict,
+    type(None),
+)
 
 
 def _refuse_kind_json_cannot_encode(
@@ -578,10 +627,12 @@ def _refuse_kind_json_cannot_encode(
     ``lt`` / ``in``) hands it to ``JSONField.get_db_prep_value``, which encodes it with the
     column's ``encoder``; with none that is ``json.dumps``, so a ``Decimal``, ``date``,
     ``datetime``, ``time``, ``timedelta`` or ``UUID`` raises ``TypeError`` for every request
-    that sends a value. The kind is the one each form field cleans, read off its class
-    (``_cleaned_kind``), not the scalar it publishes (a ``DurationField`` publishes
-    ``String`` and cleans a ``timedelta``); a kind the class does not name (an arbitrary
-    ``coerce``, a consumer field) is not refused. A text
+    that sends a value, while a kind ``json.dumps`` encodes (``_JSON_NATIVE_KINDS``: a
+    ``coerce=tuple`` choice's ``tuple`` is an array) is never refused. The kind is the one
+    each form field cleans, read off its class (``_cleaned_kind``), not the scalar it
+    publishes (a ``DurationField`` publishes ``String`` and cleans a ``timedelta``); a kind
+    the class does not name (an arbitrary ``coerce``, a consumer field, a subclass
+    overriding how its class cleans) is not refused. A text
     lookup (a key's ``icontains``, ``has_key``) renders the value as text and never reaches
     the encoder, and a declared encoder is trusted. A ``method=`` filter or a consumer
     ``filter`` override (``filters/sets.py::_runs_shipped_filter``) owns what its value
@@ -965,13 +1016,28 @@ def _element_annotation(
     ``int``. To get a typed element on a method filter, back it with a model
     field (``field_name=``) or declare the input annotation explicitly.
     """
+    scalar = _element_scalar(filter_instance, model_field, filterset_cls)
+    if scalar is not None:
+        return scalar
+    type_name = _enum_prefix(owner_definition, filterset_cls)
+    return _choice_enum_from_filter(filter_instance, type_name, model_field, filterset_cls)
+
+
+def _element_scalar(
+    filter_instance: Filter,
+    model_field: ModelField | None,
+    filterset_cls: type[FilterSet],
+) -> object | None:
+    """Return the scalar ``_element_annotation`` publishes, ``None`` for a choice column's enum.
+
+    Builds nothing, so ``publishes_json_value`` asks it at request time.
+    """
     if truth.is_instance(filter_instance, TextPatternFilter):
         return str
     if array_element_field(model_field) is not None:
         raise _array_column_refusal(filter_instance, model_field, filterset_cls)
     if model_field is not None and getattr(model_field, "choices", None):
-        type_name = _enum_prefix(owner_definition, filterset_cls)
-        return _choice_enum_from_filter(filter_instance, type_name, model_field, filterset_cls)
+        return None
     if model_field is not None:
         return _scalar_from_model_field(model_field)
     form_field = _declared_form_field(filter_instance)
@@ -980,6 +1046,85 @@ def _element_annotation(
         if form_field is not None
         else _scalar_from_model_field(model_field)
     )
+
+
+def _catchall_element(
+    filter_instance: Filter,
+    model_field: ModelField | None,
+    filterset_cls: type[FilterSet],
+    element: Callable[[ModelField | None], object],
+) -> object:
+    """Type one value of a catch-all leaf: ``bool`` for a null test, else ``element`` of its field.
+
+    A ``method=`` filter is typed from its model column, else from the form field its class
+    builds; one whose ``field`` builds none on the unbound declaration raises (spec-027
+    Decision 4). ``isnull`` is a boolean predicate regardless of the column type, past a
+    transform too (``year__isnull``): the value field is irrelevant there. A ``method=``
+    filter's method applies no lookup of the filter's, so a form that cleans its own kind
+    types it, whatever the column (``NumberFilter(field_name="name", lookup_expr="isnull",
+    method=...)`` takes a number); one passing any value through keeps ``Boolean``. Any other
+    leaf's element is the field its form cleans a value of (``_form_cleaned_value_field``).
+    ``element`` is ``_element_annotation`` for the published input and ``_element_scalar``
+    for ``publishes_json_value``.
+    """
+    _refuse_method_without_form_field(filter_instance, filterset_cls)
+    if _filterset_lookup_operand(filterset_cls, filter_instance).null_test:
+        if read_attr(filter_instance, "method", None) is None or all(
+            _passes_value_through(field) for field in _form_value_fields(filter_instance)
+        ):
+            return bool
+        return element(None)
+    return element(_form_cleaned_value_field(filter_instance, model_field, filterset_cls))
+
+
+def publishes_json_value(filter_instance: Filter, filterset_cls: type[FilterSet]) -> bool:
+    """Whether one value of ``filter_instance`` is published as ``JSON``, so an object is a value.
+
+    Asks the arms of ``convert_filter_to_input_annotation`` that type one value through
+    ``_element_annotation`` (a bare ``TypedFilter`` and the catch-all), dispatched on the same
+    kind table, for the scalar alone (``_element_scalar``: no choice enum is built); every
+    other arm publishes no ``JSON`` value. ``filters/sets.py::FilterSet._leaf_form_data``
+    reads it: an object sent to such a leaf (a pass-through ``TypedFilter`` on a ``JSONField``
+    key, a ``method=`` filter whose form is a ``forms.JSONField``) is one JSON value, bound
+    under its one form-data key.
+    """
+    model_field = _filterset_value_field(filterset_cls, filter_instance)
+
+    def _no_json(_filter: Filter) -> object:
+        return None
+
+    def _typed(matched: Filter) -> object:
+        value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
+        return _element_scalar(matched, value_field, filterset_cls)
+
+    def _catchall(matched: Filter) -> object:
+        return _catchall_element(
+            matched,
+            model_field,
+            filterset_cls,
+            lambda field: _element_scalar(matched, field, filterset_cls),
+        )
+
+    published = convert_with_mro(
+        filter_instance,
+        isinstance_prechecks=_filter_input_prechecks(
+            _no_json,
+            _no_json,
+            _no_json,
+            _no_json,
+            _no_json,
+            _no_json,
+            _no_json,
+            _no_json,
+            _typed,
+            _no_json,
+            _no_json,
+            _catchall,
+        ),
+        scalar_registry={},
+        fallthrough_error_factory=_unexpected_filter_dispatch,
+    )
+    return truth.is_among(published, (strawberry.scalars.JSON,))
 
 
 # ---------------------------------------------------------------------------
@@ -1256,24 +1401,13 @@ def convert_filter_to_input_annotation(
         return _choice_enum_from_filter(matched, type_name, model_field, filterset_cls)
 
     def _catchall(matched: Filter) -> object:
-        # Catch-all scalar branch: a ``method=`` filter is typed from its model column, else
-        # from the form field its class builds; one whose ``field`` builds none on the
-        # unbound declaration raises (spec-027 Decision 4).
-        _refuse_method_without_form_field(matched, filterset_cls)
-        if _filterset_lookup_operand(filterset_cls, matched).null_test:
-            # ``isnull`` is a boolean predicate regardless of the column type, past a
-            # transform too (``year__isnull``): the value field is irrelevant here. A
-            # ``method=`` filter's method applies no lookup of the filter's, so a form that
-            # cleans its own kind types it, whatever the column
-            # (``NumberFilter(field_name="name", lookup_expr="isnull", method=...)`` takes a
-            # number); one passing any value through keeps ``Boolean``.
-            if read_attr(matched, "method", None) is None or all(
-                _passes_value_through(field) for field in _form_value_fields(matched)
-            ):
-                return bool
-            return _element_annotation(matched, None, owner_definition, filterset_cls)
-        value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
-        return _element_annotation(matched, value_field, owner_definition, filterset_cls)
+        # Catch-all scalar branch (``_catchall_element``).
+        return _catchall_element(
+            matched,
+            model_field,
+            filterset_cls,
+            lambda field: _element_annotation(matched, field, owner_definition, filterset_cls),
+        )
 
     def _one_key(handler: Callable[[Filter], object]) -> Callable[[Filter], object]:
         def _checked(matched: Filter) -> object:
@@ -1326,6 +1460,8 @@ def normalize_input_value(
       ``ChoiceFilter`` is ``IS NULL``). A GlobalID is kept in its base64
       wire form (not pre-decoded to a bare ``node_id``) so the bound filter
       can validate its ``type_name`` before decoding;
+    - a ``dict`` when the filter publishes a ``JSON`` value (``publishes_json_value``):
+      one JSON object, bound under the filter's one form-data key;
     - a ``list`` when ``django-filter`` consumes a list;
     - a ``_RangeFormPatch`` when the filter consumes the two form-data keys
       its range widget reads (``RangeFilter`` -> ``{<field>_0, <field>_1}``,

@@ -132,9 +132,11 @@ Progress: 0 done, 164 to do.
   `isnull` stays `Boolean`. A key named like a sibling column (`payload__flag`, `payload__price`) is a key, no longer
   typed by that column (`CharFilter(field_name="payload__price")` was `Decimal`, now `String`). A filter whose form
   cleans a `Decimal`, `date`, `datetime`, `time`, `timedelta` or `UUID` (read off the form field's class, so a
-  `DurationFilter` and a `TypedMultipleChoiceFilter(coerce=Decimal)` count) over a `JSONField` with no `encoder` raises
-  `ConfigurationError` at schema build where it built and raised `TypeError` on every request that sent a value; a
-  declared `encoder` is trusted. Under `filter_overrides={JSONField: {"filter_class": CharFilter}}` the generated leaf
+  `DurationFilter` and a `TypedMultipleChoiceFilter(coerce=Decimal)` count, while a subclass defining its own cleaning
+  and a `coerce=tuple` do not) over a `JSONField` with no `encoder` raises `ConfigurationError` at schema build where it
+  built and raised `TypeError` on every request that sent a value; a declared `encoder` is trusted. A leaf published as
+  `JSON` (a bare `Filter` / `TypedFilter`, a `forms.JSONField` `method=` filter) takes an object value, which was
+  refused as a malformed operator bag. Under `filter_overrides={JSONField: {"filter_class": CharFilter}}` the generated leaf
   and a package `ListFilter` / `RangeFilter` publish `String` (were `JSON`, cleaned to text). A `method=` filter with no
   column whose form is a `forms.JSONField` publishes `JSON` (was `String`). A `JSONField` subclass that overrides
   `get_prep_value` or `to_python` keeps the column's type, as does every column registered under a scalar other than
