@@ -153,7 +153,7 @@ def test_make_relation_resolver_forward_is_named_resolve_field() -> None:
     assert resolver(SimpleNamespace(category=sentinel), fake_info) is sentinel
 
 
-def test_b2_forward_fk_id_elision_returns_stub_without_accessing_relation() -> None:
+def test_forward_fk_id_elision_returns_stub_without_accessing_relation() -> None:
     """Forward resolver returns a target stub from ``<field>_id`` when elided."""
     ItemType = _parent_type(Item)
 
@@ -260,7 +260,7 @@ def test_fk_id_elision_stub_is_scoped_when_the_relation_was_not_planned() -> Non
     assert saved_pk(scoped) == saved_pk(category)
 
 
-def test_b2_forward_fk_id_elision_uses_registered_field_meta_attname() -> None:
+def test_forward_fk_id_elision_uses_registered_field_meta_attname() -> None:
     """Resolver FK-id elision reads attname from registered FieldMeta."""
     # The real ``Item`` type registers its own ``FieldMeta`` for ``category``.
     ItemType = _parent_type(Item, fields=("id", "category"))
@@ -286,7 +286,7 @@ def test_b2_forward_fk_id_elision_uses_registered_field_meta_attname() -> None:
     assert saved_pk(result) == 42
 
 
-def test_b2_forward_fk_id_elision_returns_none_for_null_fk() -> None:
+def test_forward_fk_id_elision_returns_none_for_null_fk() -> None:
     """Nullable FK ids still resolve to ``None`` instead of a stub."""
     ItemType = _parent_type(Item, "ItemType")
 
@@ -303,7 +303,7 @@ def test_b2_forward_fk_id_elision_returns_none_for_null_fk() -> None:
     assert resolver(fake_root, fake_info) is None
 
 
-def test_b2_fk_id_stub_returns_none_without_related_model() -> None:
+def test_fk_id_stub_returns_none_without_related_model() -> None:
     """Direct unit: incomplete metadata cannot build an FK-id stub."""
     field_meta = FieldMeta(
         name="category",
@@ -315,7 +315,7 @@ def test_b2_fk_id_stub_returns_none_without_related_model() -> None:
     assert _build_fk_id_stub(SimpleNamespace(category_id=42), field_meta) is None
 
 
-def test_b2_forward_fk_id_elision_does_not_leak_across_parent_types() -> None:
+def test_forward_fk_id_elision_does_not_leak_across_parent_types() -> None:
     """Elision for one parent type does not affect another type."""
     ItemType = _parent_type(Item, "ItemType")
 
@@ -335,7 +335,7 @@ def test_b2_forward_fk_id_elision_does_not_leak_across_parent_types() -> None:
     assert resolver(fake_root, fake_info) is sentinel
 
 
-def test_b2_forward_fk_id_elision_ignores_bare_field_name_key() -> None:
+def test_forward_fk_id_elision_ignores_bare_field_name_key() -> None:
     """Elision requires the full branch-sensitive resolver key."""
     ItemType = _parent_type(Item, "ItemType")
 
@@ -555,7 +555,7 @@ def test_runtime_path_from_info_strips_list_indexes_and_keeps_aliases() -> None:
     assert runtime_path_from_info(info) == ("allItems", "cat")
 
 
-def test_o1_make_relation_resolver_reverse_one_to_one_returns_none_on_doesnotexist() -> None:
+def test_make_relation_resolver_reverse_one_to_one_returns_none_on_doesnotexist() -> None:
     """Direct unit: reverse OneToOne resolver swallows DoesNotExist into None.
 
     Direct ``_make_relation_resolver`` call with a fabricated ``DoesNotExist``.
@@ -678,7 +678,7 @@ async def test_forward_resolver_async_planned_path_contains_unsaved_instance() -
     assert await pending is None
 
 
-def test_o1_reverse_one_to_one_propagates_plain_attribute_error() -> None:
+def test_reverse_one_to_one_propagates_plain_attribute_error() -> None:
     """Reverse OneToOne: a plain ``AttributeError`` is a BUG, not an absent row.
 
     The catch is exactly ``related_model.DoesNotExist`` - which Django's
@@ -1151,7 +1151,7 @@ def test_fk_id_stub_returns_unsafe_sentinel_when_attname_deferred() -> None:
     """Direct unit: ``_build_fk_id_stub`` signals unsafe without reading the column.
 
     Pins the loaded-check at the function boundary (mirrors
-    ``test_b2_fk_id_stub_returns_none_without_related_model``): a deferred FK
+    ``test_fk_id_stub_returns_none_without_related_model``): a deferred FK
     ``attname`` yields ``_FK_ELISION_UNSAFE`` and the deferred column is never read
     (spec-035 Decision 5).
     """

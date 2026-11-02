@@ -1345,14 +1345,15 @@ def test_no_comment_docstring_name_or_package_string_carries_a_provenance_phrase
     test asserts.
 
     Deliberate limits. Only those phrases are read; the wider history vocabulary
-    ("now", "no longer", "the fix", plan labels, version banners) needs judgment
-    site by site and is not gated here. Outside the package only string
-    statements are read: an error message, an assigned constant or a fixture
-    string in a test or script may quote a phrase. A statement built with ``+``
-    is not read (ruff B018 and basedpyright
+    ("now", "no longer", "the fix", version banners) needs judgment site by site and
+    is not gated here; the optimizer plan labels have their own row below. Outside
+    the package only string statements are read: an error message, an assigned
+    constant or a fixture string in a test or script may quote a phrase. A statement
+    built with ``+`` is not read (ruff B018 and basedpyright
     ``reportUnusedExpression`` refuse it), nor is a bytes statement, which is not
-    prose, nor is a t-string statement. A trailing comment is never joined to the full-line comment below it:
-    each is its own segment, so a phrase split across that pair is no match.
+    prose, nor is a t-string statement. A trailing comment is never joined to the
+    full-line comment below it: each is its own segment, so a phrase split across
+    that pair is no match.
     """
     corpus = _sweep_corpus()
     violations, read = _provenance_entries_in(corpus)
@@ -1787,6 +1788,214 @@ def test_the_release_pattern_widens_with_the_version() -> None:
         "2.1.12",
     ]
     assert [text for text in ("2.2.0", "3.0.0", "12.1.0") if pattern.search(text)] == []
+
+
+#: The optimizer plan labels: ``O[1-6]`` title spec-002's headings (the
+#: optimizer foundation), ``B[1-8]`` spec-004's (the optimizer beyond it) and
+#: ``G[1-3]`` spec-035's decisions (the robustness guards). Case-sensitive: a
+#: lowercase ``b1`` in prose is a seed value or a local, never a label.
+PLAN_LABEL_PATTERN = re.compile(r"(?<!\w)(?:B[1-8]|O[1-6]|G[1-3])(?!\w)")
+
+#: The same labels in a def or class name, read with its underscores as spaces.
+PLAN_LABEL_NAME_PATTERN = re.compile(r"(?<!\w)(?:B[1-8]|O[1-6]|G[1-3])(?!\w)", re.IGNORECASE)
+
+#: An inline code span closed on its line. It quotes a value (a seed row, a
+#: branch code, a computed genre key), so a token inside it is not a label,
+#: unless the span holds nothing but a label (``PLAN_LABEL_SPAN_PATTERN``):
+#: that is the label set in code type, and a value of that spelling is quoted
+#: as the literal it is (``"B1"``).
+CODE_SPAN_PATTERN = re.compile(r"(``?)([^`\n]+?)\1")
+
+#: A code span's content that is a bare label.
+PLAN_LABEL_SPAN_PATTERN = re.compile(r"(?:B[1-8]|O[1-6]|G[1-3])")
+
+#: A camel-case word boundary in a def or class name: a lowercase letter
+#: followed by an uppercase one (``TestB8``), or an uppercase letter followed by
+#: a lowercase one (``O2OField``, split before ``Field`` only, so ``O2O`` stays
+#: one word).
+CAMEL_BOUNDARY_PATTERN = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=\w)(?=[A-Z][a-z])")
+
+
+def _blank_value_span(span: re.Match[str]) -> str:
+    """Blank a code span quoting a value; keep one holding a bare plan label."""
+    if PLAN_LABEL_SPAN_PATTERN.fullmatch(span[2]):
+        return span[0]
+    return " " * len(span[0])
+
+
+def _plan_label_entries_in(
+    paths: Iterable[Path],
+    package_root: Path = PACKAGE_ROOT,
+) -> tuple[list[str], int]:
+    """Return one formatted violation per optimizer plan label, and the texts read.
+
+    The texts are ``_swept_texts``: every file's prose, plus a package file's
+    runtime strings. Prose and strings are read with their value code spans
+    blanked (``_blank_value_span``); a def or class name is read whole, split at
+    its camel-case boundaries (``CAMEL_BOUNDARY_PATTERN``). Each violation names
+    the file, the line, the kind of text and the label.
+    """
+    violations: list[str] = []
+    read = 0
+    for path in paths:
+        display = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path
+        source = path.read_text(encoding="utf-8")
+        for first_line, kind, text in _swept_texts(path, source, package_root):
+            read += 1
+            if kind == "name":
+                words = CAMEL_BOUNDARY_PATTERN.sub(" ", text)
+                matches = PLAN_LABEL_NAME_PATTERN.finditer(words)
+            else:
+                blanked = CODE_SPAN_PATTERN.sub(_blank_value_span, text)
+                matches = PLAN_LABEL_PATTERN.finditer(blanked)
+            for match in matches:
+                line = first_line + text.count("\n", 0, match.start())
+                violations.append(f"{display}:{line}: {kind}: {match[0]!r}")
+    return violations, read
+
+
+def test_no_comment_docstring_name_or_package_string_carries_an_optimizer_plan_label() -> None:
+    """No first-party prose, and no package string, names an optimizer plan label.
+
+    START.md "Style the maintainer cares about": plan and slice numbering is
+    process provenance, and a contract is cited by content, never by ordinal.
+    The optimizer specs title their headings with labels (``PLAN_LABEL_PATTERN``);
+    code names the behaviour instead (the plan cache, FK-id elision, the
+    evaluated-queryset guard), and a spec-035 guard is cited as
+    ``spec-035 Decision N``, the gated pointer. This row reads every comment,
+    string statement and def/class name of the sweep corpus, plus every other
+    ``str`` constant in ``django_strawberry_framework/``, and refuses a label.
+
+    Deliberate limits. A label inside an inline code span that quotes more than
+    the label is not read: seed rows, branch codes and computed values share the
+    spelling, so a value is quoted as its literal (``"B1"``), and a value written
+    bare in prose is quoted, not exempted. A span holding a bare label is read.
+    A def or class name is read at its underscores and camel-case boundaries
+    (``TestB8Diffing``), never inside one word (``O2OField``). Only these three
+    families are read; another plan's labels (requirement ids, a lateral
+    strategy's arms) are judged by hand. A non-statement string outside the
+    package (test data, fixtures) is not read.
+    """
+    corpus = _sweep_corpus()
+    violations, read = _plan_label_entries_in(corpus)
+    assert REPO_ROOT / CENSUS_MODULE in corpus, "the sweep corpus does not hold this module"
+    assert PACKAGE_ROOT / "__init__.py" in corpus, "the sweep corpus does not hold the package"
+    assert read, "no comment, docstring, name or string was read; the sweep read nothing"
+    assert not violations, (
+        "optimizer plan label(s) in first-party code:\n"
+        + "\n".join(violations)
+        + "\nName the behaviour the label stood for, cite a spec-035 guard as "
+        "'spec-035 Decision N', or quote a data value as its literal in a code span "
+        "(START.md, "
+        "'Style the maintainer cares about')."
+    )
+
+
+#: One planted shape per refused form: the file it sits in (``package`` or
+#: ``other``), its body, and every violation the report must name (line, kind,
+#: label).
+PLANTED_PLAN_LABEL_SHAPES = [
+    (
+        "comment",
+        "other",
+        "VALUE = 1\n# the B3 contract fires\n",
+        ["2: comment: 'B3'"],
+    ),
+    (
+        "docstring-prefixed",
+        "other",
+        'def run():\n    """Run.\n\n    The clone, pre-G1, re-ran the SQL.\n    """\n',
+        ["4: docstring: 'G1'"],
+    ),
+    (
+        "range",
+        "other",
+        "# the B1-B8 suite\n",
+        ["1: comment: 'B1'", "1: comment: 'B8'"],
+    ),
+    (
+        "beside-a-spec",
+        "other",
+        "# spec-035 G2 gates the projection\n",
+        ["1: comment: 'G2'"],
+    ),
+    (
+        "test-name",
+        "other",
+        "def test_o6_downgrade():\n    pass\n",
+        ["1: name: 'o6'"],
+    ),
+    (
+        "class-name",
+        "other",
+        "class Probe_B4:\n    pass\n",
+        ["1: name: 'B4'"],
+    ),
+    (
+        "bare-label-code-span",
+        "other",
+        "# Pins the ``B2`` elision\n",
+        ["1: comment: 'B2'"],
+    ),
+    (
+        "camel-case-class-name",
+        "other",
+        "class TestB8Diffing:\n    pass\n",
+        ["1: name: 'B8'"],
+    ),
+    (
+        "package-message",
+        "package",
+        "MESSAGE = 'the B5 stash is empty'\n",
+        ["1: string: 'B5'"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("where", "body", "expected"),
+    [(where, body, expected) for _, where, body, expected in PLANTED_PLAN_LABEL_SHAPES],
+    ids=[name for name, _, _, _ in PLANTED_PLAN_LABEL_SHAPES],
+)
+def test_the_plan_label_sweep_reports_a_planted_shape(
+    tmp_path: Path,
+    where: str,
+    body: str,
+    expected: list[str],
+) -> None:
+    """Each refused form is reported at its line, with its kind and label."""
+    if where == "package":
+        planted, root = _plant_package(tmp_path, "planted.py", body)
+    else:
+        planted, root = _plant_prose(tmp_path, body), tmp_path / "django_strawberry_framework"
+    violations, _ = _plan_label_entries_in([planted], root)
+    assert violations == [f"{planted}:{entry}" for entry in expected], violations
+
+
+def test_the_plan_label_sweep_reports_nothing_for_a_planted_permitted_form(
+    tmp_path: Path,
+) -> None:
+    """The negative direction: the forms the gate leaves alone are not reported.
+
+    A value quoted as its literal in a double or single code span, a code span
+    holding more than a label, a token outside the three families or glued to a
+    word (``B9``, ``O7``, ``G4``, ``AB1``, ``B1a``), a lowercase seed value in
+    prose, the gated ``spec-035 Decision N`` pointer, a label-shaped run inside
+    one camel-case word of a class name, and a test-data string outside the
+    package.
+    """
+    planted = _plant_prose(
+        tmp_path,
+        '# rows ``A1`` and ``"B1"``; the key `"G1"`, ``"G2"`` and ``B3 rows``\n'
+        "# B9, O7, G4, AB1 and B1a are not labels; nor is the seed b2\n"
+        "# spec-035 Decision 3 is the pointer\n"
+        "class O2OField:\n"
+        "    pass\n"
+        "FIXTURE = 'B1'\n",
+    )
+    violations, read = _plan_label_entries_in([planted])
+    assert read == 2, read
+    assert violations == [], violations
 
 
 def test_channels_floor_constant_matches_the_pyproject_dependency_row() -> None:

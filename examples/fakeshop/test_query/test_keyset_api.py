@@ -2059,7 +2059,7 @@ async def test_async_nested_keyset_window_pages_under_the_hook_order() -> None:
 # declared ``cursor_field``, made total by the pk tiebreaker): the root slicer,
 # the planned nested window and the per-parent pipeline seek, mint and number
 # rows under that same reversed order. Rows below reuse the hook-order seed:
-# ``A1`` ``y``, ``A2`` ``x``, ``A3`` ``x``, ``B1`` ``a``, created in that order.
+# ``A1`` ``y``, ``A2`` ``x``, ``A3`` ``x``, ``"B1"`` ``a``, created in that order.
 
 #: The full root order per reversed hook (``title``: ``title DESC, id DESC``).
 _REVERSED_ROOT_ORDERS = {
@@ -2320,7 +2320,7 @@ def test_order_by_beside_a_reversed_hook_pages_every_row_once() -> None:
 # nested window and the per-parent pipeline page, seek and mint under it (its
 # ``.reverse()`` included), extended by the pk tiebreaker rather than replaced.
 # Rows below reuse the hook-order seed: ``A1`` ``y``, ``A2`` ``x``, ``A3`` ``x``,
-# ``B1`` ``a``, created in that order (the ``m2m`` books each on their own shelf,
+# ``"B1"`` ``a``, created in that order (the ``m2m`` books each on their own shelf,
 # shelf codes ``A-1`` .. ``B-1`` in that order too).
 
 

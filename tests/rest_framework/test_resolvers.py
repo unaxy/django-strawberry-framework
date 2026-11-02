@@ -36,7 +36,7 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
 - the `SyncMisuseError` async-`get_queryset`-from-sync path; async create colour
   is live (`test_create_item_via_serializer_over_graphql_async`);
 - the re-fetch PLAN OBJECT (`select_related` kept, the selection's columns recorded,
-  no `.only(...)` introduced under the mutation operation; spec-035 G2) - the
+  no `.only(...)` introduced under the mutation operation; spec-035 Decision 4) - the
   optimizer's stashed plan is introspection state no `/graphql` response carries, so
   only its behavioral half (the emitted SQL) is earned live.
 - hostile `__name__` labels on producer-declared classes (mutation, serializer,

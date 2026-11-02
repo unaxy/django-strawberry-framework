@@ -106,7 +106,7 @@ class TestOptimizationPlanIsEmpty:
 
 
 class TestLookupPaths:
-    """``lookup_paths`` flattens Django lookup paths for debugging/B8."""
+    """``lookup_paths`` flattens Django lookup paths for the strictness stash."""
 
     def test_flatten_select_related_paths(self) -> None:
         plan = OptimizationPlan(select_related=["item", "item__category"])

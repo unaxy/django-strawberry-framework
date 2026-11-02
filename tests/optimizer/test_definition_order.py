@@ -5,7 +5,7 @@ absence, definition ``field_map`` identity, and annotation-only relation
 metadata have no wire shape. Reverse-O2O JOIN SQL is
 ``examples/fakeshop/test_query/test_library_api.py::test_library_optimizer_reverse_o2o_card_joins_in_root_sql``;
 hooked-target Prefetch SQL is
-``examples/fakeshop/test_query/test_scalars_api.py::test_scalars_optimizer_o6_downgrade_to_prefetch_for_custom_get_queryset_in_http_query``.
+``examples/fakeshop/test_query/test_scalars_api.py::test_scalars_optimizer_downgrade_to_prefetch_for_custom_get_queryset_in_http_query``.
 """
 
 from collections.abc import Iterator
@@ -108,7 +108,7 @@ def test_plan_relation_class_fallback_downgrades_custom_get_queryset_target() ->
     A target that overrides ``get_queryset`` still turns a forward FK into a
     ``Prefetch`` when no captured definition is passed. The walk always passes
     one; that captured arm is executed by
-    ``examples/fakeshop/test_query/test_scalars_api.py::test_scalars_optimizer_o6_downgrade_to_prefetch_for_custom_get_queryset_in_http_query``.
+    ``examples/fakeshop/test_query/test_scalars_api.py::test_scalars_optimizer_downgrade_to_prefetch_for_custom_get_queryset_in_http_query``.
     """
 
     class FilteredCategoryType(DjangoType):

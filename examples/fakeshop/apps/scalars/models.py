@@ -17,7 +17,7 @@ model ``parent`` / ``children`` self-FK on ``ScalarSpecimen``. The two
 models also let consumers compose richer example queries that span both
 all-required and all-nullable shapes in one round-trip.
 
-``ScalarSpecimenTag`` is the substrate for the O6 ``Prefetch``-downgrade
+``ScalarSpecimenTag`` is the substrate for the optimizer's ``Prefetch``-downgrade
 behavior: its companion ``ScalarSpecimenTagType`` declares a custom
 ``get_queryset()`` classmethod that filters to ``active=True``. A nullable
 forward FK from ``ScalarSpecimen.tag`` points at it. Selecting
@@ -124,11 +124,11 @@ if TYPE_CHECKING:
 
 
 class ScalarSpecimenTag(models.Model):
-    """Tag referenced by ``ScalarSpecimen.tag``; substrate for the O6 downgrade rule.
+    """Tag referenced by ``ScalarSpecimen.tag``; substrate for the ``Prefetch``-downgrade rule.
 
     The companion ``ScalarSpecimenTagType`` declares a custom
     ``get_queryset()`` classmethod that filters to ``active=True``. The
-    optimizer's O6 rule requires that any forward FK whose target type
+    optimizer's ``Prefetch``-downgrade rule requires that any forward FK whose target type
     declares ``get_queryset`` be planned as ``Prefetch(qs)`` rather than
     ``select_related`` so the consumer's filter survives end-to-end -
     visible in the live test by an inactive tag resolving to ``null`` on
@@ -213,7 +213,7 @@ class ScalarSpecimen(models.Model):
         on_delete=models.CASCADE,
     )
     # Forward FK to a target whose ``DjangoType`` declares a custom
-    # ``get_queryset()``. Triggers the optimizer's O6 ``Prefetch``-
+    # ``get_queryset()``. Triggers the optimizer's ``Prefetch``-
     # downgrade rule: forward-FK selection through ``tag`` must NOT use
     # ``select_related`` (which would JOIN raw, bypassing the consumer's
     # ``active=True`` filter), and the planner must record a

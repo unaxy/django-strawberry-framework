@@ -1231,7 +1231,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
            list / connection field consumer paths use, so the middleware never
            decides it independently.
         3. An already-evaluated queryset (``_result_cache`` populated) is
-           returned unchanged (G1, ``spec-035`` Decision 3). The consumer's
+           returned unchanged (``spec-035`` Decision 3). The consumer's
            root resolver already ran the SQL (a ``len(qs)`` guard, a
            ``bool(qs)`` branch, a slice for a log line); past this point
            :meth:`apply_to` clones the queryset to attach ``.only()`` /
@@ -1266,7 +1266,7 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         if normalized[1] is False:
             return finish(normalized[0])
         inner_result = normalized[0]
-        # G1 (spec-035 Decision 3): a consumer-evaluated root queryset passes
+        # spec-035 Decision 3: a consumer-evaluated root queryset passes
         # through unchanged. Placement is load-bearing in both directions - it
         # sits AFTER the Manager coercion (a coerced ``.all()`` is always a
         # fresh unevaluated queryset, so a ``Model.objects``-returning resolver
