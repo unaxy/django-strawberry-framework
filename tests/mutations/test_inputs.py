@@ -1591,6 +1591,19 @@ def test_payload_model_less_shape() -> None:
     assert "result" not in fields
 
 
+def test_payload_refuses_a_decorator_that_attaches_no_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``strawberry.type`` that hands back the bare class raises instead of passing it on."""
+
+    def bare(cls: type[object], **_kwargs: object) -> type[object]:
+        return cls
+
+    monkeypatch.setattr(strawberry, "type", bare)
+    with pytest.raises(TypeError, match="attached no object definition to 'DoActionPayload'"):
+        build_payload_type("DoAction", object_type=None)
+
+
 def test_payload_type_name_keeps_an_underscore_in_the_mutation_name() -> None:
     """A mutation class named with an underscore publishes ``<Name>Payload`` verbatim.
 

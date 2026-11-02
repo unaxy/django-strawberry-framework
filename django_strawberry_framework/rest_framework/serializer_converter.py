@@ -387,9 +387,10 @@ def _bound_field_name(field: DRFField) -> str:
     """Return a bound serializer field's name.
 
     DRF types ``Field.field_name`` optional because it is set by ``bind``; a field
-    read off a serializer's ``.fields`` is always bound, so it always carries one.
+    read off a serializer's ``.fields`` is always bound, so it always carries one, and
+    an unbound field raises ``TypeError``.
     """
-    return cast("str", field.field_name)
+    return require_instance(field.field_name, str)
 
 
 def _reject_nested_serializer(field: DRFField) -> None:

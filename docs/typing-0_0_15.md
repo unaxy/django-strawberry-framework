@@ -8,14 +8,14 @@ Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit an
 `# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 63 rules on everywhere with no
 suppression left), every file-level `# pyright:` directive, and any per-site count off the generated ledger
 `scripts/type_suppressions.toml`: each site (`path::QualifiedName`) holds its `typing.cast` calls and its ignore
-comments per unlocked rule (122 casts in all), every count may only fall, and a suppression cannot move to new code by
+comments per unlocked rule (112 casts in all), every count may only fall, and a suppression cannot move to new code by
 giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger and gains the marker. In CI, a commit that raises a
 total (casts, or one rule's ignores) fails unless it carries a `Suppression-Growth-Approved:` trailer, the
 maintainer's consent.
 
-Progress: 29 done, 6 closed (survey verdicts), 3 open (one waits on upstream, one is the cast sweep's third phase,
-one is a behavior change outside typing, carded). Ignore comments: 669 lines (1897 at the start of 0.0.15's ignore
-sweep); `typing.cast` calls: 122 (432 at the start of the cast work).
+Progress: 30 done, 6 closed (survey verdicts), 2 open (one waits on upstream, one is a behavior change outside
+typing, carded). Ignore comments: 669 lines (1897 at the start of 0.0.15's ignore
+sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -224,6 +224,56 @@ sweep); `typing.cast` calls: 122 (432 at the start of the cast work).
   returning `Self`, `get_fields`, `FilterSetOptions.fields`, `Filter.filter`), django-stubs (`Options.concrete_model`
   optional, `QuerySet(hints=)`, `Window(order_by=)`), Strawberry (`SliceMetadata.from_arguments` reading `info` only
   without `max_results`, `Edge.node`, `Info._raw_info`)
+- [x] 38. Cast sweep, phase 3: the package casts no survey had opened, sorted into fix, upstream-only and keep.
+  First pass (package casts 85 to 81): `utils/typing.py::strawberry_schema_from_info` reads
+  `_strawberry_schema` through `optional_instance(..., Schema)` (only Strawberry files that slot; anything else raises
+  `TypeError`), so `schema_config_from_info` reads `.config` off it and its bare `schema.config` fallback, which only
+  namespace stand-ins reached, is gone (the stand-in rows now build real schemas);
+  `connection.py::_build_relation_connection_resolver` requires a `str` response key (graphql-core keys only list
+  items by `int`); `optimizer/selections.py::ast_child_selections` answers graphql-core's own `SelectionNode` and
+  `_stamp` requires a `FieldNode` in its field branch (once per field node per operation, never per row). In
+  passing, `consumers.py`'s legacy `handle_stop` override is deleted: upstream's `cleanup_operation` returns for an id
+  the connection is not running from the 0.328.0 floor on, and the live stop row passes on upstream alone. Second pass (package casts 81 to 78): `filters/sets.py::_admitted_rows` reads the explicit `queryset=`
+  through `RelatedFilter.get_queryset(request)`, django-filter's own seam, so a callable `queryset=` (django-filter's
+  request-aware form, accepted at construction) is called with the filter set's request on a nested branch and on a
+  flat leaf's walk, where the cast let the bare callable reach `.model` and raise `AttributeError` (a live row in
+  `test_filter_consumer_contracts_api.py` pins both paths);
+  `rest_framework/serializer_converter.py::_bound_field_name` requires a `str` (an unbound field raises `TypeError`);
+  `rest_framework/resolvers.py::_nested_specs_of` raises `TypeError` for a spec recording no nested map. Third pass
+  (package casts 78 to 71, from a review of the sort): `build_payload_type` / `build_strawberry_input_class` ask
+  Strawberry's own `has_object_definition` of the decorated class; `decode_global_id` asks `implements_relay_node` of
+  its candidate (a strategy stamped on a non-Node type raises `ConfigurationError`); the walker's
+  `_build_child_queryset` raises `TypeError` for a custom `get_queryset` verdict with no target type, and
+  `_walk_selections` for a hint beside no registered type; `ends_in_unique_column` and `TypeRegistry.unregister` read
+  through the new `is_options` / `is_identity_map` predicates. `apply_async` now runs `_apply_common_prelude` inside
+  the same sync worker as `_probed_filterset`, so a callable `queryset=` reading the ORM on a nested branch no longer
+  runs on the event loop (an async live row pins both paths). `bind_auth_mutations` stays: a type-only rider base
+  removes the cast but the bind's `primary` is optional until a user-typed surface is known, so the rider's slot
+  write needs the same correlation. The 71 left hold no fix. Upstream-only (16): Strawberry (`connection.py`'s
+  `_edge_over` / `_offset_edge_over` over `Edge.node`, `_consume_fallback` over a `NodeIterableType` that leaves out
+  a `__getitem__`-only source, `_raw_resolve_info` over the unparameterized `Info._raw_info`,
+  `derive_connection_window_bounds` over `SliceMetadata`), types-django-filter (`FilterSetMetaclass.__new__`,
+  `get_fields`'s three, `_leaf_chain`, whose `get_model_field` is typed a `Field` while it also answers a reverse
+  relation), django-stubs (`_seal_or_defect`'s `concrete_model`, the `hints=` of `_built_queryset` /
+  `_hint_prefetch_over_pk_set`, the `str | Combinable` order entries of `plan_connection_relation` /
+  `normalize_order_direction`), typeshed (`_install_typename_closure`'s `classmethod.__func__`). Keep (55): the 11
+  earlier surveys kept (items 36 and 37, and `ARRAY_FIELD_CLS`, a by-name soft import like `_HSTORE_FIELD_CLS`);
+  `_filter_child_rows`, whose `_M` row type no check states; a check would refuse
+  input accepted today (`_authenticated_actor_or_none` and `session_store_class` on the `_User` / `SESSION_ENGINE`
+  reasoning, `_optimize`'s `values()` root, `_from_field_shape`'s resolver-path stand-ins, `resolve_strategy`'s
+  duck-typed consumer strategy, `nested_serializer_child`'s two, whose other children fail at the guarded `.fields`
+  read with the package's own message); no runtime check exists for the claim (`_strawberry_patches.py`'s four upstream
+  captures, `_captured_upstream_body_getter`, `_disallowed_connection_methods`; the TypeVar reads of
+  `_declare_auth_surface`, `operation_state.py`'s two, `expanded_once`, `PrivateMembership.recall` and
+  `MetaValidatingMetaclass.__new__`; `DjangoConnectionField` / `DjangoListField`, whose field object stands in for its
+  value; the generic parameters of `_scope_specs_over_serializer`, `get_form` and `_validate_post_orderset_result`; the
+  protocol views of `_expr_graph_defect` and `promote_set_meta_fields`; the by-name soft imports
+  `_PostgresBTreeIndex` / `_HSTORE_FIELD_CLS`; `_correlation_steps`'s `GenericRelation`, which the app registry may
+  refuse to import; django-filter's untyped `extra` / `FILTER_DEFAULTS` reads in `filter_for_field` and
+  `_null_test_filter_for_relation`'s two; `get_form_fields`, whose `dict()` call is the check); adapted upstream code
+  (`_patched_list_connection_resolve_connection`'s three); duck-typed matchers the tests drive with hostile doubles
+  (`lateral_fetch.py`'s three, `utils/relations.py::_link_field_tuple`); reads of Django's own slots on a package-built
+  queryset, on the routing and per-row paths (`_snapshot_routing_intent`'s two, `materialized_rows`)
 
 ## Rules off
 
@@ -329,16 +379,6 @@ Survey verdicts recorded so nothing is re-tried blind:
   `test_resolvers.py` and `test_sets.py` (two)). Once a release ships it: bump the lock, drop the nine ignores, and
   retire both `ModelSerializerBase` classes (each exists only to hold that override), their subclasses deriving from
   `serializers.ModelSerializer` again
-- [ ] 38. Cast sweep, phase 3: sort the package casts no survey has opened into fix, upstream-only and keep, then
-  retire the fixes. First pass (package casts 85 to 81): `utils/typing.py::strawberry_schema_from_info` reads
-  `_strawberry_schema` through `optional_instance(..., Schema)` (only Strawberry files that slot; anything else raises
-  `TypeError`), so `schema_config_from_info` reads `.config` off it and its bare `schema.config` fallback, which only
-  namespace stand-ins reached, is gone (the stand-in rows now build real schemas);
-  `connection.py::_build_relation_connection_resolver` requires a `str` response key (graphql-core keys only list
-  items by `int`); `optimizer/selections.py::ast_child_selections` answers graphql-core's own `SelectionNode` and
-  `_stamp` requires a `FieldNode` in its field branch (once per field node per operation, never per row). In
-  passing, `consumers.py`'s legacy `handle_stop` override is deleted: upstream's `cleanup_operation` returns for an id
-  the connection is not running from the 0.328.0 floor on, and the live stop row passes on upstream alone
 - [ ] 35. Behavior, not typing (item 6's open question): on the prefetch path a `get_queryset` hook reads the planning
   resolver's `info.field_name` / `selected_fields`; run by the relation's own resolver it reads the relation's. The
   optimizer should not change what a hook observes: build a per-relation raw info, as strawberry_django's

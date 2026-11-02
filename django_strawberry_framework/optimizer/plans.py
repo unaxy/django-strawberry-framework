@@ -67,6 +67,7 @@ from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_dict,
+    is_options,
     is_str,
     list_of,
     read_attr,
@@ -95,7 +96,6 @@ if TYPE_CHECKING:
 
     from django.db import models
     from django.db.models.expressions import Combinable, Expression
-    from django.db.models.options import Options
     from django.db.models.sql.compiler import SQLCompiler
     from django.db.models.sql.query import Query
     from graphql import GraphQLResolveInfo
@@ -1239,7 +1239,8 @@ def ends_in_unique_column(effective: tuple[object, ...], model: type[models.Mode
         return False
     ref = parsed[0]
     # A model class's ``_meta`` is its ``Options``.
-    meta = cast("Options[models.Model] | None", truth.static_attr(model, "_meta"))
+    raw_meta = truth.static_attr(model, "_meta")
+    meta = None if raw_meta is None else require(raw_meta, is_options)
     if meta is None:
         return False
     pk = read_attr(meta, "pk", None)

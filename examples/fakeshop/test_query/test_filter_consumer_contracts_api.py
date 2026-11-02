@@ -5,23 +5,27 @@ an actual list is refused on each execution path. A customized projected child
 walks its own related branch permission before returning any parent rows. A forward
 relation choice keeps its authored DISTINCT on the parent query beside its visibility EXISTS.
 An explicit related queryset must carry the target filterset's exact model whenever its branch
-is active, including the distinction between a proxy and its concrete model.
+is active, including the distinction between a proxy and its concrete model; a callable one is
+called with the HTTP request, on a nested branch and on a flat leaf walking it, and under
+``apply_async`` off the event loop, so its own ORM reads run.
 """
 
+from collections.abc import Awaitable, Callable
 from functools import wraps
 
 import pytest
 import strawberry
 from apps.library import models
+from asgiref.sync import sync_to_async
 from django.db import connection
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase
-from django.test import Client, override_settings
+from django.test import AsyncClient, Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django_filters import CharFilter, Filter, ModelChoiceFilter
 from graphql import GraphQLError
-from graphql_client import JSONObject, graphql_payload, json_at, json_list
+from graphql_client import JSONObject, graphql_payload, json_at, json_list, response_json
 from strawberry.scalars import JSON
 
 from django_strawberry_framework import (
@@ -32,9 +36,10 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
+from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import require
 from django_strawberry_framework.utils.relations import is_model_class
-from django_strawberry_framework.views import DjangoGraphQLView
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
@@ -53,7 +58,17 @@ def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
-urlpatterns = [path("graphql-filter-contracts/", _graphql_view)]
+@wraps(AsyncDjangoGraphQLView.as_view())
+async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [
+    path("graphql-filter-contracts/", _graphql_view),
+    path("graphql-filter-contracts-async/", _async_graphql_view),
+]
 
 
 def _returns_a_list(_self: Filter, _queryset: object, _value: object) -> list[object]:
@@ -317,7 +332,11 @@ def test_a_forward_model_choice_keeps_consumer_distinctness_on_the_parent_rows(
     assert filtered[0].upper().count("EXISTS") == 1, filtered
 
 
-def _explicit_queryset_schema(queryset: QuerySet[Model]) -> DjangoSchema:
+def _explicit_queryset_schema(
+    queryset: QuerySet[Model] | Callable[[HttpRequest], QuerySet[Model]],
+    *,
+    use_async: bool = False,
+) -> DjangoSchema:
     class ShelfChild(FilterSet):
         class Meta:
             model = models.Shelf
@@ -328,7 +347,14 @@ def _explicit_queryset_schema(queryset: QuerySet[Model]) -> DjangoSchema:
         (FilterSet,),
         {
             "shelves": RelatedFilter(ShelfChild, field_name="shelves", queryset=queryset),
-            "Meta": type("Meta", (), {"model": models.Branch, "fields": {"name": ["exact"]}}),
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": models.Branch,
+                    "fields": {"name": ["exact"], "shelves__code": ["exact"]},
+                },
+            ),
         },
     )
 
@@ -350,14 +376,23 @@ def _explicit_queryset_schema(queryset: QuerySet[Model]) -> DjangoSchema:
         del root
         return parent.apply_sync(where, models.Branch.objects.order_by("name"), info)
 
+    async def resolve_rows_async(
+        root: object,
+        info: strawberry.Info[object, object],
+        where: JSON,
+    ) -> list[models.Branch]:
+        del root
+        rows = await parent.apply_async(where, models.Branch.objects.order_by("name"), info)
+        return await sync_to_async(list)(rows)
+
     def resolve_all(root: object) -> QuerySet[models.Branch]:
         del root
         return models.Branch.objects.order_by("name")
 
     @strawberry.type
     class Query:
-        rows: QuerySet[models.Branch] = strawberry.field(
-            resolver=resolve_rows,
+        rows: QuerySet[models.Branch] | Awaitable[list[models.Branch]] = strawberry.field(
+            resolver=resolve_rows_async if use_async else resolve_rows,
             graphql_type=list[BranchOutput],
         )
         all_rows: QuerySet[models.Branch] = strawberry.field(
@@ -415,3 +450,69 @@ def test_related_queryset_requires_the_exact_child_model_only_when_the_branch_is
         assert payload == {
             "data": {"rows": [{"name": "alpha"}] if active else all_rows, "allRows": all_rows},
         }, payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "where",
+    [{"shelves": {"code": "match"}}, {"shelves__code": "match"}],
+    ids=["nested", "flat"],
+)
+def test_a_callable_related_queryset_is_called_with_the_request(where: JSONObject) -> None:
+    """django-filter's request-aware ``queryset=`` scopes the branch with the HTTP request."""
+    first = models.Branch.objects.create(name="alpha")
+    models.Shelf.objects.create(branch=first, code="match", topic="open")
+    second = models.Branch.objects.create(name="beta")
+    models.Shelf.objects.create(branch=second, code="match", topic="closed")
+    seen: list[str] = []
+
+    def open_shelves(request: HttpRequest) -> QuerySet[Model]:
+        seen.append(request.path)
+        return models.Shelf.objects.filter(topic="open")
+
+    payload = _post(_explicit_queryset_schema(open_shelves), where, label="name")
+    assert payload == {
+        "data": {"rows": [{"name": "alpha"}], "allRows": [{"name": "alpha"}, {"name": "beta"}]},
+    }, payload
+    assert seen
+    assert set(seen) == {"/graphql-filter-contracts/"}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "where",
+    [{"shelves": {"code": "match"}}, {"shelves__code": "match"}],
+    ids=["nested", "flat"],
+)
+async def test_a_callable_related_queryset_reads_the_orm_off_the_event_loop(
+    where: JSONObject,
+) -> None:
+    """Under ``apply_async`` the callable runs in the sync worker, so a blocking read in it works."""
+
+    def seed() -> None:
+        first = models.Branch.objects.create(name="alpha")
+        models.Shelf.objects.create(branch=first, code="match", topic="open")
+        second = models.Branch.objects.create(name="beta")
+        models.Shelf.objects.create(branch=second, code="match", topic="closed")
+
+    await sync_to_async(seed)()
+
+    def open_shelves(_request: HttpRequest) -> QuerySet[Model]:
+        # A blocking read: on the event loop Django raises ``SynchronousOnlyOperation``.
+        open_pks = list(models.Shelf.objects.filter(topic="open").values_list("pk", flat=True))
+        return models.Shelf.objects.filter(pk__in=open_pks)
+
+    _CURRENT["schema"] = _explicit_queryset_schema(open_shelves, use_async=True)
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            result = await AsyncTestClient(client=AsyncClient()).query(
+                "query($where: JSON!) { rows(where: $where) { name } }",
+                variables={"where": where},
+                assert_no_errors=False,
+                url="/graphql-filter-contracts-async/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+    assert result.response.status_code == 200
+    payload = response_json(result.response)
+    assert payload == {"data": {"rows": [{"name": "alpha"}]}}, payload

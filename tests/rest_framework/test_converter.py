@@ -244,6 +244,16 @@ def test_required_ness_reflects_field_required() -> None:
     )
 
 
+def test_bound_field_name_refuses_an_unbound_field() -> None:
+    """A field no serializer has bound carries no name; reading one raises ``TypeError``."""
+    assert (
+        serializer_converter._bound_field_name(bind_unparented(serializers.CharField(), "f"))
+        == "f"
+    )
+    with pytest.raises(TypeError, match="expected an instance of str, got NoneType"):
+        serializer_converter._bound_field_name(serializers.CharField())
+
+
 def test_email_field_maps_via_mro_under_charfield() -> None:
     """A known subclass (``EmailField``) resolves to its ``CharField`` parent's scalar (MRO walk)."""
     assert (

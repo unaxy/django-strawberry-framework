@@ -8164,6 +8164,7 @@ def test_apply_related_constraints_skips_branch_without_qs_or_explicit() -> None
         parent_qs,
         {},
         None,
+        None,
         {},
     )
     assert "shelves__in" not in str(constrained.query)

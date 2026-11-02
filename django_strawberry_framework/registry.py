@@ -17,10 +17,11 @@ fixture.
 from __future__ import annotations
 
 from enum import Enum
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal
 
 from .exceptions import ConfigurationError
 from .utils import truth
+from .utils._narrowing import is_identity_map, require
 from .utils.imports import import_attr_if_importable
 
 if TYPE_CHECKING:
@@ -379,10 +380,7 @@ class TypeRegistry:
             # The attribute is ``connection.py``'s own ``_connection_type_cache``, an
             # identity map keyed by ``DjangoType`` class, read by name to dodge the
             # import cycle.
-            lambda cache: cast("truth.IdentityMap[type[DjangoType], object]", cache).pop(
-                type_cls,
-                None,
-            ),
+            lambda cache: require(cache, is_identity_map).pop(type_cls, None),
         )
 
     def get(self, model: type[models.Model]) -> type[DjangoType] | None:

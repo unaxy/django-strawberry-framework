@@ -38,11 +38,12 @@ symmetric by construction (spec-036 Decision 6).
 from __future__ import annotations
 
 from types import GenericAlias
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, NamedTuple
 
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
+from strawberry.types.base import has_object_definition
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
@@ -1107,7 +1108,9 @@ def build_payload_type(
             "errors": strawberry.field(default_factory=list),
         }
     type_name = payload_type_name(mutation_name)
-    cls = type(type_name, (), namespace)
-    # basedpyright: strawberry.type's signature returns its argument's type unchanged, so the
-    # __strawberry_definition__ the decorator attaches is invisible without the cast
-    return cast("type[WithStrawberryObjectDefinition]", strawberry.type(cls, name=type_name))
+    payload_cls = strawberry.type(type(type_name, (), namespace), name=type_name)
+    # ``strawberry.type``'s signature returns its argument's type unchanged; Strawberry's own
+    # guard proves the definition the decorator attached.
+    if not has_object_definition(payload_cls):
+        raise TypeError(f"strawberry.type attached no object definition to {type_name!r}")
+    return payload_cls

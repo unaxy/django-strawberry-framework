@@ -142,6 +142,19 @@ def test_build_strawberry_input_class_emits_name_and_description() -> None:
     assert note.graphql_name is None
 
 
+def test_build_strawberry_input_class_refuses_a_decorator_that_attaches_no_definition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``strawberry.input`` that hands back the bare class raises instead of passing it on."""
+
+    def bare(cls: type[object], **_kwargs: object) -> type[object]:
+        return cls
+
+    monkeypatch.setattr(strawberry, "input", bare)
+    with pytest.raises(TypeError, match="attached no object definition to 'BareInput'"):
+        build_strawberry_input_class("BareInput", [("note", str, {})])
+
+
 def test_builder_rejects_duplicate_python_attributes() -> None:
     """The last defensive layer rejects a duplicate before the namespace drops a field."""
     with pytest.raises(ConfigurationError, match=r"input attribute 'same'.*more than once"):

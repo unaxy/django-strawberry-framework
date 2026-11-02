@@ -97,6 +97,7 @@ from django_strawberry_framework.optimizer.walker import (
     _plan_connection_relation,
     _prefetch_hint_for_path,
     _record_prefetch_path_keys,
+    _resolve_field_map,
     _response_key_arguments_conflict,
     _selected_scalar_names,
     plan_optimizations,
@@ -1940,6 +1941,13 @@ def test_child_hook_without_resolve_info_fails_loudly() -> None:
     assert calls == []
 
 
+def test_build_child_queryset_refuses_a_custom_verdict_without_a_target_type() -> None:
+    """A custom ``get_queryset`` verdict with no target type names the defect, not a hook."""
+    field = FieldMeta.from_django_field(Category._meta.get_field("items"))
+    with pytest.raises(TypeError, match="custom get_queryset verdict reached a relation with no"):
+        _build_child_queryset(field, None, None, has_custom_qs=True)
+
+
 # ---------------------------------------------------------------------------
 # Nested prefetch chains
 # ---------------------------------------------------------------------------
@@ -2078,6 +2086,40 @@ def test_plan_honors_optimizer_hints_at_nested_depth() -> None:
     assert prefetch.prefetch_to == "items"
     assert prefetch.queryset is not None
     assert queryset_prefetch_lookups(prefetch.queryset) == ()
+
+
+def test_plan_refuses_a_hint_without_a_registered_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hints map answered beside no registered type is a defect the walk names."""
+    registry.clear()
+
+    class CategoryType:
+        @classmethod
+        def has_custom_get_queryset(cls) -> bool:
+            return False
+
+    _register_type_definition(
+        Category,
+        CategoryType,
+        optimizer_hints={"items": OptimizerHint.SKIP},
+    )
+
+    def unregistered(
+        model: type[Model],
+        *,
+        source_type: type[DjangoType] | None = None,
+    ) -> tuple[None, DjangoTypeDefinition | None, dict[str, FieldMeta]]:
+        _, definition, field_map = _resolve_field_map(model, source_type=source_type)
+        return None, definition, field_map
+
+    monkeypatch.setattr(
+        "django_strawberry_framework.optimizer.walker._resolve_field_map",
+        unregistered,
+    )
+    try:
+        with pytest.raises(TypeError, match="optimizer hint on 'items' without a registered"):
+            plan_optimizations([_sel("items", selections=[_sel("name")])], Category)
+    finally:
+        registry.clear()
 
 
 def test_plan_honors_prefetch_obj_hint_does_not_walk_inner_selections() -> None:
