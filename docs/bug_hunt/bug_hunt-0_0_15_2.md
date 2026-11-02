@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 395 done, 87 to do. The CHANGELOG entries filed here moved to
+Progress: 396 done, 88 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2268,6 +2268,14 @@ Progress: 395 done, 87 to do. The CHANGELOG entries filed here moved to
   to `utils/write_values.py::unstorable_columns`, so a model `save()` narrowed away from the `None` column answers
   the constraint envelope, and a consumer `save()` that raises before saving the row (or a failure after it saved)
   is never diagnosed from it. spec-038 says so. Tests: `tests/forms/test_resolvers.py`
+- [x] 387. Already fixed by dry item 92 (dry-0_0_15_3): `filters/inputs.py::_build_input_fields` types each leaf
+  through `filters/base.py::_filterset_value_field`, the field its lookup compares to, not the column, so a generated
+  `year` / `iso_year` leaf (and every `Extract` transform) takes `Int`, `time` takes `Time` and `date` takes `Date`, on
+  a `DateTimeField` and a `DateField` alike, and each filters by the value sent. Pinned live in the
+  `generated_year_schema` holder: `examples/fakeshop/test_query/test_scalars_filter_api.py::
+  test_generated_year_leaf_is_typed_by_the_transforms_output` (now `isoYear`, `isoYearLte`, `time`, `timeGt`, `date` and
+  the `occurredOn` head too) and `::test_generated_iso_year_time_and_date_leaves_filter_by_the_value_sent` (10 rows; a
+  2021-01-01 row whose ISO year is 2020 tells `iso_year` from `year`), failable against the column-typed `_leaf_of`
 
 ## Outside review of the fixes
 
@@ -2307,11 +2315,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 | C15. An in-place change to the settings `OrderedDict` stays stale | Not a defect: configuration is trusted after construction; only an exact `dict` source is held by reference (other mappings are copied by design, per `conf.py::_normalize_user_settings`), and replacing or overriding the setting reloads (`override_settings` fires `setting_changed`) | none |
 
 ## To do: found along the way
-
-- [ ] 387. **SKIP for now** (upstream-seam refactor in flight: F11, filter scalar typing in `filters/inputs.py`). Generated opt-in `year` / `iso_year` filter leaves are typed as the column's scalar (`Date` / `DateTime`), so
-  every wire value cleans to `"Enter a number."`; and the generated `time` leaf on a `DateTimeField` raises
-  `AttributeError: 'datetime.datetime' object has no attribute 'strip'` in `forms.TimeField` clean before the filter
-  seam
 
 - [ ] 563. **SKIP for now** (upstream-seam refactor in flight: package-wide comment sweep). Package comments and docstrings outside the gated phrases still narrate history: "now", "no longer", "the
   former", "byte-unchanged" (634 removed every release number and gates it); judge each against START's provenance rule (dry-0_0_15_3 items 31 and 71 cover part of it; 566 restated the
@@ -2417,6 +2420,21 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 707. The two flavors pick the refused row by different rules: `rest_framework/resolvers.py` reads
   `attempted[-1]` whichever row it is, `forms/resolvers.py::_unstorable_cleaned_fields` the latest attempt of
   `form.instance`; give `utils/write_values.py` one rule both call. Found verifying 696
+- [ ] 708. (robustness) A declared filter whose own form cannot clean a value of the column it compares, with no
+  transform between them (`django_filters.TimeFilter(field_name="occurred_at")` on a `DateTimeField`), is published
+  typed by the column (`exact: DateTime`) and answers every value with the masked error (`AttributeError` from
+  `forms.TimeField` clean; typed by its form it would be a `TypeError` at the column's prep, and plain django-filter
+  fails at `.qs`): refuse it when the schema is built (`filters/inputs.py::_form_cleaned_value_field` keeps the column
+  on purpose). Found fact-finding 387
+- [ ] 709. A generated `FilterSet` leaf over a project-defined transform or lookup class
+  (`DateTimeField.register_lookup(HourOfDay)`, named in `Meta.fields`) is published on a `DjangoConnectionField`'s
+  `filter:` input, but every request naming it answers the masked `ConfigurationError` "`<Set>.apply_sync` must return
+  an unevaluated, unsliced QuerySet ... untrusted defect (where clause carries a HourOfDay node)": the visibility seal
+  refuses any non-Django node class (`utils/querysets.py::_type_is_genuinely_django`, spec-045 Decision 2), so the
+  schema build accepts a configuration no request can use, and the message blames an `apply_sync` the project never
+  overrode. docs/README.md's filter section lists "a transform you register with an `IntegerField` output" as a
+  supported integer transform; the same class registered as Django's own `ExtractHour` filters. Found fact-finding
+  387
 
 ## To do: holes found re-checking the fixes
 

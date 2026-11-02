@@ -37,7 +37,10 @@ A holder schema (``generated_year_schema``) serves ``Meta.fields`` ``year`` / ``
 one ``occurredAt`` head (``year``, ``yearGt``, ``yearIn``), takes the transform's ``Int`` and
 filters by it, and a ``year`` / ``year__gt`` of 0 or 10000, whose
 datetime bound Django cannot form, is ``FILTER_INVALID`` keyed to its form field, flat,
-under ``not`` and through ``partner`` nested and flat. Its declared ``ListFilter``
+under ``not`` and through ``partner`` nested and flat. Its ``iso_year`` / ``iso_year__lte``
+leaves take ``Int``, ``time`` / ``time__gt`` the ``time`` transform's ``Time`` and ``date``
+a ``Date``, on ``occurred_at``, and ``year`` / ``iso_year`` on the date column
+``occurred_on`` take ``Int``; each filters by the value sent. Its declared ``ListFilter``
 (``year__in``) and ``RangeFilter`` (``year__range``, a lone bound included) take and filter
 by an ``Int`` year, and the same shapes with a ``method=`` keep the column's ``DateTime``,
 which reaches the method; the two ranges mint two range types.
@@ -984,8 +987,10 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
 
     No shipped fakeshop set spells a transform in a ``lookup_expr``, so the holder declares
     one over ``ScalarSpecimen``: ``Meta.fields`` ``year`` / ``year__exact`` (which
-    django-filter names as it names ``year``) / ``year__gt`` / ``year__in`` and the null tests
-    ``year__isnull`` / ``date__isnull``; a ``ListFilter`` (``year__in``) and a
+    django-filter names as it names ``year``) / ``year__gt`` / ``year__in`` / ``iso_year`` /
+    ``iso_year__lte`` / ``time`` / ``time__gt`` / ``date`` and the null tests
+    ``year__isnull`` / ``date__isnull`` on ``occurred_at``, and ``year`` / ``iso_year`` on the
+    date column ``occurred_on``; a ``ListFilter`` (``year__in``) and a
     ``RangeFilter`` (``year__range``); and the same list and range shapes with a ``method=``,
     whose method receives the column's values.
     A ``NullableScalarSpecimen`` set reaches it through ``partner``, nested and flat, and
@@ -1035,9 +1040,15 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
                     "year__exact",
                     "year__gt",
                     "year__in",
+                    "iso_year",
+                    "iso_year__lte",
+                    "time",
+                    "time__gt",
+                    "date",
                     "year__isnull",
                     "date__isnull",
                 ],
+                "occurred_on": ["year", "iso_year"],
             }
 
     class GeneratedYearSpecimenType(DjangoType):
@@ -1104,6 +1115,9 @@ query {
   bag: __type(name: "GeneratedYearFilterOccurredAtFilterInputType") {
     inputFields { name type { name kind ofType { kind ofType { name } } } }
   }
+  day: __type(name: "GeneratedYearFilterOccurredOnFilterInputType") {
+    inputFields { name type { name kind ofType { kind ofType { name } } } }
+  }
 }
 """
 
@@ -1118,9 +1132,12 @@ def _scalar_leaf(name: str, scalar: str) -> JSONObject:
 def test_generated_year_leaf_is_typed_by_the_transforms_output() -> None:
     """Every ``occurred_at`` lookup is a leaf of one ``occurredAt`` head, typed by its operand.
 
-    ``year`` / ``year__gt`` / ``year__in`` take the transform's ``Int``, not ``DateTime``, and
-    each chain leaf is named segment by segment (``yearGt``, ``yearIsNull``). ``year__exact``
-    adds no leaf: django-filter names it ``occurred_at__year`` as it names ``year``.
+    ``year`` / ``year__gt`` / ``year__in`` / ``iso_year`` / ``iso_year__lte`` take the
+    transform's ``Int``, not ``DateTime``, ``time`` / ``time__gt`` the ``time`` transform's
+    ``Time`` and ``date`` the ``date`` transform's ``Date``, and each chain leaf is named
+    segment by segment (``yearGt``, ``isoYearLte``, ``yearIsNull``). ``year__exact`` adds no
+    leaf: django-filter names it ``occurred_at__year`` as it names ``year``. On the date
+    column ``occurred_on`` ``year`` / ``iso_year`` take ``Int``, not ``Date``.
     """
     payload = response_json(post_graphql(_GENERATED_YEAR_TYPES_QUERY, url="/graphql-test/"))
 
@@ -1138,10 +1155,16 @@ def test_generated_year_leaf_is_typed_by_the_transforms_output() -> None:
                             "ofType": {"kind": "NON_NULL", "ofType": {"name": "Int"}},
                         },
                     },
+                    _scalar_leaf("isoYear", "Int"),
+                    _scalar_leaf("isoYearLte", "Int"),
+                    _scalar_leaf("time", "Time"),
+                    _scalar_leaf("timeGt", "Time"),
+                    _scalar_leaf("date", "Date"),
                     _scalar_leaf("yearIsNull", "Boolean"),
                     _scalar_leaf("dateIsNull", "Boolean"),
                 ],
             },
+            "day": {"inputFields": [_scalar_leaf("year", "Int"), _scalar_leaf("isoYear", "Int")]},
         },
     }
 
@@ -1184,6 +1207,90 @@ def test_generated_year_leaf_filters_by_the_integer_sent(
     _seed_year_partners()
 
     assert _holder_payload(root, year_filter) == {
+        "data": {root: {"edges": [{"node": {"label": label}} for label in labels]}},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("generated_year_schema")
+@pytest.mark.parametrize(
+    ("root", "transform_filter", "labels"),
+    [
+        pytest.param("specimens", {"occurredAt": {"isoYear": 2020}}, ["new-year"], id="iso-year"),
+        pytest.param(
+            "specimens",
+            {"occurredAt": {"isoYearLte": 2020}},
+            ["new-year"],
+            id="iso-year-lte",
+        ),
+        pytest.param("specimens", {"occurredAt": {"time": "09:30:00"}}, ["mid-year"], id="time"),
+        pytest.param(
+            "specimens",
+            {"occurredAt": {"timeGt": "12:00:00"}},
+            ["new-year"],
+            id="time-gt",
+        ),
+        pytest.param(
+            "specimens",
+            {"occurredAt": {"date": "2021-01-01"}},
+            ["new-year"],
+            id="date",
+        ),
+        pytest.param(
+            "specimens",
+            {"occurredOn": {"year": 2021}},
+            ["new-year"],
+            id="date-column-year",
+        ),
+        pytest.param(
+            "specimens",
+            {"occurredOn": {"isoYear": 2020}},
+            ["new-year"],
+            id="date-column-iso-year",
+        ),
+        pytest.param(
+            "specimens",
+            {"not": {"occurredAt": {"time": "09:30:00"}}},
+            ["new-year"],
+            id="not-time",
+        ),
+        pytest.param(
+            "partners",
+            {"partner": {"occurredAt": {"isoYear": 2021}}},
+            ["of-mid-year"],
+            id="nested-partner-iso-year",
+        ),
+        pytest.param(
+            "partners",
+            {"partnerOccurredAt": {"time": "14:00:00"}},
+            ["of-new-year"],
+            id="flat-partner-time",
+        ),
+    ],
+)
+def test_generated_iso_year_time_and_date_leaves_filter_by_the_value_sent(
+    root: str,
+    transform_filter: dict[str, object],
+    labels: list[str],
+) -> None:
+    """An ``Int`` ISO year, a ``Time`` or a ``Date`` sent to its generated leaf filters by it.
+
+    ``new-year`` falls on 2021-01-01 14:00 UTC, whose ISO year is 2020 while its calendar
+    year is 2021, and ``mid-year`` on 2021-06-15 09:30 UTC, so ``iso_year`` is told apart
+    from ``year``, and ``time`` takes a time of day that is compared with the time of each
+    row's datetime. The date column ``occurred_on`` is 2021-01-01 for ``new-year`` and
+    2022-06-15 for ``mid-year``, so each date-column row keeps one specimen.
+    """
+    new_year = _seed_specimen(
+        "new-year",
+        occurred_on=datetime.date(2021, 1, 1),
+        occurred_at=datetime.datetime(2021, 1, 1, 14, tzinfo=datetime.timezone.utc),
+    )
+    mid_year = _seed_specimen("mid-year", occurred_on=datetime.date(2022, 6, 15))
+    models.NullableScalarSpecimen.objects.create(label="of-new-year", partner=new_year)
+    models.NullableScalarSpecimen.objects.create(label="of-mid-year", partner=mid_year)
+
+    assert _holder_payload(root, transform_filter) == {
         "data": {root: {"edges": [{"node": {"label": label}} for label in labels]}},
     }
 
