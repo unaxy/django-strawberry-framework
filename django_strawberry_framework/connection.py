@@ -219,7 +219,7 @@ def _keyset_connection_context(cls: type[_ConnectionT]) -> CursorState | None:
     A declared ``Meta.cursor_field`` on the node type's definition makes every
     connection over it KEYSET-MODE - value cursors minted/decoded through the
     canonical codec, offset cursors rejected; the ``False`` sentinel keeps the
-    shipped offset behavior. ``_generate_connection_class`` derives the state
+    default offset behavior. ``_generate_connection_class`` derives the state
     from the field's ONE captured definition and stashes it in the class
     namespace, so the DEFAULT vocabulary a request mints with is the one the
     class was built with; nothing here reads the node type at resolve time. A
@@ -1571,7 +1571,7 @@ def _generate_connection_class(
     branches: ``populate`` (when given) fills the class namespace (the
     ``totalCount`` variant's members); ``description`` is forwarded to
     ``strawberry.type`` (the bare variant preserves the parent's inherited SDL
-    description; the opted variant ships description-less, today's SDL shape).
+    description; the opted variant ships description-less).
 
     Name the generated connection from the node type's canonical GraphQL type
     name (``graphql_type_name`` - ``Meta.name`` when set, else the Python
@@ -1760,11 +1760,11 @@ def _connection_type_for(
         # ``resolve_connection`` override - Strawberry's schema-build generic
         # specialization copies the alias into a plain specialized class whose
         # ``resolve_connection`` is ``ListConnection``'s, so the ``first`` +
-        # ``last`` guard never ran through-schema (the bug spec-032
+        # ``last`` guard would never run through-schema (the defect spec-032
         # records). A concrete class is used as-is by the schema build,
         # so the override survives. The description is read from the parent's
-        # strawberry definition (never copied as a package literal), preserving
-        # the previous bare-alias SDL byte-for-byte.
+        # strawberry definition (never copied as a package literal), so the SDL
+        # is byte-for-byte the bare alias's.
         connection_type = _generate_connection_class(
             target_type,
             definition,

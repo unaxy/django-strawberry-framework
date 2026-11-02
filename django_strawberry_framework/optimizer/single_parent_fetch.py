@@ -30,19 +30,19 @@ included) and minted under the cursor vocabulary the plan derived from that
 order (``plans.py::effective_cursor_state``, read back by
 ``connection.py::_consume_window``), so its cursors equal the windowed body's.
 
-Two verified corrections to the original idea:
+Two limits on the fast path:
 
-1. ``node(id:)`` roots do NOT reach the windowed prefetch today -
+1. ``node(id:)`` roots do NOT reach the windowed prefetch -
    ``types/relay.py::_resolve_nodes_default`` returns a list of instances (one
    per id, the single-id refetch included) and the extension middleware only
    optimizes ``QuerySet`` results. The fast
    path targets the general case: any windowed prefetch whose injected parent-IN
    list has length 1 (e.g. a root connection/filtered list returning one parent
    row). It claims no node-root benefit.
-2. M2M / ``THROUGH_TABLE`` joins are excluded in v1: Django's M2M prefetch
+2. M2M / ``THROUGH_TABLE`` joins are excluded: Django's M2M prefetch
    attaches rows via ``extra(select={"_prefetch_related_val_*": ...})``, which a
-   degenerate re-query from the pristine clone cannot reproduce. v1 requires the
-   ``DIRECT_FK`` join shape.
+   degenerate re-query from the pristine clone cannot reproduce. The fast path
+   requires the ``DIRECT_FK`` join shape.
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ def single_parent_spec(request: NestedConnectionRequest) -> SingleParentWindowSp
 
     ``None`` (the windowed body stays) unless EVERY eligibility condition holds:
 
-    - ``request.keyset_seek is None`` - keyset seeks are out of v1 scope; their
+    - ``request.keyset_seek is None`` - keyset seeks are excluded; their
       cursor arithmetic is not a plain filtered ``LIMIT``.
     - ``not request.with_total_count`` - a bare ``LIMIT`` cannot produce the
       partition count, so ``totalCount``/counted shapes keep the window (whose

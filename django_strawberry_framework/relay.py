@@ -175,7 +175,7 @@ def _node_id_slot(
     ``model._meta.get_field`` - and the three non-concrete shapes each take
     their own path: a name that is no model field at all
     (``FieldDoesNotExist``) yields ``None`` (no column to coerce or filter on;
-    all consumers fall through with the raw literal, the pre-032 behavior); a
+    all consumers fall through with the raw literal); a
     reverse relation yields its ``Rel`` object, which the coercer maps to
     ``None`` (read: ``null`` with no query; write: ``UNCOERCIBLE_PK``); a
     non-concrete forward field (e.g. ``GenericForeignKey``) yields the field

@@ -797,7 +797,7 @@ def _login_resolve_body(
 
     Handles Django HTTP under synchronous execution directly, and a directly-invoked
     Strawberry ``SyncGraphQLHTTPConsumer`` (a classified Channels HTTP scope) through
-    a SINGLE ``async_to_sync`` bridge at the private transport boundary (the plan's
+    a SINGLE ``async_to_sync`` bridge at the private transport boundary (the
     one permitted sync->async hop; an async Channels consumer instead awaits the
     native async body). The package router serves no HTTP at all (spec-046
     Decision 2 gives HTTP to the consumer's own Django ASGI application), so a
@@ -920,8 +920,8 @@ def _logout_observation(
     (the ONE anonymity definition shared with ``current_user``) and the
     ``{ ok, errors }`` payload is constructed BEFORE any session mutation, so ``ok``
     describes the state being transitioned and payload construction cannot fail after
-    teardown. The Channels caller invokes this inside the held per-scope lock, the
-    same point the observation is captured today.
+    teardown. The Channels caller invokes this inside the held per-scope lock, where
+    the observation is captured.
     """
     ok = _authenticated_actor_or_none(request) is not None
     return ok, payload_cls(ok=ok, errors=[])
@@ -1029,12 +1029,12 @@ def _logout_resolve_body(holder_cls: _SealedAuthHolderMeta, info: Info[object, o
 
     Handles Django HTTP under synchronous execution directly, and a directly-invoked
     Strawberry ``SyncGraphQLHTTPConsumer`` (a classified Channels HTTP scope) through
-    a SINGLE ``async_to_sync`` bridge at the private transport boundary (the plan's
+    a SINGLE ``async_to_sync`` bridge at the private transport boundary (the
     one permitted sync->async hop; an async Channels consumer instead awaits the
     native async body). The package router serves no HTTP at all (spec-046
     Decision 2 gives HTTP to the consumer's own Django ASGI application), so a
     Channels HTTP scope reaches here only from a consumer the project mounted
-    itself. ``ok`` retains the shipped meaning: it is ``true`` only
+    itself. ``ok`` is ``true`` only
     when an authenticated actor existed under the lock before teardown, and an
     already-anonymous logout returns ``{ok: false, errors: []}`` after still flushing
     any residual session data (idempotent teardown with an observational result). A

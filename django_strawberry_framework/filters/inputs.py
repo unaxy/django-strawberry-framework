@@ -1180,7 +1180,7 @@ def _filter_input_prechecks(
 def _unexpected_filter_dispatch(obj: object) -> ConfigurationError:
     """Fallthrough factory for the filter-input ``convert_with_mro`` riders.
 
-    Last precheck is ``object`` (the original ``else``), so a real dispatch
+    Last precheck is ``object`` (the catch-all), so a real dispatch
     never reaches here, and no handler returns ``MRO_CONTINUE``. The factory
     keeps ``convert_with_mro``'s raising contract all the same.
     """
@@ -1279,8 +1279,7 @@ def convert_filter_to_input_annotation(
     Range / List / Array, then bare ``TypedFilter``, then
     ``ChoiceFilter``, then a ``MultipleChoiceFilter`` (a list whose element is typed
     like a ``ListFilter``'s, from the model column, never from
-    ``TypedMultipleChoiceFilter.coerce``), then the ``object`` catch-all (the original
-    ``else``).
+    ``TypedMultipleChoiceFilter.coerce``), then the ``object`` catch-all.
     ``method=...`` filters
     that expose no form field raise ``ConfigurationError``.
 

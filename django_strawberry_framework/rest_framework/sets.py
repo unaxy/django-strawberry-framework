@@ -881,7 +881,7 @@ class SerializerMutation(DjangoMutation):
         """Return the default serializer-construction kwargs - CONSTRUCTOR-ONLY, resolver-consumed.
 
         The graphene ``get_serializer_kwargs`` parity seam (spec-039 Decision 7 step 4 /
-        Decision 8), hardened to a CONSTRUCTOR-ONLY hook: a consumer overrides this to add
+        Decision 8) as a CONSTRUCTOR-ONLY hook: a consumer overrides this to add
         constructor kwargs (an extra ``context`` key, a constructor argument like ``tenant``) -
         never to reshape the write itself.
 
@@ -905,8 +905,8 @@ class SerializerMutation(DjangoMutation):
         ``write_alias`` / ``instance_pk``).
 
         **Narrowing away a required field: use ``Meta.injected_fields`` +
-        ``get_serializer_injected_data``.** Injecting values by rewriting ``data`` here is no
-        longer possible.
+        ``get_serializer_injected_data``.** Rewriting ``data`` here is refused (see
+        above).
         """
         del info, hook_context  # the default ignores them; an override may consult them.
         # Shared with the form default via ``write_mixins.py::construction_kwargs``:

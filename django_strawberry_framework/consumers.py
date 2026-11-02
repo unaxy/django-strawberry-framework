@@ -1059,7 +1059,7 @@ async def send_revalidated_operation_frame(
     here. The one path that arrives with no operation of the package's to end at
     all is the protocols' subscription-limit ``error`` frame, which both handlers
     emit from the connection's own message-loop task; the close alone is the whole
-    rejection there, and it needs no carve-out now that nothing is cancelled.
+    rejection there, and it needs no carve-out because nothing is cancelled.
     Upstream's own ``shutdown()`` / ``cleanup()`` still cancels and awaits every
     sibling operation on disconnect.
     """

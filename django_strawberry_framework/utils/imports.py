@@ -72,8 +72,8 @@ def import_attr_if_importable(module_path: str, attr_name: str) -> object | None
     submodule reachable, another not) returns ``None`` for the unreachable
     module so the caller can skip it and continue. A ``None`` entry in
     ``sys.modules`` (the test-isolation shape for simulating an unimportable
-    submodule) raises ``ImportError`` inside ``import_module``, same as the
-    previous inline guards, and so also returns ``None``. The ``getattr`` has
+    submodule) raises ``ImportError`` inside ``import_module``, as an inline
+    ``from .submodule import X`` does, and so also returns ``None``. The ``getattr`` has
     NO default - a missing attribute on an importable module is a real bug
     and fails loud (``AttributeError``), matching the registry co-clear
     semantics.

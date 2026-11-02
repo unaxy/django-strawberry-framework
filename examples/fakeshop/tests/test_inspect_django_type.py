@@ -70,7 +70,7 @@ def test_inspect_by_meta_name() -> None:
     ``PublicPatronType`` declares ``name = "PublicPatron"`` - the SDL surface an
     operator sees in introspection. Pasting that GraphQL name into the CLI must
     resolve the type and title the table with the same authoritative name. The
-    Python class name still resolves as back-compat and titles the same SDL name.
+    Python class name resolves too and titles the same SDL name.
     """
     out = StringIO()
     call_command("inspect_django_type", "PublicPatron", stdout=out)
@@ -81,7 +81,7 @@ def test_inspect_by_meta_name() -> None:
     assert "PublicPatronType" not in text.splitlines()[0]
     # A kept scalar column still renders (exclude drops email / fines only).
     assert "name" in text
-    # Python class name still resolves (back-compat for call sites / muscle memory).
+    # The Python class name resolves too.
     out_cls = StringIO()
     call_command("inspect_django_type", "PublicPatronType", stdout=out_cls)
     assert out_cls.getvalue().splitlines()[0].startswith("PublicPatron  (model:")

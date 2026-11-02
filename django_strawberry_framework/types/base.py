@@ -413,7 +413,7 @@ def _validate_relation_shapes(
 
 # The three positional parameters a ``callable`` GlobalID encoder must accept.
 # The callable runs at encode time, BEFORE ``resolve_id``, so it never receives
-# ``node_id``. ``info`` was dropped pre-1.0 (this is unpublished): a callable
+# ``node_id``. It never receives ``info`` either: a callable
 # encoder is a deterministic pure per-(type, object) function, and withholding
 # ``info`` prevents easy request/actor dependence (it cannot prevent I/O -
 # purity stays the consumer's obligation). Named once so the validator's error

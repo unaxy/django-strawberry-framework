@@ -375,7 +375,7 @@ def _check_n1(
     # ``forward_resolver`` may have already read the PLAN sentinel and computed
     # the resolver key; reuse them when threaded so the ``info.path`` walk runs
     # once per row, not once per consumer. Other call sites omit
-    # both and get the original read-and-compute behavior.
+    # both, and this reads the sentinel and computes the key itself.
     if planned is _PLAN_UNREAD:
         planned = _planned_resolver_keys(context)
     key = (
@@ -835,8 +835,7 @@ def _make_relation_resolver(
         # Cheap per-row gate: a ``ContextVar`` read, not a second stash dispatch.
         # ``None`` (no extension ran) plus an absent plan sentinel means nothing
         # armed the guard and there is no plan to compare against, so the
-        # resolver-key walk is skipped exactly as it was before strictness became
-        # reachable without a stash. A real value threads into ``_check_n1``
+        # resolver-key walk is skipped. A real value threads into ``_check_n1``
         # below, which then re-reads nothing.
         live_strictness = _active_strictness()
         if not elisions and planned is None and live_strictness in (None, "off"):
@@ -1027,7 +1026,7 @@ def _attach_file_resolvers(
     ``skip_field_names`` is ``DjangoTypeDefinition.consumer_authored_fields`` --
     deliberately BROADER than the relation pass's
     ``consumer_assigned_relation_fields`` (assigned overrides only). A consumer
-    annotation-only override such as ``attachment: str`` keeps the legacy ``str``
+    annotation-only override such as ``attachment: str`` keeps its ``str``
     shape (already honored by ``_build_annotations``) and must also receive NO
     generated file resolver here; skipping only assigned ``strawberry.field``
     overrides would silently clobber an annotation opt-out (spec-037 Decision 3).

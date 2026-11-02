@@ -391,8 +391,8 @@ class TypeRegistry:
         Three return states:
 
         - **Primary declared.** ``_primaries[model]`` is set; return it.
-        - **Single registered type, no primary flag.** Backward-compatible
-          path for the single-type-per-model case; return that type.
+        - **Single registered type, no primary flag.** The
+          single-type-per-model case; return that type.
         - **Multiple registered types and no declared primary.** Ambiguous
           state pending the ``finalize_django_types()`` audit; return
           ``None``. Callers cannot distinguish this from

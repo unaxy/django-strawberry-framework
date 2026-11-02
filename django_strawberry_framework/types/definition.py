@@ -234,7 +234,7 @@ class DjangoTypeDefinition:
     connection: dict[str, bool] | None = None
     # Keyset-cursor opt-in (the spec-030 ``## Keyset cursors`` contract):
     # the validated ``Meta.cursor_field`` order strings, or ``None`` for the
-    # shipped offset-cursor behavior. When set, every connection over this
+    # default offset-cursor behavior. When set, every connection over this
     # type is KEYSET-MODE: it orders by these columns, mints value-encoded
     # signed cursors (``keyset.py``), and rejects offset cursors. Shape is
     # validated at class creation (``types/base.py::_validate_cursor_field``);

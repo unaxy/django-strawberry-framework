@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 396 done, 88 to do. The CHANGELOG entries filed here moved to
+Progress: 397 done, 87 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2276,6 +2276,19 @@ Progress: 396 done, 88 to do. The CHANGELOG entries filed here moved to
   test_generated_year_leaf_is_typed_by_the_transforms_output` (now `isoYear`, `isoYearLte`, `time`, `timeGt`, `date` and
   the `occurredOn` head too) and `::test_generated_iso_year_time_and_date_leaves_filter_by_the_value_sent` (10 rows; a
   2021-01-01 row whose ISO year is 2020 tells `iso_year` from `year`), failable against the column-typed `_leaf_of`
+- [x] 563. Package comments, docstrings and string statements state the invariant where they narrated this package's
+  own history: about 107 sites in 43 files ("the previous shape", "grew separately", "independently grew", "v1",
+  "pre-033", "pre-1.0", "back-compat", "now-fixed", "the hardened hooks", "today's behavior", "as spec-047 shipped
+  them", "predates the boundary middleware", ...), plus five test-tree sites and a kanban migration docstring;
+  `routers.py::_MISSING_DJANGO_APPLICATION_HINT` keeps naming its migration (spec-046 Decision 3). The item's own words
+  ("now", "no longer", "the former", "byte-unchanged") were almost all present-tense invariants and stay judged by
+  hand. The gate, renamed `tests/test_ci_governance.py::
+  test_no_comment_docstring_name_or_package_string_carries_a_provenance_phrase`, reads every package runtime string
+  (`_swept_texts`, shared with the release sibling) and refuses 11 more phrases, each history in every corpus hit
+  (`pre-NNN`, `pre-1.0`, back(wards)-compat, `independently grew`, `grew separately`, `historically`,
+  `byte-unchanged`, `moved verbatim`, `net-new`, `now-fixed`, `the original implementation`), with planted rows;
+  START's rule and REVIEW.md's Comments axis say so. Every changed package file's docstring-stripped AST is
+  unchanged
 
 ## Outside review of the fixes
 
@@ -2316,9 +2329,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 563. **SKIP for now** (upstream-seam refactor in flight: package-wide comment sweep). Package comments and docstrings outside the gated phrases still narrate history: "now", "no longer", "the
-  former", "byte-unchanged" (634 removed every release number and gates it); judge each against START's provenance rule (dry-0_0_15_3 items 31 and 71 cover part of it; 566 restated the
-  `(hardened)`, `(hardening)` and `historically` sites in `schema.py` and `rest_framework/`). Found fact-finding 500
 - [ ] 565. **SKIP for now** (upstream-seam refactor in flight: package-wide comment sweep, `optimizer/extension.py`). Optimizer plan labels (B1-B8, O2-O6, G1-G3) label 177 comment and docstring sites, 15 of them in the
   package (`optimizer/extension.py`, `optimizer/plans.py`, `optimizer/walker.py`, `types/resolvers.py`) and most in
   `tests/optimizer/test_extension.py` and `test_walker.py`; the clause after each label already states the behaviour,

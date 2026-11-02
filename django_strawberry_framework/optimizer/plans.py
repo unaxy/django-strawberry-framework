@@ -176,9 +176,9 @@ class _IndexedList(list[_T]):
         """Append ``value`` once, using the sidecar index when the key is hashable.
 
         The hashable path runs inside one ``try`` (zero-cost when nothing raises)
-        rather than the previous probe-``try`` plus a ``contextlib.suppress``
+        rather than a probe-``try`` plus a ``contextlib.suppress``
         around the ``add`` - a per-call context-manager allocation this hot loop
-        could feel. The consolidation is safe because ``in`` and ``add`` hash the
+        could feel. One ``try`` is safe because ``in`` and ``add`` hash the
         SAME key: when the membership probe passed, the ``add`` cannot raise
         ``TypeError``, so the appended-then-failed-to-index state is unreachable.
         """
@@ -312,7 +312,7 @@ class OptimizationPlan:
     are swapped to frozensets. The ``cacheable`` bool remains a plain settable
     attribute and its post-handoff immutability is a construction-time
     convention. ``merge_from`` rejects finalized plans on both sides and
-    ``merge_metadata_from`` a finalized target, so the extracted nested planner
+    ``merge_metadata_from`` a finalized target, so the nested planner
     cannot reopen a handed-off plan.
     """
 
@@ -1284,8 +1284,8 @@ def effective_connection_order(
     (``nested_planner.py::plan_connection_relation``) and the resolve-time
     pipeline (``connection.py::_finalize_queryset``), so a planned window's row
     order can never drift from the per-parent pipeline's (the cursor-parity
-    invariant, spec-033 Decision 4 - this completes the Decision 11 hoist that
-    gave ``deterministic_order`` its one source):
+    invariant, spec-033 Decision 4; spec-033 Decision 11 homes this order rule
+    beside ``deterministic_order``, whose one caller this is):
 
     - a keyset target's declared ``Meta.cursor_field`` IS the connection
       default order when nothing else ordered ``query`` - no explicit
@@ -1538,7 +1538,7 @@ def _keyset_order_ref(entry: object) -> tuple[str, str, bool] | None:
     ``order_entry_name_and_direction`` parses; rejects (``None``) entries a
     value cursor cannot anchor: unresolvable expressions (aggregates,
     transforms) and explicit ``nulls_first`` / ``nulls_last`` positioning
-    (the nullable domain the v1 column contract excludes --
+    (the nullable domain the keyset column contract excludes --
     ``order_entry_has_explicit_nulls``).
     """
     if order_entry_has_explicit_nulls(entry):
@@ -1788,7 +1788,7 @@ def apply_window_pagination(
       ABSOLUTE first row (``_dst_row_number_abs == 1``) since page-relative
       ``rn == 1`` only exists when the page itself is non-empty.
 
-    Reversed keyset windows are not planned in v1 (the nested planner's fallback
+    Reversed keyset windows are never planned (the nested planner's fallback
     discipline routes ``last`` / ``before:`` keyset shapes per-parent), so
     ``keyset_seek`` + ``reverse`` raises the loud ``OptimizerError``.
 

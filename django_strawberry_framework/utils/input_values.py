@@ -1,16 +1,16 @@
 """Set-input traversal substrate shared by the FilterSet and OrderSet families.
 
-FilterSet and OrderSet independently grew the SAME runtime walk over a generated
+FilterSet and OrderSet run the SAME walk over a generated
 Strawberry input value: detect dict vs input-dataclass shape, decide which values
 are active (``None`` / ``strawberry.UNSET``), resolve the per-field ``FieldSpec``
 provenance, and classify each supplied top-level field as a leaf, a related
-branch, or a logical operator. That classification was spelled inline at four
+branch, or a logical operator. That classification serves four
 correctness-sensitive call sites -- the filter normalizer
 (``filters/sets.py::FilterSet._normalize_input``), the order normalizer
 (``orders/inputs.py::normalize_input_value``), and the permission walk
 (``utils/permissions.py::active_permission_targets`` and its
-``active_related_branches`` wrapper). A drift between any two copies in the active-input
-decision is a real bug class -- a filter applied without its permission gate, a
+``active_related_branches`` wrapper). A drift between any two of them in the active-input
+decision would be a real bug class -- a filter applied without its permission gate, a
 related visibility hook skipped, work done on inactive input -- so the neutral
 mechanics are single-sited here.
 
@@ -69,7 +69,7 @@ DEFAULT_SET_INPUT_TRAVERSAL_DEPTH = 8
 # three are mutually exclusive -- the logical-operator attrs are never related
 # names and related names are never logical -- so classification order between
 # the logic and related checks is immaterial; ``iter_active_fields`` tests logic
-# first to mirror ``FilterSet._normalize_input``'s original branch order.
+# first.
 LOGIC = "logic"
 RELATED = "related"
 LEAF = "leaf"

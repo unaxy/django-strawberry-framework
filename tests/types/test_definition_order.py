@@ -1566,7 +1566,7 @@ def test_finalize_succeeds_when_model_has_multiple_types_one_primary() -> None:
 
 
 def test_finalize_succeeds_when_model_has_single_type_no_primary() -> None:
-    """Backward-compat: a single registered type with no primary still finalizes cleanly."""
+    """A single registered type with no primary finalizes cleanly."""
 
     class ItemType(DjangoType):
         class Meta:

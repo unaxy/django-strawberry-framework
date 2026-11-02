@@ -317,7 +317,7 @@ def build_lateral_sql(
     # spliced visibility WHERE - which Django compiles against the real table
     # name, not the alias - agree with the select/order/parent-link/seek refs
     # for free. THROUGH_TABLE keeps its alias (it needs disambiguation from the
-    # through table, and v1 visibility WHERE is DIRECT_FK-only).
+    # through table, and the visibility WHERE is DIRECT_FK-only).
     child = child_table if spec.through_table is None else qn(LATERAL_CHILD_ALIAS)
     parents = qn(LATERAL_PARENT_ALIAS)
     pid = f"{parents}.{qn(LATERAL_PARENT_COLUMN)}"
@@ -1026,7 +1026,7 @@ LATERAL_STRATEGY = LateralPrefetchStrategy()
 def _plain_single_table_where(node: Node, base_table: str) -> bool:
     """Return whether every leaf qual under ``node`` is a plain ``base_table`` column qual.
 
-    The v1 visibility-WHERE admission test: each leaf lookup's ``lhs`` must be a
+    The visibility-WHERE admission test: each leaf lookup's ``lhs`` must be a
     bare ``Col`` on the base child table (``base_table`` is the ``Col.alias``
     Django assigns the base relation) and its ``rhs`` must be a plain value, not
     an expression. Nested ``WhereNode`` subtrees - including the negated node
@@ -1097,8 +1097,8 @@ def _build_lateral_spec(request: NestedConnectionRequest) -> LateralWindowSpec |
         # reproduce - carry it here, compile and splice it at fetch time. The
         # combined gate keeps refusing every shape the raw SQL cannot express:
         # a keyset seek (its base WHERE already carries the seek residue, and
-        # combining the two matchers is out of v1 scope), a THROUGH_TABLE M2M
-        # (v1 visibility WHERE is DIRECT_FK-only; the aliased child table would
+        # combining the two matchers is unsupported), a THROUGH_TABLE M2M
+        # (the visibility WHERE is DIRECT_FK-only; the aliased child table would
         # not agree with Django's real-name compile), an ``is_empty()`` hook
         # (``qs.none()`` -> ``EmptyResultSet`` at compile), and any
         # multi-table / ``Exists`` / ``Subquery`` / expression qual.

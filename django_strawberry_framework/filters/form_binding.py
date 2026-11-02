@@ -284,7 +284,7 @@ def bound_filter_form_class(
     actual: type[forms.Form],
     bindings: FilterFormBindings,
 ) -> type[forms.Form]:
-    """Keep all consumer form overrides ahead of the new actual-widget binding seam.
+    """Keep all consumer form overrides ahead of the actual-widget binding seam.
 
     Bare ``forms.Form`` cannot precede the mixin, which inherits it (no consistent MRO),
     so it is replaced by the mixin; every other form class keeps its place ahead of it.

@@ -593,7 +593,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
 
         The overridable input-materialization seam ``bind_write_declarations`` calls at
         phase 2.5. The **model default** delegates to ``_materialize_input_for``
-        (today's exact model behavior: the model-column ``<Model>Input`` /
+        (the model-column ``<Model>Input`` /
         ``<Model>PartialInput`` built from the editable columns, or ``None`` for a
         ``delete``), then stashes ``_input_field_specs`` + ``_model_fields_by_attr`` for
         the decode; the form flavors override it to build the form-derived input from

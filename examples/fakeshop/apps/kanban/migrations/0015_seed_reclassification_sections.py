@@ -1,4 +1,4 @@
-"""Seed the four net-new ``Section`` rows for the ``other`` reclassification.
+"""Seed the four ``Section`` rows the ``other`` reclassification adds.
 
 This data-only migration seeds the four target sections the reclassification
 of ``other`` card items needs, at orders 9-12, the slots after ``other``

@@ -1,11 +1,11 @@
 """Shared permission traversal and Django/Channels request-context decoding.
 
-FilterSet and OrderSet independently grew the SAME active-input permission
+FilterSet and OrderSet share the SAME active-input permission
 contract: resolve the request from ``info``, walk only supplied input fields,
 dedupe ``check_<field>_permission`` calls by class, recurse into active related
 branches, and fire both child gates and parent branch gates. A divergence
-between the two copies is a real authorization-bug class -- a fix to one side is
-easy to miss on the other -- so the neutral mechanics are single-sited here.
+between the two families would be a real authorization-bug class, so the neutral
+mechanics are single-sited here.
 
 This module owns mechanics only; the family-specific shape lives on
 ``sets_mixins.ActiveInputPermissionAttrs`` (one instance per set class):

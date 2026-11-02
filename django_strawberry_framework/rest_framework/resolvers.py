@@ -58,7 +58,7 @@ The serializer-specific invariants this module owns:
   request).
 
 - **The serializer is constructed via the CONSTRUCTOR-ONLY ``get_serializer_kwargs``
-  hook + the framework merge** (spec-039 Decision 8 step 4 / hardened). The framework
+  hook + the framework merge** (spec-039 Decision 8 step 4). The framework
   builds the authoritative serializer ``data`` ITSELF - decoded client data plus the
   ``get_serializer_injected_data`` injection (whose keys must EXACTLY match
   ``Meta.injected_fields``) - then calls ``get_serializer_kwargs(info, data=<copy>,
@@ -881,7 +881,7 @@ def _frozen_hook_view(value: object) -> object: ...
 def _frozen_hook_view(value: object) -> object:
     """Build the IMMUTABLE view of a decoded data tree the consumer hooks receive.
 
-    The hardened hooks (``get_serializer_injected_data`` / ``get_serializer_kwargs``
+    The consumer hooks (``get_serializer_injected_data`` / ``get_serializer_kwargs``
     / ``get_serializer_save_kwargs``) must not be able to mutate the authoritative
     serializer data - not the outer mapping, not a nested list, not a mutable scalar
     leaf, not an uploaded file's stream. A mutable clone only prevents the outer
@@ -1226,10 +1226,10 @@ def _assert_schema_runtime_agreement(
     The schema-time field map (the ``get_serializer_for_schema()`` hook) drives the generated
     GraphQL input + the bind-stashed reverse map (``mutation_cls._input_field_specs``); the
     runtime write uses the REAL ``serializer_class``. If they diverge, DRF would silently
-    ignore an incoming key the GraphQL schema implied is writable (the exact bug the fakeshop
-    fixtures once demonstrated). This turns the hook into a VERIFIED contract: for every
-    write-surface field spec (GraphQL input + ``Meta.injected_fields`` - one walk via
-    ``_write_surface_specs``), the runtime ``serializer.fields`` must
+    ignore an incoming key the GraphQL schema implied is writable. This turns the hook
+    into a VERIFIED contract: for every write-surface field spec (GraphQL input +
+    ``Meta.injected_fields`` - one walk via ``_write_surface_specs``), the runtime
+    ``serializer.fields`` must
 
     - contain ``spec.target_name`` and have it WRITABLE (not ``read_only``);
     - bind the SAME ``source`` the schema-time discovery recorded;

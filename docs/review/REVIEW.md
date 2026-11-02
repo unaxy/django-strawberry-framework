@@ -258,9 +258,11 @@ graded. Each is one of:
 - **stale** — described a body that has since changed (the worst grade: it misleads);
 - **duplicates the code** — says what the next line says; delete it;
 - **process provenance** — names a spec (a pointer to a spec Decision is kept, START.md
-  "Style"; a bare `(spec-NNN)` is provenance), card, round, worker, review, "fix for", "legacy",
-  "moved from", "now", "no longer" ([START.md][start] "Style"); delete or rewrite as the present-tense
-  rule.
+  "Style"; a bare `(spec-NNN)` is provenance), card, round, worker, review, "fix for", and "legacy",
+  "moved from", "now", "no longer" where they set the code against an earlier state of itself
+  (upstream's own "legacy" protocol, a bound "no longer than N" or a step "the row is now locked"
+  is not; the phrases `tests/test_ci_governance.py::PROVENANCE_PHRASES` names already fail CI)
+  ([START.md][start] "Style"); delete or rewrite as the present-tense rule.
 
 First lines, by kind:
 

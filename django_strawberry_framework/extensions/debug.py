@@ -811,7 +811,7 @@ class DjangoDebugExtension(_OperationBoundExtension[_DebugOperationState]):
             # disclose must not also refuse the request. A hook entered with no
             # operation state bound is the same answer for the same reason:
             # there is no operation to capture for, and capturing onto the
-            # extension instead is exactly the shared stash this state replaced.
+            # extension instead would share one stash across operations.
             if state is not None:
                 logger.warning(
                     "DjangoDebugExtension is installed on a schema running with "

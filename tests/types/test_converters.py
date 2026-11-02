@@ -2153,7 +2153,7 @@ def test_relation_resolves_to_primary_when_secondary_registered_before_source_be
 
 
 def test_relation_resolves_when_target_model_has_one_type_no_primary() -> None:
-    """Backward-compat: a single registered type with no primary still resolves."""
+    """A single registered type with no primary resolves."""
 
     class ItemType(DjangoType):
         class Meta:

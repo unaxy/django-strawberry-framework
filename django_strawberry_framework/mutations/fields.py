@@ -96,8 +96,8 @@ def _validate_mutation_target(mutation_cls: object) -> None:
     load cycle (``forms/sets.py`` imports ``mutations/sets.py``). So the family is
     recognized by the protocol attrs every flavor carries - the ``036``
     ``DjangoMutation`` (and so ``DjangoModelFormMutation``) and the plain
-    ``DjangoFormMutation`` all pass; today's ``DjangoMutation`` behavior is
-    unchanged (it carries every protocol attr).
+    ``DjangoFormMutation`` all pass (``DjangoMutation`` carries every protocol
+    attr).
 
     It does NOT require ``_input_class`` / ``_payload_type_name`` - those are BIND
     outputs populated at ``finalize_django_types``, and the field is constructed at
@@ -255,7 +255,7 @@ def _synthesized_mutation_signature(
     ``data`` is a ``strawberry.lazy`` forward-ref to the generated input class -
     named via the seams ``mutation_cls.input_type_name(meta)`` +
     ``mutation_cls.input_module_path`` (the model default = ``mutations.inputs`` /
-    today's name; the form flavors override to ``forms.inputs`` + the form-input
+    the model input name; the form flavors override to ``forms.inputs`` + the form-input
     name; the serializer flavor names its ``<Mutation>Data`` slot in
     ``rest_framework.inputs``, which its bind fills), so the form ``data:`` ref
     resolves the form-derived input. The seams run here, before

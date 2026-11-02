@@ -3247,8 +3247,8 @@ class FilterSet(
             # TODO(spec-060 Slice 1): Meta.search_fields - wire
             # `construct_search(all_filters)` from
             # `django_strawberry_framework.filters.inputs.LOOKUP_PREFIXES` here.
-            # The prefix map and `construct_search` landed with spec-027
-            # Decision 2; spec-060 owns the consumer surface.
+            # The prefix map and `construct_search` are spec-027 Decision 2's;
+            # spec-060 owns the consumer surface.
 
             # The two-condition cache-write gate (own `related_filters` +
             # no unresolved string lazy targets) is single-sited in
@@ -3527,7 +3527,7 @@ class FilterSet(
         published on THIS class: a filterset instantiated before its lazy
         ``RelatedFilter`` targets resolve (``should_cache_expansion`` skips the
         cache) presents the unexpanded surface and correctly degrades to
-        today's behavior, and the adapter treats any name absent from a present
+        running without a snapshot, and the adapter treats any name absent from a present
         snapshot's mapping as a non-candidate.
         """
         # Only the expansion cache writes this own-namespace slot, with an ``ExpansionSnapshot``.
@@ -5545,7 +5545,7 @@ class FilterSet(
                 )
 
     def check_permissions(self, request: object, requested_fields: set[str] | None = None) -> None:
-        """Backward-compatible thin delegate to `_run_permission_checks`.
+        """Thin public delegate to `_run_permission_checks`.
 
         Cookbook callers reach for the bound-method form; the active-input
         normalization happens in `_run_permission_checks` so both entry
@@ -6710,7 +6710,7 @@ class FilterSet(
         12 microseconds per inactive to-many leaf, all inner-root construction
         and no I/O; a pathological sixteen-inactive-leaf request is about 0.2 ms
         of Python and is dwarfed by the database round-trip of any request that
-        actually filters, so the earlier precise policy is not worth the
+        actually filters, so that per-filter policy is not worth the
         construction it would save.
 
         A restrictive-empty input produces

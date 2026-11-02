@@ -293,7 +293,7 @@ def test_spec_carries_single_table_visibility_where(child_queryset: models.Query
 
 
 def test_spec_refuses_visibility_where_on_m2m_through() -> None:
-    """v1 visibility WHERE is DIRECT_FK-only: an M2M through filter downgrades."""
+    """The visibility WHERE is DIRECT_FK-only: an M2M through filter downgrades."""
     request = _request(Genre, "books", child_queryset=Book.objects.filter(title="x"))
     assert _build_lateral_spec(request) is None
 

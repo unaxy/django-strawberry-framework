@@ -57,7 +57,7 @@ from django_strawberry_framework.utils.lazy import unwrap_lazy_object
 # ``SyncMisuseError`` is owned by ``utils/querysets.py``; the redundant ``as``
 # alias re-exports it from this module so ``from ...types.relay import
 # SyncMisuseError`` and the ``types/__init__.py`` re-export resolve here.
-from django_strawberry_framework.utils.querysets import SyncMisuseError as SyncMisuseError  # noqa: PLC0414 - kept re-export path
+from django_strawberry_framework.utils.querysets import SyncMisuseError as SyncMisuseError  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,
@@ -241,18 +241,18 @@ _NO_NODE_ID_MESSAGE = "No field annotated with `NodeID` found in "
 def _stamp_relay_id_attr(type_cls: type[relay.Node]) -> str:
     """Resolve the Relay id attribute ONCE, pin it on the class and return it (Phase 2.5).
 
-    Two defects in the per-call path this replaces:
+    Two defects of resolving it per call through upstream alone:
 
     - **Order-dependent shadowing.** Strawberry's ``Node.resolve_id_attr``
       caches its scan result on ``cls._id_attr``, and its cache check reads
       INHERITED values - so in a chain where parent and child declare
-      DIFFERENT ``relay.NodeID[...]`` annotations, whichever class resolved
-      first decided the child's id attribute (the child silently emitted and
-      filtered on the parent's column). Seeding ``_id_attr = None`` into the
+      DIFFERENT ``relay.NodeID[...]`` annotations, whichever class resolves
+      first decides the child's id attribute (the child silently emits and
+      filters on the parent's column). Seeding ``_id_attr = None`` into the
       class's OWN ``__dict__`` blinds the inherited-cache read, so the scan
       below always starts from this class's annotations.
     - **Per-row rescan.** Upstream caches only on success; the common
-      no-``NodeID`` ``"pk"`` fallback re-ran the full MRO ``eval_type``
+      no-``NodeID`` ``"pk"`` fallback re-runs the full MRO ``eval_type``
       annotation scan on EVERY ``resolve_id`` call - once per row of every
       result set. The stamp turns that into one ``__dict__`` read.
 
@@ -882,7 +882,7 @@ def _install_typename_closure(
             info: Info[object, object],
         ) -> str:
             # Strawberry's resolve_typename seam passes ``(cls, root, info)``; the
-            # encoder contract dropped ``info`` (pre-1.0), so only ``root`` is
+            # encoder contract excludes ``info``, so only ``root`` is
             # forwarded to ``encode_typename``.
             del info
             return encode_typename(definition, strategy, cls, root)
