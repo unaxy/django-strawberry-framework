@@ -31,10 +31,15 @@ datetime or time the database cannot store is refused live on each. The ``SplitF
 pairs write ``occurred_at`` through ``forms.ScalarSpecimenSplitStampForm``'s
 ``SplitDateTimeField``, whose widget reads a date key and a time key: unprefixed, under the
 form's own prefix (``PrefixedSplitForm``), and from a copy a ``get_form`` keys under that
-prefix itself (``RekeyedSplitForm``). The ``NullableScalarSpecimen`` ``ViaForm`` pair writes
-the ``null=True`` ``flag`` column through ``forms.NullableScalarSpecimenFlagForm``'s
-checkbox and the ``null=True`` ``payload`` JSON column through its ``CharField``, so an
-explicit ``null`` and an update omitting either over a stored ``NULL`` store ``NULL``.
+prefix itself (``RekeyedSplitForm``). The ``ViaPosted`` pairs bind a ``get_form_kwargs``
+mapping holding each value as its text (``forms.as_posted_text``): over the temporal form's
+one-key ``DateTimeField`` (``PostedForm``) the text is parsed and stored, while the split
+widget's ``decompress`` cannot split the text of a datetime (``PostedSplitForm``), a
+``ConfigurationError`` before ``is_valid()``. The ``NullableScalarSpecimen`` ``ViaForm``
+pair writes the ``null=True`` ``flag`` column through
+``forms.NullableScalarSpecimenFlagForm``'s checkbox and the ``null=True`` ``payload`` JSON
+column through its ``CharField``, so an explicit ``null`` and an update omitting either
+over a stored ``NULL`` store ``NULL``.
 
 ``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
 ``FilteredRelation("parent")`` alias named ``par``, filtered by
@@ -617,6 +622,98 @@ class UpdateScalarSpecimenViaRekeyedSplitForm(DjangoModelFormMutation):
         )
 
 
+class CreateScalarSpecimenViaPostedForm(DjangoModelFormMutation):
+    """Create a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalForm`` bound to posted text."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenTemporalForm
+        operation = "create"
+        permission_classes = []
+
+    @override
+    def get_form_kwargs(
+        self,
+        info: strawberry.Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: Model | None = None,
+    ) -> dict[str, object]:
+        """Bind the data as the text an HTML form post carries (``forms.as_posted_text``)."""
+        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
+        kwargs["data"] = forms.as_posted_text(data)
+        return kwargs
+
+
+class UpdateScalarSpecimenViaPostedForm(DjangoModelFormMutation):
+    """Update a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalForm`` bound to posted text."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenTemporalForm
+        operation = "update"
+        permission_classes = []
+
+    @override
+    def get_form_kwargs(
+        self,
+        info: strawberry.Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: Model | None = None,
+    ) -> dict[str, object]:
+        """Bind the data as the text an HTML form post carries (``forms.as_posted_text``)."""
+        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
+        kwargs["data"] = forms.as_posted_text(data)
+        return kwargs
+
+
+class CreateScalarSpecimenViaPostedSplitForm(DjangoModelFormMutation):
+    """Create a ``ScalarSpecimen`` through the split-stamp form bound to posted text."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenSplitStampForm
+        operation = "create"
+        permission_classes = []
+
+    @override
+    def get_form_kwargs(
+        self,
+        info: strawberry.Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: Model | None = None,
+    ) -> dict[str, object]:
+        """Bind the data as the text an HTML form post carries (``forms.as_posted_text``)."""
+        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
+        kwargs["data"] = forms.as_posted_text(data)
+        return kwargs
+
+
+class UpdateScalarSpecimenViaPostedSplitForm(DjangoModelFormMutation):
+    """Update a ``ScalarSpecimen`` through the split-stamp form bound to posted text."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenSplitStampForm
+        operation = "update"
+        permission_classes = []
+
+    @override
+    def get_form_kwargs(
+        self,
+        info: strawberry.Info[object, object],
+        *,
+        data: dict[str, object],
+        files: dict[str, object],
+        instance: Model | None = None,
+    ) -> dict[str, object]:
+        """Bind the data as the text an HTML form post carries (``forms.as_posted_text``)."""
+        kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
+        kwargs["data"] = forms.as_posted_text(data)
+        return kwargs
+
+
 class CreateNullableScalarSpecimenViaForm(DjangoModelFormMutation):
     """Create a ``NullableScalarSpecimen`` through ``forms.NullableScalarSpecimenFlagForm``."""
 
@@ -659,7 +756,8 @@ class Mutation:
 
     The ``ScalarSpecimen`` create / update pairs write the temporal columns through each
     flavor (model, ``ModelForm``, serializer); the ``SplitForm`` pairs write
-    ``occurredAt`` through a ``SplitDateTimeField``; the ``NullableScalarSpecimen``
+    ``occurredAt`` through a ``SplitDateTimeField``; the ``ViaPosted`` pairs bind posted
+    text over the temporal and the split form; the ``NullableScalarSpecimen``
     ``ViaForm`` pair writes the ``null=True`` ``flag`` through a checkbox and ``payload``
     through a ``CharField``.
     """
@@ -684,6 +782,18 @@ class Mutation:
     )
     update_scalar_specimen_via_rekeyed_split_form = DjangoMutationField(
         UpdateScalarSpecimenViaRekeyedSplitForm,
+    )
+    create_scalar_specimen_via_posted_form = DjangoMutationField(
+        CreateScalarSpecimenViaPostedForm,
+    )
+    update_scalar_specimen_via_posted_form = DjangoMutationField(
+        UpdateScalarSpecimenViaPostedForm,
+    )
+    create_scalar_specimen_via_posted_split_form = DjangoMutationField(
+        CreateScalarSpecimenViaPostedSplitForm,
+    )
+    update_scalar_specimen_via_posted_split_form = DjangoMutationField(
+        UpdateScalarSpecimenViaPostedSplitForm,
     )
     create_nullable_scalar_specimen_via_form = DjangoMutationField(
         CreateNullableScalarSpecimenViaForm,

@@ -2,6 +2,8 @@
 
 Ordinary consumer JSON and DateTime arguments enter public FilterSet.apply_sync.
 The form's actual widgets, constructor edits and physical data keys own cleaning.
+A form rebinding each value as its text keeps a one-key widget's value, while a split
+date/time widget cannot split a datetime's text: a masked ``ConfigurationError``.
 The native holder orders its branch rows by primary key.
 """
 
@@ -9,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import datetime
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import wraps
@@ -37,6 +40,7 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.utils._narrowing import (
     call_method,
@@ -149,12 +153,17 @@ def _post(schema: DjangoSchema, where: object) -> JSONObject:
         _CURRENT["schema"] = None
 
 
+_RANGE_DOCUMENT = (
+    "query($start: DateTime, $end: DateTime) { rows(start: $start, end: $end) { name } }"
+)
+
+
 def _range_post(schema: DjangoSchema, start: str | None, end: str | None) -> JSONObject:
     _CURRENT["schema"] = schema
     try:
         with override_settings(ROOT_URLCONF=__name__):
             return graphql_payload(
-                "query($start: DateTime, $end: DateTime) { rows(start: $start, end: $end) { name } }",
+                _RANGE_DOCUMENT,
                 variables={"start": start, "end": end},
                 url="/graphql-filter-widgets/",
             )
@@ -378,6 +387,12 @@ def _data_form(style: str) -> type[forms.Form]:
                 if style == "querydict-prefix-empty":
                     bound.setlist("pick", [])
                 self.data = bound
+            elif style == "text":
+                # Each value as its text, the mapping an HTML form post binds.
+                posted = QueryDict(mutable=True)
+                for key, value in current.items():
+                    posted[key] = str(value)
+                self.data = QueryDict(posted.urlencode())
             elif style == "early-clean":
                 self.full_clean()
             elif style == "physical-partial":
@@ -700,6 +715,78 @@ def test_nested_datetime_range_widgets_keep_each_supplied_axis(
 
     payload = _range_post(_schema(RangeFilter, ranged=True), start, end)
     assert payload == _expected(expected), payload
+
+
+@pytest.mark.django_db
+def test_a_one_key_widget_bound_to_its_text_filters_by_it() -> None:
+    """A form ``__init__`` rebinding each value as its text keeps a one-key widget's value."""
+    _branches()
+
+    class TextFilter(FilterSet):
+        pick = django_filters.CharFilter(field_name="name")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+            form = _data_form("text")
+
+    payload = _post(_schema(TextFilter), {"pick": "Beta"})
+    assert payload == _expected(("Beta",)), payload
+
+
+@pytest.mark.django_db
+def test_split_datetime_widgets_bound_to_their_text_are_a_masked_configuration_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A nested ``SplitDateTimeWidget`` cannot split the text of a datetime bound.
+
+    The form ``__init__`` rebinds each bound value as its text, so ``span_0`` holds the
+    text of the start bound, which ``decompress`` (taking a ``datetime``) cannot split:
+    a ``ConfigurationError`` naming ``span_0`` and the widget's ``span_0_0`` /
+    ``span_0_1``, never the value's text, before the form cleans. The client gets the
+    error policy's masked top-level error and no rows.
+    """
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+    _branches()
+
+    class RangeFilter(FilterSet):
+        span = _NestedDateRangeFilter(field_name="moment", lookup_expr="range")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+            form = _data_form("text")
+
+    payload = _range_post(
+        _schema(RangeFilter, ranged=True),
+        "2024-01-02T00:00:00+00:00",
+        "2024-01-03T00:00:00+00:00",
+    )
+    correlation_id = json_at(payload, "errors", 0, "extensions", "correlationId")
+    assert isinstance(correlation_id, str), payload
+    assert payload == {
+        "data": None,
+        "errors": [
+            {
+                "message": "An unexpected error occurred.",
+                "locations": [{"line": 1, "column": _RANGE_DOCUMENT.index("rows") + 1}],
+                "path": ["rows"],
+                "extensions": {"correlationId": correlation_id},
+            },
+        ],
+    }
+    [logged] = [
+        record.exc_info
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert isinstance(logged[1], ConfigurationError), logged
+    message = str(logged[1])
+    assert message.startswith(
+        "SplitDateTimeWidget.decompress cannot split the str bound under 'span_0' into "
+        "the parts the widget reads ('span_0_0', 'span_0_1'): it raised AttributeError",
+    ), message
+    assert "2024-01-02" not in message, message
 
 
 @pytest.mark.django_db

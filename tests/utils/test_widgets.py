@@ -3,8 +3,9 @@
 ``widget_keys`` / ``widget_entries`` answer, for one widget, every key it reads and the
 entries binding a value under them; the form flavors bind through them
 (``tests/forms/test_resolvers.py`` drives that end to end, on PostgreSQL for the real
-``SplitArrayField``). These rows pin the recursion, the ``decompress`` split, the padding
-and the ``size`` refusal on their own, PostgreSQL's ``SplitArrayWidget`` through its
+``SplitArrayField``). These rows pin the recursion, the ``decompress`` split (a value it
+cannot split is a ``ConfigurationError``, its ``ValidationError`` kept), the padding and the
+``size`` refusal on their own, PostgreSQL's ``SplitArrayWidget`` through its
 driver-free double (``tests/_postgres_fields.py::FakeSplitArrayWidget``) and, on the
 Postgres tier, as itself. ``multi_widget_keys`` is pinned by the filter rows that read it
 (``tests/filters/test_sets.py``).
@@ -17,9 +18,11 @@ import datetime
 import pytest
 from django import forms
 from django.core.exceptions import ValidationError
+from django.test import override_settings
 from django_filters.widgets import RangeWidget
 from typing_extensions import override
 
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils import widgets
 from django_strawberry_framework.utils.widgets import widget_entries, widget_keys
 from tests._postgres_fields import FakeSplitArrayWidget
@@ -52,6 +55,37 @@ class _TupleSplitWidget(forms.MultiWidget):
     def decompress(self, value: object) -> object:
         """Answer the value itself."""
         return value
+
+
+class _ValueErrorSplitWidget(forms.MultiWidget):
+    """A widget whose ``decompress`` raises ``ValueError`` for every value."""
+
+    def __init__(self) -> None:
+        super().__init__((forms.TextInput, forms.TextInput))
+
+    @override
+    def decompress(self, value: object) -> list[object]:
+        """Refuse the value as no Django refusal."""
+        raise ValueError("unsplittable")
+
+
+class _UndecompressingWidget(forms.MultiWidget):
+    """A ``MultiWidget`` declaring no ``decompress``: Django's raises ``NotImplementedError``."""
+
+    def __init__(self) -> None:
+        super().__init__((forms.TextInput, forms.TextInput))
+
+
+class _RefusingSplitWidget(forms.MultiWidget):
+    """A widget whose ``decompress`` refuses every value with a ``ValidationError``."""
+
+    def __init__(self) -> None:
+        super().__init__((forms.TextInput, forms.TextInput))
+
+    @override
+    def decompress(self, value: object) -> list[object]:
+        """Refuse the value."""
+        raise ValidationError("refused", code="refused")
 
 
 def test_a_single_key_widget_reads_its_key_and_binds_the_value_there() -> None:
@@ -111,9 +145,65 @@ def test_a_consumer_multi_widget_splits_its_value_with_its_own_decompress() -> N
 
 
 def test_a_decompress_answering_no_list_or_tuple_raises() -> None:
-    """A ``decompress`` that splits nothing is the widget's defect, never a silent bind."""
-    with pytest.raises(TypeError):
+    """A ``decompress`` that splits nothing is a ``ConfigurationError``, never a silent bind."""
+    with pytest.raises(ConfigurationError) as caught:
         widget_entries(_TupleSplitWidget(), "f", "whole")
+
+    assert str(caught.value).startswith(
+        "_TupleSplitWidget.decompress cannot split the str bound under 'f' into the parts "
+        "the widget reads ('f_0', 'f_1'): it answered str. ",
+    ), caught.value
+
+
+@pytest.mark.parametrize(
+    "tz_settings",
+    [{"USE_TZ": True}, {"USE_TZ": False}],
+    ids=["aware", "naive"],
+)
+def test_a_datetime_bound_as_text_is_a_configuration_error_naming_the_keys(
+    tz_settings: dict[str, object],
+) -> None:
+    """``SplitDateTimeWidget.decompress`` takes a ``datetime``: its text has no parts to bind.
+
+    The message names the key and the part keys the widget reads, never the value's text.
+    """
+    with override_settings(**tz_settings), pytest.raises(ConfigurationError) as caught:
+        widget_entries(forms.SplitDateTimeWidget(), "stamp", str(_STAMP))
+
+    message = str(caught.value)
+    assert message.startswith(
+        "SplitDateTimeWidget.decompress cannot split the str bound under 'stamp' into the "
+        "parts the widget reads ('stamp_0', 'stamp_1'): it raised AttributeError: ",
+    ), message
+    assert str(_STAMP) not in message, message
+    assert isinstance(caught.value.__cause__, AttributeError)
+
+
+@pytest.mark.parametrize(
+    ("widget", "cause"),
+    [
+        pytest.param(_ValueErrorSplitWidget(), ValueError, id="value-error"),
+        pytest.param(_UndecompressingWidget(), NotImplementedError, id="no-decompress"),
+    ],
+)
+def test_any_exception_from_decompress_is_a_configuration_error_chained_to_it(
+    widget: forms.MultiWidget,
+    cause: type[Exception],
+) -> None:
+    """Whatever ``decompress`` raises short of a ``ValidationError`` is the same refusal."""
+    with pytest.raises(ConfigurationError) as caught:
+        widget_entries(widget, "f", "whole")
+
+    assert f"('f_0', 'f_1'): it raised {cause.__name__}" in str(caught.value), caught.value
+    assert type(caught.value.__cause__) is cause
+
+
+def test_a_validation_error_from_decompress_propagates_as_the_value_s_refusal() -> None:
+    """A ``decompress`` refusing the value with Django's ``ValidationError`` keeps it."""
+    with pytest.raises(ValidationError) as caught:
+        widget_entries(_RefusingSplitWidget(), "f", "whole")
+
+    assert caught.value.code == "refused"
 
 
 @pytest.mark.parametrize(

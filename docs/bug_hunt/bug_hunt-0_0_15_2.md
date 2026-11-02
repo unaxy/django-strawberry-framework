@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 399 done, 87 to do. The CHANGELOG entries filed here moved to
+Progress: 400 done, 86 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2317,6 +2317,21 @@ Progress: 399 done, 87 to do. The CHANGELOG entries filed here moved to
   (sync and async), package rows for the `ArrayField` shapes on PostgreSQL, a text form field cleaning to a
   non-empty value, a consumer hook, and a `null=False` refusal ahead of a filling `save()`; spec-038, GLOSSARY and
   the `test_query` README say so
+- [x] 621. fixed: a value a `MultiWidget`'s own `decompress` cannot split (it raises, or answers no list or tuple),
+  such as a `SplitDateTimeField`'s datetime that a `get_form` / `get_form_kwargs` hook or a form's or filter
+  `Meta.form`'s `__init__` rebinds as its text (`QueryDict(urlencode(data))`), is a `ConfigurationError` naming the
+  key and the widget's part keys, raised while the form is bound, before `is_valid()`, with nothing written and the
+  wire masked as any unexpected error; it answered Django's raw `AttributeError` (a non-list answer a `TypeError`).
+  Django calls `decompress` only on a valid compressed value and never on form data, and no upstream seam turns text
+  into one, so the package names the hook contract instead of guessing (leaving the field unbound as plain Django
+  does would store `NULL` over a sent or stored datetime). A `ValidationError` from `decompress` stays the field's
+  refusal. `utils/widgets.py::widget_entries` splits through the new `_decompressed` (message `_unsplittable`: kinds
+  and keys, never the value's text), shared by the form binders in `forms/resolvers.py` and the filter side's
+  `filters/form_binding.py::NormalizedFormValue.render`. Live rows through new fakeshop scalars
+  `createScalarSpecimenViaPostedSplitForm` / `updateScalarSpecimenViaPostedSplitForm` (hook `as_posted_text`) and
+  their one-key controls in `test_scalars_mutation_api.py`, a text-binding `Meta.form` in
+  `test_filter_widget_binding_api.py`, package rows in `tests/utils/test_widgets.py` (text, any exception, a non-list
+  answer, the `ValidationError` kept); spec-038, README, GLOSSARY and the `test_query` README say so
 
 ## Outside review of the fixes
 
@@ -2357,9 +2372,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 621. **SKIP for now** (upstream-seam refactor in flight: F4, partial-update rebinding in `forms/resolvers.py`). (robustness) A `get_form` hook binding `QueryDict(urlencode(data))` turns a `SplitDateTimeField`'s datetime
-  into text, which `SplitDateTimeWidget.decompress` cannot split: the request answers a top-level `AttributeError` (it
-  silently stored NULL before 553's binding). Found verifying 553
 - [ ] 624. **SKIP for now** (upstream-seam refactor in flight: F6, `filters/base.py::_ColumnCleanedFilter`). A package `RangeFilter` whose `lookup_expr` carries a transform (`date__range`, `date__exact`, `date`)
   applies a lone bound as `<field_name>__gte` / `__lte` without it: `RangeFilter(field_name="occurred_at",
   lookup_expr="date__range")` sent `{end: "2021-12-31"}` compares the datetime with midnight and leaves out a

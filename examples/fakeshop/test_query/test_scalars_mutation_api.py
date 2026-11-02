@@ -27,7 +27,11 @@ accepts, there) is written.
 The ``SplitForm`` pairs write ``occurred_at`` through a ``SplitDateTimeField``, whose
 widget reads a date key and a time key: the datetime sent is stored on create and update
 and kept when omitted, unprefixed, under the form's prefix and beside a ``get_form``'s own
-prefixed copy.
+prefixed copy. The ``ViaPosted`` pairs' ``get_form_kwargs`` binds each value as its text:
+the temporal form's one-key ``DateTimeField`` parses and stores it, while the split
+widget's ``decompress`` cannot split the text of a datetime, a ``ConfigurationError``
+naming its keys before ``is_valid()``, masked on the wire, with nothing written on
+create, update or an update omitting ``occurredAt``.
 
 ``createNullableScalarSpecimenViaForm`` / ``updateNullableScalarSpecimenViaForm`` write the
 ``null=True`` ``NullableScalarSpecimen.flag`` through a checkbox
@@ -45,6 +49,7 @@ a string sent is stored as that JSON string and one stored is kept when omitted.
 from __future__ import annotations
 
 import datetime
+import logging
 import uuid
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
@@ -63,6 +68,7 @@ from django.urls import path
 from django.utils import timezone
 from graphql_client import JSONObject, json_at, post_graphql, response_json
 
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
@@ -544,6 +550,122 @@ def test_split_datetime_form_field_writes_the_datetime_sent(form: str, operation
     }
     rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_at"))
     assert rows == [(label, stored_at)]
+
+
+#: The ``ViaPosted`` surfaces, binding posted text: create and update root fields and inputs.
+_POSTED_FORMS = {
+    "temporal": (
+        "createScalarSpecimenViaPostedForm",
+        "ScalarSpecimenTemporalFormInput",
+        "updateScalarSpecimenViaPostedForm",
+        "ScalarSpecimenTemporalFormPartialInput",
+    ),
+    "split": (
+        "createScalarSpecimenViaPostedSplitForm",
+        "ScalarSpecimenSplitStampFormInput",
+        "updateScalarSpecimenViaPostedSplitForm",
+        "ScalarSpecimenSplitStampFormPartialInput",
+    ),
+}
+
+
+def _posted_write(form: str, operation: str) -> tuple[str, str, JSONObject, datetime.datetime]:
+    """Write through a ``ViaPosted`` form: its root, document, payload and the datetime bound.
+
+    A create sends ``_SENT_AT``; an update renames the seeded row and sends ``_SENT_AT``
+    or, ``update-omitted``, omits ``occurredAt``, so its stored ``_STORED_AT`` is bound.
+    """
+    create_field, create_input, update_field, update_input = _POSTED_FORMS[form]
+    selection = "{ result { label occurredAt } errors { field messages codes path } }"
+    if operation == "create":
+        root = create_field
+        document = f"mutation Write($data: {create_input}!) {{ {root}(data: $data) {selection} }}"
+        variables: dict[str, object] = {
+            "data": {**_CREATE_DATA, "occurredAt": _SENT_AT.isoformat()},
+        }
+        bound = _SENT_AT
+    else:
+        specimen = _seed()
+        root = update_field
+        document = (
+            f"mutation Write($id: ID!, $data: {update_input}!) "
+            f"{{ {root}(id: $id, data: $data) {selection} }}"
+        )
+        data: dict[str, object] = {"label": "renamed"}
+        if operation == "update":
+            data["occurredAt"] = _SENT_AT.isoformat()
+        variables = {"id": str(specimen.pk), "data": data}
+        bound = _SENT_AT if operation == "update" else _STORED_AT
+    return root, document, response_json(post_graphql(document, variables=variables)), bound
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update", "update-omitted"])
+def test_posted_text_over_a_one_key_datetime_widget_is_parsed_and_stored(operation: str) -> None:
+    """A ``get_form_kwargs`` binding each value as its text writes through a one-key widget.
+
+    ``ScalarSpecimenTemporalForm``'s ``DateTimeField`` reads ``occurred_at`` alone and
+    parses the text of the datetime, so the hook's posted text is stored on create and
+    update, and an update omitting ``occurredAt`` keeps the stored datetime.
+    """
+    root, _document, payload, bound = _posted_write("temporal", operation)
+    label = "written" if operation == "create" else "renamed"
+
+    assert payload == {
+        "data": {
+            root: {"result": {"label": label, "occurredAt": bound.isoformat()}, "errors": []},
+        },
+    }
+    rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_at"))
+    assert rows == [(label, bound)]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update", "update-omitted"])
+def test_posted_text_over_a_split_datetime_widget_is_a_masked_configuration_error(
+    operation: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The text of a datetime has no parts ``SplitDateTimeWidget.decompress`` can split.
+
+    ``decompress`` takes the field's value, a ``datetime``: the hook's posted text for
+    ``occurred_at`` (the datetime sent, or on an update omitting it the stored one) is a
+    ``ConfigurationError`` naming ``occurred_at`` and the widget's ``occurred_at_0`` /
+    ``occurred_at_1``, never the value's text, raised while the form is bound, before
+    ``is_valid()``. The client gets the error policy's masked top-level error and
+    nothing is written: no row created, the updated row's label and datetime kept.
+    """
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+    root, document, payload, bound = _posted_write("split", operation)
+    correlation_id = json_at(payload, "errors", 0, "extensions", "correlationId")
+
+    assert isinstance(correlation_id, str), payload
+    assert payload == {
+        "data": None,
+        "errors": [
+            {
+                "message": "An unexpected error occurred.",
+                "locations": [{"line": 1, "column": document.index(root) + 1}],
+                "path": [root],
+                "extensions": {"correlationId": correlation_id},
+            },
+        ],
+    }
+    [logged] = [
+        record.exc_info
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert isinstance(logged[1], ConfigurationError), logged
+    message = str(logged[1])
+    assert message.startswith(
+        "SplitDateTimeWidget.decompress cannot split the str bound under 'occurred_at' "
+        "into the parts the widget reads ('occurred_at_0', 'occurred_at_1'): it raised "
+        "AttributeError",
+    ), message
+    assert str(bound) not in message, message
+    rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_at"))
+    assert rows == ([] if operation == "create" else [("stored", _STORED_AT)])
 
 
 def _create_model_value(data: Mapping[str, object]) -> JSONObject:

@@ -20,9 +20,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from django.contrib.postgres.validators import ArrayMaxLengthValidator
+from django.core.exceptions import ValidationError
 from django.forms import MultiWidget, SelectDateWidget, Widget
 from django.utils.datastructures import MultiValueDict
 from django_filters.widgets import SuffixedMultiWidget
+
+from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import truth
 from ._narrowing import (
@@ -30,7 +33,6 @@ from ._narrowing import (
     is_list_or_tuple,
     list_of,
     read_attr,
-    require,
     require_instance,
 )
 from .imports import import_attr_if_importable
@@ -137,7 +139,8 @@ def widget_entries(widget: object, key: str, value: object) -> dict[str, object]
 
     A widget reading one key binds ``{key: value}``. A ``MultiWidget`` binds each part
     of ``value`` under its sub-widget's key: a list or tuple is its parts, any other value
-    is split by the widget's own ``decompress``, and a part past the end is ``None``, as
+    is split by the widget's own ``decompress`` (``_decompressed``: one it cannot split is a
+    ``ConfigurationError``), and a part past the end is ``None``, as
     ``MultiWidget.get_context`` renders it. A ``SplitArrayWidget`` binds each element
     under ``<key>_<index>`` and pads to its ``size`` with ``None``, so an empty list binds
     every key and is never read as an omitted field; ``None`` binds no element and a value
@@ -155,12 +158,61 @@ def widget_entries(widget: object, key: str, value: object) -> dict[str, object]
     elif is_list_or_tuple(value):
         parts = list(value)
     else:
-        parts = list_of(require(call_method(widget, "decompress", value), is_list_or_tuple))
+        parts = _decompressed(widget, key, value, [sub_key for sub_key, _sub in subs])
     entries: dict[str, object] = {}
     for index, (sub_key, sub_widget) in enumerate(subs):
         part = parts[index] if index < len(parts) else None
         entries.update(widget_entries(sub_widget, sub_key, part))
     return entries
+
+
+def _decompressed(
+    widget: object,
+    key: str,
+    value: object,
+    part_keys: list[str],
+) -> list[object]:
+    """Return the parts ``widget``'s own ``decompress`` splits ``value`` into.
+
+    Django's ``MultiWidget.decompress`` takes the field's compressed value, which it "can
+    be assumed to be valid" (a ``datetime`` for ``SplitDateTimeWidget``): the value the
+    package decodes and binds. Django calls it on an initial it renders or compares, never
+    on form data. A value it cannot split (it raises, or answers no list or tuple), such as
+    a ``datetime`` a ``get_form`` / ``get_form_kwargs`` hook or a form's ``__init__`` rebinds
+    as its text, has no parts the widget would read: a ``ConfigurationError`` naming the
+    key and the widget's part keys, raised while the form is bound, before ``is_valid()``.
+    A ``ValidationError`` it raises is that value's own refusal and propagates unchanged.
+    """
+    try:
+        parts = call_method(widget, "decompress", value)
+    except ValidationError:
+        raise
+    except Exception as error:
+        raise ConfigurationError(
+            _unsplittable(widget, key, value, part_keys, f"raised {truth.kind(error)}: {error}"),
+        ) from error
+    if not is_list_or_tuple(parts):
+        raise ConfigurationError(
+            _unsplittable(widget, key, value, part_keys, f"answered {truth.kind(parts)}"),
+        )
+    return list(parts)
+
+
+def _unsplittable(
+    widget: object,
+    key: str,
+    value: object,
+    part_keys: list[str],
+    answer: str,
+) -> str:
+    """Return the ``ConfigurationError`` message for a value ``widget`` cannot split."""
+    return (
+        f"{truth.kind(widget)}.decompress cannot split the {truth.kind(value)} bound under "
+        f"{key!r} into the parts the widget reads ({', '.join(map(repr, part_keys))}): it "
+        f"{answer}. decompress takes the field's value as the package binds it, so a "
+        "mapping a get_form or get_form_kwargs hook or the form's __init__ binds keeps that "
+        "value as it is (never its text), or binds its parts under those keys."
+    )
 
 
 def _array_parts(value: object) -> list[object]:
