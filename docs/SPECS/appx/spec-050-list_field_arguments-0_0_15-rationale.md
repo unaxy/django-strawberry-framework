@@ -363,30 +363,32 @@ Spec: [Decision 10][spec-050-d10].
 
 Spec: [Decision 12][spec-050-d12].
 
-*Decision:* The `ExecutionContext.complete_list_value` delegator lives in its own
-`_graphql_core_patches.py` module, gated by the canonical `graphql_core` dependency key.
+*Decision:* graphql-core owns asynchronous list completion and the package installs no
+graphql-core patch; a graphql-core workaround, when one is needed, lives in its own patch module
+gated by its own `APPLY_UPSTREAM_PATCHES` dependency key.
 
 *Why:* The patched callable, upstream release cadence, retirement signal, and consumer opt-out
-all belong to graphql-core. Strawberry happens to invoke that executor, but its HTTP-view patch
-has a different owner and a different retirement condition. One module and gate per patched
-dependency keeps disabling or retiring either workaround from silently changing the other.
+of such a workaround all belong to graphql-core. Strawberry happens to invoke that executor, but
+its HTTP-view patch has a different owner and a different retirement condition. One module and
+gate per patched dependency keeps disabling or retiring either workaround from silently changing
+the other.
 
-*Rejected:* Keeping the executor wrapper in `_strawberry_patches.py` because graphql-core is a
-transitive Strawberry dependency. That makes dependency topology decide lifecycle ownership,
-couples unrelated escape hatches, and lets an HTTP-view opt-out restore an executor bug.
+*Rejected:* Keeping a graphql-core executor wrapper in `_strawberry_patches.py` because
+graphql-core is a transitive Strawberry dependency. That makes dependency topology decide
+lifecycle ownership, couples unrelated escape hatches, and lets an HTTP-view opt-out restore an
+executor bug.
 
-*Why the asynchronous executor's queryset adaptation is an arm of this wrapper:* the defect is
-graphql-core's completion order, so its fix belongs to the owner of that completion, and
-graphql-core 3.3 ships the same order (async iteration first under the asynchronous executor),
-so the arm retires with the pin bump through its own sentinel. It reads the bound operation mode,
-so a synchronous operation nested inside an asynchronous one keeps synchronous completion. It
-adapts a Django `QuerySet` only, because Django's async iteration protocol is the one the package
-vouches for; any other value offering both protocols completes as upstream completes it.
+*Why upstream completion owns a queryset a resolver returns:* the completion order is
+graphql-core's, and its asynchronous executor completes a value exposing `__aiter__` through
+it. Strawberry turns that off for its synchronous executor only, so a synchronous operation
+nested inside an asynchronous one keeps synchronous completion. Any value offering both
+protocols completes the same way, a Django `QuerySet` included, so the package adds no
+completion rule of its own for a resolver's return value.
 
 *Rejected - the optimizer as the completion owner:* wrapping the planned root queryset in
-`DjangoOptimizerExtension` serves only roots the optimizer sees, so a schema without the
-extension and every nested resolver keep the defect, and a second completion owner beside the
-list field's would split one rule across two modules.
+`DjangoOptimizerExtension` would serve only roots the optimizer sees, so a schema without the
+extension and every nested resolver would complete differently, and a completion owner beside
+upstream's and the list field's would split one rule across modules.
 
 *Rejected - running a plain `def` root resolver in a worker thread:* the resolver is application
 code whose color the consumer chose; moving it off the loop changes which thread its

@@ -292,7 +292,11 @@ scope and timing.
   `scripts/check_public_types.py::build_environment` (`--frozen` installed the lock unchecked). `postgres.yml`'s
   `uv sync --upgrade-package Django` stays unlocked (`--locked` fails on any Django newer than the lock) behind a
   `uv lock --check`. `tests/test_ci_governance.py::_uv_lock_problems` reads each shell segment and owns the lock
-  rules; the floor-cell check reads the same segments. Reading and mutation tables prove each refusal
+  rules; the floor-cell check reads the same segments. Reading and mutation tables prove each refusal. Accepted
+  gaps, mutants of the shell reader in `tests/_workflows.py` no row kills: `_SHELL_PART`'s redirection `\d*[<>]&`
+  narrowed to `\d[<>]&` or `>&` (no `>&2` / `<&` row, though its comment names those forms); `shell_commands`
+  without its whitespace collapse; `_SHELL_COMMENT` opening a comment at any `#`, not only at a word start;
+  `_UV_SYNC_WORDS` without its `(?<![\w-])` guard (no `--no-sync` row reaches its `?` fallback)
 - [x] 41. Trivial truths. `[project] classifiers` carries `Typing :: Typed`. `[tool.basedpyright] exclude` lists
   `**/hunt-ws` (a bare entry is root-anchored there; ruff matches the name at any depth), and
   `tests/test_ci_governance.py::test_basedpyright_excludes_every_tree_ruff_excludes` requires a `**/<name>` entry for
@@ -311,7 +315,9 @@ scope and timing.
   subscripts) never leave the package, and `line_count.py` (informational) is left as is. Measured at 3.10, a stub
   `-> Self` reads as `Unknown` (the stubs import `typing.Self`, which typeshed defines from 3.11), not `Any`;
   `pyproject.toml` (with the floor config's reasons for its six rules off), START.md and "Rules off" say so. The
-  pre-commit table is labelled the 4ce779e1 snapshot, its re-measure scheduled after item 45
+  pre-commit table is labelled the 4ce779e1 snapshot, its re-measure scheduled after item 45. Accepted gap: no
+  clean-CI row covers `_committable_files`'s census filter; removing it fails the census only when a `hunt-ws/` tree
+  exists, so a regression is a loud local red, not a silent pass
 
 ## Rules off
 
@@ -414,7 +420,8 @@ Not taken:
 - locked rules the floor pass turns off (the 3.11 pass enforces them, and the floor needs them off);
 - the growth gate passing a force push (the maintainer's own pushes);
 - `always_run` on the typing hooks (CI catches a deletion-only commit; it would add 16s per commit);
-- a mypy cross-check, typing at the declared dependency floors, and measuring `reportImportCycles` (cost over value).
+- a mypy cross-check, typing at the declared dependency floors, typing without django-stubs installed (a
+  consumer-side check), and measuring `reportImportCycles` (cost over value).
 
 - [ ] 42. Strict by default for a new file. The root `[tool.basedpyright]` sets `reportUnannotatedClassAttribute` and
   `reportUnusedCallResult` to `"none"`, so a `.py` outside every listed environment root gets the tests' leniency.

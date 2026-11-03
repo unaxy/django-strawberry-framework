@@ -145,9 +145,9 @@ The unwrap-time half has no consumer-facing API. Its `apply()` carries no leadin
 
 The Django patch lives in its own private module, `django_strawberry_framework/_django_patches.py`, not inlined in `apps.py`. The leading underscore is the signal: consumers never import it; the patch is a side effect of app loading.
 
-The organizing rule is **one patch module per third-party dependency**, each with its own `apply()` and its own name in `django_strawberry_framework/conf.py #"UPSTREAM_PATCH_DEPENDENCIES = frozenset("` (`{"django", "strawberry", "cross_web", "graphql_core"}`). A further Django bug lands as another function inside `_django_patches.py`; a bug in another dependency gets its own module.
+The organizing rule is **one patch module per third-party dependency**, each with its own `apply()` and its own name in `django_strawberry_framework/conf.py #"UPSTREAM_PATCH_DEPENDENCIES = frozenset("` (`{"cross_web", "django", "strawberry"}`). A further Django bug lands as another function inside `_django_patches.py`; a bug in another dependency gets its own module.
 
-`django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready` dispatches the four appliers in order — Django, Strawberry, `cross_web`, `graphql-core` — behind function-local imports, so importing `apps` outside a configured Django project pulls in no patch module. This card owns the Django applier only; the dispatch site and the `AppConfig` shape belong to [`docs/SPECS/spec-021-apps-0_0_7.md`][spec-021], and each patch module's own docstring is the single source of truth for what it hardens. `ready()` deliberately repeats none of that inventory.
+`django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready` dispatches the three appliers in order — Django, Strawberry, `cross_web` — behind function-local imports, so importing `apps` outside a configured Django project pulls in no patch module. This card owns the Django applier only; the dispatch site and the `AppConfig` shape belong to [`docs/SPECS/spec-021-apps-0_0_7.md`][spec-021], and each patch module's own docstring is the single source of truth for what it hardens. `ready()` deliberately repeats none of that inventory.
 
 Rationale companion — the derivation and the rejected inline-in-`apps.py` alternative: [Decision 1][rationale-d1].
 
@@ -211,7 +211,7 @@ The unwrap-time half — and only that half — is gated by `DJANGO_STRAWBERRY_F
 Two configured shapes are accepted:
 
 - **`bool`** — the global toggle. `False` stops the package monkey-patching any upstream dependency at startup.
-- **`Mapping[str, bool]`** keyed by `UPSTREAM_PATCH_DEPENDENCIES` (`{"django", "strawberry", "cross_web", "graphql_core"}`) — per-dependency opt-out. `{"django": False}` disables this test-only patch while leaving every other dependency's patch, including the production request hardening, installed. Missing names default to `True`.
+- **`Mapping[str, bool]`** keyed by `UPSTREAM_PATCH_DEPENDENCIES` (`{"cross_web", "django", "strawberry"}`) — per-dependency opt-out. `{"django": False}` disables this test-only patch while leaving every other dependency's patch, including the production request hardening, installed. Missing names default to `True`.
 
 Any other shape raises `ConfigurationError`: a non-bool / non-mapping value (a `"false"` string is truthy and would silently *enable* the patches), a non-string mapping key, an unknown mapping name (a typo must not silently keep patching), or a non-bool mapping value. The whole mapping is validated on every read, not just the dependency being asked about, so a typo fails at the first gate regardless of which patch module reads first.
 
@@ -275,7 +275,7 @@ Rationale companion — the rejected `0.0.8` alternative: [Decision 11][rational
 One module, one helper, one dispatch line, three test modules:
 
 1. `django_strawberry_framework/_django_patches.py` — the module docstring (bug inventory, ecosystem precedent, the settings paragraph, the surface-visibility note), the guarded `_DatabaseFailure` import, the three `_PATCH_*` constants, the two method-list attribute names, `_captured_upstream_descriptor`, `_upstream_function`, `_validate_upstream_shape`, `_is_database_failure`, `_disallowed_connection_methods`, `_patched_remove_databases_failures` plus the two `setattr` stamps, `_patch_is_installed`, and `apply()`.
-2. `django_strawberry_framework/apps.py` — `ready()` calls the Django applier first of four, behind function-local imports.
+2. `django_strawberry_framework/apps.py` — `ready()` calls the Django applier first of three, behind function-local imports.
 3. `django_strawberry_framework/conf.py` — `APPLY_UPSTREAM_PATCHES_KEY`, `UPSTREAM_PATCH_DEPENDENCIES`, and `upstream_patches_enabled`.
 4. `django_strawberry_framework/testing/_wrap.py` — `safe_wrap_connection_method`; re-exported from `django_strawberry_framework/testing/__init__.py`.
 5. `tests/test_django_patches.py`, `tests/testing/test_wrap.py`, `tests/test_apps.py` — see [Test plan](#test-plan).
@@ -310,7 +310,7 @@ The five contract clauses of [Decision 8](#decision-8--the-wrap-time-half-degrad
 
 ### `tests/test_apps.py` — collected whole, owned by the sibling card
 
-All six of the module's test functions belong to [`docs/SPECS/spec-021-apps-0_0_7.md`][spec-021]. Four pin the `AppConfig` shape — subclass, `name` / `verbose_name`, registry pickup, and the consolidated forbidden-attribute negative. The other two pin `ready()`'s dispatch, and they are that card's too: each asserts a contract over **all four** patch appliers — `_django_patches`, `_strawberry_patches`, `_cross_web_patches` and `_graphql_core_patches` — while this card ships only the first, so the contract they pin is the dispatcher's, specified at that spec's [Decision 4][spec-021-decision-4].
+All six of the module's test functions belong to [`docs/SPECS/spec-021-apps-0_0_7.md`][spec-021]. Four pin the `AppConfig` shape — subclass, `name` / `verbose_name`, registry pickup, and the consolidated forbidden-attribute negative. The other two pin `ready()`'s dispatch, and they are that card's too: each asserts a contract over **all three** patch appliers — `_django_patches`, `_strawberry_patches` and `_cross_web_patches` — while this card ships only the first, so the contract they pin is the dispatcher's, specified at that spec's [Decision 4][spec-021-decision-4].
 
 They are described here because this card depends on them: they are the only deterministic proof that `ready()` installs this card's applier at all. `ready` is permitted on the `AppConfig` (it is required on this class, not forbidden) and the behavioral dispatch tests call it through Django's registered app config. `test_ready_dispatches_all_four_patch_appliers_and_refires_safely` pins the dispatch deterministically — a per-module installed-at-collection assertion is masked by earlier direct `apply()` calls on the same worker, so a dropped dispatch line would otherwise pass the gate. `test_ready_reinstalls_patches_after_their_modules_reload` pins [Decision 7](#decision-7--idempotent-self-healing-and-reload-safe)'s reload contract.
 

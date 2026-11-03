@@ -126,9 +126,17 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
 try:
-    from check_trailing_commas import has_ruff_excluded_segment, is_ruff_excluded_name
+    from check_trailing_commas import (
+        git_visible_scope,
+        has_ruff_excluded_segment,
+        is_ruff_excluded_name,
+    )
 except ModuleNotFoundError:  # imported as ``scripts.check_citations`` (repo root on path)
-    from scripts.check_trailing_commas import has_ruff_excluded_segment, is_ruff_excluded_name
+    from scripts.check_trailing_commas import (
+        git_visible_scope,
+        has_ruff_excluded_segment,
+        is_ruff_excluded_name,
+    )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -377,19 +385,46 @@ class Outcome:
         }
 
 
+def _visible_walk(
+    top: Path,
+    scope: tuple[frozenset[str], frozenset[str]] | None,
+) -> Iterator[tuple[Path, list[str], list[str]]]:
+    """``os.walk(top)`` restricted to what git would accept as repo content.
+
+    Yields ``(directory, subdirectories, files)`` like ``os.walk``, with every
+    subdirectory and file git ignores already dropped, so a caller that prunes
+    ``subdirectories`` further still never descends into an ignored tree. ``scope``
+    is ``scripts/check_trailing_commas.py::git_visible_scope``'s answer; ``None``
+    (no git, an unpacked sdist) filters nothing.
+    """
+    for directory, subdirs, files in os.walk(top):
+        here = Path(directory)
+        if scope is not None:
+            relative = here.relative_to(REPO_ROOT).as_posix()
+            base = "" if relative == "." else f"{relative}/"
+            subdirs[:] = [name for name in subdirs if f"{base}{name}" in scope[1]]
+            files[:] = [name for name in files if f"{base}{name}" in scope[0]]
+        yield here, subdirs, files
+
+
 def iter_python_sources() -> tuple[Path, ...]:
     """Return every first-party ``.py`` file, sorted.
 
     A file under a ``[tool.ruff] extend-exclude`` name is an evidence copy of the repo,
-    not first-party source, and is skipped.
+    not first-party source, and is skipped; so is one git ignores, which is not repo
+    content.
     """
+    scope = git_visible_scope()
     found: list[Path] = []
     for tree in SOURCE_TREES:
-        found.extend(
-            path
-            for path in (REPO_ROOT / tree).rglob("*.py")
-            if not has_ruff_excluded_segment(path.relative_to(REPO_ROOT).parts)
-        )
+        for directory, subdirs, files in _visible_walk(REPO_ROOT / tree, scope):
+            subdirs[:] = sorted(name for name in subdirs if not is_ruff_excluded_name(name))
+            found.extend(
+                directory / name
+                for name in files
+                if name.endswith(".py")
+                and not has_ruff_excluded_segment((directory / name).relative_to(REPO_ROOT).parts)
+            )
     return tuple(sorted(found))
 
 
@@ -597,9 +632,10 @@ def _other_file_index() -> dict[str, tuple[Path, ...]]:
     if cached is not None:
         return cached
     index: dict[str, list[Path]] = {}
-    for directory, subdirs, files in os.walk(REPO_ROOT):
-        # A ruff-excluded tree holds evidence copies of the repo, whose files would
-        # otherwise resolve a citation to a file the repo no longer has.
+    # A git-ignored or ruff-excluded tree holds scratch or evidence copies of the
+    # repo, whose files would otherwise resolve a citation to a file the repo no
+    # longer has.
+    for directory, subdirs, files in _visible_walk(REPO_ROOT, git_visible_scope()):
         subdirs[:] = sorted(
             name
             for name in subdirs
@@ -610,7 +646,7 @@ def _other_file_index() -> dict[str, tuple[Path, ...]]:
         for name in sorted(files):
             if name.endswith(".py"):
                 continue
-            path = Path(directory) / name
+            path = directory / name
             parts = path.relative_to(REPO_ROOT).parts
             for start in range(len(parts)):
                 index.setdefault("/".join(parts[start:]), []).append(path)
