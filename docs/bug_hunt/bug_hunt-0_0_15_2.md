@@ -2673,8 +2673,8 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `{shelves: {}}` keeps only the parents with a visible, admitted shelf (`_restrict_through_branch`) and
   `not: {shelves: {}}` keeps the rest, while a root `filter: {}` constrains nothing. The maintainer ruled that `{}`
   constrains nothing everywhere and that to-many existence is spelled with explicit `some` / `none` / `every`
-  quantifiers on a per-target wrapper input (Prisma's shape), so this closes with that contract change, which has
-  its own plan and review pending. Found planning 216
+  quantifiers on a per-target wrapper input (Prisma's shape), so this closes with that contract change. Plan:
+  `docs/relation-quantifiers-plan.md` (v1, unreviewed; adversarial review next). Found planning 216
 - [ ] 730. (robustness) A declared `CharFilter` / `NumberFilter` / `ListFilter` / `MultipleChoiceFilter` /
   `AllValuesMultipleFilter`, with or without `method=`, whose `field_name` ends on a relation (forward FK `branch` /
   `branch_id`, reverse FK, M2M, `GenericForeignKey`, `branch__shelves`) is refused at schema build with
@@ -2761,6 +2761,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   valid choice" and `shelves__code` excludes. GraphQL cannot name a head. Same root as 749: `_flat_leaf_walk` must walk
   the path Django resolves for the predicate, heads included (one fix closes both); needs 750's actor. Found planning
   216
+- [ ] 216. A dense `RelatedFilter` graph publishes a flat surface factorial in its size (path-relative expansion over every
+  simple path: six sets each related to every other give about 11k flat keys per set, seven about 94k). The bound
+  landed in `47dd4daa`; the maintainer ruled the per-declaration opt-out `RelatedFilter(flat=False)`. Plan:
+  `docs/related-filter-flat-opt-out-plan.md` (v7, reviewed five rounds). Blocked on 745 and on 748 / 749, which land
+  first. Moved from Waiting on you
 - [ ] 749. A filter whose `lookup_expr` crosses a relation (`RelationPkMultipleFilter(field_name="shelf",
   lookup_expr="branch__in")`, `CharFilter(field_name="shelf", lookup_expr="branch__name")`, the shape
   `filters/base.py::_filterset_lookup_operand` documents) skips that hop's visibility and gates:
@@ -3099,9 +3104,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 207. Earlier open questions with no row: nullable payloads (card 056), and the HUNT negative-offset cursor fix on
   list sources being off by one (the `FieldError.field` name was settled by item 11; items 1 and 51 support a multi-column
   `ForeignObject`, the reverse fallback kept)
-- [ ] 216. A dense `RelatedFilter` graph publishes a flat surface factorial in its size (path-relative expansion over every
-  simple path: six sets each related to every other give about 11k flat keys per set, seven about 94k); decide a stated
-  bound or a per-declaration opt-out of flat copies
 - [ ] 217. A subclass of a `FilterSet` in a `RelatedFilter` cycle publishes one lap more than its parent (the cycle closes at
   the parent class, not the subclass); decide whether a subclass should close the cycle at itself
 - [ ] 219. Strawberry's own `ListConnection` (0.327.7 and 0.334.4) fails `assert last is not None` when `after + 1 + first`

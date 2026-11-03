@@ -485,7 +485,8 @@ The four drift failure modes this exists to prevent, each observed in the audite
 
 **What we'd do**: add `RelatedFilter(..., flat=False)`, which publishes no flat copy of the target's filters through that declaration, from any root set, while the nested `RelatedFilter` branch and explicit `Meta.fields` paths stay.
 
-**Spec**:
+**Spec**: superseded by the reviewed plan `docs/related-filter-flat-opt-out-plan.md` (bug-hunt item 216), which wins
+where this card disagrees; the card is removed when 216 lands.
 
 - Per declaration, not per set: the flag sits on the edge whose expansion it stops.
 - The nested branch is unaffected: every path the flag removes stays reachable as a nested filter, applied as a correlated `EXISTS` per branch.
