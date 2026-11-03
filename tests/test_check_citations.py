@@ -90,13 +90,17 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     check_citations._OTHER_FILE_INDEX.clear()
 
 
-def _scope_ignoring(root: Path, ignored: str) -> tuple[frozenset[str], frozenset[str]]:
-    """The ``git_visible_scope`` answer for ``root`` were the ``ignored`` directory git-ignored."""
+def _scope_ignoring(root: Path, *ignored: str) -> tuple[frozenset[str], frozenset[str]]:
+    """The ``git_visible_scope`` answer for ``root`` were each ``ignored`` path git-ignored."""
     files = frozenset(
         relative
         for path in root.rglob("*")
         if path.is_file()
-        and not (relative := path.relative_to(root).as_posix()).startswith(f"{ignored}/")
+        and not any(
+            (relative := path.relative_to(root).as_posix()) == name
+            or relative.startswith(f"{name}/")
+            for name in ignored
+        )
     )
     directories = frozenset(
         "/".join(Path(path).parts[:depth])
@@ -379,23 +383,29 @@ def test_a_pinpoint_never_resolves_through_a_git_ignored_tree(
     tree: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An ignored ``scratch/`` copy of a doc the repo lacks resolves nothing; a visible copy does."""
+    """An ignored ``scratch/`` copy, or an ignored file in a visible directory, resolves nothing."""
     _write(tree, "scratch/copy/docs/guide.md", "## Coverage rule\n")
     _write(tree, "kept/copy/docs/guide.md", "## Kept heading\n")
+    _write(tree, "kept/copy/docs/local.md", "## Local heading\n")
     monkeypatch.setattr(
         check_citations,
         "git_visible_scope",
-        lambda: _scope_ignoring(tree, "scratch"),
+        lambda: _scope_ignoring(tree, "scratch", "kept/copy/docs/local.md"),
     )
     outcomes = _cite(
         tree,
         """\
         # docs/guide.md #"Coverage rule"
         # docs/guide.md #"Kept heading"
+        # docs/local.md #"Local heading"
         """,
     )
     pinpoints = [o for o in outcomes if o.citation.kind == "substring"]
-    assert [(o.citation.line, o.resolved) for o in pinpoints] == [(1, False), (2, True)]
+    assert [(o.citation.line, o.resolved) for o in pinpoints] == [
+        (1, False),
+        (2, True),
+        (3, False),
+    ]
 
 
 def test_without_git_every_unpruned_tree_is_indexed(tree: Path) -> None:
@@ -412,18 +422,20 @@ def test_a_python_file_under_a_git_ignored_tree_is_not_first_party_source(
     tree: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A ``.py`` under an ignored directory inside a source tree is outside the corpus."""
+    """A ``.py`` git ignores, alone or under an ignored directory, is outside the corpus."""
     _write(tree, "tests/lib/evidence.py", "def only_in_ignored():\n    return 1\n")
     _write(tree, "tests/kept/evidence.py", "def kept_symbol():\n    return 1\n")
+    _write(tree, "tests/kept/local.py", "def only_local():\n    return 1\n")
     monkeypatch.setattr(
         check_citations,
         "git_visible_scope",
-        lambda: _scope_ignoring(tree, "tests/lib"),
+        lambda: _scope_ignoring(tree, "tests/lib", "tests/kept/local.py"),
     )
     corpus = check_citations.iter_python_sources()
 
     assert tree / "tests/kept/evidence.py" in corpus
     assert tree / "tests/lib/evidence.py" not in corpus
+    assert tree / "tests/kept/local.py" not in corpus
 
 
 def test_a_python_file_under_a_ruff_excluded_tree_is_not_first_party_source(tree: Path) -> None:
