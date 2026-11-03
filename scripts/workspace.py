@@ -192,9 +192,10 @@ Guarantees, each one a hand-run failure this encodes away:
   that cannot be restored and proved, keeps the state directory with a notice
   on stderr; the resync still completes, and the prover's own refusal keeps
   guarding ``prove`` in that copy until the marker is resolved or ``gc``.
-  It then runs ``uv sync --frozen --group pg`` and asserts the copy's
-  package digest equals the shared tree's. A shared file that changes
-  mid-copy restarts the sync.
+  It then runs ``uv sync --locked --group pg`` (``--locked`` as CI's syncs,
+  so a ``pyproject.toml`` the lock no longer satisfies fails the copy as it
+  fails CI) and asserts the copy's package digest equals the shared tree's.
+  A shared file that changes mid-copy restarts the sync.
 * **Copies are reset in place, never cloned.** A virtualenv's entry scripts
   name their own interpreter by absolute path. A cloned ``.venv/bin/pytest``
   would therefore import the other copy's package. Reuse keeps each copy at
@@ -1608,7 +1609,7 @@ def _uv_sync(destination: Path, holding: Sequence[int] = ()) -> None:
         "sync",
         "--directory",
         str(destination),
-        "--frozen",
+        "--locked",
         "--group",
         "pg",
         "-q",
@@ -1780,7 +1781,7 @@ def floor_install_commands(copy: Path, venv: Path, pins: Mapping[str, str]) -> l
     """Return the floor cell's install, aimed at ``venv`` (``UV_PROJECT_ENVIRONMENT``).
 
     The ``test`` job of ``.github/workflows/django.yml`` syncs the lock at the
-    floor Python, then replaces Django and strawberry-graphql with the exact
+    floor Python with ``--locked``, then replaces Django and strawberry-graphql with the exact
     floor points, then every soft dependency in one install; the lock resolves
     newer releases of each for that Python, so they are installed over the
     sync rather than beside it.
@@ -1803,7 +1804,7 @@ def floor_install_commands(copy: Path, venv: Path, pins: Mapping[str, str]) -> l
             "sync",
             "--directory",
             str(copy),
-            "--frozen",
+            "--locked",
             "--python",
             pins["python"],
             "-q",

@@ -62,7 +62,7 @@ jobs:
         # The render scripts initialize the full fakeshop Django project, whose
         # schema imports the example DRF serializers; use the normal dev sync
         # rather than the package-only ``--no-dev`` environment.
-        run: uv sync --python 3.12
+        run: uv sync --locked --python 3.12
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0

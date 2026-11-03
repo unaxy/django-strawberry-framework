@@ -2138,8 +2138,6 @@ def test_the_floor_bounds_refuse_a_marker_split_floor_row() -> None:
 #: The ``if`` of the ``test`` job's strawberry-graphql floor step and of its soft-dependency one.
 STRAWBERRY_FLOOR_IF = "matrix.strawberry"
 SOFT_FLOOR_IF = "matrix.compatibility_only == '1'"
-#: A ``uv`` command that syncs the environment to ``uv.lock``, reverting any pin installed over it.
-_SYNCING_UV = re.compile(r"\buv (?:sync\b|run\b(?![^\n;&|]*--no-sync\b))")
 #: ``(later, earlier)``: each step that must run after the other in the ``test`` job.
 _STEP_ORDER = (
     ("Django install", "uv sync"),
@@ -2157,9 +2155,81 @@ def _step_script(step: dict[object, object]) -> str:
     return str(step.get("run", "")).replace("\\\n", " ")
 
 
-def _step_lines(step: dict[object, object]) -> list[str]:
-    """The stripped, non-blank lines of a workflow step's joined ``run`` script."""
-    return [line.strip() for line in _step_script(step).splitlines() if line.strip()]
+#: One simple command of a shell line: a quoted string stays whole, ``&``, ``|`` and ``;`` end it.
+_SHELL_SEGMENT = re.compile(r"""(?:"[^"]*"|'[^']*'|[^"';&|])+""")
+_SHELL_COMMENT = re.compile(r"(?:^|\s)#.*")
+#: A ``uv`` word and a later ``sync`` word (never the ``sync`` of ``--no-sync``).
+_UV_SYNC_WORDS = re.compile(r"\buv\b.*(?<![\w-])sync\b")
+#: uv's global options whose value is the next word (``uv --help``); the subcommand follows.
+_UV_VALUED_GLOBALS = frozenset(
+    {
+        "--allow-insecure-host",
+        "--cache-dir",
+        "--color",
+        "--config-file",
+        "--directory",
+        "--project",
+    },
+)
+#: The uv subcommands a workflow runs besides ``sync``; a ``sync`` word after one is an argument.
+_UV_OTHER_SUBCOMMANDS = frozenset(
+    {
+        "build",
+        "export",
+        "lock",
+        "pip",
+        "python",
+        "run",
+        "tool",
+        "venv",
+    },
+)
+#: A word deciding whether a uv command may move off ``uv.lock``; group 1 spells an upgrade.
+_UV_LOCK_FLAG = re.compile(r"--frozen|--locked|--no-sync|(--upgrade-package(?:=\S+)?|-P)")
+
+
+def _shell_segments(script: str) -> list[str]:
+    """The simple commands of a joined ``run`` script, in order, whitespace runs collapsed.
+
+    Each line loses a trailing ``#`` comment, then splits at ``&&``, ``||``, ``;``, ``|``
+    and ``&`` outside quotes.
+    """
+    return [
+        " ".join(match.group().split())
+        for line in script.splitlines()
+        for match in _SHELL_SEGMENT.finditer(_SHELL_COMMENT.sub("", line))
+        if match.group().strip()
+    ]
+
+
+def _uv_command(segment: str) -> tuple[str, list[str]]:
+    """A segment's uv subcommand and the words after its first ``uv`` word.
+
+    Whatever precedes ``uv`` (``VAR=val`` assignments, ``env``) and uv's global
+    options are skipped. The subcommand reads ``"pip sync"`` / ``"pip install"`` for
+    those, ``"?"`` for a segment naming ``uv`` and ``sync`` with no subcommand this
+    check knows, and ``""`` for a segment running no uv command it judges.
+    """
+    words = segment.split()
+    rest = words[words.index("uv") + 1 :] if "uv" in words else []
+    index = 0
+    while index < len(rest) and rest[index].startswith("-"):
+        index += 2 if rest[index] in _UV_VALUED_GLOBALS else 1
+    subcommand = rest[index] if index < len(rest) else ""
+    if subcommand == "pip" and rest[index + 1 : index + 2] in (["sync"], ["install"]):
+        return f"pip {rest[index + 1]}", rest
+    if subcommand == "sync" or subcommand in _UV_OTHER_SUBCOMMANDS:
+        return subcommand, rest
+    return ("?" if _UV_SYNC_WORDS.search(segment) else ""), rest
+
+
+def _lock_flags(words: list[str]) -> list[str]:
+    """The lock-deciding words of a uv command, each upgrade spelling read as ``--upgrade-package``."""
+    return [
+        "--upgrade-package" if match.group(1) else word
+        for word in words
+        if (match := _UV_LOCK_FLAG.fullmatch(word))
+    ]
 
 
 def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str]:
@@ -2167,8 +2237,8 @@ def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str
 
     A floor node is identified by its content, a ``(python, django)`` pair equal to
     the floor's, never by the ``compatibility_only`` marker the floor steps key on;
-    the floor steps are identified by their ``if``, the sync, the Django install and
-    the test run by their ``run`` lines.
+    the floor steps are identified by their ``if``, the sync and the Django install by
+    their shell segments, the test run by its ``run`` script.
     """
     job = json_object(object_result(yaml.safe_load, workflow_text), "jobs", "test")
     include = str(json_at(job, "strategy", "matrix", "include"))
@@ -2194,18 +2264,18 @@ def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str
                 problems.append(f"node list {list_index}, node {index}: marked but off the floor")
 
     steps = list(map(json_object, json_list(job, "steps")))
+    segments = [_shell_segments(_step_script(step)) for step in steps]
     located = {
         "uv sync": [
             index
-            for index, step in enumerate(steps)
-            if any(line.startswith("uv sync") for line in _step_lines(step))
+            for index, found in enumerate(segments)
+            if any(_uv_command(segment)[0] == "sync" for segment in found)
         ],
         "Django install": [
             index
-            for index, step in enumerate(steps)
+            for index, found in enumerate(segments)
             if any(
-                line.startswith("uv pip install --upgrade-package Django ")
-                for line in _step_lines(step)
+                segment.startswith("uv pip install --upgrade-package Django ") for segment in found
             )
         ],
         "strawberry floor": [
@@ -2228,21 +2298,8 @@ def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str
         for later, earlier in _STEP_ORDER
         if at[later] < at[earlier]
     )
-    first_pin = min(at["Django install"], at["strawberry floor"], at["soft floor"])
-    for index in range(first_pin, at["pytest run"] + 1):
-        if index == at["uv sync"]:
-            continue
-        script = _step_script(steps[index])
-        for match in _SYNCING_UV.finditer(script):
-            line_end = script.find("\n", match.start())
-            line = script[
-                script.rfind("\n", 0, match.start()) + 1 : None if line_end == -1 else line_end
-            ]
-            problems.append(
-                f"{steps[index].get('name')!r} re-syncs the floor pins away: {line.strip()}",
-            )
     installs = [
-        line for line in _step_lines(steps[at["soft floor"]]) if line.startswith("uv pip install ")
+        segment for segment in segments[at["soft floor"]] if segment.startswith("uv pip install ")
     ]
     pinned = [
         (match.group(1), match.group(2))
@@ -2270,11 +2327,10 @@ def test_every_floor_literal_in_the_django_workflow_is_its_pyproject_lower_bound
     either side alone fails here instead of the cell silently running a point
     the project no longer declares. Every node at the floor Python and Django
     carries ``compatibility_only`` (the floor steps' condition) and every node
-    carrying it is at the floor. The Django install runs after the job's
-    ``uv sync``, both floor steps after the two of them, the test run after the
-    floor steps, and nothing from the Django install through the test run
-    syncs again (``uv sync``, or ``uv run`` without ``--no-sync``), since any of
-    those would put the ``uv.lock`` resolution back over the pins.
+    carrying it is at the floor. The Django install runs after the job's one
+    ``uv sync``, both floor steps after the two of them, and the test run after
+    the floor steps; ``_uv_lock_problems`` refuses a ``uv run`` that would sync
+    the pins away.
     """
     text = (WORKFLOW_DIR / "django.yml").read_text(encoding="utf-8")
 
@@ -2318,8 +2374,6 @@ def _replace_once(
 
 
 _MULTI_DB_FLOOR_NODE = '"database": "multi DB", "fakeshop_sharded": "1", "strawberry": "'
-_DJANGO_STEP = "'Install Django ${{ matrix.django }}'"
-_STRAWBERRY_STEP = "'Install Strawberry ${{ matrix.strawberry }} (minimum supported floor)'"
 _FLOOR_MUTATIONS: dict[str, tuple[Callable[[str, dict[str, str]], str], list[str]]] = {
     "django-step-above-sync": (
         lambda text, _bounds: _move_step(text, "Install Django", "Install dependencies"),
@@ -2346,45 +2400,6 @@ _FLOOR_MUTATIONS: dict[str, tuple[Callable[[str, dict[str, str]], str], list[str
     "test-run-above-soft-step": (
         lambda text, _bounds: _move_step(text, "Run Tests", "Install the soft"),
         ["the pytest run step runs before the soft floor step"],
-    ),
-    "test-run-syncs": (
-        lambda text, _bounds: _replace_once(text, "uv run --no-sync pytest", "uv run pytest"),
-        [
-            (
-                "'Run Tests (${{ matrix.database }}, ${{ matrix.shard }})' re-syncs the floor "
-                'pins away: uv run pytest -o addopts="$addopts" $targets'
-            ),
-        ],
-    ),
-    "test-run-tolerates-flags-before-no-sync": (
-        lambda text, _bounds: _replace_once(
-            text,
-            "uv run --no-sync pytest",
-            "uv run --frozen --no-sync pytest",
-        ),
-        [],
-    ),
-    "django-step-runs-uv-run": (
-        lambda text, _bounds: _replace_once(
-            text,
-            "uv run --no-sync django-admin --version",
-            "uv run django-admin --version",
-        ),
-        [f"{_DJANGO_STEP} re-syncs the floor pins away: uv run django-admin --version"],
-    ),
-    "strawberry-step-runs-uv-run-behind-an-and": (
-        lambda text, _bounds: _replace_once(
-            text,
-            "uv run --no-sync python -c",
-            "true && uv run python -c",
-        ),
-        [
-            (
-                f"{_STRAWBERRY_STEP} re-syncs the floor pins away: true && uv run python -c "
-                "\"import importlib.metadata as m; print('strawberry-graphql', "
-                "m.version('strawberry-graphql'))\""
-            ),
-        ],
     ),
     "full-list-node-unmarked": (
         lambda text, bounds: _replace_once(
@@ -2432,6 +2447,247 @@ def test_the_floor_cell_check_judges_a_mutated_django_workflow(mutation: str) ->
 
     assert mutated != text
     assert _floor_cell_problems(mutated, bounds) == expected
+
+
+#: The problem of a ``uv run`` that may re-lock with no sync before it.
+_UNSYNCED_RUN = "may re-lock with no uv sync before it in its job"
+#: The problem of a ``uv run`` that syncs away the pins of an earlier ``uv pip install``.
+_PINS_REVERTED = "syncs away the job's uv pip install pins without --no-sync"
+#: The workflow files that run a ``uv sync``; the check must read one in each.
+_UV_SYNCING_WORKFLOWS = ("django.yml", "kanban-pages.yml", "postgres.yml")
+
+
+def _job_segments(workflow_text: str) -> dict[str, list[tuple[str, str]]]:
+    """Each job's shell segments in step order, each with its step's name."""
+    workflow = object_result(yaml.safe_load, workflow_text)
+    assert _is_mapping(workflow), "workflow is not a mapping"
+    return {
+        str(job_name): [
+            (str(step.get("name")), segment)
+            for step in map(_mapping, _steps(_mapping(job)))
+            for segment in _shell_segments(_step_script(step))
+        ]
+        for job_name, job in _jobs(workflow).items()
+    }
+
+
+def _uv_lock_problems(workflow_text: str) -> list[str]:
+    """Each way ``workflow_text`` installs or runs anything but exactly ``uv.lock``.
+
+    - A ``uv sync`` carries ``--locked``, unless it upgrades a package
+      (``--upgrade-package X``, ``--upgrade-package=X``, ``-P X``): an upgrading sync
+      carries no ``--locked`` and follows a ``uv lock --check`` in its job.
+    - No sync carries ``--frozen``; nothing runs ``uv pip sync`` or a uv sync this
+      check cannot read.
+    - A ``uv run`` with neither ``--no-sync`` nor ``--locked`` may re-lock, so it
+      follows a sync in its job.
+    - A ``uv run`` after a ``uv pip install`` in its job carries ``--no-sync``.
+    """
+    problems: list[str] = []
+    for job, segments in _job_segments(workflow_text).items():
+        synced = lock_checked = pinned = False
+        for step, segment in segments:
+            subcommand, words = _uv_command(segment)
+            flags = _lock_flags(words)
+            where = f"job {job!r}, step {step!r}: {segment}"
+            if subcommand == "sync":
+                synced = True
+                upgrades = "--upgrade-package" in flags
+                if "--frozen" in flags:
+                    problems.append(f"{where} carries --frozen")
+                if upgrades and "--locked" in flags:
+                    problems.append(f"{where} carries --locked beside --upgrade-package")
+                if upgrades and not lock_checked:
+                    problems.append(f"{where} upgrades with no uv lock --check before it")
+                if not upgrades and "--locked" not in flags:
+                    problems.append(f"{where} does not carry --locked")
+            elif subcommand == "pip sync":
+                synced = True
+                problems.append(f"{where} installs a requirements file past uv.lock")
+            elif subcommand == "?":
+                synced = True
+                problems.append(f"{where} names a uv sync this check cannot read")
+            elif subcommand == "pip install":
+                pinned = True
+            elif subcommand == "lock" and "--check" in words:
+                lock_checked = True
+            elif subcommand == "run":
+                if not synced and not {"--locked", "--no-sync"} & set(flags):
+                    problems.append(f"{where} {_UNSYNCED_RUN}")
+                if pinned and "--no-sync" not in flags:
+                    problems.append(f"{where} {_PINS_REVERTED}")
+    return problems
+
+
+@pytest.mark.parametrize("path", WORKFLOW_PATHS, ids=WORKFLOW_IDS)
+def test_every_ci_uv_sync_asserts_the_lock_unless_it_upgrades_a_package(path: Path) -> None:
+    """Every CI install is exactly ``uv.lock``, by the rules ``_uv_lock_problems`` lists.
+
+    A workflow that syncs must show the check a sync it read, so the row cannot
+    pass over a file whose syncs it no longer finds.
+    """
+    text = path.read_text(encoding="utf-8")
+    read = [
+        segment
+        for segments in _job_segments(text).values()
+        for _step, segment in segments
+        if _uv_command(segment)[0] == "sync"
+    ]
+
+    assert set(_UV_SYNCING_WORKFLOWS) <= set(WORKFLOW_IDS)
+    assert bool(read) is (path.name in _UV_SYNCING_WORKFLOWS)
+    assert _uv_lock_problems(text) == []
+
+
+#: A ``run`` script, then each of its segments' uv subcommand and lock flags.
+_UV_SEGMENT_READINGS: dict[str, list[tuple[str, list[str]]]] = {
+    "cd docs && uv sync": [("", []), ("sync", [])],
+    "UV_PYTHON=3.12 uv sync --locked": [("sync", ["--locked"])],
+    "uv --directory sub sync --locked": [("sync", ["--locked"])],
+    "uv -q --no-cache sync --locked": [("sync", ["--locked"])],
+    "uv sync && uv run --locked ruff --version": [("sync", []), ("run", ["--locked"])],
+    "uv sync --locked & uv sync": [("sync", ["--locked"]), ("sync", [])],
+    "uv sync  # --locked": [("sync", [])],
+    "uv sync --upgrade-package=Django": [("sync", ["--upgrade-package"])],
+    "uv sync -P Django --group pg": [("sync", ["--upgrade-package"])],
+    "uv${UV_FLAGS} sync --locked": [("?", [])],
+    'uv run --no-sync python -c "a; b" | uv sync': [("run", ["--no-sync"]), ("sync", [])],
+    "uv run pytest -k sync": [("run", [])],
+    "uv pip install x && uv pip sync requirements.txt": [("pip install", []), ("pip sync", [])],
+}
+
+
+@pytest.mark.parametrize("script", list(_UV_SEGMENT_READINGS))
+def test_the_uv_lock_check_reads_each_shell_segment_on_its_own(script: str) -> None:
+    """Each segment of a ``run`` script reads as its own uv subcommand and lock flags."""
+    readings = [_uv_command(segment) for segment in _shell_segments(script)]
+
+    assert [
+        (subcommand, _lock_flags(words)) for subcommand, words in readings
+    ] == _UV_SEGMENT_READINGS[script]
+
+
+def _add_job(command: str) -> Callable[[str], str]:
+    """A mutation adding to ``django.yml`` a job ``extra`` whose one step runs ``command``."""
+    return lambda text: _replace_once(
+        text,
+        "\n  test:\n",
+        (
+            "\n  extra:\n    runs-on: ubuntu-latest\n    steps:\n"
+            f"      - name: Render\n        run: {command}\n\n  test:\n"
+        ),
+    )
+
+
+_LINT_SYNC = "        run: uv sync --locked\n"
+_KANBAN_SYNC = "        run: uv sync --locked --python 3.12\n"
+_POSTGRES_SYNC = "uv sync --python 3.14 --group pg --upgrade-package Django"
+_POSTGRES_STEP = "job 'test-postgres', step 'Install dependencies with latest Django'"
+_TEST_STEP = "job 'test', step 'Run Tests (${{ matrix.database }}, ${{ matrix.shard }})'"
+_UV_LOCK_MUTATIONS: dict[str, tuple[str, Callable[[str], str], list[str]]] = {
+    "lint-sync-drops-locked": (
+        "django.yml",
+        lambda text: _replace_once(text, _LINT_SYNC, "        run: uv sync\n"),
+        ["job 'lint', step 'Install dependencies': uv sync does not carry --locked"],
+    ),
+    "lint-sync-frozen": (
+        "django.yml",
+        lambda text: _replace_once(text, _LINT_SYNC, "        run: uv sync --frozen\n"),
+        [
+            "job 'lint', step 'Install dependencies': uv sync --frozen carries --frozen",
+            "job 'lint', step 'Install dependencies': uv sync --frozen does not carry --locked",
+        ],
+    ),
+    "lint-sync-unreadable": (
+        "django.yml",
+        lambda text: _replace_once(text, _LINT_SYNC, "        run: uv${UV_FLAGS} sync --locked\n"),
+        [
+            (
+                "job 'lint', step 'Install dependencies': uv${UV_FLAGS} sync --locked "
+                "names a uv sync this check cannot read"
+            ),
+        ],
+    ),
+    "kanban-sync-becomes-pip-sync": (
+        "kanban-pages.yml",
+        lambda text: _replace_once(text, _KANBAN_SYNC, "        run: uv pip sync req.txt\n"),
+        [
+            (
+                "job 'build', step 'Install dependencies': uv pip sync req.txt "
+                "installs a requirements file past uv.lock"
+            ),
+        ],
+    ),
+    "job-runs-uv-run-without-a-sync": (
+        "django.yml",
+        _add_job("uv run python x.py"),
+        [f"job 'extra', step 'Render': uv run python x.py {_UNSYNCED_RUN}"],
+    ),
+    "job-runs-uv-run-frozen-without-a-sync": (
+        "django.yml",
+        _add_job("uv run --frozen python x.py"),
+        [f"job 'extra', step 'Render': uv run --frozen python x.py {_UNSYNCED_RUN}"],
+    ),
+    "job-runs-uv-run-locked-without-a-sync": (
+        "django.yml",
+        _add_job("uv run --locked python x.py"),
+        [],
+    ),
+    "test-run-locked-after-the-pins": (
+        "django.yml",
+        lambda text: _replace_once(text, "uv run --no-sync pytest", "uv run --locked pytest"),
+        [f'{_TEST_STEP}: uv run --locked pytest -o addopts="$addopts" $targets {_PINS_REVERTED}'],
+    ),
+    "test-run-frozen-after-the-pins": (
+        "django.yml",
+        lambda text: _replace_once(text, "uv run --no-sync pytest", "uv run --frozen pytest"),
+        [f'{_TEST_STEP}: uv run --frozen pytest -o addopts="$addopts" $targets {_PINS_REVERTED}'],
+    ),
+    "test-run-tolerates-flags-before-no-sync": (
+        "django.yml",
+        lambda text: _replace_once(
+            text,
+            "uv run --no-sync pytest",
+            "uv run --frozen --no-sync pytest",
+        ),
+        [],
+    ),
+    "postgres-sync-locked": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_SYNC, f"{_POSTGRES_SYNC} --locked"),
+        [f"{_POSTGRES_STEP}: {_POSTGRES_SYNC} --locked carries --locked beside --upgrade-package"],
+    ),
+    "postgres-sync-drops-upgrade": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_SYNC, "uv sync --python 3.14 --group pg"),
+        [f"{_POSTGRES_STEP}: uv sync --python 3.14 --group pg does not carry --locked"],
+    ),
+    "postgres-drops-the-lock-check": (
+        "postgres.yml",
+        lambda text: _replace_once(text, "          uv lock --check\n", ""),
+        [f"{_POSTGRES_STEP}: {_POSTGRES_SYNC} upgrades with no uv lock --check before it"],
+    ),
+    "postgres-run-after-the-upgrade-sync": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            "uv run --no-sync django-admin --version",
+            "uv run django-admin --version",
+        ),
+        [],
+    ),
+}
+
+
+@pytest.mark.parametrize("mutation", list(_UV_LOCK_MUTATIONS))
+def test_the_uv_lock_check_judges_a_mutated_workflow(mutation: str) -> None:
+    """Each mutation of a workflow's uv commands yields exactly its own problems, a harmless one none."""
+    name, mutate, expected = _UV_LOCK_MUTATIONS[mutation]
+    text = (WORKFLOW_DIR / name).read_text(encoding="utf-8")
+    mutated = mutate(text)
+
+    assert mutated != text
+    assert _uv_lock_problems(mutated) == expected
 
 
 #: Files the project's ruff config excludes, each holding source ``ruff format`` would change.
