@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 414 done, 110 to do. The CHANGELOG entries filed here moved to
+Progress: 415 done, 110 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2507,6 +2507,15 @@ Progress: 414 done, 110 to do. The CHANGELOG entries filed here moved to
   (`list-in`, `range`, `range-start`, `range-end`, `bare-year-start`, `bare-year-end`) and
   `test_raw_filter_forms_api.py::test_a_plain_parents_two_bound_year_range_past_the_range_answers_as_one_past_it`.
   Residuals filed as 758 and 759
+- [x] 688. Already fixed on main by 7bd478bf, which ticked no row, and pinned here: a declared
+  `ListFilter(field_name="<col>__year", lookup_expr="in")` cleans each member as the transform's integer output
+  (`filters/base.py::_column_form_field` reads `_bound_value_field`), so an integral decimal member (`"2021.0"`,
+  `"2.021e3"`) and a `RangeFilter` bound `"2021.0"` (start, end, both) select the rows the plain `"2021"` selects.
+  Live rows in
+  `examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_declared_year_filters_keep_their_matching_rows_and_exclusion_complements`
+  (`year-in-integral-decimal`, `year-in-integral-exponent`, `year-range-integral-decimal`,
+  `year-range-start-integral-decimal`, `year-range-end-integral-decimal`), each failing with `_bound_model_field`
+  restored ("Enter a value the database can represent."). No production change. Filed 760
 
 ## Outside review of the fixes
 
@@ -2568,9 +2577,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 688. (robustness) A declared `ListFilter(field_name="<col>__year", lookup_expr="in")` refuses an integral
-  decimal member (`"2020.0"`, `"2.02e3"`) with "Enter a value the database can represent." where the generated
-  `year__in` leaf matches the 2020 rows. Found verifying 652
 - [ ] 692. (robustness) A nested integer `ArrayField` filter (`ArrayField(ArrayField(IntegerField))`, `contains`)
   cleans its members as text (`[["1", "9223372036854775808"]]`) and binds them as strings, so the integer ask never
   reads them and PostgreSQL refuses the cast at execution (the element form field, `filters/base.py`). Found
@@ -2823,6 +2829,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   nothing fails if a declared `date__in` / `date__range` over a datetime column goes back to cleaning as a
   `DateTimeField` (accepting `"2020-06-15T11:00:00Z"`, which the generated leaf and the published `Date` refuse, and
   keeping only the earlier rows for a lone end bound `"2020-06-15"`). Found regrading 684
+- [ ] 760. A declared `ListFilter(field_name="occurred_on__year", lookup_expr="in")` handed a fractional member
+  (`"2021.5"` through an `apply_sync` JSON `where`) truncates it and returns the 2021 rows, where the generated
+  `year__in` leaf drops it and returns none, as 685's outcome says an integer `in` does:
+  `filters/base.py::_integer_in_column` reads `_bound_model_field` (the `DateField`), so `ListFilter.filter`'s
+  fractional-drop branch never runs for a declared transform path. Reading `_bound_value_field` there instead fails
+  existing refusal rows in `test_scalar_predicate_binding_api.py` (past-int64 members, the `in-below-min` /
+  `in-above-max` bounds), so the fix needs its own ruling. Found verifying 688
 
 ## To do: holes found re-checking the fixes
 

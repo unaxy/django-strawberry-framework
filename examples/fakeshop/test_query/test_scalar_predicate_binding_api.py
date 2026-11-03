@@ -908,6 +908,36 @@ def test_declared_year_filters_refuse_each_integer_bound_the_database_cannot_bin
 
 _YEAR_INTEGER_ACCEPTED: dict[str, tuple[JSONObject, tuple[str, ...]]] = {
     "year-in": ({"day_years_among": {"in_": ["2021"]}}, ("new-year-2021", "mid-2021")),
+    "year-in-integral-decimal": (
+        {"day_years_among": {"in_": ["2021.0"]}},
+        ("new-year-2021", "mid-2021"),
+    ),
+    "year-in-integral-exponent": (
+        {"day_years_among": {"in_": ["2.021e3"]}},
+        ("new-year-2021", "mid-2021"),
+    ),
+    "year-range-integral-decimal": (
+        {"day_years_span": {"range": {"start": "2021.0", "end": "2021.0"}}},
+        ("new-year-2021", "mid-2021"),
+    ),
+    "year-range-start-integral-decimal": (
+        {"day_years_span": {"range": {"start": "2021.0"}}},
+        (
+            "new-year-2021",
+            "mid-2021",
+            "mid-2022",
+            "mid-9998",
+        ),
+    ),
+    "year-range-end-integral-decimal": (
+        {"day_years_span": {"range": {"end": "2021.0"}}},
+        (
+            "mid-2019",
+            "mid-2020",
+            "new-year-2021",
+            "mid-2021",
+        ),
+    ),
     "iso-year-in": ({"iso_years_among": {"in_": ["2021"]}}, ("mid-2021",)),
     "excluded-multi-valued-relation": (
         {"child_years_not_among": {"in_": ["2021"]}},
