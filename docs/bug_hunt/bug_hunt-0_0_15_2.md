@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 415 done, 110 to do. The CHANGELOG entries filed here moved to
+Progress: 416 done, 111 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2516,6 +2516,27 @@ Progress: 415 done, 110 to do. The CHANGELOG entries filed here moved to
   (`year-in-integral-decimal`, `year-in-integral-exponent`, `year-range-integral-decimal`,
   `year-range-start-integral-decimal`, `year-range-end-integral-decimal`), each failing with `_bound_model_field`
   restored ("Enter a value the database can represent."). No production change. Filed 760
+- [x] 692. A `ListFilter` / `ArrayFilter` over an `ArrayField` (reached by a JSON `where` on an unwired set via
+  `apply_sync` / `apply_async`, or raw `FilterSet(data=...)`; the GraphQL input refuses a nested array at build)
+  cleans every member as the innermost column: `filters/base.py::_column_form_field` reads `array_leaf_field`'s leaf
+  and `::_ElementField` descends list / tuple members at any depth over an array of arrays (`element_nests`), so
+  `[["abc"]]` is the leaf's "Enter a number.", a date leaf's bad text "Enter a valid date.", and an integer member
+  past the leaf's range `FILTER_INVALID` ("Enter a value the database can represent.") where the ask runs, instead of
+  text bound to the database; a flat list of leaves and a deeper nest still bind, as cleaned leaves. Under an `in`
+  whose lookup is Django's `ArrayInLookup` (`utils/_array_field.py::is_array_in_lookup`, read from the resolved lookup
+  class; `members_are_arrays` set by `::_ElementCleanedFilter._hand_column_field`), flat or nested, each member is one
+  whole array value: a flat `[[1, 2]]` (was "Enter a number.") is cleaned and binds, and a member that is no list
+  (`[1]`, `None`, raw `?name=1,2`) is `FILTER_INVALID` / the form's `invalid_list` "Enter a list of values." where the
+  parent raised `TypeError` from `.qs` (flat, and any `None` member) or bound a digit split (nested); a `None` inside
+  a member stays `None`. `LICENSE.django` now ships beside the other upstream licenses (sdist and wheel) for the
+  Django-adapted test doubles in `tests/_postgres_fields.py`. Pinned by
+  `tests/filters/test_sets.py::test_nested_array_leaf_is_cleaned_as_its_innermost_column`,
+  `::test_nested_array_leaf_the_innermost_column_cannot_hold_is_a_form_error`,
+  `::test_nested_integer_array_leaf_past_its_range_is_asked`,
+  `::test_an_array_in_member_that_is_no_array_is_invalid_list`,
+  `tests/filters/test_base.py::test_list_filter_field_cleans_each_element_with_its_element_field`; the live
+  `examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::test_nested_array_members_are_cleaned_as_the_innermost_column`
+  rows are unverified until the PostgreSQL tier runs them. spec-027 states it in all five homes. Filed 761 and 762
 
 ## Outside review of the fixes
 
@@ -2577,10 +2598,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 692. (robustness) A nested integer `ArrayField` filter (`ArrayField(ArrayField(IntegerField))`, `contains`)
-  cleans its members as text (`[["1", "9223372036854775808"]]`) and binds them as strings, so the integer ask never
-  reads them and PostgreSQL refuses the cast at execution (the element form field, `filters/base.py`). Found
-  verifying 657
 - [ ] 695. (robustness) A refused save the consumer swallows before a different `IntegrityError` escapes is still
   diagnosed as the swallowed row's `null` (serializer `_attempted_row_integrity_errors` reads `attempted[-1]`; model
   `_created_row_integrity_errors` reads the create target; ModelForm `_modelform_save_or_field_errors` reads
@@ -2841,6 +2858,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
   fractional-drop branch never runs for a declared transform path. Reading `_bound_value_field` there instead fails
   existing refusal rows in `test_scalar_predicate_binding_api.py` (past-int64 members, the `in-below-min` /
   `in-above-max` bounds), so the fix needs its own ruling. Found verifying 688
+- [ ] 761. A fractional member of an integer `ArrayField` element has no contract: flat `["1.5"]` binds `int(1)`
+  (Django's `IntegerField.get_prep_value` truncates), nested `[["1.5"]]` and `[[1.5]]` bind `Decimal("1.5")`, which
+  PostgreSQL's numeric-to-integer cast rounds to 2 (a JSON `1.5` already reached that cast nested before 692). Against
+  685's drop rule for a fractional integer `in` member. Unwired `apply_sync` / raw form only. Found fixing 692
+- [ ] 762. (robustness) A ragged or over-deep member of an `in` over a nested `ArrayField` (`[[[1, [2]]]]` through an
+  `apply_sync` JSON `where`, or raw form data) raises an unmasked `TypeError` ("Field 'igrid' expected a number") from
+  `.qs` and `apply_sync` instead of a field-keyed `FILTER_INVALID`; the same at the parent of 692. PostgreSQL refuses
+  ragged arrays anyway. Found verifying 692
 
 ## To do: holes found re-checking the fixes
 

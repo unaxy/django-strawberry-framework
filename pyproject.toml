@@ -39,6 +39,7 @@ include = [
     "/tests",
     "/README.md",
     "/LICENSE",
+    "/LICENSE.django",
     "/LICENSE.django-filter",
     "/LICENSE.django-graphiql-debug-toolbar",
     "/LICENSE.strawberry",
@@ -56,6 +57,7 @@ description = "A DRF-inspired Django integration framework for Strawberry GraphQ
 license = "MIT"
 license-files = [
     "LICENSE",
+    "LICENSE.django",
     "LICENSE.django-filter",
     "LICENSE.django-graphiql-debug-toolbar",
     "LICENSE.strawberry",

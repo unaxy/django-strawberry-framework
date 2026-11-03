@@ -5,6 +5,7 @@ list-valued driver parameters require real PostgreSQL ArrayField columns. A func
 consumer model and table retain those declarations without installing a PostgreSQL-only
 model in the backend-neutral example app. Ordinary JSON arguments carry raw numeric search
 values; Time and DateTime list arguments retain their scalar's real aware Python values.
+A nested array's members are cleaned as its innermost column at any depth.
 """
 
 import datetime
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import django_filters
 import pytest
 import strawberry
+from django import forms
 from django.db import connection, models
 from django.db.models import F, QuerySet
 from django.http import HttpRequest, HttpResponseBase, QueryDict
@@ -45,6 +47,11 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.pg, pytest.mark.usefixtures("private_registry")]
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _UNBINDABLE = [{"message": "Enter a value the database can represent.", "code": "invalid"}]
+#: Django's own error for an ``in`` member over an array column that is no list.
+_INVALID_LIST = {
+    "message": str(forms.MultipleChoiceField.default_error_messages["invalid_list"]),
+    "code": "invalid_list",
+}
 
 
 @wraps(DjangoGraphQLView.as_view())
@@ -91,6 +98,9 @@ def array_consumer() -> Iterator[_ArrayConsumer]:
                     ArrayField(models.DateTimeField()),
                 )
             )
+            matrix: ArrayField[list[list[int]], list[list[int]]] = ArrayField(
+                ArrayField(models.IntegerField()),
+            )
 
             class Meta:
                 app_label = "filter_array_http"
@@ -115,6 +125,10 @@ def array_consumer() -> Iterator[_ArrayConsumer]:
             joined_contain = ArrayFilter(field_name="joined", lookup_expr="contains")
             prices_after = ArrayFilter(field_name="prices", lookup_expr="gt")
             grid_contain = ArrayFilter(field_name="grid", lookup_expr="contains")
+            matrix_contain = ArrayFilter(field_name="matrix", lookup_expr="contains")
+            matrix_are = ArrayFilter(field_name="matrix", lookup_expr="exact")
+            matrix_among = ListFilter(field_name="matrix", lookup_expr="in")
+            counts_among = ListFilter(field_name="counts", lookup_expr="in")
             stamps_contain = ArrayFilter(field_name="stamps", lookup_expr="contains")
             stamps_are = ArrayFilter(field_name="stamps", lookup_expr="exact")
             first_stamp = DateTimeFilter(field_name="stamps__0")
@@ -231,6 +245,7 @@ def array_consumer() -> Iterator[_ArrayConsumer]:
                 clocks=[datetime.time(12)],
                 prices=[decimal.Decimal(1)],
                 grid=[[datetime.datetime(2021, 1, 1, tzinfo=datetime.timezone.utc)]],
+                matrix=[[1, 2]],
             )
             ArraySpecimen.objects.create(
                 label="Other",
@@ -241,6 +256,7 @@ def array_consumer() -> Iterator[_ArrayConsumer]:
                 clocks=[datetime.time(15)],
                 prices=[decimal.Decimal(5)],
                 grid=[[datetime.datetime(2022, 1, 1, tzinfo=datetime.timezone.utc)]],
+                matrix=[[5]],
             )
             finalize_django_types()
             yield _ArrayConsumer(
@@ -364,6 +380,79 @@ def test_numeric_array_members_check_the_real_binding_type_and_keep_non_element_
     else:
         _assert_answer(payload, names, form_key)
     if names is None:
+        assert statements == [], statements
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("form_key", "value", "answer"),
+    [
+        pytest.param("matrix_contain", [["1", str(2**63)]], None, id="nested-past-int64"),
+        pytest.param("matrix_contain", [["1", str(2**31)]], None, id="nested-past-int32"),
+        pytest.param(
+            "matrix_contain",
+            [["abc"]],
+            {"message": "Enter a number.", "code": "invalid"},
+            id="nested-not-a-number",
+        ),
+        pytest.param("matrix_contain", [[1, 2]], ["Match"], id="nested-members"),
+        pytest.param("matrix_contain", [["1"]], ["Match"], id="nested-text-member"),
+        pytest.param("matrix_are", [[1, 2]], ["Match"], id="nested-exact"),
+        pytest.param("matrix_contain", [1], ["Match"], id="nested-flat-list-of-leaves"),
+        pytest.param("matrix_contain", [[[1]]], ["Match"], id="nested-deeper-than-the-column"),
+        pytest.param("matrix_among", [[[1, 2]]], ["Match"], id="nested-in"),
+        pytest.param("matrix_among", [1], _INVALID_LIST, id="nested-in-scalar-member"),
+        pytest.param("counts_among", [1], _INVALID_LIST, id="flat-in-scalar-member"),
+        pytest.param("counts_among", [[1, 2]], ["Match"], id="flat-in"),
+        pytest.param("matrix_among", [None], _INVALID_LIST, id="nested-in-none-member"),
+        pytest.param("counts_among", [[1], None], _INVALID_LIST, id="flat-in-none-member"),
+        pytest.param(
+            "grid_contain",
+            [["nope"]],
+            {"message": "Enter a valid date/time.", "code": "invalid"},
+            id="nested-datetime-not-a-datetime",
+        ),
+        pytest.param(
+            "grid_contain",
+            ["2021-01-01T00:00:00+16:00"],
+            None,
+            id="nested-datetime-text-offset",
+        ),
+    ],
+)
+def test_nested_array_members_are_cleaned_as_the_innermost_column(
+    array_consumer: _ArrayConsumer,
+    form_key: str,
+    value: object,
+    answer: list[str] | dict[str, str] | None,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A nested array's members are cleaned and asked as its innermost column at any depth.
+
+    A JSON ``where`` reaches a nested column the GraphQL input refuses at build. A member
+    the leaf cannot hold is the leaf form field's error, one past an integer leaf's range
+    is unbindable, and a flat list of leaves or a deeper nest compares as PostgreSQL's
+    dimension-blind containment reads it. Each member of an ``in`` over an array column,
+    flat or nested, is one whole array value: one that is no list, ``None`` included, is
+    ``invalid_list``.
+    """
+    statements = record_compiled_sql(array_consumer.table)
+    payload = _post(
+        array_consumer,
+        "query($where: JSON!) { rows(where: $where) { label } allRows { label } }",
+        {"where": {form_key: value}},
+    )
+    if isinstance(answer, dict):
+        assert payload["data"] is None, payload
+        errors = json_list(payload, "errors")
+        assert len(errors) == 1, payload
+        assert json_object(errors[0], "extensions") == {
+            "code": "FILTER_INVALID",
+            "errors": {form_key: [answer]},
+        }, payload
+    else:
+        _assert_answer(payload, answer, form_key)
+    if not isinstance(answer, list):
         assert statements == [], statements
 
 
