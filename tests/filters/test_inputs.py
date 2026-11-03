@@ -49,6 +49,7 @@ from django.db.models.functions import ExtractYear
 from django.db.models.lookups import GreaterThanOrEqual
 from django.http import HttpRequest
 from django.test.utils import isolate_apps, register_lookup
+from django.utils.functional import SimpleLazyObject, lazy
 from django_filters import (
     AllValuesFilter,
     AllValuesMultipleFilter,
@@ -69,6 +70,7 @@ from django_filters import (
     NumberFilter,
     TimeFilter,
     TimeRangeFilter,
+    TypedChoiceFilter,
     TypedMultipleChoiceFilter,
     UUIDFilter,
 )
@@ -880,7 +882,7 @@ def test_convert_filter_to_input_annotation_types_a_columnless_multiple_choice_m
 def test_convert_filter_to_input_annotation_handles_choice_filter_via_converter_pipeline() -> None:
     """`ChoiceFilter` reaches into ``convert_choices_to_enum`` via the model field."""
     # ``Book.circulation_status`` is a TextChoices field on the example model.
-    f = ChoiceFilter()
+    f = ChoiceFilter(choices=library_models.Book.CirculationStatus.choices)
     model_field: ModelField = library_models.Book._meta.get_field("circulation_status")
     annotation = convert_filter_to_input_annotation(f, model_field, None, FilterSet)
     non_none = [arg for arg in _args(annotation) if arg is not type(None)]
@@ -914,7 +916,9 @@ def test_convert_filter_to_input_annotation_malformed_filter_diagnostics() -> No
             None,
             FilterSet,
         )
-    assert str(exc_info.value).startswith("NoFieldFilter(method='filter_custom') on <")
+    assert str(exc_info.value).startswith(
+        "FilterSet: NoFieldFilter(method='filter_custom') on None",
+    )
     assert "is backed by no model field and exposes no form field" in str(exc_info.value)
 
     # ``AllValuesMultipleFilter`` reads the per-request ``model`` to build its field, so
@@ -924,7 +928,7 @@ def test_convert_filter_to_input_annotation_malformed_filter_diagnostics() -> No
     with pytest.raises(ConfigurationError) as exc_info:
         convert_filter_to_input_annotation(unbound, None, None, FilterSet)
     assert str(exc_info.value) == (
-        f"AllValuesMultipleFilter(method='filter_custom') on {unbound!r} is backed by no "
+        "FilterSet: AllValuesMultipleFilter(method='filter_custom') on 'city' is backed by no "
         "model field and exposes no form field, so nothing types its value; point field_name "
         "at a model field, or put the method on a typed filter primitive "
         "(`CharFilter(method=...)`, `NumberFilter(method=...)`, `ListFilter(method=...)` for "
@@ -966,13 +970,244 @@ def test_choice_filter_without_a_choices_column_names_the_declared_class(
     with pytest.raises(ConfigurationError) as exc_info:
         convert_filter_to_input_annotation(choice_filter, model_field, None, FilterSet)
     assert str(exc_info.value) == (
-        f"{type(choice_filter).__name__} on {choice_filter!r} is backed by no model field "
-        "declaring `choices` (the filter's own `choices` never feed the enum); declare "
+        f"FilterSet: {type(choice_filter).__name__} on {choice_filter.field_name!r} reads "
+        f"{model_field.model.__name__}.{model_field.name}, which declares no `choices`, so no "
+        "choice enum types its input (the filter's own `choices` never feed the enum); declare "
         "`choices` on the column it filters (a `choices=` list of pairs, or a `TextChoices` / "
-        "`IntegerChoices` class's `.choices`), or filter that column through a non-choice filter "
+        "`IntegerChoices` class's `.choices`), or filter the column through a non-choice filter "
         "(`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its lookups in Meta.fields, "
         "or `CharFilter(method=...)` for a method filter)."
     )
+
+
+def test_a_choice_filter_read_off_no_model_field_names_what_it_reads() -> None:
+    """A choice filter typed from no model field is refused saying so.
+
+    Only a column can take ``choices``, so the advice to declare them is left out; the
+    transform-output reason runs over HTTP in the live declaration rows.
+    """
+    with pytest.raises(ConfigurationError) as exc_info:
+        convert_filter_to_input_annotation(
+            ChoiceFilter(field_name="opened_on", choices=[("a", "A")]),
+            None,
+            None,
+            FilterSet,
+        )
+    assert str(exc_info.value) == (
+        "FilterSet: ChoiceFilter on 'opened_on' reads no model field, so no choice enum types "
+        "its input (the filter's own `choices` never feed the enum); filter the column through a "
+        "non-choice filter (`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its lookups "
+        "in Meta.fields, or `CharFilter(method=...)` for a method filter)."
+    )
+
+
+def _date_range_in_filter(field_name: str) -> Filter:
+    """A CSV ``in`` wrapper around ``DateRangeFilter``, as django-filter builds one for ``in``."""
+    wrapper = type("DateRangeInFilter", (DjangoBaseInFilter, DateRangeFilter), {})
+    built = wrapper(field_name=field_name, lookup_expr="in")
+    assert isinstance(built, Filter)
+    return built
+
+
+_SHELF = library_models.Shelf
+
+
+@pytest.mark.parametrize(
+    ("make_filter", "column"),
+    [
+        pytest.param(
+            lambda: _date_range_in_filter("condition"),
+            _SHELF._meta.get_field("condition"),
+            id="date-range-in-wrapper",
+        ),
+        pytest.param(
+            lambda: ChoiceFilter(field_name="tier", choices=[(10, "ten")]),
+            _SHELF._meta.get_field("tier"),
+            id="choice-disjoint",
+        ),
+        pytest.param(
+            lambda: TypedChoiceFilter(field_name="condition", choices=[("mint", "Mint")]),
+            _SHELF._meta.get_field("condition"),
+            id="typed-choice-disjoint",
+        ),
+        pytest.param(
+            lambda: ChoiceFilter(field_name="condition", choices=[("", "Unset")]),
+            _SHELF._meta.get_field("condition"),
+            id="only-the-blank-choice",
+        ),
+        pytest.param(
+            lambda: ChoiceFilter(
+                field_name="condition",
+                choices=library_models.Book.CirculationStatus,
+            ),
+            _SHELF._meta.get_field("condition"),
+            id="another-columns-choices-class",
+        ),
+    ],
+)
+def test_a_choice_filter_accepting_no_member_of_its_column_enum_is_refused(
+    make_filter: Callable[[], Filter],
+    column: ModelField,
+) -> None:
+    """A filter whose own form field accepts none of the column enum's members is refused.
+
+    Every value its input publishes would be the form's ``invalid_choice`` (an empty value
+    is skipped as no constraint, never accepted), so the build refuses it naming the column.
+    """
+    declared = make_filter()
+    with pytest.raises(ConfigurationError) as exc_info:
+        convert_filter_to_input_annotation(declared, column, None, FilterSet)
+    assert str(exc_info.value) == (
+        f"FilterSet: {type(declared).__name__} on {declared.field_name!r} publishes the choice "
+        f"enum of {column.model.__name__}.{column.name}, but its own form field accepts none of "
+        "that column's `choices`, so every value of its input would be refused (a "
+        "`DateRangeFilter`'s fixed date-range keys are no column's choices); give the filter "
+        "`choices` drawn from the column's (`choices=<Model>.<Choices>.choices`, or a subset "
+        "of them), or filter that column through a non-choice filter (`CharFilter`, "
+        "`NumberFilter`, `DateFromToRangeFilter`, its lookups in Meta.fields, or "
+        "`CharFilter(method=...)` for a method filter)."
+    )
+
+
+class _ModelChoiceFieldFilter(Filter):
+    """A filter whose form field is a ``ModelChoiceField``, whose choices are rows."""
+
+    field_class: type[forms.ModelChoiceField[models.Model]] = forms.ModelChoiceField
+
+
+@pytest.mark.parametrize(
+    "make_filter",
+    [
+        pytest.param(lambda: AllValuesFilter(field_name="condition"), id="all-values"),
+        pytest.param(
+            lambda: ChoiceFilter(field_name="condition", choices=_SHELF.Condition),
+            id="the-columns-choices-class",
+        ),
+        pytest.param(lambda: CharFilter(field_name="condition"), id="char-form-field"),
+        pytest.param(
+            lambda: _ModelChoiceFieldFilter(
+                field_name="condition",
+                queryset=library_models.Branch.objects.all(),
+            ),
+            id="model-choice-form-field",
+        ),
+    ],
+)
+def test_a_choice_filter_whose_form_may_accept_a_member_publishes_the_column_enum(
+    make_filter: Callable[[], Filter],
+) -> None:
+    """A form field accepting a member builds; one built per request or from rows is not asked.
+
+    A ``Choices`` class is read as its ``.choices``, so the column's own class accepts every
+    member. ``AllValuesFilter`` builds no form field unbound and a model-choice field's choices
+    are rows, so neither is read at schema build (no database access is allowed here), and a
+    ``CharField`` validates no choices. Callable ``choices`` and a subset run over HTTP in the
+    live declaration rows.
+    """
+    column = _SHELF._meta.get_field("condition")
+    annotation = convert_filter_to_input_annotation(make_filter(), column, None, FilterSet)
+    (enum_cls,) = (arg for arg in _args(annotation) if arg is not type(None))
+    assert isinstance(enum_cls, type)
+    assert issubclass(enum_cls, Enum)
+    assert [member.name for member in enum_cls] == [
+        "BLANK",
+        "good",
+        "worn",
+        "damaged",
+    ]
+
+
+def _conditions_on_record() -> list[tuple[str, str]]:
+    """Choices read from the database, which a test without ``django_db`` refuses."""
+    return [(shelf.condition, shelf.condition) for shelf in _SHELF.objects.all()]
+
+
+@pytest.mark.parametrize(
+    ("make_filter", "is_list"),
+    [
+        pytest.param(
+            lambda: ChoiceFilter(
+                field_name="condition",
+                choices=lazy(_conditions_on_record, list)(),
+            ),
+            False,
+            id="choice-lazy-promise",
+        ),
+        pytest.param(
+            lambda: ChoiceFilter(
+                field_name="condition",
+                choices=SimpleLazyObject(_conditions_on_record),
+            ),
+            False,
+            id="choice-simple-lazy-object",
+        ),
+        pytest.param(
+            lambda: MultipleChoiceFilter(
+                field_name="condition",
+                choices=lazy(_conditions_on_record, list)(),
+            ),
+            True,
+            id="multiple-choice-lazy-promise",
+        ),
+        pytest.param(
+            lambda: MultipleChoiceFilter(
+                field_name="condition",
+                choices=SimpleLazyObject(_conditions_on_record),
+            ),
+            True,
+            id="multiple-choice-simple-lazy-object",
+        ),
+    ],
+)
+def test_lazy_choices_reading_the_database_are_not_evaluated_at_schema_build(
+    make_filter: Callable[[], Filter],
+    *,
+    is_list: bool,
+) -> None:
+    """Lazy ``choices`` are evaluated per form build, so building the input reads no rows.
+
+    The test holds no database access, so evaluating these choices would raise.
+    """
+    column = _SHELF._meta.get_field("condition")
+    annotation = convert_filter_to_input_annotation(make_filter(), column, None, FilterSet)
+    (member,) = (arg for arg in _args(annotation) if arg is not type(None))
+    if is_list:
+        assert get_origin(member) is list
+        (member,) = _args(member)
+    assert isinstance(member, type)
+    assert issubclass(member, Enum)
+    assert [choice.name for choice in member] == [
+        "BLANK",
+        "good",
+        "worn",
+        "damaged",
+    ]
+
+
+@isolate_apps("apps.library")
+def test_a_choice_filter_over_a_column_whose_only_choice_is_blank_builds() -> None:
+    """A column whose only choice is the blank one leaves no member to ask about, so it builds.
+
+    django-filter skips an empty value as no constraint, so the form field is never asked
+    about ``BLANK``; with no other member nothing shows the declaration serves no value.
+    """
+
+    class BlankOnlyShelf(models.Model):
+        state: _Char = models.CharField(max_length=1, choices=[("", "Unset")], blank=True)
+
+        class Meta:
+            app_label = "library"
+            managed = False
+
+    annotation = convert_filter_to_input_annotation(
+        ChoiceFilter(field_name="state"),
+        BlankOnlyShelf._meta.get_field("state"),
+        None,
+        FilterSet,
+    )
+    enum_cls = _class_arg(annotation)
+    assert issubclass(enum_cls, Enum)
+    assert [member.name for member in enum_cls] == ["BLANK"]
 
 
 def test_convert_filter_to_input_annotation_wraps_nullable() -> None:
@@ -1294,14 +1529,26 @@ _LEAF_REFUSAL_CASES = {
     ),
     "choice": _LeafRefusalCase(
         lambda: ChoiceFilter(field_name="topic", choices=[("a", "A")]),
-        "ChoiceFilter on {declared} ({child}.leaf, reached through {parent}.shelf)",
-        "ChoiceFilter on {declared}",
-        " is backed by no model field declaring `choices` (the filter's own `choices` never "
-        "feed the enum); declare `choices` on the column it filters (a `choices=` list of "
-        "pairs, or a `TextChoices` / `IntegerChoices` class's `.choices`), or filter that "
-        "column through a non-choice filter (`CharFilter`, `NumberFilter`, "
-        "`DateFromToRangeFilter`, its lookups in Meta.fields, or `CharFilter(method=...)` for "
-        "a method filter).",
+        "{child}.leaf: ChoiceFilter on 'topic' (reached through {parent}.shelf)",
+        "{child}: ChoiceFilter on 'topic'",
+        " reads Shelf.topic, which declares no `choices`, so no choice enum types its input "
+        "(the filter's own `choices` never feed the enum); declare `choices` on the column it "
+        "filters (a `choices=` list of pairs, or a `TextChoices` / `IntegerChoices` class's "
+        "`.choices`), or filter the column through a non-choice filter (`CharFilter`, "
+        "`NumberFilter`, `DateFromToRangeFilter`, its lookups in Meta.fields, or "
+        "`CharFilter(method=...)` for a method filter).",
+    ),
+    "choice-off-column": _LeafRefusalCase(
+        lambda: DateRangeFilter(field_name="condition"),
+        "{child}.leaf: DateRangeFilter on 'condition' (reached through {parent}.shelf)",
+        "{child}: DateRangeFilter on 'condition'",
+        " publishes the choice enum of Shelf.condition, but its own form field accepts none of "
+        "that column's `choices`, so every value of its input would be refused (a "
+        "`DateRangeFilter`'s fixed date-range keys are no column's choices); give the filter "
+        "`choices` drawn from the column's (`choices=<Model>.<Choices>.choices`, or a subset "
+        "of them), or filter that column through a non-choice filter (`CharFilter`, "
+        "`NumberFilter`, `DateFromToRangeFilter`, its lookups in Meta.fields, or "
+        "`CharFilter(method=...)` for a method filter).",
     ),
     "range-widget": _LeafRefusalCase(
         lambda: DjangoRangeFilter(field_name="tier", widget=forms.TextInput()),
@@ -1323,9 +1570,9 @@ _LEAF_REFUSAL_CASES = {
     ),
     "method-without-field": _LeafRefusalCase(
         lambda: AllValuesMultipleFilter(method="filter_leaf"),
-        "AllValuesMultipleFilter(method='filter_leaf') on {declared} ({child}.leaf, reached "
+        "{child}.leaf: AllValuesMultipleFilter(method='filter_leaf') on 'leaf' (reached "
         "through {parent}.shelf)",
-        "AllValuesMultipleFilter(method='filter_leaf') on {declared}",
+        "{child}: AllValuesMultipleFilter(method='filter_leaf') on 'leaf'",
         " is backed by no model field and exposes no form field, so nothing types its value; "
         "point field_name at a model field, or put the method on a typed filter primitive "
         "(`CharFilter(method=...)`, `NumberFilter(method=...)`, `ListFilter(method=...)` for "
@@ -1838,11 +2085,21 @@ def test_a_consumer_class_pairing_multiple_choice_with_another_kind_keeps_that_k
         _bases(parent, django_filters.MultipleChoiceFilter),
         {},
     )
-    both = paired(field_name="condition")
+    # A form field built from the column's choices accepts its enum's members.
+    choices = library_models.Shelf.Condition.choices
+    both = (
+        paired(field_name="condition")
+        if parent is RangeFilter
+        else paired(field_name="condition", choices=choices)
+    )
     assert isinstance(both, Filter)
     assert isinstance(both, django_filters.MultipleChoiceFilter)
     model_field: ModelField = library_models.Shelf._meta.get_field("condition")
-    single = parent(field_name="condition")
+    single = (
+        parent(field_name="condition", choices=choices)
+        if parent is ChoiceFilter
+        else parent(field_name="condition")
+    )
 
     assert _input_shape(
         convert_filter_to_input_annotation(both, model_field, None, FilterSet),
@@ -3464,8 +3721,8 @@ def test_an_array_column_filter_whose_lookup_takes_no_element_array_is_refused(
     _ = _serve_array_filter(declared, exposed=True)
 
     assert _build_refusal() == (
-        f"{type(declared).__name__} on {declared!r} has no input type for "
-        f"lookup '{lookup}' on the ArrayField column _ArraySpecimen.ints: only exact, "
+        f"ArraySpecimenFilter: {type(declared).__name__} on {declared.field_name!r} has no input "
+        f"type for lookup '{lookup}' on the ArrayField column _ArraySpecimen.ints: only exact, "
         "contains, contained_by and overlap take one array of the column's elements. Declare "
         "an ArrayFilter with one of those lookup_expr values."
     )
@@ -3483,10 +3740,10 @@ def test_a_choice_filter_over_an_outer_choices_array_column_is_refused(
     _ = _serve_array_filter(declared, exposed=False)
 
     assert _build_refusal() == (
-        f"ChoiceFilter on {declared!r} has no input type for lookup 'exact' on the ArrayField "
-        "column _ArraySpecimen.flagged: only exact, contains, contained_by and overlap take one "
-        "array of the column's elements. Declare an ArrayFilter with one of those lookup_expr "
-        "values."
+        f"ArraySpecimenFilter: ChoiceFilter on {declared.field_name!r} has no input type for "
+        "lookup 'exact' on the ArrayField column _ArraySpecimen.flagged: only exact, contains, "
+        "contained_by and overlap take one array of the column's elements. Declare an "
+        "ArrayFilter with one of those lookup_expr values."
     )
     assert registry.get_enum(_ArraySpecimen, "flagged") is None
 
@@ -3764,9 +4021,9 @@ def test_an_index_or_slice_opening_the_lookup_expr_is_refused_by_name(
     _ = _serve_array_filter(declared, exposed=False)
 
     assert _build_refusal() == (
-        f"{type(declared).__name__} on {declared!r} publishes lookup '{lookup}', which is no "
-        "GraphQL field name. Spell an index or slice in field_name (`<column>__0`, "
-        "`<column>__0_2`) and name the lookup in lookup_expr."
+        f"ArraySpecimenFilter: {type(declared).__name__} on {declared.field_name!r} publishes "
+        f"lookup '{lookup}', which is no GraphQL field name. Spell an index or slice in "
+        "field_name (`<column>__0`, `<column>__0_2`) and name the lookup in lookup_expr."
     )
 
 
@@ -3797,10 +4054,10 @@ def test_a_declared_date_filter_through_a_nested_array_index_keeps_the_array_ref
     _ = _serve_array_filter(declared, exposed=False)
 
     assert _build_refusal() == (
-        f"DateFilter on {declared!r} has no input type for lookup 'exact' on the ArrayField "
-        "column _ArraySpecimen.grid: only exact, contains, contained_by and overlap take one "
-        "array of the column's elements. Declare an ArrayFilter with one of those "
-        "lookup_expr values."
+        f"ArraySpecimenFilter: DateFilter on {declared.field_name!r} has no input type for "
+        "lookup 'exact' on the ArrayField column _ArraySpecimen.grid: only exact, contains, "
+        "contained_by and overlap take one array of the column's elements. Declare an "
+        "ArrayFilter with one of those lookup_expr values."
     )
 
 

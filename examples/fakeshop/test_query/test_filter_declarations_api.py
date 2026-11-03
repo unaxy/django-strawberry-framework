@@ -4,20 +4,28 @@ import copy
 import logging
 import threading
 from collections import OrderedDict
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
 from functools import wraps
 
 import pytest
 import strawberry
-from apps.library.models import Book, Branch, Shelf
+from apps.library.models import Book, Branch, Shelf, Venue
 from apps.scalars.models import ScalarSpecimen
-from django.db.models import F, QuerySet
+from django.db.models import F, Model, QuerySet
 from django.forms import TextInput
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
-from django_filters import CharFilter, Filter
+from django.utils.functional import SimpleLazyObject, lazy
+from django_filters import (
+    CharFilter,
+    ChoiceFilter,
+    DateRangeFilter,
+    Filter,
+    MultipleChoiceFilter,
+    TypedChoiceFilter,
+)
 from graphql_client import JSONObject, graphql_payload
 from strawberry import relay
 from strawberry.schema.name_converter import HasGraphQLName, NameConverter
@@ -360,6 +368,266 @@ def test_an_unwired_set_names_its_own_choice_enum_over_http(*, subclass_target: 
     assert payload == {
         "data": {"unbound": {"name": unbound}, "inherited": None},
     }
+
+
+def _declared_choice_schema(
+    target: type[Model],
+    declared: Filter,
+    selected: tuple[str, ...] = ("id",),
+) -> DjangoSchema:
+    """Serve ``target`` rows, ``selected`` fields each, through a set whose one filter is ``pick``."""
+
+    class ChoiceDeclarationFilter(FilterSet):
+        pick = declared
+
+        class Meta:
+            model = target
+            fields = []
+
+    class ChoiceDeclarationNode(DjangoType):
+        class Meta:
+            model = target
+            fields = selected
+            interfaces = (relay.Node,)
+            filterset_class = ChoiceDeclarationFilter
+
+    @strawberry.type
+    class Query:
+        rows: DjangoConnection[ChoiceDeclarationNode] = DjangoConnectionField(
+            ChoiceDeclarationNode,
+        )
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+_OFF_THE_COLUMN = (
+    ", but its own form field accepts none of that column's `choices`, so every value of its "
+    "input would be refused (a `DateRangeFilter`'s fixed date-range keys are no column's "
+    "choices); give the filter `choices` drawn from the column's "
+    "(`choices=<Model>.<Choices>.choices`, or a subset of them), or filter that column through "
+    "a non-choice filter (`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its lookups in "
+    "Meta.fields, or `CharFilter(method=...)` for a method filter)."
+)
+
+
+@pytest.mark.parametrize(
+    ("target", "make_filter", "expected"),
+    [
+        pytest.param(
+            Shelf,
+            lambda: DateRangeFilter(field_name="condition"),
+            "ChoiceDeclarationFilter: DateRangeFilter on 'condition' publishes the choice enum "
+            f"of Shelf.condition{_OFF_THE_COLUMN}",
+            id="date-range-on-text-choices",
+        ),
+        pytest.param(
+            Shelf,
+            lambda: DateRangeFilter(field_name="tier"),
+            "ChoiceDeclarationFilter: DateRangeFilter on 'tier' publishes the choice enum of "
+            f"Shelf.tier{_OFF_THE_COLUMN}",
+            id="date-range-on-integer-choices",
+        ),
+        pytest.param(
+            Book,
+            lambda: DateRangeFilter(field_name="circulation_status"),
+            "ChoiceDeclarationFilter: DateRangeFilter on 'circulation_status' publishes the "
+            f"choice enum of Book.circulation_status{_OFF_THE_COLUMN}",
+            id="date-range-on-a-second-model",
+        ),
+        pytest.param(
+            Shelf,
+            lambda: MultipleChoiceFilter(field_name="condition", choices=[("mint", "Mint")]),
+            "ChoiceDeclarationFilter: MultipleChoiceFilter on 'condition' publishes the choice "
+            f"enum of Shelf.condition{_OFF_THE_COLUMN}",
+            id="multiple-choice-disjoint",
+        ),
+        pytest.param(
+            Shelf,
+            lambda: ChoiceFilter(field_name="condition"),
+            "ChoiceDeclarationFilter: ChoiceFilter on 'condition' publishes the choice enum of "
+            f"Shelf.condition{_OFF_THE_COLUMN}",
+            id="choice-without-choices",
+        ),
+        pytest.param(
+            Venue,
+            lambda: DateRangeFilter(field_name="opened_on", lookup_expr="year"),
+            "ChoiceDeclarationFilter: DateRangeFilter on 'opened_on' reads a transform's output "
+            "(IntegerField), which declares no `choices` whatever its column declares, so no "
+            "choice enum types its input (the filter's own `choices` never feed the enum); "
+            "filter the column through a non-choice filter (`CharFilter`, `NumberFilter`, "
+            "`DateFromToRangeFilter`, its lookups in Meta.fields, or `CharFilter(method=...)` "
+            "for a method filter).",
+            id="date-range-over-a-year-transform",
+        ),
+    ],
+)
+def test_a_choice_declaration_no_value_of_its_input_can_serve_refuses_the_schema(
+    target: type[Model],
+    make_filter: Callable[[], Filter],
+    expected: str,
+) -> None:
+    """A choice filter whose own form accepts no member of the enum it would publish is refused.
+
+    django-filter validates a declared filter's value against the filter's own ``choices``,
+    never the column's, so a ``DateRangeFilter``'s date-range keys, a disjoint ``choices=``
+    list and a ``ChoiceFilter`` declaring none would answer ``invalid_choice`` for every
+    member; past a ``year`` transform no field declaring ``choices`` types the leaf at all.
+    """
+    with pytest.raises(ConfigurationError) as exc:
+        _ = _declared_choice_schema(target, make_filter())
+
+    assert str(exc.value) == expected
+
+
+def _shelves() -> None:
+    branch = Branch.objects.create(name="Choice declarations")
+    Shelf.objects.create(branch=branch, code="g", condition="good", tier=Shelf.Tier.LOWER)
+    Shelf.objects.create(branch=branch, code="w", condition="worn", tier=Shelf.Tier.MIDDLE)
+    Shelf.objects.create(branch=branch, code="d", condition="damaged", tier=Shelf.Tier.UPPER)
+
+
+#: The one shelf both a ``good`` condition and the ``LOWER`` tier select.
+_GOOD_OR_LOWER = {"data": {"rows": {"edges": [{"node": {"code": "g"}}]}}}
+
+
+def _picked(schema: DjangoSchema, member: str) -> JSONObject:
+    return _post(
+        schema,
+        f"{{ rows(filter: {{pick: {{exact: {member}}}}}) {{ edges {{ node {{ code }} }} }} }}",
+    )
+
+
+def _refused_choice(value: object) -> JSONObject:
+    return {
+        "data": None,
+        "errors": [
+            {
+                "message": "Invalid filter input",
+                "locations": [{"line": 1, "column": 3}],
+                "path": ["rows"],
+                "extensions": {
+                    "code": "FILTER_INVALID",
+                    "errors": {
+                        "pick": [
+                            {
+                                "message": (
+                                    f"Select a valid choice. {value} is not one of the available "
+                                    "choices."
+                                ),
+                                "code": "invalid_choice",
+                            },
+                        ],
+                    },
+                },
+            },
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    (
+        "make_filter",
+        "accepted",
+        "refused",
+        "refused_value",
+    ),
+    [
+        pytest.param(
+            lambda: ChoiceFilter(
+                field_name="condition",
+                choices=[("good", "Good"), ("worn", "Worn")],
+            ),
+            "good",
+            "damaged",
+            "damaged",
+            id="choice-subset-on-text-choices",
+        ),
+        pytest.param(
+            lambda: TypedChoiceFilter(
+                field_name="tier",
+                choices=Shelf.Tier.choices[:2],
+                coerce=int,
+            ),
+            "MEMBER_1",
+            "MEMBER_3",
+            3,
+            id="typed-choice-subset-on-integer-choices",
+        ),
+    ],
+)
+@pytest.mark.django_db
+def test_a_choice_declaration_sharing_a_value_with_its_column_serves_its_own_choices(
+    make_filter: Callable[[], Filter],
+    accepted: str,
+    refused: str,
+    refused_value: object,
+) -> None:
+    """A subset of the column's ``choices`` builds: its members filter, the others are refused.
+
+    The input publishes the column's enum and the filter's own form field validates each value,
+    so a member the declaration keeps filters the rows and one it leaves out is
+    ``FILTER_INVALID`` ``invalid_choice``.
+    """
+    _shelves()
+    schema = _declared_choice_schema(Shelf, make_filter(), ("id", "code"))
+
+    assert _picked(schema, accepted) == _GOOD_OR_LOWER
+    assert _picked(schema, refused) == _refused_choice(refused_value)
+
+
+_Choices = Callable[[], list[tuple[str, str]]]
+
+
+def _counted_choices(calls: list[None]) -> _Choices:
+    """Choices recording each evaluation; a deep copy keeps the function itself."""
+
+    def choices() -> list[tuple[str, str]]:
+        calls.append(None)
+        return [("good", "Good")]
+
+    return choices
+
+
+def _as_called(choices: _Choices) -> object:
+    """Hand the declaration the callable itself."""
+    return choices
+
+
+def _as_lazy_promise(choices: _Choices) -> object:
+    """Hand the declaration a ``lazy()`` promise evaluating ``choices`` on use."""
+    return lazy(choices, list)()
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        pytest.param(_as_called, id="callable"),
+        pytest.param(_as_lazy_promise, id="lazy-promise"),
+        pytest.param(SimpleLazyObject, id="simple-lazy-object"),
+    ],
+)
+@pytest.mark.django_db
+def test_deferred_choices_are_evaluated_per_request_never_at_schema_build(
+    wrap: Callable[[_Choices], object],
+) -> None:
+    """A declaration's callable or lazy ``choices`` are left to the form each request builds.
+
+    Building the schema evaluates no consumer choices, so the declaration builds whatever
+    they would return; the one request's form evaluates them once and filters by the kept
+    member.
+    """
+    _shelves()
+    calls: list[None] = []
+    schema = _declared_choice_schema(
+        Shelf,
+        ChoiceFilter(field_name="condition", choices=wrap(_counted_choices(calls))),
+        ("id", "code"),
+    )
+    assert calls == []
+
+    assert _picked(schema, "good") == _GOOD_OR_LOWER
+    assert len(calls) == 1
 
 
 def test_same_named_ranges_with_different_axis_scalars_publish_distinct_inputs() -> None:

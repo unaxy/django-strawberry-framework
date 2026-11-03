@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 172 to do.
+Progress: 0 done, 173 to do.
 
 ## From dry-0_0_15_3
 
@@ -686,6 +686,13 @@ Progress: 0 done, 172 to do.
   field now builds, typed from that column, instead of being refused at schema build; its form still validates each
   value (`invalid_choice` for a value no row holds) before the method runs. One with no model field is still refused,
   its message now advising a model field
+- [ ] 737. CHANGELOG entry for item 538: a declared `ChoiceFilter`, `TypedChoiceFilter`, `MultipleChoiceFilter` or
+  `DateRangeFilter` over a choice column whose own choices accept none of the column's (django-filter's date-range
+  keys, a disjoint `choices=` list or another column's `Choices` class, no `choices` at all) now raises
+  `ConfigurationError` when the schema is built, naming the column, instead of publishing the column's enum and
+  answering every value "Select a valid choice". Filter refusal messages name `<FilterSet>.<attr>: <Class> on
+  '<field_name>'` instead of the filter object's repr, and the no-`choices` refusal names a transform's output or a
+  missing model field where that is what the filter reads
 
 ## From dry-upstream-0_0_15
 
