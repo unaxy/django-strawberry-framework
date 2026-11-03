@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 413 done, 96 to do. The CHANGELOG entries filed here moved to
+Progress: 414 done, 97 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2493,6 +2493,20 @@ Progress: 413 done, 96 to do. The CHANGELOG entries filed here moved to
   (`AnnotationType`, `profile { id }`) is one more nested selection that root leaves unplanned, so FK-id elision never
   runs there. The capability decision and its query-count evidence stay under Waiting item 327; no commit after the
   filing touched the node path or root-field recognition
+- [x] 684. Already fixed on main by 7bd478bf, which ticked no row: `filters/base.py::_column_form_field` reads
+  `_bound_value_field`, the output of the transforms between the column and the lookup, so a declared `ListFilter` /
+  `RangeFilter` with a transform in `lookup_expr` (`year__in`, `year__range`, `month__in`, `date__in`, a chained
+  `date__year__in`, a relation path, a project-registered transform) cleans each member as that output (an integer
+  transform through `DecimalField`, `date` through `DateField`, `time` through `TimeField`) and answers what the
+  generated leaf answers: `"2020"` matches the 2020 rows and `"abc"` answers "Enter a number." on both parents, raw
+  form data and `apply_sync` alike (424 raw cells: the 292 declared ones moved at 7bd478bf, the 132 generated ones
+  never moved). Pinned (each fails with `_bound_model_field` restored):
+  `tests/filters/test_sets.py::test_declared_filter_through_a_lookup_expr_transform_cleans_values_as_its_output`
+  (`list-in`, `range`),
+  `examples/fakeshop/test_query/test_scalars_filter_api.py::test_lookup_expr_transform_leaf_filters_by_its_output_and_a_method_by_its_column`
+  (`list-in`, `range`, `range-start`, `range-end`, `bare-year-start`, `bare-year-end`) and
+  `test_raw_filter_forms_api.py::test_a_plain_parents_two_bound_year_range_past_the_range_answers_as_one_past_it`.
+  Residuals filed as 758 and 759
 
 ## Outside review of the fixes
 
@@ -2554,10 +2568,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 684. (robustness) A declared `ListFilter` / `RangeFilter` with a transform in `lookup_expr`
-  (`field_name="occurred_at", lookup_expr="year__in"`) cleans each member through the column's form field
-  (`filters/base.py::_column_form_field` reads `_bound_model_field`), so `"2020"` answers "Enter a valid date/time."
-  (F6 area). Found fact-finding 652
 - [ ] 688. (robustness) A declared `ListFilter(field_name="<col>__year", lookup_expr="in")` refuses an integral
   decimal member (`"2020.0"`, `"2.02e3"`) with "Enter a value the database can represent." where the generated
   `year__in` leaf matches the 2020 rows. Found verifying 652
@@ -2712,6 +2722,18 @@ tracker number are recorded there; open remainders and new defects are filed as 
   as `FILTER_INVALID` over GraphQL escapes there as Django's or the driver's exception: a raw
   `occurred_on__year__gt=99999` raises `ValueError` (year 1..9999) and a past-range year raises `OverflowError`. Found
   researching 673
+- [ ] 758. (robustness) A declared bare-transform `RangeFilter` (`lookup_expr="year"` or `"date"` over a datetime
+  column, whose lone bounds the live `bare-year-*` / `bare-date-*` rows pin) sent both bounds hands django-filter's
+  `RangeFilter.filter` a `(start, stop)` tuple under the bare transform (`occurred_at__year=(a, b)`): raw form data
+  (`FilterSet(data=...).qs`, `DjangoFilterBackend`) raises `TypeError`, a 500, and the GraphQL / `apply_sync` reach
+  answers `FILTER_INVALID` "Enter a value the database can represent.", which names no fault of the bounds. Found
+  regrading 684
+- [ ] 759. (tests) No row pins the `date` transform half of 684:
+  `tests/filters/test_sets.py::test_declared_filter_through_a_lookup_expr_transform_cleans_values_as_its_output[date-in]`
+  and the live `bare-date-*` rows pass with `filters/base.py::_column_form_field` reading `_bound_model_field`, so
+  nothing fails if a declared `date__in` / `date__range` over a datetime column goes back to cleaning as a
+  `DateTimeField` (accepting `"2020-06-15T11:00:00Z"`, which the generated leaf and the published `Date` refuse, and
+  keeping only the earlier rows for a lone end bound `"2020-06-15"`). Found regrading 684
 
 ## To do: holes found re-checking the fixes
 
