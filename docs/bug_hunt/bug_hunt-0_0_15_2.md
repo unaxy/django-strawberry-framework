@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 410 done, 99 to do. The CHANGELOG entries filed here moved to
+Progress: 411 done, 98 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2464,6 +2464,12 @@ Progress: 410 done, 99 to do. The CHANGELOG entries filed here moved to
   `test_raw_filter_forms_api.py`, `test_filter_apply_arguments_api.py` and `test_scalar_predicate_binding_api.py`;
   package rows in `tests/utils/test_errors.py`, `tests/filters/test_base.py`, `tests/filters/test_sets.py`; README and
   spec-027 say so
+- [x] 680. `filters/inputs.py::_is_declared_head`'s docstring no longer says a set borrowing the same filter object
+  restamps it: since 596 a class-body filter another set owns is deep-copied before it is stamped, and a
+  `get_filters()` override sharing an object writes nothing to it. It now states why the child set's declarations
+  answer rather than the copy's provenance stamp (`origin="declared"` says a consumer owns the object, not which set
+  declares it). Docstring only; pinned by
+  `tests/filters/test_sets.py::test_a_borrowed_expanded_copy_is_its_borrowers_own_filter`
 
 ## Outside review of the fixes
 
@@ -2525,9 +2531,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 680. `filters/inputs.py::_is_declared_head`'s docstring says a set borrowing a copy "restamps" it; 596 copies an
-  owned filter at declaration, so the clause is false (one-clause fix, held for the `filters/inputs.py` refactor).
-  Found fixing 596
 - [ ] 681. (robustness) A `DjangoModelFormMutation` whose `forms.DateTimeField` over a `DateField` column (a pairing
   the build accepts), or whose `clean_<field>` hook, yields an aware datetime Django cannot make naive in the default
   zone (year 1 / 9999 across an offset) raises `OverflowError` inside `form.is_valid()` (`DateField.to_python`), the
