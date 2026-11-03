@@ -439,7 +439,7 @@ PG_PASSWORD = "fakeshop"  # noqa: S105 - the throwaway compose container's docum
 PG_PORT = "5432/tcp"
 COMPOSE_PROJECT = "dsf-ws-postgres"
 
-#: The ``lint`` job of ``.github/workflows/django.yml``, one command per ``run:`` line and in
+#: The ``lint`` job of ``.github/workflows/django.yml``, one entry per ``run:`` command and in
 #: its order, each without its ``uv run`` prefix. A package change that passes every pytest
 #: suite still reddens CI through a stale generated doc or a layout rewrite, so the gate runs
 #: these too; ``tests/test_workspace.py`` holds this list to the workflow. A gate run sets
