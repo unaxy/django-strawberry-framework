@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 407 done, 94 to do. The CHANGELOG entries filed here moved to
+Progress: 408 done, 96 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2424,6 +2424,20 @@ Progress: 407 done, 94 to do. The CHANGELOG entries filed here moved to
   field. Live rows `test_library_api.py::test_an_all_values_multiple_method_filter_*`, the multiple-choice publishes
   row and the advised-spelling row; package rows in `tests/filters/test_inputs.py` (the `method-without-field` refusal
   rows now columnless, the per-request `isnull` row); spec-027 Decision 4 says so
+- [x] 538. A declared choice filter over a choice column whose own form field accepts no member of the column's enum
+  (asked through Django's `ChoiceField.valid_value` per member outside django-filter's `EMPTY_VALUES`:
+  `DateRangeFilter`'s date-range keys, a disjoint `choices=` list or another column's `Choices` class, a choice filter
+  declared with no `choices`) now refuses the schema with `ConfigurationError` naming the column
+  (`filters/inputs.py::_refuse_choices_off_the_column`, from `_choice_enum_from_filter`) instead of publishing the
+  column's enum and answering every value `invalid_choice`; a subset, the column's own choices, a callable or lazy
+  `choices` (never evaluated by this check), `AllValuesFilter`, a model-choice form field and a column whose only
+  choice is blank build as before. The no-`choices` refusal names what the leaf reads, a column, a transform's output
+  or no model field (`_no_choices_refusal`), and every leaf refusal names `<owner>: <Class> on '<field_name>'<route>`
+  through `_declaration_subject`, so no refusal prints the filter's repr. Live rows
+  `test_filter_declarations_api.py::test_a_choice_declaration_no_value_of_its_input_can_serve_refuses_the_schema`,
+  `::test_a_choice_declaration_sharing_a_value_with_its_column_serves_its_own_choices` and
+  `::test_deferred_choices_are_evaluated_per_request_never_at_schema_build`; package rows in
+  `tests/filters/test_inputs.py`; spec-027 Decision 4 and the `FilterSet` glossary term say so
 
 ## Outside review of the fixes
 
@@ -2485,9 +2499,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
-  its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
-  valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
 - [ ] 656. A whole-array `ArrayFilter` over an `ArrayField` column (generated through `Meta.filter_overrides`, or
   declared) fails the schema build: `filters/inputs.py::_element_annotation` asks `_scalar_from_model_field` of the
   `ArrayField` itself (`types/converters.py::scalar_for_field` raises "Unsupported Django field type 'ArrayField'")
@@ -2624,6 +2635,19 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 734. A plain `AllValuesMultipleFilter(field_name="code")` on a `RelatedFilter` child set (Shelf under Book),
   served flat on the parent (`shelfPick`), answers an uncoded "Cannot resolve keyword 'code' into field", while the
   nested branch and the same declaration with `method=` both work. Found verifying 537
+- [ ] 735. (robustness) `DateRangeFilter` inside django-filter's CSV `in` wrapper (`BaseInFilter` + `DateRangeFilter`,
+  declared, or the `ConcreteInFilter` django-filter generates for `Meta.fields={col: ["in"]}` under
+  `Meta.filter_overrides={models.DateField: {"filter_class": DateRangeFilter}}`) on a column without `choices` builds
+  through the CSV arm as `[Date!]` / `[DateTime!]` / `[String!]`, and every value answers a coercion error,
+  `invalid_choice` or a masked `TypeError` (django-filter's `DateRangeFilter.filter` tests `value in self.filters`
+  with the list; plain django-filter raises the same). On a choice column 538's refusal covers it. Found researching
+  538
+- [ ] 738. (robustness) `TypedChoiceFilter` / `TypedMultipleChoiceFilter(choices=SimpleLazyObject(fn))` is evaluated
+  at schema build: `filters/inputs.py::_refuse_widget_reading_other_keys` builds the unbound form field
+  (`_declared_form_field`), whose `TypedChoiceField.__init__` runs `normalize_choices` and forces the lazy object, so
+  choices reading the database query it while the schema is built ("Database access not allowed" before `migrate`); a
+  `lazy()` promise and the same object on `ChoiceFilter` / `MultipleChoiceFilter` are not evaluated. Found verifying
+  538
 
 ## To do: holes found re-checking the fixes
 
@@ -2981,6 +3005,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `[JSON!]`) and are refused with it, though the alias and consumer shapes serve requests; a columnless
   `AllValuesMultipleFilter` breaks every request on its set with or without `method=`, as in django-filter. Typing
   them retires a documented `ConfigurationError` (spec-027 Decision 4). Found fixing 537
+- [ ] 736. Decide whether a fixed-choice filter whose choices are not its column's (`DateRangeFilter` above all, a
+  `ChoiceFilter(choices=...)` off the column's) is served through the typed input, typed by its own form (`String`, as
+  graphene-django's `get_filtering_args_from_filterset` does) or by an enum of its own keys, instead of refused at
+  build. spec-027 Decision 4 refuses it on a column without `choices` and, since 538, on a choice column whose values
+  it shares none of, and says the filter's own `choices` never feed the enum; GOAL success criterion 7 and "Coming
+  from DRF + django-filter" lean toward serving it, and no `DateRangeFilter` spelling is served through the typed
+  input today (it is through `apply_sync`'s JSON `where`). Found fixing 538
 
 ## Hunt not finished in t3
 

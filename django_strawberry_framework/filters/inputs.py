@@ -31,6 +31,8 @@ from django import forms
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.lookups import FieldGetDbPrepValueMixin
+from django.utils.choices import CallableChoiceIterator, normalize_choices
+from django.utils.functional import LazyObject, Promise
 from django_filters import (
     ChoiceFilter,
     Filter,
@@ -93,6 +95,7 @@ from django_strawberry_framework.utils.widgets import multi_widget_keys, widget_
 
 from .base import (
     _RANGE_BOUNDS,
+    EMPTY_VALUES,
     ArrayFilter,
     EnumMemberValue,
     GlobalIDFilter,
@@ -431,19 +434,15 @@ def _relation_identity_annotation(
     )
     if len(columns) > 1:
         declaration = _declaration_of(filter_instance, filterset_cls)
-        declared = declaration.declared
         raise ConfigurationError(
-            f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
-            f"{truth.render(declared.field_name)}{declaration.route} names a relation linked "
+            f"{_declaration_subject(declaration, filterset_cls)} names a relation linked "
             f"by {len(columns)} columns, so no single key value can name a related row; "
             "filter the related row's own fields through a RelatedFilter.",
         )
     if not columns:
         declaration = _declaration_of(filter_instance, filterset_cls)
-        declared = declaration.declared
         raise ConfigurationError(
-            f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
-            f"{truth.render(declared.field_name)}{declaration.route}, which is not a "
+            f"{_declaration_subject(declaration, filterset_cls)}, which is not a "
             "relation to a model on its FilterSet; name a relation key in Meta.fields, or "
             "filter the related row's own fields through a RelatedFilter.",
         )
@@ -657,8 +656,7 @@ def _refuse_kind_json_cannot_encode(
         return
     declaration = _declaration_of(filter_instance, filterset_cls)
     raise ConfigurationError(
-        f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
-        f"{truth.render(declaration.declared.field_name)}{declaration.route} cleans "
+        f"{_declaration_subject(declaration, filterset_cls)} cleans "
         f"{', '.join(refused)}, which its JSONField cannot encode with no encoder; give the "
         "filter a form field cleaning text or a number (an IntegerField or FloatField "
         "field_class), a bare Filter or TypedFilter to compare the JSON value as sent, or an "
@@ -803,8 +801,7 @@ def _range_axis_scalar(filter_instance: Filter, filterset_cls: type[FilterSet]) 
     declaration = _declaration_of(filter_instance, filterset_cls)
     kinds = ", ".join(sorted(truth.name(scalar) for scalar in scalars))
     raise ConfigurationError(
-        f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
-        f"{truth.render(declaration.declared.field_name)}{declaration.route} cleans its two "
+        f"{_declaration_subject(declaration, filterset_cls)} cleans its two "
         f"range axes as different kinds ({kinds}), and a range input carries one type for "
         "both bounds; give both axes form fields that clean one kind.",
     )
@@ -827,12 +824,10 @@ def _model_choice_identity_annotation(
     if column is None:
         declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
-            f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
-            f"{truth.render(getattr(declaration.declared, 'field_name', None))}"
-            f"{declaration.route} has no model queryset (its queryset is callable or unset) "
-            "and its field_name names no relation on the FilterSet model, so there is no "
-            "column to type its input from. Pass a model queryset, or point field_name at a "
-            "relation.",
+            f"{_declaration_subject(declaration, filterset_cls)} has no model queryset (its "
+            "queryset is callable or unset) and its field_name names no relation on the "
+            "FilterSet model, so there is no column to type its input from. Pass a model "
+            "queryset, or point field_name at a relation.",
         )
     return _scalar_from_model_field(column)
 
@@ -850,9 +845,11 @@ def _choice_enum_from_filter(
     ``DjangoType`` reading the same column; the filter's own ``choices`` never feed the enum.
     Per spec-027 Decision 4, a choice filter with no backing field declaring ``choices``
     raises ``ConfigurationError`` naming the declared filter (``_declaration_of``): a
-    ``ChoiceFilter`` on a plain column or a ``method=`` path, and django-filter's ``ChoiceFilter``
-    subclasses ``AllValuesFilter`` and ``DateRangeFilter``, whose choices are the
-    column's distinct values or fixed date-range keys.
+    ``ChoiceFilter`` on a plain column, a transform's output (``lookup_expr="year"``) or a
+    ``method=`` path, and django-filter's ``ChoiceFilter`` subclasses ``AllValuesFilter``
+    and ``DateRangeFilter``, whose choices are the column's distinct values or fixed
+    date-range keys. Over a column declaring ``choices``, a filter whose own form field
+    accepts none of the enum's members is refused too (``_refuse_choices_off_the_column``).
 
     ``model_field`` is threaded as a parameter rather than stashed on
     the filter instance - keeps the filter stateless and avoids the
@@ -863,17 +860,110 @@ def _choice_enum_from_filter(
 
     # A reverse ``ForeignObjectRel`` declares no ``choices``, so it fails the same guard.
     if not is_concrete_field(model_field) or not getattr(model_field, "choices", None):
-        declaration = _declaration_of(filter_instance, filterset_cls)
-        raise ConfigurationError(
-            f"{declaration.kind} on {truth.render(declaration.declared)}{declaration.site} "
-            "is backed by no model field declaring `choices` (the filter's own `choices` never "
-            "feed the enum); declare `choices` on the column it filters (a `choices=` list of "
-            "pairs, or a `TextChoices` / `IntegerChoices` class's `.choices`), or filter that "
-            "column through a non-choice filter (`CharFilter`, `NumberFilter`, "
-            "`DateFromToRangeFilter`, its lookups in Meta.fields, or `CharFilter(method=...)` "
-            "for a method filter).",
+        raise _no_choices_refusal(filter_instance, model_field, filterset_cls)
+    choice_enum = convert_choices_to_enum(model_field, type_name)
+    _refuse_choices_off_the_column(filter_instance, model_field, choice_enum, filterset_cls)
+    return choice_enum
+
+
+def _declaration_subject(
+    declaration: _LeafDeclaration,
+    filterset_cls: type[FilterSet] | None,
+) -> str:
+    """Return ``<owner>: <Class> on '<field_name>'<route>``, a refusal's subject for a leaf."""
+    return (
+        f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
+        f"{truth.render(declaration.declared.field_name)}{declaration.route}"
+    )
+
+
+def _no_choices_refusal(
+    filter_instance: Filter,
+    model_field: ModelField | None,
+    filterset_cls: type[FilterSet] | None,
+) -> ConfigurationError:
+    """Build the refusal for a choice filter reading its value off no field declaring ``choices``.
+
+    The reason names what the leaf is typed from: no model field (a ``method=`` path, a path
+    no column of the model answers), a transform's output, which is bound to no model
+    (``lookup_expr="year"`` compares an integer, which declares no ``choices`` whatever its
+    column declares), or a column; only the column can take ``choices``, so only its reason
+    carries the advice to declare them.
+    """
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    if model_field is None:
+        reason, declare = "reads no model field", ""
+    elif truth.is_type(read_attr(model_field, "model", None)):
+        reason = f"reads {_field_label(model_field)}, which declares no `choices`"
+        declare = (
+            "declare `choices` on the column it filters (a `choices=` list of pairs, or a "
+            "`TextChoices` / `IntegerChoices` class's `.choices`), or "
         )
-    return convert_choices_to_enum(model_field, type_name)
+    else:
+        reason = (
+            f"reads a transform's output ({truth.kind(model_field)}), which declares no "
+            "`choices` whatever its column declares"
+        )
+        declare = ""
+    return ConfigurationError(
+        f"{_declaration_subject(declaration, filterset_cls)} {reason}, so no choice enum types "
+        f"its input (the filter's own `choices` never feed the enum); {declare}filter the "
+        "column through a non-choice filter (`CharFilter`, `NumberFilter`, "
+        "`DateFromToRangeFilter`, its lookups in Meta.fields, or `CharFilter(method=...)` for "
+        "a method filter).",
+    )
+
+
+def _refuse_choices_off_the_column(
+    filter_instance: Filter,
+    model_field: ModelField,
+    choice_enum: type[enum.Enum],
+    filterset_cls: type[FilterSet] | None,
+) -> None:
+    """Refuse a filter publishing ``choice_enum`` whose own form field accepts none of its members.
+
+    The input carries a member's value (``normalize_input_value``) to the filter's own form
+    field, which validates it against the filter's own ``choices`` (django-filter never reads
+    the column's for a declared filter). The form field is asked through Django's own
+    comparison (``ChoiceField.valid_value``) for each member value outside django-filter's
+    ``EMPTY_VALUES``, which a filter skips as no constraint, so an empty member is never
+    accepted as a choice. Accepting one member builds, as a subset of the column's ``choices``
+    does (each member off it answers ``invalid_choice``, as the multiple-choice family's
+    does); accepting none (``DateRangeFilter``'s fixed date-range keys, a
+    ``choices=`` list sharing no value with the column) is a declaration no value of its
+    input can serve, so it is refused naming the column. A filter whose form field is no
+    ``ChoiceField`` (a ``CharFilter`` over a choices column), a model-choice field, a field
+    built only per request (``AllValuesFilter``, ``_declared_form_field``) and ``choices``
+    evaluated per form build are not asked: this check never evaluates a callable or lazy
+    (``lazy()`` promise, ``SimpleLazyObject``) ``choices``, which may read the database. A
+    callable is one ``normalize_choices`` wraps in a ``CallableChoiceIterator``; a
+    ``Choices`` class is no such callable (Django reads its ``.choices``), so it is asked.
+    """
+    choices = dict_of(filter_instance.extra).get("choices")
+    if truth.is_one_of(choices, (Promise, LazyObject)) or (
+        callable(choices) and isinstance(normalize_choices(choices), CallableChoiceIterator)
+    ):
+        return
+    form_field = _declared_form_field(filter_instance)
+    if not isinstance(form_field, forms.ChoiceField) or isinstance(
+        form_field,
+        forms.ModelChoiceField,
+    ):
+        return
+    checked = [value for value in map(enum_value, choice_enum) if value not in EMPTY_VALUES]
+    if not checked or any(form_field.valid_value(value) for value in checked):
+        return
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    raise ConfigurationError(
+        f"{_declaration_subject(declaration, filterset_cls)} publishes the choice enum of "
+        f"{_field_label(model_field)}, but its own form field accepts none of that column's "
+        "`choices`, so every value of its input would be refused (a `DateRangeFilter`'s "
+        "fixed date-range keys are no column's choices); give the filter `choices` drawn "
+        "from the column's (`choices=<Model>.<Choices>.choices`, or a subset of them), or "
+        "filter that column through a non-choice filter (`CharFilter`, `NumberFilter`, "
+        "`DateFromToRangeFilter`, its lookups in Meta.fields, or `CharFilter(method=...)` for "
+        "a method filter).",
+    )
 
 
 def _unnameable_lookup_refusal(
@@ -890,7 +980,7 @@ def _unnameable_lookup_refusal(
     """
     declaration = _declaration_of(filter_instance, filterset_cls)
     return ConfigurationError(
-        f"{declaration.kind} on {truth.render(declaration.declared)}{declaration.site} "
+        f"{_declaration_subject(declaration, filterset_cls)} "
         f"publishes lookup {truth.render(lookup)}, which is no GraphQL field name. Spell an "
         "index or slice in field_name (`<column>__0`, `<column>__0_2`) and name the lookup "
         "in lookup_expr.",
@@ -931,7 +1021,7 @@ def _array_column_refusal(
     declaration = _declaration_of(filter_instance, filterset_cls)
     applied = lookup if lookup is not None else getattr(filter_instance, "lookup_expr", None)
     return ConfigurationError(
-        f"{declaration.kind} on {truth.render(declaration.declared)}{declaration.site} "
+        f"{_declaration_subject(declaration, filterset_cls)} "
         f"has no input type for lookup {truth.render(applied)} on the ArrayField column "
         f"{_field_label(model_field)}: only exact, contains, contained_by and overlap take one "
         "array of the column's elements. Declare an ArrayFilter with one of those lookup_expr "
@@ -1212,12 +1302,12 @@ def _refuse_method_without_form_field(
         return
     declaration = _declaration_of(filter_instance, filterset_cls)
     raise ConfigurationError(
-        f"{declaration.kind}(method={truth.render(method)}) on "
-        f"{truth.render(declaration.declared)}{declaration.site} is backed by no model "
-        "field and exposes no form field, so nothing types its value; point field_name at a "
-        "model field, or put the method on a typed filter primitive (`CharFilter(method=...)`, "
-        "`NumberFilter(method=...)`, `ListFilter(method=...)` for a list value, ...) or on a "
-        "`Filter` subclass declaring `field_class` at class level.",
+        f"{declaration.owner(filterset_cls)}: {declaration.kind}(method={truth.render(method)}) "
+        f"on {truth.render(declaration.declared.field_name)}{declaration.route} is backed by "
+        "no model field and exposes no form field, so nothing types its value; point "
+        "field_name at a model field, or put the method on a typed filter primitive "
+        "(`CharFilter(method=...)`, `NumberFilter(method=...)`, `ListFilter(method=...)` for a "
+        "list value, ...) or on a `Filter` subclass declaring `field_class` at class level.",
     )
 
 
@@ -1262,8 +1352,7 @@ def _refuse_widget_reading_other_keys(
         else ""
     )
     raise ConfigurationError(
-        f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
-        f"{truth.render(declaration.declared.field_name)}{declaration.route} publishes one "
+        f"{_declaration_subject(declaration, filterset_cls)} publishes one "
         f"value under its form-data key {_FORM_KEY}, but its form field's widget reads "
         f"{', '.join(keys)}, so the value would never be read. Declare a RangeFilter (the "
         "package's or django-filter's) for a two-bound range, or give the filter a form field "
@@ -1289,7 +1378,9 @@ def convert_filter_to_input_annotation(
     like a ``ListFilter``'s, from the model column, never from
     ``TypedMultipleChoiceFilter.coerce``), then the ``object`` catch-all. A ``method=``
     filter with no model column whose form field is not built unbound raises
-    ``ConfigurationError`` (``_refuse_method_without_form_field``).
+    ``ConfigurationError`` (``_refuse_method_without_form_field``), as does a leaf typed by a
+    choice enum that reads no field declaring ``choices``, or whose own form field accepts
+    none of its column's choices (``_choice_enum_from_filter``).
 
     Dispatch rides ``utils/converters.py::convert_with_mro`` with the same
     kind table ``normalize_input_value`` uses.
@@ -1315,8 +1406,7 @@ def convert_filter_to_input_annotation(
     if truth.is_instance(filter_instance, LookupChoiceFilter):
         declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
-            f"{declaration.owner(filterset_cls)}: {declaration.kind} on "
-            f"{truth.render(declaration.declared.field_name)}{declaration.route} filters by "
+            f"{_declaration_subject(declaration, filterset_cls)} filters by "
             "a value and a lookup read from two form-data keys, and no GraphQL input carries "
             "that pair. List the lookups in Meta.fields dict form (one input field per "
             "lookup), or keep the filter on a FilterSet the schema does not serve.",
