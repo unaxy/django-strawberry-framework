@@ -2013,8 +2013,10 @@ def _is_declared_head(filterset_cls: type[FilterSet], name: str, filter_instance
     A filter ``filterset_cls`` declares is one, and so is a ``RelatedFilter``
     expansion's copy of a child filter that is one on its own set, followed
     through the record the copy carries (``filters/sets.py::_expansion_record``)
-    to the set declaring it. The child set's declarations answer, never a stamp
-    on the copy, which a set borrowing the same object restamps.
+    to the set declaring it. The child set's declarations answer, never the
+    copy's provenance stamp: ``origin="declared"`` says a consumer owns the
+    object, not which set declares it, and a child set's own filter that a
+    ``get_filters()`` override returns into another set carries it there too.
     """
     from .sets import _expansion_record, _projection_child_filter  # noqa: PLC0415 - import cycle
 
