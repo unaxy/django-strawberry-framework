@@ -16,6 +16,7 @@ separate public form surface.
 from __future__ import annotations
 
 import copy
+import uuid
 from collections.abc import Callable, Iterable, Iterator
 from decimal import Decimal
 from functools import partial
@@ -379,8 +380,8 @@ def test_range_filter_without_a_column_form_field_passes_bounds_through(
 ) -> None:
     """No column comparison field to read leaves the range field cleaning no bound.
 
-    A relation's would be django-filter's ``ModelChoiceField``, whose lookup of every key
-    would tell a key no row holds from one the target's ``get_queryset`` hides.
+    Django registers no ``range`` lookup on a relation, so a ``range`` over one compares no
+    column a bound could be cleaned as.
     """
     filterset = filterset_class(data={}, queryset=scalar_models.ScalarSpecimen.objects.none())
 
@@ -665,9 +666,7 @@ def test_declared_range_filter_under_django_filter_backend_answers_a_bad_bound_w
     assert (response.status_code, read_attr(response, "data")) == (status, body)
 
 
-def _specimen_list_view(
-    filterset_class: type[django_filters.FilterSet | FilterSet],
-) -> Callable[..., object]:
+def _specimen_list_view(filterset_class: type[BaseFilterSet]) -> Callable[..., object]:
     """A DRF list view filtering ``ScalarSpecimen`` through ``DjangoFilterBackend``."""
 
     class SpecimenListView(_CleanedSpecimenListView):
@@ -741,6 +740,175 @@ def test_declared_list_filter_under_django_filter_backend_answers_a_bad_member_w
     assert read_attr(response, "status_code") == 400
     assert read_attr(response, "data") == {"signed_big_in": ["Enter a number."]}
     assert len(captured) == 0
+
+
+_RELATION_PARENTS = [
+    pytest.param(FilterSet, id="package-filterset"),
+    pytest.param(django_filters.FilterSet, id="django-filter-filterset"),
+]
+_ELEMENT_FILTERS = [pytest.param(ListFilter, id="list"), pytest.param(ArrayFilter, id="array")]
+_RELATION_OVERFLOW = "99999999999999999999"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", _RELATION_PARENTS)
+@pytest.mark.parametrize("filter_class", _ELEMENT_FILTERS)
+@pytest.mark.parametrize(
+    (
+        "wire",
+        "status",
+        "body",
+        "queries",
+    ),
+    [
+        pytest.param("{key}", 200, [{"label": "kept"}], 1, id="key"),
+        pytest.param("x", 400, {"f": ["Enter a number."]}, 0, id="junk"),
+        pytest.param(_RELATION_OVERFLOW, 200, [], 0, id="overflow"),
+        pytest.param("{key}.5", 200, [], 0, id="fractional"),
+    ],
+)
+def test_declared_list_over_a_relation_under_django_filter_backend_cleans_each_member(
+    parent: type[django_filters.FilterSet | FilterSet],
+    filter_class: type[ListFilter | ArrayFilter],
+    wire: str,
+    status: int,
+    body: object,
+    queries: int,
+) -> None:
+    """``?f=`` over a relation itself is cleaned as its key column, under either parent.
+
+    A member the key cannot hold is the form's error, the backend's 400, where Django's
+    related lookup would raise and answer 500; an ``in`` drops a member past the integer
+    range or fractional, which names no row, so a list left empty matches nothing unqueried.
+    """
+    tag = scalar_models.ScalarSpecimenTag.objects.create(label="kept-tag")
+    kept = _cleaned_specimen("kept", kept=True)
+    kept.tag = tag
+    kept.save(update_fields=["tag"])
+    _ = _cleaned_specimen("other", kept=False)
+    filterset_class = _declared_set(
+        parent,
+        scalar_models.ScalarSpecimen,
+        f=filter_class(field_name="tag", lookup_expr="in"),
+    )
+    request = APIRequestFactory().get(f"/specimens/?f={wire.format(key=saved_pk(tag))}")
+
+    with CaptureQueriesContext(db_connection) as captured:
+        response = _specimen_list_view(filterset_class)(request)
+
+    assert (read_attr(response, "status_code"), read_attr(response, "data")) == (status, body)
+    assert len(captured) == queries
+
+
+@pytest.mark.parametrize("parent", _RELATION_PARENTS)
+@pytest.mark.parametrize("filter_class", _ELEMENT_FILTERS)
+@pytest.mark.parametrize(
+    (
+        "model",
+        "query",
+        "errors",
+        "cleaned",
+    ),
+    [
+        pytest.param(
+            _UuidKeyedProfile,
+            "f=00000000-0000-0000-0000-000000000001",
+            {},
+            [uuid.UUID(int=1)],
+            id="uuid-key-valid",
+        ),
+        pytest.param(
+            _UuidKeyedProfile,
+            "f=x",
+            {"f": ["Enter a valid UUID."]},
+            None,
+            id="uuid-key-junk",
+        ),
+        pytest.param(_DecimalKeyedHolder, "f=1.25", {}, [Decimal("1.25")], id="decimal-key-valid"),
+        pytest.param(
+            _DecimalKeyedHolder,
+            "f=x",
+            {"f": ["Enter a number."]},
+            None,
+            id="decimal-key-junk",
+        ),
+    ],
+)
+def test_declared_list_over_a_relation_cleans_each_element_as_its_key_column(
+    parent: type[django_filters.FilterSet | FilterSet],
+    filter_class: type[ListFilter | ArrayFilter],
+    model: type[Model],
+    query: str,
+    errors: dict[str, list[str]],
+    cleaned: list[object] | None,
+) -> None:
+    """A UUID or decimal key's element is cleaned as ``owner__pk``'s, never looked up.
+
+    ``owner`` is a one-to-one primary key into a UUID-keyed row and a foreign key into a
+    decimal-keyed one: each element is the target key column's value, so one that column
+    cannot hold is the form's error and a valid one is that column's type.
+    """
+    filterset = _declared_set(parent, model, f=filter_class(field_name="owner", lookup_expr="in"))(
+        data=QueryDict(query),
+        queryset=model._default_manager.none(),
+    )
+
+    assert filterset.is_valid() == (not errors)
+    assert filterset.errors == errors
+    assert filterset.form.cleaned_data.get("f") == cleaned
+
+
+@pytest.mark.parametrize(
+    ("model", "filter_instance"),
+    [
+        pytest.param(
+            models.ShelfLabel,
+            ListFilter(field_name="shelf", lookup_expr="in"),
+            id="multi-column-relation",
+        ),
+        pytest.param(
+            models.ShelfLabel,
+            ArrayFilter(field_name="shelf", lookup_expr="in"),
+            id="array-multi-column-relation",
+        ),
+        pytest.param(
+            models.ShelfLabel,
+            ListFilter(field_name="shelf", lookup_expr="exact"),
+            id="multi-column-relation-exact",
+        ),
+        pytest.param(
+            models.TaggedItem,
+            ListFilter(field_name="content_object", lookup_expr="in"),
+            id="generic-foreign-key",
+        ),
+        pytest.param(
+            models.Book,
+            ListFilter(field_name="shelf", lookup_expr="code__in"),
+            id="lookup-crossing-the-relation",
+        ),
+        pytest.param(
+            models.Book,
+            ArrayFilter(field_name="shelf", lookup_expr="code__in"),
+            id="array-lookup-crossing-the-relation",
+        ),
+    ],
+)
+def test_declared_list_over_a_relation_no_one_column_holds_cleans_no_element(
+    model: type[Model],
+    filter_instance: ListFilter | ArrayFilter,
+) -> None:
+    """A relation compared on several columns or none, or crossed by the lookup, cleans nothing.
+
+    No one column holds a value of a multi-column ``ForeignObject`` or a
+    ``GenericForeignKey``; a ``lookup_expr`` continuing across the relation compares the
+    crossed column, whose value is no value of the relation's key.
+    """
+    filterset = _declared_set(FilterSet, model, f=filter_instance)(
+        data={},
+        queryset=model._default_manager.none(),
+    )
+
+    assert _column_form_field(filterset.filters["f"], element=True) is None
 
 
 @pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)

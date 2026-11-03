@@ -4,8 +4,12 @@ These consumers deliberately keep a django-filter FilterSet as well as the packa
 Ordinary arguments feed the original public data/queryset/.qs seam, without publishing an
 input factory or assigning an owner. QueryDict is built by Django from a real query-string
 argument, retaining repeated SelectMultiple keys that a generated filter input cannot spell.
+A declared list or lone range bound over a relation itself cleans each raw element as the
+target column the relation compares on (its ``to_field``, else the primary key), as
+``<relation>__<that column>`` cleans it; a ``method=`` filter on a relation cleans none.
 """
 
+from collections.abc import Callable
 from functools import wraps
 
 import django_filters
@@ -14,7 +18,7 @@ import strawberry
 from apps.library import models as library_models
 from apps.scalars import models
 from django import forms
-from django.db.models import QuerySet
+from django.db.models import Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase, QueryDict
 from django.test import override_settings
 from django.urls import path
@@ -28,7 +32,13 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.filters import FilterSet, ListFilter, RelatedFilter
+from django_strawberry_framework.filters import (
+    ArrayFilter,
+    FilterSet,
+    ListFilter,
+    RangeFilter,
+    RelatedFilter,
+)
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._cleaned_filter_sets import (
     KEPT_EXTERNAL_ID,
@@ -36,6 +46,7 @@ from tests._cleaned_filter_sets import (
     PlainCleanedScalarSet,
     cleaned_specimen,
 )
+from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
@@ -540,6 +551,7 @@ def _direct_integer_list_schema() -> DjangoSchema:
     class DirectCountSet(FilterSet):
         count_among = ListFilter(field_name="quantity", lookup_expr="in")
         count_outside = ListFilter(field_name="quantity", lookup_expr="in", exclude=True)
+        count_array = ArrayFilter(field_name="quantity", lookup_expr="in")
 
         class Meta:
             model = models.OverrideSpecimen
@@ -590,6 +602,9 @@ def _direct_integer_list_schema() -> DjangoSchema:
         ),
         pytest.param("count_among", [12], ["high"], id="admitted-member"),
         pytest.param("count_outside", [12], ["low"], id="admitted-member-excluded"),
+        pytest.param("count_array", [12.5], [], id="array-fractional-member-dropped"),
+        pytest.param("count_array", [10**20], [], id="array-overflowing-member-dropped"),
+        pytest.param("count_array", [12, 10**20], ["high"], id="array-overflow-beside-member"),
     ],
 )
 def test_a_public_integer_list_primitive_drops_members_the_column_cannot_convert(
@@ -612,3 +627,299 @@ def test_a_public_integer_list_primitive_drops_members_the_column_cannot_convert
             "allRows": [{"label": label} for label in ("high", "low")],
         },
     }, payload
+
+
+_OVERFLOW = "99999999999999999999"
+
+#: The owner model and relation each raw relation row filters, by row id.
+_RELATIONS: dict[str, tuple[type[Model], str]] = {
+    "foreign-key": (library_models.Book, "shelf"),
+    "many-to-many": (library_models.Book, "genres"),
+    "reverse-foreign-key": (library_models.Shelf, "books"),
+    "one-to-one": (library_models.MembershipCard, "patron"),
+    "reverse-one-to-one": (library_models.Patron, "card"),
+    "text-primary-key": (library_models.Printing, "edition"),
+    "text-to-field": (library_models.Printing, "licensor"),
+}
+
+#: The declarations each raw relation row binds as ``f``, by row id.
+_RELATION_FILTERS: dict[str, Callable[[str], django_filters.Filter]] = {
+    "list": lambda field_name: ListFilter(field_name=field_name, lookup_expr="in"),
+    "array": lambda field_name: ArrayFilter(field_name=field_name, lookup_expr="in"),
+    "lone-bound": lambda field_name: RangeFilter(field_name=field_name, lookup_expr="gte"),
+    "crossing": lambda field_name: ListFilter(field_name=field_name, lookup_expr="code__in"),
+    "list-method": lambda field_name: ListFilter(
+        field_name=field_name,
+        lookup_expr="in",
+        method="by_target_code",
+    ),
+    "array-method": lambda field_name: ArrayFilter(
+        field_name=field_name,
+        lookup_expr="in",
+        method="by_target_code",
+    ),
+}
+
+
+def _by_target_code(
+    _filterset: BaseFilterSet,
+    queryset: QuerySet[Model],
+    name: str,
+    value: list[str],
+) -> QuerySet[Model]:
+    """A consumer method filtering on the relation's target ``code``, not its key."""
+    return queryset.filter(**{f"{name}__code__in": value})
+
+
+@strawberry.type
+class _RelationAnswer:
+    errors: list[str]
+    rows: list[str]
+
+
+def _relation_set(parent: str, kind: str, relation: str) -> type[BaseFilterSet]:
+    model, field_name = _RELATIONS[relation]
+    base = {"package": FilterSet, "django-filter": django_filters.FilterSet}[parent]
+    declared = type(
+        "RawRelationSet",
+        (base,),
+        {
+            "f": _RELATION_FILTERS[kind](field_name),
+            "by_target_code": _by_target_code,
+            "Meta": type("Meta", (), {"model": model, "fields": ()}),
+        },
+    )
+    assert issubclass(declared, BaseFilterSet)
+    return declared
+
+
+def _relation_schema() -> DjangoSchema:
+    @strawberry.type
+    class Query:
+        def _relation_rows(
+            self,
+            parent: str,
+            kind: str,
+            relation: str,
+            query: str,
+        ) -> _RelationAnswer:
+            model = _RELATIONS[relation][0]
+            filterset = _relation_set(parent, kind, relation)(
+                data=QueryDict(query),
+                queryset=model._default_manager.order_by("pk"),
+            )
+            if not filterset.is_valid():
+                errors = [
+                    f"{name}: {message}"
+                    for name, messages in filterset.errors.items()
+                    for message in messages
+                ]
+                return _RelationAnswer(errors=errors, rows=[])
+            matched: QuerySet[Model] = filterset.qs
+            return _RelationAnswer(errors=[], rows=[str(row) for row in matched])
+
+        relation_rows: _RelationAnswer = strawberry.field(resolver=_relation_rows)
+
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+def _relation_world() -> dict[str, str]:
+    """Create one matching and one other row per relation; answer each matching target's key."""
+    branch = library_models.Branch.objects.create(name="Raw relations")
+    shelf = library_models.Shelf.objects.create(branch=branch, code="A-1")
+    other_shelf = library_models.Shelf.objects.create(branch=branch, code="B-1")
+    first = library_models.Book.objects.create(shelf=shelf, title="First")
+    second = library_models.Book.objects.create(shelf=other_shelf, title="Second")
+    genre = library_models.Genre.objects.create(name="matching")
+    first.genres.add(genre)
+    second.genres.add(library_models.Genre.objects.create(name="other"))
+    patron = library_models.Patron.objects.create(name="Ada")
+    card = library_models.MembershipCard.objects.create(patron=patron, barcode="CARD-1")
+    other_patron = library_models.Patron.objects.create(name="Bo")
+    library_models.MembershipCard.objects.create(patron=other_patron, barcode="CARD-2")
+    house = library_models.Publisher.objects.create(name="Kept House", house_code="KH")
+    other_house = library_models.Publisher.objects.create(name="Other House", house_code="OH")
+    edition = library_models.Edition.objects.create(isbn_13="9780000000001", publisher=house)
+    other_edition = library_models.Edition.objects.create(
+        isbn_13="9780000000002",
+        publisher=other_house,
+    )
+    library_models.Printing.objects.create(edition=edition, licensor=house, run_size=1)
+    library_models.Printing.objects.create(edition=other_edition, licensor=other_house, run_size=2)
+    return {
+        "foreign-key": str(saved_pk(shelf)),
+        "many-to-many": str(saved_pk(genre)),
+        "reverse-foreign-key": str(saved_pk(first)),
+        "one-to-one": str(saved_pk(patron)),
+        "reverse-one-to-one": str(saved_pk(card)),
+        "text-primary-key": edition.isbn_13,
+        "text-to-field": house.name,
+    }
+
+
+#: The row each relation's matching key selects, as ``str(row)``.
+_MATCHED = {
+    "foreign-key": ["First"],
+    "many-to-many": ["First"],
+    "reverse-foreign-key": ["A-1"],
+    "one-to-one": ["CARD-1"],
+    "reverse-one-to-one": ["Ada"],
+    "text-primary-key": ["9780000000001 x1"],
+    "text-to-field": ["9780000000001 x1"],
+}
+
+
+def _post_relation(
+    parent: str,
+    kind: str,
+    relation: str,
+    query: str,
+) -> JSONObject:
+    return _post(
+        _relation_schema(),
+        "query($parent: String!, $kind: String!, $relation: String!, $query: String!) { "
+        "relationRows(parent: $parent, kind: $kind, relation: $relation, query: $query) "
+        "{ errors rows } }",
+        {
+            "parent": parent,
+            "kind": kind,
+            "relation": relation,
+            "query": query,
+        },
+    )
+
+
+def _relation_answer(errors: list[str], rows: list[str]) -> JSONObject:
+    return {"data": {"relationRows": {"errors": list(errors), "rows": list(rows)}}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize("kind", ["list", "array"])
+@pytest.mark.parametrize(
+    "relation",
+    [
+        "foreign-key",
+        "many-to-many",
+        "reverse-foreign-key",
+        "one-to-one",
+        "reverse-one-to-one",
+    ],
+)
+@pytest.mark.parametrize(
+    ("wire", "verdict"),
+    [
+        pytest.param("{key}", "matched", id="key"),
+        pytest.param("{key}.0", "matched", id="integral-decimal"),
+        pytest.param(f"{{key}},{_OVERFLOW}", "matched", id="overflow-beside-key"),
+        pytest.param("x", "refused", id="junk"),
+        pytest.param("{key},x", "refused", id="junk-beside-key"),
+        pytest.param(_OVERFLOW, "none", id="overflow"),
+        pytest.param("{key}.5", "none", id="fractional"),
+        pytest.param("2147483000", "unmatched", id="no-such-row"),
+    ],
+)
+def test_a_declared_list_over_an_integer_keyed_relation_cleans_each_raw_element_as_its_key(
+    parent: str,
+    kind: str,
+    relation: str,
+    wire: str,
+    verdict: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """``?f=`` over a relation itself reads each element as ``<relation>__<target key>`` does.
+
+    An element the key column cannot hold is the form's error (the 400 a
+    ``DjangoFilterBackend`` answers), never a value handed to Django's related lookup,
+    which raises; an ``in`` drops an element past the column's integer range or
+    fractional, which names no row, so a list left empty matches nothing without a query,
+    while a key no row holds is compared like any other.
+    """
+    keys = _relation_world()
+    model, _field_name = _RELATIONS[relation]
+    statements = record_compiled_sql(model._meta.db_table)
+    result = _post_relation(parent, kind, relation, f"f={wire.format(key=keys[relation])}")
+    expected = {
+        "matched": _relation_answer([], _MATCHED[relation]),
+        "refused": _relation_answer(["f: Enter a number."], []),
+        "none": _relation_answer([], []),
+        "unmatched": _relation_answer([], []),
+    }[verdict]
+    assert result == expected, result
+    assert len(statements) == (1 if verdict in {"matched", "unmatched"} else 0), statements
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize("kind", ["list", "array"])
+@pytest.mark.parametrize("relation", ["text-primary-key", "text-to-field"])
+@pytest.mark.parametrize("wire", ["{key}", " {key} "], ids=["key", "padded-key"])
+def test_a_declared_list_over_a_text_keyed_relation_strips_each_raw_element_as_its_key(
+    parent: str,
+    kind: str,
+    relation: str,
+    wire: str,
+) -> None:
+    """A text key element is stripped as the key column's own form strips it, ``to_field`` too."""
+    keys = _relation_world()
+    result = _post_relation(parent, kind, relation, f"f={wire.format(key=keys[relation])}")
+    assert result == _relation_answer([], _MATCHED[relation]), result
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize(
+    (
+        "kind",
+        "query",
+        "errors",
+        "rows",
+    ),
+    [
+        pytest.param("lone-bound", "f_0=x", ["f: Enter a number."], [], id="lone-bound-junk"),
+        pytest.param("lone-bound", "f_0={key}", [], ["First", "Second"], id="lone-bound-key"),
+        pytest.param("crossing", "f=A-1", [], ["First"], id="crossing-lookup-text"),
+        pytest.param("crossing", "f={key}", [], [], id="crossing-lookup-key-as-text"),
+    ],
+)
+def test_a_declared_filter_over_a_relation_cleans_only_where_its_lookup_compares_the_relation(
+    parent: str,
+    kind: str,
+    query: str,
+    errors: list[str],
+    rows: list[str],
+) -> None:
+    """A lone bound under a lookup Django applies to the relation is cleaned as its key.
+
+    A ``lookup_expr`` continuing across the relation (``code__in``) compares the crossed
+    column, so its element is that column's text, never read as the relation's key.
+    """
+    keys = _relation_world()
+    query = query.format(key=keys["foreign-key"])
+    result = _post_relation(parent, kind, "foreign-key", query)
+    assert result == _relation_answer(errors, rows), result
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize("kind", ["list-method", "array-method"])
+@pytest.mark.parametrize(
+    ("wire", "rows"),
+    [
+        pytest.param("A-1", ["First"], id="one-code"),
+        pytest.param("A-1,B-1", ["First", "Second"], id="two-codes"),
+    ],
+)
+def test_a_method_filter_over_a_relation_receives_each_raw_element_as_sent(
+    parent: str,
+    kind: str,
+    wire: str,
+    rows: list[str],
+) -> None:
+    """A ``method=`` filter on a relation cleans no element: its method, not a lookup, reads it.
+
+    The method filters on the target's ``code``, so a code is never refused as a key.
+    """
+    _relation_world()
+    result = _post_relation(parent, kind, "foreign-key", f"f={wire}")
+    assert result == _relation_answer([], rows), result

@@ -759,14 +759,21 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     other django-filter ``FilterSet`` its own ``filter_for_lookup``, a consumer override
     honoured as its ``FILTER_DEFAULTS`` and ``Meta.filter_overrides`` are. ``None`` for a
     filter bound to no ``FilterSet`` (a class-level declaration, a standalone filter), a
-    path resolving to no column, a relation, or a column django-filter builds no filter
-    for. A relation's form field is django-filter's
-    ``ModelChoiceField``, which looks every value up in the target's default manager: a
-    key no row holds would answer "Select a valid choice" where one the target's
-    ``get_queryset`` hides answers rows, an existence oracle the package's own relation
-    keys refuse (``_RelationIdentityListField``), so a relation's values reach the ORM as
-    sent. ``element`` reads one element of a list value: an ``ArrayField`` column's element
-    is a value of its ``base_field`` (``utils/_array_field.py::array_element_field``), any
+    path resolving to no column, or a column django-filter builds no filter for. A
+    relation is cleaned as the column a value compared on it meets
+    (``_compared_value_column``: the target column the relation compares on, its
+    ``to_field``, else the primary key), as ``<relation>__<that column>`` cleans it, never
+    by django-filter's own form field for a relation, ``ModelChoiceField``, which looks
+    every value up in the target's default manager: a key no row holds would answer
+    "Select a valid choice" where one the target's ``get_queryset`` hides answers rows, an
+    existence oracle the package's own relation keys refuse (``_RelationIdentityListField``).
+    ``None`` for a relation no one column holds a value of: one compared on more than one
+    column or on none, one whose ``lookup_expr`` Django does not apply to the relation
+    itself (a path continuing across it, whose values are the crossed column's, or
+    ``range``, which Django registers on no relation), or one a ``method=`` filter names,
+    whose method applies no lookup of the filter's to the relation.
+    ``element`` reads one element of a list value: an ``ArrayField`` column's element is a
+    value of its ``base_field`` (``utils/_array_field.py::array_element_field``), any
     other column's a value of the column itself.
     """
     parent = read_attr(filter_instance, "parent", None)
@@ -777,9 +784,10 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
         return None
     if element:
         model_field = array_element_field(model_field) or model_field
-    if model_field.is_relation:
+    column = _compared_value_column(filter_instance, model_field)
+    if column is None:
         return None
-    return comparison_form_field(type(parent), model_field, filter_instance.field_name)
+    return comparison_form_field(type(parent), column, filter_instance.field_name)
 
 
 def comparison_form_field(
@@ -956,12 +964,15 @@ class _ElementField(Field):
 
     ``element_field`` is the form field of the ``gte`` filter for the value each element
     compares, the column's or a transform output's (an ``ArrayField``'s ``base_field``'s for
-    an array column), so an element that value cannot hold is a form error rather than a
-    value handed to the ORM, a text element is stripped and a naive datetime element made
-    aware, under any django-filter ``FilterSet`` parent.
+    an array column, a relation's key column, ``_compared_value_column``), so an element that
+    value cannot hold is a form error rather than a value handed to the ORM, a text element
+    is stripped and a naive datetime element made aware, under any django-filter
+    ``FilterSet`` parent.
     A ``None`` element stays ``None``, and a value that is not a list or tuple, or a field
-    with no ``element_field`` (a filter bound to no ``FilterSet``, a relation, a column
-    django-filter builds no filter for), passes through as sent for the filter to judge.
+    with no ``element_field`` (a filter bound to no ``FilterSet``, a relation compared on
+    more than one column or on none, a ``lookup_expr`` continuing across a relation, a
+    ``method=`` filter on a relation, a column django-filter builds no filter for), passes
+    through as sent for the filter to judge.
 
     Raw form data reads as the generated ``in`` reads it (``_MembershipCSVWidget``, rendered
     as a text input): ``?name=a,b`` is ``["a", "b"]``, an empty ``?name=`` applies no
@@ -1034,9 +1045,11 @@ class ArrayFilter(_ElementCleanedFilter):
 
     Each element is cleaned by the form field of the ``gte`` filter for the value it
     compares, the column's or a transform output's, an ``ArrayField`` column's
-    ``base_field``'s (``_ElementField``), so an element that value cannot hold is a form
-    error rather than a value handed to the ORM, a text element is stripped and a naive
-    datetime element made aware. Raw form data (``DjangoFilterBackend``,
+    ``base_field``'s, a relation's key column's (``_ElementField``), so an element that
+    value cannot hold is a form error rather than a value handed to the ORM, a text element
+    is stripped and a naive datetime element made aware. An ``in`` over an integer column,
+    or a relation compared on one, drops each element that names no row as ``ListFilter``'s
+    does (``_integer_in_column``). Raw form data (``DjangoFilterBackend``,
     a ``QueryDict``) reads ``?name=a,b`` as ``["a", "b"]`` and an empty ``?name=`` as no
     constraint (``_MembershipCSVWidget``); only a list or tuple is an explicit ``[]``.
     """
@@ -1054,12 +1067,22 @@ class ArrayFilter(_ElementCleanedFilter):
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
         """Apply the lookup; `[]` is a real value (not `EMPTY_VALUES`-ish).
 
-        Every other value goes to django-filter's own ``Filter.filter``. The
-        ``value == []`` comparison runs the value's own ``__eq__``; whatever it
+        An ``in`` over an integer column, or a relation compared on one
+        (``_integer_in_column``), keeps only the elements that can name a row, those inside
+        the column's integer range on the queryset's database and not fractional
+        (``_identifying_members``); a list with none left matches nothing, or every row
+        under ``exclude``. Every other value goes to django-filter's own ``Filter.filter``.
+        The ``value == []`` comparison runs the value's own ``__eq__``; whatever it
         raises propagates.
         """
         if value == []:
             return _apply_lookup_predicate(self, qs, value)
+        column = _integer_in_column(self)
+        if column is not None and is_list_or_tuple(value):
+            kept = _identifying_members(column, list(value), qs.db)
+            if not kept:
+                return _match_none_queryset(self, qs)
+            return super().filter(qs, kept)
         return super().filter(qs, value)
 
 
@@ -1299,7 +1322,12 @@ class RangeFilter(_ColumnCleanedFilter):
     bound that value cannot hold (a non-finite decimal, a number past django-filter's
     ``1e50`` cap) is a form error as it is on ``gte``, a naive datetime bound is made aware
     and a text bound stripped; a bound off a choice column's choices is compared like any
-    other value.
+    other value. A relation's lone bound under a lookup Django applies to the relation
+    itself (``gte``, ``exact``) is cleaned as the target column the relation compares on
+    (its ``to_field``, else the primary key), as ``<relation>__<that column>``'s is
+    (``_compared_value_column``); a ``range`` over a relation, or a ``method=`` filter on
+    one, cleans no bound, since Django registers no ``range`` lookup on a relation and a
+    method applies no lookup of the filter's.
     """
 
     field_class: type[RangeField] = RangeField
@@ -1352,6 +1380,22 @@ class RangeFilter(_ColumnCleanedFilter):
         return super().filter(qs, value)
 
 
+def _integer_in_column(filter_instance: Filter) -> ModelField | None:
+    """Return the integer column a per-request filter's ``in`` compares its members on, else ``None``.
+
+    The column the path names, a relation's the target column it compares on, its
+    ``to_field``, else the primary key (``_compared_value_column``), so
+    ``field_name="tag"`` keeps the members ``<relation>__<that column>`` keeps
+    (``_identifying_members``). ``None`` for any other lookup, a column that is not an
+    integer, or a path naming no field.
+    """
+    if filter_instance.lookup_expr != "in":
+        return None
+    model_field = _bound_model_field(filter_instance)
+    column = None if model_field is None else _compared_value_column(filter_instance, model_field)
+    return column if isinstance(column, models.IntegerField) else None
+
+
 def _identifying_members(
     model_field: ModelField,
     members: list[object],
@@ -1386,19 +1430,22 @@ class ListFilter(_ElementCleanedFilter):
     row when `exclude=True`) instead of being normalized into a "no value
     supplied" pass-through. Each element is cleaned by the form field of the ``gte``
     filter for the value it compares, the column's or the output's of the transforms
-    between it and the lookup (``year__in``'s ``IntegerField``; ``_ElementField``), as the
-    generated ``in`` cleans its members, so an element that value cannot hold is a form
-    error rather than a value handed to the ORM, a text element is stripped and a naive
-    datetime element made aware; an element off a choice column's choices is a value like
-    any other.
-    Over an integer column, an ``in`` drops each element outside the column's integer
-    range on the queryset's database: it can identify no row, and bound raw it would
-    overflow the backend. A fractional element names no row and is dropped too, never
-    truncated to an integer. A list whose every element drops matches nothing (every row
-    when excluding). The column's own validators are not applied, so an element they
-    would refuse still matches a row that holds it. Raw form data (``DjangoFilterBackend``,
-    a ``QueryDict``) reads as the generated ``in`` reads it (``_MembershipCSVWidget``):
-    ``?name=a,b`` is ``["a", "b"]`` and an empty ``?name=`` applies no constraint.
+    between it and the lookup (``year__in``'s ``IntegerField``; ``_ElementField``), a
+    relation's the target column Django compares it on, its ``to_field``, else the primary
+    key (``field_name="tag"`` cleans as ``<relation>__<that column>``), as the generated
+    ``in`` cleans its members, never by a row lookup, so an element that value cannot hold
+    is a form error rather than a value handed to the ORM, a text element is stripped and a
+    naive datetime element made aware; an element off a choice column's choices is a value
+    like any other.
+    Over an integer column, or a relation compared on one, an ``in`` drops each element
+    outside the column's integer range on the queryset's database: it can identify no row,
+    and bound raw it would overflow the backend. A fractional element names no row and is
+    dropped too, never truncated to an integer. A list whose every element drops matches
+    nothing (every row when excluding). The column's own validators are not applied, so an
+    element they would refuse still matches a row that holds it. Raw form data
+    (``DjangoFilterBackend``, a ``QueryDict``) reads as the generated ``in`` reads it
+    (``_MembershipCSVWidget``): ``?name=a,b`` is ``["a", "b"]`` and an empty ``?name=``
+    applies no constraint.
     """
 
     # basedpyright: typeshed declares ``Filter.method`` a plain attribute, not the property it is,
@@ -1420,8 +1467,9 @@ class ListFilter(_ElementCleanedFilter):
         and a string value under an ``in`` lookup is never iterated
         char-by-char (``in: "26"`` compiling to ``IN ('2','6')``). Only the list/tuple
         shapes the form contract delivers are meaningful; everything else is
-        a coded reject. An ``in`` over an integer column then keeps only the elements inside
-        the column's integer range on the queryset's database
+        a coded reject. An ``in`` over an integer column, or a relation compared on one
+        (``_integer_in_column``), then keeps only the elements naming a row, those inside
+        the column's integer range on the queryset's database and not fractional
         (``_identifying_members``); a list with none left matches nothing, or every
         row under ``exclude`` (``_match_none_queryset``).
         """
@@ -1434,9 +1482,9 @@ class ListFilter(_ElementCleanedFilter):
         )
         if len(value) == 0:
             return _match_none_queryset(self, qs)
-        model_field = _bound_model_field(self) if self.lookup_expr == "in" else None
-        if isinstance(model_field, models.IntegerField):
-            kept = _identifying_members(model_field, value, qs.db)
+        column = _integer_in_column(self)
+        if column is not None:
+            kept = _identifying_members(column, value, qs.db)
             if not kept:
                 return _match_none_queryset(self, qs)
             return super().filter(qs, kept)
@@ -2564,6 +2612,34 @@ def _compared_columns(filter_instance: Filter, field: ModelField) -> tuple[Concr
         return ()
     targets = related._meta.pk_fields if marked else field.path_infos[-1].target_fields
     return tuple(stored_value_column(target) for target in targets)
+
+
+def _compared_value_column(filter_instance: Filter, field: ModelField) -> ModelField | None:
+    """Return the column one value ``filter_instance`` compares on ``field`` is a value of.
+
+    A column answers itself. A relation whose lookup Django applies to the relation
+    itself (``_filterset_lookup_lhs_path`` reads back the filter's own ``field_name``)
+    answers the one column a value compared on it meets (``_compared_columns``), the
+    target field Django's related lookups prepare the value through (``RelatedIn`` /
+    ``RelatedLookupMixin``: the relation's ``path_infos[-1].target_fields[-1]``, its
+    ``to_field``, else the target's primary key), so ``field_name="tag"`` reads its values
+    as ``<relation>__<that column>`` does. ``None`` for a relation compared on more than one
+    column or on none (a ``GenericForeignKey``), whose value no one column holds, for a
+    ``lookup_expr`` that continues the path across the relation
+    (``field_name="shelf", lookup_expr="topic__in"``), whose value is one of the column
+    that walk reaches, not of the relation, and for a ``method=`` filter, whose method
+    receives the value and applies no lookup of the filter's to the relation.
+    """
+    if not field.is_relation:
+        return field
+    if read_attr(filter_instance, "method", None) is not None:
+        return None
+    field_name = _bound_field_name(filter_instance)
+    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
+    if _filterset_lookup_lhs_path(parent, field_name, filter_instance.lookup_expr) != field_name:
+        return None
+    columns = _compared_columns(filter_instance, field)
+    return columns[0] if len(columns) == 1 else None
 
 
 def _coerce_relation_identity(filter_instance: Filter, value: object, alias: str) -> object:
