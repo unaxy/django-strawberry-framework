@@ -87,6 +87,8 @@ from django_strawberry_framework.filters.base import (
     _filterset_model_field,
     _filterset_value_field,
     _globalid_target,
+    _held_column_value,
+    _integer_compared_column,
     _marked_pk_field_name,
     membership_in_filter_class,
     relation_identity_column,
@@ -1041,6 +1043,71 @@ def test_a_driver_free_array_form_cleans_members_to_upstreams_python_values(
     )
     assert not refused.is_valid()
     assert refused.errors == {"priced": ["Enter a number."]}
+
+
+@pytest.mark.parametrize(
+    ("lookup_expr", "held"),
+    [
+        pytest.param(
+            "exact",
+            [-(2**63) - 1, Decimal(5)],
+            id="element-prepared-through-the-column",
+        ),
+        pytest.param(
+            "contains",
+            [Decimal("-1e999999999999999999"), Decimal(5)],
+            id="stand-in-text-contains-never-converts",
+        ),
+    ],
+)
+def test_an_integer_array_element_is_held_only_where_its_lookup_prepares_it(
+    monkeypatch: pytest.MonkeyPatch,
+    lookup_expr: str,
+    held: list[object],
+) -> None:
+    """An integer ``ArrayField``'s element past the column's range is held where Django converts it.
+
+    No live row reaches an integer ``ArrayField`` without PostgreSQL, so the driver-free
+    stand-in carries the column: its ``exact`` prepares each element through the element
+    column and holds it to one past the 64-bit end SQLite states. The stand-in is a plain
+    ``Field``, so its ``contains`` is Django's text ``PatternLookup`` (``prepare_rhs``
+    false), which never converts the value and keeps the decimal; a real ``ArrayField``'s
+    ``contains`` is ``ArrayContains``, which prepares each element and is held.
+    """
+    patch_array_field(monkeypatch)
+
+    class CountedShelf(db_models.Model):
+        counts = FakeArrayField(db_models.IntegerField())
+
+        class Meta:
+            managed = False
+            app_label = "test_array_filter_integer_hold"
+
+    filterset_class = _declared_set(
+        FilterSet,
+        CountedShelf,
+        counted=ArrayFilter(field_name="counts", lookup_expr=lookup_expr),
+    )
+    bound = filterset_class(data={}, queryset=CountedShelf.objects.none()).filters["counted"]
+    value = [Decimal("-1e999999999999999999"), Decimal(5)]
+    assert _held_column_value(bound, CountedShelf.objects.none(), value) == held
+
+
+def test_a_relation_no_one_column_holds_has_no_integer_column_to_hold_to() -> None:
+    """A declared ``exact`` over the two-column ``ShelfLabel.shelf`` link holds nothing.
+
+    Its value is compared on two columns at once, so no one integer column's range holds
+    it; Django refuses such a scalar itself (``'exact' lookup of 'shelf' must have 2
+    elements``) without converting it, at the parent commit and here alike, so no live row
+    tells the two apart.
+    """
+    filterset_class = _declared_set(
+        FilterSet,
+        models.ShelfLabel,
+        shelf_is=django_filters.NumberFilter(field_name="shelf", lookup_expr="exact"),
+    )
+    bound = filterset_class(data={}, queryset=models.ShelfLabel.objects.none())
+    assert _integer_compared_column(bound.filters["shelf_is"]) is None
 
 
 _ONE_SIDED_RANGES = [

@@ -76,6 +76,8 @@ from django_strawberry_framework.utils.errors import (
     coded_error_extensions,
     empty_validation_error,
     field_error,
+    held_past_integer_range,
+    integer_past_range,
     join_error_path,
     model_field_error_names,
     null_field_error,
@@ -1512,6 +1514,125 @@ def test_binds_integer_holds_a_number_to_the_range_the_backend_states(
     limit, as Django holds an ``in`` member or a ``range`` bound to none there.
     """
     assert binds_integer(_read_default_ranges(monkeypatch), field, number) is bound
+
+
+_PAST_ANY_INTEGER = Decimal("-1e999999999999999999")
+
+
+@pytest.mark.parametrize(
+    ("field", "number", "past"),
+    [
+        pytest.param(models.IntegerField[int, int](), _PAST_ANY_INTEGER, -(2**31) - 1, id="below"),
+        pytest.param(models.IntegerField[int, int](), Decimal("1e40"), 2**31, id="above"),
+        pytest.param(models.IntegerField[int, int](), Decimal(5), None, id="inside"),
+        pytest.param(models.IntegerField[int, int](), Decimal(-(2**31)), None, id="at-min"),
+        pytest.param(models.IntegerField[int, int](), Decimal(2**31 - 1), None, id="at-max"),
+        pytest.param(
+            models.IntegerField[int, int](),
+            Decimal(-(2**31) - 1),
+            -(2**31) - 1,
+            id="one-below-min",
+        ),
+        pytest.param(models.IntegerField[int, int](), Decimal(2**31), 2**31, id="one-above-max"),
+        pytest.param(
+            models.IntegerField[int, int](),
+            Decimal("-2147483648.9"),
+            None,
+            id="fraction-short-below",
+        ),
+        pytest.param(
+            models.IntegerField[int, int](),
+            Decimal("2147483647.9"),
+            None,
+            id="fraction-short-above",
+        ),
+        pytest.param(
+            models.PositiveIntegerField[int, int](),
+            Decimal("-0.5"),
+            None,
+            id="positive-minus-half",
+        ),
+        pytest.param(
+            models.PositiveIntegerField[int, int](),
+            Decimal(-1),
+            -1,
+            id="positive-below",
+        ),
+        pytest.param(
+            models.IntegerField[int, int](),
+            Decimal("-Infinity"),
+            None,
+            id="minus-infinity",
+        ),
+        pytest.param(models.IntegerField[int, int](), Decimal("NaN"), None, id="nan"),
+        pytest.param(
+            models.DurationField[object, object](),
+            Decimal(2**63),
+            2**63,
+            id="non-integer-as-bigint",
+        ),
+        pytest.param(_UnrangedIntegerField(), _PAST_ANY_INTEGER, None, id="no-stated-range"),
+    ],
+)
+def test_integer_past_range_answers_the_end_a_decimal_lies_past_without_converting_it(
+    monkeypatch: pytest.MonkeyPatch,
+    field: models.Field[object, object],
+    number: Decimal,
+    past: int | None,
+) -> None:
+    """A decimal whose whole part lies past the backend's range answers one past that end.
+
+    ``-1e999999999999999999`` is compared, never converted (its ``int()`` cannot
+    finish); a fraction short of one past an end keeps its truncated, in-range value; a
+    non-finite decimal and a type the backend states no range for answer ``None``.
+    """
+    assert integer_past_range(_read_default_ranges(monkeypatch), field, number) == past
+
+
+@pytest.mark.parametrize(
+    ("value", "held"),
+    [
+        pytest.param(_PAST_ANY_INTEGER, -(2**31) - 1, id="scalar"),
+        pytest.param([_PAST_ANY_INTEGER, 5], [-(2**31) - 1, 5], id="list"),
+        pytest.param((Decimal(1), _PAST_ANY_INTEGER), (Decimal(1), -(2**31) - 1), id="tuple"),
+        pytest.param(
+            [(_PAST_ANY_INTEGER, None), Decimal("1e40")],
+            [(-(2**31) - 1, None), 2**31],
+            id="nested",
+        ),
+    ],
+)
+def test_held_past_integer_range_replaces_each_decimal_past_the_range(
+    monkeypatch: pytest.MonkeyPatch,
+    value: object,
+    held: object,
+) -> None:
+    """Each decimal past the range, at any depth, is the integer one past that end; shapes keep."""
+    result = held_past_integer_range(
+        _read_default_ranges(monkeypatch),
+        models.IntegerField[int, int](),
+        value,
+    )
+    assert result == held
+    assert type(result) is type(held)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(Decimal(5), id="decimal-inside"),
+        pytest.param([Decimal(5), (1, "x")], id="list-inside"),
+        pytest.param((Decimal(5),), id="tuple-inside"),
+        pytest.param("-1e999999999999999999", id="text"),
+    ],
+)
+def test_held_past_integer_range_returns_a_value_holding_no_such_decimal_itself(
+    monkeypatch: pytest.MonkeyPatch,
+    value: object,
+) -> None:
+    """A value, list or tuple holding no decimal past the range is the same object."""
+    connection = _read_default_ranges(monkeypatch)
+    assert held_past_integer_range(connection, models.IntegerField[int, int](), value) is value
 
 
 #: Each compiled parameter list an integer-array predicate binds, and whether it refuses.

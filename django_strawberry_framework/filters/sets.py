@@ -20,6 +20,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from functools import cache
 from types import MappingProxyType
 from typing import (
@@ -105,6 +106,7 @@ from django_strawberry_framework.utils._array_field import array_leaf_field
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     dict_items,
+    is_concrete_field,
     is_dict,
     is_list_or_tuple,
     is_queryset,
@@ -122,6 +124,7 @@ from django_strawberry_framework.utils.errors import (
     UNBINDABLE_TEMPORAL_MESSAGE,
     binds_integer,
     coded_error_extensions,
+    held_past_integer_range,
     psycopg_refuses_list_parameter,
     refuses_integer_range,
     refuses_numeric_format,
@@ -164,9 +167,11 @@ from django_strawberry_framework.utils.querysets import (
     model_for,
     relation_path_visibility_types,
     run_in_one_sync_boundary,
+    split_lookup,
 )
 from django_strawberry_framework.utils.relations import (
     ClassifiedPath,
+    _walk_lookup_expr,
     classify_path,
     generated_column,
     is_many_side_relation_kind,
@@ -199,6 +204,9 @@ from .base import (
     RelationPkMultipleFilter,
     TextPatternFilter,
     _bound_field_name,
+    _bound_value_field,
+    _django_prepares,
+    _integer_compared_column,
     _reads_integer_transform,
     copied_declared_filter,
     copied_form_field,
@@ -2554,6 +2562,110 @@ def _is_lookup(value: object) -> TypeIs[model_lookups.Lookup]:
     return isinstance(value, model_lookups.Lookup)
 
 
+def _held_integer_value(
+    filter_instance: Filter,
+    value: object,
+    queryset: models.QuerySet[models.Model, object],
+) -> object:
+    """Return ``value`` with each number past its integer column's range held one past that end.
+
+    A shipped filter (``_runs_shipped_filter``, read through a projected copy to the child
+    filter it runs, ``_projected_terminal``) whose lookup is Django's own and prepares its
+    value through an integer column, an integer transform's output or an integer
+    ``ArrayField``'s elements (``filters/base.py::_integer_compared_column``), or, on a path
+    only its queryset resolves, through an integer annotation, a column past a
+    ``FilteredRelation`` alias, that alias's target key or an integer transform of either
+    (``_queryset_integer_column``), receives each ``Decimal`` its form cleaned past the
+    range the database it runs on (``_terminal_queryset``) stores for that field as the
+    integer one past the same end (``utils/errors.py::integer_past_range``), in a scalar and
+    at any depth of a list or tuple (an ``in`` member, a ``range`` bound, an array element).
+    django-filter caps a ``NumberFilter``'s decimal only from above, at ``1e50``, so
+    ``-1e1000000`` cleans to a decimal whose ``int()`` (Django's
+    ``IntegerField.get_prep_value``, which every lookup preparing its value runs) takes
+    seconds; the held integer converts at once, and every verdict of Django's own lookups,
+    which read only which side of the range the converted value lies on, is the decimal's:
+    Django's range-aware comparison matches nothing or everything, an ``in`` drops the
+    member, a ``range`` widens or empties, the bind ask refuses what the database cannot
+    bind. A lookup that does not prepare its value (``Lookup.prepare_rhs``: ``iexact``, a
+    text pattern such as ``contains`` or ``regex``, ``isnull``) never converts it and
+    receives it as cleaned, and so does a project lookup
+    (``filters/base.py::_django_prepares``), a ``method=`` filter or a consumer ``filter``
+    override. A value holding no such number is returned as it is.
+    """
+    if not _holds_decimal(value):
+        return value
+    terminal = _projected_terminal(filter_instance)
+    if not _runs_shipped_filter(terminal):
+        return value
+    source = _terminal_queryset(filter_instance, terminal, queryset)
+    column = (
+        _integer_compared_column(terminal)
+        if _bound_value_field(terminal) is not None
+        else _queryset_integer_column(terminal, source.query)
+    )
+    if column is None:
+        return value
+    return held_past_integer_range(connections[source.db], column, value)
+
+
+def _terminal_queryset(
+    filter_instance: Filter,
+    terminal: Filter,
+    queryset: models.QuerySet[models.Model, object],
+) -> models.QuerySet[models.Model, object]:
+    """Return the queryset the filter ``filter_instance`` runs (``terminal``) applies to.
+
+    ``queryset`` itself, or, for a projected copy, its child filter set's queryset.
+    """
+    if terminal is filter_instance:
+        return queryset
+    return require(
+        require_instance(read_attr(terminal, "parent"), FilterSet).queryset,
+        is_queryset,
+    )
+
+
+def _queryset_integer_column(filter_instance: Filter, query: Query) -> ModelField | None:
+    """Return the integer field a filter only its queryset resolves compares values of, else ``None``.
+
+    Split as Django's ``Query.build_filter`` splits the filter argument over ``query``
+    (``utils/querysets.py::split_lookup``): a path naming an annotation or alias the
+    queryset holds, or crossing a ``FilteredRelation`` alias to a column, starts from that
+    expression or column, and the transforms and lookup left over are walked from it as
+    ``Query.build_lookup`` walks them (``utils/relations.py::_walk_lookup_expr``), so the
+    field is the output of the lookup's left-hand side: an integer annotation's own, or a
+    ``year`` of a date annotation's ``IntegerField``; a relation (a ``FilteredRelation``
+    alias compared as itself) answers its ``target_field``, the column Django's related
+    lookups prepare a value through. ``None`` for a path Django refuses or a remainder no
+    walk accepts (``FieldError``, ``LookupValidationError``), a lookup that is not Django's
+    own preparing its value through the field (``filters/base.py::_django_prepares``:
+    ``iexact``, ``contains``, ``regex``, ``isnull``, a project lookup), a left-hand side
+    with no field of its own (a reverse relation), and an output that is no
+    ``IntegerField``.
+    """
+    try:
+        _names, start, leftover = split_lookup(
+            query,
+            LOOKUP_SEP.join((_bound_field_name(filter_instance), filter_instance.lookup_expr)),
+        )
+        walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover))
+        output = read_attr(walk.lhs, "output_field", None)
+        if is_concrete_field(output) and output.is_relation:
+            output = read_attr(output, "target_field", None)
+    except (FieldError, LookupValidationError):
+        return None
+    if not _django_prepares(walk.lookup) or not is_concrete_field(output):
+        return None
+    return output if isinstance(output, models.IntegerField) else None
+
+
+def _holds_decimal(value: object) -> bool:
+    """Whether ``value`` is a ``Decimal`` or a list or tuple holding one at any depth."""
+    if isinstance(value, Decimal):
+        return True
+    return is_list_or_tuple(value) and any(_holds_decimal(item) for item in value)
+
+
 def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]:
     """Return the refusal of each cleaned filter value the queryset's database cannot bind.
 
@@ -2588,7 +2700,9 @@ def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]
     asked through the child filter it runs (``_projected_terminal``), over its child filter
     set's queryset. A plain integer column is not asked: its generated ``in`` drops a
     member past the column's range (``filters/base.py::_identifying_members``), and its
-    comparisons are Django's own range-aware ones.
+    comparisons are Django's own range-aware ones. Every value asked is first held to its
+    integer column's range (``_held_integer_value``), so a decimal past it is asked as the
+    integer one past that end, never converted.
     """
     # django-filter's ``BaseFilterSet.__init__`` stores the model's default queryset when
     # handed none; its stub types the attribute ``QuerySet[Any] | None``.
@@ -2623,15 +2737,8 @@ def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]
             continue
         if not _runs_shipped_filter(terminal):
             continue
-        source = (
-            queryset
-            if terminal is filter_instance
-            else require(
-                require_instance(read_attr(terminal, "parent"), FilterSet).queryset,
-                is_queryset,
-            )
-        )
-        if _unbindable_predicate(terminal, source, value):
+        source = _terminal_queryset(filter_instance, terminal, queryset)
+        if _unbindable_predicate(terminal, source, _held_integer_value(terminal, value, source)):
             errors[name] = [
                 {"message": UNBINDABLE_TEMPORAL_MESSAGE, "code": FIELD_ERROR_CODE_INVALID},
             ]
@@ -5636,7 +5743,10 @@ class FilterSet(
         not a ``ClientCursor``); bound on the server, a time whose offset is 16:00 or
         more. On PostgreSQL a decimal is held to ``numeric``'s format in either mode: a
         spelling needing more than 131072 digits before the point or 16383 after
-        (``-1e1000000``, ``1e-16384``) is refused, bounded column or not.
+        (``-1e1000000``, ``1e-16384``) is refused, bounded column or not. A decimal past
+        the range of the integer column a shipped filter compares is asked as the integer
+        one past the same end (``_held_integer_value``), never converted, so a ``year``
+        bound of ``-1e1000000`` is refused at once.
         """
         form = filterset_instance.form
         copies = filterset_instance._copied_filters
@@ -6727,14 +6837,21 @@ class FilterSet(
         ``RelatedFilter`` targets resolve) makes EVERY name a non-candidate, so
         no name is routed; a leaf walking a declared hop still takes the branch
         path.
+
+        Every leaf's cleaned value is first held to its integer column's range on the
+        queryset's database (``_held_integer_value``): a shipped filter comparing an
+        integer column receives a decimal its form cleaned past that range as the integer
+        one past the same end, whose verdict is the decimal's and whose conversion is
+        immediate.
         """
         snapshot = type(self)._expansion_snapshot()
         candidates: Mapping[str, CandidateFilterMetadata] = (
             snapshot.candidates if snapshot is not None else {}
         )
-        for name, value in self._cleaned_leaf_items():
+        for name, cleaned in self._cleaned_leaf_items():
             candidate = candidates.get(name)
             filter_instance = self._filter_named(name)
+            value = _held_integer_value(filter_instance, cleaned, queryset)
             if type(self)._walks_relation_hops(filter_instance):
                 queryset = self._apply_relation_leaf(
                     queryset,

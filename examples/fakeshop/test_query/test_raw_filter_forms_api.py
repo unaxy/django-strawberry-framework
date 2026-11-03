@@ -7,10 +7,18 @@ argument, retaining repeated SelectMultiple keys that a generated filter input c
 A declared list or lone range bound over a relation itself cleans each raw element as the
 target column the relation compares on (its ``to_field``, else the primary key), as
 ``<relation>__<that column>`` cleans it; a ``method=`` filter on a relation cleans none.
+A number past an integer column's range, which django-filter's ``NumberFilter`` caps only
+from above (``-1e999999999999999999`` cleans to a decimal whose ``int()`` cannot finish),
+answers from the end it lies past without converting it, on both parents and on every
+generated and declared integer lookup; a fraction short of one past an end keeps the
+truncated value's verdict.
 """
 
-from collections.abc import Callable
+import contextlib
+from collections.abc import Callable, Generator
+from decimal import Decimal
 from functools import wraps
+from typing import TYPE_CHECKING
 
 import django_filters
 import pytest
@@ -18,13 +26,17 @@ import strawberry
 from apps.library import models as library_models
 from apps.scalars import models
 from django import forms
-from django.db.models import Model, QuerySet
+from django.db.backends.base.base import BaseDatabaseWrapper
+from django.db.models import Field, IntegerField, Lookup, Model, QuerySet
+from django.db.models.sql.compiler import SQLCompiler
 from django.http import HttpRequest, HttpResponseBase, QueryDict
 from django.test import override_settings
+from django.test.utils import register_lookup
 from django.urls import path
 from django_filters.filterset import BaseFilterSet
 from graphql_client import JSONObject, RecordCompiledSql, graphql_payload, json_object
 from strawberry.scalars import JSON
+from typing_extensions import override
 
 from django_strawberry_framework import (
     DjangoSchema,
@@ -39,6 +51,7 @@ from django_strawberry_framework.filters import (
     RangeFilter,
     RelatedFilter,
 )
+from django_strawberry_framework.filters.base import _lookup_operand, _model_lookup_operand
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._cleaned_filter_sets import (
     KEPT_EXTERNAL_ID,
@@ -47,6 +60,9 @@ from tests._cleaned_filter_sets import (
     cleaned_specimen,
 )
 from tests._idioms import saved_pk
+
+if TYPE_CHECKING:
+    from django.db.models.sql.compiler import _AsSqlType
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
@@ -62,8 +78,76 @@ def _graphql_view(request: HttpRequest) -> HttpResponseBase:
 urlpatterns = [path("graphql-raw-filter-forms/", _graphql_view)]
 
 
+class _DecimalSeeingFilter(django_filters.NumberFilter):
+    """A consumer ``filter`` override that keeps ``kept`` only when it receives a decimal."""
+
+    @override
+    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+        if value is None:
+            return qs
+        return qs.filter(label="kept" if isinstance(value, Decimal) else "other")
+
+
+class _SignedBigComparisonSet(FilterSet):
+    signed_big_overridden = _DecimalSeeingFilter(field_name="signed_big", lookup_expr="exact")
+    signed_big_at_most = django_filters.NumberFilter(field_name="signed_big", lookup_expr="lte")
+    signed_big_array_among = ArrayFilter(field_name="signed_big", lookup_expr="in")
+    signed_big_containing = django_filters.NumberFilter(
+        field_name="signed_big",
+        lookup_expr="contains",
+    )
+    signed_big_ending = django_filters.NumberFilter(
+        field_name="signed_big",
+        lookup_expr="endswith",
+    )
+    signed_big_matching = django_filters.NumberFilter(field_name="signed_big", lookup_expr="regex")
+    signed_big_as_sent = django_filters.NumberFilter(
+        field_name="signed_big",
+        method="_kept_for_a_decimal",
+    )
+
+    def _kept_for_a_decimal(
+        self,
+        queryset: QuerySet[models.ScalarSpecimen],
+        name: str,
+        value: object,
+    ) -> QuerySet[models.ScalarSpecimen]:
+        del name
+        return queryset.filter(label="kept" if isinstance(value, Decimal) else "other")
+
+    class Meta:
+        model = models.ScalarSpecimen
+        fields = {
+            "signed_big": [
+                "exact",
+                "gte",
+                "lt",
+                "in",
+                "range",
+            ],
+        }
+
+
+class _PlainYearSpanSet(django_filters.FilterSet):
+    occurred_year_span = RangeFilter(field_name="occurred_on", lookup_expr="year__range")
+
+    class Meta:
+        model = models.ScalarSpecimen
+        fields = ("label",)
+
+
+#: Sets a test declares while a project lookup it registers is in place, by parent name.
+_TEST_LOCAL_SETS: dict[str, type[BaseFilterSet]] = {}
+
+
 def _filter_set(parent: str) -> type[BaseFilterSet]:
-    return {"package": PackageCleanedScalarSet, "django-filter": PlainCleanedScalarSet}[parent]
+    shipped: dict[str, type[BaseFilterSet]] = {
+        "package": PackageCleanedScalarSet,
+        "django-filter": PlainCleanedScalarSet,
+        "generated": _SignedBigComparisonSet,
+        "plain-year": _PlainYearSpanSet,
+    }
+    return shipped[parent] if parent in shipped else _TEST_LOCAL_SETS[parent]
 
 
 def _repeated_set(parent: str) -> type[BaseFilterSet]:
@@ -84,7 +168,7 @@ def _repeated_set(parent: str) -> type[BaseFilterSet]:
     return declared
 
 
-def _schema() -> DjangoSchema:
+def _schema(*, error_policy: dict[str, object] | None = None) -> DjangoSchema:
     class ScalarOutput(DjangoType):
         class Meta:
             model = models.ScalarSpecimen
@@ -124,7 +208,7 @@ def _schema() -> DjangoSchema:
         )
 
     finalize_django_types()
-    return DjangoSchema(query=Query, config=strawberry_config())
+    return DjangoSchema(query=Query, config=strawberry_config(), error_policy=error_policy)
 
 
 def _post(schema: DjangoSchema, query: str, variables: JSONObject) -> JSONObject:
@@ -214,6 +298,249 @@ def test_django_query_dict_arguments_keep_csv_emptiness_and_membership(
     )
     assert result == {"data": {"rawRows": [{"label": label} for label in labels]}}, result
     assert len(statements) == 1, statements
+
+
+_PAST_ANY_INTEGER = "-1e999999999999999999"
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+
+
+def _raw_labels(parent: str, query_string: str, schema: DjangoSchema | None = None) -> JSONObject:
+    return _post(
+        schema or _schema(),
+        "query($parent: String!, $query: String!) { rawRows(parent: $parent, query: $query) { label } }",
+        {"parent": parent, "query": query_string},
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize(
+    ("query_string", "labels", "statements"),
+    [
+        pytest.param(
+            f"signed_big_span_0={_PAST_ANY_INTEGER}&signed_big_span_1=8",
+            ["kept"],
+            1,
+            id="range-start-below",
+        ),
+        pytest.param(
+            f"signed_big_span_0={_PAST_ANY_INTEGER}",
+            ["kept", "other"],
+            1,
+            id="lone-start-below",
+        ),
+        pytest.param(f"signed_big_span_1={_PAST_ANY_INTEGER}", [], 0, id="lone-end-below"),
+        pytest.param(f"signed_big_in={_PAST_ANY_INTEGER},7", ["kept"], 1, id="in-member-below"),
+        pytest.param(f"signed_big_in={_PAST_ANY_INTEGER}", [], 0, id="in-every-member-below"),
+    ],
+)
+def test_a_declared_integer_range_or_list_answers_a_number_past_the_column_without_converting_it(
+    parent: str,
+    query_string: str,
+    labels: list[str],
+    statements: int,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A bound or member past ``signed_big``'s range answers from the end it lies past.
+
+    django-filter's ``NumberFilter`` caps a decimal only from above, so the raw form
+    cleans ``-1e999999999999999999``; ``int()`` of it cannot finish, and the package's
+    ``RangeFilter`` and ``ListFilter`` compare it without one, under either parent.
+    """
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("other", kept=False)
+    recorded = record_compiled_sql("scalars_scalarspecimen")
+    result = _raw_labels(parent, query_string)
+    assert result == {"data": {"rawRows": [{"label": label} for label in labels]}}, result
+    assert len(recorded) == statements, recorded
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query_string", "labels", "statements"),
+    [
+        pytest.param(f"signed_big={_PAST_ANY_INTEGER}", [], 0, id="exact-below"),
+        pytest.param(
+            f"signed_big__gte={_PAST_ANY_INTEGER}",
+            [
+                "kept",
+                "max",
+                "min",
+                "other",
+            ],
+            1,
+            id="gte-below",
+        ),
+        pytest.param(f"signed_big__lt={_PAST_ANY_INTEGER}", [], 0, id="lt-below"),
+        pytest.param(f"signed_big__in={_PAST_ANY_INTEGER},7", ["kept"], 1, id="in-member-below"),
+        pytest.param(
+            f"signed_big__range={_PAST_ANY_INTEGER},7",
+            ["kept", "min"],
+            1,
+            id="range-start-below",
+        ),
+        pytest.param(f"signed_big_at_most={_PAST_ANY_INTEGER}", [], 0, id="declared-lte-below"),
+        pytest.param(
+            f"signed_big_array_among={_PAST_ANY_INTEGER},7",
+            ["kept"],
+            1,
+            id="declared-array-in-member-below",
+        ),
+        pytest.param(
+            f"signed_big_overridden={_PAST_ANY_INTEGER}",
+            ["kept"],
+            1,
+            id="filter-override-receives-the-decimal-parity",
+        ),
+        pytest.param(
+            f"signed_big_as_sent={_PAST_ANY_INTEGER}",
+            ["kept"],
+            1,
+            id="method-receives-the-decimal-parity",
+        ),
+        pytest.param(
+            "signed_big__lt=-1e1000000",
+            [],
+            0,
+            id="lt-below-million-exponent-18s-at-parent",
+        ),
+        pytest.param("signed_big=1e40", [], 0, id="exact-above-parity"),
+        pytest.param("signed_big_containing=1e40", [], 1, id="declared-contains-above-parity"),
+        pytest.param("signed_big_ending=1e40", [], 1, id="declared-endswith-above-parity"),
+        pytest.param("signed_big_matching=1e40", [], 1, id="declared-regex-above-parity"),
+        pytest.param(
+            f"signed_big_containing={_PAST_ANY_INTEGER}",
+            [],
+            1,
+            id="declared-contains-below-parity",
+        ),
+        pytest.param(f"signed_big={_INT64_MAX}.5", ["max"], 1, id="exact-fraction-short-parity"),
+        pytest.param(
+            f"signed_big__lt={_INT64_MAX}.5",
+            ["kept", "min", "other"],
+            1,
+            id="lt-fraction-short-parity",
+        ),
+    ],
+)
+def test_a_generated_or_declared_integer_comparison_answers_a_number_past_the_column_without_converting_it(
+    query_string: str,
+    labels: list[str],
+    statements: int,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """Each generated ``signed_big`` lookup and a declared ``NumberFilter`` read the side, not the number.
+
+    A number past the column's 64-bit range answers as Django's range-aware comparison
+    reads one past that end (matching nothing or everything), an ``in`` member drops and a
+    ``range`` bound widens; ``-2**63`` stays the lowest value the column stores, ``1e40``
+    lies past the top under django-filter's cap, and a fraction short of one past an end
+    is compared as Django truncates it. A ``method=`` filter and a class-level ``filter``
+    override receive the decimal their form cleaned, and a text-pattern lookup
+    (``contains``, ``endswith``, ``regex``), which Django never converts to an integer,
+    compares the decimal's own spelling.
+    """
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("other", kept=False)
+    for label, stored in (("min", _INT64_MIN), ("max", _INT64_MAX)):
+        bound = cleaned_specimen(label, kept=False)
+        bound.signed_big = stored
+        bound.save(update_fields=["signed_big"])
+    recorded = record_compiled_sql("scalars_scalarspecimen")
+    result = _raw_labels("generated", query_string)
+    assert result == {"data": {"rawRows": [{"label": label} for label in labels]}}, result
+    assert len(recorded) == statements, recorded
+
+
+@contextlib.contextmanager
+def _registered_lookup(
+    field_class: type[Field[object, object]],
+    lookup: type[Lookup],
+) -> Generator[None]:
+    """Register ``lookup`` on ``field_class`` while open, then drop the operands it resolved.
+
+    ``filters/base.py`` caches each column's resolved lookup operand for the process; an
+    entry written under the registration would outlive it into the next test on the
+    worker.
+    """
+    try:
+        with register_lookup(field_class, lookup):
+            yield
+    finally:
+        _lookup_operand.cache_clear()
+        _model_lookup_operand.cache_clear()
+
+
+class _DivisibleBy(Lookup):
+    """A project lookup on integer columns, as Django's custom-lookup guide writes one."""
+
+    lookup_name = "divisible_by"
+
+    @override
+    def as_sql(self, compiler: SQLCompiler, connection: BaseDatabaseWrapper) -> "_AsSqlType":
+        lhs, lhs_params = self.process_lhs(compiler, connection)
+        rhs, rhs_params = self.process_rhs(compiler, connection)
+        return f"{lhs} %% {rhs} = 0", (*lhs_params, *rhs_params)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+def test_a_project_lookup_receives_the_number_its_form_cleaned(
+    parent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``register_lookup`` lookup owns what its value means, so nothing is held for it.
+
+    ``divisible_by`` prepares ``-5`` through ``unsigned_big`` (``prepare_rhs`` true by
+    default) but reads more than which side of the column's range ``-5`` lies on: held to
+    ``-1``, every row would divide by it. It answers as Django prepares ``-5``, under
+    both parents.
+    """
+    for label, stored in (
+        ("a", 10),
+        ("b", 7),
+        ("c", 0),
+        ("d", 15),
+    ):
+        row = cleaned_specimen(label, kept=False)
+        row.unsigned_big = stored
+        row.save(update_fields=["unsigned_big"])
+    base = {"package": FilterSet, "django-filter": django_filters.FilterSet}[parent]
+    with _registered_lookup(IntegerField, _DivisibleBy):
+        declared = type(
+            "DivisibleBySet",
+            (base,),
+            {
+                "divisible": django_filters.NumberFilter(
+                    field_name="unsigned_big",
+                    lookup_expr="divisible_by",
+                ),
+                "Meta": type("Meta", (), {"model": models.ScalarSpecimen, "fields": ()}),
+            },
+        )
+        assert issubclass(declared, BaseFilterSet)
+        monkeypatch.setitem(_TEST_LOCAL_SETS, "divisible", declared)
+        result = _raw_labels("divisible", "divisible=-5")
+    assert result == {"data": {"rawRows": [{"label": "a"}, {"label": "c"}, {"label": "d"}]}}, (
+        result
+    )
+
+
+@pytest.mark.django_db
+def test_a_plain_parents_two_bound_year_range_past_the_range_answers_as_one_past_it() -> None:
+    """Both bounds of a ``year__range`` under a plain django-filter parent are held first.
+
+    ``-1e999999999999999999`` answers exactly as ``-9223372036854775809``, one past the
+    year output's 64-bit range: the raw driver's own error for a year no database binds
+    (raw form data runs no bind ask), never the ``MemoryError`` its ``int()`` raises.
+    """
+    cleaned_specimen("kept", kept=True)
+    query = "occurred_year_span_0={0}&occurred_year_span_1={0}"
+    schema = _schema(error_policy={"enabled": False})
+    past = _raw_labels("plain-year", query.format(_PAST_ANY_INTEGER), schema)
+    assert "errors" in past, past
+    assert past == _raw_labels("plain-year", query.format(_INT64_MIN - 1), schema), past
 
 
 @pytest.mark.django_db

@@ -5,6 +5,8 @@ Their resolvers pass request values to public FilterSet apply methods or constru
 shapes therefore reach the same supported apply seam as a consumer's assembled criteria;
 they are not private-validator wrappers. Native Meta output types remain unbound to the
 sets. Explicit pass-through policy lets refusal rows read the production diagnostics.
+A JSON number past an integer column's range answers from the end it lies past without
+being converted, and past an integer transform's range it keeps its ``FILTER_INVALID``.
 """
 
 import asyncio
@@ -27,7 +29,7 @@ from django.http import HttpRequest, HttpResponseBase
 from django.test import AsyncClient, Client, override_settings
 from django.test.utils import register_lookup
 from django.urls import path
-from django_filters import CharFilter, DateTimeFilter, MultipleChoiceFilter
+from django_filters import CharFilter, DateTimeFilter, MultipleChoiceFilter, NumberFilter
 from django_filters import RangeFilter as UpstreamRangeFilter
 from graphql import GraphQLError
 from graphql_client import JSONObject, graphql_payload, json_object, response_json
@@ -40,6 +42,7 @@ from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
+from tests._cleaned_filter_sets import cleaned_specimen
 
 if TYPE_CHECKING:
     from django_strawberry_framework import DjangoType
@@ -453,6 +456,195 @@ def test_a_valid_range_argument_keeps_only_the_admitted_patron(transport: str) -
         {"fines": {"start": 1, "end": 5}},
         transport=transport,
     ) == {"data": {"rows": [{"name": "inside"}]}}
+
+
+_PAST_ANY_INTEGER = "-1e999999999999999999"
+
+
+class _SignedBigCriteriaSet(FilterSet):
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = {"signed_big": ["gte", "in"], "occurred_on": ["year__gt"]}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("where", "labels"),
+    [
+        pytest.param(
+            {"signed_big": {"gte": _PAST_ANY_INTEGER}},
+            ["kept", "other"],
+            id="gte-below",
+        ),
+        pytest.param(
+            {"signed_big": {"in_": [_PAST_ANY_INTEGER, "7"]}},
+            ["kept"],
+            id="in-member-below",
+        ),
+    ],
+)
+def test_a_json_number_past_an_integer_column_answers_without_being_converted(
+    transport: str,
+    where: JSONObject,
+    labels: list[str],
+) -> None:
+    """``-1e999999999999999999`` cleans to a decimal no ``int()`` finishes; it is read by its side."""
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("other", kept=False)
+    schema = _schema(
+        _SignedBigCriteriaSet,
+        scalar_models.ScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+    )
+    assert _post(schema, where, transport=transport, selection="label") == {
+        "data": {"rows": [{"label": label} for label in labels]},
+    }
+
+
+class _CustomizedSignedBigCriteriaSet(_SignedBigCriteriaSet):
+    """A child whose ``__init__`` override projects its leaves onto a parent as owned copies."""
+
+    parent_year_after = NumberFilter(field_name="parent__occurred_on", lookup_expr="year__gt")
+
+    @override
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        queryset: QuerySet[Model] | None = None,
+        *,
+        request: HttpRequest | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data, queryset, request=request, prefix=prefix)
+
+
+class _PartnerSignedBigCriteriaSet(FilterSet):
+    partner = RelatedFilter(_CustomizedSignedBigCriteriaSet, field_name="partner")
+
+    class Meta:
+        model = scalar_models.NullableScalarSpecimen
+        fields = []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("where", "labels"),
+    [
+        pytest.param(
+            {"partner__signed_big": {"in_": [_PAST_ANY_INTEGER, "7"]}},
+            ["with-kept"],
+            id="column",
+        ),
+    ],
+)
+def test_a_json_number_past_a_projected_integer_leaf_answers_without_being_converted(
+    transport: str,
+    where: JSONObject,
+    labels: list[str],
+) -> None:
+    """A projected ``partner__signed_big`` copy is held to its column's range on the child's queryset."""
+    kept = cleaned_specimen("kept", kept=True)
+    other = cleaned_specimen("other", kept=False)
+    scalar_models.NullableScalarSpecimen.objects.create(label="with-kept", partner=kept)
+    scalar_models.NullableScalarSpecimen.objects.create(label="with-other", partner=other)
+    scalar_models.NullableScalarSpecimen.objects.create(label="without-partner", partner=None)
+    schema = _schema(
+        _PartnerSignedBigCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(
+            make_django_type(
+                "PartnerTarget",
+                scalar_models.ScalarSpecimen,
+                ("label",),
+                node=False,
+            ),
+        ),
+    )
+    assert _post(schema, where, transport=transport, selection="label") == {
+        "data": {"rows": [{"label": label} for label in labels]},
+    }
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_a_json_year_past_a_projected_leafs_range_is_refused_over_the_childs_queryset(
+    transport: str,
+) -> None:
+    """A projected ``year`` across the child's own ``parent`` hop is asked on the child's queryset.
+
+    ``parent`` is no relation of the parent set's model, so the copy is held and asked
+    only where its path resolves; past the transform's range it is ``FILTER_INVALID``.
+    """
+    scalar_models.NullableScalarSpecimen.objects.create(
+        label="with-kept",
+        partner=cleaned_specimen("kept", kept=True),
+    )
+    schema = _schema(
+        _PartnerSignedBigCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(
+            make_django_type(
+                "PartnerTarget",
+                scalar_models.ScalarSpecimen,
+                ("label",),
+                node=False,
+            ),
+        ),
+    )
+    _refused(
+        _post(
+            schema,
+            {"partner__parent_year_after": {"year_gt": _PAST_ANY_INTEGER}},
+            transport=transport,
+            selection="label",
+        ),
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {
+                "partner__parent_year_after": [
+                    {"message": "Enter a value the database can represent.", "code": "invalid"},
+                ],
+            },
+        },
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_a_json_year_past_the_transforms_range_keeps_its_refusal(transport: str) -> None:
+    """A ``year`` bound past its integer range is refused as the database cannot bind it, at once."""
+    cleaned_specimen("kept", kept=True)
+    schema = _schema(
+        _SignedBigCriteriaSet,
+        scalar_models.ScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+    )
+    _refused(
+        _post(
+            schema,
+            {"occurred_on": {"year_gt": _PAST_ANY_INTEGER}},
+            transport=transport,
+            selection="label",
+        ),
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {
+                "occurred_on__year__gt": [
+                    {"message": "Enter a value the database can represent.", "code": "invalid"},
+                ],
+            },
+        },
+    )
 
 
 class _ReadingFiltersSet(FilterSet):
