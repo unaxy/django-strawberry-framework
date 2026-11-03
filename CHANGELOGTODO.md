@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 173 to do.
+Progress: 0 done, 174 to do.
 
 ## From dry-0_0_15_3
 
@@ -693,6 +693,11 @@ Progress: 0 done, 173 to do.
   answering every value "Select a valid choice". Filter refusal messages name `<FilterSet>.<attr>: <Class> on
   '<field_name>'` instead of the filter object's repr, and the no-`choices` refusal names a transform's output or a
   missing model field where that is what the filter reads
+- [ ] 744. CHANGELOG entry for item 673: filtering an integer column with a number past its range (such as
+  `-1e1000000` in raw form data or a JSON `where`, or the `Decimal` input of a declared `NumberFilter` over an integer
+  annotation) now answers at once from the end the number lies past, where its conversion took seconds of CPU per
+  value, or raised `MemoryError` at an exponent like `1e18`. Answers are unchanged; a project's own lookup, a
+  `method=` filter and a consumer `filter` override still receive the value as cleaned
 
 ## From dry-upstream-0_0_15
 

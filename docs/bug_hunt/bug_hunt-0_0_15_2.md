@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 409 done, 97 to do. The CHANGELOG entries filed here moved to
+Progress: 410 done, 99 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2448,6 +2448,22 @@ Progress: 409 done, 97 to do. The CHANGELOG entries filed here moved to
   Decision 4 states the contract and
   `tests/filters/test_inputs.py::test_an_array_column_filter_is_typed_from_its_element_column` and its siblings pin
   it. No code change
+- [x] 673. A decimal a filter's form cleans past an integer column's range (django-filter's `NumberFilter` caps only a
+  positive value, at `1e50`, so `"-1e1000000"` cleans through raw form data, a JSON `where` handed to `apply_sync` /
+  `apply_async`, or the typed `Decimal` of a declared `NumberFilter` over an annotation or `FilteredRelation` path)
+  was converted with `int()` on every integer path, in time quadratic in its exponent (~18 s CPU at `1e6`,
+  `MemoryError` at `1e18`, per `in` member); it is now held, before Django prepares it, to the integer one past the
+  end its truncated whole part lies past, compared and never converted, so every answer the parent gave is kept at
+  once: a comparison matches nothing or every row, an `in` member drops, a `range` widens or empties, a `year` bound
+  the bind ask refuses stays `FILTER_INVALID`. Only Django's own lookups that prepare the value are held
+  (`filters/base.py::_django_prepares`); a text pattern, `iexact`, `isnull`, a project lookup, a `method=` filter and
+  a consumer `filter` override receive the value their form cleaned. Holds: `filters/sets.py::_held_integer_value`
+  (the flat loop and the bind ask; queryset-only paths and their transforms through `_queryset_integer_column`) and
+  `filters/base.py::_held_column_value` (`RangeFilter` / `ListFilter` / `ArrayFilter` under any django-filter parent),
+  over `utils/errors.py::integer_past_range` / `held_past_integer_range`; float columns unchanged. Live rows in
+  `test_raw_filter_forms_api.py`, `test_filter_apply_arguments_api.py` and `test_scalar_predicate_binding_api.py`;
+  package rows in `tests/utils/test_errors.py`, `tests/filters/test_base.py`, `tests/filters/test_sets.py`; README and
+  spec-027 say so
 
 ## Outside review of the fixes
 
@@ -2509,10 +2525,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 673. (robustness) A generated `NumberFilter` leaf on an `IntegerField` / `FloatField` column cleans
-  `"-1e1000000"` to a `Decimal` that reaches the bind as a huge int (integer column) or -inf (float column); the
-  filter ask reads only temporal and decimal columns. Unmeasured: the client-visible answer per backend. Found fixing
-  529
 - [ ] 680. `filters/inputs.py::_is_declared_head`'s docstring says a set borrowing a copy "restamps" it; 596 copies an
   owned filter at declaration, so the clause is false (one-clause fix, held for the `filters/inputs.py` refactor).
   Found fixing 596
@@ -2667,6 +2679,23 @@ tracker number are recorded there; open remainders and new defects are filed as 
   got [Decimal('1')]", `filters/base.py`) and a scalar value is refused by
   `filters/inputs.py::_require_list_container`. `ListFilter(field_name="ints__len", lookup_expr="in")` serves. The
   array-transform counterpart of 716. Found fact-finding 656
+- [ ] 741. A JSON request body holding an integer of 4301 or more digits anywhere (an unused variable, `extensions`)
+  answers HTTP 500 HTML on `DjangoGraphQLView`, DEBUG on and off: CPython's int-digits `ValueError` out of
+  `json.loads` escapes upstream's `except json.JSONDecodeError`, and `views.py::DjangoGraphQLView.parse_json` /
+  `_strawberry_patches.py::_patched_parse_json` translate the `UnicodeDecodeError` / `RecursionError` siblings but not
+  this one; the KANBAN row saying an oversized numeric literal is already refused and only its envelope is wrong does
+  not hold for this path. Found researching 673
+- [ ] 742. In production a literal validation error carrying a scalar's parse exception is masked as "An unexpected
+  error occurred.": graphql-core's `validate_input_literal` attaches the exception as `original_error`, which
+  `extensions/error_policy.py::_is_unexpected` reads as unexpected, contrary to its docstring and spec-048 Decision 8
+  (a parse, syntax or validation error is not masked). A `BigInt` literal `-1e50` / `1.5` / `NaN` and an `Int` literal
+  of 4301+ digits reach it (1,120 cells of 673's production grid; DEBUG shows "Expected value of type ..."). Found
+  researching 673
+- [ ] 743. (robustness) A raw-form driver (`FilterSet(data=...).qs`, `DjangoFilterBackend`, `FilterView`) never runs
+  the bind ask (`filters/sets.py::_validate_form_or_raise` / `_unbindable_value_errors`), so a value the ask refuses
+  as `FILTER_INVALID` over GraphQL escapes there as Django's or the driver's exception: a raw
+  `occurred_on__year__gt=99999` raises `ValueError` (year 1..9999) and a past-range year raises `OverflowError`. Found
+  researching 673
 
 ## To do: holes found re-checking the fixes
 

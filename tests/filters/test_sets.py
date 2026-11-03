@@ -165,6 +165,7 @@ from django_strawberry_framework.filters.sets import (
     _lookups_for_field,
     _normalize_policy_entry,
     _NormalizedPolicyEntry,
+    _queryset_integer_column,
     _release_is_audited,
     _stamp_generation_provenance,
     _upstream_authored,
@@ -7323,6 +7324,37 @@ def test_integer_column_value_is_not_asked() -> None:
 
         SignedBigFilter._validate_form_or_raise(filterset)
     assert router.asked == []
+
+
+@pytest.mark.parametrize(
+    ("field_name", "lookup_expr"),
+    [
+        pytest.param("missing", "gte", id="path-django-refuses"),
+        pytest.param("kids", "exact", id="reverse-relation-alias"),
+        pytest.param("n", "bogus", id="remainder-no-walk-accepts"),
+        pytest.param("label_copy", "gte", id="text-annotation"),
+    ],
+)
+def test_a_queryset_path_comparing_no_integer_field_holds_nothing(
+    field_name: str,
+    lookup_expr: str,
+) -> None:
+    """A path only the queryset resolves answers ``None`` wherever no integer field is compared.
+
+    A name the queryset does not hold, a ``FilteredRelation`` alias of a reverse relation
+    (no field of its own), a remainder that is no lookup of the annotation's output and a
+    text annotation leave a cleaned decimal as it is.
+    """
+    query = (
+        scalar_models.ScalarSpecimen.objects.annotate(
+            n=dj_models.F("signed_big"),
+            label_copy=dj_models.F("label"),
+        )
+        .alias(kids=dj_models.FilteredRelation("children"))
+        .query
+    )
+    filter_instance = django_filters.NumberFilter(field_name=field_name, lookup_expr=lookup_expr)
+    assert _queryset_integer_column(filter_instance, query) is None
 
 
 @pytest.mark.django_db

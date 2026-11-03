@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
 from django.core.exceptions import FieldError, ValidationError
 from django.core.files.uploadedfile import UploadedFile
-from django.db import models
+from django.db import connections, models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.options import Options
 from django.db.models.sql import Query
@@ -103,9 +103,10 @@ from django_strawberry_framework.types.relay import (
     published_node_type_name,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._array_field import array_element_field
+from django_strawberry_framework.utils._array_field import array_element_field, array_leaf_field
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
+    is_list,
     is_list_or_tuple,
     is_str,
     optional_instance,
@@ -118,6 +119,7 @@ from django_strawberry_framework.utils.errors import (
     GLOBALID_INVALID_ERROR_CODE,
     GLOBALID_UNVALIDATABLE_ERROR_CODE,
     coded_error_extensions,
+    held_past_integer_range,
 )
 from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.querysets import (
@@ -1051,7 +1053,11 @@ class ArrayFilter(_ElementCleanedFilter):
     value cannot hold is a form error rather than a value handed to the ORM, a text element
     is stripped and a naive datetime element made aware. An ``in`` over an integer column,
     or a relation compared on one, drops each element that names no row as ``ListFilter``'s
-    does (``_integer_in_column``). Raw form data (``DjangoFilterBackend``,
+    does (``_integer_in_column``). An element of an integer column, a transform's integer
+    output or an integer ``ArrayField``'s elements cleaned to a decimal past that column's
+    range on the queryset's database is applied as the integer one past the same end
+    (``_held_column_value``), whose verdict is the decimal's and whose conversion is
+    immediate. Raw form data (``DjangoFilterBackend``,
     a ``QueryDict``) reads ``?name=a,b`` as ``["a", "b"]`` and an empty ``?name=`` as no
     constraint (``_MembershipCSVWidget``); only a list or tuple is an explicit ``[]``.
     """
@@ -1077,6 +1083,7 @@ class ArrayFilter(_ElementCleanedFilter):
         """
         if value == []:
             return _apply_lookup_predicate(self, qs, value)
+        value = _held_column_value(self, qs, value)
         column = _integer_in_column(self)
         if column is not None and is_list_or_tuple(value):
             kept = _identifying_members(column, list(value), qs.db)
@@ -1327,7 +1334,11 @@ class RangeFilter(_ColumnCleanedFilter):
     (its ``to_field``, else the primary key), as ``<relation>__<that column>``'s is
     (``_compared_value_column``); a ``range`` over a relation, or a ``method=`` filter on
     one, cleans no bound, since Django registers no ``range`` lookup on a relation and a
-    method applies no lookup of the filter's.
+    method applies no lookup of the filter's. A bound of an integer column (or a transform's
+    integer output, or a relation's integer key column) cleaned to a decimal past that
+    column's range on the queryset's database applies as the integer one past the same end
+    (``_held_column_value``): Django's range-aware lookups read it as the decimal, never
+    converting a decimal whose ``int()`` takes seconds (``-1e1000000``).
     """
 
     field_class: type[RangeField] = RangeField
@@ -1359,6 +1370,7 @@ class RangeFilter(_ColumnCleanedFilter):
         """
         if not (is_list_or_tuple(value) and len(value) == _RANGE_BOUNDS):
             return super().filter(qs, value)
+        value = require(_held_column_value(self, qs, value), is_list_or_tuple)
         start, end = value
         if start is None and end is None:
             return qs
@@ -1394,6 +1406,64 @@ def _integer_in_column(filter_instance: Filter) -> ModelField | None:
     model_field = _bound_model_field(filter_instance)
     column = None if model_field is None else _compared_value_column(filter_instance, model_field)
     return column if isinstance(column, models.IntegerField) else None
+
+
+def _django_prepares(lookup: type[models.lookups.Lookup] | None) -> bool:
+    """Whether ``lookup`` is one of Django's own and prepares its value through its field.
+
+    Django's ``Lookup.prepare_rhs`` (``IExact``, the text patterns, ``Regex`` and
+    ``IsNull`` leave it false and never convert the value), on a class Django itself
+    defines (``utils/truth.py::module``): only Django's own comparisons read no more of a
+    number than which side of the column's range it lies on, so a project lookup (one a
+    ``register_lookup`` adds, ``prepare_rhs`` true by default) receives the value its form
+    cleaned, as a ``method=`` filter does.
+    """
+    return (
+        lookup is not None
+        and lookup.prepare_rhs
+        and truth.module(lookup).partition(".")[0] == "django"
+    )
+
+
+def _integer_compared_column(filter_instance: Filter) -> ModelField | None:
+    """Return the integer column whose ``int()`` each number a bound filter compares runs, else ``None``.
+
+    The column a value is cleaned as (``_column_form_field``): the field each value is a
+    value of (``_bound_value_field``: the column, or an integer transform's output such as
+    ``year``'s or ``len``'s), a relation's the target column it compares on
+    (``_compared_value_column``), an ``ArrayField``'s its innermost element column
+    (``utils/_array_field.py::array_leaf_field``), where the lookup the filter resolves is
+    Django's own and prepares its value through that field (``_django_prepares``).
+    ``None`` where it does not (``iexact``, a text pattern, ``regex``, ``isnull``: Django
+    hands the value on as it is; a project lookup, which owns what its value means),
+    where no walk resolved one, and
+    where that is no ``IntegerField`` or no one column (a filter bound to no
+    ``FilterSet``, a path naming no field).
+    """
+    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
+    operand = _filterset_lookup_operand(parent, filter_instance)
+    if operand.field is None or not _django_prepares(operand.lookup):
+        return None
+    column = _compared_value_column(filter_instance, operand.field)
+    if column is None:
+        return None
+    leaf, _depth = array_leaf_field(column)
+    return leaf if isinstance(leaf, models.IntegerField) else None
+
+
+def _held_column_value(filter_instance: Filter, qs: models.QuerySet[_M], value: object) -> object:
+    """Return ``value`` held to its integer column's range on the database ``qs`` runs on.
+
+    Each ``Decimal`` past the range of the integer column whose ``int()`` the filter's
+    lookup runs (``_integer_compared_column``) becomes the integer one past the same end
+    (``utils/errors.py::held_past_integer_range``), so the package's own filter classes
+    never hand Django a decimal whose ``int()`` takes seconds, under any django-filter
+    ``FilterSet`` parent; ``value`` as it is for any other column.
+    """
+    column = _integer_compared_column(filter_instance)
+    if column is None:
+        return value
+    return held_past_integer_range(connections[qs.db], column, value)
 
 
 def _identifying_members(
@@ -1440,7 +1510,10 @@ class ListFilter(_ElementCleanedFilter):
     Over an integer column, or a relation compared on one, an ``in`` drops each element
     outside the column's integer range on the queryset's database: it can identify no row,
     and bound raw it would overflow the backend. A fractional element names no row and is
-    dropped too, never truncated to an integer. A list whose every element drops matches
+    dropped too, never truncated to an integer. A decimal element past that range, or past
+    the range of an integer transform's output the filter compares, is held to the integer
+    one past the same end before it is read (``_held_column_value``), so it is dropped or
+    compared without its ``int()`` running. A list whose every element drops matches
     nothing (every row when excluding). The column's own validators are not applied, so an
     element they would refuse still matches a row that holds it. Raw form data
     (``DjangoFilterBackend``, a ``QueryDict``) reads as the generated ``in`` reads it
@@ -1480,6 +1553,7 @@ class ListFilter(_ElementCleanedFilter):
         )
         if len(value) == 0:
             return _match_none_queryset(self, qs)
+        value = require(_held_column_value(self, qs, value), is_list)
         column = _integer_in_column(self)
         if column is not None:
             kept = _identifying_members(column, value, qs.db)
@@ -1560,9 +1634,11 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
       queryset's database (`_identifying_members`) and one that database cannot bind or
       outside the column's integer range there is dropped, so it never reaches the backend
       as a raw `OverflowError`. A fractional member (raw form data cleans `"1.5"` to a
-      `Decimal`) names no row and is dropped, never truncated to an integer. The column's
-      own validators are not run, so a member they would refuse still matches a row that
-      holds it, as `exact` matches it.
+      `Decimal`) names no row and is dropped, never truncated to an integer. A decimal
+      member past the range reaches here already held by the filter set to the integer
+      one past the same end (`filters/sets.py::_held_integer_value`), so it drops without
+      its `int()` ever running. The column's own validators are not run, so a member they
+      would refuse still matches a row that holds it, as `exact` matches it.
     - **Empty-aware match-nothing**: a NON-empty input whose members ALL
       drop - every value is out of range and can identify no row - matches NOTHING,
       so it short-circuits to `qs.none()` rather than degrading to django-filter's
@@ -1641,7 +1717,10 @@ class IntegerRangeFilter(BaseRangeFilter, NumberFilter):
     (`NOT (col >= start AND col <= end)`), while an out-of-range bound simply widens
     (a below-min lower / above-max upper imposes no constraint) or empties the match
     (an above-max lower / below-min upper can identify no row) - the same outcome a raw
-    ``BETWEEN`` would express if the backend could bind the value.
+    ``BETWEEN`` would express if the backend could bind the value. A decimal bound past the
+    range reaches here already held by the filter set to the integer one past the same end
+    (``filters/sets.py::_held_integer_value``), which the lookups read as the decimal
+    without converting it.
 
     A lookup carrying a transform (a generated ``<column>__year__range``, ``iso_year``,
     ``month``, an ``ArrayField``'s ``len``) applies the pair to the transform's output

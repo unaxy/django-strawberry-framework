@@ -61,6 +61,11 @@ write flavors):
   no range for that type); shared with the filter bind ask
   (``filters/sets.py::_unbindable_predicate``) and the identity decode
   (``utils/querysets.py::coerce_field_value_or_none``);
+- ``integer_past_range`` / ``held_past_integer_range`` - the integer one past the end of
+  a column's range that a decimal lies past, read by comparing the decimal with the
+  range's ends, never by converting it; held by the filter set to every value a shipped
+  filter's lookup prepares through an integer field (``filters/sets.py::_held_integer_value``)
+  and by the package's own filter classes (``filters/base.py::_held_column_value``);
 - ``null_field_error`` / ``empty_validation_error`` - the two shared leaves
   for an explicit null on a non-nullable column (the column's own message) and a
   validation failure carrying no details (one message + code pair);
@@ -79,7 +84,7 @@ from __future__ import annotations
 
 import datetime
 import zoneinfo
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import TYPE_CHECKING, NamedTuple
 
 import strawberry
@@ -144,6 +149,8 @@ __all__ = [
     "datetime_django_binds",
     "empty_validation_error",
     "field_error",
+    "held_past_integer_range",
+    "integer_past_range",
     "integrity_error_field_errors",
     "join_error_path",
     "model_field_error_names",
@@ -1154,17 +1161,19 @@ def datetime_django_binds(value: datetime.date, *, use_tz: bool) -> datetime.dat
     return stamp
 
 
-def binds_integer(connection: BaseDatabaseWrapper, field: object, number: int) -> bool:
-    """Whether ``connection`` binds the integer ``number`` as a value of ``field``.
+def _integer_range(
+    connection: BaseDatabaseWrapper,
+    field: object,
+) -> tuple[int | None, int | None] | None:
+    """Return the range ``connection`` stores for ``field``'s internal type, ``None`` where it states none.
 
-    ``number`` is held to the range the backend stores for ``field``'s internal type
-    (``DatabaseOperations.integer_field_range``, the range Django's integer comparison
-    lookups test a bound against before binding it): ``IntegerField``'s 32 bits on
+    ``DatabaseOperations.integer_field_range``, the range Django's integer comparison
+    lookups test a bound against before binding it: ``IntegerField``'s 32 bits on
     PostgreSQL, 64 bits for every integer type on SQLite. A field that is no
     ``IntegerField`` yet binds an integer, as a ``DurationField`` binds its microsecond
     count on a backend without a native interval, is held to ``BigIntegerField``'s range.
     An internal type the backend states no range for (an ``IntegerField`` subclass naming
-    its own, absent from ``DatabaseOperations.integer_field_ranges``) holds no limit: the
+    its own, absent from ``DatabaseOperations.integer_field_ranges``) answers ``None``: the
     lookup raises ``KeyError`` there, and Django holds an ``in`` member or a ``range``
     bound to no range for it either.
     """
@@ -1172,10 +1181,77 @@ def binds_integer(connection: BaseDatabaseWrapper, field: object, number: int) -
         field.get_internal_type() if isinstance(field, models.IntegerField) else "BigIntegerField"
     )
     try:
-        bounds = connection.ops.integer_field_range(internal_type)
+        return connection.ops.integer_field_range(internal_type)
     except KeyError:
-        return True
-    return _within_integer_range(number, bounds)
+        return None
+
+
+def binds_integer(connection: BaseDatabaseWrapper, field: object, number: int) -> bool:
+    """Whether ``connection`` binds the integer ``number`` as a value of ``field``.
+
+    ``number`` is held to the range the backend stores for ``field``'s internal type
+    (``_integer_range``); a type it states no range for holds no limit.
+    """
+    bounds = _integer_range(connection, field)
+    return bounds is None or _within_integer_range(number, bounds)
+
+
+def integer_past_range(
+    connection: BaseDatabaseWrapper,
+    field: object,
+    number: Decimal,
+) -> int | None:
+    """Return the integer one past the end of ``field``'s range that ``number`` lies past, else ``None``.
+
+    The range is the one ``binds_integer`` holds an integer to on ``connection``
+    (``_integer_range``). ``number`` lies past an end when its whole part (truncated toward
+    zero, as ``int()`` truncates it) does, read by ``Decimal`` arithmetic and comparison and
+    never by converting it to an integer: django-filter's ``NumberFilter`` cleans form text
+    through a ``forms.DecimalField`` capped only from above (at ``1e50``), so
+    ``"-1e1000000"`` cleans to ``Decimal("-1E+1000000")``, whose conversion
+    (``IntegerField.get_prep_value`` / ``to_python``, ``int(value)``) takes time quadratic
+    in its exponent: seconds at a million, unbounded past it. The integer returned lies
+    past the same end as that whole part, so every verdict that reads only which side of
+    the range the converted value lies on answers for it as for ``number``: Django's
+    range-aware integer comparison (``IntegerFieldOverflow``: matching nothing or
+    everything), an ``in`` member identifying no row
+    (``utils/querysets.py::coerce_field_value_or_none``) and a bind the database refuses
+    (``binds_integer``). ``None`` for a ``number`` whose whole part lies inside the range
+    (a fraction short of one past an end keeps its truncated value's verdict), a
+    non-finite one, and a field whose internal type the backend states no range for.
+    """
+    bounds = _integer_range(connection, field)
+    if bounds is None or not number.is_finite():
+        return None
+    low, high = bounds
+    whole = number.to_integral_value(rounding=ROUND_DOWN)
+    if low is not None and whole < low:
+        return low - 1
+    if high is not None and whole > high:
+        return high + 1
+    return None
+
+
+def held_past_integer_range(
+    connection: BaseDatabaseWrapper,
+    field: object,
+    value: object,
+) -> object:
+    """Return ``value`` with each ``Decimal`` past ``field``'s range replaced by ``integer_past_range``'s.
+
+    Read in a scalar and at any depth of a list or tuple (an ``in`` member, a ``range``
+    bound, an ``ArrayField`` element), each decimal compared with the range's ends, never
+    converted. A value, list or tuple holding no such decimal is returned as it is.
+    """
+    if isinstance(value, Decimal):
+        past = integer_past_range(connection, field, value)
+        return value if past is None else past
+    if not is_list_or_tuple(value):
+        return value
+    items = [held_past_integer_range(connection, field, item) for item in value]
+    if all(new is old for new, old in zip(items, value, strict=True)):
+        return value
+    return items if is_list(value) else tuple(items)
 
 
 def _within_integer_range(number: int, bounds: tuple[int | None, int | None]) -> bool:

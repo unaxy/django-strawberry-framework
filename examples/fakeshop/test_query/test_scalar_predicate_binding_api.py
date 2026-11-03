@@ -4,16 +4,20 @@ Consumer-declared filters run through public apply_sync over HTTP, including mod
 whose duration column is not an output field and whose primary key is a datetime.
 The ordinary JSON argument carries form-compatible values; each filter's own form
 field, Django expression and executing database retain their upstream behavior.
+A typed ``Decimal`` a declared ``NumberFilter`` publishes over an integer annotation or a
+column past a ``FilteredRelation`` alias answers from the end of the column's range it
+lies past without being converted.
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from decimal import Decimal
 from functools import wraps
-from typing import NamedTuple, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import django_filters
 import pytest
@@ -23,7 +27,7 @@ from apps.scalars import models as scalar_models
 from django.db import connection
 from django.db import models as django_models
 from django.db.backends.base.base import BaseDatabaseWrapper
-from django.db.models import QuerySet, Transform
+from django.db.models import Count, F, FilteredRelation, QuerySet, Transform
 from django.db.models.expressions import Combinable
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
@@ -51,10 +55,21 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
+from django_strawberry_framework.filters import (
+    FilterInput,
+    FilterSet,
+    ListFilter,
+    RangeFilter,
+    RelatedFilter,
+)
+from django_strawberry_framework.filters.base import _lookup_operand, _model_lookup_operand
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.views import DjangoGraphQLView
+from tests._cleaned_filter_sets import cleaned_specimen
 from tests._idioms import saved_pk
+
+if TYPE_CHECKING:
+    from django.db.models.sql.compiler import SQLCompiler, _AsSqlType
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _M = TypeVar("_M", bound=django_models.Model)
@@ -532,6 +547,314 @@ def test_a_queryset_annotations_constant_does_not_refuse_the_filters_year(
     else:
         assert payload == _expected(labels), payload
         assert len(_root_sql(sqls, scalar_models.ScalarSpecimen)) == 1, sqls
+
+
+class _QuerysetIntegerPathFilter(FilterSet):
+    annotated_at_least = django_filters.NumberFilter(field_name="n", lookup_expr="gte")
+    annotated_below = django_filters.NumberFilter(field_name="n", lookup_expr="lt")
+    annotated_among = ListFilter(field_name="n", lookup_expr="in")
+    children_at_least = django_filters.NumberFilter(field_name="kids", lookup_expr="gte")
+    parent_is = django_filters.NumberFilter(field_name="par", lookup_expr="exact")
+    annotated_matching = django_filters.NumberFilter(field_name="n", lookup_expr="regex")
+    parent_big_at_least = django_filters.NumberFilter(
+        field_name="par__signed_big",
+        lookup_expr="gte",
+    )
+    parent_big_below = django_filters.NumberFilter(field_name="par__signed_big", lookup_expr="lt")
+    annotated_year_after = django_filters.NumberFilter(field_name="d", lookup_expr="year__gt")
+    parent_year_after = django_filters.NumberFilter(
+        field_name="par__occurred_on",
+        lookup_expr="year__gt",
+    )
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+
+def _typed_queryset_path_holder() -> DjangoSchema:
+    class QuerysetPathOutput(DjangoType):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = ("label",)
+            filterset_class = _QuerysetIntegerPathFilter
+
+    @strawberry.type
+    class Query:
+        def _rows(
+            self,
+            info: Info[object, object],
+            filter: FilterInput[_QuerysetIntegerPathFilter],  # noqa: A002
+        ) -> QuerySet[scalar_models.ScalarSpecimen]:
+            queryset = (
+                scalar_models.ScalarSpecimen.objects.annotate(
+                    n=F("signed_big"),
+                    d=F("occurred_on"),
+                    kids=Count("children"),
+                )
+                .alias(par=FilteredRelation("parent"))
+                .order_by("pk")
+            )
+            return _QuerysetIntegerPathFilter.apply_sync(filter, queryset, info)
+
+        rows: QuerySet[scalar_models.ScalarSpecimen] = strawberry.field(
+            resolver=_rows,
+            graphql_type=StrawberryList(QuerysetPathOutput),
+        )
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config(), error_policy={"enabled": False})
+
+
+def _post_typed_queryset_path(
+    document: str,
+    variables: JSONObject,
+    schema: DjangoSchema | None = None,
+) -> JSONObject:
+    if schema is None:
+        kept = cleaned_specimen("kept", kept=True)
+        child = cleaned_specimen("child", kept=False)
+        child.parent = kept
+        child.save(update_fields=["parent"])
+    _CURRENT["schema"] = schema or _typed_queryset_path_holder()
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            return graphql_payload(
+                document,
+                variables=variables,
+                url="/graphql-scalar-predicates/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("criteria", "labels", "statements"),
+    [
+        pytest.param(
+            "annotatedAtLeast: { gte: $number }",
+            ("kept", "child"),
+            1,
+            id="annotation-gte",
+        ),
+        pytest.param("annotatedBelow: { lt: $number }", (), 0, id="annotation-lt"),
+        pytest.param(
+            "childrenAtLeast: { gte: $number }",
+            ("kept", "child"),
+            1,
+            id="aggregate-annotation-gte",
+        ),
+        pytest.param(
+            "parentBigAtLeast: { gte: $number }",
+            ("child",),
+            1,
+            id="filtered-relation-gte",
+        ),
+        pytest.param("parentBigBelow: { lt: $number }", (), 0, id="filtered-relation-lt"),
+    ],
+)
+def test_a_typed_decimal_past_a_queryset_integer_path_answers_without_being_converted(
+    criteria: str,
+    labels: tuple[str, ...],
+    statements: int,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A path only the queryset resolves is held to its integer column's range on the wire.
+
+    ``n`` annotates ``signed_big``, ``kids`` counts ``children`` (an output field no model
+    owns) and ``par`` aliases ``parent`` through a ``FilteredRelation``; the declared
+    ``NumberFilter`` over each publishes ``Decimal``,
+    which carries ``-1e999999999999999999`` to a form capped only from above. The
+    comparison reads which end of the 64-bit range it lies past, never its ``int()``.
+    """
+    sqls = record_compiled_sql()
+    payload = _post_typed_queryset_path(
+        "query($number: Decimal!) { rows(filter: { %s }) { label } }" % criteria,
+        {"number": "-1e999999999999999999"},
+    )
+    assert payload == _expected(labels), payload
+    assert len(_root_sql(sqls, scalar_models.ScalarSpecimen)) == statements, sqls
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("criteria", "key"),
+    [
+        pytest.param(
+            "annotatedYearAfter: { yearGt: $number }",
+            "annotated_year_after",
+            id="annotation",
+        ),
+        pytest.param(
+            "parentYearAfter: { yearGt: $number }",
+            "parent_year_after",
+            id="filtered-relation",
+        ),
+    ],
+)
+def test_a_typed_decimal_past_a_queryset_paths_year_is_refused_without_being_converted(
+    criteria: str,
+    key: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A ``year`` of a date annotation or of a column past a ``FilteredRelation`` alias is held.
+
+    The transform's ``IntegerField`` output holds ``-1e999999999999999999`` to one past
+    the end of its range, which the database cannot bind as a year: ``FILTER_INVALID``
+    keyed to the form field, as the same ``year__gt`` over the model's own column answers.
+    """
+    sqls = record_compiled_sql()
+    payload = _post_typed_queryset_path(
+        "query($number: Decimal!) { rows(filter: { %s }) { label } }" % criteria,
+        {"number": "-1e999999999999999999"},
+    )
+    _refusal(payload, key)
+    assert _root_sql(sqls, scalar_models.ScalarSpecimen) == [], sqls
+
+
+@pytest.mark.django_db
+def test_a_typed_decimal_past_a_filtered_relation_key_answers_as_one_past_the_range() -> None:
+    """``par`` compared as the relation is held to its target key's range, never converted.
+
+    The ``FilteredRelation`` alias's ``exact`` prepares a value through the target's
+    primary key, so ``-1e999999999999999999`` answers as ``-9223372036854775809``, the
+    integer one past that key's 64-bit range, does.
+    """
+    document = (
+        "query($number: Decimal!) { rows(filter: { parentIs: { exact: $number } }) { label } }"
+    )
+    kept = cleaned_specimen("kept", kept=True)
+    cleaned_specimen("child", kept=False).parent = kept
+    schema = _typed_queryset_path_holder()
+    past = _post_typed_queryset_path(document, {"number": "-1e999999999999999999"}, schema)
+    assert "errors" in past, past
+    one_past = _post_typed_queryset_path(document, {"number": str(-(2**63) - 1)}, schema)
+    assert past == one_past, past
+
+
+@pytest.mark.django_db
+def test_a_pattern_lookup_over_an_integer_annotation_compares_the_decimal_as_sent() -> None:
+    """A ``regex`` over ``n`` never converts its value, so nothing is held: parity with the parent.
+
+    Django's ``Regex`` does not prepare its value through the annotation's output
+    (``Lookup.prepare_rhs`` false), so ``1e40`` is matched as its own spelling and matches
+    no row; held to ``2**63`` it would be bound past what SQLite binds.
+    """
+    payload = _post_typed_queryset_path(
+        "query($number: Decimal!) { rows(filter: { annotatedMatching: { regex: $number } }) { label } }",
+        {"number": "1e40"},
+    )
+    assert payload == _expected(()), payload
+
+
+class _DivisibleBy(django_models.Lookup):
+    """A project lookup on integer columns, as Django's custom-lookup guide writes one."""
+
+    lookup_name = "divisible_by"
+
+    @override
+    def as_sql(self, compiler: SQLCompiler, connection: BaseDatabaseWrapper) -> _AsSqlType:
+        lhs, lhs_params = self.process_lhs(compiler, connection)
+        rhs, rhs_params = self.process_rhs(compiler, connection)
+        return f"{lhs} %% {rhs} = 0", (*lhs_params, *rhs_params)
+
+
+@contextlib.contextmanager
+def _registered_lookup(
+    field_class: type[django_models.Field[object, object]],
+    lookup: type[django_models.Lookup],
+) -> Generator[None]:
+    """Register ``lookup`` on ``field_class`` while open, then drop the operands it resolved.
+
+    ``filters/base.py`` caches each column's resolved lookup operand for the process; an
+    entry written under the registration would outlive it into the next test on the
+    worker.
+    """
+    try:
+        with register_lookup(field_class, lookup):
+            yield
+    finally:
+        _lookup_operand.cache_clear()
+        _model_lookup_operand.cache_clear()
+
+
+class _DivisibleAnnotationFilter(FilterSet):
+    divisible = django_filters.NumberFilter(field_name="n", lookup_expr="divisible_by")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+
+@pytest.mark.django_db
+def test_a_project_lookup_over_an_integer_annotation_receives_the_number_as_sent() -> None:
+    """A ``register_lookup`` lookup over a path only the queryset resolves is never held.
+
+    ``divisible_by`` prepares ``-5`` through ``n`` (``unsigned_big``) but reads more than
+    which side of the range ``-5`` lies on: held to ``-1``, every row would divide by it.
+    It answers the rows holding 10, 0 and 15, as Django prepares ``-5``.
+    """
+    for label, stored in (
+        ("a", 10),
+        ("b", 7),
+        ("c", 0),
+        ("d", 15),
+    ):
+        row = cleaned_specimen(label, kept=False)
+        row.unsigned_big = stored
+        row.save(update_fields=["unsigned_big"])
+    with _registered_lookup(django_models.IntegerField, _DivisibleBy):
+
+        class DivisibleOutput(DjangoType):
+            class Meta:
+                model = scalar_models.ScalarSpecimen
+                fields = ("label",)
+                filterset_class = _DivisibleAnnotationFilter
+
+        @strawberry.type
+        class Query:
+            def _rows(
+                self,
+                info: Info[object, object],
+                filter: FilterInput[_DivisibleAnnotationFilter],  # noqa: A002
+            ) -> QuerySet[scalar_models.ScalarSpecimen]:
+                queryset = scalar_models.ScalarSpecimen.objects.annotate(
+                    n=F("unsigned_big"),
+                ).order_by("label")
+                return _DivisibleAnnotationFilter.apply_sync(filter, queryset, info)
+
+            rows: QuerySet[scalar_models.ScalarSpecimen] = strawberry.field(
+                resolver=_rows,
+                graphql_type=StrawberryList(DivisibleOutput),
+            )
+
+        finalize_django_types()
+        payload = _post_typed_queryset_path(
+            "query($number: Decimal!) { rows(filter: { divisible: { divisibleBy: $number } }) { label } }",
+            {"number": "-5"},
+            DjangoSchema(query=Query, config=strawberry_config()),
+        )
+    assert payload == _expected(("a", "c", "d")), payload
+
+
+@pytest.mark.django_db
+def test_a_declared_list_over_an_integer_annotation_compares_its_members_as_sent(
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A ``ListFilter`` over ``n``, a path no model column names, publishes text members.
+
+    No integer column of the model's is the list's, so nothing of the filter's own is
+    held, and each member compares as Django prepares it for the annotation's output: a
+    row that passes at the parent commit too, pinning the list filter's unheld path.
+    """
+    sqls = record_compiled_sql()
+    payload = _post_typed_queryset_path(
+        '{ rows(filter: { annotatedAmong: { in: ["7"] } }) { label } }',
+        {},
+    )
+    assert payload == _expected(("kept",)), payload
+    assert len(_root_sql(sqls, scalar_models.ScalarSpecimen)) == 1, sqls
 
 
 _YEAR_INTEGER_REFUSALS: dict[str, tuple[JSONObject, str]] = {
