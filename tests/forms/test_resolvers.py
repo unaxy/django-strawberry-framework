@@ -30,7 +30,10 @@ client-assigned key; fields whose widget reads several form-data keys
 (PostgreSQL's ``SplitArrayField``, a consumer ``MultiValueField``); and an update
 omitting a column through consumer code fakeshop's forms do not declare (a lossy
 ``DateField`` subclass, a ``disabled`` field, a hook's bound value or fresh copy of the
-row, a ``clean_<field>``, a form or model ``clean()``, an ``HStoreField``-shaped column).
+row, a ``clean_<field>``, a form or model ``clean()``, an ``HStoreField``-shaped column),
+and a decimal past PostgreSQL ``numeric``'s format in a column with no ``max_digits``
+(which fakeshop cannot declare on the Django floor), written through an alias that reads
+as PostgreSQL.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 from urllib.parse import urlencode
 
+import django
 import pytest
 import strawberry
 from apps.glossary import models as glossary_models
@@ -107,6 +111,7 @@ from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import TEST_ASYNC_RECOURSE, is_object_dict, is_object_list, saved_pk
 from tests._info import make_info, unread_info
 from tests._postgres_fields import FakeArrayField, FakeSplitArrayWidget, patch_array_field
+from tests._postgresql_stand_in import numeric_refusing_postgresql
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -7154,3 +7159,205 @@ def test_update_omitting_a_column_a_rebound_instance_holds_writes_its_value() ->
         rebound={"kind": _Kind.B},
     )
     assert row == {"title": "New", "kind": "b"}
+
+
+class FormUnboundedAmount(models.Model):
+    """Decimal columns a ``ModelForm`` can carry past PostgreSQL ``numeric``'s format.
+
+    ``amount`` and the nullable ``spare`` have no ``max_digits`` (Django's unconstrained
+    ``numeric``, from 6.1), so neither their ``forms.DecimalField`` nor their
+    ``DecimalValidator`` holds any digits; ``priced`` is bounded, and its validator counts
+    no digit for a zero's positive exponent.
+    """
+
+    amount: models.DecimalField[str | float | decimal.Decimal | Combinable, decimal.Decimal] = (
+        models.DecimalField(max_digits=None, decimal_places=None)
+    )
+    spare: models.DecimalField[
+        str | float | decimal.Decimal | Combinable | None,
+        decimal.Decimal | None,
+    ] = models.DecimalField(max_digits=None, decimal_places=None, null=True, blank=True)
+    priced: models.DecimalField[
+        str | float | decimal.Decimal | Combinable | None,
+        decimal.Decimal | None,
+    ] = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "forms_unbounded_amount"
+
+
+class UnboundedAmountForm(forms.ModelForm[FormUnboundedAmount]):
+    """The ``ModelForm`` Django builds for every column."""
+
+    class Meta:
+        model = FormUnboundedAmount
+        fields = ("amount", "spare", "priced")
+
+
+class DeclaredUnboundedAmountForm(forms.ModelForm[FormUnboundedAmount]):
+    """A ``ModelForm`` declaring a ``forms.DecimalField`` without ``max_digits`` for each column."""
+
+    amount = forms.DecimalField(max_digits=None, decimal_places=None)
+    spare = forms.DecimalField(max_digits=None, decimal_places=None, required=False)
+    priced = forms.DecimalField(max_digits=None, decimal_places=None, required=False)
+
+    class Meta:
+        model = FormUnboundedAmount
+        fields = ("amount", "spare", "priced")
+
+
+#: A column of ``FormUnboundedAmount`` and a spelling its form field and validator pass
+#: that ``numeric`` refuses: past the integer digits, the fraction digits, or a zero's
+#: written exponent.
+_PAST_NUMERIC = [
+    pytest.param("amount", "1e1000000", id="huge-exponent"),
+    pytest.param("amount", "-1e1000000", id="negative-huge-exponent"),
+    pytest.param("amount", "1e-1000000", id="tiny-exponent"),
+    pytest.param("amount", "1E+131072", id="131073-integer-digits"),
+    pytest.param("amount", "0E-16384", id="zero-16384-fraction-digits"),
+    pytest.param("spare", "1e1000000", id="nullable-huge-exponent"),
+    pytest.param("priced", "0E+1073741823", id="bounded-zero-at-exponent-limit"),
+]
+
+_AMOUNT_FORMS = [
+    pytest.param(UnboundedAmountForm, id="auto"),
+    pytest.param(DeclaredUnboundedAmountForm, id="declared"),
+]
+
+_REQUIRES_UNBOUNDED_DECIMAL = pytest.mark.skipif(
+    django.VERSION < (6, 1),
+    reason="a DecimalField without max_digits is read back from Django 6.1",
+)
+
+
+def _write_amount_via_form(
+    amount_form: type[forms.ModelForm[FormUnboundedAmount]],
+    operation: str,
+    data: dict[str, object],
+    pk: object = None,
+) -> object:
+    """Run ``amount_form``'s ``operation`` with ``data``; its payload."""
+
+    class FormUnboundedAmountT(DjangoType):
+        class Meta:
+            model = FormUnboundedAmount
+            fields = (
+                "id",
+                "amount",
+                "spare",
+                "priced",
+            )
+            primary = True
+
+    class CreateAmount(DjangoModelFormMutation):
+        class Meta:
+            form_class = amount_form
+            operation = "create"
+            permission_classes = [_AllowAll]
+
+    class UpdateAmount(DjangoModelFormMutation):
+        class Meta:
+            form_class = amount_form
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        create_amount = DjangoMutationField(CreateAmount)
+        update_amount = DjangoMutationField(UpdateAmount)
+
+    finalize_django_types()
+    del FormUnboundedAmountT
+    selection = "{ result { amount } errors { field messages codes } }"
+    if operation == "create":
+        document = (
+            f"mutation($d: {amount_form.__name__}Input!) {{ createAmount(data: $d) {selection} }}"
+        )
+        variables: dict[str, object] = {"d": data}
+    else:
+        document = (
+            f"mutation($id: ID!, $d: {amount_form.__name__}PartialInput!) "
+            f"{{ updateAmount(id: $id, data: $d) {selection} }}"
+        )
+        variables = {"id": str(pk), "d": data}
+    result = _schema(Mutation).execute_sync(document, variable_values=variables)
+    assert result.errors is None, result.errors
+    assert is_object_dict(result.data), result.data
+    return result.data[f"{operation}Amount"]
+
+
+def _stored_form_amounts() -> list[tuple[object, ...]]:
+    """Every ``FormUnboundedAmount`` row's three decimals."""
+    return list(
+        FormUnboundedAmount.objects.order_by("pk").values_list("amount", "spare", "priced"),
+    )
+
+
+@_REQUIRES_UNBOUNDED_DECIMAL
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("form_class", _AMOUNT_FORMS)
+@pytest.mark.parametrize(("column", "wire"), _PAST_NUMERIC)
+def test_modelform_write_refuses_a_decimal_past_postgresql_numeric(
+    operation: str,
+    form_class: type[forms.ModelForm[FormUnboundedAmount]],
+    column: str,
+    wire: str,
+) -> None:
+    """A decimal the valid form holds but PostgreSQL cannot bind is the field's error.
+
+    ``is_valid()`` passes it and PostgreSQL's ``numeric_in`` refuses it at the save, a
+    ``DataError`` no save mapper owns. The form flavor answers the field's ``invalid``
+    error before the save instead, with nothing written.
+    """
+    with numeric_refusing_postgresql(FormUnboundedAmount):
+        pk = (
+            saved_pk(FormUnboundedAmount.objects.create(amount=decimal.Decimal(7)))
+            if operation == "update"
+            else None
+        )
+        before = _stored_form_amounts()
+        payload = _write_amount_via_form(form_class, operation, {"amount": "7", column: wire}, pk)
+
+        assert payload == {
+            "result": None,
+            "errors": [
+                {
+                    "field": column,
+                    "messages": ["Enter a value the database can represent."],
+                    "codes": ["invalid"],
+                },
+            ],
+        }
+        assert _stored_form_amounts() == before
+
+
+@_REQUIRES_UNBOUNDED_DECIMAL
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("form_class", _AMOUNT_FORMS)
+@pytest.mark.parametrize("column", ["amount", "spare", "priced"])
+def test_modelform_write_stores_a_decimal_within_postgresql_numeric(
+    operation: str,
+    form_class: type[forms.ModelForm[FormUnboundedAmount]],
+    column: str,
+) -> None:
+    """A decimal PostgreSQL's ``numeric`` holds is written through the same stand-in."""
+    with numeric_refusing_postgresql(FormUnboundedAmount):
+        pk = (
+            saved_pk(FormUnboundedAmount.objects.create(amount=decimal.Decimal(7)))
+            if operation == "update"
+            else None
+        )
+        payload = _write_amount_via_form(
+            form_class,
+            operation,
+            {"amount": "7", column: "12.5"},
+            pk,
+        )
+
+        assert is_object_dict(payload), payload
+        assert payload["errors"] == []
+        assert read_attr(FormUnboundedAmount.objects.get(), column) == decimal.Decimal("12.5")

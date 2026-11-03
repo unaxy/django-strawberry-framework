@@ -831,7 +831,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_scalar_predicate_binding_api.py  # Native scalar predicates preserve Django's transformed, duration and backend binding semantics.
 ├── test_scalars_api.py           # Live GraphQL HTTP tests for scalar wire formats, filtering, relations, and optimizer behavior.
 ├── test_scalars_filter_api.py    # Live GraphQL HTTP tests for scalar filtering, ordering, and related-queryset behavior.
-├── test_scalars_mutation_api.py  # Live GraphQL HTTP tests for model input normalization and temporal database storability.
+├── test_scalars_mutation_api.py  # Live GraphQL HTTP tests for model input normalization and database storability.
 ├── test_schema_composition_api.py  # Live ``/graphql/`` proof that fakeshop's composed project schema publishes every app's surface.
 ├── test_serializer_runtime_api.py  # Live HTTP serializer tests for save errors, runtime field ownership and post-save conflicts.
 ├── test_single_parent_fastpath_api.py  # Live GraphQL HTTP tests for the single-parent windowed-prefetch fast path.

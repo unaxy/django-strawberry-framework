@@ -9,9 +9,13 @@ primitives (``build_error_key_map``, ``rekey_error_segment``,
 is ``examples/fakeshop/test_query/test_mutation_error_keys_api.py``.
 
 ``unstorable_temporal`` is pinned live per flavor on SQLite and PostgreSQL in
-``examples/fakeshop/test_query/test_scalars_mutation_api.py``; the rows here hold the
-lines no live SQLite request reaches: a stand-in alias whose backend stores aware
-datetimes itself (the PostgreSQL rule), an ``ArrayField`` column (a PostgreSQL-only
+``examples/fakeshop/test_query/test_scalars_mutation_api.py``, and ``unstorable_decimal``
+there on the bounded ``ScalarSpecimen.price`` and per flavor over a column with no
+``max_digits`` (which fakeshop cannot declare on the Django floor) in
+``tests/mutations/test_resolvers.py``, ``tests/forms/test_resolvers.py`` and
+``tests/rest_framework/test_resolvers.py``; the rows here hold the lines no live SQLite
+request reaches: a stand-in alias that reads as PostgreSQL (the rules for a stored
+instant and for ``numeric``'s format), an ``ArrayField`` column (a PostgreSQL-only
 column, stood in for by ``tests/_postgres_fields.py::FakeArrayField``), MySQL's own
 operations, a date a ``DateTimeField`` column holds (no fakeshop write flavor hands one
 over), and, on the Postgres tier, the real connection and ``ArrayField``.
@@ -35,6 +39,7 @@ from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.scalars import models as scalar_models
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator
 from django.db import DEFAULT_DB_ALIAS, DataError, connections, models, transaction
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.base.operations import BaseDatabaseOperations
@@ -80,10 +85,13 @@ from django_strawberry_framework.utils.errors import (
     rekey_error_segment,
     save_time_error_key_map,
     unbindable_temporal,
+    unstorable_decimal,
     unstorable_temporal,
+    unstorable_value,
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR, InputFieldSpec
+from django_strawberry_framework.utils.typing import object_result
 from tests._postgres_fields import FakeArrayField, patch_array_field, real_array_of
 from tests._postgresql_stand_in import (
     BINDING_MODES,
@@ -1587,6 +1595,153 @@ def test_refuses_numeric_format_reads_only_postgresql(raw: str, _refused: bool) 
             connections[alias],
             [Decimal(raw), [Decimal(raw)]],
         )
+
+
+#: A ``DecimalField`` with no ``max_digits`` (Django's unconstrained ``numeric``), one
+#: bounded column, and an ``ArrayField`` of the unconstrained one two levels deep.
+_UNBOUNDED_DECIMAL: models.Field[object, object] = models.DecimalField(
+    max_digits=None,
+    decimal_places=None,
+)
+_BOUNDED_DECIMAL: models.Field[object, object] = models.DecimalField(
+    max_digits=20,
+    decimal_places=4,
+)
+_NESTED_DECIMALS: models.Field[object, object] = FakeArrayField(
+    FakeArrayField(models.DecimalField(max_digits=None, decimal_places=None)),
+)
+
+
+class _CentsDecimalField(models.DecimalField[object, object]):
+    """A project ``DecimalField`` whose ``to_python`` rounds to cents: the value its save binds."""
+
+    @override
+    def to_python(self, value: object) -> object:
+        number = object_result(super().to_python, value)
+        return number.quantize(Decimal("0.01")) if isinstance(number, Decimal) else number
+
+
+#: A spelling ``numeric`` refuses that rounds to a cent ``numeric`` holds: past its
+#: fraction digits by its exponent, and by its written digits.
+_ROUNDED_TO_ZERO = [
+    pytest.param("1e-1000000", id="tiny-exponent"),
+    pytest.param("0." + "0" * 16383 + "5", id="16384-fraction-digits"),
+]
+
+
+@pytest.mark.parametrize("raw", _ROUNDED_TO_ZERO)
+def test_unstorable_decimal_holds_the_value_the_column_to_python_gives(raw: str) -> None:
+    """A decimal is read as the column's ``to_python`` gives it, the value the save binds.
+
+    A column rounding to cents binds ``0.00`` for a spelling ``numeric`` refuses as written,
+    so it stores; the same spelling in a plain column with no ``max_digits`` is refused.
+    """
+    cents = _CentsDecimalField(max_digits=None, decimal_places=None)
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        assert unstorable_decimal(cents, Decimal(raw), lambda: alias) is False
+        assert unstorable_decimal(_UNBOUNDED_DECIMAL, Decimal(raw), lambda: alias) is True
+
+
+def test_unstorable_decimal_converts_before_asking_the_column_validators() -> None:
+    """A non-finite decimal is ``to_python``'s ``ValidationError``, never reaching a validator.
+
+    ``Model.clean_fields`` converts before it validates, so a ``MaxValueValidator`` never
+    compares ``NaN`` (which would raise ``InvalidOperation``); the value answers ``False``
+    without resolving the alias.
+    """
+    capped: models.Field[object, object] = models.DecimalField(
+        max_digits=None,
+        decimal_places=None,
+        validators=[MaxValueValidator(100)],
+    )
+    assert unstorable_decimal(capped, Decimal("NaN"), _unresolvable_alias) is False
+
+
+@pytest.mark.parametrize(("raw", "refused"), _NUMERIC_SPELLINGS)
+def test_unstorable_decimal_holds_an_unbounded_column_to_numeric(
+    raw: str,
+    refused: bool,  # noqa: FBT001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A decimal for a column with no ``max_digits`` is held to ``numeric``'s format.
+
+    The column's own ``DecimalValidator(None, None)`` accepts every finite spelling, so
+    each one PostgreSQL refuses is refused here, alone and as an element of a nested
+    ``ArrayField`` beside a ``None``; ``unstorable_value`` answers the same.
+    """
+    patch_array_field(monkeypatch)
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        assert unstorable_decimal(_UNBOUNDED_DECIMAL, Decimal(raw), lambda: alias) is refused
+        assert unstorable_value(_UNBOUNDED_DECIMAL, Decimal(raw), lambda: alias) is refused
+        nested = [[None, Decimal(1)], [Decimal(raw)]]
+        assert unstorable_decimal(_NESTED_DECIMALS, nested, lambda: alias) is refused
+
+
+@pytest.mark.parametrize(
+    ("raw", "refused"),
+    [
+        pytest.param("0E+1073741823", True, id="zero-at-exponent-limit"),
+        pytest.param("-0E+1073741823", True, id="negative-zero-at-exponent-limit"),
+        pytest.param("0E+1073741822", False, id="zero-below-exponent-limit"),
+        pytest.param("1e1000000", False, id="validator-refuses-huge-exponent"),
+        pytest.param("1e-1000000", False, id="validator-refuses-tiny-exponent"),
+        pytest.param("0E-16384", False, id="validator-refuses-16384-fraction-digits"),
+        pytest.param("12.5", False, id="plain"),
+    ],
+)
+def test_unstorable_decimal_leaves_a_bounded_column_to_its_validator(
+    raw: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A bounded column's ``DecimalValidator`` answers what it refuses; a zero it passes is held.
+
+    ``DecimalValidator`` counts no digit for a zero's positive exponent, so a zero whose
+    written exponent ``numeric_in`` refuses passes it and is refused here; every other
+    spelling past ``numeric``'s format is past the column's digits, refused by the
+    validator ``full_clean`` and a ``ModelForm`` run, and not read here.
+    """
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        assert unstorable_decimal(_BOUNDED_DECIMAL, Decimal(raw), lambda: alias) is refused
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "1e1000000",
+        "1E+131072",
+        "0E-16384",
+        "0E+1073741823",
+    ],
+)
+def test_unstorable_decimal_reads_only_postgresql(raw: str) -> None:
+    """SQLite binds every spelling: it stores a decimal as its nearest double, refusing none."""
+    with _sqlite_alias(None) as alias:
+        assert not unstorable_decimal(_UNBOUNDED_DECIMAL, Decimal(raw), lambda: alias)
+        assert not unstorable_decimal(_BOUNDED_DECIMAL, Decimal(raw), lambda: alias)
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        pytest.param(_UNBOUNDED_DECIMAL, None, id="null"),
+        pytest.param(_UNBOUNDED_DECIMAL, Decimal("NaN"), id="not-finite"),
+        pytest.param(_NESTED_DECIMALS, [[None], []], id="array-without-a-decimal"),
+        pytest.param(models.FloatField[float, float](), Decimal("1e1000000"), id="float-column"),
+        pytest.param(_TEXT, "1e1000000", id="text-column"),
+    ],
+)
+def test_unstorable_decimal_asks_no_alias_without_a_decimal_its_column_validates(
+    column: models.Field[object, object],
+    value: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No decimal the column's validator accepts answers ``False`` before ``using`` is called."""
+    patch_array_field(monkeypatch)
+    assert unstorable_decimal(column, value, _unresolvable_alias) is False
+    assert unstorable_value(column, value, _unresolvable_alias) is False
 
 
 @pytest.mark.parametrize("mode", list(BINDING_MODES))

@@ -26,7 +26,8 @@ write flavors):
   form validation (``filters/sets.py::FilterSet._validate_form_or_raise``);
 - ``UNBINDABLE_TEMPORAL_MESSAGE`` - the message a temporal, duration or decimal value
   the database cannot bind answers, on a filter (``filters/sets.py::_unbindable_value_errors``,
-  which asks Django to build and compile the filter's own predicate) and on a write;
+  which asks Django to build and compile the filter's own predicate) and on a write
+  (``unstorable_value``);
 - ``unbindable_temporal`` - whether PostgreSQL refuses a datetime or time bound into a
   ``DateTimeField`` / ``TimeField`` column for its UTC offset (``refuses_utc_offset``),
   past the adapter Django's own ``Field.get_db_prep_value`` asks; the identity decode's
@@ -37,8 +38,8 @@ write flavors):
   each lookup of a filter's predicate binds for its right-hand side or a write's values;
 - ``refuses_numeric_format`` - PostgreSQL ``numeric``'s format: a decimal whose spelling
   needs more digits before or after the point than ``numeric`` stores, read over what
-  each lookup of a filter's predicate binds for its right-hand side and by the identity decode
-  (``utils/querysets.py::coerce_field_value_or_none``);
+  each lookup of a filter's predicate binds for its right-hand side, by the identity decode
+  (``utils/querysets.py::coerce_field_value_or_none``) and by a write (``unstorable_decimal``);
 - ``refuses_integer_range`` - an integer the backend cannot bind as an element of an
   integer ``ArrayField``: each integer a whole-array lookup binds for its right-hand
   side, list parameters read at any nesting depth, held to ``binds_integer`` for the
@@ -48,9 +49,13 @@ write flavors):
   of Django's own save-time preparation on that connection (``Field.get_db_prep_save``)
   and of the integer range it binds (``binds_integer``), or (PostgreSQL) a value whose
   UTC offset the server refuses or that it stores but cannot read back, or (psycopg 3)
-  an ``ArrayField`` list the driver cannot dump as a whole, applied by every write
-  flavor before the save (``utils/write_values.py::unstorable_temporal_error`` on the
-  model flavor);
+  an ``ArrayField`` list the driver cannot dump as a whole;
+- ``unstorable_decimal`` - the write-side answer for a ``DecimalField`` (or an
+  ``ArrayField`` of one): a decimal its own validators accept but
+  ``refuses_numeric_format`` refuses on the database a write runs on;
+- ``unstorable_value`` - the one write-side storability rule, ``unstorable_temporal`` or
+  ``unstorable_decimal``, applied by every write flavor before the save
+  (``utils/write_values.py::unstorable_value_error`` on the model flavor);
 - ``binds_integer`` - whether a backend binds an integer as a value of a column, held
   to the range it stores for the column's internal type (none where the backend states
   no range for that type); shared with the filter bind ask
@@ -151,8 +156,10 @@ __all__ = [
     "relation_field_error",
     "save_time_error_key_map",
     "unbindable_temporal",
+    "unstorable_decimal",
     "unstorable_temporal",
     "unstorable_text",
+    "unstorable_value",
     "validation_error_to_field_errors",
 ]
 
@@ -855,7 +862,8 @@ def refuses_numeric_format(connection: BaseDatabaseWrapper, values: Iterable[obj
     """Whether PostgreSQL refuses any decimal in ``values`` as past ``numeric``'s format.
 
     ``values`` are what a query binds on ``connection``: what a filter predicate's lookup
-    binds for its right-hand side, or a decimal an identity decode is about to bind.
+    binds for its right-hand side, a decimal an identity decode is about to bind, or one a
+    write is about to store (``unstorable_decimal``).
     psycopg sends a ``Decimal`` as its own spelling (``str``), and ``numeric_in`` parses it
     into ``numeric``'s format whatever the column's typmod: up to 131072 digits before the
     decimal point and up to 16383 after (PostgreSQL's documentation, "Numeric Types"),
@@ -988,9 +996,7 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     calling ``using`` or touching ``django.db.connections``.
     """
     column, depth = array_leaf_field(column)
-    values: list[object] = [value]
-    for _ in range(depth):
-        values = [element for item in values if is_list_or_tuple(item) for element in item]
+    values = _leaf_elements(value, depth)
     kinds = _converted_kinds(column)
     if kinds is None or not isinstance(column, models.Field):
         return False
@@ -1038,6 +1044,74 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
         and _session_wall_clock_overflows(answer, zone)
         for answer in asked
     )
+
+
+def unstorable_decimal(column: object, value: object, using: Callable[[], str]) -> bool:
+    """Return whether the database ``using()`` names cannot bind decimal ``value`` into ``column``.
+
+    The write-side answer for a ``DecimalField`` column, or an ``ArrayField`` of one at
+    any nesting depth: ``value`` is what a write flavor is about to store in ``column``,
+    after its own parse and validation. Each ``Decimal`` it holds is read as the column's
+    ``to_python`` gives it, the value the save binds (``get_prep_value``), and, once the
+    column's own validators accept that value as ``Model.clean_fields`` asks them
+    (``run_validators``: its ``DecimalValidator``, the column's ``validators=`` and a
+    subclass's ``default_validators``), held to ``refuses_numeric_format`` on that
+    connection; one they refuse is theirs to answer (``full_clean``, a ``ModelForm``'s
+    model validation). Django's own preparation answers nothing more:
+    ``DecimalValidator(None, None)`` (a column with no ``max_digits``) refuses only a value
+    that is not finite, a bounded one counts no digit for a zero's positive exponent, and
+    every backend's ``adapt_decimalfield_value`` passes the decimal through, so a spelling
+    PostgreSQL's ``numeric_in`` refuses would reach the bind. Any other column, and a value
+    holding no decimal the validators accept, answer ``False`` without calling ``using`` or
+    touching ``django.db.connections``.
+    """
+    column, depth = array_leaf_field(column)
+    if not isinstance(column, models.DecimalField):
+        return False
+    decimals = [
+        stored
+        for element in _leaf_elements(value, depth)
+        if isinstance(element, Decimal) and (stored := _validated(column, element)) is not None
+    ]
+    return bool(decimals) and refuses_numeric_format(connections[using()], decimals)
+
+
+def _leaf_elements(value: object, depth: int) -> list[object]:
+    """Return the innermost elements ``value`` holds for an ``ArrayField`` ``depth`` levels deep.
+
+    At depth 0 ``value`` itself is the one element; an item that is not a list or tuple
+    (a ``None`` element) holds nothing below its level.
+    """
+    values: list[object] = [value]
+    for _ in range(depth):
+        values = [element for item in values if is_list_or_tuple(item) for element in item]
+    return values
+
+
+def _validated(column: ConcreteField, number: Decimal) -> object:
+    """Return what ``column`` binds for ``number`` once its own validation accepts it, else ``None``.
+
+    ``column.to_python`` gives the value ``Model.clean_fields`` validates and the save
+    binds (a non-finite decimal is its ``ValidationError``); ``run_validators`` then asks
+    the column's validators of that value.
+    """
+    try:
+        stored = object_result(column.to_python, number)
+        column.run_validators(stored)
+    except ValidationError:
+        return None
+    return stored
+
+
+def unstorable_value(column: object, value: object, using: Callable[[], str]) -> bool:
+    """Return whether the database ``using()`` names cannot store ``value`` in ``column``.
+
+    The one write-side storability rule every write flavor asks before its save: a
+    temporal or duration value (``unstorable_temporal``) or a decimal
+    (``unstorable_decimal``) the database refuses, or stores but cannot read back. Any
+    other column answers ``False`` without calling ``using``.
+    """
+    return unstorable_temporal(column, value, using) or unstorable_decimal(column, value, using)
 
 
 def _converted_kinds(column: object) -> tuple[tuple[type[object], ...], type[object]] | None:

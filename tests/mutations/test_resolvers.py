@@ -20,7 +20,9 @@ Other consumer writes live in
 ``examples/fakeshop/test_query/test_uploads_api.py``; transaction rollback lives in
 ``examples/fakeshop/test_query/test_mutation_atomicity.py``. JSON defaults,
 naive datetimes and JSON text preflight live in
-``examples/fakeshop/test_query/test_scalars_mutation_api.py``.
+``examples/fakeshop/test_query/test_scalars_mutation_api.py``. A decimal past PostgreSQL
+``numeric``'s format in a column with no ``max_digits``, which fakeshop cannot declare on
+the Django floor, is written here through an alias that reads as PostgreSQL.
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ from asgiref.sync import sync_to_async
 from django import forms
 from django.core.exceptions import ValidationError
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import IntegrityError, OperationalError, connection, models, transaction
 from django.db.models import Model, QuerySet
 from django.db.models.functions import Lower
@@ -113,6 +116,7 @@ from tests._idioms import (
     saved_pk,
 )
 from tests._info import make_info, unread_info
+from tests._postgresql_stand_in import numeric_refusing_postgresql
 from tests.optimizer import _link_models
 
 if TYPE_CHECKING:
@@ -128,6 +132,7 @@ if TYPE_CHECKING:
     _Bool: TypeAlias = models.BooleanField[bool | Combinable, bool]
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
     _Text: TypeAlias = models.TextField[str | Combinable, str]
+    _DecimalSet: TypeAlias = str | float | Decimal | Combinable
 
 
 @pytest.fixture(autouse=True)
@@ -3655,3 +3660,337 @@ def _assert_relation_ids_link(stored: object, spelled: str) -> None:
             assert isinstance(owner, SpelledStampOwner)
             linked = [pk_of(row) for row in owner.stamp_targets.all()]
         assert linked == [stored]
+
+
+class NonNegativeDecimalField(models.DecimalField[object, object]):
+    """A project ``DecimalField`` whose ``default_validators`` refuse a negative value."""
+
+    default_validators = [MinValueValidator(0)]
+
+
+class CentsDecimalField(models.DecimalField[object, object]):
+    """A project ``DecimalField`` whose ``to_python`` rounds to cents: the value its save binds."""
+
+    @override
+    def to_python(self, value: object) -> object:
+        number = object_result(super().to_python, value)
+        return number.quantize(Decimal("0.01")) if isinstance(number, Decimal) else number
+
+
+class UnboundedAmount(models.Model):
+    """Decimal columns a write can carry past PostgreSQL ``numeric``'s format.
+
+    ``amount`` and the nullable ``spare`` have no ``max_digits`` (Django's unconstrained
+    ``numeric``, from 6.1), so their ``DecimalValidator`` refuses only a value that is not
+    finite; ``priced`` is bounded, and its validator counts no digit for a zero's
+    positive exponent. ``capped`` (a ``validators=`` entry) and ``floored`` (a field
+    subclass's ``default_validators``) carry a project validator besides, and ``rounded``
+    a field subclass whose ``to_python`` rounds to cents.
+    """
+
+    amount: models.DecimalField[str | float | Decimal | Combinable, Decimal] = models.DecimalField(
+        max_digits=None,
+        decimal_places=None,
+    )
+    spare: models.DecimalField[str | float | Decimal | Combinable | None, Decimal | None] = (
+        models.DecimalField(max_digits=None, decimal_places=None, null=True, blank=True)
+    )
+    priced: models.DecimalField[str | float | Decimal | Combinable | None, Decimal | None] = (
+        models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    )
+    capped: models.DecimalField[_DecimalSet | None, Decimal | None] = models.DecimalField(
+        max_digits=None,
+        decimal_places=None,
+        null=True,
+        blank=True,
+        validators=[MaxValueValidator(100)],
+    )
+    floored: NonNegativeDecimalField = NonNegativeDecimalField(
+        max_digits=None,
+        decimal_places=None,
+        null=True,
+        blank=True,
+    )
+    rounded: CentsDecimalField = CentsDecimalField(
+        max_digits=None,
+        decimal_places=None,
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "mutations_unbounded_amount"
+
+
+#: A column of ``UnboundedAmount`` and a spelling its validator passes that ``numeric``
+#: refuses: past the integer digits, the fraction digits, or a zero's written exponent.
+_PAST_NUMERIC = [
+    pytest.param("amount", "1e1000000", id="huge-exponent"),
+    pytest.param("amount", "-1e1000000", id="negative-huge-exponent"),
+    pytest.param("amount", "1e-1000000", id="tiny-exponent"),
+    pytest.param("amount", "1E+131072", id="131073-integer-digits"),
+    pytest.param("amount", "0E-16384", id="zero-16384-fraction-digits"),
+    pytest.param("spare", "1e1000000", id="nullable-huge-exponent"),
+    pytest.param("priced", "0E+1073741823", id="bounded-zero-at-exponent-limit"),
+]
+
+_REQUIRES_UNBOUNDED_DECIMAL = pytest.mark.skipif(
+    not _decimal_reads_back(),
+    reason="a DecimalField without max_digits is read back from Django 6.1",
+)
+
+
+def _write_amount(operation: str, data: dict[str, object], pk: object = None) -> object:
+    """Run the model flavor's ``operation`` on ``UnboundedAmount`` with ``data``; its payload."""
+
+    class UnboundedAmountT(DjangoType):
+        class Meta:
+            model = UnboundedAmount
+            fields = (
+                "id",
+                "amount",
+                "spare",
+                "priced",
+                "capped",
+                "floored",
+                "rounded",
+            )
+            primary = True
+
+    class CreateUnboundedAmount(DjangoMutation):
+        class Meta:
+            model = UnboundedAmount
+            operation = "create"
+            fields = (
+                "amount",
+                "spare",
+                "priced",
+                "capped",
+                "floored",
+                "rounded",
+            )
+            permission_classes = [_AllowAll]
+
+    class UpdateUnboundedAmount(DjangoMutation):
+        class Meta:
+            model = UnboundedAmount
+            operation = "update"
+            fields = (
+                "amount",
+                "spare",
+                "priced",
+                "capped",
+                "floored",
+                "rounded",
+            )
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        create_unbounded_amount = DjangoMutationField(CreateUnboundedAmount)
+        update_unbounded_amount = DjangoMutationField(UpdateUnboundedAmount)
+
+    finalize_django_types()
+    del UnboundedAmountT
+    selection = "{ result { amount spare priced } errors { field messages codes } }"
+    if operation == "create":
+        document = (
+            "mutation($d: UnboundedAmountInput!) "
+            f"{{ createUnboundedAmount(data: $d) {selection} }}"
+        )
+        variables: dict[str, object] = {"d": data}
+    else:
+        document = (
+            "mutation($id: ID!, $d: UnboundedAmountPartialInput!) "
+            f"{{ updateUnboundedAmount(id: $id, data: $d) {selection} }}"
+        )
+        variables = {"id": str(pk), "d": data}
+    result = _schema(Mutation).execute_sync(document, variable_values=variables)
+    assert result.errors is None, result.errors
+    assert is_object_dict(result.data), result.data
+    return result.data[f"{operation}UnboundedAmount"]
+
+
+def _stored_amounts() -> list[tuple[Decimal, Decimal | None, Decimal | None]]:
+    """Every ``UnboundedAmount`` row's three decimals."""
+    return [(row.amount, row.spare, row.priced) for row in UnboundedAmount.objects.order_by("pk")]
+
+
+@_REQUIRES_UNBOUNDED_DECIMAL
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize(("column", "wire"), _PAST_NUMERIC)
+def test_model_write_refuses_a_decimal_past_postgresql_numeric(
+    operation: str,
+    column: str,
+    wire: str,
+) -> None:
+    """A decimal its column's validator passes but PostgreSQL cannot bind is the field's error.
+
+    ``full_clean`` passes it and PostgreSQL's ``numeric_in`` refuses it at the save, a
+    ``DataError`` no save mapper owns. The write decode answers the field's ``invalid``
+    error instead, with nothing written.
+    """
+    with numeric_refusing_postgresql(UnboundedAmount):
+        pk = (
+            saved_pk(UnboundedAmount.objects.create(amount=Decimal(7)))
+            if operation == "update"
+            else None
+        )
+        before = _stored_amounts()
+        payload = _write_amount(operation, {"amount": "7", column: wire}, pk)
+
+        assert payload == {
+            "result": None,
+            "errors": [
+                {
+                    "field": column,
+                    "messages": ["Enter a value the database can represent."],
+                    "codes": ["invalid"],
+                },
+            ],
+        }
+        assert _stored_amounts() == before
+
+
+@_REQUIRES_UNBOUNDED_DECIMAL
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("column", ["amount", "spare", "priced"])
+def test_model_write_stores_a_decimal_within_postgresql_numeric(
+    operation: str,
+    column: str,
+) -> None:
+    """A decimal PostgreSQL's ``numeric`` holds is written through the same stand-in."""
+    with numeric_refusing_postgresql(UnboundedAmount):
+        pk = (
+            saved_pk(UnboundedAmount.objects.create(amount=Decimal(7)))
+            if operation == "update"
+            else None
+        )
+        payload = _write_amount(operation, {"amount": "7", column: "12.5"}, pk)
+
+        assert is_object_dict(payload), payload
+        assert payload["errors"] == []
+        assert read_attr(UnboundedAmount.objects.get(), column) == Decimal("12.5")
+
+
+@_REQUIRES_UNBOUNDED_DECIMAL
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_model_write_leaves_a_decimal_its_validator_refuses_to_full_clean(operation: str) -> None:
+    """A decimal past ``numeric``'s format the column's ``DecimalValidator`` refuses keeps its error.
+
+    ``priced`` holds 10 digits, so ``1e1000000`` is ``full_clean()``'s ``max_digits``
+    error, never the storability refusal, though PostgreSQL could not bind it either.
+    """
+    with numeric_refusing_postgresql(UnboundedAmount):
+        pk = (
+            saved_pk(UnboundedAmount.objects.create(amount=Decimal(7)))
+            if operation == "update"
+            else None
+        )
+        before = _stored_amounts()
+        payload = _write_amount(operation, {"amount": "7", "priced": "1e1000000"}, pk)
+
+        assert payload == {
+            "result": None,
+            "errors": [
+                {
+                    "field": "priced",
+                    "messages": ["Ensure that there are no more than 10 digits in total."],
+                    "codes": ["max_digits"],
+                },
+            ],
+        }
+        assert _stored_amounts() == before
+
+
+@_REQUIRES_UNBOUNDED_DECIMAL
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize(
+    (
+        "column",
+        "wire",
+        "message",
+        "code",
+    ),
+    [
+        pytest.param(
+            "capped",
+            "1e1000000",
+            "Ensure this value is less than or equal to 100.",
+            "max_value",
+            id="validators-entry",
+        ),
+        pytest.param(
+            "floored",
+            "-1e1000000",
+            "Ensure this value is greater than or equal to 0.",
+            "min_value",
+            id="subclass-default-validators",
+        ),
+    ],
+)
+def test_model_write_leaves_a_decimal_a_project_validator_refuses_to_it(
+    operation: str,
+    column: str,
+    wire: str,
+    message: str,
+    code: str,
+) -> None:
+    """A decimal past ``numeric``'s format the column's own validators refuse keeps their error.
+
+    The storability rule reads a decimal only once every validator ``full_clean()`` runs
+    for the column accepts it, a ``validators=`` entry and a field subclass's
+    ``default_validators`` included, so the project validator's own error answers.
+    """
+    with numeric_refusing_postgresql(UnboundedAmount):
+        pk = (
+            saved_pk(UnboundedAmount.objects.create(amount=Decimal(7)))
+            if operation == "update"
+            else None
+        )
+        before = _stored_amounts()
+        payload = _write_amount(operation, {"amount": "7", column: wire}, pk)
+
+        assert payload == {
+            "result": None,
+            "errors": [{"field": column, "messages": [message], "codes": [code]}],
+        }
+        assert _stored_amounts() == before
+
+
+_ROUNDED_TO_ZERO = [
+    pytest.param("1e-1000000", id="tiny-exponent"),
+    pytest.param("0." + "0" * 16383 + "5", id="16384-fraction-digits"),
+]
+
+
+@_REQUIRES_UNBOUNDED_DECIMAL
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("wire", _ROUNDED_TO_ZERO)
+def test_model_write_holds_the_decimal_its_column_to_python_gives(
+    operation: str,
+    wire: str,
+) -> None:
+    """A spelling ``numeric`` refuses that the column's ``to_python`` rounds to a cent is stored.
+
+    The save binds the value ``to_python`` gives (``0.00``), which ``numeric`` holds, so the
+    write stores it rather than refusing the spelling as sent.
+    """
+    with numeric_refusing_postgresql(UnboundedAmount):
+        pk = (
+            saved_pk(UnboundedAmount.objects.create(amount=Decimal(7)))
+            if operation == "update"
+            else None
+        )
+        payload = _write_amount(operation, {"amount": "7", "rounded": wire}, pk)
+
+        assert is_object_dict(payload), payload
+        assert payload["errors"] == []
+        assert UnboundedAmount.objects.get().rounded == Decimal(0)

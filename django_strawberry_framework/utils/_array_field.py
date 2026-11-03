@@ -10,7 +10,7 @@ that should fail rather than silently degrade.
 converter (``types/converters.py::scalar_route``), the write inputs and their decode
 (``forms/inputs.py``, ``rest_framework/serializer_converter.py``), the filter form
 fields (``filters/base.py``), the filter bind ask (``filters/sets.py``) and the
-write-side storability rule (``utils/errors.py::unstorable_temporal``) all ask it, so a
+write-side storability rule (``utils/errors.py::unstorable_value``) all ask it, so a
 column is an array to every one of them or to none. ``array_leaf_field`` walks it
 through nested arrays to the column the innermost elements are stored through. Both read a
 ``GeneratedField`` as the column it computes (``utils/relations.py::generated_column``), so a
