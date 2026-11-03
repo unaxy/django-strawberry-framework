@@ -34,7 +34,7 @@ import contextlib
 import json
 from collections.abc import Callable, Generator, Iterator
 from functools import wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import pytest
 from apps.products.services import seed_data
@@ -56,6 +56,7 @@ from typing_extensions import override
 
 from django_strawberry_framework import DjangoSchema, strawberry_config
 from django_strawberry_framework.testing import TestClient
+from django_strawberry_framework.utils._narrowing import read_attr, require_instance
 from django_strawberry_framework.views import DjangoGraphQLView
 
 if TYPE_CHECKING:
@@ -170,6 +171,25 @@ def _unrelated_json_view(_request: HttpRequest) -> HttpResponse:
     return HttpResponse(b'{"probe": "ok"}', content_type="application/json")
 
 
+@runtime_checkable
+class _ClearableCache(Protocol):
+    """The one ``functools.cache`` wrapper method ``_debug_toolbar_cache_state`` calls."""
+
+    def cache_clear(self) -> None: ...
+
+
+def _clear_show_toolbar_cache() -> None:
+    """Clear the toolbar's memoized ``show_toolbar_func_or_path``.
+
+    django-debug-toolbar annotates the function as returning a bare ``Callable``,
+    so the static type of its ``@cache`` wrapper is partially Unknown. The
+    wrapper is read as ``object`` and checked at run time to carry
+    ``cache_clear``, the one member called on it.
+    """
+    memoized = read_attr(dt_middleware, "show_toolbar_func_or_path")
+    require_instance(memoized, _ClearableCache).cache_clear()
+
+
 @contextlib.contextmanager
 def _debug_toolbar_cache_state() -> Generator[None]:
     """Save / clear / restore the toolbar's process-level caches (spec-042 Decision 9 hygiene).
@@ -181,9 +201,7 @@ def _debug_toolbar_cache_state() -> Generator[None]:
     Restore puts back the SAVED values (not ``None``), so a neighboring test gets
     back exactly the state it had.
     """
-    # basedpyright: django-debug-toolbar annotates show_toolbar_func_or_path as returning a
-    # bare ``Callable``, so its ``@cache`` wrapper is partially Unknown
-    dt_middleware.show_toolbar_func_or_path.cache_clear()  # pyright: ignore[reportUnknownMemberType]
+    _clear_show_toolbar_cache()
     saved_panel_classes = DebugToolbar._panel_classes
     saved_urlpatterns = DebugToolbar._urlpatterns
     DebugToolbar._panel_classes = None
@@ -191,9 +209,7 @@ def _debug_toolbar_cache_state() -> Generator[None]:
     try:
         yield
     finally:
-        # basedpyright: django-debug-toolbar annotates show_toolbar_func_or_path as returning a
-        # bare ``Callable``, so its ``@cache`` wrapper is partially Unknown
-        dt_middleware.show_toolbar_func_or_path.cache_clear()  # pyright: ignore[reportUnknownMemberType]
+        _clear_show_toolbar_cache()
         DebugToolbar._panel_classes = saved_panel_classes
         DebugToolbar._urlpatterns = saved_urlpatterns
 

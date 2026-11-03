@@ -46,7 +46,7 @@ from django_strawberry_framework.optimizer.plans import (
     WINDOW_TOTAL_COUNT,
     OptimizationPlan,
 )
-from tests._idioms import ClaimsClassBase, ClassReadRaisesBase
+from tests._idioms import ClaimsClassBase, ClassReadRaisesBase, hostile_name_instance
 from tests.optimizer._builders import nested_connection_request
 
 
@@ -149,20 +149,10 @@ def test_resolve_strategy_rejects_unknown_name_and_bad_type() -> None:
 
 def test_resolve_strategy_rejects_hostile_type_and_class_name() -> None:
     """Hostile types fail safely with ConfigurationError and classes report their name."""
-
-    class HostileType(type):
-        @property
-        @override
-        # basedpyright: the hostile shape under test, a ``__name__`` property whose read raises;
-        # the checker rejects any property overriding a base class attribute
-        def __name__(cls) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-            raise RuntimeError("type name should never run")
-
-    class NotStrategy(metaclass=HostileType):
-        pass
+    notstrategy = hostile_name_instance("NotStrategy", "type name should never run")
 
     with pytest.raises(ConfigurationError, match="nested_connection_strategy"):
-        resolve_strategy(NotStrategy())
+        resolve_strategy(notstrategy)
 
     with pytest.raises(ConfigurationError, match="WindowedPrefetchStrategy"):
         resolve_strategy(WindowedPrefetchStrategy)

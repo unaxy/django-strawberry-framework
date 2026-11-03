@@ -3799,6 +3799,39 @@ def test_an_explicit_extension_policy_is_read_once_across_an_operation() -> None
     assert object.__getattribute__(drifting, "__dict__")["_reads"] == 1
 
 
+def test_the_document_scan_charges_the_armed_snapshot_not_the_resolved_policy() -> None:
+    """The pre-parse scan reads the policy ``begin_resource_budget`` armed, not its source.
+
+    A plain ``strawberry.Schema`` answers ``resource_policy`` with whatever the
+    consumer stored there, so the object ``_resolved_policy`` returns can be a
+    subclass whose reads are its own code. Arming snapshots it (its first read,
+    here the narrow one); a scan handed the resolved object instead would read it
+    a second time and be answered with the wide bound, admitting a document the
+    armed budget refuses.
+    """
+    drifting = _DriftingPolicy()
+    object.__getattribute__(drifting, "__dict__")["_armed"] = True
+
+    @strawberry.type
+    class _Query:
+        @strawberry.field
+        def echo(self) -> str:
+            return "ok"
+
+    class _PolicySchema(strawberry.Schema):
+        resource_policy: ResourcePolicy
+
+    schema = _PolicySchema(query=_Query, extensions=[DjangoResourcePolicyExtension])
+    schema.resource_policy = drifting
+    result = schema.execute_sync("{ echo }")
+
+    assert result.errors is not None
+    [error] = result.errors
+    assert isinstance(error, ResourceLimitExceeded)
+    assert error.bound == "max_document_tokens"
+    assert object.__getattribute__(drifting, "__dict__")["_reads"] == 1
+
+
 def test_an_explicit_extension_policy_is_stored_as_an_exact_policy() -> None:
     """What the extension holds after construction is the package's own class."""
     drifting = _DriftingPolicy()
