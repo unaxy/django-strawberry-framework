@@ -3031,9 +3031,10 @@ def test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order() -> None:
     """``gate``'s lint suite is the ``lint`` job of ``django.yml``, command for command.
 
     Every ``run:`` command of that job past its setup (``uv python install``,
-    ``uv sync --locked``) is a ``uv run`` command, and the suite runs each one
-    without the prefix, in the workflow's order; a step added to the workflow and
-    not here would let a gate pass that CI fails.
+    ``uv sync --locked``) is a ``uv run`` command with no command chained or
+    backgrounded after it, and the suite runs each one without the prefix, in the
+    workflow's order; a step added to the workflow and not here would let a gate
+    pass that CI fails.
     """
     read = job_commands(_django_workflow_job("lint"))
     lines = [line for line, _after in read]
@@ -3041,8 +3042,8 @@ def test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order() -> None:
     commands = [line for line in lines if line not in setup]
 
     assert [(line, after) for line, after in read if after] == []
-    assert len(setup) == 2
-    assert all(line.startswith("uv run ") for line in commands)
+    assert len(setup) == 2, setup
+    assert all(line.startswith("uv run ") for line in commands), commands
     assert tuple(line.removeprefix("uv run ") for line in commands) == workspace.LINT_COMMANDS
     arguments, cell = workspace.GATE_SUITES["lint"]
     assert arguments == ("sh", "-exc", "\n".join(workspace.LINT_COMMANDS))
