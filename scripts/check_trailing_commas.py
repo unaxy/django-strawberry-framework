@@ -192,7 +192,7 @@ except ModuleNotFoundError:  # imported as ``scripts.check_trailing_commas`` (re
     from scripts import _git
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     from typing_extensions import TypeIs
 
@@ -265,13 +265,21 @@ def _read_pyproject(pyproject: Path) -> dict[str, object]:
         raise RuntimeError(f"cannot parse {pyproject}: {error}") from error
 
 
+# Characters ruff's ``extend-exclude`` reads as glob syntax: ``*`` and ``?`` match across
+# ``/``, ``[^...]`` negates, ``{a,b}`` expands and ``\`` escapes; a per-segment literal
+# name match reads none of them, so an entry holding one is refused.
+_GLOB_METACHARACTERS = frozenset("*?[]{}\\")
+
+
 def _ruff_extend_exclude(document: object) -> tuple[str, ...]:
     """Return ``document["tool"]["ruff"]["extend-exclude"]`` (empty when the key is absent).
 
     Raises:
         KeyError: The ``tool`` or ``ruff`` table is missing.
         TypeError: A value on the path is not a table, or the list holds a non-string.
-        ValueError: An entry is anchored (holds a ``/``), which a name match cannot honour.
+        ValueError: An entry is anchored (holds a ``/``) or a glob (holds one of
+            ``_GLOB_METACHARACTERS``, which ruff reads as glob syntax and a literal name
+            match does not), so a name match cannot honour it.
 
     """
     value = document
@@ -284,14 +292,18 @@ def _ruff_extend_exclude(document: object) -> tuple[str, ...]:
     entries = value.get("extend-exclude", [])
     if not _is_toml_array(entries):
         raise TypeError("extend-exclude")
-    patterns: list[str] = []
+    names: list[str] = []
     for entry in entries:
         if not isinstance(entry, str):
             raise TypeError("extend-exclude")
         if "/" in entry:
-            raise ValueError(entry)
-        patterns.append(entry)
-    return tuple(patterns)
+            raise ValueError(f"{entry} is anchored")
+        if any(character in _GLOB_METACHARACTERS for character in entry):
+            raise ValueError(
+                f"{entry} is a glob, which ruff expands and a literal name match does not",
+            )
+        names.append(entry)
+    return tuple(names)
 
 
 @functools.cache
@@ -300,9 +312,10 @@ def ruff_excluded_names() -> tuple[str, ...]:
 
     These are the trees the project keeps out of ruff (evidence copies of the repo,
     kept as found); excluding the same names here keeps a named path and a directory
-    sweep from rewriting them too. Each entry is a name glob matched against every
-    repo-relative path segment, as ruff matches an unanchored pattern against each name
-    it walks; an anchored entry raises, since a name match would silently not honour it.
+    sweep from rewriting them too. Each entry is a literal directory or file name matched
+    against every repo-relative path segment, as ruff matches an unanchored name against
+    each name it walks; an anchored or glob entry raises, since a literal name match
+    would silently not read it as ruff does.
     """
     pyproject = REPO_ROOT / "pyproject.toml"
     try:
@@ -311,13 +324,18 @@ def ruff_excluded_names() -> tuple[str, ...]:
         raise RuntimeError(f"[tool.ruff] extend-exclude unreadable in {pyproject}") from error
     except ValueError as error:
         raise RuntimeError(
-            f"[tool.ruff] extend-exclude entry {error} is anchored; only name globs are read",
+            f"[tool.ruff] extend-exclude entry {error}; only literal names are read",
         ) from error
 
 
-def _is_ruff_excluded_name(name: str) -> bool:
-    """Return whether one path segment matches a ``[tool.ruff] extend-exclude`` name glob."""
-    return any(fnmatchcase(name, pattern) for pattern in ruff_excluded_names())
+def is_ruff_excluded_name(name: str) -> bool:
+    """Return whether one path segment is a ``[tool.ruff] extend-exclude`` name."""
+    return name in ruff_excluded_names()
+
+
+def has_ruff_excluded_segment(parts: Iterable[str]) -> bool:
+    """Return whether any path segment is a ``[tool.ruff] extend-exclude`` name."""
+    return any(is_ruff_excluded_name(part) for part in parts)
 
 
 DEFAULT_THRESHOLD = 4
@@ -1432,7 +1450,7 @@ def is_excluded(path: Path) -> bool:
         return True
     relative = _repo_relative(path)
     segments = path.parts if relative is None else relative.split("/")
-    if any(_is_ruff_excluded_name(segment) for segment in segments):
+    if has_ruff_excluded_segment(segments):
         return True
     if relative is not None and matches_exclude_pattern(relative):
         return True
@@ -1515,7 +1533,7 @@ def _walk(
     for dirpath, dirnames, filenames in os.walk(root):
         here = Path(dirpath)
         dirnames[:] = sorted(
-            d for d in dirnames if d not in EXCLUDE_DIRS and not _is_ruff_excluded_name(d)
+            d for d in dirnames if d not in EXCLUDE_DIRS and not is_ruff_excluded_name(d)
         )
         relative = _repo_relative(here) if scope is not None else None
         base = "" if relative in (None, ".") else f"{relative}/"

@@ -226,6 +226,29 @@ def test_anchored_ruff_exclude_entry_is_refused(repo: Path) -> None:
         ctc.ruff_excluded_names()
 
 
+# ``extend-exclude`` entries ruff reads as globs (a brace expansion, ``?`` and ``*``
+# crossing ``/``, a ``[^...]`` negation, a ``\`` escape): a per-segment literal match
+# reads none of them as ruff does.
+GLOB_EXCLUDE_ENTRIES = (
+    "{hunt-ws,evidence}",
+    "hu?t",
+    "a*b",
+    "h[^i]nt",
+    "h\\*t",
+)
+
+
+@pytest.mark.parametrize("entry", GLOB_EXCLUDE_ENTRIES, ids=GLOB_EXCLUDE_ENTRIES)
+def test_glob_ruff_exclude_entry_is_refused(repo: Path, entry: str) -> None:
+    """A glob ``extend-exclude`` entry fails loudly: ruff and a segment match read it differently."""
+    (repo / "pyproject.toml").write_text(
+        f"[tool.ruff]\nline-length = 99\nextend-exclude = ['{entry}']\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match=r"is a glob.*only literal names are read"):
+        ctc.ruff_excluded_names()
+
+
 def test_summary_counts_checked_excluded_and_violations(
     repo: Path,
     capsys: pytest.CaptureFixture[str],
