@@ -251,7 +251,7 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     [`pyproject.toml`][pyproject], `django_strawberry_framework/utils/imports.py::DRF_FLOOR`
     (interpolated into the `require_drf()` guard's **install hint**), and the
     `_HINT_SUBSTRING` literal re-typed in `tests/rest_framework/test_soft_dependency.py`.
-    `tests/test_ci_governance.py::test_drf_floor_constant_matches_the_pyproject_dependency_row`
+    `tests/test_ci_governance.py::test_each_floor_constant_matches_its_pyproject_dependency_row`
     compares the constant to the pin and the absence tests match the hint against the
     literal.
     [Decision 12](#decision-12--soft-djangorestframework-dependency-and-the-100-coverage-strategy)

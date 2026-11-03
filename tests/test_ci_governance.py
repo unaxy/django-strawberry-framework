@@ -31,7 +31,6 @@ import sys
 import tokenize
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import TypeAlias
 
 import pytest
 import tomli
@@ -59,17 +58,32 @@ from scripts import _git
 # construction, so the gate cannot pass in a clean CI checkout and fail on a
 # developer machine.
 from scripts.check_citations import SOURCE_TREES, iter_python_sources, spec_files
-from tests._idioms import (
-    is_object_dict,
-    is_object_list,
-    json_at,
-    json_list,
-    json_loads,
-    json_object,
+from scripts.workspace import SOFT_FLOOR_PACKAGES
+from tests._idioms import is_object_dict, json_at, json_list, json_object
+from tests._workflows import (
+    UV_PROJECT_EDITS,
+    UV_RELOCKING,
+    UV_RUN_VALUED,
+    UV_VALUED_GLOBALS,
+    UV_VERSION,
+    WORKFLOW_DIR,
+    YAMLMapping,
+    at_floor,
+    job_segments,
+    job_steps,
+    load_workflow,
+    matrix_node_lists,
+    parse_workflow,
+    shell_commands,
+    shell_segments,
+    skip_options,
+    step_script,
+    uv_command,
+    workflow_jobs,
+    yaml_mapping,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 
 # A reviewed, immutable pin is a full 40-character commit SHA. A tag -- ``@v6``,
 # ``@v6.1.0``, ``@main`` -- is mutable by definition, so the action's contents can
@@ -83,9 +97,6 @@ IMAGE_REFERENCE = re.compile(
 # and therefore already covered by the commit under review.
 LOCAL_ACTION_PREFIX = "./"
 
-# A YAML mapping's keys are not all strings: the bare ``on:`` trigger key parses as ``True``.
-_YAMLMapping: TypeAlias = "dict[object, object]"
-
 
 def _workflow_paths() -> list[Path]:
     paths = sorted(WORKFLOW_DIR.glob("*.yml")) + sorted(WORKFLOW_DIR.glob("*.yaml"))
@@ -93,47 +104,15 @@ def _workflow_paths() -> list[Path]:
     return paths
 
 
-def _load(path: Path) -> object:
-    """Parse one YAML file into its untyped node tree."""
-    return object_result(yaml.safe_load, path.read_text(encoding="utf-8"))
-
-
-def _workflow(path: Path) -> _YAMLMapping:
-    """Parse one workflow file, which is a mapping at its root."""
-    workflow = _load(path)
-    assert is_object_dict(workflow), f"{path.name}: workflow is not a mapping"
-    return workflow
-
-
-def _mapping(node: object) -> _YAMLMapping:
-    """Read a YAML node as a mapping; an absent or empty node reads as an empty one."""
-    if not node:
-        return {}
-    assert is_object_dict(node), f"expected a YAML mapping, got {node!r}"
-    return node
-
-
 WORKFLOW_PATHS = _workflow_paths()
 WORKFLOW_IDS = [path.name for path in WORKFLOW_PATHS]
-
-
-def _jobs(workflow: _YAMLMapping) -> _YAMLMapping:
-    return _mapping(workflow.get("jobs"))
-
-
-def _steps(job: _YAMLMapping) -> list[object]:
-    steps = job.get("steps")
-    if not steps:
-        return []
-    assert is_object_list(steps), f"expected a YAML sequence of steps, got {steps!r}"
-    return steps
 
 
 @pytest.mark.parametrize("path", WORKFLOW_PATHS, ids=WORKFLOW_IDS)
 def test_workflow_parses(path: Path) -> None:
     """Every workflow is loadable YAML with at least one job."""
-    workflow = _workflow(path)
-    assert _jobs(workflow), f"{path.name}: declares no jobs"
+    workflow = load_workflow(path)
+    assert workflow_jobs(workflow), f"{path.name}: declares no jobs"
 
 
 @pytest.mark.parametrize("path", WORKFLOW_PATHS, ids=WORKFLOW_IDS)
@@ -144,7 +123,7 @@ def test_workflow_declares_top_level_read_only_permissions(path: Path) -> None:
     may be write-all. Declaring ``contents: read`` at the top level makes any
     wider grant an explicit, reviewable job-level override.
     """
-    workflow = _workflow(path)
+    workflow = load_workflow(path)
     permissions = workflow.get("permissions")
     assert permissions == {"contents": "read"}, (
         f"{path.name}: top-level permissions must be exactly "
@@ -161,9 +140,9 @@ def test_no_job_grants_repository_write(path: Path) -> None:
     step in the job, including third-party actions and the dependency tree they
     install.
     """
-    workflow = _workflow(path)
-    for name, job in _jobs(workflow).items():
-        permissions = _mapping(job).get("permissions")
+    workflow = load_workflow(path)
+    for name, job in workflow_jobs(workflow).items():
+        permissions = yaml_mapping(job).get("permissions")
         if not is_object_dict(permissions):
             continue
         assert permissions.get("contents") != "write", (
@@ -180,9 +159,9 @@ def test_every_job_declares_a_timeout(path: Path) -> None:
     suite. Without ``timeout-minutes`` a hung download or a deadlocked test holds
     a runner for GitHub's six-hour default.
     """
-    workflow = _workflow(path)
-    for name, node in _jobs(workflow).items():
-        job = _mapping(node)
+    workflow = load_workflow(path)
+    for name, node in workflow_jobs(workflow).items():
+        job = yaml_mapping(node)
         if "uses" in job:
             # A reusable-workflow call cannot set timeout-minutes; the timeout
             # belongs to the jobs inside the called workflow.
@@ -203,9 +182,9 @@ def test_every_job_declares_a_runner(path: Path) -> None:
     cannot see this: a job that lost ``runs-on`` while keeping
     ``timeout-minutes`` still satisfies that row.
     """
-    workflow = _workflow(path)
-    for name, node in _jobs(workflow).items():
-        job = _mapping(node)
+    workflow = load_workflow(path)
+    for name, node in workflow_jobs(workflow).items():
+        job = yaml_mapping(node)
         if "uses" in job:
             # A reusable-workflow call names no runner; the called workflow's own
             # jobs declare theirs, exactly as they declare their timeouts.
@@ -222,10 +201,10 @@ def test_every_external_action_is_pinned_to_a_full_commit_sha(path: Path) -> Non
     CI is whatever the tag points at today. A full-SHA pin is the only immutable
     reference GitHub offers.
     """
-    workflow = _workflow(path)
-    for name, job in _jobs(workflow).items():
-        for index, step in enumerate(_steps(_mapping(job))):
-            uses = _mapping(step).get("uses")
+    workflow = load_workflow(path)
+    for name, job in workflow_jobs(workflow).items():
+        for index, step in enumerate(job_steps(yaml_mapping(job))):
+            uses = yaml_mapping(step).get("uses")
             if not uses:
                 continue
             assert isinstance(uses, str), (
@@ -271,16 +250,16 @@ def test_checkout_steps_do_not_persist_credentials(path: Path) -> None:
     the credential has no consumer and only widens the blast radius of a
     compromised dependency.
     """
-    workflow = _workflow(path)
-    for name, job in _jobs(workflow).items():
-        for index, step in enumerate(_steps(_mapping(job))):
-            uses = _mapping(step).get("uses") or ""
+    workflow = load_workflow(path)
+    for name, job in workflow_jobs(workflow).items():
+        for index, step in enumerate(job_steps(yaml_mapping(job))):
+            uses = yaml_mapping(step).get("uses") or ""
             assert isinstance(uses, str), (
                 f"{path.name}: job {name!r} step {index} 'uses' is {uses!r}"
             )
             if not uses.startswith("actions/checkout@"):
                 continue
-            options = _mapping(_mapping(step).get("with"))
+            options = yaml_mapping(yaml_mapping(step).get("with"))
             assert options.get("persist-credentials") is False, (
                 f"{path.name}: job {name!r} step {index} checks out without "
                 "'persist-credentials: false'"
@@ -323,7 +302,8 @@ def test_dependabot_covers_python_and_github_actions() -> None:
     The ``github-actions`` entry is what stops full-SHA pins from going stale:
     an immutable pin never picks up an upstream fix on its own.
     """
-    config = _load(REPO_ROOT / ".github" / "dependabot.yml")
+    dependabot = REPO_ROOT / ".github" / "dependabot.yml"
+    config = object_result(yaml.safe_load, dependabot.read_text(encoding="utf-8"))
     ecosystems = {json_at(entry, "package-ecosystem") for entry in json_list(config, "updates")}
     assert {"uv", "github-actions"} <= ecosystems, (
         f"dependabot.yml must cover the 'uv' and 'github-actions' ecosystems, got {ecosystems}"
@@ -336,8 +316,8 @@ def test_dependency_audit_workflow_runs_on_pull_request_and_a_schedule() -> None
     A PR-only audit cannot see a vulnerability published against a dependency
     that is already locked; a schedule-only audit lets one merge first.
     """
-    workflow = _workflow(WORKFLOW_DIR / "dependency-audit.yml")
-    triggers = _mapping(workflow[True] if True in workflow else workflow["on"])
+    workflow = load_workflow(WORKFLOW_DIR / "dependency-audit.yml")
+    triggers = yaml_mapping(workflow[True] if True in workflow else workflow["on"])
     assert "pull_request" in triggers, "dependency audit must run on pull requests"
     assert triggers.get("schedule"), "dependency audit must run on a schedule"
 
@@ -349,22 +329,22 @@ def test_vendor_and_full_matrix_tiers_run_on_a_schedule(name: str) -> None:
     Every run installs the newest Django patch release, so upstream drift can
     break either tier while the repository stays still.
     """
-    workflow = _workflow(WORKFLOW_DIR / name)
-    triggers = _mapping(workflow[True] if True in workflow else workflow["on"])
+    workflow = load_workflow(WORKFLOW_DIR / name)
+    triggers = yaml_mapping(workflow[True] if True in workflow else workflow["on"])
     assert triggers.get("schedule"), f"{name} must run on a schedule"
 
 
 def test_the_scheduled_django_run_selects_the_full_matrix() -> None:
     """A scheduled Django CI run takes the dispatch matrix, not the two push cells."""
-    workflow = _workflow(WORKFLOW_DIR / "django.yml")
-    matrix = _mapping(_mapping(_mapping(_mapping(workflow["jobs"])["test"])["strategy"])["matrix"])
-    assert "github.event_name == 'schedule'" in str(matrix["include"])
+    jobs = workflow_jobs(load_workflow(WORKFLOW_DIR / "django.yml"))
+    include = json_at(jobs, "test", "strategy", "matrix", "include")
+    assert "github.event_name == 'schedule'" in str(include)
 
 
-def _environment_name(job: _YAMLMapping) -> object:
+def _environment_name(job: YAMLMapping) -> object:
     """Return a job's environment name, from the bare or the mapping spelling."""
     environment = job.get("environment")
-    return _mapping(environment).get("name") if is_object_dict(environment) else environment
+    return yaml_mapping(environment).get("name") if is_object_dict(environment) else environment
 
 
 def test_publish_workflow_keeps_the_trusted_publisher_binding() -> None:
@@ -375,20 +355,20 @@ def test_publish_workflow_keeps_the_trusted_publisher_binding() -> None:
     holding ``id-token: write`` (the token PyPI exchanges for an upload
     credential), behind the build that checked the tag against ``__version__``.
     """
-    workflow = _workflow(WORKFLOW_DIR / "publish.yml")
-    triggers = _mapping(workflow[True] if True in workflow else workflow["on"])
+    workflow = load_workflow(WORKFLOW_DIR / "publish.yml")
+    triggers = yaml_mapping(workflow[True] if True in workflow else workflow["on"])
     assert set(triggers) == {"push"}, f"publish.yml must run on tag pushes only, got {triggers}"
-    assert _mapping(triggers["push"]).get("tags") == ["v*"], "publish.yml must run on v* tags"
+    assert yaml_mapping(triggers["push"]).get("tags") == ["v*"], "publish.yml must run on v* tags"
     minting = {
-        name: _mapping(job)
-        for name, job in _jobs(workflow).items()
-        if _mapping(_mapping(job).get("permissions")).get("id-token") == "write"
+        name: yaml_mapping(job)
+        for name, job in workflow_jobs(workflow).items()
+        if yaml_mapping(yaml_mapping(job).get("permissions")).get("id-token") == "write"
     }
     assert list(minting) == ["publish"], f"exactly one job mints the token, got {list(minting)}"
     publish = minting["publish"]
     assert _environment_name(publish) == "pypi"
     assert publish.get("needs") == "build"
-    actions = [_mapping(step).get("uses") or "" for step in _steps(publish)]
+    actions = [yaml_mapping(step).get("uses") or "" for step in job_steps(publish)]
     assert any(str(uses).startswith("pypa/gh-action-pypi-publish@") for uses in actions)
 
 
@@ -661,15 +641,17 @@ def _sweep_corpus() -> tuple[Path, ...]:
     return tuple(sorted({*iter_python_sources(), *(path for path in extra if path.is_file())}))
 
 
-def _committable_python_files() -> set[str]:
-    """Return the ``.py`` paths a commit here could contain, repo-relative.
+def _committable_files(pathspec: str) -> list[str]:
+    """Return the paths under ``pathspec`` a commit here could contain, repo-relative.
 
     ``--cached --others --exclude-standard`` is exactly "tracked, plus untracked
-    but not ignored". It is an oracle for "first-party source" derived from git
-    rather than from the sweep's own tree list, which is what makes the census
-    below a measurement instead of a restatement of the corpus by itself. Read
-    through ``scripts/_git.py``, so "ignored" is the repository's own rules and
-    never the caller's global excludes or XDG ignore file.
+    but not ignored", so an ignored scratch file never fails a row and a misplaced
+    file fails one before it is staged. Over ``*.py`` it is an oracle for
+    "first-party source" derived from git rather than from the sweep's own tree
+    list, which is what makes the census below a measurement instead of a
+    restatement of the corpus by itself. Read through ``scripts/_git.py``, so
+    "ignored" is the repository's own rules and never the caller's global excludes
+    or XDG ignore file.
 
     Three ways git can fail to answer, and none may reduce the census to nothing.
     A missing ``git`` raises here; a non-zero exit trips the assert below; and an
@@ -687,13 +669,12 @@ def _committable_python_files() -> set[str]:
         "--others",
         "--exclude-standard",
         "--",
-        "*.py",
+        pathspec,
     )
     assert completed.returncode == 0, (
-        f"git ls-files failed ({completed.returncode}); the corpus census cannot "
-        f"be taken without it: {completed.stderr.strip()}"
+        f"git ls-files {pathspec} failed ({completed.returncode}): {completed.stderr.strip()}"
     )
-    return {name for name in completed.stdout.split("\0") if name}
+    return [name for name in completed.stdout.split("\0") if name]
 
 
 def _unreported_required_files(answer: Iterable[str]) -> list[str]:
@@ -781,7 +762,7 @@ def test_the_sweep_corpus_covers_every_committable_python_file() -> None:
     the row stops being able to fail. Checking that the answer carries the files
     it must carry is what keeps ``not missing`` a measurement.
     """
-    committable = _committable_python_files()
+    committable = set(_committable_files("*.py"))
     unreported = _unreported_required_files(committable)
     assert not unreported, (
         f"git enumerated {len(committable)} .py file(s) but not "
@@ -1992,88 +1973,46 @@ def test_the_plan_label_sweep_reports_nothing_for_a_planted_permitted_form(
     assert violations == [], violations
 
 
-def test_channels_floor_constant_matches_the_pyproject_dependency_row() -> None:
-    """The one Channels floor the install hints name is the one the project pins.
-
-    ``CHANNELS_FLOOR`` is interpolated into every ``pip install
-    'channels>=...'`` hint, so the hints cannot drift from each other. This
-    row compares it to the ``channels[daphne]`` dev-group row in
-    ``pyproject.toml``. Nothing imports a TOML dependency row, so a bump on
-    either side is otherwise silent.
-    """
-    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    rows = re.findall(r'"channels\[daphne\]>=([0-9][^"]*)"', text)
-    assert rows == [CHANNELS_FLOOR], (rows, CHANNELS_FLOOR)
-
-
-def test_strawberry_floor_constant_matches_the_pyproject_dependency_row() -> None:
-    """The Strawberry floor the router's hint recommends is the one the project requires.
-
-    The mirror of the Channels row above: the router's broken-``strawberry.channels``
-    hint interpolates ``STRAWBERRY_FLOOR``, and nothing else compares that
-    constant to the ``strawberry-graphql`` row in ``pyproject.toml``. A floor
-    raise on either side would otherwise be silent, and the hint could advise
-    installing a version the install itself rejects. Parsed exactly like the
-    Channels row so the two pins cannot diverge in method.
-    """
-    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    rows = re.findall(r'"strawberry-graphql>=([0-9][^"]*)"', text)
-    assert rows == [STRAWBERRY_FLOOR], (rows, STRAWBERRY_FLOOR)
-
-
-def test_debug_toolbar_floor_constant_matches_the_pyproject_dependency_row() -> None:
-    """The debug-toolbar floor the middleware's hint names is the one the project pins.
-
-    The toolbar middleware's install hint interpolates ``DEBUG_TOOLBAR_FLOOR``,
-    and nothing else compares that constant to the ``django-debug-toolbar``
-    dev-group row in ``pyproject.toml``. A floor bump on either side would
-    otherwise be silent. Parsed exactly like the Channels row.
-    """
-    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    rows = re.findall(r'"django-debug-toolbar>=([0-9][^"]*)"', text)
-    assert rows == [DEBUG_TOOLBAR_FLOOR], (rows, DEBUG_TOOLBAR_FLOOR)
-
-
-def test_drf_floor_constant_matches_the_pyproject_dependency_row() -> None:
-    """The DRF floor the serializer-mutation hint names is the one the project pins.
-
-    ``require_drf()``'s install hint interpolates ``DRF_FLOOR``, and nothing
-    else compares that constant to the ``djangorestframework`` dev-group row in
-    ``pyproject.toml``. A floor bump on either side would otherwise be silent.
-    Parsed exactly like the Channels row; the quote before ``>=`` keeps the
-    ``djangorestframework-stubs`` row out of the match.
-    """
-    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    rows = re.findall(r'"djangorestframework>=([0-9][^"]*)"', text)
-    assert rows == [DRF_FLOOR], (rows, DRF_FLOOR)
-
-
-def test_cryptography_floor_constant_matches_the_pyproject_dependency_row() -> None:
-    """The cryptography floor the keyset cursor's hint names is the one the project pins.
-
-    The keyset cursor's install hint interpolates ``CRYPTOGRAPHY_FLOOR``, and
-    nothing else compares that constant to the ``cryptography`` dev-group row in
-    ``pyproject.toml``. A floor bump on either side would otherwise be silent.
-    Parsed exactly like the Channels row.
-    """
-    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    rows = re.findall(r'"cryptography>=([0-9][^"]*)"', text)
-    assert rows == [CRYPTOGRAPHY_FLOOR], (rows, CRYPTOGRAPHY_FLOOR)
-
-
-#: The soft dependencies (START.md "Support matrix"), spelled as their dev-group rows are.
-SOFT_DEPENDENCIES = (
-    "channels[daphne]",
-    "cryptography",
-    "django-debug-toolbar",
-    "djangorestframework",
+@pytest.mark.parametrize(
+    ("row", "floor"),
+    [
+        ("channels[daphne]", CHANNELS_FLOOR),
+        ("strawberry-graphql", STRAWBERRY_FLOOR),
+        ("django-debug-toolbar", DEBUG_TOOLBAR_FLOOR),
+        ("djangorestframework", DRF_FLOOR),
+        ("cryptography", CRYPTOGRAPHY_FLOOR),
+    ],
+    ids=[
+        "channels",
+        "strawberry",
+        "debug-toolbar",
+        "drf",
+        "cryptography",
+    ],
 )
+def test_each_floor_constant_matches_its_pyproject_dependency_row(row: str, floor: str) -> None:
+    """The floor an install hint names is the one ``pyproject.toml`` pins for that row.
+
+    Each ``*_FLOOR`` constant is interpolated into its package's install hints (the
+    Channels router's, the router's broken-``strawberry.channels`` one, the toolbar
+    middleware's, ``require_drf()``'s, the keyset cursor's), so the hints cannot
+    drift from each other, and nothing else compares the constant to its
+    ``[project].dependencies`` or ``[dependency-groups].dev`` row: a bump on either
+    side would otherwise be silent, and a hint could advise a version the install
+    itself rejects. The quote before the name keeps a longer row
+    (``djangorestframework-stubs``) out of the match.
+    """
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    rows = re.findall(rf'"{re.escape(row)}>=([0-9][^"]*)"', text)
+    assert rows == [floor], (rows, floor)
+
+
 _REQUIREMENT = re.compile(r"\s*([A-Za-z0-9][\w.-]*(?:\[[^\]]*\])?)\s*(.*)")
 _LOWER_BOUND = re.compile(r">=\s*([^,;\s]+)")
 
 
 #: The pyproject rows the floor cell pins, so each must state exactly one floor.
-_FLOOR_ROWS = ("Django", "strawberry-graphql", *SOFT_DEPENDENCIES)
+_FLOOR_ROWS = ("Django", "strawberry-graphql", *SOFT_FLOOR_PACKAGES)
 
 
 def _lower_bounds_of(pyproject_text: str) -> dict[str, str]:
@@ -2144,27 +2083,6 @@ _STEP_ORDER = (
 )
 
 
-def _step_script(step: dict[object, object]) -> str:
-    """A workflow step's ``run`` script with its backslash-newline continuations joined."""
-    return str(step.get("run", "")).replace("\\\n", " ")
-
-
-#: The control operators that end a simple command, each before any operator it begins.
-_SHELL_OPERATORS = (
-    "&&",
-    "||",
-    ";",
-    "|",
-    "&",
-)
-#: A simple command of a shell line, or the operator that ends it; a quoted string and a
-#: redirection's ``&`` (``2>&1``, ``>&2``, ``&>file``) stay inside the command.
-_SHELL_PART = re.compile(
-    r"""(?:"[^"]*"|'[^']*'|\d*[<>]&\d*-?|&>|[^"';&|])+|"""
-    + "|".join(map(re.escape, _SHELL_OPERATORS)),
-)
-#: A quoted string (group 1, kept whole) or a ``#`` comment, which opens at a word start.
-_SHELL_COMMENT = re.compile(r"""("[^"]*"|'[^']*')|(?:^|(?<=\s))#.*""")
 #: A word ahead of a command's own name: a ``VAR=val`` assignment, ``env`` or ``time``.
 _COMMAND_PREFIX = re.compile(r"env|time|[A-Za-z_]\w*=\S*")
 #: The ``shell:`` names GitHub runs with errexit (``bash --noprofile --norc -eo pipefail {0}``,
@@ -2174,97 +2092,9 @@ _ERREXIT_SHELL_NAMES = frozenset({"bash", "sh"})
 _ERREXIT_SHELL_OPTION = re.compile(r"-[a-z]*e[a-z]*")
 #: The ``bash`` / ``sh`` options whose value is the next word (``-o pipefail``).
 _SHELL_VALUED_OPTIONS = frozenset({"-o", "+o"})
-#: A ``uv`` word and a later ``sync`` word (never the ``sync`` of ``--no-sync``).
-_UV_SYNC_WORDS = re.compile(r"\buv\b.*(?<![\w-])sync\b")
-#: uv's global options that take the next word as their value at runtime, hidden and alias
-#: names included (``--python-fetch``, ``--python-preference``, ``--preview-features``,
-#: ``--trusted-host``); the subcommand follows.
-_UV_VALUED_GLOBALS = frozenset(
-    {
-        "--allow-insecure-host",
-        "--cache-dir",
-        "--color",
-        "--config-file",
-        "--directory",
-        "--preview-features",
-        "--project",
-        "--python-fetch",
-        "--python-preference",
-        "--trusted-host",
-    },
-)
-#: The options ``uv run`` takes the next word as the value of at runtime, its own and the
-#: globals, hidden names included (``--max-recursion-depth``); the child command follows.
-_UV_RUN_VALUED = _UV_VALUED_GLOBALS | frozenset(
-    {
-        "--config-setting",
-        "--config-settings-package",
-        "--default-index",
-        "--env-file",
-        "--exclude-newer",
-        "--exclude-newer-package",
-        "--extra",
-        "--extra-index-url",
-        "--find-links",
-        "--fork-strategy",
-        "--group",
-        "--index",
-        "--index-strategy",
-        "--index-url",
-        "--keyring-provider",
-        "--link-mode",
-        "--max-recursion-depth",
-        "--no-binary-package",
-        "--no-build-isolation-package",
-        "--no-build-package",
-        "--no-editable-package",
-        "--no-extra",
-        "--no-group",
-        "--no-sources-package",
-        "--only-group",
-        "--package",
-        "--prerelease",
-        "--prerelease-package",
-        "--python",
-        "--python-platform",
-        "--refresh-package",
-        "--reinstall-package",
-        "--resolution",
-        "--upgrade-group",
-        "--upgrade-package",
-        "--with",
-        "--with-editable",
-        "--with-requirements",
-        "-C",
-        "-P",
-        "-f",
-        "-i",
-        "-p",
-        "-w",
-    },
-)
-#: The uv subcommands a workflow runs besides ``sync``; a ``sync`` word after one is an argument.
-_UV_OTHER_SUBCOMMANDS = frozenset(
-    {
-        "build",
-        "lock",
-        "pip",
-        "python",
-        "run",
-        "tool",
-        "venv",
-    },
-)
-#: The uv subcommands that edit ``pyproject.toml`` and ``uv.lock``; CI runs neither.
-_UV_PROJECT_EDITS = frozenset({"add", "remove"})
-#: The uv subcommands that lock the project first unless told ``--locked`` / ``--frozen``.
-_UV_RELOCKING = frozenset({"export", "tree"})
-#: The uv subcommand that re-locks only when it writes a version (a value or ``--bump``) without
-#: ``--locked`` / ``--frozen``; a bare ``uv version`` reads the version and leaves ``uv.lock``.
-_UV_VERSION = "version"
 #: A superset of the options ``uv version`` takes the next word as the value of at runtime:
 #: ``uv run``'s plus ``--bump`` and ``--output-format``.
-_UV_VERSION_VALUED = _UV_RUN_VALUED | frozenset({"--bump", "--output-format"})
+_UV_VERSION_VALUED = UV_RUN_VALUED | frozenset({"--bump", "--output-format"})
 #: A word deciding whether a uv command may move off ``uv.lock``; group 1 spells a one-package
 #: upgrade (``--upgrade-package X``, ``--upgrade-package=X``, ``-P X``, ``-PX``), group 2 a
 #: whole upgrade.
@@ -2283,36 +2113,9 @@ def _command_word(command: str) -> str:
     return next((word for word in command.split() if not _COMMAND_PREFIX.fullmatch(word)), "")
 
 
-def _shell_commands(script: str) -> list[tuple[str, str]]:
-    """The simple commands of a joined ``run`` script in order, each with the operator after it.
-
-    Each line loses a trailing ``#`` comment (a ``#`` inside quotes stays), then splits at
-    ``&&``, ``||``, ``;``, ``|`` and ``&`` outside quotes and outside a redirection
-    (``2>&1``, ``&>file``), whitespace runs collapsed. A command ending its line is
-    followed by ``""``.
-    """
-    commands: list[tuple[str, str]] = []
-    for line in script.splitlines():
-        stripped = _SHELL_COMMENT.sub(lambda match: match.group(1) or "", line)
-        parts = [
-            match.group() for match in _SHELL_PART.finditer(stripped) if match.group().strip()
-        ]
-        commands.extend(
-            (" ".join(part.split()), parts[index + 1] if index + 1 < len(parts) else "")
-            for index, part in enumerate(parts)
-            if part not in _SHELL_OPERATORS
-        )
-    return commands
-
-
-def _shell_segments(script: str) -> list[str]:
-    """The simple commands of a joined ``run`` script, in order (``_shell_commands`` sans operator)."""
-    return [command for command, _after in _shell_commands(script)]
-
-
-def _default_shell(node: _YAMLMapping, inherited: object) -> object:
+def _default_shell(node: YAMLMapping, inherited: object) -> object:
     """The ``defaults.run.shell`` a workflow or job sets, else the one it inherits."""
-    return _mapping(_mapping(node.get("defaults")).get("run")).get("shell", inherited)
+    return yaml_mapping(yaml_mapping(node.get("defaults")).get("run")).get("shell", inherited)
 
 
 def _runs_with_errexit(shell: object) -> bool:
@@ -2330,55 +2133,14 @@ def _runs_with_errexit(shell: object) -> bool:
     words = str(shell).split()
     if not words or Path(words[0]).name not in _ERREXIT_SHELL_NAMES:
         return False
-    options = words[1 : _skip_options(words, 1, _SHELL_VALUED_OPTIONS)]
+    options = words[1 : skip_options(words, 1, _SHELL_VALUED_OPTIONS)]
     return any(_ERREXIT_SHELL_OPTION.fullmatch(word) for word in options)
-
-
-def _skip_options(words: list[str], index: int, valued: frozenset[str]) -> int:
-    """The index of the first word from ``index`` on that is no option and no option's value.
-
-    A ``--`` ends the options: the index stops on it.
-    """
-    while index < len(words) and words[index].startswith("-") and words[index] != "--":
-        index += 2 if words[index] in valued else 1
-    return index
-
-
-def _uv_command(segment: str) -> tuple[str, list[str]]:
-    """A segment's uv subcommand and uv's own words after its first ``uv`` word.
-
-    Whatever precedes ``uv`` (``VAR=val`` assignments, ``env``) and uv's global
-    options are skipped. The subcommand reads ``"pip sync"`` / ``"pip install"`` for
-    those (``pip``'s global options skipped too), ``"?"`` for a segment naming ``uv``
-    and ``sync`` with no subcommand this check knows, and ``""`` for a segment running
-    no uv command it judges. A ``uv run``'s words end at its child command, so the
-    child's own ``--locked`` / ``--no-sync`` is never read as uv's.
-    """
-    words = segment.split()
-    rest = words[words.index("uv") + 1 :] if "uv" in words else []
-    index = _skip_options(rest, 0, _UV_VALUED_GLOBALS)
-    subcommand = rest[index] if index < len(rest) else ""
-    if subcommand == "pip":
-        action = _skip_options(rest, index + 1, _UV_VALUED_GLOBALS)
-        if rest[action : action + 1] in (["sync"], ["install"]):
-            return f"pip {rest[action]}", rest
-    if subcommand == "run":
-        return subcommand, rest[: _skip_options(rest, index + 1, _UV_RUN_VALUED)]
-    if subcommand in {
-        "sync",
-        *_UV_OTHER_SUBCOMMANDS,
-        *_UV_PROJECT_EDITS,
-        *_UV_RELOCKING,
-        _UV_VERSION,
-    }:
-        return subcommand, rest
-    return ("?" if _UV_SYNC_WORDS.search(segment) else ""), rest
 
 
 def _uv_version_writes(words: list[str]) -> bool:
     """Whether a ``uv version``'s uv words set the version: a positional value or ``--bump``."""
-    args = words[_skip_options(words, 0, _UV_VALUED_GLOBALS) + 1 :]
-    return _skip_options(args, 0, _UV_VERSION_VALUED) < len(args) or any(
+    args = words[skip_options(words, 0, UV_VALUED_GLOBALS) + 1 :]
+    return skip_options(args, 0, _UV_VERSION_VALUED) < len(args) or any(
         word == "--bump" or word.startswith("--bump=") for word in args
     )
 
@@ -2400,43 +2162,41 @@ def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str
     the floor steps are identified by their ``if``, the sync and the Django install by
     their shell segments, the test run by its ``run`` script.
     """
-    job = json_object(object_result(yaml.safe_load, workflow_text), "jobs", "test")
-    include = str(json_at(job, "strategy", "matrix", "include"))
-    node_lists: list[str] = re.findall(r"fromJSON\('(\[.*?\])'\)", include, re.DOTALL)
+    job = json_object(workflow_jobs(parse_workflow(workflow_text)), "test")
+    node_lists = matrix_node_lists(job)
     problems: list[str] = []
     if len(node_lists) != 2:
         problems.append(f"{len(node_lists)} matrix node lists, not the full and push/PR pair")
-    floor = (bounds["python"], bounds["Django"], bounds["strawberry-graphql"])
-    for list_index, text in enumerate(node_lists):
-        nodes = list(map(json_object, json_list(json_loads(text))))
-        if not any((node.get("python"), node.get("django")) == floor[:2] for node in nodes):
+    python, django = bounds["python"], bounds["Django"]
+    for list_index, nodes in enumerate(node_lists):
+        if not any(at_floor(node, python, django) for node in nodes):
             problems.append(f"node list {list_index} has no node at the floor")
         for index, node in enumerate(nodes):
             marked = node.get("compatibility_only") == "1"
-            if (node.get("python"), node.get("django")) == floor[:2] and not marked:
+            if at_floor(node, python, django) and not marked:
                 problems.append(
                     f"node list {list_index}, node {index}: at the floor without compatibility_only",
                 )
-            if (
-                marked
-                and (node.get("python"), node.get("django"), node.get("strawberry")) != floor
+            if marked and (
+                not at_floor(node, python, django)
+                or node.get("strawberry") != bounds["strawberry-graphql"]
             ):
                 problems.append(f"node list {list_index}, node {index}: marked but off the floor")
 
-    steps = list(map(json_object, json_list(job, "steps")))
-    segments = [_shell_segments(_step_script(step)) for step in steps]
+    steps = list(map(yaml_mapping, job_steps(job)))
+    segments = [shell_segments(step_script(step)) for step in steps]
     located = {
         "uv sync": [
             index
             for index, found in enumerate(segments)
-            if any(_uv_command(segment)[0] == "sync" for segment in found)
+            if any(uv_command(segment)[0] == "sync" for segment in found)
         ],
         "Django install": [
             index
             for index, found in enumerate(segments)
             if any(
                 subcommand == "pip install" and "--upgrade-package" in _lock_flags(words)
-                for subcommand, words in map(_uv_command, found)
+                for subcommand, words in map(uv_command, found)
             )
         ],
         "strawberry floor": [
@@ -2448,7 +2208,7 @@ def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str
         "pytest run": [
             index
             for index, step in enumerate(steps)
-            if re.search(r"\bpytest\b", _step_script(step))
+            if re.search(r"\bpytest\b", step_script(step))
         ],
     }
     if any(len(found) != 1 for found in located.values()):
@@ -2462,14 +2222,14 @@ def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str
     installs = [
         segment
         for segment in segments[at["soft floor"]]
-        if _uv_command(segment)[0] == "pip install"
+        if uv_command(segment)[0] == "pip install"
     ]
     pinned = [
         (match.group(1), match.group(2))
         for match in re.finditer(r'"([^"=]+)==([^"]+)"', installs[0] if len(installs) == 1 else "")
     ]
-    if [name for name, _version in pinned] != list(SOFT_DEPENDENCIES):
-        problems.append(f"the soft floor step pins {installs}, not each of {SOFT_DEPENDENCIES}")
+    if [name for name, _version in pinned] != list(SOFT_FLOOR_PACKAGES):
+        problems.append(f"the soft floor step pins {installs}, not each of {SOFT_FLOOR_PACKAGES}")
     problems.extend(
         f"the soft floor step pins {name} off its floor"
         for name, version in pinned
@@ -2639,7 +2399,7 @@ def _local_actions_dir_problems(root: Path) -> list[str]:
 
 def _env_keys(env: object) -> list[str]:
     """The lock-deciding ``UV_*`` names a workflow, job or step ``env:`` block sets."""
-    return [str(key) for key in _mapping(env) if _UV_LOCK_ENV.fullmatch(str(key))]
+    return [str(key) for key in yaml_mapping(env) if _UV_LOCK_ENV.fullmatch(str(key))]
 
 
 def _uv_lock_problems(workflow_text: str) -> list[str]:
@@ -2672,16 +2432,15 @@ def _uv_lock_problems(workflow_text: str) -> list[str]:
       ``UV_LOCKED``.
     - No step runs a local ``uses: ./...`` action, which this check does not read.
     """
-    workflow = object_result(yaml.safe_load, workflow_text)
-    assert is_object_dict(workflow), "workflow is not a mapping"
+    workflow = parse_workflow(workflow_text)
     problems = [f"workflow env sets {key}" for key in _env_keys(workflow.get("env"))]
     workflow_shell = _default_shell(workflow, None)
-    for job_name, job_node in _jobs(workflow).items():
-        job = _mapping(job_node)
+    for job_name, job_node in workflow_jobs(workflow).items():
+        job = yaml_mapping(job_node)
         job_shell = _default_shell(job, workflow_shell)
         problems.extend(f"job {job_name!r} env sets {key}" for key in _env_keys(job.get("env")))
         synced = lock_checked = pinned = False
-        for step in map(_mapping, _steps(job)):
+        for step in map(yaml_mapping, job_steps(job)):
             at = f"job {job_name!r}, step {str(step.get('name'))!r}"
             uses = str(step.get("uses", ""))
             if uses.startswith(LOCAL_ACTION_PREFIX):
@@ -2693,8 +2452,8 @@ def _uv_lock_problems(workflow_text: str) -> list[str]:
                 and _runs_with_errexit(step.get("shell", job_shell))
             )
             forced = _RUNS_PAST_A_FAILURE.search(str(step.get("if", ""))) is not None
-            for position, (segment, after) in enumerate(_shell_commands(_step_script(step))):
-                subcommand, words = _uv_command(segment)
+            for position, (segment, after) in enumerate(shell_commands(step_script(step))):
+                subcommand, words = uv_command(segment)
                 flags = set(_lock_flags(words))
                 where = f"{at}: {segment}"
                 problems.extend(
@@ -2724,11 +2483,11 @@ def _uv_lock_problems(workflow_text: str) -> list[str]:
                     problems.append(f"{where} names a uv sync this check cannot read")
                 elif subcommand == "pip install":
                     pinned = True
-                elif subcommand in _UV_PROJECT_EDITS:
+                elif subcommand in UV_PROJECT_EDITS:
                     problems.append(f"{where} edits pyproject.toml and uv.lock")
                 elif (
-                    subcommand in _UV_RELOCKING
-                    or (subcommand == _UV_VERSION and _uv_version_writes(words))
+                    subcommand in UV_RELOCKING
+                    or (subcommand == UV_VERSION and _uv_version_writes(words))
                 ) and not {"--locked", "--frozen"} & flags:
                     problems.append(f"{where} may re-lock without --locked or --frozen")
                 elif subcommand == "lock":
@@ -2761,10 +2520,9 @@ def test_every_ci_uv_sync_asserts_the_lock_unless_it_upgrades_a_package(path: Pa
     text = path.read_text(encoding="utf-8")
     read = [
         segment
-        for job in _jobs(_workflow(path)).values()
-        for step in map(_mapping, _steps(_mapping(job)))
-        for segment in _shell_segments(_step_script(step))
-        if _uv_command(segment)[0] == "sync"
+        for job in workflow_jobs(load_workflow(path)).values()
+        for segment in job_segments(yaml_mapping(job))
+        if uv_command(segment)[0] == "sync"
     ]
 
     assert set(_UV_SYNCING_WORKFLOWS) <= set(WORKFLOW_IDS)
@@ -2837,7 +2595,7 @@ _UV_SEGMENT_READINGS: dict[str, list[tuple[str, list[str]]]] = {
 @pytest.mark.parametrize("script", list(_UV_SEGMENT_READINGS))
 def test_the_uv_lock_check_reads_each_shell_segment_on_its_own(script: str) -> None:
     """Each segment of a ``run`` script reads as its own uv subcommand and lock flags."""
-    readings = [_uv_command(segment) for segment in _shell_segments(script)]
+    readings = [uv_command(segment) for segment in shell_segments(script)]
 
     assert [
         (subcommand, _lock_flags(words)) for subcommand, words in readings
@@ -2860,7 +2618,7 @@ _SHELL_COMMAND_READINGS: dict[str, list[tuple[str, str]]] = {
 @pytest.mark.parametrize("script", list(_SHELL_COMMAND_READINGS))
 def test_the_shell_reader_reads_each_command_and_the_operator_after_it(script: str) -> None:
     """Commands read in order, each with the operator after it, ``""`` at its line end."""
-    assert _shell_commands(script) == _SHELL_COMMAND_READINGS[script]
+    assert shell_commands(script) == _SHELL_COMMAND_READINGS[script]
 
 
 #: A ``shell:`` value, then whether a step under it ends on its first failing command.
@@ -3672,32 +3430,9 @@ def _misplaced_archive_files(paths: Iterable[str]) -> list[str]:
     return violations
 
 
-def _committable_archive_files() -> list[str]:
-    """Return every committable path under ``docs/SPECS/``, repo-relative.
-
-    The same git oracle as ``_committable_python_files`` (tracked, plus untracked
-    but not ignored), so an ignored scratch file never fails the row and a
-    misplaced file fails it before it is staged.
-    """
-    completed = _git.run_git(
-        REPO_ROOT,
-        "ls-files",
-        "-z",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "--",
-        SPEC_ARCHIVE,
-    )
-    assert completed.returncode == 0, (
-        f"git ls-files failed ({completed.returncode}): {completed.stderr.strip()}"
-    )
-    return [name for name in completed.stdout.split("\0") if name]
-
-
 def test_the_spec_archive_holds_only_specs_and_their_appx_companions() -> None:
     """Every file under ``docs/SPECS/`` sits where the archive layout puts it."""
-    paths = _committable_archive_files()
+    paths = _committable_files(SPEC_ARCHIVE)
     # An answer missing either level would pass the layout row on nothing.
     assert any(path.startswith(f"{SPEC_APPENDIX}/") for path in paths), paths
     assert f"{SPEC_ARCHIVE}/NEXT.md" in paths, paths
