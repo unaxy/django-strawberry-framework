@@ -13,9 +13,9 @@ giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger a
 total (casts, or one rule's ignores) fails unless it carries a `Suppression-Growth-Approved:` trailer, the
 maintainer's consent.
 
-Progress: 31 done, 6 closed (survey verdicts), 2 open (one waits on upstream, one is a behavior change outside
-typing, carded). Ignore comments: 707 lines (1897 at the start of 0.0.15's ignore
-sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
+Progress: 32 done, 6 closed (survey verdicts), 7 open (items 41-45 from the 2026-11-02 review; one waits on
+upstream, one is a behavior change outside typing, carded). Ignore comments: 707 lines (1897 at the start of 0.0.15's
+ignore sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -279,6 +279,17 @@ sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
   property)`), so the `ArrayFilter` / `ListFilter` setters decorate with a typed `property.setter` and the shared
   install calls its `__set__`. The stub declares the slot a plain attribute, so each setter keeps one
   `reportIncompatibleVariableOverride` (14 ignores out, 2 in; maintainer-approved growth of that rule)
+- [x] 40. CI installs exactly the lock. Every `uv sync` in `django.yml` (`lint`, `test`, `coverage`) and
+  `kanban-pages.yml` (`build`) ran plain, so a `pyproject.toml` / `uv.lock` mismatch re-resolved silently; each now
+  runs `uv sync --locked`, as do the `workspace.py` copy and floor syncs and
+  `scripts/check_public_types.py::build_environment` (`--frozen` installed the lock unchecked). `postgres.yml`'s
+  `uv sync --upgrade-package Django` stays unlocked (`--locked` fails on any Django newer than the lock) behind a
+  `uv lock --check`. `tests/test_ci_governance.py::_uv_lock_problems` reads each shell segment and refuses a sync
+  without `--locked` unless it upgrades (`--upgrade-package X`, `=X`, `-P X`), an upgrading sync with `--locked` or
+  no lock check before it, `--frozen` on a sync, `uv pip sync`, an unreadable sync, a `uv run` without `--no-sync`
+  or `--locked` before any sync in its job (it may re-lock), and a `uv run` without `--no-sync` after a
+  `uv pip install` in its job (it syncs the pins away); the floor-cell check reads the same segments. Reading and
+  mutation tables prove each refusal
 
 ## Rules off
 
@@ -374,6 +385,46 @@ Survey verdicts recorded so nothing is re-tried blind:
   `object`, the guard stays live, and `read_attr` is `getattr`, `list_of` is `list` at run time)
 
 ## Open
+
+Items 40-45 come from the 2026-11-02 review of the typing setup (40 is done). Each lands as its own commit, in order.
+Not taken:
+- locked rules the floor pass turns off (the 3.11 pass enforces them, and the floor needs them off);
+- the growth gate passing a force push (the maintainer's own pushes);
+- `always_run` on the typing hooks (CI catches a deletion-only commit; it would add 16s per commit);
+- a mypy cross-check, typing at the declared dependency floors, and measuring `reportImportCycles` (cost over value).
+
+- [ ] 41. Trivial truths:
+  - Add the `Typing :: Typed` classifier to `[project] classifiers`.
+  - Add `hunt-ws` to `[tool.basedpyright] exclude`, matching ruff's `extend-exclude` and its comment.
+  - Correct "reads every `Self` as `Any`" to `Unknown` in `pyproject.toml` (above `pythonVersion`) and `START.md` (the
+    basedpyright bullet).
+  - Mark this file's pre-commit table as the 4ce779e1 snapshot, or re-measure it with every hook listed.
+- [ ] 42. Strict by default for a new file. The root `[tool.basedpyright]` sets `reportUnannotatedClassAttribute` and
+  `reportUnusedCallResult` to `"none"`, so a `.py` outside every listed environment root gets the tests' leniency.
+  - Set both to `"error"` at the root, and give `tests/` (and the example test folders that inherit them) explicit
+    environments that turn them off.
+  - Then drop the per-file root environments that exist only to turn them on (`conftest.py`, `line_count.py`,
+    `docs/dry/export_dry_review.py`), where an environment's import roots allow it.
+  - Prove the moves: `uv run basedpyright` and the floor pass stay at 0 errors over 626 files. An off-by-default count
+    measured before and after must match: about 18,100 with both rules forced on in tests and examples.
+- [ ] 43. Lazy-export typing parity. The package root's `__getattr__` returns `Any`, so a lazy export missing from its
+  `TYPE_CHECKING` mirror types a consumer import as `Any`. Add a test row asserting the lazy map's keys equal the names
+  the `TYPE_CHECKING` block imports: read both from the module's AST. `tests/rest_framework/test_soft_dependency.py`
+  pins the key set only.
+- [ ] 44. Public inference pinned with `assert_type`. `reportAssertTypeFailure` is locked with nothing to check.
+  - Add one typed module under tests/ whose `assert_type` calls pin what a consumer's checker infers. Cover
+    `DjangoListField`, `DjangoConnectionField`, `DjangoNodeField`, a `FilterSet` / `OrderSet` `apply_sync`
+    return, and `DjangoType.get_queryset`.
+  - The existing basedpyright run checks it, and pytest runs it, since `assert_type` is a no-op at run time.
+  - Pin only what the code states today. Item 19's field-factory returns are the source.
+- [ ] 45. The reason rule, gated. START.md and `pyproject.toml` require a reason for every ignore, but about 37 ignore
+  lines carry none.
+  - `scripts/check_type_suppressions.py` refuses a `# pyright: ignore[...]` with no comment text on its line and no
+    `#` comment line directly above.
+  - It also refuses an inert `# type: ignore`, which `enableTypeIgnoreComments = false` never reads.
+  - Write the 37 missing reasons, each stating its real cause, and add the gate's rows to
+    `tests/test_check_type_suppressions.py`.
+  - The ledger counts must not move.
 
 - [ ] 23. Waits on upstream: drf-stubs declares a stub-only `ModelSerializer.Meta`
   (typeddjango/djangorestframework-stubs#689, open). The first fix, #1069, closed unmerged; #1101 makes the same change

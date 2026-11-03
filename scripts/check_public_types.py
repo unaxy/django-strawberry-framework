@@ -31,10 +31,12 @@ How it measures:
 * The package is installed NON-editable into a fresh environment inside a
   ``tempfile.TemporaryDirectory``, because ``--verifytypes`` does not follow an
   editable install and finds no ``py.typed`` through the shared ``.venv``.
-  ``uv sync --frozen --no-editable --reinstall-package django-strawberry-framework
+  ``uv sync --locked --no-editable --reinstall-package django-strawberry-framework
   --python <this interpreter>``, with ``UV_PROJECT_ENVIRONMENT`` naming that
   directory, installs the lock's default groups, so the soft dependencies and
-  the stubs resolve for the verifier the way they do for the package checkers.
+  the stubs resolve for the verifier the way they do for the package checkers;
+  ``--locked`` fails the build when ``pyproject.toml`` and ``uv.lock`` disagree,
+  as CI's own syncs do.
   ``--reinstall-package`` is load-bearing: uv caches the project's built wheel
   under a key read from ``pyproject.toml``, so without it a fresh environment
   can receive a build of older source.
@@ -369,7 +371,7 @@ def build_environment(environment: Path) -> None:
         [
             _uv_executable(),
             "sync",
-            "--frozen",
+            "--locked",
             "--no-editable",
             "--reinstall-package",
             DISTRIBUTION,

@@ -46,7 +46,7 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked
       - name: Ruff Check
         run: uv run ruff check .
       - name: Ruff Format Check
@@ -273,7 +273,7 @@ jobs:
         run: uv python install ${{ matrix.python }}
 
       - name: Install dependencies
-        run: uv sync --python ${{ matrix.python }}
+        run: uv sync --locked --python ${{ matrix.python }}
 
       - name: Install Django ${{ matrix.django }}
         # ``--upgrade-package Django`` is not redundant with the pin beside it:
@@ -398,7 +398,7 @@ jobs:
         run: uv python install 3.14
 
       - name: Install dependencies
-        run: uv sync --python 3.14
+        run: uv sync --locked --python 3.14
 
       - name: Download the shards' coverage data
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

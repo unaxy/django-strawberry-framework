@@ -3021,12 +3021,16 @@ def test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order() -> None:
     """``gate``'s lint suite is the ``lint`` job of ``django.yml``, command for command.
 
     Every ``run:`` line of that job past its setup (``uv python install``,
-    ``uv sync``) is a ``uv run`` command, and the suite runs each one without the
-    prefix, in the workflow's order; a step added to the workflow and not here
-    would let a gate pass that CI fails.
+    ``uv sync --locked``) is a ``uv run`` command, and the suite runs each one
+    without the prefix, in the workflow's order; a step added to the workflow and
+    not here would let a gate pass that CI fails.
     """
     lines = _run_lines(_django_workflow_job("lint"))
-    setup = [line for line in lines if line.startswith("uv python install") or line == "uv sync"]
+    setup = [
+        line
+        for line in lines
+        if line.startswith("uv python install") or line == "uv sync --locked"
+    ]
     commands = [line for line in lines if line not in setup]
 
     assert len(setup) == 2
@@ -3035,6 +3039,42 @@ def test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order() -> None:
     arguments, cell = workspace.GATE_SUITES["lint"]
     assert arguments == ("sh", "-exc", "\n".join(workspace.LINT_COMMANDS))
     assert cell == "default"
+
+
+def test_a_copy_sync_asserts_the_lock_as_the_ci_lint_job_sync_does(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy syncs with the lint job's lock flag, so a stale ``uv.lock`` fails both alike.
+
+    ``--frozen`` would install the lock without checking it against
+    ``pyproject.toml``: a bound raised without ``uv lock`` would pass the gate
+    while CI's ``uv sync --locked`` fails.
+    """
+    commands: list[list[str]] = []
+
+    def _run_checked(command: list[str], _env: dict[str, str], _holding: object = ()) -> None:
+        commands.append(list(command))
+
+    monkeypatch.setattr(workspace, "_run_checked", _run_checked)
+    workspace._uv_sync(tmp_path)
+    ci_syncs = [
+        line for line in _run_lines(_django_workflow_job("lint")) if line.startswith("uv sync")
+    ]
+
+    assert ci_syncs == ["uv sync --locked"]
+    assert commands == [
+        [
+            "uv",
+            "sync",
+            "--directory",
+            str(tmp_path),
+            "--locked",
+            "--group",
+            "pg",
+            "-q",
+        ],
+    ]
 
 
 def _django_workflow_job(name: str) -> dict[object, object]:
@@ -3235,7 +3275,8 @@ def test_the_floor_gate_suite_installs_and_runs_what_the_ci_floor_cell_does(
 ) -> None:
     """The floor suite is the ``test`` job's floor node: its install and its coverage-free run.
 
-    That job syncs the lock at the floor Python, installs Django over it with
+    That job syncs the lock at the floor Python with the floor cell's sync
+    (``uv sync --locked``), installs Django over it with
     ``--upgrade-package Django``, then strawberry-graphql, then every soft
     dependency in one install, and runs pytest with ``addopts`` that drop
     ``--cov``; the suite does each of those against its own virtualenv and only
@@ -3257,7 +3298,7 @@ def test_the_floor_gate_suite_installs_and_runs_what_the_ci_floor_cell_does(
 
     commands = workspace.floor_install_commands(tmp_path / "gate", venv, pins)
 
-    assert "uv sync --python ${{ matrix.python }}" in lines
+    assert "uv sync --locked --python ${{ matrix.python }}" in lines
     assert 'uv pip install --upgrade-package Django "Django==${{ matrix.django }}"' in lines
     assert 'uv pip install "strawberry-graphql==${{ matrix.strawberry }}"' in lines
     assert "uv pip install " + " ".join(f'"{pin}"' for pin in soft) in lines
@@ -3277,7 +3318,7 @@ def test_the_floor_gate_suite_installs_and_runs_what_the_ci_floor_cell_does(
             "sync",
             "--directory",
             str(tmp_path / "gate"),
-            "--frozen",
+            "--locked",
             "--python",
             "3.10",
             "-q",
