@@ -282,7 +282,9 @@ jobs:
         # Python 3.12+ (where uv.lock gives 6.x) but leaves 3.11 on its locked
         # 5.2 patch -- one matrix label, two versions under test. Scoping the
         # upgrade to Django alone, rather than a bare ``--upgrade``, keeps every
-        # transitive pin at its uv.lock version.
+        # transitive pin at its uv.lock version unless the installed Django's
+        # requirements force it up (e.g. asgiref, sqlparse), directly or
+        # through another package's bound.
         run: |
           if [ "${{ matrix.django }}" == "latest" ]; then
             uv pip install --upgrade-package Django "Django"

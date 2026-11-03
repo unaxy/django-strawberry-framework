@@ -98,7 +98,10 @@ jobs:
         # No ``--locked``: ``--upgrade-package Django`` re-resolves Django on purpose,
         # so ``--locked`` would fail the run whenever a Django release is newer than
         # the lock. ``uv lock --check`` first fails the run when ``pyproject.toml``
-        # and ``uv.lock`` disagree, so every other pin stays at its uv.lock version.
+        # and ``uv.lock`` disagree. A newer Django also moves every pin its
+        # requirements force up (e.g. asgiref, sqlparse), directly or through
+        # another package's bound, to its newest compatible release; every pin
+        # it does not force stays at its uv.lock version.
         run: |
           uv lock --check
           uv sync --python 3.14 --group pg --upgrade-package Django

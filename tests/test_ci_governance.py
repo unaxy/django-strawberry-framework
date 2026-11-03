@@ -31,7 +31,7 @@ import sys
 import tokenize
 from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TypeAlias
 
 import pytest
 import tomli
@@ -59,10 +59,14 @@ from scripts import _git
 # construction, so the gate cannot pass in a clean CI checkout and fail on a
 # developer machine.
 from scripts.check_citations import SOURCE_TREES, iter_python_sources, spec_files
-from tests._idioms import json_at, json_list, json_loads, json_object
-
-if TYPE_CHECKING:
-    from typing_extensions import TypeIs
+from tests._idioms import (
+    is_object_dict,
+    is_object_list,
+    json_at,
+    json_list,
+    json_loads,
+    json_object,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
@@ -89,16 +93,6 @@ def _workflow_paths() -> list[Path]:
     return paths
 
 
-def _is_mapping(node: object) -> "TypeIs[_YAMLMapping]":
-    """Return whether a parsed YAML node is a mapping."""
-    return isinstance(node, dict)
-
-
-def _is_sequence(node: object) -> "TypeIs[list[object]]":
-    """Return whether a parsed YAML node is a sequence."""
-    return isinstance(node, list)
-
-
 def _load(path: Path) -> object:
     """Parse one YAML file into its untyped node tree."""
     return object_result(yaml.safe_load, path.read_text(encoding="utf-8"))
@@ -107,7 +101,7 @@ def _load(path: Path) -> object:
 def _workflow(path: Path) -> _YAMLMapping:
     """Parse one workflow file, which is a mapping at its root."""
     workflow = _load(path)
-    assert _is_mapping(workflow), f"{path.name}: workflow is not a mapping"
+    assert is_object_dict(workflow), f"{path.name}: workflow is not a mapping"
     return workflow
 
 
@@ -115,7 +109,7 @@ def _mapping(node: object) -> _YAMLMapping:
     """Read a YAML node as a mapping; an absent or empty node reads as an empty one."""
     if not node:
         return {}
-    assert _is_mapping(node), f"expected a YAML mapping, got {node!r}"
+    assert is_object_dict(node), f"expected a YAML mapping, got {node!r}"
     return node
 
 
@@ -131,7 +125,7 @@ def _steps(job: _YAMLMapping) -> list[object]:
     steps = job.get("steps")
     if not steps:
         return []
-    assert _is_sequence(steps), f"expected a YAML sequence of steps, got {steps!r}"
+    assert is_object_list(steps), f"expected a YAML sequence of steps, got {steps!r}"
     return steps
 
 
@@ -170,7 +164,7 @@ def test_no_job_grants_repository_write(path: Path) -> None:
     workflow = _workflow(path)
     for name, job in _jobs(workflow).items():
         permissions = _mapping(job).get("permissions")
-        if not _is_mapping(permissions):
+        if not is_object_dict(permissions):
             continue
         assert permissions.get("contents") != "write", (
             f"{path.name}: job {name!r} grants contents: write; no CI job here "
@@ -370,7 +364,7 @@ def test_the_scheduled_django_run_selects_the_full_matrix() -> None:
 def _environment_name(job: _YAMLMapping) -> object:
     """Return a job's environment name, from the bare or the mapping spelling."""
     environment = job.get("environment")
-    return _mapping(environment).get("name") if _is_mapping(environment) else environment
+    return _mapping(environment).get("name") if is_object_dict(environment) else environment
 
 
 def test_publish_workflow_keeps_the_trusted_publisher_binding() -> None:
@@ -2155,12 +2149,36 @@ def _step_script(step: dict[object, object]) -> str:
     return str(step.get("run", "")).replace("\\\n", " ")
 
 
-#: One simple command of a shell line: a quoted string stays whole, ``&``, ``|`` and ``;`` end it.
-_SHELL_SEGMENT = re.compile(r"""(?:"[^"]*"|'[^']*'|[^"';&|])+""")
-_SHELL_COMMENT = re.compile(r"(?:^|\s)#.*")
+#: The control operators that end a simple command, each before any operator it begins.
+_SHELL_OPERATORS = (
+    "&&",
+    "||",
+    ";",
+    "|",
+    "&",
+)
+#: A simple command of a shell line, or the operator that ends it; a quoted string and a
+#: redirection's ``&`` (``2>&1``, ``>&2``, ``&>file``) stay inside the command.
+_SHELL_PART = re.compile(
+    r"""(?:"[^"]*"|'[^']*'|\d*[<>]&\d*-?|&>|[^"';&|])+|"""
+    + "|".join(map(re.escape, _SHELL_OPERATORS)),
+)
+#: A quoted string (group 1, kept whole) or a ``#`` comment, which opens at a word start.
+_SHELL_COMMENT = re.compile(r"""("[^"]*"|'[^']*')|(?:^|(?<=\s))#.*""")
+#: A word ahead of a command's own name: a ``VAR=val`` assignment, ``env`` or ``time``.
+_COMMAND_PREFIX = re.compile(r"env|time|[A-Za-z_]\w*=\S*")
+#: The ``shell:`` names GitHub runs with errexit (``bash --noprofile --norc -eo pipefail {0}``,
+#: ``sh -e {0}``).
+_ERREXIT_SHELL_NAMES = frozenset({"bash", "sh"})
+#: A custom ``bash`` / ``sh`` option cluster turning errexit on (``-e``, ``-eo pipefail``).
+_ERREXIT_SHELL_OPTION = re.compile(r"-[a-z]*e[a-z]*")
+#: The ``bash`` / ``sh`` options whose value is the next word (``-o pipefail``).
+_SHELL_VALUED_OPTIONS = frozenset({"-o", "+o"})
 #: A ``uv`` word and a later ``sync`` word (never the ``sync`` of ``--no-sync``).
 _UV_SYNC_WORDS = re.compile(r"\buv\b.*(?<![\w-])sync\b")
-#: uv's global options whose value is the next word (``uv --help``); the subcommand follows.
+#: uv's global options that take the next word as their value at runtime, hidden and alias
+#: names included (``--python-fetch``, ``--python-preference``, ``--preview-features``,
+#: ``--trusted-host``); the subcommand follows.
 _UV_VALUED_GLOBALS = frozenset(
     {
         "--allow-insecure-host",
@@ -2168,14 +2186,67 @@ _UV_VALUED_GLOBALS = frozenset(
         "--color",
         "--config-file",
         "--directory",
+        "--preview-features",
         "--project",
+        "--python-fetch",
+        "--python-preference",
+        "--trusted-host",
+    },
+)
+#: The options ``uv run`` takes the next word as the value of at runtime, its own and the
+#: globals, hidden names included (``--max-recursion-depth``); the child command follows.
+_UV_RUN_VALUED = _UV_VALUED_GLOBALS | frozenset(
+    {
+        "--config-setting",
+        "--config-settings-package",
+        "--default-index",
+        "--env-file",
+        "--exclude-newer",
+        "--exclude-newer-package",
+        "--extra",
+        "--extra-index-url",
+        "--find-links",
+        "--fork-strategy",
+        "--group",
+        "--index",
+        "--index-strategy",
+        "--index-url",
+        "--keyring-provider",
+        "--link-mode",
+        "--max-recursion-depth",
+        "--no-binary-package",
+        "--no-build-isolation-package",
+        "--no-build-package",
+        "--no-editable-package",
+        "--no-extra",
+        "--no-group",
+        "--no-sources-package",
+        "--only-group",
+        "--package",
+        "--prerelease",
+        "--prerelease-package",
+        "--python",
+        "--python-platform",
+        "--refresh-package",
+        "--reinstall-package",
+        "--resolution",
+        "--upgrade-group",
+        "--upgrade-package",
+        "--with",
+        "--with-editable",
+        "--with-requirements",
+        "-C",
+        "-P",
+        "-f",
+        "-i",
+        "-p",
+        "-w",
     },
 )
 #: The uv subcommands a workflow runs besides ``sync``; a ``sync`` word after one is an argument.
 _UV_OTHER_SUBCOMMANDS = frozenset(
     {
         "build",
-        "export",
         "lock",
         "pip",
         "python",
@@ -2184,49 +2255,138 @@ _UV_OTHER_SUBCOMMANDS = frozenset(
         "venv",
     },
 )
-#: A word deciding whether a uv command may move off ``uv.lock``; group 1 spells an upgrade.
-_UV_LOCK_FLAG = re.compile(r"--frozen|--locked|--no-sync|(--upgrade-package(?:=\S+)?|-P)")
+#: The uv subcommands that edit ``pyproject.toml`` and ``uv.lock``; CI runs neither.
+_UV_PROJECT_EDITS = frozenset({"add", "remove"})
+#: The uv subcommands that lock the project first unless told ``--locked`` / ``--frozen``.
+_UV_RELOCKING = frozenset({"export", "tree"})
+#: The uv subcommand that re-locks only when it writes a version (a value or ``--bump``) without
+#: ``--locked`` / ``--frozen``; a bare ``uv version`` reads the version and leaves ``uv.lock``.
+_UV_VERSION = "version"
+#: A superset of the options ``uv version`` takes the next word as the value of at runtime:
+#: ``uv run``'s plus ``--bump`` and ``--output-format``.
+_UV_VERSION_VALUED = _UV_RUN_VALUED | frozenset({"--bump", "--output-format"})
+#: A word deciding whether a uv command may move off ``uv.lock``; group 1 spells a one-package
+#: upgrade (``--upgrade-package X``, ``--upgrade-package=X``, ``-P X``, ``-PX``), group 2 a
+#: whole upgrade.
+_UV_LOCK_FLAG = re.compile(
+    r"--frozen|--locked|--no-sync|(--upgrade-package(?:=\S+)?|-P\S*)|(--upgrade|-U)",
+)
+#: ``UV_FROZEN`` / ``UV_NO_SYNC`` / ``UV_LOCKED``: the environment spellings of the flags above.
+_UV_LOCK_ENV = re.compile(r"UV_(?:FROZEN|NO_SYNC|LOCKED)")
+_UV_LOCK_ENV_SET = re.compile(rf"\b({_UV_LOCK_ENV.pattern})=")
+#: A step ``if:`` that runs the step after an earlier step failed.
+_RUNS_PAST_A_FAILURE = re.compile(r"\b(?:always|failure|cancelled)\s*\(")
+
+
+def _command_word(command: str) -> str:
+    """A simple command's own first word, past ``VAR=val`` assignments, ``env`` and ``time``."""
+    return next((word for word in command.split() if not _COMMAND_PREFIX.fullmatch(word)), "")
+
+
+def _shell_commands(script: str) -> list[tuple[str, str]]:
+    """The simple commands of a joined ``run`` script in order, each with the operator after it.
+
+    Each line loses a trailing ``#`` comment (a ``#`` inside quotes stays), then splits at
+    ``&&``, ``||``, ``;``, ``|`` and ``&`` outside quotes and outside a redirection
+    (``2>&1``, ``&>file``), whitespace runs collapsed. A command ending its line is
+    followed by ``""``.
+    """
+    commands: list[tuple[str, str]] = []
+    for line in script.splitlines():
+        stripped = _SHELL_COMMENT.sub(lambda match: match.group(1) or "", line)
+        parts = [
+            match.group() for match in _SHELL_PART.finditer(stripped) if match.group().strip()
+        ]
+        commands.extend(
+            (" ".join(part.split()), parts[index + 1] if index + 1 < len(parts) else "")
+            for index, part in enumerate(parts)
+            if part not in _SHELL_OPERATORS
+        )
+    return commands
 
 
 def _shell_segments(script: str) -> list[str]:
-    """The simple commands of a joined ``run`` script, in order, whitespace runs collapsed.
+    """The simple commands of a joined ``run`` script, in order (``_shell_commands`` sans operator)."""
+    return [command for command, _after in _shell_commands(script)]
 
-    Each line loses a trailing ``#`` comment, then splits at ``&&``, ``||``, ``;``, ``|``
-    and ``&`` outside quotes.
+
+def _default_shell(node: _YAMLMapping, inherited: object) -> object:
+    """The ``defaults.run.shell`` a workflow or job sets, else the one it inherits."""
+    return _mapping(_mapping(node.get("defaults")).get("run")).get("shell", inherited)
+
+
+def _runs_with_errexit(shell: object) -> bool:
+    """Whether a step's ``shell:`` ends the step on its first failing command.
+
+    True when no shell is set (on a Linux or macOS runner, where every job here runs, the
+    default is ``bash -e``; a Windows runner's default is ``pwsh``), for ``bash`` and
+    ``sh`` (GitHub adds ``-e``), and for a custom shell string whose program is ``bash``
+    or ``sh`` with a lowercase option cluster carrying ``e`` (``-e``, ``-eo pipefail``)
+    among its options. ``bash -l {0}``, ``bash -E {0}``, ``pwsh``, ``python -We {0}`` and
+    ``xvfb-run -e /dev/stdout bash {0}`` run past a failing command.
     """
-    return [
-        " ".join(match.group().split())
-        for line in script.splitlines()
-        for match in _SHELL_SEGMENT.finditer(_SHELL_COMMENT.sub("", line))
-        if match.group().strip()
-    ]
+    if shell is None or str(shell) in _ERREXIT_SHELL_NAMES:
+        return True
+    words = str(shell).split()
+    if not words or Path(words[0]).name not in _ERREXIT_SHELL_NAMES:
+        return False
+    options = words[1 : _skip_options(words, 1, _SHELL_VALUED_OPTIONS)]
+    return any(_ERREXIT_SHELL_OPTION.fullmatch(word) for word in options)
+
+
+def _skip_options(words: list[str], index: int, valued: frozenset[str]) -> int:
+    """The index of the first word from ``index`` on that is no option and no option's value.
+
+    A ``--`` ends the options: the index stops on it.
+    """
+    while index < len(words) and words[index].startswith("-") and words[index] != "--":
+        index += 2 if words[index] in valued else 1
+    return index
 
 
 def _uv_command(segment: str) -> tuple[str, list[str]]:
-    """A segment's uv subcommand and the words after its first ``uv`` word.
+    """A segment's uv subcommand and uv's own words after its first ``uv`` word.
 
     Whatever precedes ``uv`` (``VAR=val`` assignments, ``env``) and uv's global
     options are skipped. The subcommand reads ``"pip sync"`` / ``"pip install"`` for
-    those, ``"?"`` for a segment naming ``uv`` and ``sync`` with no subcommand this
-    check knows, and ``""`` for a segment running no uv command it judges.
+    those (``pip``'s global options skipped too), ``"?"`` for a segment naming ``uv``
+    and ``sync`` with no subcommand this check knows, and ``""`` for a segment running
+    no uv command it judges. A ``uv run``'s words end at its child command, so the
+    child's own ``--locked`` / ``--no-sync`` is never read as uv's.
     """
     words = segment.split()
     rest = words[words.index("uv") + 1 :] if "uv" in words else []
-    index = 0
-    while index < len(rest) and rest[index].startswith("-"):
-        index += 2 if rest[index] in _UV_VALUED_GLOBALS else 1
+    index = _skip_options(rest, 0, _UV_VALUED_GLOBALS)
     subcommand = rest[index] if index < len(rest) else ""
-    if subcommand == "pip" and rest[index + 1 : index + 2] in (["sync"], ["install"]):
-        return f"pip {rest[index + 1]}", rest
-    if subcommand == "sync" or subcommand in _UV_OTHER_SUBCOMMANDS:
+    if subcommand == "pip":
+        action = _skip_options(rest, index + 1, _UV_VALUED_GLOBALS)
+        if rest[action : action + 1] in (["sync"], ["install"]):
+            return f"pip {rest[action]}", rest
+    if subcommand == "run":
+        return subcommand, rest[: _skip_options(rest, index + 1, _UV_RUN_VALUED)]
+    if subcommand in {
+        "sync",
+        *_UV_OTHER_SUBCOMMANDS,
+        *_UV_PROJECT_EDITS,
+        *_UV_RELOCKING,
+        _UV_VERSION,
+    }:
         return subcommand, rest
     return ("?" if _UV_SYNC_WORDS.search(segment) else ""), rest
 
 
+def _uv_version_writes(words: list[str]) -> bool:
+    """Whether a ``uv version``'s uv words set the version: a positional value or ``--bump``."""
+    args = words[_skip_options(words, 0, _UV_VALUED_GLOBALS) + 1 :]
+    return _skip_options(args, 0, _UV_VERSION_VALUED) < len(args) or any(
+        word == "--bump" or word.startswith("--bump=") for word in args
+    )
+
+
 def _lock_flags(words: list[str]) -> list[str]:
-    """The lock-deciding words of a uv command, each upgrade spelling read as ``--upgrade-package``."""
+    """The lock-deciding words of a uv command, each upgrade spelling read by its group."""
     return [
-        "--upgrade-package" if match.group(1) else word
+        "--upgrade-package" if match.group(1) else "--upgrade" if match.group(2) else word
         for word in words
         if (match := _UV_LOCK_FLAG.fullmatch(word))
     ]
@@ -2275,7 +2435,8 @@ def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str
             index
             for index, found in enumerate(segments)
             if any(
-                segment.startswith("uv pip install --upgrade-package Django ") for segment in found
+                subcommand == "pip install" and "--upgrade-package" in _lock_flags(words)
+                for subcommand, words in map(_uv_command, found)
             )
         ],
         "strawberry floor": [
@@ -2299,7 +2460,9 @@ def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str
         if at[later] < at[earlier]
     )
     installs = [
-        segment for segment in segments[at["soft floor"]] if segment.startswith("uv pip install ")
+        segment
+        for segment in segments[at["soft floor"]]
+        if _uv_command(segment)[0] == "pip install"
     ]
     pinned = [
         (match.group(1), match.group(2))
@@ -2397,6 +2560,13 @@ _FLOOR_MUTATIONS: dict[str, tuple[Callable[[str, dict[str, str]], str], list[str
         lambda text, _bounds: _move_step(text, "Install the soft", "Install Django"),
         ["the soft floor step runs before the Django install step"],
     ),
+    "test-run-above-strawberry-step": (
+        lambda text, _bounds: _move_step(text, "Run Tests", "Install Strawberry"),
+        [
+            "the pytest run step runs before the strawberry floor step",
+            "the pytest run step runs before the soft floor step",
+        ],
+    ),
     "test-run-above-soft-step": (
         lambda text, _bounds: _move_step(text, "Run Tests", "Install the soft"),
         ["the pytest run step runs before the soft floor step"],
@@ -2453,69 +2623,131 @@ def test_the_floor_cell_check_judges_a_mutated_django_workflow(mutation: str) ->
 _UNSYNCED_RUN = "may re-lock with no uv sync before it in its job"
 #: The problem of a ``uv run`` that syncs away the pins of an earlier ``uv pip install``.
 _PINS_REVERTED = "syncs away the job's uv pip install pins without --no-sync"
+#: The problem of an upgrading ``uv sync`` no lock check it can rely on precedes.
+_UNCHECKED_UPGRADE = "upgrades with no unconditional uv lock --check before it"
 #: The workflow files that run a ``uv sync``; the check must read one in each.
 _UV_SYNCING_WORKFLOWS = ("django.yml", "kanban-pages.yml", "postgres.yml")
 
 
-def _job_segments(workflow_text: str) -> dict[str, list[tuple[str, str]]]:
-    """Each job's shell segments in step order, each with its step's name."""
-    workflow = object_result(yaml.safe_load, workflow_text)
-    assert _is_mapping(workflow), "workflow is not a mapping"
-    return {
-        str(job_name): [
-            (str(step.get("name")), segment)
-            for step in map(_mapping, _steps(_mapping(job)))
-            for segment in _shell_segments(_step_script(step))
-        ]
-        for job_name, job in _jobs(workflow).items()
-    }
+def _local_actions_dir_problems(root: Path) -> list[str]:
+    """The problem of a ``.github/actions`` directory under ``root``: no reader here reads it."""
+    actions = root / ".github" / "actions"
+    if not actions.exists():
+        return []
+    return [f"{actions} exists; the uv lock check does not read its actions"]
+
+
+def _env_keys(env: object) -> list[str]:
+    """The lock-deciding ``UV_*`` names a workflow, job or step ``env:`` block sets."""
+    return [str(key) for key in _mapping(env) if _UV_LOCK_ENV.fullmatch(str(key))]
 
 
 def _uv_lock_problems(workflow_text: str) -> list[str]:
     """Each way ``workflow_text`` installs or runs anything but exactly ``uv.lock``.
 
-    - A ``uv sync`` carries ``--locked``, unless it upgrades a package
-      (``--upgrade-package X``, ``--upgrade-package=X``, ``-P X``): an upgrading sync
-      carries no ``--locked`` and follows a ``uv lock --check`` in its job.
-    - No sync carries ``--frozen``; nothing runs ``uv pip sync`` or a uv sync this
-      check cannot read.
-    - A ``uv run`` with neither ``--no-sync`` nor ``--locked`` may re-lock, so it
-      follows a sync in its job.
+    The reader guards against honest drift (a well-meaning workflow edit), not
+    deliberate evasion: quote-split spellings, ``uv tool run uv``, a ``--project``
+    pointing elsewhere and a quoted ``"--locked"`` are out of its reach.
+
+    - A ``uv sync`` carries ``--locked``, unless it upgrades one package
+      (``--upgrade-package X``, ``--upgrade-package=X``, ``-P X``, ``-PX``): an
+      upgrading sync carries no ``--locked``, sits in a step whose ``if:`` never runs it
+      past a failure (``always()``, ``failure()``, ``cancelled()``), and follows a
+      ``uv lock --check`` of its job that runs unconditionally. Such a check is its
+      step's first simple command, followed by nothing but ``;`` or its line end, with
+      ``uv`` its first word past ``VAR=val`` / ``env`` / ``time``; the step has no
+      ``if:``, no ``continue-on-error`` and a shell that stops at a failing command
+      (``_runs_with_errexit``, the step's ``shell:`` else the job's, else the
+      workflow's ``defaults.run.shell``).
+    - No sync carries ``--frozen`` or ``--upgrade``; nothing runs ``uv pip sync`` or a
+      uv sync this check cannot read; the only ``uv lock`` is ``uv lock --check``.
+    - Nothing runs ``uv add`` or ``uv remove``; ``uv export``, ``uv tree`` and a
+      ``uv version`` that writes a version (a positional value or ``--bump``) carry
+      ``--locked`` or ``--frozen``; a bare ``uv version`` only reads it.
+    - A ``uv run`` with neither ``--no-sync`` nor ``--locked`` of its own (a child
+      command's flags are not uv's) may re-lock, so it follows a sync in its job; no
+      ``uv run`` upgrades a package.
     - A ``uv run`` after a ``uv pip install`` in its job carries ``--no-sync``.
+    - No ``env:`` block and no command sets ``UV_FROZEN``, ``UV_NO_SYNC`` or
+      ``UV_LOCKED``.
+    - No step runs a local ``uses: ./...`` action, which this check does not read.
     """
-    problems: list[str] = []
-    for job, segments in _job_segments(workflow_text).items():
+    workflow = object_result(yaml.safe_load, workflow_text)
+    assert is_object_dict(workflow), "workflow is not a mapping"
+    problems = [f"workflow env sets {key}" for key in _env_keys(workflow.get("env"))]
+    workflow_shell = _default_shell(workflow, None)
+    for job_name, job_node in _jobs(workflow).items():
+        job = _mapping(job_node)
+        job_shell = _default_shell(job, workflow_shell)
+        problems.extend(f"job {job_name!r} env sets {key}" for key in _env_keys(job.get("env")))
         synced = lock_checked = pinned = False
-        for step, segment in segments:
-            subcommand, words = _uv_command(segment)
-            flags = _lock_flags(words)
-            where = f"job {job!r}, step {step!r}: {segment}"
-            if subcommand == "sync":
-                synced = True
+        for step in map(_mapping, _steps(job)):
+            at = f"job {job_name!r}, step {str(step.get('name'))!r}"
+            uses = str(step.get("uses", ""))
+            if uses.startswith(LOCAL_ACTION_PREFIX):
+                problems.append(f"{at} runs the local action {uses}")
+            problems.extend(f"{at} env sets {key}" for key in _env_keys(step.get("env")))
+            checkable = (
+                "if" not in step
+                and "continue-on-error" not in step
+                and _runs_with_errexit(step.get("shell", job_shell))
+            )
+            forced = _RUNS_PAST_A_FAILURE.search(str(step.get("if", ""))) is not None
+            for position, (segment, after) in enumerate(_shell_commands(_step_script(step))):
+                subcommand, words = _uv_command(segment)
+                flags = set(_lock_flags(words))
+                where = f"{at}: {segment}"
+                problems.extend(
+                    f"{where} sets {match.group(1)}"
+                    for match in _UV_LOCK_ENV_SET.finditer(segment)
+                )
                 upgrades = "--upgrade-package" in flags
-                if "--frozen" in flags:
-                    problems.append(f"{where} carries --frozen")
-                if upgrades and "--locked" in flags:
-                    problems.append(f"{where} carries --locked beside --upgrade-package")
-                if upgrades and not lock_checked:
-                    problems.append(f"{where} upgrades with no uv lock --check before it")
-                if not upgrades and "--locked" not in flags:
-                    problems.append(f"{where} does not carry --locked")
-            elif subcommand == "pip sync":
-                synced = True
-                problems.append(f"{where} installs a requirements file past uv.lock")
-            elif subcommand == "?":
-                synced = True
-                problems.append(f"{where} names a uv sync this check cannot read")
-            elif subcommand == "pip install":
-                pinned = True
-            elif subcommand == "lock" and "--check" in words:
-                lock_checked = True
-            elif subcommand == "run":
-                if not synced and not {"--locked", "--no-sync"} & set(flags):
-                    problems.append(f"{where} {_UNSYNCED_RUN}")
-                if pinned and "--no-sync" not in flags:
-                    problems.append(f"{where} {_PINS_REVERTED}")
+                if subcommand == "sync":
+                    synced = True
+                    if "--frozen" in flags:
+                        problems.append(f"{where} carries --frozen")
+                    if "--upgrade" in flags:
+                        problems.append(f"{where} carries --upgrade")
+                    if upgrades and "--locked" in flags:
+                        problems.append(f"{where} carries --locked beside --upgrade-package")
+                    if upgrades and forced:
+                        problems.append(f"{where} upgrades in a step that runs past a failure")
+                    if upgrades and not lock_checked:
+                        problems.append(f"{where} {_UNCHECKED_UPGRADE}")
+                    if not upgrades and "--locked" not in flags:
+                        problems.append(f"{where} does not carry --locked")
+                elif subcommand == "pip sync":
+                    synced = True
+                    problems.append(f"{where} installs a requirements file past uv.lock")
+                elif subcommand == "?":
+                    synced = True
+                    problems.append(f"{where} names a uv sync this check cannot read")
+                elif subcommand == "pip install":
+                    pinned = True
+                elif subcommand in _UV_PROJECT_EDITS:
+                    problems.append(f"{where} edits pyproject.toml and uv.lock")
+                elif (
+                    subcommand in _UV_RELOCKING
+                    or (subcommand == _UV_VERSION and _uv_version_writes(words))
+                ) and not {"--locked", "--frozen"} & flags:
+                    problems.append(f"{where} may re-lock without --locked or --frozen")
+                elif subcommand == "lock":
+                    if "--check" not in words or {"--upgrade", "--upgrade-package"} & flags:
+                        problems.append(f"{where} is not a plain uv lock --check")
+                    elif (
+                        checkable
+                        and position == 0
+                        and after in ("", ";")
+                        and _command_word(segment) == "uv"
+                    ):
+                        lock_checked = True
+                elif subcommand == "run":
+                    if not synced and not {"--locked", "--no-sync"} & flags:
+                        problems.append(f"{where} {_UNSYNCED_RUN}")
+                    if pinned and "--no-sync" not in flags:
+                        problems.append(f"{where} {_PINS_REVERTED}")
+                    if upgrades or "--upgrade" in flags:
+                        problems.append(f"{where} upgrades past uv.lock")
     return problems
 
 
@@ -2529,14 +2761,36 @@ def test_every_ci_uv_sync_asserts_the_lock_unless_it_upgrades_a_package(path: Pa
     text = path.read_text(encoding="utf-8")
     read = [
         segment
-        for segments in _job_segments(text).values()
-        for _step, segment in segments
+        for job in _jobs(_workflow(path)).values()
+        for step in map(_mapping, _steps(_mapping(job)))
+        for segment in _shell_segments(_step_script(step))
         if _uv_command(segment)[0] == "sync"
     ]
 
     assert set(_UV_SYNCING_WORKFLOWS) <= set(WORKFLOW_IDS)
     assert bool(read) is (path.name in _UV_SYNCING_WORKFLOWS)
     assert _uv_lock_problems(text) == []
+
+
+def test_no_local_action_directory_runs_uv_commands_the_lock_check_cannot_see() -> None:
+    """``.github/actions`` does not exist, so no composite action escapes ``_uv_lock_problems``.
+
+    The check reads workflow steps only; a step's local ``uses: ./...`` is refused
+    per step, and this row refuses the directory such an action would live in.
+    """
+    assert _local_actions_dir_problems(REPO_ROOT) == []
+
+
+def test_the_local_action_directory_check_reports_a_planted_directory(tmp_path: Path) -> None:
+    """A ``.github/actions`` directory is one problem; its absence is none."""
+    actions = tmp_path / ".github" / "actions"
+    before = _local_actions_dir_problems(tmp_path)
+    (actions / "setup").mkdir(parents=True)
+
+    assert before == []
+    assert _local_actions_dir_problems(tmp_path) == [
+        f"{actions} exists; the uv lock check does not read its actions",
+    ]
 
 
 #: A ``run`` script, then each of its segments' uv subcommand and lock flags.
@@ -2554,6 +2808,29 @@ _UV_SEGMENT_READINGS: dict[str, list[tuple[str, list[str]]]] = {
     'uv run --no-sync python -c "a; b" | uv sync': [("run", ["--no-sync"]), ("sync", [])],
     "uv run pytest -k sync": [("run", [])],
     "uv pip install x && uv pip sync requirements.txt": [("pip install", []), ("pip sync", [])],
+    "uv run pytest --locked": [("run", [])],
+    "uv run --python 3.12 --locked pytest": [("run", ["--locked"])],
+    "uv sync --locked && uv run --max-recursion-depth 3 -PDjango pytest": [
+        ("sync", ["--locked"]),
+        ("run", ["--upgrade-package"]),
+    ],
+    "uv run -q --with x --no-sync pytest": [("run", ["--no-sync"])],
+    "uv --directory d run --no-sync pytest --locked": [("run", ["--no-sync"])],
+    "uv --python-preference only-managed sync --locked": [("sync", ["--locked"])],
+    'printf "%s\\n" "a # b"; uv sync --frozen': [("", []), ("sync", ["--frozen"])],
+    'uv sync --locked # "--frozen"': [("sync", ["--locked"])],
+    "echo '#' ; uv sync": [("", []), ("sync", [])],
+    "uv pip -q sync req.txt": [("pip sync", [])],
+    "uv pip --cache-dir d install x": [("pip install", [])],
+    "uv -q pip -q install x": [("pip install", [])],
+    "uv pip show x": [("pip", [])],
+    "uv sync -P=Django": [("sync", ["--upgrade-package"])],
+    "uv sync --locked 2>&1": [("sync", ["--locked"])],
+    "uv lock --check >/dev/null 2>&1": [("lock", [])],
+    "uv sync --locked &>log": [("sync", ["--locked"])],
+    "if x; then uv sync --locked; fi": [("", []), ("sync", ["--locked"]), ("", [])],
+    "uv run -- --no-sync": [("run", [])],
+    "uv export --frozen": [("export", ["--frozen"])],
 }
 
 
@@ -2567,14 +2844,61 @@ def test_the_uv_lock_check_reads_each_shell_segment_on_its_own(script: str) -> N
     ] == _UV_SEGMENT_READINGS[script]
 
 
+#: A ``run`` script, then each of its simple commands with the operator after it.
+_SHELL_COMMAND_READINGS: dict[str, list[tuple[str, str]]] = {
+    "a; b": [("a", ";"), ("b", "")],
+    "a && b": [("a", "&&"), ("b", "")],
+    "a || b": [("a", "||"), ("b", "")],
+    "a | b": [("a", "|"), ("b", "")],
+    "a & b": [("a", "&"), ("b", "")],
+    "a 2>&1": [("a 2>&1", "")],
+    "a &>log": [("a &>log", "")],
+    "# x\n\na &&\nb": [("a", "&&"), ("b", "")],
+}
+
+
+@pytest.mark.parametrize("script", list(_SHELL_COMMAND_READINGS))
+def test_the_shell_reader_reads_each_command_and_the_operator_after_it(script: str) -> None:
+    """Commands read in order, each with the operator after it, ``""`` at its line end."""
+    assert _shell_commands(script) == _SHELL_COMMAND_READINGS[script]
+
+
+#: A ``shell:`` value, then whether a step under it ends on its first failing command.
+_ERREXIT_READINGS: dict[str | None, bool] = {
+    None: True,
+    "bash": True,
+    "sh": True,
+    "bash --noprofile --norc -eo pipefail {0}": True,
+    "sh -e {0}": True,
+    "/bin/bash -o pipefail -e {0}": True,
+    "bash {0}": False,
+    "bash -l {0}": False,
+    "bash --login -l {0}": False,
+    "bash -x {0}": False,
+    "bash -E {0}": False,
+    "bash -c 'set +e; . {0}'": False,
+    "pwsh -NoProfile -Command \". '{0}'\"": False,
+    "pwsh -File {0}": False,
+    "xvfb-run -e /dev/stdout bash {0}": False,
+    "python -We {0}": False,
+}
+
+
+@pytest.mark.parametrize("shell", list(_ERREXIT_READINGS))
+def test_the_errexit_reader_reads_only_a_bash_or_sh_e_option(shell: str | None) -> None:
+    """Errexit is the unset default, ``bash`` / ``sh``, or their own ``-e`` option cluster."""
+    assert _runs_with_errexit(shell) is _ERREXIT_READINGS[shell]
+
+
 def _add_job(command: str) -> Callable[[str], str]:
     """A mutation adding to ``django.yml`` a job ``extra`` whose one step runs ``command``."""
+    body = "\n".join(f"          {line}" for line in command.splitlines())
     return lambda text: _replace_once(
         text,
         "\n  test:\n",
         (
             "\n  extra:\n    runs-on: ubuntu-latest\n    steps:\n"
-            f"      - name: Render\n        run: {command}\n\n  test:\n"
+            f"      - name: Render\n        run: |\n{body}\n\n  test:\n"
         ),
     )
 
@@ -2584,6 +2908,13 @@ _KANBAN_SYNC = "        run: uv sync --locked --python 3.12\n"
 _POSTGRES_SYNC = "uv sync --python 3.14 --group pg --upgrade-package Django"
 _POSTGRES_STEP = "job 'test-postgres', step 'Install dependencies with latest Django'"
 _TEST_STEP = "job 'test', step 'Run Tests (${{ matrix.database }}, ${{ matrix.shard }})'"
+_LINT_STEP = "job 'lint', step 'Install dependencies'"
+_EXTRA_STEP = "job 'extra', step 'Render'"
+_POSTGRES_CHECK = "          uv lock --check\n"
+_POSTGRES_UNCHECKED = f"{_POSTGRES_STEP}: {_POSTGRES_SYNC} {_UNCHECKED_UPGRADE}"
+_POSTGRES_GATED = f"{_POSTGRES_STEP}: {_POSTGRES_SYNC} upgrades in a step that runs past a failure"
+_NO_ERREXIT_DEFAULT = "\ndefaults:\n  run:\n    shell: bash -l {0}\n\njobs:\n"
+_PWSH_DEFAULT = "\ndefaults:\n  run:\n    shell: pwsh -NoProfile -Command \". '{0}'\"\n\njobs:\n"
 _UV_LOCK_MUTATIONS: dict[str, tuple[str, Callable[[str], str], list[str]]] = {
     "lint-sync-drops-locked": (
         "django.yml",
@@ -2617,11 +2948,6 @@ _UV_LOCK_MUTATIONS: dict[str, tuple[str, Callable[[str], str], list[str]]] = {
                 "installs a requirements file past uv.lock"
             ),
         ],
-    ),
-    "job-runs-uv-run-without-a-sync": (
-        "django.yml",
-        _add_job("uv run python x.py"),
-        [f"job 'extra', step 'Render': uv run python x.py {_UNSYNCED_RUN}"],
     ),
     "job-runs-uv-run-frozen-without-a-sync": (
         "django.yml",
@@ -2657,15 +2983,10 @@ _UV_LOCK_MUTATIONS: dict[str, tuple[str, Callable[[str], str], list[str]]] = {
         lambda text: _replace_once(text, _POSTGRES_SYNC, f"{_POSTGRES_SYNC} --locked"),
         [f"{_POSTGRES_STEP}: {_POSTGRES_SYNC} --locked carries --locked beside --upgrade-package"],
     ),
-    "postgres-sync-drops-upgrade": (
-        "postgres.yml",
-        lambda text: _replace_once(text, _POSTGRES_SYNC, "uv sync --python 3.14 --group pg"),
-        [f"{_POSTGRES_STEP}: uv sync --python 3.14 --group pg does not carry --locked"],
-    ),
     "postgres-drops-the-lock-check": (
         "postgres.yml",
-        lambda text: _replace_once(text, "          uv lock --check\n", ""),
-        [f"{_POSTGRES_STEP}: {_POSTGRES_SYNC} upgrades with no uv lock --check before it"],
+        lambda text: _replace_once(text, _POSTGRES_CHECK, ""),
+        [_POSTGRES_UNCHECKED],
     ),
     "postgres-run-after-the-upgrade-sync": (
         "postgres.yml",
@@ -2673,6 +2994,405 @@ _UV_LOCK_MUTATIONS: dict[str, tuple[str, Callable[[str], str], list[str]]] = {
             text,
             "uv run --no-sync django-admin --version",
             "uv run django-admin --version",
+        ),
+        [],
+    ),
+    "uv-run-child-no-sync-flag": (
+        "django.yml",
+        _add_job("uv run python x.py --no-sync"),
+        [f"{_EXTRA_STEP}: uv run python x.py --no-sync {_UNSYNCED_RUN}"],
+    ),
+    "test-run-child-no-sync-after-the-pins": (
+        "django.yml",
+        lambda text: _replace_once(text, "uv run --no-sync pytest", "uv run pytest --no-sync"),
+        [f'{_TEST_STEP}: uv run pytest --no-sync -o addopts="$addopts" $targets {_PINS_REVERTED}'],
+    ),
+    "uv-run-valued-option-then-locked-without-a-sync": (
+        "django.yml",
+        _add_job("uv run --python 3.12 --locked python x.py"),
+        [],
+    ),
+    "uv-run-upgrades-a-package": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            "uv run --no-sync django-admin",
+            "uv run --no-sync --upgrade-package Django django-admin",
+        ),
+        [
+            (
+                f"{_POSTGRES_STEP}: uv run --no-sync --upgrade-package Django django-admin "
+                "--version upgrades past uv.lock"
+            ),
+        ],
+    ),
+    "uv-run-upgrades-everything": (
+        "django.yml",
+        _add_job("uv run --locked -U python x.py"),
+        [f"{_EXTRA_STEP}: uv run --locked -U python x.py upgrades past uv.lock"],
+    ),
+    "quoted-hash-hides-a-frozen-sync": (
+        "django.yml",
+        _add_job('printf "%s\\n" "a # b"; uv sync --frozen'),
+        [
+            f"{_EXTRA_STEP}: uv sync --frozen carries --frozen",
+            f"{_EXTRA_STEP}: uv sync --frozen does not carry --locked",
+        ],
+    ),
+    "uv-pip-sync-after-a-global-option": (
+        "django.yml",
+        _add_job("uv pip -q sync req.txt"),
+        [f"{_EXTRA_STEP}: uv pip -q sync req.txt installs a requirements file past uv.lock"],
+    ),
+    "uv-run-after-a-pip-install-after-a-global-option": (
+        "django.yml",
+        _add_job("uv pip -q install x && uv run python x.py"),
+        [
+            f"{_EXTRA_STEP}: uv run python x.py {_UNSYNCED_RUN}",
+            f"{_EXTRA_STEP}: uv run python x.py {_PINS_REVERTED}",
+        ],
+    ),
+    "postgres-lock-check-or-true": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_CHECK, "          uv lock --check || true\n"),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-after-and": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_CHECK, "          true && uv lock --check\n"),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-before-and": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            _POSTGRES_CHECK,
+            "          uv lock --check && echo ok\n",
+        ),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-after-or": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_CHECK, "          false || uv lock --check\n"),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-in-the-background": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_CHECK, "          uv lock --check &\n"),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-piped": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_CHECK, "          uv lock --check | cat\n"),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-step-has-if": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            f"        run: |\n{_POSTGRES_CHECK}",
+            f"        if: always()\n        run: |\n{_POSTGRES_CHECK}",
+        ),
+        [_POSTGRES_GATED, _POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-step-continues-on-error": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            f"        run: |\n{_POSTGRES_CHECK}",
+            f"        continue-on-error: true\n        run: |\n{_POSTGRES_CHECK}",
+        ),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-in-its-own-step": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            f"        run: |\n{_POSTGRES_CHECK}",
+            (
+                "        run: uv lock --check\n"
+                "      - name: Install dependencies with latest Django\n        run: |\n"
+            ),
+        ),
+        [],
+    ),
+    "postgres-upgrade-step-has-if": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            f"        run: |\n{_POSTGRES_CHECK}",
+            (
+                "        run: uv lock --check\n"
+                "      - name: Install dependencies with latest Django\n"
+                "        if: always()\n        run: |\n"
+            ),
+        ),
+        [_POSTGRES_GATED],
+    ),
+    "postgres-upgrade-step-has-a-matrix-if": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            f"        run: |\n{_POSTGRES_CHECK}",
+            (
+                "        run: uv lock --check\n"
+                "      - name: Install dependencies with latest Django\n"
+                "        if: matrix.x == 'y'\n        run: |\n"
+            ),
+        ),
+        [],
+    ),
+    "postgres-lock-check-after-the-sync": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            f"{_POSTGRES_CHECK}          {_POSTGRES_SYNC}\n",
+            f"          {_POSTGRES_SYNC}\n{_POSTGRES_CHECK}",
+        ),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-in-another-job": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            _replace_once(text, _POSTGRES_CHECK, ""),
+            "\n  test-postgres:\n",
+            (
+                "\n  lockcheck:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - name: Check\n        run: uv lock --check\n\n  test-postgres:\n"
+            ),
+        ),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-redirects-stderr": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_CHECK, "          uv lock --check 2>&1\n"),
+        [],
+    ),
+    "postgres-lock-check-redirects-both-streams": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            _POSTGRES_CHECK,
+            "          uv lock --check &>lock.log\n",
+        ),
+        [],
+    ),
+    "postgres-lock-check-in-a-one-line-if": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            _POSTGRES_CHECK,
+            "          if true; then uv lock --check; fi\n",
+        ),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-in-an-if-block": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            _POSTGRES_CHECK,
+            "          if true; then\n            uv lock --check\n          fi\n",
+        ),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-as-an-if-condition": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            _POSTGRES_CHECK,
+            "          if uv lock --check; then echo ok; fi\n",
+        ),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-negated": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_CHECK, "          ! uv lock --check\n"),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-after-a-trailing-or": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            _POSTGRES_CHECK,
+            "          true ||\n          uv lock --check\n",
+        ),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-after-set-plus-e": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            _POSTGRES_CHECK,
+            "          set +e\n          uv lock --check\n",
+        ),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-after-another-command": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_CHECK, "          echo x; uv lock --check\n"),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-then-a-semicolon": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_CHECK, "          uv lock --check; echo ok\n"),
+        [],
+    ),
+    "postgres-lock-check-under-a-shell-without-errexit": (
+        "postgres.yml",
+        lambda text: _replace_once(text, "\njobs:\n", _NO_ERREXIT_DEFAULT),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-under-a-pwsh-default": (
+        "postgres.yml",
+        lambda text: _replace_once(text, "\njobs:\n", _PWSH_DEFAULT),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-job-shell-bash-overrides-the-default": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            _replace_once(text, "\njobs:\n", _NO_ERREXIT_DEFAULT),
+            "\n  test-postgres:\n",
+            "\n  test-postgres:\n    defaults:\n      run:\n        shell: bash\n",
+        ),
+        [],
+    ),
+    "postgres-step-shell-with-errexit-overrides-the-default": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            _replace_once(text, "\njobs:\n", _NO_ERREXIT_DEFAULT),
+            f"        run: |\n{_POSTGRES_CHECK}",
+            f"        shell: bash -eo pipefail {{0}}\n        run: |\n{_POSTGRES_CHECK}",
+        ),
+        [],
+    ),
+    "postgres-lock-check-as-an-echo-argument": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_CHECK, "          echo uv lock --check\n"),
+        [_POSTGRES_UNCHECKED],
+    ),
+    "postgres-lock-check-after-prefixes": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            _POSTGRES_CHECK,
+            "          X=1 env time uv lock --check\n",
+        ),
+        [],
+    ),
+    "job-runs-uv-add": (
+        "django.yml",
+        _add_job("uv add x"),
+        [f"{_EXTRA_STEP}: uv add x edits pyproject.toml and uv.lock"],
+    ),
+    "job-runs-uv-remove": (
+        "django.yml",
+        _add_job("uv remove x"),
+        [f"{_EXTRA_STEP}: uv remove x edits pyproject.toml and uv.lock"],
+    ),
+    "job-runs-uv-export": (
+        "django.yml",
+        _add_job("uv export -o r.txt"),
+        [f"{_EXTRA_STEP}: uv export -o r.txt may re-lock without --locked or --frozen"],
+    ),
+    "job-runs-uv-tree": (
+        "django.yml",
+        _add_job("uv tree"),
+        [f"{_EXTRA_STEP}: uv tree may re-lock without --locked or --frozen"],
+    ),
+    "job-runs-uv-version": ("django.yml", _add_job("uv version"), []),
+    "job-runs-uv-version-bump": (
+        "django.yml",
+        _add_job("uv version --bump patch"),
+        [f"{_EXTRA_STEP}: uv version --bump patch may re-lock without --locked or --frozen"],
+    ),
+    "job-runs-uv-version-value": (
+        "django.yml",
+        _add_job("uv version 0.2.0"),
+        [f"{_EXTRA_STEP}: uv version 0.2.0 may re-lock without --locked or --frozen"],
+    ),
+    "job-runs-uv-export-frozen": ("django.yml", _add_job("uv export --frozen -o r.txt"), []),
+    "job-runs-uv-tree-locked": ("django.yml", _add_job("uv tree --locked"), []),
+    "workflow-env-sets-uv-frozen": (
+        "django.yml",
+        lambda text: _replace_once(
+            text,
+            "\npermissions:\n",
+            "\nenv:\n  UV_FROZEN: 1\n\npermissions:\n",
+        ),
+        ["workflow env sets UV_FROZEN"],
+    ),
+    "job-env-sets-uv-no-sync": (
+        "django.yml",
+        lambda text: _replace_once(
+            text,
+            "\n  lint:\n",
+            "\n  lint:\n    env:\n      UV_NO_SYNC: 1\n",
+        ),
+        ["job 'lint' env sets UV_NO_SYNC"],
+    ),
+    "step-env-sets-uv-locked": (
+        "django.yml",
+        lambda text: _replace_once(
+            text,
+            _LINT_SYNC,
+            f"        env:\n          UV_LOCKED: 1\n{_LINT_SYNC}",
+        ),
+        [f"{_LINT_STEP} env sets UV_LOCKED"],
+    ),
+    "command-prefix-sets-uv-frozen": (
+        "django.yml",
+        lambda text: _replace_once(
+            text,
+            _LINT_SYNC,
+            "        run: UV_FROZEN=1 uv sync --locked\n",
+        ),
+        [f"{_LINT_STEP}: UV_FROZEN=1 uv sync --locked sets UV_FROZEN"],
+    ),
+    "export-sets-uv-no-sync": (
+        "django.yml",
+        _add_job("export UV_NO_SYNC=1"),
+        [f"{_EXTRA_STEP}: export UV_NO_SYNC=1 sets UV_NO_SYNC"],
+    ),
+    "job-runs-a-bare-uv-lock": (
+        "django.yml",
+        _add_job("uv lock"),
+        [f"{_EXTRA_STEP}: uv lock is not a plain uv lock --check"],
+    ),
+    "job-runs-uv-lock-upgrade-package": (
+        "django.yml",
+        _add_job("uv lock --check -P Django"),
+        [
+            f"{_EXTRA_STEP}: uv lock --check -P Django is not a plain uv lock --check",
+        ],
+    ),
+    "lint-sync-upgrades-everything": (
+        "django.yml",
+        lambda text: _replace_once(text, _LINT_SYNC, "        run: uv sync --locked -U\n"),
+        [f"{_LINT_STEP}: uv sync --locked -U carries --upgrade"],
+    ),
+    "postgres-sync-upgrades-everything": (
+        "postgres.yml",
+        lambda text: _replace_once(text, _POSTGRES_SYNC, f"{_POSTGRES_SYNC} --upgrade"),
+        [f"{_POSTGRES_STEP}: {_POSTGRES_SYNC} --upgrade carries --upgrade"],
+    ),
+    "step-runs-a-local-action": (
+        "django.yml",
+        lambda text: _replace_once(
+            text,
+            "      - name: Set up Python 3.12\n",
+            (
+                "      - name: Local\n        uses: ./.github/actions/setup\n"
+                "      - name: Set up Python 3.12\n"
+            ),
+        ),
+        ["job 'lint', step 'Local' runs the local action ./.github/actions/setup"],
+    ),
+    "postgres-sync-attached-short-upgrade": (
+        "postgres.yml",
+        lambda text: _replace_once(
+            text,
+            _POSTGRES_SYNC,
+            "uv sync --python 3.14 --group pg -PDjango",
         ),
         [],
     ),
