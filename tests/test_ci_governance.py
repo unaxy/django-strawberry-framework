@@ -37,13 +37,7 @@ import tomli
 import yaml
 
 import django_strawberry_framework
-from django_strawberry_framework.utils.imports import (
-    CHANNELS_FLOOR,
-    CRYPTOGRAPHY_FLOOR,
-    DEBUG_TOOLBAR_FLOOR,
-    DRF_FLOOR,
-    STRAWBERRY_FLOOR,
-)
+from django_strawberry_framework.utils import imports
 from django_strawberry_framework.utils.typing import object_result
 from scripts import _git
 
@@ -58,8 +52,8 @@ from scripts import _git
 # construction, so the gate cannot pass in a clean CI checkout and fail on a
 # developer machine.
 from scripts.check_citations import SOURCE_TREES, iter_python_sources, spec_files
-from scripts.workspace import SOFT_FLOOR_PACKAGES
-from tests._idioms import is_object_dict, json_at, json_list, json_object
+from scripts.workspace import FLOOR_PACKAGES, SOFT_FLOOR_PACKAGES
+from tests._idioms import is_object_dict, json_at, json_list, module_binding
 from tests._workflows import (
     UV_PROJECT_EDITS,
     UV_RELOCKING,
@@ -142,7 +136,7 @@ def test_no_job_grants_repository_write(path: Path) -> None:
     """
     workflow = load_workflow(path)
     for name, job in workflow_jobs(workflow).items():
-        permissions = yaml_mapping(job).get("permissions")
+        permissions = job.get("permissions")
         if not is_object_dict(permissions):
             continue
         assert permissions.get("contents") != "write", (
@@ -160,8 +154,7 @@ def test_every_job_declares_a_timeout(path: Path) -> None:
     a runner for GitHub's six-hour default.
     """
     workflow = load_workflow(path)
-    for name, node in workflow_jobs(workflow).items():
-        job = yaml_mapping(node)
+    for name, job in workflow_jobs(workflow).items():
         if "uses" in job:
             # A reusable-workflow call cannot set timeout-minutes; the timeout
             # belongs to the jobs inside the called workflow.
@@ -183,8 +176,7 @@ def test_every_job_declares_a_runner(path: Path) -> None:
     ``timeout-minutes`` still satisfies that row.
     """
     workflow = load_workflow(path)
-    for name, node in workflow_jobs(workflow).items():
-        job = yaml_mapping(node)
+    for name, job in workflow_jobs(workflow).items():
         if "uses" in job:
             # A reusable-workflow call names no runner; the called workflow's own
             # jobs declare theirs, exactly as they declare their timeouts.
@@ -203,8 +195,8 @@ def test_every_external_action_is_pinned_to_a_full_commit_sha(path: Path) -> Non
     """
     workflow = load_workflow(path)
     for name, job in workflow_jobs(workflow).items():
-        for index, step in enumerate(job_steps(yaml_mapping(job))):
-            uses = yaml_mapping(step).get("uses")
+        for index, step in enumerate(job_steps(job)):
+            uses = step.get("uses")
             if not uses:
                 continue
             assert isinstance(uses, str), (
@@ -252,14 +244,14 @@ def test_checkout_steps_do_not_persist_credentials(path: Path) -> None:
     """
     workflow = load_workflow(path)
     for name, job in workflow_jobs(workflow).items():
-        for index, step in enumerate(job_steps(yaml_mapping(job))):
-            uses = yaml_mapping(step).get("uses") or ""
+        for index, step in enumerate(job_steps(job)):
+            uses = step.get("uses") or ""
             assert isinstance(uses, str), (
                 f"{path.name}: job {name!r} step {index} 'uses' is {uses!r}"
             )
             if not uses.startswith("actions/checkout@"):
                 continue
-            options = yaml_mapping(yaml_mapping(step).get("with"))
+            options = yaml_mapping(step.get("with"))
             assert options.get("persist-credentials") is False, (
                 f"{path.name}: job {name!r} step {index} checks out without "
                 "'persist-credentials: false'"
@@ -360,15 +352,15 @@ def test_publish_workflow_keeps_the_trusted_publisher_binding() -> None:
     assert set(triggers) == {"push"}, f"publish.yml must run on tag pushes only, got {triggers}"
     assert yaml_mapping(triggers["push"]).get("tags") == ["v*"], "publish.yml must run on v* tags"
     minting = {
-        name: yaml_mapping(job)
+        name: job
         for name, job in workflow_jobs(workflow).items()
-        if yaml_mapping(yaml_mapping(job).get("permissions")).get("id-token") == "write"
+        if yaml_mapping(job.get("permissions")).get("id-token") == "write"
     }
     assert list(minting) == ["publish"], f"exactly one job mints the token, got {list(minting)}"
     publish = minting["publish"]
     assert _environment_name(publish) == "pypi"
     assert publish.get("needs") == "build"
-    actions = [yaml_mapping(step).get("uses") or "" for step in job_steps(publish)]
+    actions = [step.get("uses") or "" for step in job_steps(publish)]
     assert any(str(uses).startswith("pypa/gh-action-pypi-publish@") for uses in actions)
 
 
@@ -653,11 +645,12 @@ def _committable_files(pathspec: str) -> list[str]:
     "ignored" is the repository's own rules and never the caller's global excludes
     or XDG ignore file.
 
-    Three ways git can fail to answer, and none may reduce the census to nothing.
+    Three ways git can fail to answer, and none may pass a caller's row on nothing.
     A missing ``git`` raises here; a non-zero exit trips the assert below; and an
     exit-0 answer that enumerates nothing - what git returns when run against a
     directory that is untracked-and-ignored inside an enclosing repository - is
-    refused by the caller through ``_unreported_required_files``. That third one
+    refused by each caller from the files its answer must carry (the census's
+    through ``_unreported_required_files``). That third one
     reports no error of any kind: it is a coherent-LOOKING answer that happens to
     be wrong, which is the class no return code can catch.
     """
@@ -1973,24 +1966,20 @@ def test_the_plan_label_sweep_reports_nothing_for_a_planted_permitted_form(
     assert violations == [], violations
 
 
-@pytest.mark.parametrize(
-    ("row", "floor"),
-    [
-        ("channels[daphne]", CHANNELS_FLOOR),
-        ("strawberry-graphql", STRAWBERRY_FLOOR),
-        ("django-debug-toolbar", DEBUG_TOOLBAR_FLOOR),
-        ("djangorestframework", DRF_FLOOR),
-        ("cryptography", CRYPTOGRAPHY_FLOOR),
-    ],
-    ids=[
-        "channels",
-        "strawberry",
-        "debug-toolbar",
-        "drf",
-        "cryptography",
-    ],
+#: The pyproject row each ``*_FLOOR`` constant of ``django_strawberry_framework.utils.imports``
+#: names, by constant name: strawberry-graphql's, then one per soft dependency the package
+#: guards, in ``SOFT_FLOOR_PACKAGES`` order.
+_FLOOR_CONSTANTS = (
+    pytest.param("strawberry-graphql", "STRAWBERRY_FLOOR", id="strawberry"),
+    pytest.param("channels[daphne]", "CHANNELS_FLOOR", id="channels"),
+    pytest.param("cryptography", "CRYPTOGRAPHY_FLOOR", id="cryptography"),
+    pytest.param("django-debug-toolbar", "DEBUG_TOOLBAR_FLOOR", id="debug-toolbar"),
+    pytest.param("djangorestframework", "DRF_FLOOR", id="drf"),
 )
-def test_each_floor_constant_matches_its_pyproject_dependency_row(row: str, floor: str) -> None:
+
+
+@pytest.mark.parametrize(("row", "constant"), _FLOOR_CONSTANTS)
+def test_each_floor_constant_matches_its_pyproject_dependency_row(row: str, constant: str) -> None:
     """The floor an install hint names is the one ``pyproject.toml`` pins for that row.
 
     Each ``*_FLOOR`` constant is interpolated into its package's install hints (the
@@ -2004,7 +1993,23 @@ def test_each_floor_constant_matches_its_pyproject_dependency_row(row: str, floo
     """
     text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     rows = re.findall(rf'"{re.escape(row)}>=([0-9][^"]*)"', text)
+    floor = module_binding(imports, constant)
     assert rows == [floor], (rows, floor)
+
+
+def test_the_soft_floor_packages_are_the_soft_dependencies_the_package_pins_a_floor_for() -> None:
+    """``SOFT_FLOOR_PACKAGES`` names every soft dependency with a package ``*_FLOOR``.
+
+    The floor cell rows and the workspace floor install read the soft set from that
+    tuple, so a name dropped from it and from ``django.yml``'s soft install step
+    passes both. The package's floor constants are the independent source: the
+    ``*_FLOOR`` names ``django_strawberry_framework.utils.imports`` binds are the
+    table's, and its rows past ``FLOOR_PACKAGES`` are the soft set.
+    """
+    floor_names = {name for name in vars(imports) if name.endswith("_FLOOR")}
+    assert floor_names == {param.values[1] for param in _FLOOR_CONSTANTS}
+    rows = [param.values[0] for param in _FLOOR_CONSTANTS]
+    assert [row for row in rows if row not in FLOOR_PACKAGES] == list(SOFT_FLOOR_PACKAGES)
 
 
 _REQUIREMENT = re.compile(r"\s*([A-Za-z0-9][\w.-]*(?:\[[^\]]*\])?)\s*(.*)")
@@ -2162,7 +2167,7 @@ def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str
     the floor steps are identified by their ``if``, the sync and the Django install by
     their shell segments, the test run by its ``run`` script.
     """
-    job = json_object(workflow_jobs(parse_workflow(workflow_text)), "test")
+    job = workflow_jobs(parse_workflow(workflow_text))["test"]
     node_lists = matrix_node_lists(job)
     problems: list[str] = []
     if len(node_lists) != 2:
@@ -2183,7 +2188,7 @@ def _floor_cell_problems(workflow_text: str, bounds: dict[str, str]) -> list[str
             ):
                 problems.append(f"node list {list_index}, node {index}: marked but off the floor")
 
-    steps = list(map(yaml_mapping, job_steps(job)))
+    steps = job_steps(job)
     segments = [shell_segments(step_script(step)) for step in steps]
     located = {
         "uv sync": [
@@ -2435,12 +2440,11 @@ def _uv_lock_problems(workflow_text: str) -> list[str]:
     workflow = parse_workflow(workflow_text)
     problems = [f"workflow env sets {key}" for key in _env_keys(workflow.get("env"))]
     workflow_shell = _default_shell(workflow, None)
-    for job_name, job_node in workflow_jobs(workflow).items():
-        job = yaml_mapping(job_node)
+    for job_name, job in workflow_jobs(workflow).items():
         job_shell = _default_shell(job, workflow_shell)
         problems.extend(f"job {job_name!r} env sets {key}" for key in _env_keys(job.get("env")))
         synced = lock_checked = pinned = False
-        for step in map(yaml_mapping, job_steps(job)):
+        for step in job_steps(job):
             at = f"job {job_name!r}, step {str(step.get('name'))!r}"
             uses = str(step.get("uses", ""))
             if uses.startswith(LOCAL_ACTION_PREFIX):
@@ -2521,7 +2525,7 @@ def test_every_ci_uv_sync_asserts_the_lock_unless_it_upgrades_a_package(path: Pa
     read = [
         segment
         for job in workflow_jobs(load_workflow(path)).values()
-        for segment in job_segments(yaml_mapping(job))
+        for segment in job_segments(job)
         if uv_command(segment)[0] == "sync"
     ]
 

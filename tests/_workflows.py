@@ -3,10 +3,10 @@
 The YAML loader hands back untyped nodes, so each walker checks the node kind it
 reads. ``shell_commands`` splits a ``run`` script into its simple commands and
 ``uv_command`` reads one command's uv subcommand and uv's own words, the reading
-every row that asks what a workflow installs or runs goes through.
-``matrix_node_lists`` and ``at_floor`` locate the matrix nodes of a job by their
-content. Shared by ``tests/test_ci_governance.py`` and ``tests/test_workspace.py``,
-which both read ``django.yml``.
+the uv lock and sync rows go through. ``matrix_node_lists`` and ``at_floor``
+locate the matrix nodes of a job by their content. Shared by
+``tests/test_ci_governance.py`` and ``tests/test_workspace.py``, which both read
+``django.yml``.
 """
 
 import re
@@ -31,16 +31,16 @@ WORKFLOW_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 YAMLMapping: TypeAlias = "dict[object, object]"
 
 
-def parse_workflow(text: str) -> YAMLMapping:
-    """Parse one workflow's text, which is a mapping at its root."""
+def parse_workflow(text: str, name: str = "workflow") -> YAMLMapping:
+    """Parse one workflow's text, which is a mapping at its root; ``name`` labels a failure."""
     workflow = object_result(yaml.safe_load, text)
-    assert is_object_dict(workflow), "workflow is not a mapping"
+    assert is_object_dict(workflow), f"{name} is not a mapping"
     return workflow
 
 
 def load_workflow(path: Path) -> YAMLMapping:
     """Parse one workflow file (``parse_workflow`` over its text)."""
-    return parse_workflow(path.read_text(encoding="utf-8"))
+    return parse_workflow(path.read_text(encoding="utf-8"), path.name)
 
 
 def yaml_mapping(node: object) -> YAMLMapping:
@@ -51,18 +51,18 @@ def yaml_mapping(node: object) -> YAMLMapping:
     return node
 
 
-def workflow_jobs(workflow: YAMLMapping) -> YAMLMapping:
-    """A workflow's ``jobs`` mapping, by job name."""
-    return yaml_mapping(workflow.get("jobs"))
+def workflow_jobs(workflow: YAMLMapping) -> dict[object, YAMLMapping]:
+    """A workflow's jobs by job name, each job a mapping."""
+    return {name: yaml_mapping(job) for name, job in yaml_mapping(workflow.get("jobs")).items()}
 
 
-def job_steps(job: YAMLMapping) -> list[object]:
-    """A job's ``steps`` sequence, each step an untyped node."""
+def job_steps(job: YAMLMapping) -> list[YAMLMapping]:
+    """A job's ``steps`` sequence, each step a mapping."""
     steps = job.get("steps")
     if not steps:
         return []
     assert is_object_list(steps), f"expected a YAML sequence of steps, got {steps!r}"
-    return steps
+    return list(map(yaml_mapping, steps))
 
 
 def step_script(step: YAMLMapping) -> str:
@@ -246,13 +246,14 @@ def uv_command(segment: str) -> tuple[str, list[str]]:
     return ("?" if _UV_SYNC_WORDS.search(segment) else ""), rest
 
 
+def job_commands(job: YAMLMapping) -> list[tuple[str, str]]:
+    """``shell_commands`` over every ``run`` script of ``job``, in step order."""
+    return [command for step in job_steps(job) for command in shell_commands(step_script(step))]
+
+
 def job_segments(job: YAMLMapping) -> list[str]:
     """The simple commands of every ``run`` script of ``job``, in step order."""
-    return [
-        segment
-        for step in map(yaml_mapping, job_steps(job))
-        for segment in shell_segments(step_script(step))
-    ]
+    return [command for command, _after in job_commands(job)]
 
 
 def matrix_node_lists(job: YAMLMapping) -> list[list[dict[object, object]]]:
