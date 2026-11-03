@@ -1054,17 +1054,18 @@ def _catchall_element(
     """Type one value of a catch-all leaf: ``bool`` for a null test, else ``element`` of its field.
 
     A ``method=`` filter is typed from its model column, else from the form field its class
-    builds; one whose ``field`` builds none on the unbound declaration raises (spec-027
-    Decision 4). ``isnull`` is a boolean predicate regardless of the column type, past a
-    transform too (``year__isnull``): the value field is irrelevant there. A ``method=``
-    filter's method applies no lookup of the filter's, so a form that cleans its own kind
-    types it, whatever the column (``NumberFilter(field_name="name", lookup_expr="isnull",
-    method=...)`` takes a number); one passing any value through keeps ``Boolean``. Any other
+    builds; one with no column whose ``field`` builds none on the unbound declaration raises
+    (``_refuse_method_without_form_field``, spec-027 Decision 4). ``isnull`` is a boolean
+    predicate regardless of the column type, past a transform too (``year__isnull``): the
+    value field is irrelevant there. A ``method=`` filter's method applies no lookup of the
+    filter's, so a form that cleans its own kind types it, whatever the column
+    (``NumberFilter(field_name="name", lookup_expr="isnull", method=...)`` takes a number);
+    one passing any value through, or building none unbound, keeps ``Boolean``. Any other
     leaf's element is the field its form cleans a value of (``_form_cleaned_value_field``).
     ``element`` is ``_element_annotation`` for the published input and ``_element_scalar``
     for ``publishes_json_value``.
     """
-    _refuse_method_without_form_field(filter_instance, filterset_cls)
+    _refuse_method_without_form_field(filter_instance, model_field, filterset_cls)
     if _filterset_lookup_operand(filterset_cls, filter_instance).null_test:
         if read_attr(filter_instance, "method", None) is None or all(
             _passes_value_through(field) for field in _form_value_fields(filter_instance)
@@ -1188,25 +1189,35 @@ def _unexpected_filter_dispatch(obj: object) -> ConfigurationError:
 
 def _refuse_method_without_form_field(
     filter_instance: Filter,
+    model_field: ModelField | None,
     filterset_cls: type[FilterSet] | None,
 ) -> None:
-    """Refuse a ``method=`` filter whose class builds no form field on the unbound declaration.
+    """Refuse a ``method=`` filter with no model field whose class builds no form field unbound.
 
-    Nothing can type such a filter's input: ``AllValuesMultipleFilter`` reads the
-    per-request ``model`` to build its field, so unbound it builds none. The refusal
-    names the filter as declared (``_declaration_of``).
+    ``model_field`` is the field the caller types the leaf from
+    (``filters/base.py::_filterset_value_field``); over one, the arm types the leaf from that
+    column (a ``method=`` filter keeps its column), whether or not the form field is built
+    unbound: an ``AllValuesMultipleFilter`` reads the per-request ``model`` to build its
+    field, so unbound it builds none, and over a column its element is the column's while the
+    form field built per request validates each value before the method runs. With no model
+    field and no form field, nothing types the value. The refusal names the filter as
+    declared (``_declaration_of``).
     """
-    form_field = _declared_form_field(filter_instance)
     method = read_attr(filter_instance, "method", None)
-    if method is None or form_field is not None:
+    if (
+        method is None
+        or model_field is not None
+        or _declared_form_field(filter_instance) is not None
+    ):
         return
     declaration = _declaration_of(filter_instance, filterset_cls)
     raise ConfigurationError(
         f"{declaration.kind}(method={truth.render(method)}) on "
-        f"{truth.render(declaration.declared)}{declaration.site} exposes no form "
-        "field; put the method on a typed filter primitive (`CharFilter(method=...)`, "
-        "`NumberFilter(method=...)`, `ListFilter(method=...)` for a list value, ...) "
-        "or on a `Filter` subclass declaring `field_class` at class level.",
+        f"{truth.render(declaration.declared)}{declaration.site} is backed by no model "
+        "field and exposes no form field, so nothing types its value; point field_name at a "
+        "model field, or put the method on a typed filter primitive (`CharFilter(method=...)`, "
+        "`NumberFilter(method=...)`, `ListFilter(method=...)` for a list value, ...) or on a "
+        "`Filter` subclass declaring `field_class` at class level.",
     )
 
 
@@ -1276,9 +1287,9 @@ def convert_filter_to_input_annotation(
     Range / List / Array, then bare ``TypedFilter``, then
     ``ChoiceFilter``, then a ``MultipleChoiceFilter`` (a list whose element is typed
     like a ``ListFilter``'s, from the model column, never from
-    ``TypedMultipleChoiceFilter.coerce``), then the ``object`` catch-all.
-    ``method=...`` filters
-    that expose no form field raise ``ConfigurationError``.
+    ``TypedMultipleChoiceFilter.coerce``), then the ``object`` catch-all. A ``method=``
+    filter with no model column whose form field is not built unbound raises
+    ``ConfigurationError`` (``_refuse_method_without_form_field``).
 
     Dispatch rides ``utils/converters.py::convert_with_mro`` with the same
     kind table ``normalize_input_value`` uses.
@@ -1346,8 +1357,9 @@ def convert_filter_to_input_annotation(
         # The form field (``MultipleChoiceField``) cleans a list; each element is typed
         # from the model column like a ``ListFilter``'s (spec-027 Decision 4), unless the
         # column holds values as given and compares what the form cleans
-        # (``_form_cleaned_value_field``).
-        _refuse_method_without_form_field(matched, filterset_cls)
+        # (``_form_cleaned_value_field``). A ``method=`` one is typed so too, its form field
+        # built per request or not (``_refuse_method_without_form_field``).
+        _refuse_method_without_form_field(matched, model_field, filterset_cls)
         value_field = (
             _form_cleaned_value_field(matched, model_field, filterset_cls)
             if model_field is not None and _holds_values_as_given(model_field)

@@ -11794,6 +11794,20 @@ class _IntegerMethodFilter(Filter):
     field_class = forms.IntegerField
 
 
+class _ModelBuiltMethodFilter(Filter):
+    """A consumer ``Filter`` subclass whose form field is built only once a FilterSet binds it.
+
+    ``field`` reads the bound ``model`` first, as django-filter's ``AllValuesFilter`` does, so
+    the class-level declaration builds no form field.
+    """
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        _ = read_attr(self, "model")
+        return super().field
+
+
 def _filter_title_among(
     _filterset: FilterSet,
     queryset: QuerySet[models.Book],
@@ -11856,6 +11870,18 @@ _METHOD_SPELLING_CASES: dict[str, _MethodSpellingCase] = {
         None,
         ("A",),
     ),
+    "column-all-values-multiple": _MethodSpellingCase(
+        lambda: AllValuesMultipleFilter(field_name="title", method="filter_title_among"),
+        "[String!]",
+        ["A", "C"],
+        ("A", "C"),
+    ),
+    "column-form-field-built-per-request": _MethodSpellingCase(
+        lambda: _ModelBuiltMethodFilter(field_name="title", method="filter_title"),
+        "String",
+        "A",
+        ("A",),
+    ),
 }
 
 
@@ -11877,8 +11903,11 @@ def test_library_method_filter_spellings_the_refusal_advises_filter_over_http(
 
     A typed filter primitive carrying the method (``CharFilter``, ``NumberFilter``,
     ``ListFilter`` for a list value) or a ``Filter`` subclass declaring ``field_class``
-    at class level builds its form field unbound, so the schema builds, the variable
-    declared as the case's type is accepted, and the method keeps the books it matches.
+    at class level builds its form field unbound; a ``field_name`` naming a model field
+    types the input from that column, which a ``method=`` filter keeps, though the form field
+    is built only per request (``AllValuesMultipleFilter``, a ``Filter`` subclass whose
+    ``field`` reads the bound ``model``). Either way the schema builds, the variable declared
+    as the case's type is accepted, and the method keeps the books it matches.
     """
     case = _METHOD_SPELLING_CASES[case_id]
     branch = models.Branch.objects.create(name="Spelling", city="Boston")
@@ -26123,17 +26152,19 @@ def _no_lookup_choices(_field: object) -> dict[str, object]:
     return {"choices": (("general", "general"), ("rare", "rare"))}
 
 
-def _multiple_choice_holder_schema() -> strawberry.Schema:
+def _multiple_choice_holder_schema(received: list[tuple[str, object]]) -> strawberry.Schema:
     """Holder schema over ``Shelf`` declaring django-filter's multiple-choice filters.
 
     ``code*`` read the text column, ``condition*`` the text choice column and
     ``tier_picks`` the integer choice column: ``MultipleChoiceFilter`` (``conjoined=True``
     as ``condition_picks_all``), ``TypedMultipleChoiceFilter`` and
-    ``AllValuesMultipleFilter``, whose choices are the column's stored values. The static
-    choices leave ``D-4``, ``damaged`` and the ``UPPER`` tier out. ``Meta.filter_overrides``
-    makes ``topic``'s generated ``exact`` leaf a ``MultipleChoiceFilter``. A holder, so
-    the per-request ``SELECT DISTINCT`` each ``AllValuesMultipleFilter`` form field runs
-    never reaches a shipped request.
+    ``AllValuesMultipleFilter``, whose choices are the column's stored values; the
+    ``*_values_method`` ones name the method ``filter_values``, which appends the column and
+    the value it is handed to ``received`` and keeps the rows holding a listed value. The
+    static choices leave ``D-4``, ``damaged`` and the ``UPPER`` tier out.
+    ``Meta.filter_overrides`` makes ``topic``'s generated ``exact`` leaf a
+    ``MultipleChoiceFilter``. A holder, so the per-request ``SELECT DISTINCT`` each
+    ``AllValuesMultipleFilter`` form field runs never reaches a shipped request.
     """
 
     class HolderPicksShelfFilter(FilterSet):
@@ -26159,6 +26190,22 @@ def _multiple_choice_holder_schema() -> strawberry.Schema:
             choices=models.Shelf.Tier.choices[:2],
             coerce=int,
         )
+        code_values_method = AllValuesMultipleFilter(field_name="code", method="filter_values")
+        condition_values_method = AllValuesMultipleFilter(
+            field_name="condition",
+            method="filter_values",
+        )
+        tier_values_method = AllValuesMultipleFilter(field_name="tier", method="filter_values")
+
+        def filter_values(
+            self,
+            queryset: QuerySet[models.Shelf],
+            name: str,
+            value: list[str],
+        ) -> QuerySet[models.Shelf]:
+            """Record ``name`` and ``value``; keep the rows whose ``name`` column holds a value."""
+            received.append((name, value))
+            return queryset.filter(**{f"{name}__in": value})
 
         class Meta:
             model = models.Shelf
@@ -26198,11 +26245,19 @@ def _multiple_choice_holder_schema() -> strawberry.Schema:
 def _post_multiple_choice_holder(
     query: str,
     variables: Mapping[str, object] | None = None,
+    received: list[tuple[str, object]] | None = None,
 ) -> JSONObject:
-    """POST ``query`` to a fresh ``_multiple_choice_holder_schema`` and return the payload."""
+    """POST ``query`` to a fresh ``_multiple_choice_holder_schema`` and return the payload.
+
+    ``received`` collects what each ``method=`` filter's method is handed.
+    """
     registry.clear()
     try:
-        response = _post_holder(_multiple_choice_holder_schema(), query, variables=variables)
+        response = _post_holder(
+            _multiple_choice_holder_schema([] if received is None else received),
+            query,
+            variables=variables,
+        )
     finally:
         registry.clear()
     assert response.status_code == 200
@@ -26286,6 +26341,17 @@ query ($filter: HolderPicksShelfFilterInputType) {
             id="typed-multiple-choice-integer-choices",
         ),
         pytest.param("topic", "[String!]", id="filter-overrides-exact"),
+        pytest.param("codeValuesMethod", "[String!]", id="all-values-multiple-method-text"),
+        pytest.param(
+            "conditionValuesMethod",
+            "[HolderPicksShelfTypeConditionEnum!]",
+            id="all-values-multiple-method-choices",
+        ),
+        pytest.param(
+            "tierValuesMethod",
+            "[HolderPicksShelfTypeTierEnum!]",
+            id="all-values-multiple-method-integer-choices",
+        ),
     ],
 )
 def test_multiple_choice_filter_publishes_a_list_of_its_column_values_over_http(
@@ -26297,7 +26363,9 @@ def test_multiple_choice_filter_publishes_a_list_of_its_column_values_over_http(
     Its form field (``MultipleChoiceField``) cleans a list, so the input is a list: of
     ``String`` over a text column, of the column's enum over a choice column, never
     typed from ``TypedMultipleChoiceFilter.coerce``. A ``Meta.filter_overrides``
-    ``MultipleChoiceFilter`` publishes the same shape.
+    ``MultipleChoiceFilter`` publishes the same shape, and so does an
+    ``AllValuesMultipleFilter`` naming a ``method=``, whose form field is built only per
+    request.
     """
     leaf_type = f"HolderPicksShelfFilter{leaf[0].upper()}{leaf[1:]}FilterInputType"
     payload = _post_multiple_choice_holder(_INPUT_FIELD_TYPES, {"name": leaf_type})
@@ -26418,6 +26486,69 @@ def test_multiple_choice_filter_refuses_a_value_off_its_choices_over_http(
     payload = _post_multiple_choice_holder(_PICKED_SHELVES, {"filter": filter_input})
 
     _assert_invalid_choice_payload(payload, form_key)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_input", "codes", "handed"),
+    [
+        pytest.param(
+            {"codeValuesMethod": {"exact": ["D-4", "A-1"]}},
+            ["A-1", "D-4"],
+            ("code", ["D-4", "A-1"]),
+            id="text",
+        ),
+        pytest.param(
+            {"conditionValuesMethod": {"exact": ["damaged", "BLANK"]}},
+            ["A-1", "D-4"],
+            ("condition", ["damaged", ""]),
+            id="choices",
+        ),
+        pytest.param(
+            {"tierValuesMethod": {"exact": ["MEMBER_3"]}},
+            ["C-3"],
+            ("tier", ["3"]),
+            id="integer-choices",
+        ),
+    ],
+)
+def test_an_all_values_multiple_method_filter_hands_its_method_the_cleaned_list_over_http(
+    filter_input: dict[str, object],
+    codes: list[str],
+    handed: tuple[str, list[str]],
+) -> None:
+    """A column-backed ``AllValuesMultipleFilter(method=...)`` hands its method the cleaned list.
+
+    Its form field, built per request from the column's stored values, cleans the list
+    (each enum member unwrapped to its value, cleaned by ``MultipleChoiceField`` to text,
+    ``MEMBER_3`` the tier ``"3"``), and the method alone filters: it is called once, with the
+    filter's column and that list, and keeps the rows holding a listed value.
+    """
+    pks = _seed_picked_shelves()
+    received: list[tuple[str, object]] = []
+
+    payload = _post_multiple_choice_holder(_PICKED_SHELVES, {"filter": filter_input}, received)
+
+    assert "errors" not in payload, payload
+    rows = json_list(payload, "data", "shelves")
+    assert sorted(json_int(row, "id") for row in rows) == sorted(pks[code] for code in codes)
+    assert received == [handed]
+
+
+@pytest.mark.django_db
+def test_an_all_values_multiple_method_filter_refuses_an_unheld_value_over_http() -> None:
+    """A value no row holds is ``invalid_choice`` from the bound form; the method never runs."""
+    _seed_picked_shelves()
+    received: list[tuple[str, object]] = []
+
+    payload = _post_multiple_choice_holder(
+        _PICKED_SHELVES,
+        {"filter": {"codeValuesMethod": {"exact": ["A-1", "Z-9"]}}},
+        received,
+    )
+
+    _assert_invalid_choice_payload(payload, "code_values_method")
+    assert received == []
 
 
 @pytest.mark.django_db
