@@ -43,9 +43,9 @@
 "django_strawberry_framework/extensions/operation_state.py::_OperationBoundExtension.execution_context" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/extensions/operation_state.py::_bound_state" = { cast = 1 }
 "django_strawberry_framework/extensions/resource_policy.py::_declared_input_type" = { reportUnknownMemberType = 1 }
-"django_strawberry_framework/filters/base.py::ArrayFilter.method" = { reportAttributeAccessIssue = 1, reportFunctionMemberAccess = 1, reportOptionalMemberAccess = 1, reportUnknownMemberType = 1, reportUntypedFunctionDecorator = 1 }
+"django_strawberry_framework/filters/base.py::ArrayFilter.method" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/base.py::EnumChoiceFilter" = { reportUnsafeMultipleInheritance = 1 }
-"django_strawberry_framework/filters/base.py::ListFilter.method" = { reportAttributeAccessIssue = 1, reportFunctionMemberAccess = 1, reportOptionalMemberAccess = 1, reportUnknownMemberType = 1, reportUntypedFunctionDecorator = 1 }
+"django_strawberry_framework/filters/base.py::ListFilter.method" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/base.py::RelatedFilter.__init__" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/base.py::RelatedFilter.filterset" = { reportPropertyTypeMismatch = 1 }
 "django_strawberry_framework/filters/base.py::RelatedFilter.get_queryset" = { reportIncompatibleMethodOverride = 1 }
@@ -53,7 +53,6 @@
 "django_strawberry_framework/filters/base.py::_EnumChoiceField" = { reportUnsafeMultipleInheritance = 1 }
 "django_strawberry_framework/filters/base.py::_GlobalIDMultipleChoiceField.to_python" = { reportIncompatibleMethodOverride = 1 }
 "django_strawberry_framework/filters/base.py::_MembershipCSVWidget.value_from_datadict" = { reportIncompatibleMethodOverride = 1 }
-"django_strawberry_framework/filters/base.py::_install_empty_list_aware_method" = { reportAttributeAccessIssue = 1, reportFunctionMemberAccess = 1, reportOptionalMemberAccess = 1, reportUnknownMemberType = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.FILTER_DEFAULTS" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/sets.py::FilterSet.__init__" = { reportArgumentType = 2 }
 "django_strawberry_framework/filters/sets.py::FilterSet._build_stashed_instance" = { reportArgumentType = 1 }

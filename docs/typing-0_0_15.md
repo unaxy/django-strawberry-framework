@@ -5,7 +5,7 @@ rules still switched off and the `# pyright: ignore[...]` comments still in the 
 Each item is fixed at the root, gated (both passes 0 errors, full suite in one pass at 100% coverage), then committed.
 A split suite run on a tree other sessions are editing can drop modules from every part, so it is not a coverage gate.
 Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit and the CI lint job) refuses a
-`# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 63 rules on everywhere with no
+`# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 65 rules on everywhere with no
 suppression left), every file-level `# pyright:` directive, and any per-site count off the generated ledger
 `scripts/type_suppressions.toml`: each site (`path::QualifiedName`) holds its `typing.cast` calls and its ignore
 comments per unlocked rule (112 casts in all), every count may only fall, and a suppression cannot move to new code by
@@ -13,8 +13,8 @@ giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger a
 total (casts, or one rule's ignores) fails unless it carries a `Suppression-Growth-Approved:` trailer, the
 maintainer's consent.
 
-Progress: 30 done, 6 closed (survey verdicts), 2 open (one waits on upstream, one is a behavior change outside
-typing, carded). Ignore comments: 669 lines (1897 at the start of 0.0.15's ignore
+Progress: 31 done, 6 closed (survey verdicts), 2 open (one waits on upstream, one is a behavior change outside
+typing, carded). Ignore comments: 707 lines (1897 at the start of 0.0.15's ignore
 sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
 
 ## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
@@ -274,6 +274,11 @@ sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
   (`_patched_list_connection_resolve_connection`'s three); duck-typed matchers the tests drive with hostile doubles
   (`lateral_fetch.py`'s three, `utils/relations.py::_link_field_tuple`); reads of Django's own slots on a package-built
   queryset, on the routing and per-row paths (`_snapshot_routing_intent`'s two, `materialized_rows`)
+- [x] 39. `reportUntypedFunctionDecorator` and `reportOptionalMemberAccess` locked: `filters/base.py` reads
+  django-filter's `Filter.method` property off the class (`require_instance(truth.static_attr(Filter, "method"),
+  property)`), so the `ArrayFilter` / `ListFilter` setters decorate with a typed `property.setter` and the shared
+  install calls its `__set__`. The stub declares the slot a plain attribute, so each setter keeps one
+  `reportIncompatibleVariableOverride` (14 ignores out, 2 in; maintainer-approved growth of that rule)
 
 ## Rules off
 
@@ -281,12 +286,12 @@ Off by design (not planned): `reportImplicitStringConcatenation`, `reportPrivate
 `reportImportCycles`, `reportUninitializedInstanceVariable`. The reasons are in `pyproject.toml`.
 
 Off for tests and the example project by design: `reportUnannotatedClassAttribute` (tests/, the example project and
-its test folders: 9033 sites, 6948 of them in a nested `class Meta`; on for scripts/, the package and the root files):
+its test folders: 12283 sites measured 2026-11-02 (9033 earlier), 6948 of them in a nested `class Meta`; on for scripts/, the package and the root files):
 the flagged attributes are declarative configuration a framework reads by name at run time (`Meta`, admin options,
 declared filters, migrations, `AppConfig`) on classes nothing subclasses, so no inferred type reaches an override, and
 every satisfier at that scale (`@final` on each `class Meta`, `Final` or `ClassVar[...]` on each attribute) changes the
 bare `class Meta:` the READMEs teach. `reportUnusedCallResult` (tests/ and the example project's test folders, about
-4300 sites): a test calls for side effects (fixture rows, `delete()`, a call inside `pytest.raises`).
+5800 sites measured 2026-11-02): a test calls for side effects (fixture rows, `delete()`, a call inside `pytest.raises`).
 
 Off at the 3.10 floor only: the five `reportUnknown*` rules and `reportUnnecessaryTypeIgnoreComment`. django-stubs needs
 `typing.Self` (3.11), so at 3.10 every `-> Self` reads as unknown.
@@ -320,8 +325,8 @@ Survey verdicts recorded so nothing is re-tried blind:
 - Item 34, kept budgeted (each at its floor): `reportMissingSuperCall` 3 (the `TYPE_CHECKING` router and consumer
   declarations, and a test form whose `__init__` forwards through `call_forwarded`; a forwarding `super().__init__` body trades it for four ruff `ARG002` or six `reportArgumentType`);
   `reportPropertyTypeMismatch` 5 (setters that take a lazy target or the stop-aware schema wrapper and getters
-  that return the resolved value, the django-filter idiom); `reportFunctionMemberAccess` 4 (the `__test__` pytest
-  guard spec-043 Decision 7 fixes, and the django-filter `Filter.method` stub); `reportGeneralTypeIssues` 5
+  that return the resolved value, the django-filter idiom); `reportFunctionMemberAccess` 1 (the `__test__` pytest
+  guard spec-043 Decision 7 fixes; item 39 cleared the django-filter `Filter.method` three); `reportGeneralTypeIssues` 5
   (resolver-only Strawberry fields typed from run-time annotations, a class annotation would win over them; the
   hostile `__dict__`, the refused sync iteration, the string `_meta.model`); `reportInvalidTypeArguments` 5 (`FilterInput[...]` / `OrderInput[...]`
   refusing a non-set, and `DjangoConnection`'s unbounded `NodeType`); `reportUndefinedVariable` 5 (unresolvable
@@ -421,7 +426,7 @@ Checked against django-stubs 6.1.2 and master. Happy to send a PR if this is wel
 
 ## Ignore breakdown
 
-Lines carrying a `# pyright: ignore[...]` comment: 669 (734 rule hits): tests 492, package 117, examples 57,
+A snapshot from before items 38 and 39 (`scripts/type_suppressions.toml` holds the current per-site counts). Lines carrying a `# pyright: ignore[...]` comment: 669 (734 rule hits): tests 492, package 117, examples 57,
 scripts 3. By rule and by file are measured at 669 lines; by cause at 881.
 
 ### By cause
