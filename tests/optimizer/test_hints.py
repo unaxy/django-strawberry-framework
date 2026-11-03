@@ -23,7 +23,7 @@ from django_strawberry_framework.optimizer.nested_fetch import (
     resolve_strategy,
 )
 from django_strawberry_framework.utils.typing import object_result
-from tests._idioms import ClaimsClassBase, ClassReadRaisesBase
+from tests._idioms import ClaimsClassBase, ClassReadRaisesBase, hostile_name_instance
 
 _RAISING_CLASS_ERRORS = [RuntimeError, TypeError, KeyboardInterrupt]
 
@@ -211,22 +211,12 @@ class TestStrategyFactory:
 
     def test_strategy_rejects_hostile_type_name_safely(self) -> None:
         """A hostile metaclass cannot replace the typed strategy rejection."""
-
-        class HostileType(type):
-            @property
-            @override
-            # basedpyright: the hostile shape under test, a ``__name__`` property whose read
-            # raises; the checker rejects any property overriding a base class attribute
-            def __name__(cls) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-                raise RuntimeError("type name should never run")
-
-        class NotStrategy(metaclass=HostileType):
-            pass
+        notstrategy = hostile_name_instance("NotStrategy", "type name should never run")
 
         with pytest.raises(ConfigurationError, match="nested_connection_strategy"):
             # basedpyright: the non-strategy object is the hostile input under test;
             # OptimizerHint.strategy types the parameter as StrategySelection
-            OptimizerHint.strategy(NotStrategy())  # pyright: ignore[reportArgumentType]
+            OptimizerHint.strategy(notstrategy)  # pyright: ignore[reportArgumentType]
 
     def test_strategy_rejects_class_with_clean_name(self) -> None:
         """Passing a strategy class instead of an instance names the class, not 'type'."""
@@ -464,22 +454,12 @@ class TestInvalidStatesRejected:
 
     def test_prefetch_obj_rejects_hostile_type_name_safely(self) -> None:
         """A hostile metaclass cannot replace the typed Prefetch rejection."""
-
-        class HostileType(type):
-            @property
-            @override
-            # basedpyright: the hostile shape under test, a ``__name__`` property whose read
-            # raises; the checker rejects any property overriding a base class attribute
-            def __name__(cls) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-                raise RuntimeError("type name should never run")
-
-        class NotPrefetch(metaclass=HostileType):
-            pass
+        notprefetch = hostile_name_instance("NotPrefetch", "type name should never run")
 
         with pytest.raises(ConfigurationError, match="Prefetch"):
             # basedpyright: the non-Prefetch object is the hostile input under test;
             # OptimizerHint.prefetch types the parameter as a Prefetch
-            OptimizerHint.prefetch(NotPrefetch())  # pyright: ignore[reportArgumentType]
+            OptimizerHint.prefetch(notprefetch)  # pyright: ignore[reportArgumentType]
 
     @pytest.mark.parametrize("raised", _RAISING_CLASS_ERRORS)
     @pytest.mark.parametrize(

@@ -204,7 +204,6 @@
 "examples/fakeshop/drf_serializers.py::ModelSerializerBase.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_connection_pagination_api.py::_TenantScopedGenreQuerySet.query" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_debug_extension_api.py::install_probe_schema.Query.broken_non_null" = { reportReturnType = 1 }
-"examples/fakeshop/test_query/test_debug_toolbar_api.py::_debug_toolbar_cache_state" = { reportUnknownMemberType = 2 }
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_HybridAuthority" = { reportUnsafeMultipleInheritance = 1 }
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_ladder_schema" = { reportArgumentType = 1 }
 "examples/fakeshop/test_query/test_extension_isolation_api.py::_rebuild_the_box" = { reportCallIssue = 1 }
@@ -268,10 +267,7 @@
 "tests/auth/test_queries.py::test_legacy_callable_returning_an_awaitable_is_closed_and_read_as_anonymous" = { reportAttributeAccessIssue = 1 }
 "tests/auth/test_queries.py::test_me_is_null_not_a_crash_when_the_request_user_is_absent" = { reportAttributeAccessIssue = 2 }
 "tests/base/test_conf.py::test_normalize_rejection_skips_raising_metaclass_name" = { reportArgumentType = 1 }
-"tests/base/test_conf.py::test_normalize_rejection_skips_raising_metaclass_name.BadMeta.__name__" = { reportIncompatibleVariableOverride = 1 }
 "tests/base/test_conf.py::test_settings_reload_rejects_non_mapping_value" = { reportArgumentType = 1 }
-"tests/base/test_conf.py::test_upstream_patches_mapping_value_rejection_skips_raising_metaclass_name.BadMeta.__name__" = { reportIncompatibleVariableOverride = 1 }
-"tests/base/test_conf.py::test_upstream_patches_toggle_rejection_skips_raising_metaclass_name.BadMeta.__name__" = { reportIncompatibleVariableOverride = 1 }
 "tests/extensions/test_debug.py::_as_connection" = { reportReturnType = 1 }
 "tests/extensions/test_debug.py::test_a_nan_duration_costs_only_its_own_row_and_the_rest_keep_their_order._InjectingQuery.ok" = { reportArgumentType = 1 }
 "tests/extensions/test_debug.py::test_a_non_bool_acknowledgement_is_refused_at_construction" = { reportArgumentType = 1 }
@@ -365,7 +361,6 @@
 "tests/optimizer/test_hints.py::TestFrozenImmutability.test_skip_sentinel_cannot_be_mutated" = { reportAttributeAccessIssue = 1 }
 "tests/optimizer/test_hints.py::TestInvalidStatesRejected.test_non_bool_flags_raise" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::TestInvalidStatesRejected.test_prefetch_obj_rejects_hostile_type_name_safely" = { reportArgumentType = 1 }
-"tests/optimizer/test_hints.py::TestInvalidStatesRejected.test_prefetch_obj_rejects_hostile_type_name_safely.HostileType.__name__" = { reportIncompatibleVariableOverride = 1 }
 "tests/optimizer/test_hints.py::TestInvalidStatesRejected.test_prefetch_obj_rejects_non_prefetch_value" = { reportArgumentType = 2 }
 "tests/optimizer/test_hints.py::TestPrefetchFactory.test_none_rejected" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::TestSkipPredicate.test_skip_shapes" = { reportArgumentType = 1 }
@@ -373,12 +368,10 @@
 "tests/optimizer/test_hints.py::TestStrategyFactory.test_strategy_non_str_lookalikes_stay_typed" = { reportArgumentType = 2 }
 "tests/optimizer/test_hints.py::TestStrategyFactory.test_strategy_rejects_class_with_clean_name" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::TestStrategyFactory.test_strategy_rejects_hostile_type_name_safely" = { reportArgumentType = 1 }
-"tests/optimizer/test_hints.py::TestStrategyFactory.test_strategy_rejects_hostile_type_name_safely.HostileType.__name__" = { reportIncompatibleVariableOverride = 1 }
 "tests/optimizer/test_hints.py::_prefetch_through_constructor" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::_prefetch_through_factory" = { reportArgumentType = 1 }
 "tests/optimizer/test_join_taxonomy.py::_as_field" = { reportReturnType = 1 }
 "tests/optimizer/test_nested_fetch.py::test_builtin_strategy_registry_is_cached_and_immutable" = { reportIndexIssue = 1 }
-"tests/optimizer/test_nested_fetch.py::test_resolve_strategy_rejects_hostile_type_and_class_name.HostileType.__name__" = { reportIncompatibleVariableOverride = 1 }
 "tests/optimizer/test_nested_fetch.py::test_unwindowable_child_queryset_reason_matrix" = { reportAttributeAccessIssue = 1 }
 "tests/optimizer/test_nested_index_advisory.py::_IdxChildBareProxy.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/optimizer/test_nested_index_advisory.py::_IdxMtiChild.Meta" = { reportIncompatibleVariableOverride = 1 }

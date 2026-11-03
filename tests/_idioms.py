@@ -82,6 +82,14 @@ hash-keyed stores keep finding the class by identity. ``against`` narrows the ho
 to comparisons with that one class (any other comparison is ``NotImplemented`` and unrecorded),
 for a row whose class also passes through a standard-library equality test it cannot avoid.
 
+``hostile_name_instance`` returns an instance of a class named ``class_name`` whose metaclass
+answers every ``__name__`` read with ``RuntimeError(message)``, the hostile shape a rejection
+that names the received value's type must survive: a guard that reads ``type(value).__name__``
+raises the consumer's error instead of its own, while one that asks the interpreter
+(``truth.kind``) still names the class. The metaclass is built through ``type(...)`` with the
+property in its namespace, so no class-body ``__name__`` override exists for the checker to
+reject.
+
 ``str_subclass_name`` spells a field name through one of the ``str`` subclass kinds a
 consumer can hand a declaration (``STR_SUBCLASS_KINDS``): an honest subclass, one whose
 ``__eq__`` / ``__ne__`` answer "never equal", one whose comparisons raise, a ``(str, Enum)``
@@ -264,6 +272,20 @@ def comparing_metaclass(
     assert isinstance(meta, type)
     assert issubclass(meta, base)
     return meta
+
+
+def hostile_name_instance(class_name: str, message: str) -> object:
+    """An instance of ``class_name`` whose metaclass ``__name__`` read raises ``message``."""
+
+    def raising_name(_cls: type) -> NoReturn:
+        raise RuntimeError(message)
+
+    meta = object_result(type, "HostileNameMeta", (type,), {"__name__": property(raising_name)})
+    assert isinstance(meta, type)
+    assert issubclass(meta, type)
+    cls = object_result(meta, class_name, (), {})
+    assert isinstance(cls, type)
+    return object_result(cls)
 
 
 #: The ``SyncMisuseError`` recourse a test hands the visibility helpers, which require one

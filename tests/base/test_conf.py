@@ -49,7 +49,7 @@ from django_strawberry_framework.conf import (
 from django_strawberry_framework.conf import settings as bound_settings
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils._narrowing import read_attr
-from tests._idioms import ClaimsClassBase, ClassReadRaises
+from tests._idioms import ClaimsClassBase, ClassReadRaises, hostile_name_instance
 
 _PATCH_DEPENDENCIES = sorted(conf.UPSTREAM_PATCH_DEPENDENCIES)
 
@@ -841,41 +841,21 @@ def test_normalize_rejection_skips_raising_metaclass_name() -> None:
     metaclass whose ``__name__`` property raises never runs and the message
     names the real class.
     """
-
-    class BadMeta(type):
-        @property
-        @override
-        # basedpyright: the hostile shape under test, a ``__name__`` property whose read raises;
-        # the checker rejects any property overriding a base class attribute
-        def __name__(cls) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-            raise RuntimeError("hostile __name__ boom")
-
-    class Evil(metaclass=BadMeta):
-        pass
+    evil = hostile_name_instance("Evil", "hostile __name__ boom")
 
     with pytest.raises(ConfigurationError, match="must be a mapping or None; got Evil"):
-        conf._normalize_user_settings(Evil())
+        conf._normalize_user_settings(evil)
     with pytest.raises(ConfigurationError, match="must be a mapping or None; got Evil"):
         # basedpyright: the object whose class __name__ raises is the hostile input under test;
         # Settings types the parameter as Mapping[str, object] | None
-        Settings(Evil())  # pyright: ignore[reportArgumentType]
+        Settings(evil)  # pyright: ignore[reportArgumentType]
 
 
 def test_upstream_patches_toggle_rejection_skips_raising_metaclass_name() -> None:
     """A non-bool/non-mapping toggle whose metaclass ``__name__`` raises is refused typed."""
+    evil = hostile_name_instance("Evil", "hostile __name__ boom")
 
-    class BadMeta(type):
-        @property
-        @override
-        # basedpyright: the hostile shape under test, a ``__name__`` property whose read raises;
-        # the checker rejects any property overriding a base class attribute
-        def __name__(cls) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-            raise RuntimeError("hostile __name__ boom")
-
-    class Evil(metaclass=BadMeta):
-        pass
-
-    s = Settings({"APPLY_UPSTREAM_PATCHES": Evil()})
+    s = Settings({"APPLY_UPSTREAM_PATCHES": evil})
 
     with (
         mock.patch.object(conf, "settings", s),
@@ -886,19 +866,9 @@ def test_upstream_patches_toggle_rejection_skips_raising_metaclass_name() -> Non
 
 def test_upstream_patches_mapping_value_rejection_skips_raising_metaclass_name() -> None:
     """A non-bool per-dependency value whose metaclass ``__name__`` raises is refused typed."""
+    evil = hostile_name_instance("Evil", "hostile __name__ boom")
 
-    class BadMeta(type):
-        @property
-        @override
-        # basedpyright: the hostile shape under test, a ``__name__`` property whose read raises;
-        # the checker rejects any property overriding a base class attribute
-        def __name__(cls) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-            raise RuntimeError("hostile __name__ boom")
-
-    class Evil(metaclass=BadMeta):
-        pass
-
-    s = Settings({"APPLY_UPSTREAM_PATCHES": {"django": Evil()}})
+    s = Settings({"APPLY_UPSTREAM_PATCHES": {"django": evil}})
 
     with (
         mock.patch.object(conf, "settings", s),
