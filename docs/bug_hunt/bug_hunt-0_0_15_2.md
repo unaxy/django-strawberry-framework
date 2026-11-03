@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 414 done, 97 to do. The CHANGELOG entries filed here moved to
+Progress: 414 done, 110 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2662,6 +2662,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   written, then the post-write re-fetch raises `decimal.InvalidOperation` from the converter's `quantize`: a masked
   top-level error and a rolled-back write where README "Writing data" says a value the database cannot store is
   refused before the write. A column with no `max_digits` reads the same row back as `Infinity`. Found fixing 530
+- [ ] 729. spec-027's `apply_async` paragraph says a "present-but-empty nested branch" constrains nothing, but a
+  present branch is active whatever its inner value (`utils/permissions.py::active_related_branches`), so
+  `{shelves: {}}` keeps only the parents with a visible, admitted shelf (`_restrict_through_branch`) and
+  `not: {shelves: {}}` keeps the rest, while a root `filter: {}` constrains nothing. The maintainer ruled that `{}`
+  constrains nothing everywhere and that to-many existence is spelled with explicit `some` / `none` / `every`
+  quantifiers on a per-target wrapper input (Prisma's shape), so this closes with that contract change, which has
+  its own plan and review pending. Found planning 216
 - [ ] 730. (robustness) A declared `CharFilter` / `NumberFilter` / `ListFilter` / `MultipleChoiceFilter` /
   `AllValuesMultipleFilter`, with or without `method=`, whose `field_name` ends on a relation (forward FK `branch` /
   `branch_id`, reverse FK, M2M, `GenericForeignKey`, `branch__shelves`) is refused at schema build with
@@ -2722,6 +2729,88 @@ tracker number are recorded there; open remainders and new defects are filed as 
   as `FILTER_INVALID` over GraphQL escapes there as Django's or the driver's exception: a raw
   `occurred_on__year__gt=99999` raises `ValueError` (year 1..9999) and a past-range year raises `OverflowError`. Found
   researching 673
+- [ ] 745. The finalizer's GlobalID encode-only audit
+  (`types/finalizer.py::_audit_globalid_filter_strategies`) resolves each filter's original `field_name` against
+  its wired owner, but a request first rebinds the leaf through its declared hops or an undeclared hop's face
+  (`filters/sets.py::FilterSet._leaf_chain` / `_bound_terminal`), and it never reads unwired targets. A schema
+  whose executing filter decodes into a `callable` / `custom` type passes `finalize_django_types()` and fails every
+  request supplying a nonempty value with `GLOBALID_UNVALIDATABLE`: a `RelatedFilter` into an unwired set over an
+  MTI descendant whose `faults` key reaches a callable-strategy type, or a re-entry `shelf__books__id` that the
+  runtime decodes against a secondary Book type. The fix must audit the filter that executes, skip consumer
+  decoders (`_decodes_before_binding`: `method=` or a class-level `filter` override), and record that refusing at
+  construction also removes empty-list and null requests that succeed today. Found planning 216
+- [ ] 746. The finalizer's deep-copy probe (`types/finalizer.py::_audit_filter_copies`) reads each wired set's
+  `base_filters` before expansion, so an entry a `get_filters()` override publishes after expansion
+  (`filters/sets.py::FilterSet._publish_filters`), such as a borrowed `RelatedFilter` head keyed by an expanded
+  name, is never probed when no enabled declaration copies it: a lock-holding `method=` on it passes
+  `finalize_django_types()` and the first request raises `TypeError: cannot pickle '_thread.lock' object`. Found
+  planning 216
+- [ ] 748. A raw-form `RelatedFilter` head (`FilterSet(data=...)`, `DjangoFilterBackend`) skips the visibility and
+  declaration scope every walked key gets. An own head is a `ModelChoiceFilter` over
+  `filters/base.py::RelatedFilter.get_queryset`'s base queryset, not the target type's `get_queryset`, and a copied
+  head (`shelves__books__shelf`) is never walked (`filters/sets.py::FilterSet._flat_leaf_walk` returns `None`). An
+  anonymous raw `BookFilter` `shelf=<secret shelf pk>` returns the book on the shelf `ShelfType.get_queryset` hides,
+  while `shelf__code=<its code>` returns nothing; a raw `BranchFilter` `shelves__books__shelf=<secret shelf pk>`
+  matches through a shelf outside `BranchFilter.shelves`' `queryset=` scope, which `shelves=<pk>` refuses as "Select a
+  valid choice" and `shelves__code` excludes. GraphQL cannot name a head. Same root as 749: `_flat_leaf_walk` must walk
+  the path Django resolves for the predicate, heads included (one fix closes both); needs 750's actor. Found planning
+  216
+- [ ] 749. A filter whose `lookup_expr` crosses a relation (`RelationPkMultipleFilter(field_name="shelf",
+  lookup_expr="branch__in")`, `CharFilter(field_name="shelf", lookup_expr="branch__name")`, the shape
+  `filters/base.py::_filterset_lookup_operand` documents) skips that hop's visibility and gates:
+  `filters/sets.py::FilterSet._flat_leaf_walk` walks only `_bound_field_name`, so `_leaf_chain` /
+  `_apply_relation_leaf` run the unbound filter over unscoped rows and `_leaf_gates` fires no gate for the crossed hop.
+  A restricted branch's pk matches through a visible book over GraphQL and raw forms, while `field_name="shelf__branch"`
+  returns nothing. Django already resolves the joined path (`utils/querysets.py::split_lookup` over
+  `Query.names_to_path`, which input typing uses); the walk and `_bound_terminal` must read it, rebinding both
+  `field_name` and the lookup tail. A to-many crossing raises `LookupValidationError`. Found probing 748
+- [ ] 750. A raw `FilterSet(data=..., request=...)` (`DjangoFilterBackend`) never sets `_apply_info` (only
+  `apply_sync` / `apply_async` do, `_build_stashed_instance`), so every hop and choice hook scopes with `info=None`: a
+  staff request is filtered as anonymous (`CatalogueBookFilter` `shelf=<secret pk>` returns nothing for staff), and a
+  hook reading `info.context.request.user` raises. GOAL "Trust boundary": the actor is the user Django's
+  authentication attached to the request. Blocks 748's raw-head fix. Found probing 748
+- [ ] 751. An own `RelatedFilter` head's raw-form `ModelChoiceField` accepts a hidden pk (it matches, 748) but answers a
+  missing pk with "Select a valid choice", so a raw-form client tells hidden rows from missing ones; writes keep them
+  indistinguishable on purpose (`utils/write_values.py::decode_visible_relation_ids`). Walking the head (748) does not
+  close it: the head's choice queryset (`filters/base.py::RelatedFilter.get_queryset`, `base_queryset`) must answer a
+  hidden pk as it answers a missing one. Found probing 748
+- [ ] 752. A `RelatedOrder` whose target `OrderSet` is keyed on another model than the relation reaches is accepted, and
+  `orders/sets.py::OrderSet._scoped_hops` scopes its hop by the wrong type (`set_bound_type(hop.target)`, no
+  correlation check), so hidden rows of the real model order visible parents: `BookOrder.shelf =
+  RelatedOrder(DeskProfileOrder, field_name="shelf")` gives anonymous `orderBy: [{shelf: {code: ASC}}]` staff's order,
+  exposing a secret shelf's code. The filter side refuses the same declaration at build (item 34,
+  `_require_relation_path` / `_require_correlated_target` over `optimizer/predicates.py::correlates_related_rows`);
+  `OrderSet.get_fields` runs only `reject_captured_branches`. Found probing 748
+- [ ] 753. (docs) A `RelatedFilter`'s `queryset=` bounds only paths through that declaration, not a dotted
+  `Meta.fields` key on another set reaching the same relation (`branch__shelves__topic` on a Shelf set passes
+  `BranchFilter.shelves`' scope; its hops still get target visibility). Answered from AGENTS' defect rule and GOAL's
+  "nested filters can narrow it but cannot escape" (the declaration's own branch): state it in spec-027 Decision 8 and
+  GLOSSARY "Flat fields walking a declared branch". Found probing 748
+- [ ] 754. (docs, fakeshop) A non-null forward edge into a hidden target is a dangling key to the viewer: `isNull: true`
+  matches exactly those rows (item 97's null extension, a one-bit oracle on the hidden target) and a non-null output
+  field masks the whole list as "An unexpected error occurred." (`types/resolvers.py::_visible_related_object`). GOAL:
+  declared rules cascade by default; a `get_queryset` hook is trusted code whose contract is to cascade
+  (`apply_cascade_permissions`, as products' `ItemType` does). The package cannot tell a hook cascades, so it states
+  the contract (README, GLOSSARY cascade and isnull rows); fakeshop's library `BookType`, `CatalogueBookType` and
+  `ShelfLabelType` keep it. Found probing 748
+- [ ] 755. (docs) A `globalid_strategy="type"` Relay secondary with no `get_queryset` serves, through `node(id:)`
+  (`types/relay.py::_resolve_nodes_default`), rows its primary's hook hides: each type's hook is its own declaration
+  (GOAL "Trust boundary"), and visibility declared on the model covers every type over it. State it beside README's
+  secondary-type paragraph and GLOSSARY `DjangoNodeField`. Found probing 748
+- [ ] 756. (robustness) A consumer `ModelChoiceFilter` with no `queryset=` (or one `Meta.filter_overrides` selects) is
+  accepted at declaration and raises `TypeError: ModelChoiceField.__init__() missing 1 required positional argument:
+  'queryset'` on the request that builds its form; GOAL: configuration is validated at construction. Found probing 748
+- [ ] 757. Under `FAKESHOP_TEST_BOUND_SETS`, `node(id:)` for a type-strategy Relay secondary over Shelf
+  (`BindingPlainShelfType:1`, `BindingHidingShelfType:1`) fails for a visible row, anonymous and staff, with "Abstract
+  type 'Node' must resolve to an Object type at runtime for field 'Query.node'"; the Book secondaries resolve. Reported
+  by a probe, not yet reproduced on main. Found probing 748
+- [ ] 68. A model's default manager hides rows from declared filter hops but not from undeclared filter hops or
+  ordering. Answered 2026-11-03 from AGENTS and GOAL: a filtered default manager is not declared visibility (GOAL:
+  visibility is a model rule or a type's `get_queryset`; a project manager is trusted code), and Django reads no
+  manager across a join and `_base_manager` for related access (AGENTS: upstream is asked). So every hop seeds from
+  the same rows Django's join reads, roots and writes keep `_default_manager`, and the GLOSSARY cascade line ("a
+  registered proxy type whose filtered `_default_manager` IS its visibility policy") and the fakeshop `VisibleBranch`
+  docstring are corrected; a fixture that needs the policy declares a hook or rule. Moved from Waiting on you
 - [ ] 758. (robustness) A declared bare-transform `RangeFilter` (`lookup_expr="year"` or `"date"` over a datetime
   column, whose lone bounds the live `bare-year-*` / `bare-date-*` rows pin) sent both bounds hands django-filter's
   `RangeFilter.filter` a `(start, stop)` tuple under the bare transform (`occurred_at__year=(a, b)`): raw form data
@@ -2939,8 +3028,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   message in `auth/mutations.py` renders permission-class names raw. Read the label only on the failure branch, reject at
   declaration, or keep?
 - [ ] 54. Docs (parked): glossary, a sliced combinator branch on SQLite raises Django's own `DatabaseError`
-- [ ] 68. A model's default manager hides rows from declared filter hops but not from undeclared filter hops or ordering. Make them
-  agree, or keep?
 - [ ] 77. The read enum refuses a grouped-choices column, though group labels are presentation like choice labels. Flatten it on
   the read side too (retires the `str`-override carve-out and the write-side grouped refusal), or keep?
 - [ ] 73. A set subclass used only as a `RelatedFilter` / `RelatedOrder` target, never wired to a type, inherits its base's owner and
