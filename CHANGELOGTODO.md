@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 175 to do.
+Progress: 0 done, 176 to do.
 
 ## From dry-0_0_15_3
 
@@ -705,6 +705,16 @@ Progress: 0 done, 175 to do.
   whose wall clock in the current time zone leaves years 1..9999 answers "Enter a value the current time zone can
   represent." on a write and as a filter's `FILTER_INVALID`, instead of the masked `ConfigurationError`. New fakeshop
   mutations: `createScalarSpecimenViaDayInstantForm` / `updateScalarSpecimenViaDayInstantForm`
+- [ ] 763. CHANGELOG entry for item 692: a declared `ListFilter` / `ArrayFilter` over an `ArrayField` (reachable by a
+  JSON `where` handed to `apply_sync` / `apply_async` or by raw form data) now cleans every member as the innermost
+  column, at any depth over an array of arrays: a member the column cannot hold answers `FILTER_INVALID` with the
+  column's form error, and an integer member past the column's range answers `FILTER_INVALID` ("Enter a value the
+  database can represent."), where the database's error surfaced before. An `in` over an array column takes each
+  member as one whole array value: a list member is cleaned and applied (a flat `[[1, 2]]` was refused), and a member
+  that is no list, `null` and a raw `?name=1,2` included, answers `FILTER_INVALID` "Enter a list of values." where the
+  queryset raised `TypeError` or bound the text split into characters. Members bind as the cleaned values (an integer
+  leaf as a `Decimal`, a text leaf stripped, a naive datetime made aware). The source distribution and wheel now
+  include Django's license (`LICENSE.django`)
 
 ## From dry-upstream-0_0_15
 

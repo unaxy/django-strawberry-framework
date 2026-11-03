@@ -7088,6 +7088,246 @@ def test_integer_array_leaf_is_asked_wherever_django_contrib_postgres_is_unavail
     }
 
 
+class _GriddedShelf(django_models.Model):
+    """A table with flat and nested arrays of integers, dates and text.
+
+    Query-build only (``managed = False``): the bind ask compiles, never runs, its clause.
+    """
+
+    counts = FakeArrayField(django_models.IntegerField())
+    grid = FakeArrayField(FakeArrayField(django_models.IntegerField()))
+    calendar = FakeArrayField(FakeArrayField(django_models.DateField()))
+    labels = FakeArrayField(FakeArrayField(django_models.TextField()))
+
+    class Meta:
+        managed = False
+        app_label = "test_nested_array_leaf"
+
+
+def _gridded_shelf_filter_classes() -> tuple[type[FilterSet], type[django_filters.FilterSet]]:
+    """A package and a plain django-filter filterset reaching ``_GriddedShelf``'s arrays.
+
+    Each declares the whole-array ``exact`` on each column, the first element of ``grid``
+    (index ``0``, a flat array of integers) spelled in the ``field_name`` and in the
+    ``lookup_expr``, and an ``in`` over ``grid`` and over ``counts``, each member a whole
+    array value.
+    """
+
+    class GriddedShelfFilter(FilterSet):
+        counts_are = ArrayFilter(field_name="counts", lookup_expr="exact")
+        grid_are = ArrayFilter(field_name="grid", lookup_expr="exact")
+        first_row_is = ArrayFilter(field_name="grid__0", lookup_expr="exact")
+        first_row_holds = ArrayFilter(field_name="grid", lookup_expr="0__contains")
+        grid_among = ListFilter(field_name="grid", lookup_expr="in")
+        counts_among = ListFilter(field_name="counts", lookup_expr="in")
+        calendar_are = ArrayFilter(field_name="calendar", lookup_expr="exact")
+        labels_are = ArrayFilter(field_name="labels", lookup_expr="exact")
+
+        class Meta:
+            model = _GriddedShelf
+            fields = []
+
+    class PlainGriddedShelfFilter(django_filters.FilterSet):
+        counts_are = ArrayFilter(field_name="counts", lookup_expr="exact")
+        grid_are = ArrayFilter(field_name="grid", lookup_expr="exact")
+        first_row_is = ArrayFilter(field_name="grid__0", lookup_expr="exact")
+        first_row_holds = ArrayFilter(field_name="grid", lookup_expr="0__contains")
+        grid_among = ListFilter(field_name="grid", lookup_expr="in")
+        counts_among = ListFilter(field_name="counts", lookup_expr="in")
+        calendar_are = ArrayFilter(field_name="calendar", lookup_expr="exact")
+        labels_are = ArrayFilter(field_name="labels", lookup_expr="exact")
+
+        class Meta:
+            model = _GriddedShelf
+            fields = []
+
+    return GriddedShelfFilter, PlainGriddedShelfFilter
+
+
+def _gridded_shelf_filterset(parent: str, data: QueryDict | dict[str, object]) -> BaseFilterSet:
+    """The ``parent`` (``package`` / ``django-filter``) gridded filterset over ``data``."""
+    package, plain = _gridded_shelf_filter_classes()
+    shelf_filter = package if parent == "package" else plain
+    return shelf_filter(data=data, queryset=_GriddedShelf.objects.all())
+
+
+#: A nested value holding one empty row.
+_EMPTY_ROW: list[list[object]] = [[]]
+
+
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize(
+    ("form_key", "value", "cleaned"),
+    [
+        pytest.param("grid_are", [["1", "2"]], [[Decimal(1), Decimal(2)]], id="nested-integers"),
+        pytest.param("grid_are", [1, "2"], [Decimal(1), Decimal(2)], id="flat-list-of-leaves"),
+        pytest.param("grid_are", [[None, "1"]], [[None, Decimal(1)]], id="none-member"),
+        pytest.param("grid_are", (("1",),), [[Decimal(1)]], id="tuples"),
+        pytest.param("grid_are", [[["1"]]], [[[Decimal(1)]]], id="deeper-than-the-column"),
+        pytest.param("grid_are", [None], [None], id="none-row"),
+        pytest.param("grid_are", [], [], id="empty"),
+        pytest.param("grid_are", _EMPTY_ROW, _EMPTY_ROW, id="empty-row"),
+        pytest.param("grid_are", None, None, id="no-value"),
+        pytest.param(
+            "grid_among",
+            [[["1", "2"]]],
+            [[[Decimal(1), Decimal(2)]]],
+            id="in-over-nested",
+        ),
+        pytest.param(
+            "calendar_are",
+            [["2026-10-01"]],
+            [[datetime.date(2026, 10, 1)]],
+            id="nested-dates",
+        ),
+        pytest.param("labels_are", [["  ab  ", None]], [["ab", None]], id="nested-text"),
+        pytest.param(
+            "counts_among",
+            [[1, "2"], [None]],
+            [[Decimal(1), Decimal(2)], [None]],
+            id="in-over-flat",
+        ),
+    ],
+)
+def test_nested_array_leaf_is_cleaned_as_its_innermost_column(
+    monkeypatch: pytest.MonkeyPatch,
+    parent: str,
+    form_key: str,
+    value: object,
+    cleaned: object,
+) -> None:
+    """Every member of a nested ``ArrayField`` value is cleaned as the innermost column.
+
+    A list or tuple member is descended at any depth, so a flat list of leaves, a value
+    nested deeper than the column and an ``in`` whose members are nested arrays clean
+    alike; a ``None`` stays ``None`` at any depth, inside an ``in`` member too; under the
+    package ``FilterSet`` and a plain django-filter one. The filtered queryset builds over
+    the cleaned value.
+    """
+    patch_array_field(monkeypatch)
+    filterset = _gridded_shelf_filterset(parent, {form_key: value})
+    form = filterset.form
+    assert form.is_valid(), form.errors
+    assert form.cleaned_data[form_key] == cleaned
+    assert filterset.qs.model is _GriddedShelf
+
+
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize(
+    ("form_key", "value", "message"),
+    [
+        pytest.param("grid_are", [["abc"]], "Enter a number.", id="nested-text-member"),
+        pytest.param("grid_are", [[["abc"]]], "Enter a number.", id="deeper-text-member"),
+        pytest.param("grid_among", [[["abc"]]], "Enter a number.", id="in-over-nested"),
+        pytest.param("calendar_are", [["notadate"]], "Enter a valid date.", id="nested-date"),
+        pytest.param("counts_are", [[1]], "Enter a number.", id="flat-column-list-member"),
+        pytest.param("first_row_is", [[1]], "Enter a number.", id="index-reads-a-flat-array"),
+        pytest.param(
+            "first_row_holds",
+            [[1]],
+            "Enter a number.",
+            id="index-lookup-reads-a-flat-array",
+        ),
+    ],
+)
+def test_nested_array_leaf_the_innermost_column_cannot_hold_is_a_form_error(
+    monkeypatch: pytest.MonkeyPatch,
+    parent: str,
+    form_key: str,
+    value: object,
+    message: str,
+) -> None:
+    """A member the innermost column cannot hold is the leaf form field's error, unindexed.
+
+    A list member of a flat array, or of the flat array an index of a nested one reads,
+    is no element the column stores.
+    """
+    patch_array_field(monkeypatch)
+    form = _gridded_shelf_filterset(parent, {form_key: value}).form
+    assert not form.is_valid()
+    assert form.errors.get_json_data() == {form_key: [{"message": message, "code": "invalid"}]}
+
+
+#: Django's own error for a value that is no list.
+_INVALID_LIST = [
+    {
+        "message": str(forms.MultipleChoiceField.default_error_messages["invalid_list"]),
+        "code": "invalid_list",
+    },
+]
+
+
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize(
+    ("form_key", "data"),
+    [
+        pytest.param("counts_among", {"counts_among": [1]}, id="flat"),
+        pytest.param("grid_among", {"grid_among": [[[1]], 1]}, id="nested"),
+        pytest.param("counts_among", {"counts_among": [None]}, id="flat-none-member"),
+        pytest.param("counts_among", {"counts_among": [[1], None]}, id="flat-list-then-none"),
+        pytest.param("grid_among", {"grid_among": [None]}, id="nested-none-member"),
+        pytest.param("grid_among", {"grid_among": [[[1]], None]}, id="nested-list-then-none"),
+        pytest.param("counts_among", QueryDict("counts_among=1"), id="flat-raw-text"),
+        pytest.param("grid_among", QueryDict("grid_among=1,2"), id="nested-raw-text"),
+    ],
+)
+def test_an_array_in_member_that_is_no_array_is_invalid_list(
+    monkeypatch: pytest.MonkeyPatch,
+    parent: str,
+    form_key: str,
+    data: QueryDict | dict[str, object],
+) -> None:
+    """Each member of an ``in`` over an ``ArrayField`` is one whole array value.
+
+    A member that is no list or tuple, ``None`` included (a raw ``?name=1,2`` reads as two
+    text members), is the field's ``invalid_list`` error, Django's own message, and the
+    filtered queryset builds: the member never reaches ``ArrayInLookup``, which would raise
+    ``TypeError`` turning it into a tuple.
+    """
+    patch_array_field(monkeypatch)
+    filterset = _gridded_shelf_filterset(parent, data)
+    assert filterset.form.errors.get_json_data() == {form_key: _INVALID_LIST}
+    assert "WHERE" not in str(filterset.qs.query)
+
+
+@pytest.mark.parametrize(
+    ("value", "refused"),
+    [
+        pytest.param([["1", str(2**31)]], True, id="member-past-int32"),
+        pytest.param([["1", str(2**63)]], True, id="member-past-int64"),
+        pytest.param(["1", str(2**31)], True, id="flat-list-member-past-int32"),
+        pytest.param([["1", str(2**31 - 1)]], False, id="member-max-int32"),
+    ],
+)
+def test_nested_integer_array_leaf_past_its_range_is_asked(
+    monkeypatch: pytest.MonkeyPatch,
+    value: object,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A nested integer member past the innermost column's range is ``FILTER_INVALID``.
+
+    Cleaned to a decimal, it meets the integer leaf's range ask as a flat array's element
+    does (Django's default ranges, PostgreSQL's: 32 bits for an ``IntegerField``).
+    """
+    patch_array_field(monkeypatch)
+    shelf_filter, _plain = _gridded_shelf_filter_classes()
+    monkeypatch.setattr(
+        connection.ops,
+        "integer_field_range",
+        _default_range_operations(connection).integer_field_range,
+    )
+    filterset = shelf_filter(data={"grid_are": value}, queryset=_GriddedShelf.objects.all())
+    if not refused:
+        shelf_filter._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        shelf_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {"grid_are": _UNBINDABLE},
+    }
+
+
 _NAIVE_CLOCK = datetime.time(9, 30)
 
 

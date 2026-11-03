@@ -15,6 +15,8 @@ column is an array to every one of them or to none. ``array_leaf_field`` walks i
 through nested arrays to the column the innermost elements are stored through. Both read a
 ``GeneratedField`` as the column it computes (``utils/relations.py::generated_column``), so a
 generated column with an ``ArrayField`` output is an array to every subsystem too.
+``is_array_in_lookup`` asks whether a resolved lookup class is Django's ``ArrayInLookup``,
+the ``in`` an ``ArrayField`` registers, whose members are whole column values.
 """
 
 from __future__ import annotations
@@ -31,13 +33,26 @@ if TYPE_CHECKING:
 
     from .typing import ConcreteField
 
-__all__ = ("ARRAY_FIELD_CLS", "array_element_field", "array_leaf_field")
+__all__ = (
+    "ARRAY_FIELD_CLS",
+    "ARRAY_IN_LOOKUP_CLS",
+    "array_element_field",
+    "array_leaf_field",
+    "is_array_in_lookup",
+)
 
 #: ``django.contrib.postgres.fields.ArrayField``, or ``None`` without a PostgreSQL
 #: driver. The cast names the class the by-name lookup returns.
 ARRAY_FIELD_CLS = cast(
     "type[ArrayField[Never, object]] | None",
     import_attr_if_importable("django.contrib.postgres.fields", "ArrayField"),
+)
+
+#: ``django.contrib.postgres.fields.array.ArrayInLookup``, the ``in`` every ``ArrayField``
+#: registers, or ``None`` without a PostgreSQL driver.
+ARRAY_IN_LOOKUP_CLS = import_attr_if_importable(
+    "django.contrib.postgres.fields.array",
+    "ArrayInLookup",
 )
 
 
@@ -71,3 +86,15 @@ def array_leaf_field(field: object) -> tuple[object, int]:
         field = element
         depth += 1
     return field, depth
+
+
+def is_array_in_lookup(lookup: object) -> bool:
+    """Whether ``lookup`` is a class deriving Django's ``ArrayInLookup``.
+
+    The ``in`` an ``ArrayField`` (or a transform whose output is one) resolves through its
+    own ``get_lookup("in")``: each member is a whole array value of that column, which
+    ``ArrayInLookup.get_prep_lookup`` converts to a tuple. ``False`` for every lookup when
+    ``django.contrib.postgres`` is unavailable.
+    """
+    cls = ARRAY_IN_LOOKUP_CLS
+    return truth.is_type(cls) and truth.is_subclass(lookup, cls)

@@ -103,7 +103,7 @@ from django_strawberry_framework.types.relay import (
     published_node_type_name,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._array_field import array_element_field, array_leaf_field
+from django_strawberry_framework.utils._array_field import array_leaf_field, is_array_in_lookup
 from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_list,
@@ -777,8 +777,9 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     ``range``, which Django registers on no relation), or one a ``method=`` filter names,
     whose method applies no lookup of the filter's to the relation.
     ``element`` reads one element of a list value: an ``ArrayField`` column's element is a
-    value of its ``base_field`` (``utils/_array_field.py::array_element_field``), any
-    other column's a value of the column itself.
+    value of its innermost ``base_field``, the column a nested array's leaves are stored
+    through (``utils/_array_field.py::array_leaf_field``), any other column's a value of
+    the column itself.
     """
     parent = read_attr(filter_instance, "parent", None)
     if not isinstance(parent, BaseFilterSet):
@@ -787,7 +788,9 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     if model_field is None:
         return None
     if element:
-        model_field = array_element_field(model_field) or model_field
+        leaf, depth = array_leaf_field(model_field)
+        if depth:
+            model_field = require(leaf, is_concrete_field)
     column = _compared_value_column(filter_instance, model_field)
     if column is None:
         return None
@@ -967,16 +970,27 @@ class _ElementField(Field):
     """Form field of ``ListFilter`` / ``ArrayFilter``: each element is cleaned by ``element_field``.
 
     ``element_field`` is the form field of the ``gte`` filter for the value each element
-    compares, the column's or a transform output's (an ``ArrayField``'s ``base_field``'s for
-    an array column, a relation's key column, ``_compared_value_column``), so an element that
-    value cannot hold is a form error rather than a value handed to the ORM, a text element
-    is stripped and a naive datetime element made aware, under any django-filter
-    ``FilterSet`` parent.
-    A ``None`` element stays ``None``, and a value that is not a list or tuple, or a field
-    with no ``element_field`` (a filter bound to no ``FilterSet``, a relation compared on
-    more than one column or on none, a ``lookup_expr`` continuing across a relation, a
-    ``method=`` filter on a relation, a column django-filter builds no filter for), passes
-    through as sent for the filter to judge.
+    compares, the column's or a transform output's (an ``ArrayField``'s innermost
+    ``base_field``'s for an array column, a relation's key column, ``_compared_value_column``),
+    so an element that value cannot hold is a form error rather than a value handed to the
+    ORM, a text element is stripped and a naive datetime element made aware, under any
+    django-filter ``FilterSet`` parent. Over an ``ArrayField`` of arrays (``element_nests``)
+    a list or tuple element is descended at any depth and each member that is no list is
+    cleaned the same way: Django's ``ArrayRHSMixin`` prepares only the outermost members of
+    such a value, through an inner ``ArrayField`` that prepares nothing, and PostgreSQL's
+    containment and overlap read a multidimensional array's elements whatever its
+    dimensions, so a flat list of leaves compares as the nested one does. Under an ``in``
+    whose members are whole array values (``members_are_arrays``: the column's own ``in`` is
+    Django's ``ArrayInLookup``, flat or nested) each member is one value of the column: a
+    list or tuple member is cleaned as that array is, and any other member, ``None``
+    included, is the field's error with ``MultipleChoiceField``'s ``invalid_list`` message,
+    never a leaf, since ``ArrayInLookup`` turns each member into a tuple.
+    Any other ``None`` element, one inside such a member included, stays ``None``, and a
+    value that is not a list or tuple, or a field with no ``element_field`` (a filter bound
+    to no ``FilterSet``, a relation compared on more than one column or on none, a
+    ``lookup_expr`` continuing across a relation, a ``method=`` filter on a relation, a
+    column django-filter builds no filter for), passes through as sent for the filter to
+    judge.
 
     Raw form data reads as the generated ``in`` reads it (``_MembershipCSVWidget``, rendered
     as a text input): ``?name=a,b`` is ``["a", "b"]``, an empty ``?name=`` applies no
@@ -990,10 +1004,14 @@ class _ElementField(Field):
         self,
         *,
         element_field: Field | None = None,
+        element_nests: bool = False,
+        members_are_arrays: bool = False,
         **kwargs: Unpack[_FieldOptions],
     ) -> None:
         super().__init__(**kwargs)
         self.element_field: Field | None = element_field
+        self.element_nests: bool = element_nests
+        self.members_are_arrays: bool = members_are_arrays
 
     @override
     def to_python(self, value: object) -> object:
@@ -1001,7 +1019,37 @@ class _ElementField(Field):
         element_field = self.element_field
         if element_field is None or not is_list_or_tuple(value):
             return value
-        return [None if element is None else element_field.clean(element) for element in value]
+        if self.members_are_arrays:
+            return [self._cleaned(element_field, _array_value(member)) for member in value]
+        return self._cleaned(element_field, value)
+
+    def _cleaned(
+        self,
+        element_field: Field,
+        elements: list[object] | tuple[object, ...],
+    ) -> list[object]:
+        """Return ``elements`` cleaned, a list or tuple one descended over an array of arrays."""
+        return [
+            None
+            if element is None
+            else self._cleaned(element_field, element)
+            if self.element_nests and is_list_or_tuple(element)
+            else element_field.clean(element)
+            for element in elements
+        ]
+
+
+def _array_value(member: object) -> list[object] | tuple[object, ...]:
+    """Return ``member``, one whole array value; any other member is ``invalid_list``.
+
+    The message is Django's own for a value that is no list (``MultipleChoiceField``).
+    """
+    if is_list_or_tuple(member):
+        return member
+    raise ValidationError(
+        MultipleChoiceField.default_error_messages["invalid_list"],
+        code="invalid_list",
+    )
 
 
 class _ElementCleanedFilter(_ColumnCleanedFilter):
@@ -1011,9 +1059,14 @@ class _ElementCleanedFilter(_ColumnCleanedFilter):
 
     @override
     def _hand_column_field(self, field: Field, /) -> None:
-        """Hand an ``_ElementField`` the comparison form field of one element of the column."""
+        """Hand an ``_ElementField`` the comparison form field of an innermost element."""
         if isinstance(field, _ElementField):
             field.element_field = _column_form_field(self, element=True)
+            field.element_nests = array_leaf_field(_bound_value_field(self))[1] > 1
+            parent: BaseFilterSet | None = getattr(self, "parent", None)
+            field.members_are_arrays = is_array_in_lookup(
+                _filterset_lookup_operand(parent, self).lookup,
+            )
 
 
 class ArrayFilterMethod(_EmptyListAwareFilterMethod):
@@ -1048,7 +1101,7 @@ class ArrayFilter(_ElementCleanedFilter):
         queryset).
 
     Each element is cleaned by the form field of the ``gte`` filter for the value it
-    compares, the column's or a transform output's, an ``ArrayField`` column's
+    compares, the column's or a transform output's, an ``ArrayField`` column's innermost
     ``base_field``'s, a relation's key column's (``_ElementField``), so an element that
     value cannot hold is a form error rather than a value handed to the ORM, a text element
     is stripped and a naive datetime element made aware. An ``in`` over an integer column,

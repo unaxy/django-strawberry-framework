@@ -20,7 +20,8 @@ test where the module is unimportable (no PostgreSQL driver).
 
 ``FakeArrayField`` reads an index (``<column>__0``), a slice (``<column>__0_2``) and ``len``
 as a real ``ArrayField`` does: an index's output is ``base_field``, a slice's the array,
-``len``'s an ``IntegerField``.
+``len``'s an ``IntegerField``. Its ``in`` is ``FakeArrayInLookup``, whose members are whole
+array values as ``ArrayInLookup``'s are.
 
 A model hosting either double declares ``class Meta: managed = False``.
 
@@ -32,6 +33,7 @@ A model hosting either double declares ``class Meta: managed = False``.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 import pytest
@@ -121,6 +123,35 @@ class FakeArrayLength(Length):
 FakeArrayField.register_lookup(FakeArrayLength)
 
 
+class FakeArrayInLookup(models.lookups.In):
+    """An ``in`` whose members are whole array values, as a real ``ArrayField`` registers.
+
+    Adapted from ``django/contrib/postgres/fields/array.py::ArrayInLookup`` (Django, BSD):
+    each member that is no expression is converted to a tuple, so a member that is no
+    iterable raises ``TypeError`` as the real lookup's does.
+    """
+
+    @override
+    def get_prep_lookup(self) -> Iterable[object]:
+        values: Iterable[object] = super().get_prep_lookup()
+        if hasattr(values, "resolve_expression"):
+            return values
+        return [_array_in_member(value) for value in values]
+
+
+def _array_in_member(value: object) -> object:
+    """One ``in`` member as ``ArrayInLookup`` prepares it: an expression, else a tuple."""
+    if hasattr(value, "resolve_expression"):
+        return value
+    if not isinstance(value, Iterable):
+        message = f"{type(value).__name__!r} object is not iterable"
+        raise TypeError(message)
+    return tuple(value)
+
+
+FakeArrayField.register_lookup(FakeArrayInLookup)
+
+
 def patch_array_field(
     monkeypatch: pytest.MonkeyPatch,
     field_cls: type[models.Field[object, object]] | None = FakeArrayField,
@@ -128,9 +159,12 @@ def patch_array_field(
     """Point the one ``ArrayField`` owner at ``field_cls`` (``FakeArrayField`` by default).
 
     ``None`` stands for an environment without ``django.contrib.postgres``, where no
-    column is an ``ArrayField``.
+    column is an ``ArrayField`` and no lookup is its ``in``; otherwise the array ``in`` is
+    ``FakeArrayInLookup``.
     """
     monkeypatch.setattr(_array_field, "ARRAY_FIELD_CLS", field_cls)
+    in_lookup = None if field_cls is None else FakeArrayInLookup
+    monkeypatch.setattr(_array_field, "ARRAY_IN_LOOKUP_CLS", in_lookup)
 
 
 class FakeHStoreField(models.Field[object, object]):
