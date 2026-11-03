@@ -1,9 +1,9 @@
 r"""Capture the row-preserving-predicate PostgreSQL EXPLAIN artifact.
 
-The [Part 1 plan][part1-plan] (``docs/row-preserving-predicates-part1-plan.md``,
-Slice C.3a and Sequencing step 9) requires a PostgreSQL
+The row-preserving to-many predicate contract (``docs/GLOSSARY.md``,
+"Row-preserving to-many predicates (Part 1)") is backed by a PostgreSQL
 ``EXPLAIN (ANALYZE, BUFFERS)`` artifact captured from the **actually emitted**
-query -- "never an idealized hand-written query". This script drives the genuine
+query, never an idealized hand-written one. This script drives the genuine
 production generation + apply path for the two shapes a flat filter leaf over a
 to-many path compiles to, reads the SQL straight off each compiled queryset,
 runs ``EXPLAIN (ANALYZE, BUFFERS)`` on it against a real Postgres server, and
@@ -552,9 +552,9 @@ def main() -> None:
     lines.append("# Row-preserving predicates: PostgreSQL EXPLAIN (ANALYZE, BUFFERS) artifact")
     lines.append("")
     lines.append(
-        "Planner evidence for the row-preserving-predicates Part 1 plan "
-        "(`docs/row-preserving-predicates-part1-plan.md`, Slice C.3a and Sequencing "
-        "step 9) and for the declared-branch restriction of spec-027 Decision 8 "
+        "Planner evidence for the row-preserving to-many predicate contract "
+        '(`docs/GLOSSARY.md`, "Row-preserving to-many predicates (Part 1)") and for '
+        "the declared-branch restriction of spec-027 Decision 8 "
         "(`docs/SPECS/spec-027-filters-0_0_8.md`): the `EXPLAIN (ANALYZE, BUFFERS)` "
         "output for the **actually emitted** query of each shape a flat filter leaf "
         "over a to-many path compiles to, captured from the framework's compiled "
