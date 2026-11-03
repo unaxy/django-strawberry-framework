@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 408 done, 96 to do. The CHANGELOG entries filed here moved to
+Progress: 409 done, 97 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2438,6 +2438,16 @@ Progress: 408 done, 96 to do. The CHANGELOG entries filed here moved to
   `::test_a_choice_declaration_sharing_a_value_with_its_column_serves_its_own_choices` and
   `::test_deferred_choices_are_evaluated_per_request_never_at_schema_build`; package rows in
   `tests/filters/test_inputs.py`; spec-027 Decision 4 and the `FilterSet` glossary term say so
+- [x] 656. Not a defect on main: already fixed by the dry-0_0_15_3 sweep (its item 77, commit 7bd478bf), which landed
+  two days after this item was filed. A list filter (`ArrayFilter`, `ListFilter`, an `ArrayFilter`-shaped CSV filter)
+  over an `ArrayField` column with `exact` / `contains` / `contained_by` / `overlap` is typed from the array's
+  `base_field` (`filters/inputs.py::_array_element_column`; a choice element shares the read side's enum), every other
+  filter or lookup over the column is refused at build (`_array_column_refusal`), and a nested array takes the read
+  side's refusal (`types/converters.py::refuse_nested_array`). Measured: "Unsupported Django field type 'ArrayField'"
+  in 0 of 1071 real-`ArrayField` and 615 stand-in cells, declared and through `Meta.filter_overrides`; spec-027
+  Decision 4 states the contract and
+  `tests/filters/test_inputs.py::test_an_array_column_filter_is_typed_from_its_element_column` and its siblings pin
+  it. No code change
 
 ## Outside review of the fixes
 
@@ -2499,11 +2509,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 656. A whole-array `ArrayFilter` over an `ArrayField` column (generated through `Meta.filter_overrides`, or
-  declared) fails the schema build: `filters/inputs.py::_element_annotation` asks `_scalar_from_model_field` of the
-  `ArrayField` itself (`types/converters.py::scalar_for_field` raises "Unsupported Django field type 'ArrayField'")
-  instead of its element (`array_element_field`); only index / slice / `len` leaves publish (F11 area). Found
-  fact-finding 389
 - [ ] 673. (robustness) A generated `NumberFilter` leaf on an `IntegerField` / `FloatField` column cleans
   `"-1e1000000"` to a `Decimal` that reaches the bind as a huge int (integer column) or -inf (float column); the
   filter ask reads only temporal and decimal columns. Unmeasured: the client-visible answer per backend. Found fixing
@@ -2648,6 +2653,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
   choices reading the database query it while the schema is built ("Database access not allowed" before `migrate`); a
   `lazy()` promise and the same object on `ChoiceFilter` / `MultipleChoiceFilter` are not evaluated. Found verifying
   538
+- [ ] 739. spec-027 Decision 4's `FilterSet.get_fields` paragraph and `filters/sets.py::_lookups_for_field` say a
+  column made filterable through `Meta.filter_overrides` ("a `JSONField`, a `FileField`, an `ArrayField`") keeps the
+  whole lookup set "since its filter class owns the lookups it accepts", but `Meta.filter_overrides={ArrayField:
+  {"filter_class": ArrayFilter}}` with `Meta.fields={<col>: "__all__"}` (or the list form's generated lookups beyond
+  `exact`) is refused at build at `iexact` by `_array_column_refusal`; and a declared
+  `ArrayFilter(lookup_expr="isnull")` is refused with advice naming the four list lookups where a `BooleanFilter` is
+  the spelling that builds. No schema-build row pins `contains` / `contained_by` / `overlap` or the
+  `Meta.filter_overrides` route. Found fact-finding 656
+- [ ] 740. `ArrayFilter(field_name="ints", lookup_expr="len")`, `ArrayFilter(field_name="ints__len")` and
+  `ArrayFilter(field_name="ints__0")` over an `ArrayField(IntegerField())` build and publish `[Int!]`, though the
+  transform's output is one integer; applying `[2]` raises a masked `TypeError` ("Field 'ints' expected a number but
+  got [Decimal('1')]", `filters/base.py`) and a scalar value is refused by
+  `filters/inputs.py::_require_list_container`. `ListFilter(field_name="ints__len", lookup_expr="in")` serves. The
+  array-transform counterpart of 716. Found fact-finding 656
 
 ## To do: holes found re-checking the fixes
 
