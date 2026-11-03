@@ -336,7 +336,9 @@ package-internal; Slice 4 is the live consumer surface.
     (`form.add_prefix`, a multi-key widget's own keys; a list longer than a
     `SplitArrayWidget`'s `size` → that field's `max_length` error; a value a
     `MultiWidget`'s `decompress` cannot split → a `ConfigurationError` before
-    `is_valid()`, nothing written); **validate** via
+    `is_valid()`, nothing written; a datetime `SplitDateTimeWidget.decompress` cannot
+    convert to the current time zone's wall clock → that field's `invalid` error "Enter a
+    value the current time zone can represent.", nothing written); **validate** via
     `form.is_valid()` — a failure maps
     `form.errors` onto the [`FieldError` envelope][glossary-fielderror-envelope] (each
     form field name re-keyed to the GraphQL input field the client sent, the form's
@@ -380,9 +382,11 @@ package-internal; Slice 4 is the live consumer surface.
     [`forms/resolvers.py`][forms-resolvers]; (c) the synthesized `data:` lazy ref
     consults `mutation_cls.input_type_name(meta)` + `input_module_path`.
   - [ ] A valid `ModelForm` whose instance holds a value the database cannot store (a
-    datetime, time or duration; on PostgreSQL a decimal past `numeric`'s format its
+    date, datetime, time or duration, a `clean_<field>`'s, form `clean()`'s or model
+    `clean()`'s included; on PostgreSQL a decimal past `numeric`'s format its
     column's own validators accept) answers that field's `invalid` error before the
-    save, with nothing written ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
+    save, with nothing written, and so does one whose conversion inside `is_valid()`
+    raises `OverflowError`, beside the form's errors collected before it ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
   - [ ] Package coverage: [`tests/forms/test_resolvers.py`][test-forms] — create /
     update happy paths, the `form.errors` → envelope (incl. a `NON_FIELD_ERRORS`
     `clean()` error → `"__all__"`), the **decode split** (`categoryId` → `{"category":
@@ -1543,7 +1547,10 @@ write flavor rides.
    no list or tuple), such as the text a hook or a form's `__init__` rebinds for a
    datetime, is a `ConfigurationError` naming the key and the widget's part keys, raised
    while the form is bound, before `is_valid()`, with nothing written; a `ValidationError`
-   it raises stays that field's error
+   it raises stays that field's error, and an `OverflowError` (a datetime whose wall clock
+   in the current time zone leaves years 1..9999, which `to_current_timezone` cannot
+   convert) is that field's `invalid` error "Enter a value the current time zone can
+   represent.", also for an omitted field's stored value
    (`django_strawberry_framework/utils/widgets.py::_decompressed`).
    The form's own `__init__` sees the field-keyed mapping
    (`django_strawberry_framework/forms/resolvers.py::_bind_under_form_keys`; the keys a
@@ -1817,7 +1824,15 @@ write flavor rides.
    bits of microseconds on SQLite or MySQL, which bind it as that integer, is refused by
    the same rule, Django's own save-time preparation on that alias); a refused column is the
    form field's `invalid` error `"Enter a value the database can represent."` and nothing
-   is written. **The
+   is written. The value read is the one the save writes, whatever set it (a form field's
+   cleaning, a `clean_<field>`, a form `clean()`, a model `clean()`). Where Django's model
+   validation inside `is_valid()` raises `OverflowError` converting such a value
+   (`DateField.to_python` making a hook's aware datetime naive in the default time zone, a
+   unique column's value bound by `validate_unique`), each column the same rule refuses is
+   that error, merged with the form's errors collected before the overflow, and
+   `is_valid()` is never run again; an overflow on a plain form, or one naming no such
+   column, is the application's and propagates
+   ([`forms/resolvers.py`][forms-resolvers]`::_bound_form_or_field_errors`). **The
    `ModelForm` save also maps the one other failure a valid `ModelForm` reaches on its own**
    ([`forms/resolvers.py`][forms-resolvers]`::_modelform_save_or_field_errors`): over
    a `blank=True, null=False` column the form field is optional, so an explicit `null`
@@ -2273,7 +2288,11 @@ Rationale companion: [Decision 14][rationale-d14].
   keys, before `is_valid()`, masked on the wire, nothing written (created, updated, or an
   update omitting the field, whose stored value is bound); a hook keeps the package's
   values (a `QueryDict` built with `setlist`) or binds the parts under the widget's keys,
-  and a one-key `DateTimeField` parses the text. An explicit
+  and a one-key `DateTimeField` parses the text. A datetime whose wall clock in the
+  current time zone leaves years 1..9999, which `SplitDateTimeWidget.decompress` cannot
+  convert (`0001-01-01T00:30:00+00:00` under `America/New_York`, which the database
+  stores), is that field's `invalid` error "Enter a value the current time zone can
+  represent.", nothing written, sent or stored for an update omitting the field. An explicit
   `null` is bound whole beside its parts, so the explicit-`null` check answers it as for
   any field: the column's `null` error on a `null=False` column, `NULL` stored on a
   `null=True` one, while an update omitting the field keeps the stored `NULL`. A
@@ -2479,7 +2498,11 @@ Rationale companion: [Decision 14][rationale-d14].
   huge exponent in a bounded one); the save would raise an error no save mapper owns.
   The form flavor answers the field's `invalid` error `"Enter a value the database can
   represent."` before the save instead, with nothing written ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
-  SQLite refuses no decimal: it stores the nearest double.
+  SQLite refuses no decimal: it stores the nearest double. A `clean_<field>`, form
+  `clean()` or model `clean()` answering an aware datetime for a `DateField` whose date in
+  the default time zone leaves years 1..9999 makes Django raise `OverflowError` inside
+  `is_valid()`; the column is the same `invalid` error, beside the form's other errors.
+  A form `clean()` raising its own `OverflowError`, or a plain form's, propagates.
 - **No `DjangoType` `Meta` key added.** [`DEFERRED_META_KEYS`][types-base] /
   `ALLOWED_META_KEYS` carry no form key
   ([Decision 13](#decision-13--finalization-seam-reuse-the-mutation-phase-25-bind-no-deferred_meta_keys-change)).
@@ -2871,6 +2894,16 @@ behavior reachable through `/graphql/`, package tests own internals.
     (`::test_posted_text_over_a_one_key_datetime_widget_is_parsed_and_stored`); a filter
     form `__init__` doing the same over nested split widgets is the same masked error
     (`examples/fakeshop/test_query/test_filter_widget_binding_api.py::test_split_datetime_widgets_bound_to_their_text_are_a_masked_configuration_error`);
+    a datetime whose wall clock in the current time zone leaves years 1..9999 is the
+    split field's `invalid` error with nothing written on create, update and an update
+    omitting it over such a stored value, sync and async
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_split_datetime_the_current_time_zone_cannot_present_is_the_field_error`,
+    `::test_split_update_omitting_a_stored_datetime_the_zone_cannot_present_is_the_field_error`,
+    `::test_async_form_write_holds_the_zone_and_hook_refusals`), a `clean_occurred_on`
+    answering an aware datetime whose date leaves years 1..9999 is the `occurredOn`
+    `invalid` error (`::test_clean_hook_datetime_the_date_column_cannot_store_is_the_field_error`),
+    and a nested split range bound the same is the filter's `FILTER_INVALID`
+    (`examples/fakeshop/test_query/test_filter_widget_binding_api.py::test_a_nested_split_range_bound_the_zone_cannot_present_is_filter_invalid`);
     a consumer `MultiValueField` over a text column (no fakeshop form declares one) does
     the same unprefixed, prefixed, from a `MultiValueDict` a `get_form_kwargs` binds and
     beside a hook's own prefixed copy
@@ -2883,8 +2916,14 @@ behavior reachable through `/graphql/`, package tests own internals.
     `::test_disabled_split_widget_field_keeps_its_stored_value_past_size`,
     `::test_omitted_initial_binds_under_the_split_widget_keys`), and the key and entry
     walk on its own in `tests/utils/test_widgets.py` (with a `decompress` that answers
-    no list, the text of a datetime, any other exception it raises, and a `decompress`
-    `ValidationError` kept);
+    no list, the text of a datetime, any other exception it raises, a `decompress`
+    `ValidationError` kept, its `OverflowError` over an aware datetime the value's `invalid`
+    refusal and over any other value the `ConfigurationError`); an
+    `OverflowError` inside `is_valid()` beside a form error, a form `clean()`'s own, any
+    other exception and a plain form's
+    (`::test_overflow_inside_is_valid_merges_the_column_refusal_with_the_form_s_errors`,
+    `::test_an_exception_naming_no_unstorable_column_propagates_from_is_valid`,
+    `::test_an_overflow_inside_a_plain_form_s_is_valid_propagates`);
     **the `get_form_kwargs` / `get_form` hook** — an override injecting `user` and one
     scoping a `ModelChoiceField.queryset` (input shape unchanged); **partial-update
     reconstruction at the unit tier** — omitted scalar / FK / M2M preserved from the
@@ -3077,7 +3116,9 @@ The completion contract.
    `MultiWidget`'s or `SplitArrayWidget`'s own keys, a split list padded to `size`), a list
    longer than a `SplitArrayWidget`'s `size` being that field's `max_length` error before
    `is_valid()` and a value a `MultiWidget`'s `decompress` cannot split a
-   `ConfigurationError` before `is_valid()`, nothing written. `form.errors` maps
+   `ConfigurationError` before `is_valid()`, nothing written, while a datetime
+   `SplitDateTimeWidget.decompress` cannot convert to the current time zone's wall clock is
+   that field's `invalid` error. `form.errors` maps
    onto the [`FieldError` envelope][glossary-fielderror-envelope] (each form field keyed
    to its input name, `NON_FIELD_ERRORS` → `"__all__"`, via the reused
    `validation_error_to_field_errors(ValidationError(form.errors.as_data()), key_map)`); **the write is wrapped by the `036` `save_or_field_errors`
@@ -3108,7 +3149,8 @@ The completion contract.
    / [Decision 9](#decision-9--optimizer-composition-the-modelform-payload-re-fetch-rides-the-spec-036-g2-path)).
    A valid `ModelForm` holding a value the database cannot store, on PostgreSQL a decimal
    past `numeric`'s format its column's own validators accept included, answers the
-   field's `invalid` error before the save, with nothing written
+   field's `invalid` error before the save, with nothing written, as does one whose
+   conversion inside `is_valid()` raises `OverflowError`, beside the form's other errors
    ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
 
 **Slice 4 — products live form surface**

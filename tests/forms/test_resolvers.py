@@ -33,7 +33,9 @@ omitting a column through consumer code fakeshop's forms do not declare (a lossy
 row, a ``clean_<field>``, a form or model ``clean()``, an ``HStoreField``-shaped column),
 and a decimal past PostgreSQL ``numeric``'s format in a column with no ``max_digits``
 (which fakeshop cannot declare on the Django floor), written through an alias that reads
-as PostgreSQL.
+as PostgreSQL. An ``OverflowError`` inside ``is_valid()`` is answered here where no shipped
+form raises it: beside a form error collected before it, raised by a form ``clean()`` itself
+(propagated), any other exception (propagated) and a plain form's (propagated).
 """
 
 from __future__ import annotations
@@ -7361,3 +7363,185 @@ def test_modelform_write_stores_a_decimal_within_postgresql_numeric(
         assert is_object_dict(payload), payload
         assert payload["errors"] == []
         assert read_attr(FormUnboundedAmount.objects.get(), column) == decimal.Decimal("12.5")
+
+
+# ---------------------------------------------------------------------------
+# An ``OverflowError`` inside ``is_valid()`` (``_bound_form_or_field_errors``)
+# ---------------------------------------------------------------------------
+
+#: The aware datetime a hook answers for ``0001-01-01``: its midnight UTC, whose date under
+#: ``America/New_York`` falls in year 0.
+_YEAR_ONE_MIDNIGHT_UTC = datetime.datetime(1, 1, 1, tzinfo=datetime.timezone.utc)
+
+#: The input a ``ScalarSpecimen`` create sends.
+_SPECIMEN_INPUT: dict[str, object] = {
+    "label": "written",
+    "occurredOn": "0001-01-01",
+    "occurredAt": "2021-06-15T09:30:00+00:00",
+    "occurredTime": "09:30:00",
+    "externalId": "12345678-1234-5678-1234-567812345678",
+}
+
+
+class _SpecimenForm(forms.ModelForm[scalars_models.ScalarSpecimen]):
+    class Meta:
+        model = scalars_models.ScalarSpecimen
+        fields = (
+            "label",
+            "occurred_on",
+            "occurred_at",
+            "occurred_time",
+            "external_id",
+        )
+
+
+class _InstantDayForm(_SpecimenForm):
+    """``clean_occurred_on`` answers the aware midnight UTC of ``0001-01-01``."""
+
+    def clean_occurred_on(self) -> datetime.datetime:
+        return _YEAR_ONE_MIDNIGHT_UTC
+
+
+class _RefusedLabelInstantDayForm(_InstantDayForm):
+    """``_InstantDayForm`` whose ``clean_label`` refuses the label first."""
+
+    def clean_label(self) -> str:
+        raise ValidationError("Refused by clean_label().", code="refused")
+
+
+class _OwnOverflowForm(_SpecimenForm):
+    """A form ``clean()`` raising its own ``OverflowError``, naming no column."""
+
+    @override
+    def clean(self) -> dict[str, object] | None:
+        raise OverflowError("the hook's own arithmetic")
+
+
+class _InstantDayValueErrorForm(_InstantDayForm):
+    """A form ``clean()`` setting the instance's ``occurred_on`` to the hook's value, then raising.
+
+    The instance holds a value the database cannot store when the ``ValueError`` is raised.
+    """
+
+    @override
+    def clean(self) -> dict[str, object] | None:
+        self.instance.occurred_on = _YEAR_ONE_MIDNIGHT_UTC
+        raise ValueError("the hook's own failure")
+
+
+def _create_specimen(
+    specimen_form: type[forms.ModelForm[scalars_models.ScalarSpecimen]],
+) -> ExecutionResult:
+    """Run a ``ModelForm`` create over ``specimen_form`` sending ``_SPECIMEN_INPUT``."""
+
+    class ScalarSpecimenT(DjangoType):
+        class Meta:
+            model = scalars_models.ScalarSpecimen
+            fields = ("label", "occurred_on")
+            primary = True
+
+    class CreateSpecimen(DjangoModelFormMutation):
+        class Meta:
+            form_class = specimen_form
+            operation = "create"
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        create_specimen = DjangoMutationField(CreateSpecimen)
+
+    finalize_django_types()
+    del ScalarSpecimenT
+    return _schema(Mutation).execute_sync(
+        f"mutation($d: {specimen_form.__name__}Input!) {{ createSpecimen(data: $d) "
+        "{ result { label } errors { field messages codes } } }",
+        variable_values={"d": _SPECIMEN_INPUT},
+    )
+
+
+@pytest.mark.django_db
+@override_settings(TIME_ZONE="America/New_York")
+def test_overflow_inside_is_valid_merges_the_column_refusal_with_the_form_s_errors() -> None:
+    """``is_valid()`` raising ``OverflowError`` answers each column the instance cannot store.
+
+    ``clean_label`` refuses the label, then ``clean_occurred_on``'s aware midnight UTC of
+    ``0001-01-01`` makes ``DateField.to_python`` raise ``OverflowError`` inside
+    ``_post_clean`` (its date under ``America/New_York`` falls in year 0). The form's errors
+    collected before the overflow and ``occurred_on``'s ``invalid`` error are answered
+    together, keyed to the input fields, with nothing written.
+    """
+    result = _create_specimen(_RefusedLabelInstantDayForm)
+
+    assert result.errors is None, result.errors
+    assert result.data == {
+        "createSpecimen": {
+            "result": None,
+            "errors": [
+                {
+                    "field": "label",
+                    "messages": ["Refused by clean_label()."],
+                    "codes": ["refused"],
+                },
+                {
+                    "field": "occurredOn",
+                    "messages": ["Enter a value the database can represent."],
+                    "codes": ["invalid"],
+                },
+            ],
+        },
+    }
+    assert not scalars_models.ScalarSpecimen.objects.exists()
+
+
+@pytest.mark.django_db
+@override_settings(TIME_ZONE="America/New_York")
+@pytest.mark.parametrize(
+    ("form_class", "raised"),
+    [
+        pytest.param(_OwnOverflowForm, OverflowError, id="own-overflow"),
+        pytest.param(_InstantDayValueErrorForm, ValueError, id="another-exception"),
+    ],
+)
+def test_an_exception_naming_no_unstorable_column_propagates_from_is_valid(
+    form_class: type[forms.ModelForm[scalars_models.ScalarSpecimen]],
+    raised: type[Exception],
+) -> None:
+    """Only an ``OverflowError`` converting a value the instance holds is a field's refusal.
+
+    A form ``clean()`` raising its own ``OverflowError`` leaves the instance holding nothing
+    the database refuses: the application's error propagates. Any other exception
+    propagates even when the instance holds such a value.
+    """
+    result = _create_specimen(form_class)
+
+    assert result.errors is not None
+    assert [type(error.original_error) for error in result.errors] == [raised]
+    assert not scalars_models.ScalarSpecimen.objects.exists()
+
+
+@pytest.mark.django_db
+def test_an_overflow_inside_a_plain_form_s_is_valid_propagates() -> None:
+    """A plain form holds no row, so its ``OverflowError`` is the application's own."""
+
+    class TotalForm(forms.Form):
+        total = forms.IntegerField()
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            raise OverflowError("the hook's own arithmetic")
+
+    class Submit(DjangoFormMutation):
+        class Meta:
+            form_class = TotalForm
+            permission_classes = []
+
+    finalize_django_types()
+    with pytest.raises(OverflowError):
+        _ = form_resolvers._bound_form_or_field_errors(
+            Submit,
+            Submit(),
+            unread_info(),
+            ({"total": 1}, {}, frozenset()),
+            instance=None,
+            specs=Submit._input_field_specs,
+        )

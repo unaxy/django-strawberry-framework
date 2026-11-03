@@ -17,11 +17,13 @@ neither of which owns a widget:
 
 from __future__ import annotations
 
+import datetime
 from typing import TYPE_CHECKING
 
 from django.contrib.postgres.validators import ArrayMaxLengthValidator
 from django.core.exceptions import ValidationError
 from django.forms import MultiWidget, SelectDateWidget, Widget
+from django.utils import timezone
 from django.utils.datastructures import MultiValueDict
 from django_filters.widgets import SuffixedMultiWidget
 
@@ -35,6 +37,7 @@ from ._narrowing import (
     read_attr,
     require_instance,
 )
+from .errors import FIELD_ERROR_CODE_INVALID, UNREPRESENTABLE_IN_ZONE_MESSAGE
 from .imports import import_attr_if_importable
 
 if TYPE_CHECKING:
@@ -140,14 +143,15 @@ def widget_entries(widget: object, key: str, value: object) -> dict[str, object]
     A widget reading one key binds ``{key: value}``. A ``MultiWidget`` binds each part
     of ``value`` under its sub-widget's key: a list or tuple is its parts, any other value
     is split by the widget's own ``decompress`` (``_decompressed``: one it cannot split is a
-    ``ConfigurationError``), and a part past the end is ``None``, as
-    ``MultiWidget.get_context`` renders it. A ``SplitArrayWidget`` binds each element
-    under ``<key>_<index>`` and pads to its ``size`` with ``None``, so an empty list binds
-    every key and is never read as an omitted field; ``None`` binds no element and a value
-    that is no list or tuple binds as its one element. A list longer than ``size`` cannot
-    be bound (the widget reads no key past it, so the extra elements would be dropped):
-    ``ArrayMaxLengthValidator`` refuses it with Django's own ``ValidationError``, code
-    ``max_length``. Each part recurses into its sub-widget.
+    ``ConfigurationError``, an aware ``datetime`` whose wall clock in the current time zone
+    leaves years 1..9999 the ``invalid`` ``ValidationError``), and a part past the end is
+    ``None``, as ``MultiWidget.get_context`` renders it. A ``SplitArrayWidget`` binds each
+    element under ``<key>_<index>`` and pads to its ``size`` with ``None``, so an empty
+    list binds every key and is never read as an omitted field; ``None`` binds no element
+    and a value that is no list or tuple binds as its one element. A list longer than
+    ``size`` cannot be bound (the widget reads no key past it, so the extra elements would
+    be dropped): ``ArrayMaxLengthValidator`` refuses it with Django's own
+    ``ValidationError``, code ``max_length``. Each part recurses into its sub-widget.
     """
     subs = _sub_widgets(widget, key)
     if subs is None:
@@ -182,12 +186,23 @@ def _decompressed(
     as its text, has no parts the widget would read: a ``ConfigurationError`` naming the
     key and the widget's part keys, raised while the form is bound, before ``is_valid()``.
     A ``ValidationError`` it raises is that value's own refusal and propagates unchanged.
+    An ``OverflowError`` splitting an aware ``datetime`` is that value's refusal too: its
+    wall clock in the current time zone leaves years 1..9999, which
+    ``SplitDateTimeWidget.decompress`` cannot convert (``to_current_timezone``), whether or
+    not the database could store it, so it is raised as the ``invalid`` ``ValidationError``
+    ``UNREPRESENTABLE_IN_ZONE_MESSAGE``, chained to it. An ``OverflowError`` splitting any
+    other value is the widget's own and is the ``ConfigurationError`` above.
     """
     try:
         parts = call_method(widget, "decompress", value)
     except ValidationError:
         raise
     except Exception as error:
+        if truth.is_instance(error, OverflowError) and _is_aware_datetime(value):
+            raise ValidationError(
+                UNREPRESENTABLE_IN_ZONE_MESSAGE,
+                code=FIELD_ERROR_CODE_INVALID,
+            ) from error
         raise ConfigurationError(
             _unsplittable(widget, key, value, part_keys, f"raised {truth.kind(error)}: {error}"),
         ) from error
@@ -196,6 +211,11 @@ def _decompressed(
             _unsplittable(widget, key, value, part_keys, f"answered {truth.kind(parts)}"),
         )
     return list(parts)
+
+
+def _is_aware_datetime(value: object) -> bool:
+    """Whether ``value`` is an aware ``datetime``, the value ``to_current_timezone`` converts."""
+    return truth.is_instance(value, datetime.datetime) and timezone.is_aware(value)
 
 
 def _unsplittable(

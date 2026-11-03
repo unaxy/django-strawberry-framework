@@ -4,7 +4,8 @@
 entries binding a value under them; the form flavors bind through them
 (``tests/forms/test_resolvers.py`` drives that end to end, on PostgreSQL for the real
 ``SplitArrayField``). These rows pin the recursion, the ``decompress`` split (a value it
-cannot split is a ``ConfigurationError``, its ``ValidationError`` kept), the padding and the
+cannot split is a ``ConfigurationError``, its ``ValidationError`` kept, its ``OverflowError``
+over an aware datetime the value's ``invalid`` ``ValidationError``), the padding and the
 ``size`` refusal on their own, PostgreSQL's ``SplitArrayWidget`` through its
 driver-free double (``tests/_postgres_fields.py::FakeSplitArrayWidget``) and, on the
 Postgres tier, as itself. ``multi_widget_keys`` is pinned by the filter rows that read it
@@ -74,6 +75,19 @@ class _UndecompressingWidget(forms.MultiWidget):
 
     def __init__(self) -> None:
         super().__init__((forms.TextInput, forms.TextInput))
+
+
+class _DayPairWidget(forms.MultiWidget):
+    """A widget splitting a date into it and the next day, which overflows at ``9999-12-31``."""
+
+    def __init__(self) -> None:
+        super().__init__((forms.DateInput, forms.DateInput))
+
+    @override
+    def decompress(self, value: object) -> list[object]:
+        """Answer the date and the day after it."""
+        assert isinstance(value, datetime.date)
+        return [value, value + datetime.timedelta(days=1)]
 
 
 class _RefusingSplitWidget(forms.MultiWidget):
@@ -180,22 +194,54 @@ def test_a_datetime_bound_as_text_is_a_configuration_error_naming_the_keys(
 
 
 @pytest.mark.parametrize(
-    ("widget", "cause"),
+    ("widget", "value", "cause"),
     [
-        pytest.param(_ValueErrorSplitWidget(), ValueError, id="value-error"),
-        pytest.param(_UndecompressingWidget(), NotImplementedError, id="no-decompress"),
+        pytest.param(_ValueErrorSplitWidget(), "whole", ValueError, id="value-error"),
+        pytest.param(_UndecompressingWidget(), "whole", NotImplementedError, id="no-decompress"),
+        pytest.param(_ValueErrorSplitWidget(), _STAMP, ValueError, id="value-error-on-aware"),
+        pytest.param(
+            _DayPairWidget(),
+            datetime.date(9999, 12, 31),
+            OverflowError,
+            id="overflow-on-a-date",
+        ),
     ],
 )
-def test_any_exception_from_decompress_is_a_configuration_error_chained_to_it(
+def test_another_exception_from_decompress_is_a_configuration_error_chained_to_it(
     widget: forms.MultiWidget,
+    value: object,
     cause: type[Exception],
 ) -> None:
-    """Whatever ``decompress`` raises short of a ``ValidationError`` is the same refusal."""
+    """Any other exception ``decompress`` raises is the same ``ConfigurationError``.
+
+    An ``OverflowError`` is the value's refusal only where it splits an aware ``datetime``;
+    a widget's own overflow on another value (the day after ``9999-12-31``) is its own.
+    """
     with pytest.raises(ConfigurationError) as caught:
-        widget_entries(widget, "f", "whole")
+        widget_entries(widget, "f", value)
 
     assert f"('f_0', 'f_1'): it raised {cause.__name__}" in str(caught.value), caught.value
     assert type(caught.value.__cause__) is cause
+
+
+def test_an_overflow_from_decompress_is_the_value_s_invalid_refusal() -> None:
+    """``decompress`` overflowing an aware datetime is the value's ``invalid`` ``ValidationError``.
+
+    ``SplitDateTimeWidget.decompress`` converts an aware datetime to the current time zone's
+    wall clock, which falls in year 0 for ``0001-01-01T00:30:00+00:00`` under
+    ``America/New_York``, a value the database stores: the refusal names the time zone and
+    chains the ``OverflowError``.
+    """
+    value = datetime.datetime(1, 1, 1, 0, 30, tzinfo=datetime.timezone.utc)
+    with (
+        override_settings(TIME_ZONE="America/New_York"),
+        pytest.raises(ValidationError) as caught,
+    ):
+        widget_entries(forms.SplitDateTimeWidget(), "f", value)
+
+    assert caught.value.messages == ["Enter a value the current time zone can represent."]
+    assert caught.value.code == "invalid"
+    assert type(caught.value.__cause__) is OverflowError
 
 
 def test_a_validation_error_from_decompress_propagates_as_the_value_s_refusal() -> None:

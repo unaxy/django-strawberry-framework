@@ -27,11 +27,16 @@ The ``ScalarSpecimen`` create / update mutations write the ``occurred_at`` /
 ``occurred_time`` columns through all three write flavors (``DjangoMutation``,
 ``DjangoModelFormMutation`` over ``forms.ScalarSpecimenTemporalForm``,
 ``SerializerMutation`` over ``serializers.ScalarSpecimenTemporalSerializer``), so a
-datetime or time the database cannot store is refused live on each. The ``SplitForm``
-pairs write ``occurred_at`` through ``forms.ScalarSpecimenSplitStampForm``'s
-``SplitDateTimeField``, whose widget reads a date key and a time key: unprefixed, under the
-form's own prefix (``PrefixedSplitForm``), and from a copy a ``get_form`` keys under that
-prefix itself (``RekeyedSplitForm``). The ``ViaPosted`` pairs bind a ``get_form_kwargs``
+datetime or time the database cannot store is refused live on each. The
+``DayInstantForm`` pair writes ``occurred_on`` through
+``forms.ScalarSpecimenDayInstantForm``'s ``clean_occurred_on``, which answers an aware
+datetime for the ``DateField``: one whose date in the default time zone leaves years
+1..9999 is the field's ``invalid`` error. The ``SplitForm`` pairs write ``occurred_at``
+through ``forms.ScalarSpecimenSplitStampForm``'s ``SplitDateTimeField``, whose widget reads
+a date key and a time key: unprefixed, under the form's own prefix (``PrefixedSplitForm``),
+and from a copy a ``get_form`` keys under that prefix itself (``RekeyedSplitForm``); a
+datetime whose wall clock in the current time zone leaves years 1..9999 is the field's
+``invalid`` error there. The ``ViaPosted`` pairs bind a ``get_form_kwargs``
 mapping holding each value as its text (``forms.as_posted_text``): over the temporal form's
 one-key ``DateTimeField`` (``PostedForm``) the text is parsed and stored, while the split
 widget's ``decompress`` cannot split the text of a datetime (``PostedSplitForm``), a
@@ -526,6 +531,24 @@ class UpdateScalarSpecimenViaForm(DjangoModelFormMutation):
         permission_classes = []
 
 
+class CreateScalarSpecimenViaDayInstantForm(DjangoModelFormMutation):
+    """Create a ``ScalarSpecimen`` through ``ScalarSpecimenDayInstantForm``."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenDayInstantForm
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateScalarSpecimenViaDayInstantForm(DjangoModelFormMutation):
+    """Update a ``ScalarSpecimen`` through ``ScalarSpecimenDayInstantForm``."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenDayInstantForm
+        operation = "update"
+        permission_classes = []
+
+
 class CreateScalarSpecimenViaSplitForm(DjangoModelFormMutation):
     """Create a ``ScalarSpecimen`` through ``ScalarSpecimenSplitStampForm`` (a split ``occurredAt``)."""
 
@@ -771,6 +794,12 @@ class Mutation:
     update_scalar_specimen = DjangoMutationField(UpdateScalarSpecimen)
     create_scalar_specimen_via_form = DjangoMutationField(CreateScalarSpecimenViaForm)
     update_scalar_specimen_via_form = DjangoMutationField(UpdateScalarSpecimenViaForm)
+    create_scalar_specimen_via_day_instant_form = DjangoMutationField(
+        CreateScalarSpecimenViaDayInstantForm,
+    )
+    update_scalar_specimen_via_day_instant_form = DjangoMutationField(
+        UpdateScalarSpecimenViaDayInstantForm,
+    )
     create_scalar_specimen_via_split_form = DjangoMutationField(CreateScalarSpecimenViaSplitForm)
     update_scalar_specimen_via_split_form = DjangoMutationField(UpdateScalarSpecimenViaSplitForm)
     create_scalar_specimen_via_prefixed_split_form = DjangoMutationField(

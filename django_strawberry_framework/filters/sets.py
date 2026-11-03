@@ -48,6 +48,7 @@ from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression
 from django.db.models.sql.query import Query
 from django.db.models.sql.where import WhereNode
+from django.forms.utils import ErrorList
 from django.utils.functional import Promise
 from django_filters import (
     BaseInFilter,
@@ -5703,11 +5704,16 @@ class FilterSet(
         (``BoundField.data``, every sub-value of a multi-widget field included), so a
         generated, declared, ``method=``, list, range or consumer ``field_class`` filter
         is held to the one rule, and a nested branch or logical arm through its own
-        filterset's call here. A ``disabled`` field is skipped, since it cleans to its
-        initial value and never binds what was sent. A GlobalID filter's value is exempt
-        unless a ``filter`` of its own (a ``method=`` included) replaces its decode
-        (``_decodes_before_binding``): the decode refuses text it cannot read as the
-        ``GLOBALID_INVALID`` the node-refetch path answers for the same id.
+        filterset's call here. A widget refusing the value it is handed as it is read
+        (a ``ValidationError`` from its ``decompress``: an aware datetime a nested range
+        bound's ``SplitDateTimeWidget`` cannot split into the current time zone's wall
+        clock, ``utils/widgets.py::_decompressed``) is that field's refusal, keyed and
+        shaped as ``Form._clean_fields`` keys the same read. A ``disabled`` field is
+        skipped, since it cleans to its initial value and never binds what was sent. A
+        GlobalID filter's value is exempt unless a ``filter`` of its own (a ``method=``
+        included) replaces its decode (``_decodes_before_binding``): the decode refuses
+        text it cannot read as the ``GLOBALID_INVALID`` the node-refetch path answers for
+        the same id.
 
         Every key is the form field's name under the instance's ``_branch_path``
         (``_branch_key``): the root's keys are its own, a nested branch's are
@@ -5754,7 +5760,14 @@ class FilterSet(
         for bound in form:
             if bound.field.disabled or _decodes_before_binding(copies.get(bound.name)):
                 continue
-            refusal = unstorable_text(bound.name, read_attr(bound, "data"))
+            try:
+                data = read_attr(bound, "data")
+            except ValidationError as error:
+                # The widget refused the value it was handed (its ``decompress``):
+                # ``Form._clean_fields`` keys the same read's refusal to the field.
+                errors[bound.name] = ErrorList(error.error_list).get_json_data()
+                continue
+            refusal = unstorable_text(bound.name, data)
             if refusal is not None:
                 errors[bound.name] = [{"message": refusal.message, "code": refusal.code}]
         if not errors:

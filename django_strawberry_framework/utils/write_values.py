@@ -161,7 +161,9 @@ def unstorable_value_error(
     filter answers for the same value (``UNBINDABLE_TEMPORAL_MESSAGE``), before any
     database-bound work. ``value`` is what the write hands its save, which converts and
     binds it (the model flavor's value after the naive-datetime coercion), and a column
-    the rule does not read answers ``None`` without resolving the alias.
+    the rule does not read answers ``None`` without resolving the alias. The model flavor
+    holds each provided column to the same rule again after ``clean_fields()`` and a model
+    ``clean()`` rewrite it (``mutations/resolvers.py::_unstorable_cleaned_errors``).
     """
     if not unstorable_value(column, value, using):
         return None

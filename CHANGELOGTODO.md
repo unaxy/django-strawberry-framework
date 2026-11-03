@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 174 to do.
+Progress: 0 done, 175 to do.
 
 ## From dry-0_0_15_3
 
@@ -698,6 +698,13 @@ Progress: 0 done, 174 to do.
   annotation) now answers at once from the end the number lies past, where its conversion took seconds of CPU per
   value, or raised `MemoryError` at an exponent like `1e18`. Answers are unchanged; a project's own lookup, a
   `method=` filter and a consumer `filter` override still receive the value as cleaned
+- [ ] 747. CHANGELOG entry for item 681: a form or model mutation whose own validation turns a value into one the
+  database cannot store (a `clean_<field>`, form or model `clean()` returning an aware datetime for a `DateField`, a
+  unique column, a `DurationField` mapped to text) answers that field's "Enter a value the database can represent."
+  instead of the masked error. A `SplitDateTimeField` sent (or, on an update omitting it, holding) an aware datetime
+  whose wall clock in the current time zone leaves years 1..9999 answers "Enter a value the current time zone can
+  represent." on a write and as a filter's `FILTER_INVALID`, instead of the masked `ConfigurationError`. New fakeshop
+  mutations: `createScalarSpecimenViaDayInstantForm` / `updateScalarSpecimenViaDayInstantForm`
 
 ## From dry-upstream-0_0_15
 

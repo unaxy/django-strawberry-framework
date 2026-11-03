@@ -3,7 +3,9 @@
 Ordinary consumer JSON and DateTime arguments enter public FilterSet.apply_sync.
 The form's actual widgets, constructor edits and physical data keys own cleaning.
 A form rebinding each value as its text keeps a one-key widget's value, while a split
-date/time widget cannot split a datetime's text: a masked ``ConfigurationError``.
+date/time widget cannot split a datetime's text: a masked ``ConfigurationError``. A nested
+split range bound whose wall clock in the current time zone leaves years 1..9999 is the
+field's ``FILTER_INVALID`` refusal.
 The native holder orders its branch rows by primary key.
 """
 
@@ -715,6 +717,74 @@ def test_nested_datetime_range_widgets_keep_each_supplied_axis(
 
     payload = _range_post(_schema(RangeFilter, ranged=True), start, end)
     assert payload == _expected(expected), payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mapping", ["dict", "querydict-prefix"], ids=["dict", "querydict-prefix"])
+@pytest.mark.parametrize("side", ["start", "end"])
+@pytest.mark.parametrize(
+    ("zone", "bound", "expected"),
+    [
+        pytest.param("UTC", "0001-01-01T00:30:00+01:00", None, id="utc-before-year-one"),
+        pytest.param("UTC", "9999-12-31T23:30:00-01:00", None, id="utc-past-year-9999"),
+        pytest.param(
+            "America/New_York",
+            "0001-01-01T00:30:00+00:00",
+            None,
+            id="new-york-year-one-in-utc",
+        ),
+        pytest.param(
+            "UTC",
+            "0001-01-01T00:30:00+00:00",
+            {"start": _NAMES, "end": ()},
+            id="utc-year-one-in-utc",
+        ),
+    ],
+)
+def test_a_nested_split_range_bound_the_zone_cannot_present_is_filter_invalid(
+    mapping: str,
+    side: str,
+    zone: str,
+    bound: str,
+    expected: Mapping[str, tuple[str, ...]] | None,
+) -> None:
+    """A bound whose wall clock in the current time zone leaves years 1..9999 is refused.
+
+    The nested ``SplitDateTimeWidget`` splits each bound into the current time zone's date
+    and time as the form reads it, which it cannot do for a datetime whose wall clock there
+    falls in year 0 or 10000: ``FILTER_INVALID`` keyed to ``span``, ``invalid`` ("Enter a
+    value the current time zone can represent."), even for ``0001-01-01T00:30:00+00:00``,
+    which filters under ``UTC``.
+    """
+    _branches()
+
+    class RangeFilter(FilterSet):
+        span = _NestedDateRangeFilter(field_name="moment", lookup_expr="range")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+            form = _data_form(mapping)
+
+    schema = _schema(RangeFilter, ranged=True)
+    with override_settings(TIME_ZONE=zone):
+        payload = _range_post(schema, *((bound, None) if side == "start" else (None, bound)))
+
+    if expected is not None:
+        assert payload == _expected(expected[side]), payload
+        return
+    refusal = {"message": "Enter a value the current time zone can represent.", "code": "invalid"}
+    assert payload == {
+        "data": None,
+        "errors": [
+            {
+                "message": "Invalid filter input",
+                "locations": [{"line": 1, "column": _RANGE_DOCUMENT.index("rows") + 1}],
+                "path": ["rows"],
+                "extensions": {"code": "FILTER_INVALID", "errors": {"span": [refusal]}},
+            },
+        ],
+    }, payload
 
 
 @pytest.mark.django_db

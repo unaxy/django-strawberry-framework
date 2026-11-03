@@ -14,6 +14,9 @@ database cannot store is refused over a live request. ``ScalarSpecimenSplitStamp
 writes ``occurred_at`` through Django's ``SplitDateTimeField`` (the admin's form field for a
 ``DateTimeField``), whose ``SplitDateTimeWidget`` reads a date key and a time key, and
 ``PrefixedScalarSpecimenSplitStampForm`` reads them under the prefix ``specimen``.
+``ScalarSpecimenDayInstantForm``'s ``clean_occurred_on`` answers the aware midnight UTC of
+the date sent, which the ``DateField`` column stores as its date in the default time zone,
+so a day whose midnight falls outside years 1..9999 there is refused over a live request.
 ``as_posted_text`` re-encodes form data as the text a browser posts, the mapping the
 ``ViaPosted`` mutations' ``get_form_kwargs`` binds over both forms.
 
@@ -28,6 +31,7 @@ own cleaning would rewrite it (the ``label`` ``CharField``'s strip, the ``payloa
 
 from __future__ import annotations
 
+import datetime
 from typing import TYPE_CHECKING
 
 from django import forms
@@ -84,6 +88,24 @@ class ScalarSpecimenSplitStampForm(ScalarSpecimenTemporalForm):
     """
 
     occurred_at = forms.SplitDateTimeField()
+
+
+class ScalarSpecimenDayInstantForm(ScalarSpecimenTemporalForm):
+    """``ScalarSpecimenTemporalForm`` keeping ``occurred_on`` as the instant its day starts in UTC.
+
+    ``clean_occurred_on`` answers the aware midnight UTC of the date sent, which the
+    ``DateField`` column stores as its date in the default time zone (``TIME_ZONE``). Under a
+    zone behind UTC the midnight of ``0001-01-01`` falls in year 0 there, a value the
+    database cannot represent: the mutation answers the field's ``invalid`` error.
+    """
+
+    def clean_occurred_on(self) -> datetime.datetime:
+        """Answer the aware midnight UTC of the date sent."""
+        day: object = self.cleaned_data.get("occurred_on")
+        if not isinstance(day, datetime.date):
+            # Django runs ``clean_occurred_on`` only once the field cleaned to a date.
+            raise TypeError(f"expected the cleaned date, got {type(day).__name__}")
+        return datetime.datetime.combine(day, datetime.time.min, tzinfo=datetime.timezone.utc)
 
 
 class PrefixedScalarSpecimenSplitStampForm(ScalarSpecimenSplitStampForm):
