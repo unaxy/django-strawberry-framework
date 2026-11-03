@@ -111,6 +111,7 @@ from django_strawberry_framework.utils._narrowing import (
     optional_instance,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.errors import (
     FILTER_INVALID_ERROR_CODE,
@@ -142,6 +143,10 @@ from django_strawberry_framework.utils.typing import object_result, strawberry_s
 #: django-filter's ``EMPTY_VALUES``: the values a filter treats as "not supplied". The stub
 #: types the constant ``Any``; it is a tuple of values.
 EMPTY_VALUES = require(read_attr(_filter_constants, "EMPTY_VALUES"), is_list_or_tuple)
+
+#: django-filter's ``Filter.method`` property, read off the class: the stub declares the slot a
+#: plain attribute, so ``Filter.method`` types as its value, not the property.
+_FILTER_METHOD_PROPERTY = require_instance(truth.static_attr(Filter, "method"), property)
 
 # The three framework strategies whose emitted GlobalID a filter input CAN
 # decode + validate (``model`` / ``type`` / ``type+model``). Derived from the
@@ -267,10 +272,7 @@ def _install_empty_list_aware_method(
     subclass remains a per-filter type identity (graphene-parity public names);
     only the install sequence is shared.
     """
-    # basedpyright: typeshed declares ``Filter.method`` a plain attribute; django-filter defines it
-    # as a property, whose ``fset`` this reuses. It reports ``fset`` unknown on each arm of the
-    # declared ``Callable | str | None``
-    TypedFilter.method.fset(filter_instance, value)  # pyright: ignore[reportFunctionMemberAccess, reportAttributeAccessIssue, reportOptionalMemberAccess, reportUnknownMemberType]
+    _FILTER_METHOD_PROPERTY.__set__(filter_instance, value)
     if value is not None:
         # django-filter's own ``method`` setter shadows ``filter`` per instance the same way
         # (``self.filter = FilterMethod(self)``).
@@ -1054,12 +1056,10 @@ class ArrayFilter(_ElementCleanedFilter):
     constraint (``_MembershipCSVWidget``); only a list or tuple is an explicit ``[]``.
     """
 
-    # basedpyright: typeshed declares ``Filter.method`` a plain attribute, not the property it is,
-    # so it reports ``setter`` unknown on each arm of the declared ``Callable | str | None``, and
-    # the decorator it cannot type as untyped
+    # basedpyright: the stub declares ``Filter.method`` a plain attribute, not the property it is
+    @_FILTER_METHOD_PROPERTY.setter
     @override
-    @TypedFilter.method.setter  # pyright: ignore[reportFunctionMemberAccess, reportAttributeAccessIssue, reportOptionalMemberAccess, reportUntypedFunctionDecorator, reportUnknownMemberType]
-    def method(self, value: object) -> None:
+    def method(self, value: object) -> None:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Swap in `ArrayFilterMethod` when a consumer `method=` is set."""
         _install_empty_list_aware_method(self, value, ArrayFilterMethod)
 
@@ -1448,12 +1448,10 @@ class ListFilter(_ElementCleanedFilter):
     applies no constraint.
     """
 
-    # basedpyright: typeshed declares ``Filter.method`` a plain attribute, not the property it is,
-    # so it reports ``setter`` unknown on each arm of the declared ``Callable | str | None``, and
-    # the decorator it cannot type as untyped
+    # basedpyright: the stub declares ``Filter.method`` a plain attribute, not the property it is
+    @_FILTER_METHOD_PROPERTY.setter
     @override
-    @TypedFilter.method.setter  # pyright: ignore[reportFunctionMemberAccess, reportAttributeAccessIssue, reportOptionalMemberAccess, reportUntypedFunctionDecorator, reportUnknownMemberType]
-    def method(self, value: object) -> None:
+    def method(self, value: object) -> None:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Swap in `ListFilterMethod` when a consumer `method=` is set."""
         _install_empty_list_aware_method(self, value, ListFilterMethod)
 
