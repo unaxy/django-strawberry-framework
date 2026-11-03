@@ -284,12 +284,8 @@ ignore sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
   runs `uv sync --locked`, as do the `workspace.py` copy and floor syncs and
   `scripts/check_public_types.py::build_environment` (`--frozen` installed the lock unchecked). `postgres.yml`'s
   `uv sync --upgrade-package Django` stays unlocked (`--locked` fails on any Django newer than the lock) behind a
-  `uv lock --check`. `tests/test_ci_governance.py::_uv_lock_problems` reads each shell segment and refuses a sync
-  without `--locked` unless it upgrades (`--upgrade-package X`, `=X`, `-P X`), an upgrading sync with `--locked` or
-  no lock check before it, `--frozen` on a sync, `uv pip sync`, an unreadable sync, a `uv run` without `--no-sync`
-  or `--locked` before any sync in its job (it may re-lock), and a `uv run` without `--no-sync` after a
-  `uv pip install` in its job (it syncs the pins away); the floor-cell check reads the same segments. Reading and
-  mutation tables prove each refusal
+  `uv lock --check`. `tests/test_ci_governance.py::_uv_lock_problems` reads each shell segment and owns the lock
+  rules; the floor-cell check reads the same segments. Reading and mutation tables prove each refusal
 
 ## Rules off
 

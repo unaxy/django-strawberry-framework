@@ -112,7 +112,7 @@ uv pip install --python <scratch>/dsf-floor/bin/python '<each soft dep>==<floor>
 
 Floor values from BUILD.md "Floor verification" at run time.
 
-Never mutate shared `.venv` for a matrix check; silently changes floor for every concurrent session (`UV_PROJECT_ENVIRONMENT` redirects `uv sync`/`uv run`, NOT `uv pip install`). Restore w/ `uv sync --frozen`. Launch pg tier as `uv run --group pg pytest` (group pinned at launch; a parallel `uv sync` strips psycopg mid-run). Postgres CI's `uv sync --upgrade-package Django` rewrites `uv.lock` whenever a Django newer than the lock exists, if copied locally → revert lock after.
+Never mutate shared `.venv` for a matrix check; silently changes floor for every concurrent session (`UV_PROJECT_ENVIRONMENT` redirects `uv sync`/`uv run`, NOT `uv pip install`). Restore w/ `uv sync --frozen`. Launch pg tier as `uv run --group pg pytest` (group pinned at launch; a parallel `uv sync` strips psycopg mid-run). Postgres CI's `uv sync --upgrade-package Django` rewrites `uv.lock` whenever a Django newer than the lock exists (what it moves: the comment on `postgres.yml`'s "Install dependencies with latest Django" step), if copied locally → revert lock after.
 
 Change depends on WHICH upstream attribute/body (wrapped seam, patch target)? Enumerate every published release floor→latest, fetch each wheel, grep the module. Installed version ≠ consumer's. Pin result as version→names table beside the contract + a SET of audited bodies so an unseen third fails closed. Upstream bump "regression": read WHICH assertion failed in a multi-assert test; stale SQL-text expectation looks identical to a broken boundary.
 
