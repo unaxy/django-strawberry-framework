@@ -379,6 +379,10 @@ package-internal; Slice 4 is the live consumer surface.
     `mutation_cls.resolve_sync` / `resolve_async`, so a form flavor routes to
     [`forms/resolvers.py`][forms-resolvers]; (c) the synthesized `data:` lazy ref
     consults `mutation_cls.input_type_name(meta)` + `input_module_path`.
+  - [ ] A valid `ModelForm` whose instance holds a value the database cannot store (a
+    datetime, time or duration; on PostgreSQL a decimal past `numeric`'s format its
+    column's own validators accept) answers that field's `invalid` error before the
+    save, with nothing written ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
   - [ ] Package coverage: [`tests/forms/test_resolvers.py`][test-forms] — create /
     update happy paths, the `form.errors` → envelope (incl. a `NON_FIELD_ERRORS`
     `clean()` error → `"__all__"`), the **decode split** (`categoryId` → `{"category":
@@ -1795,13 +1799,19 @@ write flavor rides.
    file is bound through `files=`
    (an explicit `null` on an update is the clear sentinel `False`), and a form-required field fails
    `is_valid()` with its own `required` error first, so none of them is checked. **Before
-   the save, the `ModelForm` also refuses a temporal or duration value the database cannot store**
-   ([`forms/resolvers.py`][forms-resolvers]`::_unstorable_temporal_errors`): Django's
+   the save, the `ModelForm` also refuses a temporal, duration or decimal value the database
+   cannot store** ([`forms/resolvers.py`][forms-resolvers]`::_unstorable_value_errors`): Django's
    `DateTimeField` / `TimeField` form fields range-check nothing past what Python parses,
    so every concrete column the cleaned data names is read from `form.instance` (the value
    the save writes; a date an `ArrayField` of datetimes still holds after
-   `Model.clean_fields` is read as the midnight Django stores for it) and held to `django_strawberry_framework/utils/errors.py::unstorable_temporal`
-   on the pinned alias, the rule the model flavor's decode applies (on psycopg 3 an
+   `Model.clean_fields` is read as the midnight Django stores for it) and held to
+   `django_strawberry_framework/utils/errors.py::unstorable_value` on the pinned alias, the
+   rule the model flavor's decode applies. A `forms.DecimalField` and the model's
+   `DecimalValidator` hold no digits for a column with no `max_digits` (and count none for
+   a zero's positive exponent), so on PostgreSQL a decimal past `numeric`'s format the
+   column's own validators accept is refused (`django_strawberry_framework/utils/errors.py::unstorable_decimal`);
+   SQLite refuses none. A temporal or duration column is held to
+   `django_strawberry_framework/utils/errors.py::unstorable_temporal` (on psycopg 3 an
    `ArrayField` list is also asked of the driver as a whole, which dumps every element with
    one dumper and so can refuse a naive time beside an aware one; a `DurationField` past 64
    bits of microseconds on SQLite or MySQL, which bind it as that integer, is refused by
@@ -2462,6 +2472,14 @@ Rationale companion: [Decision 14][rationale-d14].
   [`DjangoModelPermission`][glossary-djangomodelpermission] that does not override
   `has_permission` is **rejected** at class creation, since that hook resolves its
   codename from a model a model-less mutation never supplies ([Decision 11](#decision-11--write-authorization-reuse-the-036-seam-djangomodelpermission-for-the-modelform-explicit-classes-for-the-plain-form)).
+- **A value the database cannot store.** A valid `ModelForm` can hold a datetime or
+  time the adapter or the server refuses, a duration past 64 bits of microseconds on
+  SQLite or MySQL, and on PostgreSQL a decimal past `numeric`'s format that `is_valid()`
+  passes (any finite spelling in a `DecimalField` with no `max_digits`, a zero with a
+  huge exponent in a bounded one); the save would raise an error no save mapper owns.
+  The form flavor answers the field's `invalid` error `"Enter a value the database can
+  represent."` before the save instead, with nothing written ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
+  SQLite refuses no decimal: it stores the nearest double.
 - **No `DjangoType` `Meta` key added.** [`DEFERRED_META_KEYS`][types-base] /
   `ALLOWED_META_KEYS` carry no form key
   ([Decision 13](#decision-13--finalization-seam-reuse-the-mutation-phase-25-bind-no-deferred_meta_keys-change)).
@@ -2590,6 +2608,15 @@ behavior reachable through `/graphql/`, package tests own internals.
   null=False` text column) returns the `description` / `null` envelope `createItem` /
   `updateItem` return, with no row written and the stored description unchanged.
 - **Package-internal** ([`tests/forms/`][test-forms]):
+  - `tests/forms/test_resolvers.py::test_modelform_write_refuses_a_decimal_past_postgresql_numeric`
+    — on an alias that reads as PostgreSQL and refuses what `numeric` refuses
+    (`tests/_postgresql_stand_in.py::numeric_refusing_postgresql`), the auto-built
+    `ModelForm` and one declaring `forms.DecimalField(max_digits=None)` answer a decimal
+    past `numeric`'s format in a column with no `max_digits`, non-null and nullable, and
+    a zero past the exponent limit in a bounded column, with the field's `invalid` error
+    and nothing written, on create and update;
+    `::test_modelform_write_stores_a_decimal_within_postgresql_numeric` writes a decimal
+    `numeric` holds through the same alias.
   - `test_converter.py` — each supported form-field class → annotation +
     required-ness; `ModelChoiceField` / `ModelMultipleChoiceField` id mapping
     (Relay-`GlobalID` vs raw pk); `forms.FileField`, and a field rendered with a
@@ -3079,6 +3106,10 @@ The completion contract.
    ([Decision 5](#decision-5--public-surface-djangoformmutation--djangomodelformmutation-exported-from-the-root)
    / [Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
    / [Decision 9](#decision-9--optimizer-composition-the-modelform-payload-re-fetch-rides-the-spec-036-g2-path)).
+   A valid `ModelForm` holding a value the database cannot store, on PostgreSQL a decimal
+   past `numeric`'s format its column's own validators accept included, answers the
+   field's `invalid` error before the save, with nothing written
+   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
 
 **Slice 4 — products live form surface**
 

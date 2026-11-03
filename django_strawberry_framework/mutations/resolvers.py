@@ -201,8 +201,8 @@ from django_strawberry_framework.utils.write_values import (
     decoded_into,
     relation_into,
     unstorable_columns,
-    unstorable_temporal_error,
     unstorable_text_error,
+    unstorable_value_error,
 )
 
 from . import inputs
@@ -690,14 +690,14 @@ def _decode_relations(
         if text_error is not None:
             return None, text_error
         stored = _make_aware_if_naive(decoded)
-        temporal_error = unstorable_temporal_error(
+        storability_error = unstorable_value_error(
             graphql_name,
             model_fields[spec.input_attr],
             stored,
             pinned_write_alias,
         )
-        if temporal_error is not None:
-            return None, temporal_error
+        if storability_error is not None:
+            return None, storability_error
         return stored, None
 
     def relation_handler(

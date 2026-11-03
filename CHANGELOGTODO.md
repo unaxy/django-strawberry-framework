@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 170 to do.
+Progress: 0 done, 171 to do.
 
 ## From dry-0_0_15_3
 
@@ -676,6 +676,11 @@ Progress: 0 done, 170 to do.
   `FilterSet(data=...)` is a form error (400) instead of a 500, and a padded text key matches; a `method=` filter
   still receives its values as sent. An `ArrayFilter` `in` over an integer column, or a relation compared on one,
   drops overflowing or fractional members as `ListFilter` does
+- [ ] 728. CHANGELOG entry for item 530: a decimal PostgreSQL's `numeric` cannot hold (more than 131072 digits before
+  the point or 16383 after, or a zero whose written exponent the server refuses) that its column's own validators
+  accept is now the field's `invalid` error with nothing written, on every write flavor, instead of a masked
+  database error: any such value in a Django 6.1 `DecimalField` without `max_digits`, and a zero with a huge
+  exponent in a bounded column. SQLite is unchanged: it stores a decimal as its nearest double
 
 ## From dry-upstream-0_0_15
 

@@ -4,8 +4,9 @@ The flavor-neutral owner of the per-value write checks every write flavor
 runs at decode time:
 
 - ``unstorable_text_error`` - the text storability preflight (lone surrogate, NUL);
-- ``unstorable_temporal_error`` - the temporal storability preflight (a date, datetime,
-  time or duration the write alias cannot store, or cannot read back);
+- ``unstorable_value_error`` - the storability preflight (a date, datetime, time or
+  duration the write alias cannot store, or cannot read back, or a decimal past
+  PostgreSQL ``numeric``'s format its column's own validators accept);
 - ``raw_choice_value`` - choice-enum member unwrapping;
 - ``coerce_relation_pk_or_none`` - raw relation-pk coercion;
 - ``relation_takes_global_id`` - whether a relation's id is a Relay GlobalID;
@@ -56,8 +57,8 @@ from .errors import (
     field_error,
     join_error_path,
     relation_field_error,
-    unstorable_temporal,
     unstorable_text,
+    unstorable_value,
 )
 from .inputs import FILE, RELATION_MULTI, RELATION_SINGLE, iter_provided_input_fields
 from .lazy import unwrap_lazy_object
@@ -132,31 +133,37 @@ def unstorable_text_error(field_name: str, value: object) -> FieldError | None:
     return field_error(refusal.path, refusal.message, codes=refusal.code)
 
 
-def unstorable_temporal_error(
+def unstorable_value_error(
     field_name: str,
     column: object,
     value: object,
     using: Callable[[], str],
 ) -> FieldError | None:
-    """Reject a temporal or duration value the write alias ``using()`` cannot store in ``column``.
+    """Reject a value the write alias ``using()`` cannot store in ``column``.
 
     The write decode's envelope for the shared rule
-    (``utils/errors.py::unstorable_temporal``): a value Django's own save-time preparation
-    on that connection refuses (an aware datetime whose projection onto the connection's
+    (``utils/errors.py::unstorable_value``): a temporal or duration value Django's own
+    save-time preparation on that connection refuses (an aware datetime whose projection
+    onto the connection's
     time zone leaves years 1..9999, or whose date in the default time zone does in a
     ``DateField``, an aware time, any aware datetime under ``USE_TZ = False``) or binds
     as an integer the backend cannot hold (a duration past 64 bits of microseconds on
     SQLite or MySQL) would raise its
     ``OverflowError`` / ``ValueError`` at ``save()``, and an aware datetime PostgreSQL
-    stores but cannot load back would raise at the post-write re-fetch; neither is an
+    stores but cannot load back would raise at the post-write re-fetch, and a decimal past
+    PostgreSQL ``numeric``'s format the column's own validators accept (the ones
+    ``full_clean`` runs; its ``DecimalValidator`` passes any finite spelling in a column
+    with no ``max_digits`` and a zero with a huge exponent in any) would raise the server's
+    ``DataError`` at the first query binding it (a unique column's ``validate_unique()``,
+    else ``save()``); none is an
     error the save mappers own, so it would escape as a masked top-level error. It is the
     ``invalid`` ``FieldError`` keyed to ``field_name`` instead, carrying the message a
     filter answers for the same value (``UNBINDABLE_TEMPORAL_MESSAGE``), before any
-    database-bound work. ``value`` is what the write stores (the model flavor's value
-    after the naive-datetime coercion), and a column that is neither temporal nor a
-    duration answers ``None`` without resolving the alias.
+    database-bound work. ``value`` is what the write hands its save, which converts and
+    binds it (the model flavor's value after the naive-datetime coercion), and a column
+    the rule does not read answers ``None`` without resolving the alias.
     """
-    if not unstorable_temporal(column, value, using):
+    if not unstorable_value(column, value, using):
         return None
     return field_error(field_name, UNBINDABLE_TEMPORAL_MESSAGE, codes=FIELD_ERROR_CODE_INVALID)
 
@@ -336,7 +343,7 @@ def decode_scalar_leaf(graphql_name: str, value: object) -> tuple[object, FieldE
     mis-order it. Returns ``(decoded, None)`` on success or ``(None, FieldError)``.
     Flavor-specific scalar steps (the model path's explicit-null rejection and
     naive-datetime coercion) stay at the call site, composed around this leaf, and so
-    does the temporal storability check (``unstorable_temporal_error``): it reads the
+    does the storability check (``unstorable_value_error``): it reads the
     value each flavor stores, which on the form and serializer flavors exists only once
     their own validation has cleaned it.
     """

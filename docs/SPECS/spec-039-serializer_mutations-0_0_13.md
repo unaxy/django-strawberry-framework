@@ -663,6 +663,10 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     `prefetch_related` and introduces no `.only(...)` — is package-internal at
     [`tests/rest_framework/test_resolvers.py`][test-rest-framework]`::test_serializer_refetch_introduces_no_projection`,
     because the stash is introspection state no `/graphql/` response carries.
+  - [ ] A validated value the database cannot store (a datetime, time or duration; on
+    PostgreSQL a decimal past `numeric`'s format its column's own validators
+    accept) is the field's `invalid` error before any write, with nothing written
+    ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)).
   - [ ] **Package-internal, genuinely-unreachable internals only**
     ([`tests/rest_framework/test_resolvers.py`][test-rest-framework]): the residue a live
     fakeshop query **cannot** drive — the **recursive flattener** shapes no products
@@ -2013,12 +2017,22 @@ The pipeline steps:
      pairwise identity, so duplicate and explicit-empty-list set semantics pass through),
      and nested paths alike. A validator may reject a supplied relation but never pop,
      substitute, or inject one.
-   - **A temporal storability check.** After the relation-intent proof,
-     `_unstorable_temporal_errors` holds each writable bound field whose `source` is a
+   - **A storability check.** After the relation-intent proof,
+     `_unstorable_value_errors` holds each writable bound field whose `source` is a
      top-level `validated_data` key naming a concrete column
      (`utils/relations.py::written_model_field`) to
-     `django_strawberry_framework/utils/errors.py::unstorable_temporal` on the pinned
-     alias, the rule the model flavor's decode applies. DRF's own `overflow` answer for an
+     `django_strawberry_framework/utils/errors.py::unstorable_value` on the pinned
+     alias, the rule the model flavor's decode applies. A
+     `DecimalField(max_digits=None, decimal_places=None)` (the field a column with no
+     `max_digits` needs, since DRF's `ModelSerializer` cannot build one) holds no digits,
+     and a field the serializer declares itself runs no model validator (a field
+     `ModelSerializer` builds carries them), so on PostgreSQL a decimal past `numeric`'s format
+     its column's own validators accept (its `DecimalValidator` passes any finite
+     spelling with no `max_digits`, and a zero with a huge exponent in a bounded column)
+     is refused
+     (`django_strawberry_framework/utils/errors.py::unstorable_decimal`); SQLite refuses
+     none. A temporal or duration column is held to
+     `django_strawberry_framework/utils/errors.py::unstorable_temporal`. DRF's own `overflow` answer for an
      aware datetime it cannot project onto the current time zone comes first, inside
      `is_valid()`; what it lets through (an aware time, which SQLite, MySQL and Oracle
      refuse; an aware datetime the connection's own `TIME_ZONE` projects out of years
@@ -2977,6 +2991,16 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   otherwise finalize but never validate. `read_only` / `HiddenField` are outside the
   writable basis; `Meta.injected_fields` is the only field-level subtraction. Update
   (`partial=True`) inputs are unaffected.
+- **A value the database cannot store.** A valid serializer can hold a datetime or time
+  the adapter or the server refuses, a duration past 64 bits of microseconds on SQLite
+  or MySQL, and on PostgreSQL a decimal past `numeric`'s format a
+  `DecimalField(max_digits=None, decimal_places=None)` passes (any finite spelling over
+  a column with no `max_digits`, a zero with a huge exponent over a bounded one); the
+  save would raise an error no save mapper owns. The serializer flavor answers the
+  field's `invalid` error `"Enter a value the database can represent."` before any
+  write instead, with nothing written ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)). A nested serializer's
+  values are the consumer's `create()` / `update()`'s to write and are not read. SQLite
+  refuses no decimal: it stores the nearest double.
 - **No `DjangoType` `Meta` key added.** The serializer flavor adds nothing to
   [`DEFERRED_META_KEYS`][types-base] or `ALLOWED_META_KEYS`, and no settings key.
 
@@ -3071,6 +3095,15 @@ same transport, different app.
   `/graphql-async/`) answers the `itemId` `null` error the model and `ModelForm`
   flavors answer, with no row written.
 - **Package-internal** ([`tests/rest_framework/`][test-rest-framework]):
+  - `tests/rest_framework/test_resolvers.py::test_serializer_write_refuses_a_decimal_past_postgresql_numeric`
+    — on an alias that reads as PostgreSQL and refuses what `numeric` refuses
+    (`tests/_postgresql_stand_in.py::numeric_refusing_postgresql`), a serializer
+    declaring `DecimalField(max_digits=None, decimal_places=None)` answers a decimal past
+    `numeric`'s format over a column with no `max_digits`, non-null and nullable, and a
+    zero past the exponent limit over a bounded column, with the field's `invalid` error
+    and nothing written, on create and update;
+    `::test_serializer_write_stores_a_decimal_within_postgresql_numeric` writes a
+    decimal `numeric` holds through the same alias.
   - `test_converter.py` — each supported serializer-field class → annotation +
     required-ness; `PrimaryKeyRelatedField` / `ManyRelatedField` id mapping
     (Relay-`GlobalID` vs raw pk); `FileField` → [`Upload`][glossary-upload-scalar]; the
@@ -3424,6 +3457,10 @@ The completion contract.
    ([Decision 5](#decision-5--public-surface-serializermutation-exported-from-the-root-the-038-generalized-factory-reused)
    / [Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)
    / [Decision 9](#decision-9--optimizer-composition-the-modelserializer-payload-re-fetch-rides-the-spec-036-g2-path)).
+   A validated value the database cannot store, on PostgreSQL a decimal past `numeric`'s
+   format its column's own validators accept included, is the field's `invalid` error
+   before any write, with nothing written
+   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)).
 
 5. Products exposes the `SerializerMutation`s (create + update over `Item`) backed by
    an [`ItemSerializer`][products-serializers], and

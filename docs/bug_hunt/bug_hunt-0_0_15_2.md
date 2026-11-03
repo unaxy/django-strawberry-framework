@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 405 done, 89 to do. The CHANGELOG entries filed here moved to
+Progress: 406 done, 91 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2398,6 +2398,23 @@ Progress: 405 done, 89 to do. The CHANGELOG entries filed here moved to
   `test_a_public_integer_list_primitive_drops_members_the_column_cannot_convert`), package rows in
   `tests/filters/test_base.py` (`test_declared_list_over_a_relation_*`); spec-027 Decision 4 rows and its fractional
   edge case say so
+- [x] 530. fixed (the PostgreSQL half; SQLite stores a decimal as its nearest double, documented): a decimal its
+  column's own validators accept, read as the column's `to_python` gives it (the value the save binds), but
+  PostgreSQL's `numeric` refuses (more than 131072 digits before the point or 16383 after, or a zero whose written
+  exponent `numeric_in` refuses) is refused before the write on every flavor as the field's `invalid` error "Enter a
+  value the database can represent.", nothing written, instead of a masked `DataError`: any such spelling in a Django
+  6.1 `DecimalField` with no `max_digits`, and a zero with a huge exponent in a bounded column, whose
+  `DecimalValidator` counts no digit for it. One write-side storability rule, `utils/errors.py::unstorable_value`
+  (`unstorable_temporal` or the new `unstorable_decimal`, through `::_validated` and `::_leaf_elements`), asked by
+  the renamed preflights `utils/write_values.py::unstorable_value_error`, `forms/resolvers.py::_unstorable_value_errors`
+  and `rest_framework/resolvers.py::_unstorable_value_errors`; a value the column's validators refuse keeps their own
+  error. Nested serializer values stay unread (spec-039 Decision 8). Package rows `tests/utils/test_errors.py`
+  (`test_unstorable_decimal_*`), flavor rows on `tests/_postgresql_stand_in.py::numeric_refusing_postgresql`
+  (`tests/{mutations,forms,rest_framework}/test_resolvers.py::*_write_refuses_a_decimal_past_postgresql_numeric`,
+  `*_holds_the_decimal_its_column_to_python_gives`,
+  `test_model_write_leaves_a_decimal_a_project_validator_refuses_to_it`), live
+  `test_scalars_mutation_api.py::test_decimal_postgresql_cannot_bind_*` (the `pg` row unrun locally); README "Writing
+  data", the `FieldError envelope` glossary term and spec-027 / 036 / 038 / 039 say so
 
 ## Outside review of the fixes
 
@@ -2459,10 +2476,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 530. (robustness) The three write flavors accept `"1e1000000"` (or `"1e-1000000"`) for a Django 6.1
-  `DecimalField` with no `max_digits` (a serializer through an explicit `serializers.DecimalField(max_digits=None,
-  decimal_places=None)`): PostgreSQL refuses the bind with a masked `DataError`, and SQLite stores it as `Infinity`
-  or `0` without a word. Found verifying 591
 - [ ] 537. (robustness) `AllValuesMultipleFilter(field_name=<column>, method=...)` is refused at schema build ("exposes
   no form field") though its column alone would type it, as the same filter without `method=` is typed: its form field
   reads the per-request `model`, so the unbound copy builds none and the catch-all refuses before the column is
@@ -2579,6 +2592,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   range raw: `?f=999999999 00:00:00` under `DjangoFilterBackend` / `FilterSet(data=...)` raises `OverflowError`
   ("Python int too large to convert to SQLite INTEGER"), a 500, where an integer column's `in` drops a member
   naming no row (`filters/base.py::_identifying_members`). Found fixing 527
+- [ ] 725. (robustness) A write's storability preflight runs after the flavor's own validation, but a `ModelForm`'s
+  `validate_unique()` / `validate_constraints()` and DRF's `UniqueValidator` bind the value inside `is_valid()`, so a
+  unique decimal column sent a value past PostgreSQL `numeric`'s format, or a unique temporal column sent a value the
+  database cannot store, still answers a masked error (`DataError` on PostgreSQL; `OverflowError` on SQLite for an
+  aware datetime at a year bound through a `ModelForm` over `DateTimeField(unique=True)`). Shared with 381's temporal
+  preflight. Found fixing 530
+- [ ] 726. (robustness) On SQLite a bounded `DecimalField` (`max_digits` set) holding a value SQLite stores as an
+  infinity (a lax serializer field's value, or `1E+309` in `DecimalField(max_digits=400, decimal_places=0)`) is
+  written, then the post-write re-fetch raises `decimal.InvalidOperation` from the converter's `quantize`: a masked
+  top-level error and a rolled-back write where README "Writing data" says a value the database cannot store is
+  refused before the write. A column with no `max_digits` reads the same row back as `Infinity`. Found fixing 530
 
 ## To do: holes found re-checking the fixes
 
@@ -2921,6 +2945,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
   bound still binds raw through Django's related lookups (`OverflowError`, a 500); continuing to the key column would
   fix that and also make a two-bound `range` on a relation work, which reverses item 375 (Django registers no
   `range` lookup on a relation, and django-filter's own `RangeFilter` fails the same way). Found fixing 527
+- [ ] 727. Decide what a serializer field laxer than its bounded column gets: a declared
+  `serializers.DecimalField(max_digits=None, decimal_places=None)` over `DecimalField(max_digits=10,
+  decimal_places=2)` passes values the column refuses, and DRF runs no model validator on a declared field, so the
+  write ends masked (PostgreSQL's typmod `DataError`; on SQLite the re-fetch's `InvalidOperation` after the write).
+  Refuse the laxer declaration at construction (GOAL "Configuration is validated at construction"), or run the
+  column's own validators in the write preflight? Since 530 the docs tell the consumer to declare each such field as
+  strict as its column. The same shape exists for a `CharField` without `max_length` over a bounded column. Found
+  fixing 530 (16 cells of its probe grid)
 
 ## Hunt not finished in t3
 

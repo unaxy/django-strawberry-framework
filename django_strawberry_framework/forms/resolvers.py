@@ -118,9 +118,10 @@ and the form-specific invariants this module owns:
   the input does not expose keeps its form field name, and the form's
   ``NON_FIELD_ERRORS`` bucket lands on the ``"__all__"`` sentinel - the same
   keying a model ``full_clean()`` failure gets. A valid ``ModelForm`` whose instance
-  holds a datetime or time the pinned alias cannot store (or, on PostgreSQL, read back)
-  answers that column's ``invalid`` error before the save
-  (``_unstorable_temporal_errors``).
+  holds a datetime or time the pinned alias cannot store (or, on PostgreSQL, read back),
+  or a decimal past PostgreSQL ``numeric``'s format its column's own validators
+  accept, answers that column's ``invalid`` error before the save
+  (``_unstorable_value_errors``).
 
 - **Write via the ``ModelForm``'s save / ``perform_mutate`` (plain), wrapped by
   the reused save-time mappers** (``save_or_field_errors``; a ``ModelForm`` update
@@ -232,7 +233,7 @@ from django_strawberry_framework.utils.errors import (
     UNBINDABLE_TEMPORAL_MESSAGE,
     build_error_key_map,
     save_time_error_key_map,
-    unstorable_temporal,
+    unstorable_value,
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
@@ -1618,16 +1619,19 @@ def _store_nulls(form: _ModelFormAny, fields: list[_FieldAny]) -> None:
         field.save_form_data(instance, None)
 
 
-def _unstorable_temporal_errors(form: _ModelFormAny) -> dict[str, list[ValidationError]]:
-    """Map each column the form writes a datetime or time the write alias cannot store to its error.
+def _unstorable_value_errors(form: _ModelFormAny) -> dict[str, list[ValidationError]]:
+    """Map each column the form writes a value the write alias cannot store to its error.
 
     Django's ``forms.DateTimeField`` / ``forms.TimeField`` range-check nothing past what
     Python parses, so a valid form can carry an aware value the database refuses at
     ``save()`` (the adapter's ``OverflowError`` / ``ValueError``) or, on PostgreSQL,
-    stores but cannot load back at the re-fetch. Every concrete column the cleaned data
-    names is read from ``form.instance``, the value the save writes (what
+    stores but cannot load back at the re-fetch; ``forms.DecimalField`` and the model's
+    ``DecimalValidator`` hold no digits for a column with no ``max_digits`` (and count none
+    for a zero's positive exponent), so it can carry a decimal PostgreSQL's ``numeric``
+    refuses at ``save()``. Every concrete column
+    the cleaned data names is read from ``form.instance``, the value the save writes (what
     ``construct_instance`` set, else the column's stored or default value), and held to
-    ``utils/errors.py::unstorable_temporal`` on the write pipeline's pinned alias (a date
+    ``utils/errors.py::unstorable_value`` on the write pipeline's pinned alias (a date
     an ``ArrayField`` of datetimes still holds after ``Model.clean_fields`` is read as the
     midnight Django stores for it). A
     refused column answers the ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` error under its
@@ -1640,7 +1644,7 @@ def _unstorable_temporal_errors(form: _ModelFormAny) -> dict[str, list[Validatio
         field.name: [ValidationError(UNBINDABLE_TEMPORAL_MESSAGE, code=FIELD_ERROR_CODE_INVALID)]
         for field in instance._meta.concrete_fields
         if field.name in cleaned_data
-        and unstorable_temporal(
+        and unstorable_value(
             field,
             read_attr(instance, field.attname),
             pinned_write_alias,
@@ -1827,8 +1831,8 @@ def _modelform_write_step(
     ``NULL`` in a ``null=True`` column whose explicit ``null`` (or omitted stored ``NULL``
     whose restore a consumer-set value skipped) its own form field cleaned to a value
     (``_store_nulls``), refuses a
-    datetime or time the write alias cannot store as that column's ``invalid`` error
-    (``_unstorable_temporal_errors``), then writes through
+    datetime, time or decimal the write alias cannot store as that column's ``invalid``
+    error (``_unstorable_value_errors``), then writes through
     ``_modelform_save_or_field_errors`` (the form's save, split around
     ``commit=False`` on an update and a client-assigned-key create; the reused
     ``IntegrityError`` / ``ValidationError`` mappers, the update's ``conflict``, plus
@@ -1861,9 +1865,9 @@ def _modelform_write_step(
             _form_errors_to_field_errors(_column_null_errors(refused_fields), specs),
         )
     _store_nulls(form, coerced_fields)
-    temporal_errors = _unstorable_temporal_errors(form)
-    if temporal_errors:
-        return StepFailure(_form_errors_to_field_errors(temporal_errors, specs))
+    storability_errors = _unstorable_value_errors(form)
+    if storability_errors:
+        return StepFailure(_form_errors_to_field_errors(storability_errors, specs))
 
     # The pinned-alias WRITE phase opens for exactly the form's save: the form
     # construction + ``is_valid()`` above are database-read-only under the

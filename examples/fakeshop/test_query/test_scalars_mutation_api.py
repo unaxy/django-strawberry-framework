@@ -1,4 +1,4 @@
-"""Live GraphQL HTTP tests for model input normalization and temporal database storability.
+"""Live GraphQL HTTP tests for model input normalization and database storability.
 
 The ``scalars`` app writes ``ScalarSpecimen.occurred_at`` (``DateTime``) and
 ``occurred_time`` (``Time``) through every write flavor: ``createScalarSpecimen`` /
@@ -23,6 +23,13 @@ leaves them under ``USE_TZ = False``. A value a flavor stores (the
 serializer's naive projection under ``USE_TZ = False``, the serializer's projection of
 an aware datetime onto the current time zone, an aware time whose offset PostgreSQL
 accepts, there) is written.
+
+``createScalarSpecimen`` / ``updateScalarSpecimen`` also write the bounded
+``ScalarSpecimen.price``: a zero past PostgreSQL ``numeric``'s exponent limit
+(``0E+9999999999``), which its ``DecimalValidator`` passes since it counts no digit for a
+zero's positive exponent, is the field's ``invalid`` ``FieldError`` with nothing written on
+PostgreSQL, where the server would refuse the bind, and is stored as zero on SQLite, which
+stores a decimal as its nearest double.
 
 The ``SplitForm`` pairs write ``occurred_at`` through a ``SplitDateTimeField``, whose
 widget reads a date key and a time key: the datetime sent is stored on create and update
@@ -56,6 +63,7 @@ import logging
 import uuid
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
+from decimal import Decimal
 from functools import wraps
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -439,6 +447,74 @@ def test_serializer_temporal_refusal_is_keyed_to_the_renamed_input(operation: st
     )
     assert written == _expected("serializer", root, _STORED, stored, label)
     assert models.ScalarSpecimen.objects.get(label=label).occurred_time == datetime.time(11, 15)
+
+
+#: A zero whose written exponent PostgreSQL's ``numeric_in`` refuses ("value overflows
+#: numeric format"), which ``price``'s bounded ``DecimalValidator`` passes: it counts no
+#: digit for a zero's positive exponent.
+_ZERO_PAST_NUMERIC = "0E+9999999999"
+
+#: The ``price`` an updated row holds before the write.
+_STORED_PRICE = Decimal("12.5000")
+
+
+def _write_price(operation: str) -> tuple[str, JSONObject, models.ScalarSpecimen | None]:
+    """Send ``_ZERO_PAST_NUMERIC`` as ``price`` through the model flavor's ``operation``."""
+    specimen = None
+    if operation == "update":
+        specimen = _seed()
+        specimen.price = _STORED_PRICE
+        specimen.save(update_fields=["price"])
+    root, document = _document("model", operation)
+    variables = (
+        {"data": {**_CREATE_DATA, "price": _ZERO_PAST_NUMERIC}}
+        if specimen is None
+        else {"id": str(specimen.pk), "data": {"price": _ZERO_PAST_NUMERIC}}
+    )
+    return root, response_json(post_graphql(document, variables=variables)), specimen
+
+
+@pytest.mark.pg
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_decimal_postgresql_cannot_bind_is_the_field_error(operation: str) -> None:
+    """A decimal ``full_clean`` passes but PostgreSQL's ``numeric`` refuses is the field's error.
+
+    The server would refuse the bind at ``save()`` with a ``DataError`` no save mapper
+    owns, a masked top-level error; the write decode answers ``price``'s ``invalid``
+    error instead, nothing created and an updated row's ``price`` kept.
+    """
+    root, payload, specimen = _write_price(operation)
+
+    error = {
+        "field": "price",
+        "messages": [_UNSTORABLE],
+        "codes": ["invalid"],
+        "path": ["price"],
+    }
+    assert payload == {"data": {root: {"result": None, "errors": [error]}}}
+    rows = list(models.ScalarSpecimen.objects.values_list("label", "price"))
+    assert rows == ([] if specimen is None else [("stored", _STORED_PRICE)])
+
+
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="pins how SQLite stores a decimal")
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_decimal_postgresql_cannot_bind_stores_as_its_nearest_double_on_sqlite(
+    operation: str,
+) -> None:
+    """On SQLite the same decimal is written as the nearest double, here zero.
+
+    SQLite refuses no spelling: Django binds the decimal as its text, which the
+    ``NUMERIC`` column stores as its nearest double, so the zero is written as ``0``.
+    """
+    root, payload, specimen = _write_price(operation)
+
+    label = "written" if specimen is None else "stored"
+    assert payload == {"data": {root: {"result": {"label": label}, "errors": []}}}
+    assert list(models.ScalarSpecimen.objects.values_list("label", "price")) == [
+        (label, Decimal("0.0000")),
+    ]
 
 
 @wraps(AsyncDjangoGraphQLView.as_view())

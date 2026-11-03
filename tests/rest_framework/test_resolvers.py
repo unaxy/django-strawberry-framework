@@ -53,6 +53,11 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
   DRF's ``overflow`` error keyed at its depth, and a ``to_internal_value`` override that
   answers the overflow itself left to it. The example serializer writes its datetime at
   the top level only (live in ``examples/fakeshop/test_query/test_scalars_mutation_api.py``).
+- a ``DecimalField(max_digits=None, decimal_places=None)`` over a column with no
+  ``max_digits`` (which fakeshop cannot declare on the Django floor) and over a bounded
+  one: a decimal past PostgreSQL ``numeric``'s format its column's own validators
+  accept refused as the field's ``invalid`` error, written through an alias that reads
+  as PostgreSQL.
 
 **No create/update happy path, envelope, reverse-map, partial-update, visibility,
 write-auth, authorize-before-decode, Upload, request-context, or re-fetch BEHAVIORAL test
@@ -176,7 +181,7 @@ from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
 )
 from django_strawberry_framework.utils.querysets import SyncMisuseError
-from django_strawberry_framework.utils.typing import call_forwarded
+from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from django_strawberry_framework.utils.write_transaction import (
     authorization_phase,
     managed_write_transaction,
@@ -199,6 +204,7 @@ from tests._idioms import (
     saved_pk,
 )
 from tests._info import make_info, unread_info
+from tests._postgresql_stand_in import numeric_refusing_postgresql
 
 if TYPE_CHECKING:
     from typing import TypeAlias, TypeVar
@@ -8079,3 +8085,282 @@ def test_serializer_m2m_ids_spelling_a_stored_key_differently_link_its_row(
             assert isinstance(owner, SerializerSpelledStampOwner)
             linked = [pk_of(row) for row in owner.stamp_targets.all()]
         assert linked == [stored]
+
+
+class SerializerCentsDecimalField(models.DecimalField[object, object]):
+    """A project ``DecimalField`` whose ``to_python`` rounds to cents: the value its save binds."""
+
+    @override
+    def to_python(self, value: object) -> object:
+        number = object_result(super().to_python, value)
+        return (
+            number.quantize(decimal.Decimal("0.01"))
+            if isinstance(number, decimal.Decimal)
+            else number
+        )
+
+
+class SerializerUnboundedAmount(Model):
+    """Decimal columns a serializer can carry past PostgreSQL ``numeric``'s format.
+
+    ``amount`` and the nullable ``spare`` have no ``max_digits`` (Django's unconstrained
+    ``numeric``, from 6.1), which DRF's ``ModelSerializer`` cannot build a field for, so
+    the serializer declares ``DecimalField(max_digits=None, decimal_places=None)``, which
+    holds no digits; ``priced`` is bounded, and its validator counts no digit for a
+    zero's positive exponent; ``rounded`` is a field subclass whose ``to_python`` rounds
+    to cents.
+    """
+
+    amount: models.DecimalField[str | float | decimal.Decimal | Combinable, decimal.Decimal] = (
+        models.DecimalField(max_digits=None, decimal_places=None)
+    )
+    spare: models.DecimalField[
+        str | float | decimal.Decimal | Combinable | None,
+        decimal.Decimal | None,
+    ] = models.DecimalField(max_digits=None, decimal_places=None, null=True, blank=True)
+    priced: models.DecimalField[
+        str | float | decimal.Decimal | Combinable | None,
+        decimal.Decimal | None,
+    ] = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    rounded: SerializerCentsDecimalField = SerializerCentsDecimalField(
+        max_digits=None,
+        decimal_places=None,
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "serializer_unbounded_amount"
+
+
+class UnboundedAmountSerializer(ModelSerializerBase[SerializerUnboundedAmount]):
+    """A serializer declaring a ``DecimalField`` without ``max_digits`` for each column."""
+
+    amount = serializers.DecimalField(max_digits=None, decimal_places=None)
+    spare = serializers.DecimalField(
+        max_digits=None,
+        decimal_places=None,
+        required=False,
+        allow_null=True,
+    )
+    priced = serializers.DecimalField(
+        max_digits=None,
+        decimal_places=None,
+        required=False,
+        allow_null=True,
+    )
+    rounded = serializers.DecimalField(
+        max_digits=None,
+        decimal_places=None,
+        required=False,
+        allow_null=True,
+    )
+
+    class Meta:
+        model = SerializerUnboundedAmount
+        fields = (
+            "amount",
+            "spare",
+            "priced",
+            "rounded",
+        )
+
+
+#: A column of ``SerializerUnboundedAmount`` and a spelling its serializer field and
+#: validator pass that ``numeric`` refuses: past the integer digits, the fraction digits,
+#: or a zero's written exponent.
+_PAST_NUMERIC = [
+    pytest.param("amount", "1e1000000", id="huge-exponent"),
+    pytest.param("amount", "-1e1000000", id="negative-huge-exponent"),
+    pytest.param("amount", "1e-1000000", id="tiny-exponent"),
+    pytest.param("amount", "1E+131072", id="131073-integer-digits"),
+    pytest.param("amount", "0E-16384", id="zero-16384-fraction-digits"),
+    pytest.param("spare", "1e1000000", id="nullable-huge-exponent"),
+    pytest.param("priced", "0E+1073741823", id="bounded-zero-at-exponent-limit"),
+]
+
+_REQUIRES_UNBOUNDED_DECIMAL = pytest.mark.skipif(
+    django.VERSION < (6, 1),
+    reason="a DecimalField without max_digits is read back from Django 6.1",
+)
+
+
+def _write_amount_via_serializer(
+    operation: str,
+    data: dict[str, object],
+    pk: object = None,
+) -> object:
+    """Run the serializer flavor's ``operation`` with ``data``; its payload."""
+
+    class SerializerUnboundedAmountT(DjangoType):
+        class Meta:
+            model = SerializerUnboundedAmount
+            fields = (
+                "id",
+                "amount",
+                "spare",
+                "priced",
+            )
+            primary = True
+
+    class _AllowAll:
+        def has_permission(
+            self,
+            _info: object,
+            _mutation: type[object],
+            _op: str,
+            _data: object,
+            _instance: object = None,
+        ) -> bool:
+            return True
+
+    class CreateAmount(SerializerMutation):
+        class Meta:
+            serializer_class = UnboundedAmountSerializer
+            operation = "create"
+            permission_classes = [_AllowAll]
+
+    class UpdateAmount(SerializerMutation):
+        class Meta:
+            serializer_class = UnboundedAmountSerializer
+            operation = "update"
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class Mutation:
+        create_amount = DjangoMutationField(CreateAmount)
+        update_amount = DjangoMutationField(UpdateAmount)
+
+    finalize_django_types()
+    del SerializerUnboundedAmountT
+    selection = "{ result { amount } errors { field messages codes } }"
+    if operation == "create":
+        document = (
+            "mutation($d: UnboundedAmountSerializerInput!) "
+            f"{{ createAmount(data: $d) {selection} }}"
+        )
+        variables: dict[str, object] = {"d": data}
+    else:
+        document = (
+            "mutation($id: ID!, $d: UnboundedAmountSerializerPartialInput!) "
+            f"{{ updateAmount(id: $id, data: $d) {selection} }}"
+        )
+        variables = {"id": str(pk), "d": data}
+    request = HttpRequest()
+    request.user = User(username="u")
+    result = DjangoSchema(query=Query, mutation=Mutation).execute_sync(
+        document,
+        variable_values=variables,
+        context_value=SimpleNamespace(request=request),
+    )
+    assert result.errors is None, result.errors
+    assert is_object_dict(result.data), result.data
+    return result.data[f"{operation}Amount"]
+
+
+def _stored_serializer_amounts() -> list[tuple[object, ...]]:
+    """Every ``SerializerUnboundedAmount`` row's three decimals."""
+    return list(
+        SerializerUnboundedAmount.objects.order_by("pk").values_list("amount", "spare", "priced"),
+    )
+
+
+@_REQUIRES_UNBOUNDED_DECIMAL
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize(("column", "wire"), _PAST_NUMERIC)
+def test_serializer_write_refuses_a_decimal_past_postgresql_numeric(
+    operation: str,
+    column: str,
+    wire: str,
+) -> None:
+    """A decimal the serializer validates but PostgreSQL cannot bind is the field's error.
+
+    ``is_valid()`` passes it (a declared ``DecimalField`` without ``max_digits`` holds no
+    digits and runs no model validator) and PostgreSQL's ``numeric_in`` refuses it at the
+    save, a ``DataError`` no save mapper owns. The serializer flavor answers the field's
+    ``invalid`` error before any write instead, with nothing written.
+    """
+    with numeric_refusing_postgresql(SerializerUnboundedAmount):
+        pk = (
+            saved_pk(SerializerUnboundedAmount.objects.create(amount=decimal.Decimal(7)))
+            if operation == "update"
+            else None
+        )
+        before = _stored_serializer_amounts()
+        payload = _write_amount_via_serializer(operation, {"amount": "7", column: wire}, pk)
+
+        assert payload == {
+            "result": None,
+            "errors": [
+                {
+                    "field": column,
+                    "messages": ["Enter a value the database can represent."],
+                    "codes": ["invalid"],
+                },
+            ],
+        }
+        assert _stored_serializer_amounts() == before
+
+
+@_REQUIRES_UNBOUNDED_DECIMAL
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("column", ["amount", "spare", "priced"])
+def test_serializer_write_stores_a_decimal_within_postgresql_numeric(
+    operation: str,
+    column: str,
+) -> None:
+    """A decimal PostgreSQL's ``numeric`` holds is written through the same stand-in."""
+    with numeric_refusing_postgresql(SerializerUnboundedAmount):
+        pk = (
+            saved_pk(SerializerUnboundedAmount.objects.create(amount=decimal.Decimal(7)))
+            if operation == "update"
+            else None
+        )
+        payload = _write_amount_via_serializer(operation, {"amount": "7", column: "12.5"}, pk)
+
+        assert is_object_dict(payload), payload
+        assert payload["errors"] == []
+        stored = read_attr(SerializerUnboundedAmount.objects.get(), column)
+        assert stored == decimal.Decimal("12.5")
+
+
+_ROUNDED_TO_ZERO = [
+    pytest.param("1e-1000000", id="tiny-exponent"),
+    pytest.param("0." + "0" * 16383 + "5", id="16384-fraction-digits"),
+]
+
+
+@_REQUIRES_UNBOUNDED_DECIMAL
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("wire", _ROUNDED_TO_ZERO)
+def test_serializer_write_holds_the_decimal_its_column_to_python_gives(
+    operation: str,
+    wire: str,
+) -> None:
+    """A validated decimal the column's ``to_python`` rounds to a cent ``numeric`` holds is stored.
+
+    DRF hands the spelling as sent to the save, which binds the value ``to_python`` gives
+    (``0.00``), so the write stores it rather than refusing the spelling.
+    """
+    with numeric_refusing_postgresql(SerializerUnboundedAmount):
+        pk = (
+            saved_pk(SerializerUnboundedAmount.objects.create(amount=decimal.Decimal(7)))
+            if operation == "update"
+            else None
+        )
+        payload = _write_amount_via_serializer(operation, {"amount": "7", "rounded": wire}, pk)
+
+        assert is_object_dict(payload), payload
+        assert payload["errors"] == []
+        assert SerializerUnboundedAmount.objects.get().rounded == decimal.Decimal(0)
