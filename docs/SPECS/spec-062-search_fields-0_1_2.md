@@ -63,13 +63,15 @@ and `filters/sets.py::_admitted_rows`). Search wires the `search:`
 surface onto that restriction; it designs neither a compilation strategy
 nor a visibility mechanism of its own.
 
-That groundwork is **this spec's pre-card slice ("Slice 0")**, planned in
-[`docs/row-preserving-predicates-part1-plan.md`][part1-plan], and **this
-card owns its completion bookkeeping**: the `docs/GLOSSARY.md` /
-`docs/TREE.md` / `KANBAN.md` fold-in for the `FilterSet` multiset-contract
-change, the `optimizer/predicates.py` module, and the `OptimizerError`
-predicate-attachment raise-site documentation all wrap under this card.
-The groundwork ships no release-state artifacts of its own.
+That groundwork is **this spec's pre-card slice ("Slice 0")**, shipped;
+its standing contract is the [`docs/GLOSSARY.md`][glossary] entry
+"Row-preserving to-many predicates (Part 1)" and
+spec-027 Decision 8 for walked declared hops. The
+`docs/GLOSSARY.md` / `docs/TREE.md` entries and the `OptimizerError`
+predicate-attachment raise-site documentation are in place; **this card
+owns the remaining `KANBAN.md` fold-in** for the `FilterSet`
+multiset-contract change and the `optimizer/predicates.py` module. The
+groundwork ships no release-state artifacts of its own.
 
 Permission caveat: [`AGENTS.md`][agents] prohibits `CHANGELOG.md` edits
 without explicit permission. This card does not touch `CHANGELOG.md`; card
@@ -823,10 +825,9 @@ subsumes the other):
 
 - **a reverse FK after a to-one prefix**, matching the Customer
   production topology — earned through the shared reproduction fixture
-  the Part 1 plan defines
-  ([part1-plan][part1-plan] C.4: `Loan.book -> Book.loans ->
-  Loan.patron -> Patron.email` with its four named loans and
-  ordered-sequence oracle). This card's integration use: declare
+  (`examples/fakeshop/test_query/test_library_api.py::_seed_customer_loan_graph`:
+  `Loan.book -> Book.loans -> Loan.patron -> Patron.email` with its four
+  named loans and ordered-sequence oracle). This card's integration use: declare
   `LoanType.Meta.search_fields = ("note", "book__loans__patron__email")`
   on the **existing** `LoanType`
   (`examples/fakeshop/apps/library/schema.py` — declared before `Book` /
@@ -1268,8 +1269,7 @@ ship-it-today-defer-the-real-fix shape [`AGENTS.md`][agents] forbids.
 
 ### Decision 14 — Search scope is type-definition-wide and immutable
 
-The Customer production reproduction (recorded in the
-[Part 1 plan][part1-plan]) surfaces a second application concern beyond
+The Customer production reproduction surfaces a second application concern beyond
 cardinality: the same DRF viewset intentionally exposes group-name search
 on one action and withholds it from three others, via
 `SearchFilter.get_search_fields(view, request)` action/request dynamism.
@@ -1960,7 +1960,6 @@ compiler shape.
 [glossary-orderset]: ../GLOSSARY.md#orderset
 [glossary-relatedfilter]: ../GLOSSARY.md#relatedfilter
 [glossary-single-upstream-parity]: ../GLOSSARY.md#single-upstream-parity
-[part1-plan]: ../row-preserving-predicates-part1-plan.md
 
 <!-- docs/SPECS/ -->
 [search-terms]: appx/spec-062-search_fields-0_1_2-terms.csv
