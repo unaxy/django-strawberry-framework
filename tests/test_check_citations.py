@@ -9,7 +9,8 @@ no live sibling in ``examples/fakeshop/test_query/``.
 ``REPO_ROOT`` (here and in ``scripts/check_trailing_commas.py``, whose
 ``[tool.ruff] extend-exclude`` names the gate skips) is monkeypatched to a
 ``tmp_path`` fake tree with its own ``pyproject.toml``, so no row reads the real
-repository.
+repository. The fake tree is not a git checkout: ``git_visible_scope`` is
+monkeypatched to ``None`` (no git) unless a row hands it a scope of its own.
 """
 
 import textwrap
@@ -69,6 +70,9 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """
     monkeypatch.setattr(check_citations, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(check_trailing_commas, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(check_citations, "git_visible_scope", lambda: None)
+    check_trailing_commas.git_visible_scope.cache_clear()
+    check_citations._OTHER_FILE_INDEX.clear()
     _write(
         tmp_path,
         "pyproject.toml",
@@ -82,6 +86,24 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     check_trailing_commas.ruff_excluded_names.cache_clear()
     yield tmp_path
     check_trailing_commas.ruff_excluded_names.cache_clear()
+    check_trailing_commas.git_visible_scope.cache_clear()
+    check_citations._OTHER_FILE_INDEX.clear()
+
+
+def _scope_ignoring(root: Path, ignored: str) -> tuple[frozenset[str], frozenset[str]]:
+    """The ``git_visible_scope`` answer for ``root`` were the ``ignored`` directory git-ignored."""
+    files = frozenset(
+        relative
+        for path in root.rglob("*")
+        if path.is_file()
+        and not (relative := path.relative_to(root).as_posix()).startswith(f"{ignored}/")
+    )
+    directories = frozenset(
+        "/".join(Path(path).parts[:depth])
+        for path in files
+        for depth in range(1, len(Path(path).parts))
+    )
+    return files, directories
 
 
 def _cite(
@@ -351,6 +373,57 @@ def test_a_pinpoint_never_resolves_through_a_ruff_excluded_tree(tree: Path) -> N
     )
     pinpoints = [o for o in outcomes if o.citation.kind == "substring"]
     assert [(o.citation.line, o.resolved) for o in pinpoints] == [(1, False), (2, True)]
+
+
+def test_a_pinpoint_never_resolves_through_a_git_ignored_tree(
+    tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ignored ``scratch/`` copy of a doc the repo lacks resolves nothing; a visible copy does."""
+    _write(tree, "scratch/copy/docs/guide.md", "## Coverage rule\n")
+    _write(tree, "kept/copy/docs/guide.md", "## Kept heading\n")
+    monkeypatch.setattr(
+        check_citations,
+        "git_visible_scope",
+        lambda: _scope_ignoring(tree, "scratch"),
+    )
+    outcomes = _cite(
+        tree,
+        """\
+        # docs/guide.md #"Coverage rule"
+        # docs/guide.md #"Kept heading"
+        """,
+    )
+    pinpoints = [o for o in outcomes if o.citation.kind == "substring"]
+    assert [(o.citation.line, o.resolved) for o in pinpoints] == [(1, False), (2, True)]
+
+
+def test_without_git_every_unpruned_tree_is_indexed(tree: Path) -> None:
+    """With no git answer (an unpacked sdist) the walk filters nothing it does not prune."""
+    _write(tree, "scratch/copy/docs/guide.md", "## Coverage rule\n")
+    _write(tree, "tests/lib/evidence.py", "def only_in_ignored():\n    return 1\n")
+    outcomes = _cite(tree, '# docs/guide.md #"Coverage rule"\n')
+    pinpoints = [o for o in outcomes if o.citation.kind == "substring"]
+    assert [(o.citation.line, o.resolved) for o in pinpoints] == [(1, True)]
+    assert tree / "tests/lib/evidence.py" in check_citations.iter_python_sources()
+
+
+def test_a_python_file_under_a_git_ignored_tree_is_not_first_party_source(
+    tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``.py`` under an ignored directory inside a source tree is outside the corpus."""
+    _write(tree, "tests/lib/evidence.py", "def only_in_ignored():\n    return 1\n")
+    _write(tree, "tests/kept/evidence.py", "def kept_symbol():\n    return 1\n")
+    monkeypatch.setattr(
+        check_citations,
+        "git_visible_scope",
+        lambda: _scope_ignoring(tree, "tests/lib"),
+    )
+    corpus = check_citations.iter_python_sources()
+
+    assert tree / "tests/kept/evidence.py" in corpus
+    assert tree / "tests/lib/evidence.py" not in corpus
 
 
 def test_a_python_file_under_a_ruff_excluded_tree_is_not_first_party_source(tree: Path) -> None:
