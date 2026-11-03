@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 412 done, 97 to do. The CHANGELOG entries filed here moved to
+Progress: 413 done, 96 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2486,6 +2486,13 @@ Progress: 412 done, 97 to do. The CHANGELOG entries filed here moved to
   in `test_scalars_mutation_api.py` (the new `ScalarSpecimenDayInstantForm` pair) and
   `test_filter_widget_binding_api.py`; package rows in `tests/forms`, `tests/mutations` and
   `tests/utils/test_widgets.py`; README, the glossary and spec-027 / 036 / 038 say so
+- [x] 683. Not a defect against the shipped contract, and the same design call as 607: spec-015 Decision 3 leaves both
+  node defaults without an optimizer pass (`types/relay.py::_resolve_nodes_default` returns rows, which
+  `optimizer/extension.py::DjangoOptimizerExtension._optimize` passes through), and the glossary's Relay Node
+  integration entry states that node refetch receives no optimizer plan; a to-one relation's `id` under a node root
+  (`AnnotationType`, `profile { id }`) is one more nested selection that root leaves unplanned, so FK-id elision never
+  runs there. The capability decision and its query-count evidence stay under Waiting item 327; no commit after the
+  filing touched the node path or root-field recognition
 
 ## Outside review of the fixes
 
@@ -2547,9 +2554,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 683. (robustness) `nodes(ids:)` over a type selecting a to-one relation's `id` (`AnnotationType`, `profile { id }`)
-  runs one query per row: the node fields dispatch without an optimizer pass, so the relation is never planned.
-  Decide planning the node root fields or documenting the cost. Found fixing 606
 - [ ] 684. (robustness) A declared `ListFilter` / `RangeFilter` with a transform in `lookup_expr`
   (`field_name="occurred_at", lookup_expr="year__in"`) cleans each member through the column's form field
   (`filters/base.py::_column_form_field` reads `_bound_model_field`), so `"2020"` answers "Enter a valid date/time."
