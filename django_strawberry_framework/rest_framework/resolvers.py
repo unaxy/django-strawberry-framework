@@ -2931,8 +2931,9 @@ def _guarded_serializer_write(
     # nested paths alike): a validator that swapped a visible row for a hidden one
     # after the scoped field lookup is a loud ``ConfigurationError``, never a write.
     relation_keys = _assert_relation_intent(mutation_cls, serializer, ledger)
-    # A datetime, time or decimal DRF validated but the pinned alias cannot store (or, on
-    # PostgreSQL, read back) is the field's ``invalid`` error before any write.
+    # A date, datetime, time, duration or decimal DRF validated (or a ``validate_<field>``
+    # hook set) but the pinned alias cannot store (or, on PostgreSQL, read back) is the
+    # field's ``invalid`` error before any write.
     storability_errors = _unstorable_value_errors(
         serializer,
         backing_model_of(mutation_cls._mutation_meta),

@@ -38,7 +38,19 @@ prefixed copy. The ``ViaPosted`` pairs' ``get_form_kwargs`` binds each value as 
 the temporal form's one-key ``DateTimeField`` parses and stores it, while the split
 widget's ``decompress`` cannot split the text of a datetime, a ``ConfigurationError``
 naming its keys before ``is_valid()``, masked on the wire, with nothing written on
-create, update or an update omitting ``occurredAt``.
+create, update or an update omitting ``occurredAt``. A datetime whose wall clock in the
+current time zone leaves years 1..9999 cannot be split either: the split form answers the
+``occurredAt`` ``invalid`` ``FieldError`` ("Enter a value the current time zone can
+represent."), even for ``0001-01-01T00:30:00+00:00``, which the database stores, on create,
+update and an update omitting ``occurredAt`` over such a stored value, sync and async.
+
+The ``DayInstantForm`` pair writes ``occurred_on`` through a ``clean_occurred_on`` answering
+the aware midnight UTC of the date sent, which the ``DateField`` column stores as its date
+in the default time zone. Under ``America/New_York`` the midnight of ``0001-01-01`` falls in
+year 0 there, where Django's own conversion inside ``is_valid()`` raises ``OverflowError``:
+the mutation answers the ``occurredOn`` ``invalid`` ``FieldError`` with nothing written,
+sync and async, while ``UTC`` stores the date and an in-range day is stored as its date in
+the default time zone.
 
 ``createNullableScalarSpecimenViaForm`` / ``updateNullableScalarSpecimenViaForm`` write the
 ``null=True`` ``NullableScalarSpecimen.flag`` through a checkbox
@@ -88,6 +100,7 @@ if TYPE_CHECKING:
     from django.http.response import HttpResponseBase
 
 _UNSTORABLE = "Enter a value the database can represent."
+_UNREPRESENTABLE_IN_ZONE = "Enter a value the current time zone can represent."
 
 #: The input a flavor writes a column through, where it differs from the column's own name:
 #: the serializer renames ``occurred_time`` to ``clock_time`` by ``source=``.
@@ -629,6 +642,269 @@ def test_split_datetime_form_field_writes_the_datetime_sent(form: str, operation
     }
     rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_at"))
     assert rows == [(label, stored_at)]
+
+
+_SPLIT_SELECTION = "{ result { label occurredAt } errors { field messages codes path } }"
+
+
+def _split_write(
+    operation: str,
+    data: dict[str, object],
+) -> tuple[str, JSONObject, models.ScalarSpecimen | None]:
+    """Write ``data`` through the unprefixed split form: its root, payload and the seeded row.
+
+    A create sends ``data`` beside ``_CREATE_DATA``; an update sends it over a seeded row.
+    """
+    create_field, create_input, update_field, update_input = _SPLIT_FORMS["unprefixed"]
+    if operation == "create":
+        document = (
+            f"mutation Write($data: {create_input}!) "
+            f"{{ {create_field}(data: $data) {_SPLIT_SELECTION} }}"
+        )
+        variables: dict[str, object] = {"data": {**_CREATE_DATA, **data}}
+        return create_field, response_json(post_graphql(document, variables=variables)), None
+    specimen = _seed()
+    document = (
+        f"mutation Write($id: ID!, $data: {update_input}!) "
+        f"{{ {update_field}(id: $id, data: $data) {_SPLIT_SELECTION} }}"
+    )
+    variables = {"id": str(specimen.pk), "data": data}
+    return update_field, response_json(post_graphql(document, variables=variables)), specimen
+
+
+def _field_refusal(root: str, field: str, message: str) -> JSONObject:
+    """The payload refusing ``field`` with its ``invalid`` ``message``, the result ``null``."""
+    error = {
+        "field": field,
+        "messages": [message],
+        "codes": ["invalid"],
+        "path": [field],
+    }
+    return {"data": {root: {"result": None, "errors": [error]}}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize(
+    ("zone", "sent", "outcome"),
+    [
+        pytest.param("UTC", "0001-01-01T00:30:00+01:00", _REFUSED, id="utc-before-year-one"),
+        pytest.param("UTC", "9999-12-31T23:30:00-01:00", _REFUSED, id="utc-past-year-9999"),
+        pytest.param(
+            "America/New_York",
+            "0001-01-01T00:30:00+00:00",
+            _REFUSED,
+            id="new-york-year-one-in-utc",
+        ),
+        pytest.param("UTC", "0001-01-01T00:30:00+00:00", _STORED, id="utc-year-one-in-utc"),
+    ],
+)
+def test_split_datetime_the_current_time_zone_cannot_present_is_the_field_error(
+    operation: str,
+    zone: str,
+    sent: str,
+    outcome: str,
+) -> None:
+    """A datetime whose wall clock in the current time zone leaves years 1..9999 is refused.
+
+    ``SplitDateTimeWidget.decompress`` splits the datetime into the current time zone's
+    date and time, which it cannot do for one whose wall clock there falls in year 0 or
+    10000: the ``occurredAt`` ``invalid`` ``FieldError`` ("Enter a value the current time
+    zone can represent."), nothing created and an updated row kept, even for
+    ``0001-01-01T00:30:00+00:00``, which the database stores under ``UTC``.
+    """
+    with override_settings(TIME_ZONE=zone):
+        root, payload, specimen = _split_write(operation, {"occurredAt": sent})
+    label = "written" if operation == "create" else "stored"
+    sent_at = datetime.datetime.fromisoformat(sent)
+    stored = outcome == _STORED
+
+    if stored:
+        assert payload == {
+            "data": {
+                root: {"result": {"label": label, "occurredAt": sent}, "errors": []},
+            },
+        }
+    else:
+        assert payload == _field_refusal(root, "occurredAt", _UNREPRESENTABLE_IN_ZONE)
+    rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_at"))
+    if specimen is None:
+        assert rows == ([(label, sent_at)] if stored else []), rows
+    else:
+        assert rows == [(label, sent_at if stored else _STORED_AT)], rows
+
+
+_YEAR_ONE_IN_UTC = datetime.datetime(1, 1, 1, 0, 30, tzinfo=datetime.timezone.utc)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("zone", "outcome"),
+    [
+        pytest.param("America/New_York", _REFUSED, id="new-york"),
+        pytest.param("UTC", _STORED, id="utc"),
+    ],
+)
+def test_split_update_omitting_a_stored_datetime_the_zone_cannot_present_is_the_field_error(
+    zone: str,
+    outcome: str,
+) -> None:
+    """An update omitting ``occurredAt`` over a stored value the zone cannot split is refused.
+
+    The update binds the stored ``0001-01-01T00:30:00+00:00`` through the split widget like
+    a value sent, so under ``America/New_York``, where its wall clock falls in year 0, the
+    update is the ``occurredAt`` ``invalid`` ``FieldError`` and the row is kept: the caller
+    supplies a valid replacement in the same request. Under ``UTC`` the update keeps it.
+    """
+    specimen = _seed()
+    models.ScalarSpecimen.objects.filter(pk=specimen.pk).update(occurred_at=_YEAR_ONE_IN_UTC)
+    _, _, update_field, update_input = _SPLIT_FORMS["unprefixed"]
+    document = (
+        f"mutation Write($id: ID!, $data: {update_input}!) "
+        f"{{ {update_field}(id: $id, data: $data) {_SPLIT_SELECTION} }}"
+    )
+    variables = {"id": str(specimen.pk), "data": {"label": "renamed"}}
+    with override_settings(TIME_ZONE=zone):
+        payload = response_json(post_graphql(document, variables=variables))
+    kept = outcome == _STORED
+
+    if kept:
+        result = {"label": "renamed", "occurredAt": _YEAR_ONE_IN_UTC.isoformat()}
+        assert payload == {"data": {update_field: {"result": result, "errors": []}}}
+    else:
+        assert payload == _field_refusal(update_field, "occurredAt", _UNREPRESENTABLE_IN_ZONE)
+    rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_at"))
+    assert rows == [("renamed" if kept else "stored", _YEAR_ONE_IN_UTC)], rows
+
+
+#: The day-instant form surface: create and update root fields and their input types.
+_DAY_INSTANT_FORM = (
+    "createScalarSpecimenViaDayInstantForm",
+    "ScalarSpecimenDayInstantFormInput",
+    "updateScalarSpecimenViaDayInstantForm",
+    "ScalarSpecimenDayInstantFormPartialInput",
+)
+
+
+def _day_instant_write(
+    operation: str,
+    day: str,
+) -> tuple[str, JSONObject, models.ScalarSpecimen | None]:
+    """Send ``occurredOn: day`` through the day-instant form: its root, payload and seeded row."""
+    create_field, create_input, update_field, update_input = _DAY_INSTANT_FORM
+    selection = "{ result { label occurredOn } errors { field messages codes path } }"
+    if operation == "create":
+        document = (
+            f"mutation Write($data: {create_input}!) {{ {create_field}(data: $data) {selection} }}"
+        )
+        variables: dict[str, object] = {"data": {**_CREATE_DATA, "occurredOn": day}}
+        return create_field, response_json(post_graphql(document, variables=variables)), None
+    specimen = _seed()
+    document = (
+        f"mutation Write($id: ID!, $data: {update_input}!) "
+        f"{{ {update_field}(id: $id, data: $data) {selection} }}"
+    )
+    variables = {"id": str(specimen.pk), "data": {"occurredOn": day}}
+    return update_field, response_json(post_graphql(document, variables=variables)), specimen
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize(
+    ("zone", "day", "stored_day"),
+    [
+        pytest.param("America/New_York", "0001-01-01", None, id="new-york-year-one"),
+        pytest.param("UTC", "0001-01-01", "0001-01-01", id="utc-year-one"),
+        pytest.param("America/New_York", "2021-06-15", "2021-06-14", id="new-york-in-range"),
+    ],
+)
+def test_clean_hook_datetime_the_date_column_cannot_store_is_the_field_error(
+    operation: str,
+    zone: str,
+    day: str,
+    stored_day: str | None,
+) -> None:
+    """A ``clean_<field>`` hook's aware datetime whose date leaves years 1..9999 is refused.
+
+    ``ScalarSpecimenDayInstantForm.clean_occurred_on`` answers the aware midnight UTC of the
+    date sent, which the ``DateField`` column stores as its date in the default time zone:
+    Django's own conversion of it inside ``is_valid()`` raises ``OverflowError`` where that
+    date falls in year 0 (``0001-01-01`` under ``America/New_York``), so the mutation is the
+    ``occurredOn`` ``invalid`` ``FieldError`` ("Enter a value the database can represent.")
+    with nothing created and an updated row kept. Under ``UTC`` the date is stored, and
+    an in-range day is stored as its date in the default time zone (``2021-06-14``).
+    """
+    with override_settings(TIME_ZONE=zone):
+        root, payload, specimen = _day_instant_write(operation, day)
+    label = "written" if operation == "create" else "stored"
+
+    if stored_day is None:
+        assert payload == _field_refusal(root, "occurredOn", _UNSTORABLE)
+    else:
+        assert payload == {
+            "data": {root: {"result": {"label": label, "occurredOn": stored_day}, "errors": []}},
+        }
+    rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_on"))
+    if stored_day is not None:
+        expected = [(label, datetime.date.fromisoformat(stored_day))]
+    else:
+        expected = [] if specimen is None else [(label, specimen.occurred_on)]
+    assert rows == expected, rows
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "root",
+        "input_type",
+        "data",
+        "field",
+        "message",
+    ),
+    [
+        pytest.param(
+            _SPLIT_FORMS["unprefixed"][0],
+            _SPLIT_FORMS["unprefixed"][1],
+            {"occurredAt": "0001-01-01T00:30:00+00:00"},
+            "occurredAt",
+            _UNREPRESENTABLE_IN_ZONE,
+            id="split",
+        ),
+        pytest.param(
+            _DAY_INSTANT_FORM[0],
+            _DAY_INSTANT_FORM[1],
+            {"occurredOn": "0001-01-01"},
+            "occurredOn",
+            _UNSTORABLE,
+            id="day-instant",
+        ),
+    ],
+)
+async def test_async_form_write_holds_the_zone_and_hook_refusals(
+    root: str,
+    input_type: str,
+    data: dict[str, object],
+    field: str,
+    message: str,
+) -> None:
+    """The async form pipeline refuses the split zone and hook overflow values the same way.
+
+    Under ``America/New_York`` the split widget cannot present ``0001-01-01T00:30:00+00:00``
+    and the day-instant hook's midnight UTC of ``0001-01-01`` falls in year 0, so each create
+    over ``/graphql-async/`` is the field's ``invalid`` error with nothing written.
+    """
+    selection = "{ result { label } errors { field messages codes path } }"
+    document = f"mutation Write($data: {input_type}!) {{ {root}(data: $data) {selection} }}"
+    with override_settings(ROOT_URLCONF=__name__, TIME_ZONE="America/New_York"):
+        result = await AsyncTestClient().query(
+            document,
+            variables={"data": {**_CREATE_DATA, **data}},
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+
+    assert response_json(result.response) == _field_refusal(root, field, message)
+    assert await models.ScalarSpecimen.objects.acount() == 0
 
 
 #: The ``ViaPosted`` surfaces, binding posted text: create and update root fields and inputs.

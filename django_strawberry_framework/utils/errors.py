@@ -28,6 +28,9 @@ write flavors):
   the database cannot bind answers, on a filter (``filters/sets.py::_unbindable_value_errors``,
   which asks Django to build and compile the filter's own predicate) and on a write
   (``unstorable_value``);
+- ``UNREPRESENTABLE_IN_ZONE_MESSAGE`` - the message a datetime the current time zone
+  cannot present answers where a form widget splits it into that zone's wall clock
+  (``utils/widgets.py::_decompressed``);
 - ``unbindable_temporal`` - whether PostgreSQL refuses a datetime or time bound into a
   ``DateTimeField`` / ``TimeField`` column for its UTC offset (``refuses_utc_offset``),
   past the adapter Django's own ``Field.get_db_prep_value`` asks; the identity decode's
@@ -141,6 +144,7 @@ __all__ = [
     "NON_FIELD_ERROR_KEY",
     "PAGINATION_INVALID_ERROR_CODE",
     "UNBINDABLE_TEMPORAL_MESSAGE",
+    "UNREPRESENTABLE_IN_ZONE_MESSAGE",
     "FieldError",
     "UnstorableText",
     "binds_integer",
@@ -753,6 +757,12 @@ def _unstorable_leaf(path: str, text: str) -> UnstorableText | None:
 #: The message a value the database cannot bind answers (``unbindable_temporal``,
 #: ``refuses_numeric_format``).
 UNBINDABLE_TEMPORAL_MESSAGE = "Enter a value the database can represent."
+
+#: The message a datetime the current time zone cannot present answers: a form widget that
+#: splits it into that zone's wall clock (``SplitDateTimeWidget.decompress``) refuses one
+#: whose date there leaves years 1..9999 (``utils/widgets.py::_decompressed``), a value
+#: the database may still store.
+UNREPRESENTABLE_IN_ZONE_MESSAGE = "Enter a value the current time zone can represent."
 
 
 def unbindable_temporal(

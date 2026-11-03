@@ -100,7 +100,10 @@ and the form-specific invariants this module owns:
   bare field names and none of those keys is re-keyed: each value whole under
   ``form.add_prefix(name)``, its parts under the widget's keys (a ``MultiWidget`` splits a
   value with its own ``decompress``, and one it cannot split, such as a hook's text for a
-  ``SplitDateTimeField``'s datetime, is a ``ConfigurationError`` before ``is_valid()``; a
+  ``SplitDateTimeField``'s datetime, is a ``ConfigurationError`` before ``is_valid()``, while
+  an aware datetime whose wall clock in the current time zone leaves years 1..9999 is the
+  field's ``invalid`` error there (``UNREPRESENTABLE_IN_ZONE_MESSAGE``), on an update
+  omitting the field over such a stored value too; a
   ``SplitArrayWidget`` gets one element per index, padded to its ``size`` with ``None``); a
   bound ``files`` mapping is re-keyed under the prefix; one already holding a key the form
   reads is left as bound (``_bind_under_form_keys``), a multi-key widget field's whole
@@ -118,10 +121,15 @@ and the form-specific invariants this module owns:
   the input does not expose keeps its form field name, and the form's
   ``NON_FIELD_ERRORS`` bucket lands on the ``"__all__"`` sentinel - the same
   keying a model ``full_clean()`` failure gets. A valid ``ModelForm`` whose instance
-  holds a datetime or time the pinned alias cannot store (or, on PostgreSQL, read back),
-  or a decimal past PostgreSQL ``numeric``'s format its column's own validators
-  accept, answers that column's ``invalid`` error before the save
-  (``_unstorable_value_errors``).
+  holds a date, datetime, time or duration the pinned alias cannot store (or, on
+  PostgreSQL, read back), or a decimal past PostgreSQL ``numeric``'s format its column's
+  own validators accept, answers that column's ``invalid`` error before the save
+  (``_unstorable_value_errors``), whether a form field cleaned it or a ``clean_<field>``,
+  form ``clean()`` or model ``clean()`` set it. Where Django's own model validation
+  inside ``is_valid()`` raises ``OverflowError`` converting such a value (an aware
+  datetime a hook sets on a ``DateField``, a unique column's value bound by the uniqueness
+  query), each column the same rule refuses is that error, beside the form's errors
+  collected before it (``_bound_form_or_field_errors``).
 
 - **Write via the ``ModelForm``'s save / ``perform_mutate`` (plain), wrapped by
   the reused save-time mappers** (``save_or_field_errors``; a ``ModelForm`` update
@@ -973,8 +981,10 @@ def _widget_parts(
     widget reading one, each part under its own key for a ``MultiWidget`` /
     ``SplitArrayWidget``. A value the widget cannot read (a list longer than a
     ``SplitArrayWidget``'s ``size``) answers Django's ``ArrayMaxLengthValidator``
-    ``ValidationError`` instead; one a ``MultiWidget``'s ``decompress`` cannot split (the
-    text a hook binds for a datetime) raises ``ConfigurationError``. A ``disabled`` field
+    ``ValidationError`` instead, and so does an aware datetime a ``SplitDateTimeWidget``
+    cannot split into the current time zone's wall clock (its ``invalid`` error); one a
+    ``MultiWidget``'s ``decompress`` cannot split (the text a hook binds for a datetime)
+    raises ``ConfigurationError``. A ``disabled`` field
     reads no data (Django cleans its initial), so its value is bound whole under that one
     key, never split nor refused.
     """
@@ -1078,7 +1088,8 @@ def _bind_under_form_keys(form: forms.BaseForm) -> dict[str, list[ValidationErro
     ``is_bound`` reads only whether either mapping was passed.
 
     Returns the errors of each field whose value its widget cannot read (a list longer
-    than a ``SplitArrayWidget``'s ``size``), keyed by field name.
+    than a ``SplitArrayWidget``'s ``size``, a datetime a ``SplitDateTimeWidget`` cannot split
+    into the current time zone's wall clock), keyed by field name.
     """
     moved = {name: keys for name in form.fields if (keys := _form_keys(form, name))}
     errors: dict[str, list[ValidationError]] = {}
@@ -1318,15 +1329,30 @@ def _bound_form_or_field_errors(
     Returns ``(form, None)`` on success or ``(None, errors)`` on a validation
     failure, the errors keyed through the request's published ``specs``. A value the bound
     form's widget cannot read (a list longer than a ``SplitArrayWidget``'s ``size``, sent,
-    reconstructed from the located row, or an omitted field's initial) is that field's
-    ``max_length`` error before ``is_valid()`` runs (``_bind_under_form_keys``). ``holder``
+    reconstructed from the located row, or an omitted field's initial; a datetime a
+    ``SplitDateTimeWidget`` cannot split into the current time zone's wall clock) is that
+    field's error before ``is_valid()`` runs (``_bind_under_form_keys``). ``holder``
     is the ``mutation_cls`` instance whose ``get_form`` hook builds the form. On the
     ``ModelForm`` flavor the built form's ``instance`` must be a row of the mutation's
     model (or a subclass), or the request is a ``ConfigurationError`` before any bind or
     ``is_valid()``, nothing written (``_require_backing_row``). On an update, a column
-    the input omitted keeps its stored value where the form's cleaning of it is the form
-    field's own (``_keep_omitted_columns``). The
-    persist hook (``form.save`` vs ``perform_mutate``) stays at the caller so
+    the input omitted keeps its stored value where the form field's cleaning of it is the
+    form field's own (``_keep_omitted_columns``).
+
+    Django's model validation converts a ``ModelForm``'s cleaned values inside
+    ``is_valid()`` (``_post_clean``: ``construct_instance``, then ``Model.full_clean`` and
+    ``validate_unique``), and a value past what Python represents raises ``OverflowError``
+    there instead of a ``ValidationError``: ``DateField.to_python`` making the aware
+    datetime a ``clean_<field>``, form ``clean()``, model ``clean()`` or form field subclass
+    answers naive in the default time zone, a unique column's value bound by the uniqueness
+    query. ``form.instance`` then holds the value the save would write, so each column the
+    write-side rule refuses (``_unstorable_value_errors``) is its ``invalid`` error, merged
+    with the errors the form collected before the overflow, and ``is_valid()`` is never run
+    again. An overflow on a plain form, which holds no row, or one naming no such column (a
+    hook's own arithmetic, a model ``clean()`` setting a column the form does not declare)
+    is the application's and propagates.
+
+    The persist hook (``form.save`` vs ``perform_mutate``) stays at the caller so
     ModelForm can return ``form.instance`` while a plain ``Form`` has no instance
     slot.
     """
@@ -1335,7 +1361,8 @@ def _bound_form_or_field_errors(
     reconstructed = {name: form_data[name] for name in omitted}
     form = holder.get_form(info, data=form_data, files=provided_files, instance=instance)
     # ``_primary_type is None`` is the plain flavor, whose form has no row to write.
-    if mutation_cls._primary_type is not None:
+    model_form = mutation_cls._primary_type is not None
+    if model_form:
         _ = _require_backing_row(mutation_cls, form, saved=False)
     unbindable = _bind_under_form_keys(form)
     if instance is not None:
@@ -1344,7 +1371,16 @@ def _bound_form_or_field_errors(
     if unbindable:
         return None, _form_errors_to_field_errors(unbindable, specs)
     stored = _omitted_column_values(form, omitted)
-    if not form.is_valid():
+    try:
+        valid = form.is_valid()
+    except OverflowError:
+        if not model_form:
+            raise
+        overflowed = _unstorable_value_errors(require_instance(form, _ModelFormAny))
+        if not overflowed:
+            raise
+        return None, _form_errors_to_field_errors(form.errors.as_data() | overflowed, specs)
+    if not valid:
         return None, _form_errors_to_field_errors(form.errors.as_data(), specs)
     _keep_omitted_columns(form, stored, reconstructed)
     return form, None
@@ -1623,7 +1659,9 @@ def _unstorable_value_errors(form: _ModelFormAny) -> dict[str, list[ValidationEr
     """Map each column the form writes a value the write alias cannot store to its error.
 
     Django's ``forms.DateTimeField`` / ``forms.TimeField`` range-check nothing past what
-    Python parses, so a valid form can carry an aware value the database refuses at
+    Python parses, and a ``clean_<field>``, form ``clean()`` or model ``clean()`` may set
+    any value (an aware datetime on a ``DateField``, a duration past what the backend's
+    integer binds), so a valid form can carry a value the database refuses at
     ``save()`` (the adapter's ``OverflowError`` / ``ValueError``) or, on PostgreSQL,
     stores but cannot load back at the re-fetch; ``forms.DecimalField`` and the model's
     ``DecimalValidator`` hold no digits for a column with no ``max_digits`` (and count none
@@ -1636,7 +1674,8 @@ def _unstorable_value_errors(form: _ModelFormAny) -> dict[str, list[ValidationEr
     midnight Django stores for it). A
     refused column answers the ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` error under its
     form field name, the form-error shape the envelope maps
-    (``_form_errors_to_field_errors``).
+    (``_form_errors_to_field_errors``). It also answers an ``is_valid()`` that raised
+    ``OverflowError`` converting such a value (``_bound_form_or_field_errors``).
     """
     instance = form.instance
     cleaned_data: Mapping[str, object] = form.cleaned_data
@@ -1831,8 +1870,8 @@ def _modelform_write_step(
     ``NULL`` in a ``null=True`` column whose explicit ``null`` (or omitted stored ``NULL``
     whose restore a consumer-set value skipped) its own form field cleaned to a value
     (``_store_nulls``), refuses a
-    datetime, time or decimal the write alias cannot store as that column's ``invalid``
-    error (``_unstorable_value_errors``), then writes through
+    date, datetime, time, duration or decimal the write alias cannot store as that column's
+    ``invalid`` error (``_unstorable_value_errors``), then writes through
     ``_modelform_save_or_field_errors`` (the form's save, split around
     ``commit=False`` on an update and a client-assigned-key create; the reused
     ``IntegrityError`` / ``ValidationError`` mappers, the update's ``conflict``, plus

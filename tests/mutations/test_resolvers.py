@@ -22,7 +22,10 @@ Other consumer writes live in
 naive datetimes and JSON text preflight live in
 ``examples/fakeshop/test_query/test_scalars_mutation_api.py``. A decimal past PostgreSQL
 ``numeric``'s format in a column with no ``max_digits``, which fakeshop cannot declare on
-the Django floor, is written here through an alias that reads as PostgreSQL.
+the Django floor, is written here through an alias that reads as PostgreSQL. No fakeshop
+model has a ``clean()`` rewriting a column or a ``DurationField`` mapped to text, so the
+storability rule over the values ``clean_fields()`` and a model ``clean()`` leave is held
+here too.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ import contextlib
 import datetime
 import itertools
 import json
+import logging
 import threading
 import time
 import zoneinfo
@@ -83,6 +87,7 @@ from django_strawberry_framework.mutations.inputs import (
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.types.converters import SCALAR_MAP
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
@@ -3994,3 +3999,229 @@ def test_model_write_holds_the_decimal_its_column_to_python_gives(
         assert is_object_dict(payload), payload
         assert payload["errors"] == []
         assert UnboundedAmount.objects.get().rounded == Decimal(0)
+
+
+class CleanedStamp(models.Model):
+    """A model ``clean()`` rewriting a column the write stores, chosen by the ``label`` sent.
+
+    ``day-instant`` replaces the unique ``day`` with the aware midnight UTC of its date, which
+    Django stores as its date in the default time zone; ``noted-instant`` sets ``noted``, a
+    column the mutations below never provide; ``day-refused`` does what ``day-instant`` does
+    and refuses ``day`` itself. ``span`` is a ``DurationField``, which a project maps to a text
+    scalar Django's own ``clean_fields()`` parses.
+    """
+
+    label: models.TextField[str | Combinable, str] = models.TextField()
+    day: models.DateField[str | datetime.date | Combinable | None, datetime.date | None] = (
+        models.DateField(null=True, blank=True, unique=True)
+    )
+    noted: models.DateField[str | datetime.date | Combinable | None, datetime.date | None] = (
+        models.DateField(null=True, blank=True)
+    )
+    span: models.DurationField[object, datetime.timedelta | None] = models.DurationField(
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "mutations_cleaned_stamp"
+
+    @override
+    def clean(self) -> None:
+        """Rewrite ``day`` or ``noted`` as ``label`` names (the class docstring)."""
+        if self.label == "noted-instant":
+            self.noted = datetime.datetime(1, 1, 1, 0, 30, tzinfo=datetime.timezone.utc)
+        elif self.label in {"day-instant", "day-refused"} and self.day is not None:
+            midnight = datetime.datetime.combine(self.day, datetime.time.min)
+            self.day = midnight.replace(tzinfo=datetime.timezone.utc)
+            if self.label == "day-refused":
+                raise ValidationError(
+                    {"day": ValidationError("Refused by clean().", code="refused")},
+                )
+
+
+def _create_cleaned_stamp(data: dict[str, object], written: str) -> ExecutionResult:
+    """Run a model-flavor create of ``CleanedStamp``'s ``label`` and ``written`` columns."""
+
+    class CleanedStampT(DjangoType):
+        class Meta:
+            model = CleanedStamp
+            fields = ("label", written)
+            primary = True
+
+    class CreateCleanedStamp(DjangoMutation):
+        class Meta:
+            model = CleanedStamp
+            operation = "create"
+            fields = ("label", written)
+            permission_classes = [_AllowAll]
+
+    @strawberry.type
+    class Mutation:
+        create_cleaned_stamp = DjangoMutationField(CreateCleanedStamp)
+
+    finalize_django_types()
+    del CleanedStampT
+    input_type = f"CleanedStamp{''.join(sorted(('Label', written.title())))}Input"
+    return _schema(Mutation).execute_sync(
+        f"mutation($d: {input_type}!) {{ createCleanedStamp(data: $d) "
+        "{ result { label } errors { field messages codes path } } }",
+        variable_values={"d": data},
+    )
+
+
+def _stored_cleaned_stamps() -> list[tuple[object, ...]]:
+    """Every ``CleanedStamp`` row's label, day and span."""
+    return list(CleanedStamp._base_manager.order_by("pk").values_list("label", "day", "span"))
+
+
+def _unstorable_errors(field: str) -> list[dict[str, object]]:
+    """The ``invalid`` envelope a value the database cannot store answers under ``field``."""
+    return [
+        {
+            "field": field,
+            "messages": ["Enter a value the database can represent."],
+            "codes": ["invalid"],
+            "path": [field],
+        },
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "label",
+        "day",
+        "errors",
+        "stored_day",
+    ),
+    [
+        pytest.param(
+            "day-instant",
+            "0001-01-01",
+            _unstorable_errors("day"),
+            None,
+            id="year-one-instant",
+        ),
+        pytest.param(
+            "day-instant",
+            "2021-06-15",
+            [],
+            datetime.date(2021, 6, 14),
+            id="in-range-instant",
+        ),
+        pytest.param(
+            "day-refused",
+            "0001-01-01",
+            [
+                {
+                    "field": "day",
+                    "messages": ["Refused by clean()."],
+                    "codes": ["refused"],
+                    "path": ["day"],
+                },
+            ],
+            None,
+            id="refused-by-clean",
+        ),
+    ],
+)
+@override_settings(TIME_ZONE="America/New_York")
+def test_model_clean_datetime_the_unique_date_column_cannot_store_is_the_field_error(
+    label: str,
+    day: str,
+    errors: list[dict[str, object]],
+    stored_day: datetime.date | None,
+) -> None:
+    """A model ``clean()``'s aware datetime whose date leaves years 1..9999 is refused.
+
+    ``clean()`` runs after the decode held the date sent to the storability rule, and
+    leaves ``day`` the aware midnight UTC of ``0001-01-01``, whose date under
+    ``America/New_York`` falls in year 0: Django's own conversion of it would raise
+    ``OverflowError`` binding the unique column's uniqueness query, then the save. The model
+    flavor holds each provided column the instance then carries to the same rule before
+    that query: the ``day`` ``invalid`` error with nothing written. A column ``clean()``
+    already refused keeps its own error alone, and an in-range day is stored as its date in
+    the default time zone.
+    """
+    with _tables(CleanedStamp):
+        result = _create_cleaned_stamp({"label": label, "day": day}, "day")
+        stored = _stored_cleaned_stamps()
+
+    assert result.errors is None, result.errors
+    assert _json_at(result.data, "createCleanedStamp", "errors") == errors
+    assert stored == ([] if stored_day is None else [(label, stored_day, None)])
+
+
+@pytest.mark.django_db(transaction=True)
+@override_settings(TIME_ZONE="America/New_York")
+def test_model_clean_value_on_a_column_the_input_does_not_provide_stays_the_application_s(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A model ``clean()`` setting a value on a column the input does not provide fails the save.
+
+    ``noted`` is no input field, so ``clean()``'s aware datetime there is the application's
+    own value: the storability rule holds only the provided columns, and Django's conversion
+    at the save raises the ``OverflowError`` as the request's error, nothing written.
+    """
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+    with _tables(CleanedStamp):
+        result = _create_cleaned_stamp({"label": "noted-instant"}, "day")
+        stored = _stored_cleaned_stamps()
+
+    assert result.errors is not None
+    assert [error.message for error in result.errors] == ["An unexpected error occurred."]
+    logged = [
+        record.exc_info[1]
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert [type(error) for error in logged] == [OverflowError], logged
+    assert stored == []
+
+
+@pytest.mark.skipif(
+    connection.vendor != "sqlite",
+    reason="SQLite binds a duration as its microsecond count, an integer of 64 bits",
+)
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("span", "errors", "stored"),
+    [
+        pytest.param(
+            "106751992 00:00:00",
+            _unstorable_errors("span"),
+            [],
+            id="past-64-bits",
+        ),
+        pytest.param(
+            "1 00:00:00",
+            [],
+            [("spanned", None, datetime.timedelta(days=1))],
+            id="in-range",
+        ),
+    ],
+)
+def test_text_scalar_duration_parsed_past_the_backend_integer_is_the_field_error(
+    monkeypatch: pytest.MonkeyPatch,
+    span: str,
+    errors: list[dict[str, object]],
+    stored: list[tuple[object, ...]],
+) -> None:
+    """A ``DurationField`` a project maps to text holds the duration ``clean_fields()`` parses.
+
+    The decode holds the text sent, which the storability rule cannot read as a duration;
+    ``clean_fields()`` writes back the ``timedelta`` it parses, which SQLite cannot bind past
+    64 bits of microseconds. The model flavor holds the parsed value to the rule: the
+    ``span`` ``invalid`` error with nothing written, while a one-day duration is stored.
+    """
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    with _tables(CleanedStamp):
+        result = _create_cleaned_stamp({"label": "spanned", "span": span}, "span")
+        written = _stored_cleaned_stamps()
+
+    assert result.errors is None, result.errors
+    assert _json_at(result.data, "createCleanedStamp", "errors") == errors
+    assert written == stored

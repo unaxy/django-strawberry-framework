@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 411 done, 98 to do. The CHANGELOG entries filed here moved to
+Progress: 412 done, 97 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2470,6 +2470,22 @@ Progress: 411 done, 98 to do. The CHANGELOG entries filed here moved to
   answer rather than the copy's provenance stamp (`origin="declared"` says a consumer owns the object, not which set
   declares it). Docstring only; pinned by
   `tests/filters/test_sets.py::test_a_borrowed_expanded_copy_is_its_borrowers_own_filter`
+- [x] 681. A value a write flavor's own validation turns into one the database cannot store answers the field's
+  `invalid` "Enter a value the database can represent." instead of the masked error, with nothing written: on the form
+  flavor, a `clean_<field>`, form `clean()`, model `clean()`, field subclass or `__init__`-swapped field leaving an
+  aware datetime on a `DateField` (or a unique column bound by `validate_unique`) that Django's conversion inside
+  `is_valid()` overflows is answered from the write rule beside the form's earlier errors, without a second
+  `is_valid()` (`forms/resolvers.py::_bound_form_or_field_errors`); a plain form's overflow, or one naming no such
+  column, stays the application's. On the model flavor each provided column `clean_fields()` or a model `clean()`
+  leaves unstorable (a text-mapped `DurationField` past 64 bits, a `clean()`'s aware datetime) is held before the
+  uniqueness and constraint checks (`mutations/resolvers.py::_unstorable_cleaned_errors`). A `SplitDateTimeWidget`
+  handed an aware datetime whose wall clock in the current time zone leaves years 1..9999 answers `invalid` "Enter a
+  value the current time zone can represent." (`utils/errors.py::UNREPRESENTABLE_IN_ZONE_MESSAGE`,
+  `utils/widgets.py::_decompressed`) instead of the masked `ConfigurationError`, on a write (an update omitting the
+  field included) and as a filter's `FILTER_INVALID` (`filters/sets.py::FilterSet._validate_form_or_raise`). Live rows
+  in `test_scalars_mutation_api.py` (the new `ScalarSpecimenDayInstantForm` pair) and
+  `test_filter_widget_binding_api.py`; package rows in `tests/forms`, `tests/mutations` and
+  `tests/utils/test_widgets.py`; README, the glossary and spec-027 / 036 / 038 say so
 
 ## Outside review of the fixes
 
@@ -2531,12 +2547,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 681. (robustness) A `DjangoModelFormMutation` whose `forms.DateTimeField` over a `DateField` column (a pairing
-  the build accepts), or whose `clean_<field>` hook, yields an aware datetime Django cannot make naive in the default
-  zone (year 1 / 9999 across an offset) raises `OverflowError` inside `form.is_valid()` (`DateField.to_python`), the
-  masked error, before the package's unstorable check runs (`forms/resolvers.py`). Found fact-finding 650
-  The `forms/resolvers.py` docstrings describing the write-side check as "datetime or time" columns go stale with 650
-  (DateField and DurationField columns are held too): fix them with this row.
 - [ ] 683. (robustness) `nodes(ids:)` over a type selecting a to-one relation's `id` (`AnnotationType`, `profile { id }`)
   runs one query per row: the node fields dispatch without an optimizer pass, so the relation is never planned.
   Decide planning the node root fields or documenting the cost. Found fixing 606
@@ -2628,12 +2638,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   range raw: `?f=999999999 00:00:00` under `DjangoFilterBackend` / `FilterSet(data=...)` raises `OverflowError`
   ("Python int too large to convert to SQLite INTEGER"), a 500, where an integer column's `in` drops a member
   naming no row (`filters/base.py::_identifying_members`). Found fixing 527
-- [ ] 725. (robustness) A write's storability preflight runs after the flavor's own validation, but a `ModelForm`'s
-  `validate_unique()` / `validate_constraints()` and DRF's `UniqueValidator` bind the value inside `is_valid()`, so a
-  unique decimal column sent a value past PostgreSQL `numeric`'s format, or a unique temporal column sent a value the
-  database cannot store, still answers a masked error (`DataError` on PostgreSQL; `OverflowError` on SQLite for an
-  aware datetime at a year bound through a `ModelForm` over `DateTimeField(unique=True)`). Shared with 381's temporal
-  preflight. Found fixing 530
+- [ ] 725. (robustness) A `ModelForm`'s `validate_unique()` / `validate_constraints()` and DRF's `UniqueValidator`
+  bind the value inside `is_valid()`, before the write's storability preflight, so a unique decimal column sent a
+  value past PostgreSQL `numeric`'s format still answers a masked `DataError`, and so does a unique temporal column
+  the database refuses when `USE_TZ = False` (SQLite's adapter `ValueError`, which 681's `OverflowError` seam does not
+  catch); the `OverflowError` cells on SQLite closed with 681. Shared with 381's temporal preflight. Found fixing 530
 - [ ] 726. (robustness) On SQLite a bounded `DecimalField` (`max_digits` set) holding a value SQLite stores as an
   infinity (a lax serializer field's value, or `1E+309` in `DecimalField(max_digits=400, decimal_places=0)`) is
   written, then the post-write re-fetch raises `decimal.InvalidOperation` from the converter's `quantize`: a masked

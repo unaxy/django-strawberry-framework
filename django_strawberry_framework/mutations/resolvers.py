@@ -53,6 +53,10 @@ and the load-bearing invariants this module owns:
   a check with a provided field (``CleanExcludes``), so a ``UniqueConstraint``
   duplicate or a failed ``CheckConstraint`` is caught here as a ``ValidationError``
   before ``save()``; a multi-field constraint keys to the ``"__all__"`` sentinel. A
+  provided column ``clean_fields()`` or a model ``clean()`` leaves holding a value the
+  write alias cannot store (a ``DurationField``'s text parsed past the backend's integer,
+  an aware datetime a ``clean()`` sets on a ``DateField``) is its ``invalid`` error before
+  the uniqueness query binds it (``_unstorable_cleaned_errors``). A
   concurrent-race ``IntegrityError`` at ``save()`` maps to the same envelope as a
   documented best-effort fallback: a create INSERTs (``save_new_row``), so a row
   committed under a client-assigned key between the check and the save is that
@@ -145,12 +149,14 @@ from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_NOT_FOUND,
     FIELD_ERROR_CODE_NULL,
     FIELD_ERROR_CODE_PROTECTED,
+    UNBINDABLE_TEMPORAL_MESSAGE,
     FieldError,
     build_error_key_map,
     field_error,
     integrity_error_field_errors,
     model_field_error_names,
     null_field_error,
+    unstorable_value,
     validation_error_to_field_errors,
 )
 from django_strawberry_framework.utils.input_values import UNSET
@@ -211,7 +217,7 @@ from .operations import operation_takes_id
 from .permissions import _require_sync_bool_auth_result
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Iterable, Sequence
+    from collections.abc import Callable, Container, Coroutine, Iterable, Sequence
     from typing import Protocol, TypeAlias, TypeVar
 
     from django.db import models
@@ -1802,7 +1808,9 @@ def _full_clean_or_field_errors(
 
     ``instance.full_clean(exclude=exclude.fields, validate_unique=False,
     validate_constraints=False)`` runs ``clean_fields()`` and ``clean()`` (a model's own
-    ``full_clean`` override included) with every unprovided field excluded, then
+    ``full_clean`` override included) with every unprovided field excluded, each provided
+    column the instance then holds a value of that the write alias cannot store is its
+    ``invalid`` error (``_unstorable_cleaned_errors``), then
     ``validate_unique()`` and ``validate_constraints()`` run with ``exclude.checks``
     plus every field an earlier step failed, exactly as ``Model.full_clean`` adds them,
     and the errors merge through ``ValidationError.update_error_dict`` in the order
@@ -1828,6 +1836,7 @@ def _full_clean_or_field_errors(
         )
     except ValidationError as exc:
         errors = exc.update_error_dict(errors)
+    errors |= _unstorable_cleaned_errors(instance, exclude.fields, errors)
     checks = set(exclude.checks)
     for validate in (instance.validate_unique, instance.validate_constraints):
         checks |= {name for name in errors if name != NON_FIELD_ERRORS}
@@ -1838,6 +1847,34 @@ def _full_clean_or_field_errors(
     if errors:
         return validation_error_to_field_errors(ValidationError(errors), error_key_map())
     return None
+
+
+def _unstorable_cleaned_errors(
+    instance: models.Model,
+    unprovided: Container[str],
+    refused: Container[str],
+) -> dict[str, list[ValidationError]]:
+    """Map each provided column holding a value the write alias cannot store to its error.
+
+    The decode holds each value the client sent to ``utils/errors.py::unstorable_value``
+    (``unstorable_value_error``), but ``clean()`` and ``clean_fields()`` run after it:
+    ``clean_fields()`` writes back each column's ``to_python`` (a ``DurationField``'s text
+    parsed to its ``timedelta``) and a model ``clean()`` may set its own value (an aware
+    datetime on a ``DateField``). Each column the input provided, outside ``unprovided``
+    and not already ``refused``, is read from ``instance``, the value ``validate_unique()``
+    binds and the save writes, and held to the same rule on the write pipeline's pinned
+    alias: a refused one answers the ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` error under
+    its model field name, which also keeps it out of the uniqueness and constraint
+    queries. A column the input does not provide is the application's own: a model
+    ``clean()`` setting a value it cannot store fails at the save.
+    """
+    return {
+        field.name: [ValidationError(UNBINDABLE_TEMPORAL_MESSAGE, code=FIELD_ERROR_CODE_INVALID)]
+        for field in instance._meta.concrete_fields
+        if field.name not in unprovided
+        and field.name not in refused
+        and unstorable_value(field, read_attr(instance, field.attname), pinned_write_alias)
+    }
 
 
 def _bound_model_fields(mutation_cls: type[DjangoMutation]) -> ModelFieldIndex:
