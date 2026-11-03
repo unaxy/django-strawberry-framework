@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 406 done, 91 to do. The CHANGELOG entries filed here moved to
+Progress: 407 done, 94 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2415,6 +2415,15 @@ Progress: 406 done, 91 to do. The CHANGELOG entries filed here moved to
   `test_model_write_leaves_a_decimal_a_project_validator_refuses_to_it`), live
   `test_scalars_mutation_api.py::test_decimal_postgresql_cannot_bind_*` (the `pg` row unrun locally); README "Writing
   data", the `FieldError envelope` glossary term and spec-027 / 036 / 038 / 039 say so
+- [x] 537. A `method=` filter whose form field is built only per request (`AllValuesMultipleFilter`, a consumer
+  `field` reading `self.model` / `self.parent`) is typed from the model field its `field_name` names, as every
+  `method=` filter keeps its column, instead of refused at schema build; its form field, built per request, validates
+  each value (`invalid_choice` for a value no row holds) before the method receives the cleaned list, as plain
+  django-filter does. `filters/inputs.py::_refuse_method_without_form_field` takes the caller's `model_field` and
+  reads the form field only without one; a declaration with neither is still refused, its message now advising a model
+  field. Live rows `test_library_api.py::test_an_all_values_multiple_method_filter_*`, the multiple-choice publishes
+  row and the advised-spelling row; package rows in `tests/filters/test_inputs.py` (the `method-without-field` refusal
+  rows now columnless, the per-request `isnull` row); spec-027 Decision 4 says so
 
 ## Outside review of the fixes
 
@@ -2476,10 +2485,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 537. (robustness) `AllValuesMultipleFilter(field_name=<column>, method=...)` is refused at schema build ("exposes
-  no form field") though its column alone would type it, as the same filter without `method=` is typed: its form field
-  reads the per-request `model`, so the unbound copy builds none and the catch-all refuses before the column is
-  consulted. Found implementing 517
 - [ ] 538. (robustness) A `DateRangeFilter` declared on a `Choices` column builds and types as the column's enum, while
   its own form field accepts only its fixed date-range keys, so every enum member answers `FILTER_INVALID` "Select a
   valid choice"; the same filter on a plain column is refused at schema build. Found verifying 518
@@ -2603,6 +2608,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
   written, then the post-write re-fetch raises `decimal.InvalidOperation` from the converter's `quantize`: a masked
   top-level error and a rolled-back write where README "Writing data" says a value the database cannot store is
   refused before the write. A column with no `max_digits` reads the same row back as `Infinity`. Found fixing 530
+- [ ] 730. (robustness) A declared `CharFilter` / `NumberFilter` / `ListFilter` / `MultipleChoiceFilter` /
+  `AllValuesMultipleFilter`, with or without `method=`, whose `field_name` ends on a relation (forward FK `branch` /
+  `branch_id`, reverse FK, M2M, `GenericForeignKey`, `branch__shelves`) is refused at schema build with
+  `types/converters.py::scalar_for_field`'s DjangoType advice ("Unsupported Django field type 'ForeignKey' ... Add an
+  entry to SCALAR_MAP or exclude this field via Meta.exclude"), which names no FilterSet remedy, though django-filter
+  serves a forward key and the package types relation keys for its raw-pk filters
+  (`filters/base.py::_compared_columns`). Related: 375, 722. Found researching 537
+- [ ] 733. (robustness) A declared filter can publish a value kind its own form refuses for every value:
+  `NumberFilter(field_name=<decimal column>, lookup_expr="isnull")` publishes `Boolean` and answers `true` / `false`
+  with `FILTER_INVALID` "Enter a number." (plain django-filter refuses `"true"` too and raises `ValueError` for
+  `"1"`), and a plain `AllValuesMultipleFilter(lookup_expr="year")` publishes the transform's `[Int!]` while its
+  choices are the column's dates (`invalid_choice` for every year). The build-time analogue of 538. Found verifying
+  537
+- [ ] 734. A plain `AllValuesMultipleFilter(field_name="code")` on a `RelatedFilter` child set (Shelf under Book),
+  served flat on the parent (`shelfPick`), answers an uncoded "Cannot resolve keyword 'code' into field", while the
+  nested branch and the same declaration with `method=` both work. Found verifying 537
 
 ## To do: holes found re-checking the fixes
 
@@ -2953,6 +2974,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   column's own validators in the write preflight? Since 530 the docs tell the consumer to declare each such field as
   strict as its column. The same shape exists for a `CharField` without `max_length` over a bounded column. Found
   fixing 530 (16 cells of its probe grid)
+- [ ] 731. Decide whether a `method=` filter with no model field whose form field is built only per request is typed
+  like its plain twin instead of refused (`filters/inputs.py::_refuse_method_without_form_field`): a `field` reading
+  `self.parent.queryset` over a queryset annotation alias, a consumer `Filter` whose `field` reads `self.model`, a
+  transform path (`opened_on__year`) and a JSON key path (`payload__k`) each build without `method=` (`String`, `Int`,
+  `[JSON!]`) and are refused with it, though the alias and consumer shapes serve requests; a columnless
+  `AllValuesMultipleFilter` breaks every request on its set with or without `method=`, as in django-filter. Typing
+  them retires a documented `ConfigurationError` (spec-027 Decision 4). Found fixing 537
 
 ## Hunt not finished in t3
 

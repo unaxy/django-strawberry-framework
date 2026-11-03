@@ -546,11 +546,25 @@ def test_a_consumer_lookup_registered_as_isnull_takes_its_own_operand() -> None:
     assert labels == expected == ["kept"]
 
 
+class _ModelBuiltFilter(Filter):
+    """A consumer ``Filter`` whose ``field`` reads the bound ``model`` before building it."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        _ = read_attr(self, "model")
+        return super().field
+
+
 @pytest.mark.parametrize("field_name", ["price", "label"], ids=["decimal-column", "text-column"])
 @pytest.mark.parametrize(
     ("filter_class", "expected"),
-    [(NumberFilter, decimal.Decimal | None), (Filter, bool | None)],
-    ids=["form-cleans-a-number", "form-passes-any-value"],
+    [
+        (NumberFilter, decimal.Decimal | None),
+        (Filter, bool | None),
+        (_ModelBuiltFilter, bool | None),
+    ],
+    ids=["form-cleans-a-number", "form-passes-any-value", "form-built-per-request"],
 )
 def test_a_method_filter_named_isnull_is_typed_by_a_form_cleaning_its_own_kind(
     filter_class: type[Filter],
@@ -561,7 +575,9 @@ def test_a_method_filter_named_isnull_is_typed_by_a_form_cleaning_its_own_kind(
 
     The method receives what the form cleans: a ``NumberFilter`` hands it a number, which
     ``Boolean`` would refuse, whatever the column (``label``'s ``String`` would refuse it
-    too); a bare ``Filter`` passes any value through and stays ``Boolean``.
+    too); a bare ``Filter`` passes any value through and stays ``Boolean``, and so does a
+    filter over a column whose form field is built only per request (its ``field`` reads the
+    bound ``model``), since no form field names another kind at schema build.
     """
 
     class MethodNullFilter(FilterSet):
@@ -899,18 +915,20 @@ def test_convert_filter_to_input_annotation_malformed_filter_diagnostics() -> No
             FilterSet,
         )
     assert str(exc_info.value).startswith("NoFieldFilter(method='filter_custom') on <")
-    assert "exposes no form field" in str(exc_info.value)
+    assert "is backed by no model field and exposes no form field" in str(exc_info.value)
 
     # ``AllValuesMultipleFilter`` reads the per-request ``model`` to build its field, so
-    # unbound it builds none; the refusal advises the two spellings that build one.
+    # unbound it builds none; with no column either, the refusal advises the spellings
+    # that type it.
     unbound = AllValuesMultipleFilter(field_name="city", method="filter_custom")
     with pytest.raises(ConfigurationError) as exc_info:
         convert_filter_to_input_annotation(unbound, None, None, FilterSet)
     assert str(exc_info.value) == (
-        f"AllValuesMultipleFilter(method='filter_custom') on {unbound!r} exposes no form "
-        "field; put the method on a typed filter primitive (`CharFilter(method=...)`, "
-        "`NumberFilter(method=...)`, `ListFilter(method=...)` for a list value, ...) or on a "
-        "`Filter` subclass declaring `field_class` at class level."
+        f"AllValuesMultipleFilter(method='filter_custom') on {unbound!r} is backed by no "
+        "model field and exposes no form field, so nothing types its value; point field_name "
+        "at a model field, or put the method on a typed filter primitive "
+        "(`CharFilter(method=...)`, `NumberFilter(method=...)`, `ListFilter(method=...)` for "
+        "a list value, ...) or on a `Filter` subclass declaring `field_class` at class level."
     )
 
 
@@ -1304,11 +1322,12 @@ _LEAF_REFUSAL_CASES = {
         "PostgreSQL range column, which the schema does not publish.",
     ),
     "method-without-field": _LeafRefusalCase(
-        lambda: AllValuesMultipleFilter(field_name="topic", method="filter_leaf"),
+        lambda: AllValuesMultipleFilter(method="filter_leaf"),
         "AllValuesMultipleFilter(method='filter_leaf') on {declared} ({child}.leaf, reached "
         "through {parent}.shelf)",
         "AllValuesMultipleFilter(method='filter_leaf') on {declared}",
-        " exposes no form field; put the method on a typed filter primitive "
+        " is backed by no model field and exposes no form field, so nothing types its value; "
+        "point field_name at a model field, or put the method on a typed filter primitive "
         "(`CharFilter(method=...)`, `NumberFilter(method=...)`, `ListFilter(method=...)` for "
         "a list value, ...) or on a `Filter` subclass declaring `field_class` at class level.",
     ),

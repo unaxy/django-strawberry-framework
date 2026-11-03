@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 171 to do.
+Progress: 0 done, 172 to do.
 
 ## From dry-0_0_15_3
 
@@ -681,6 +681,11 @@ Progress: 0 done, 171 to do.
   accept is now the field's `invalid` error with nothing written, on every write flavor, instead of a masked
   database error: any such value in a Django 6.1 `DecimalField` without `max_digits`, and a zero with a huge
   exponent in a bounded column. SQLite is unchanged: it stores a decimal as its nearest double
+- [ ] 732. CHANGELOG entry for item 537: a `method=` filter whose form field is built only per request
+  (`AllValuesMultipleFilter`, or a filter whose `field` reads the bound FilterSet's `model` / `parent`) over a model
+  field now builds, typed from that column, instead of being refused at schema build; its form still validates each
+  value (`invalid_choice` for a value no row holds) before the method runs. One with no model field is still refused,
+  its message now advising a model field
 
 ## From dry-upstream-0_0_15
 
