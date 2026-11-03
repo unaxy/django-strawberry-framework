@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 169 to do.
+Progress: 0 done, 170 to do.
 
 ## From dry-0_0_15_3
 
@@ -670,6 +670,12 @@ Progress: 0 done, 169 to do.
   refused with a `null` error, now updates. The form still validates the cleaned value, and a value a hook,
   `clean_<field>`, form `clean()` or model `clean()` sets is still written unless it equals the field's own
   cleaning (write that one in `save()`)
+- [ ] 723. CHANGELOG entry for item 527: a declared `ListFilter`, `ArrayFilter` or lone `RangeFilter` bound whose
+  `field_name` names a relation cleans each raw value as the target column the relation compares on (its
+  `to_field`, else the primary key), as `<relation>__<that column>` does: junk sent through `DjangoFilterBackend` or
+  `FilterSet(data=...)` is a form error (400) instead of a 500, and a padded text key matches; a `method=` filter
+  still receives its values as sent. An `ArrayFilter` `in` over an integer column, or a relation compared on one,
+  drops overflowing or fractional members as `ListFilter` does
 
 ## From dry-upstream-0_0_15
 

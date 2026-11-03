@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 404 done, 87 to do. The CHANGELOG entries filed here moved to
+Progress: 405 done, 89 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2381,6 +2381,23 @@ Progress: 404 done, 87 to do. The CHANGELOG entries filed here moved to
   `updateNullableScalarSpecimenViaForm` keeps a stored JSON object or list
   (`test_scalars_mutation_api.py::test_update_omitting_a_column_keeps_its_stored_value[json-object|json-list]`).
   The `str()` of a `payload` the client sends is item 720
+- [x] 527. fixed (the `ListFilter` / `ArrayFilter` half; a `RangeFilter` on a relation fails for valid bounds too, item
+  375, and stays): a declared `ListFilter` / `ArrayFilter` whose `field_name` is a relation, under a lookup Django
+  applies to the relation itself, cleans each element as the target column the relation compares on (its `to_field`,
+  else the primary key), as `<relation>__<that column>` does, through the column Django's related lookups prepare a
+  value through (`filters/base.py::_compared_value_column` over `::_compared_columns`, into `::_column_form_field`'s
+  `comparison_form_field`), never a row lookup. A junk raw element under `DjangoFilterBackend` / `FilterSet(data=...)`
+  is the form's 400 (`FILTER_INVALID` under a consumer string `SCALAR_MAP` entry) where Django's related lookup
+  raised a 500; an `in` over an integer column, or a relation compared on one, drops an overflowing or fractional
+  element for `ArrayFilter` as `ListFilter` already did (`::_integer_in_column`); a `RangeFilter` lone bound under
+  `gte` / `exact` on a relation is cleaned the same way. A `method=` filter, `range` on a relation, a multi-column
+  `ForeignObject`, a `GenericForeignKey` and a `lookup_expr` continuing across the relation pass through as sent.
+  Live rows in `test_raw_filter_forms_api.py` (`test_a_declared_list_over_an_integer_keyed_relation_*`,
+  `..._text_keyed_relation_*`, `..._cleans_only_where_its_lookup_compares_the_relation`,
+  `test_a_method_filter_over_a_relation_receives_each_raw_element_as_sent`, the `array-*` rows of
+  `test_a_public_integer_list_primitive_drops_members_the_column_cannot_convert`), package rows in
+  `tests/filters/test_base.py` (`test_declared_list_over_a_relation_*`); spec-027 Decision 4 rows and its fractional
+  edge case say so
 
 ## Outside review of the fixes
 
@@ -2442,11 +2459,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 527. (robustness) A declared `ListFilter` (or `RangeFilter`) whose `field_name` is a relation itself keeps
-  its elements uncleaned ("a relation's elements reach the ORM as sent"), so under `DjangoFilterBackend` a junk raw
-  value (`?tag=x` on a ForeignKey to an integer key) answers Django's `ValueError`, a 500, where a column path
-  (`tag__pk`) answers the form's 400; the schema build refuses such a declaration, so GraphQL cannot send it. Found
-  verifying 512
 - [ ] 530. (robustness) The three write flavors accept `"1e1000000"` (or `"1e-1000000"`) for a Django 6.1
   `DecimalField` with no `max_digits` (a serializer through an explicit `serializers.DecimalField(max_digits=None,
   decimal_places=None)`): PostgreSQL refuses the bind with a masked `DataError`, and SQLite stores it as `Infinity`
@@ -2556,6 +2568,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   client sends as its Python `str()` (`{"a": 1}` stored as `"{'a': 1}"`): the field cleans the decoded value as
   text. Split from 711 (its omitted half closed with 524); fact finding owes what the form's published input type
   is and whether the write is the consumer form's own choice
+- [ ] 721. (robustness) A declared `ListFilter` / `ArrayFilter` whose `lookup_expr` continues across a relation
+  (`ListFilter(field_name="holders", lookup_expr="year__in")`, `lookup_expr="pk__in"` / `"id__in"` over a relation)
+  or whose `field_name` is a `FilteredRelation` alias leaves its elements uncleaned, so `?f=x` under
+  `DjangoFilterBackend` / `FilterSet(data=...)` answers Django's `ValueError`, a 500. Typing question for the fix:
+  clean and type the element as the crossed column (`holders__year`'s `IntegerField`, the target pk for `pk__in`),
+  resolving `_bound_value_field` through the crossing walk (and the queryset for an alias) instead of answering the
+  relation. Found fixing 527
+- [ ] 724. (robustness) A `ListFilter` / `ArrayFilter` `in` over a `DurationField` binds a member past the backend's
+  range raw: `?f=999999999 00:00:00` under `DjangoFilterBackend` / `FilterSet(data=...)` raises `OverflowError`
+  ("Python int too large to convert to SQLite INTEGER"), a 500, where an integer column's `in` drops a member
+  naming no row (`filters/base.py::_identifying_members`). Found fixing 527
 
 ## To do: holes found re-checking the fixes
 
@@ -2893,6 +2916,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `range` `ListFilter` checking its length is part of (b) or (c). Declared django-filter CSV classes stay as
   django-filter runs them (507, 516). 316 and this row are one decision: a list- or range-shaped package filter
   declared with a scalar lookup
+- [ ] 722. Decide whether a `RangeFilter` whose `field_name` is a relation should continue to its key column. Since
+  527 a lone bound under a non-range `lookup_expr` (`gte`, `exact`) is cleaned as the key column, but an overflowing
+  bound still binds raw through Django's related lookups (`OverflowError`, a 500); continuing to the key column would
+  fix that and also make a two-bound `range` on a relation work, which reverses item 375 (Django registers no
+  `range` lookup on a relation, and django-filter's own `RangeFilter` fails the same way). Found fixing 527
 
 ## Hunt not finished in t3
 
