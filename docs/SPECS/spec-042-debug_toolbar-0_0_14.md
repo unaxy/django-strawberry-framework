@@ -1027,7 +1027,7 @@ lazy-symbol][glossary-pep-562-lazy-export] variant:
    The three-places-that-must-agree rule holds, and it names the **gated** trio:
    the package test compares the hint to the re-typed literal and the literal
    to the [`pyproject.toml`][pyproject] dev-group row, and
-   `tests/test_ci_governance.py::test_debug_toolbar_floor_constant_matches_the_pyproject_dependency_row`
+   `tests/test_ci_governance.py::test_each_floor_constant_matches_its_pyproject_dependency_row`
    compares `DEBUG_TOOLBAR_FLOOR` to the same row, so none of the three can
    move alone. It is not a census of everywhere the floor is written — the
    consumer docs restate it ungated — so a bump sweeps the tree rather than

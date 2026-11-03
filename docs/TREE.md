@@ -505,6 +505,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── _relation_fixtures.py         # Shared TEST-ONLY relation fixture models.
 ├── _soft_dependency.py           # Shared soft-dependency absence simulation for the optional-import guards.
 ├── _subprocess.py                # Shared fresh-interpreter isolation for tests whose claim is about a clean process.
+├── _workflows.py                 # Readers for the CI workflows under ``.github/workflows/``: YAML walkers, ``run`` commands, uv.
 ├── conftest.py                   # Shared package-test fixtures: registry isolation, script imports, stop signals, budgets.
 ├── test_app_registry_restore.py  # The suite-wide app-registry restore keeps a module-scope model registered.
 ├── test_apps.py                  # AppConfig tests for package registration and upstream patch dispatch.
@@ -873,6 +874,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── _relation_fixtures.py         # Shared TEST-ONLY relation fixture models.
 ├── _soft_dependency.py           # Shared soft-dependency absence simulation for the optional-import guards.
 ├── _subprocess.py                # Shared fresh-interpreter isolation for tests whose claim is about a clean process.
+├── _workflows.py                 # Readers for the CI workflows under ``.github/workflows/``: YAML walkers, ``run`` commands, uv.
 ├── conftest.py                   # Shared package-test fixtures: registry isolation, script imports, stop signals, budgets.
 ├── test_app_registry_restore.py  # The suite-wide app-registry restore keeps a module-scope model registered.
 ├── test_apps.py                  # AppConfig tests for package registration and upstream patch dispatch.
