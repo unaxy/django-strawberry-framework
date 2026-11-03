@@ -13,11 +13,15 @@ giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger a
 total (casts, or one rule's ignores) fails unless it carries a `Suppression-Growth-Approved:` trailer, the
 maintainer's consent.
 
-Progress: 32 done, 6 closed (survey verdicts), 7 open (items 41-45 from the 2026-11-02 review; one waits on
+Progress: 33 done, 6 closed (survey verdicts), 6 open (items 42-45 from the 2026-11-02 review; one waits on
 upstream, one is a behavior change outside typing, carded). Ignore comments: 707 lines (1897 at the start of 0.0.15's
 ignore sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
 
-## Pre-commit (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
+## Pre-commit snapshot (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
+
+Measured at 4ce779e1 (2026-10-13), when the config held nine hooks. It predates check-type-suppressions,
+truthful-reads, annotation-subscripts, import-spec-terms-check and check-spec-glossaries, so its hook list, file
+counts and total are not today's.
 
 | Hook | Result | Time | Scope |
 | --- | --- | --- | --- |
@@ -31,6 +35,9 @@ ignore sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
 | kanban anchors | pass | 1.1s | 77 cards, 149 glossary anchors |
 | citations | pass | 3.4s | 3400 citations |
 | **Total** | **9/9 pass** | **45s wall** | |
+
+A full re-measure (every hook, today's scope and timing) is scheduled after item 45, since items 42 and 45 change hook
+scope and timing.
 
 ## Done
 
@@ -286,6 +293,25 @@ ignore sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
   `uv sync --upgrade-package Django` stays unlocked (`--locked` fails on any Django newer than the lock) behind a
   `uv lock --check`. `tests/test_ci_governance.py::_uv_lock_problems` reads each shell segment and owns the lock
   rules; the floor-cell check reads the same segments. Reading and mutation tables prove each refusal
+- [x] 41. Trivial truths. `[project] classifiers` carries `Typing :: Typed`. `[tool.basedpyright] exclude` lists
+  `**/hunt-ws` (a bare entry is root-anchored there; ruff matches the name at any depth), and
+  `tests/test_ci_governance.py::test_basedpyright_excludes_every_tree_ruff_excludes` requires a `**/<name>` entry for
+  every `[tool.ruff] extend-exclude` name. basedpyright does not read `.gitignore`, so the table's comment owns its
+  scope and START.md and the `django.yml` step comment point to it instead of "git-ignored scratch trees"; the floor
+  config inherits the list through `extends`. Three whole-repo readers saw a ruff-excluded tree and now skip it through
+  `scripts/check_trailing_commas.py::has_ruff_excluded_segment` (or its per-name `is_ruff_excluded_name`):
+  `tests/test_ci_governance.py::_committable_files`, whose `git ls-files --cached --others` listing put a `hunt-ws/`
+  copy in the sweep-corpus census; `scripts/check_citations.py::iter_python_sources`, whose `rglob` over the source
+  trees put a nested copy (`tests/hunt-ws/`) in the citations corpus and the governance sweep corpus; and
+  `scripts/check_citations.py::_other_file_index`, whose `os.walk` resolved a pinpoint to a doc the repo lacks.
+  `scripts/check_trailing_commas.py::ruff_excluded_names` refuses an `extend-exclude` entry a literal name match
+  cannot read as ruff does (anchored, or a glob), so ruff's list holds literal names only.
+  `check_trailing_commas.py` already skipped the names, `scripts/workspace.py::is_excluded` drops every `*-ws` copy,
+  the tracked-only listings never list an untracked tree, the package-scoped walkers (truthful reads, annotation
+  subscripts) never leave the package, and `line_count.py` (informational) is left as is. Measured at 3.10, a stub
+  `-> Self` reads as `Unknown` (the stubs import `typing.Self`, which typeshed defines from 3.11), not `Any`;
+  `pyproject.toml` (with the floor config's reasons for its six rules off), START.md and "Rules off" say so. The
+  pre-commit table is labelled the 4ce779e1 snapshot, its re-measure scheduled after item 45
 
 ## Rules off
 
@@ -301,7 +327,7 @@ bare `class Meta:` the READMEs teach. `reportUnusedCallResult` (tests/ and the e
 5800 sites measured 2026-11-02): a test calls for side effects (fixture rows, `delete()`, a call inside `pytest.raises`).
 
 Off at the 3.10 floor only: the five `reportUnknown*` rules and `reportUnnecessaryTypeIgnoreComment`. django-stubs needs
-`typing.Self` (3.11), so at 3.10 every `-> Self` reads as unknown.
+`typing.Self` (3.11), so at 3.10 every `-> Self` reads as `Unknown`.
 
 ## Ignore refactors: survey verdicts
 
@@ -382,26 +408,21 @@ Survey verdicts recorded so nothing is re-tried blind:
 
 ## Open
 
-Items 40-45 come from the 2026-11-02 review of the typing setup (40 is done). Each lands as its own commit, in order.
+Items 40-45 come from the 2026-11-02 review of the typing setup (40 and 41 are done). Each lands as its own commit,
+in order.
 Not taken:
 - locked rules the floor pass turns off (the 3.11 pass enforces them, and the floor needs them off);
 - the growth gate passing a force push (the maintainer's own pushes);
 - `always_run` on the typing hooks (CI catches a deletion-only commit; it would add 16s per commit);
 - a mypy cross-check, typing at the declared dependency floors, and measuring `reportImportCycles` (cost over value).
 
-- [ ] 41. Trivial truths:
-  - Add the `Typing :: Typed` classifier to `[project] classifiers`.
-  - Add `hunt-ws` to `[tool.basedpyright] exclude`, matching ruff's `extend-exclude` and its comment.
-  - Correct "reads every `Self` as `Any`" to `Unknown` in `pyproject.toml` (above `pythonVersion`) and `START.md` (the
-    basedpyright bullet).
-  - Mark this file's pre-commit table as the 4ce779e1 snapshot, or re-measure it with every hook listed.
 - [ ] 42. Strict by default for a new file. The root `[tool.basedpyright]` sets `reportUnannotatedClassAttribute` and
   `reportUnusedCallResult` to `"none"`, so a `.py` outside every listed environment root gets the tests' leniency.
   - Set both to `"error"` at the root, and give `tests/` (and the example test folders that inherit them) explicit
     environments that turn them off.
   - Then drop the per-file root environments that exist only to turn them on (`conftest.py`, `line_count.py`,
     `docs/dry/export_dry_review.py`), where an environment's import roots allow it.
-  - Prove the moves: `uv run basedpyright` and the floor pass stay at 0 errors over 626 files. An off-by-default count
+  - Prove the moves: `uv run basedpyright` and the floor pass stay at 0 errors over 627 files. An off-by-default count
     measured before and after must match: about 18,100 with both rules forced on in tests and examples.
 - [ ] 43. Lazy-export typing parity. The package root's `__getattr__` returns `Any`, so a lazy export missing from its
   `TYPE_CHECKING` mirror types a consumer import as `Any`. Add a test row asserting the lazy map's keys equal the names

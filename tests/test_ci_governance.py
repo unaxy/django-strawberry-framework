@@ -52,6 +52,7 @@ from scripts import _git
 # construction, so the gate cannot pass in a clean CI checkout and fail on a
 # developer machine.
 from scripts.check_citations import SOURCE_TREES, iter_python_sources, spec_files
+from scripts.check_trailing_commas import has_ruff_excluded_segment, ruff_excluded_names
 from scripts.workspace import FLOOR_PACKAGES, SOFT_FLOOR_PACKAGES
 from tests._idioms import is_object_dict, json_at, json_list, module_binding
 from tests._workflows import (
@@ -643,7 +644,10 @@ def _committable_files(pathspec: str) -> list[str]:
     list, which is what makes the census below a measurement instead of a
     restatement of the corpus by itself. Read through ``scripts/_git.py``, so
     "ignored" is the repository's own rules and never the caller's global excludes
-    or XDG ignore file.
+    or XDG ignore file. Any path with a segment ``[tool.ruff] extend-exclude`` names
+    (an evidence copy of the repo) is dropped through
+    ``scripts/check_trailing_commas.py::has_ruff_excluded_segment``, so a copy's files
+    are never read as this repo's.
 
     Three ways git can fail to answer, and none may pass a caller's row on nothing.
     A missing ``git`` raises here; a non-zero exit trips the assert below; and an
@@ -667,7 +671,11 @@ def _committable_files(pathspec: str) -> list[str]:
     assert completed.returncode == 0, (
         f"git ls-files {pathspec} failed ({completed.returncode}): {completed.stderr.strip()}"
     )
-    return [name for name in completed.stdout.split("\0") if name]
+    return [
+        name
+        for name in completed.stdout.split("\0")
+        if name and not has_ruff_excluded_segment(name.split("/"))
+    ]
 
 
 def _unreported_required_files(answer: Iterable[str]) -> list[str]:
@@ -3238,6 +3246,22 @@ def test_ruff_format_still_checks_a_named_python_file(tmp_path: Path) -> None:
     (tmp_path / "example.py").write_text("x = [1,2 ,3]\n", encoding="utf-8")
     result = _ruff_format(tmp_path, "--check", "example.py")
     assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_basedpyright_excludes_every_tree_ruff_excludes() -> None:
+    """Each ``[tool.ruff] extend-exclude`` name is a ``**/<name>`` ``[tool.basedpyright]`` exclude.
+
+    basedpyright does not read ``.gitignore``, so an untracked evidence tree ruff skips
+    would be type-checked as a second repo unless its own ``exclude`` names it too.
+    ruff matches an unanchored name at any depth; basedpyright anchors a bare entry at
+    the root, so only the ``**/`` spelling excludes the same trees.
+    """
+    document = object_result(tomli.loads, (REPO_ROOT / "pyproject.toml").read_text("utf-8"))
+    exclude = set(map(str, json_list(document, "tool", "basedpyright", "exclude")))
+    names = ruff_excluded_names()
+
+    assert names
+    assert [name for name in names if f"**/{name}" not in exclude] == []
 
 
 #: The live tier the raw-post sweep reads: every ``.py`` directly under it.

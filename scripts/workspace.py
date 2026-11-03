@@ -1394,7 +1394,12 @@ def flow_lease(layout: Layout, *, create: bool = True) -> Generator[FlowLease, N
 
 
 def is_excluded(name: str) -> bool:
-    """Report whether a listing entry is cycle scratch or a parked copy, not tree content."""
+    """Report whether a listing entry is cycle scratch or a parked copy, not tree content.
+
+    The ``*-ws`` suffix matches any copy a harness parks in the tree, named at run time;
+    ruff's ``extend-exclude`` names only the trees the repository declares, so this rule
+    does not read it.
+    """
     if name.startswith(EXCLUDED_PREFIXES):
         return True
     parts = name.split("/")

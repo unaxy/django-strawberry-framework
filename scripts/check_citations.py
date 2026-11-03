@@ -125,6 +125,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+try:
+    from check_trailing_commas import has_ruff_excluded_segment, is_ruff_excluded_name
+except ModuleNotFoundError:  # imported as ``scripts.check_citations`` (repo root on path)
+    from scripts.check_trailing_commas import has_ruff_excluded_segment, is_ruff_excluded_name
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # The first-party trees. A citation's file half is resolved against these (plus the
@@ -373,10 +378,18 @@ class Outcome:
 
 
 def iter_python_sources() -> tuple[Path, ...]:
-    """Return every first-party ``.py`` file, sorted."""
+    """Return every first-party ``.py`` file, sorted.
+
+    A file under a ``[tool.ruff] extend-exclude`` name is an evidence copy of the repo,
+    not first-party source, and is skipped.
+    """
     found: list[Path] = []
     for tree in SOURCE_TREES:
-        found.extend((REPO_ROOT / tree).rglob("*.py"))
+        found.extend(
+            path
+            for path in (REPO_ROOT / tree).rglob("*.py")
+            if not has_ruff_excluded_segment(path.relative_to(REPO_ROOT).parts)
+        )
     return tuple(sorted(found))
 
 
@@ -585,8 +598,14 @@ def _other_file_index() -> dict[str, tuple[Path, ...]]:
         return cached
     index: dict[str, list[Path]] = {}
     for directory, subdirs, files in os.walk(REPO_ROOT):
+        # A ruff-excluded tree holds evidence copies of the repo, whose files would
+        # otherwise resolve a citation to a file the repo no longer has.
         subdirs[:] = sorted(
-            name for name in subdirs if not name.startswith(".") and name not in PRUNED_DIRS
+            name
+            for name in subdirs
+            if not name.startswith(".")
+            and name not in PRUNED_DIRS
+            and not is_ruff_excluded_name(name)
         )
         for name in sorted(files):
             if name.endswith(".py"):

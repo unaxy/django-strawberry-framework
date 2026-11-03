@@ -77,6 +77,7 @@ classifiers = [
     "Framework :: Django :: 5.2",
     "Framework :: Django :: 6.0",
     "Framework :: Django :: 6.1",
+    "Typing :: Typed",
 ]
 dependencies = [
     "Django>=5.2.16",
@@ -432,11 +433,11 @@ max-statements = 133
 convention = "google"
 
 [tool.basedpyright]
-# Every .py in the repo (the package's annotations are public via ``py.typed``); the
-# excludes are git-ignored scratch trees (docs/shadow/ copies, cycle temp files). tests/
-# stays in the root environment, importing fakeshop through the extra path as pytest's
-# `pythonpath` does: an environment rooted at tests/ lets tests/rest_framework and
-# tests/types shadow DRF and the stdlib.
+# Every .py in the repo (the package's annotations are public via ``py.typed``) minus the
+# trees `exclude` lists: basedpyright does not read .gitignore, so each scratch or evidence
+# tree is named there. tests/ stays in the root environment, importing fakeshop through the
+# extra path as pytest's `pythonpath` does: an environment rooted at tests/ lets
+# tests/rest_framework and tests/types shadow DRF and the stdlib.
 include = ["."]
 extraPaths = ["examples/fakeshop"]
 exclude = [
@@ -446,10 +447,17 @@ exclude = [
     "docs/shadow",
     "docs/*/temp-tests",
     "docs/*/worker-memory",
+    # A bug-hunt evidence tree (copies of the repo, kept as found) is untracked and not
+    # git-ignored, so the whole-repo run would check each copy as a second repo. Every
+    # name in `[tool.ruff] extend-exclude` is listed here (tests/test_ci_governance.py).
+    "**/hunt-ws",
 ]
 # Lowest Python the stubs support (they import `typing.Self`; lower reads every `Self`
-# as `Any`). The 3.10 floor is proven by the floor CI cell and pyrightconfig.floor.json,
-# which re-checks this scope at 3.10 so a 3.11+ stdlib or `typing` name fails.
+# as `Unknown`). The 3.10 floor is proven by the floor CI cell and
+# pyrightconfig.floor.json, which re-checks this scope at 3.10 so a 3.11+ stdlib or
+# `typing` name fails. That config turns the five `reportUnknown*` rules off, since they
+# would measure the stubs, not the code, and `reportUnnecessaryTypeIgnoreComment` off,
+# since a suppression this pass needs can be moot at 3.10.
 pythonVersion = "3.11"
 # No plugin: only the stubs' and packages' own annotations (every dependency is typed),
 # so the package reads as a downstream checker sees it and fakeshop settings are never

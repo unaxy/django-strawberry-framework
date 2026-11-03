@@ -6,16 +6,19 @@ the function-body, dunder and wrapped-line rules, the ``--paths`` / ``--json`` /
 codes). A CLI that reads source text has no ``/graphql/`` wire shape, so there is
 no live sibling in ``examples/fakeshop/test_query/``.
 
-``REPO_ROOT`` is monkeypatched to a ``tmp_path`` fake tree, so no row reads the
-real repository.
+``REPO_ROOT`` (here and in ``scripts/check_trailing_commas.py``, whose
+``[tool.ruff] extend-exclude`` names the gate skips) is monkeypatched to a
+``tmp_path`` fake tree with its own ``pyproject.toml``, so no row reads the real
+repository.
 """
 
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from scripts import check_citations
+from scripts import check_citations, check_trailing_commas
 from tests._idioms import json_at, json_list, json_loads, json_object
 
 MODULE = '''\
@@ -58,15 +61,27 @@ def _write(root: Path, relative: str, text: str) -> Path:
 
 
 @pytest.fixture
-def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Build a fake repo with the four source trees, a board, an archived spec and docs."""
+def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Build a fake repo with the four source trees, a board, an archived spec and docs.
+
+    Its ``pyproject.toml`` names ``hunt-ws`` in ``[tool.ruff] extend-exclude``, read
+    through ``scripts/check_trailing_commas.py::ruff_excluded_names`` from this tree.
+    """
     monkeypatch.setattr(check_citations, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(check_trailing_commas, "REPO_ROOT", tmp_path)
+    _write(
+        tmp_path,
+        "pyproject.toml",
+        '[tool.ruff]\nline-length = 99\nextend-exclude = ["hunt-ws"]\n',
+    )
     for name in check_citations.SOURCE_TREES:
         (tmp_path / name).mkdir()
     _write(tmp_path, "django_strawberry_framework/widgets.py", MODULE)
     _write(tmp_path, "KANBAN.md", "# Board\n")
     _write(tmp_path, "docs/SPECS/spec-000-fixture.md", "# Spec\n")
-    return tmp_path
+    check_trailing_commas.ruff_excluded_names.cache_clear()
+    yield tmp_path
+    check_trailing_commas.ruff_excluded_names.cache_clear()
 
 
 def _cite(
@@ -321,6 +336,39 @@ def test_substring_pinpoints_resolve_inside_the_symbol_or_the_file(tree: Path) -
     assert missing.hint == ()
     assert pinpoints[5].warning is not None
     assert all(o.warning is None for o in pinpoints[:5])
+
+
+def test_a_pinpoint_never_resolves_through_a_ruff_excluded_tree(tree: Path) -> None:
+    """A ``hunt-ws/`` copy of a doc the repo lacks resolves nothing; another tree's copy does."""
+    _write(tree, "hunt-ws/copy/docs/guide.md", "## Coverage rule\n")
+    _write(tree, "kept/copy/docs/guide.md", "## Kept heading\n")
+    outcomes = _cite(
+        tree,
+        """\
+        # docs/guide.md #"Coverage rule"
+        # docs/guide.md #"Kept heading"
+        """,
+    )
+    pinpoints = [o for o in outcomes if o.citation.kind == "substring"]
+    assert [(o.citation.line, o.resolved) for o in pinpoints] == [(1, False), (2, True)]
+
+
+def test_a_python_file_under_a_ruff_excluded_tree_is_not_first_party_source(tree: Path) -> None:
+    """A nested ``hunt-ws/`` copy is outside the corpus, so a symbol only it defines fails."""
+    _write(tree, "tests/hunt-ws/copy/evidence.py", "def only_in_copy():\n    return 1\n")
+    _write(tree, "tests/kept/evidence.py", "def kept_symbol():\n    return 1\n")
+    corpus = check_citations.iter_python_sources()
+    outcomes = _cite(
+        tree,
+        """\
+        # evidence.py::only_in_copy
+        # evidence.py::kept_symbol
+        """,
+    )
+
+    assert tree / "tests/kept/evidence.py" in corpus
+    assert not any("hunt-ws" in path.parts for path in corpus)
+    assert [(o.citation.line, o.resolved) for o in outcomes] == [(1, False), (2, True)]
 
 
 def test_substrings_flag_fails_the_run_and_warns_on_ambiguity(
