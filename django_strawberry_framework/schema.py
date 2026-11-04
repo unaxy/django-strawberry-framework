@@ -78,7 +78,7 @@ import contextlib
 import functools
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, NoReturn, TypeVar, cast
+from typing import TYPE_CHECKING, NoReturn, TypeGuard, TypeVar
 
 import strawberry
 from asgiref.sync import AsyncToSync, async_to_sync, sync_to_async
@@ -1501,17 +1501,15 @@ def _consumer_extension_entries(
     entries: list[object] = []
     declared: ResourcePolicy | None = None
     for entry in supplied:
-        role = _declared_authority(entry)
-        if role is None:
+        if _declared_authority(entry) is None:
             entries.append(entry)
             continue
-        if role is not DjangoResourcePolicyExtension:
+        # A declared authority is an exact resource-policy or error-policy entry
+        # (``_declared_authority`` refuses a subclass); the error-policy one
+        # declares nothing beyond the automatic extension and is dropped.
+        if not _is_exact_resource_policy_entry(entry):
             continue
-        # ``_declared_authority`` answered with this entry's exact type (``type()``, the
-        # entry itself for a class), a proof the checkers cannot carry back to ``entry``.
-        policy = _entry_resource_policy(
-            cast("DjangoResourcePolicyExtension | type[DjangoResourcePolicyExtension]", entry),
-        )
+        policy = _entry_resource_policy(entry)
         if policy is None:
             continue
         if declared is not None:
@@ -1549,6 +1547,18 @@ def _declared_authority(entry: object) -> type[SchemaExtension] | None:
                 "error_policy=, and give an unrelated extension its own hooks.",
             )
     return None
+
+
+def _is_exact_resource_policy_entry(
+    entry: object,
+) -> TypeGuard[DjangoResourcePolicyExtension | type[DjangoResourcePolicyExtension]]:
+    """Whether ``entry`` is ``DjangoResourcePolicyExtension`` itself or an exact instance of it.
+
+    The same ``type()`` test ``_declared_authority`` runs, so the narrowing is the
+    check itself. ``TypeGuard``: a subclass entry answers ``False`` while being an
+    instance of the class.
+    """
+    return _entry_type(entry) is DjangoResourcePolicyExtension
 
 
 def _entry_resource_policy(

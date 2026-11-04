@@ -3165,14 +3165,14 @@ def release(
             return []
         with file_lock(layout.pool_lock), contextlib.ExitStack() as leases:
             state = _held_state(layout)
-            chosen = [
-                slot
+            chosen = {
+                slot: bound
                 for slot, bound in state["slots"].items()
                 if bound
                 and bound["item"] == item
                 and (not roles or bound["role"] in roles)
                 and bound["role"] not in keep
-            ]
+            }
             busy: list[str] = []
             for slot in chosen:
                 try:
@@ -3184,11 +3184,9 @@ def release(
                 raise LockBusyError(msg)
             postgres = _running_postgres(layout.repo_root)
             released: list[str] = []
-            for slot in chosen:
+            for slot, bound in chosen.items():
                 if postgres is not None:
                     _ = postgres.drop_matching(layout.db_name(slot), exact=True)
-                # ``chosen`` holds only bound slots.
-                bound = cast("_SlotBinding", state["slots"][slot])
                 released.append(f"{slot} {bound['address']}")
                 state["slots"][slot] = None
             forgot = not roles and not keep and state["items"].pop(item, None) is not None

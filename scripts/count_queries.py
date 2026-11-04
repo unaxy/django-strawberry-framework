@@ -60,7 +60,7 @@ import json
 import sys
 from dataclasses import dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict
 
 from _bench_common import (
     bootstrap_fakeshop_django,
@@ -543,8 +543,10 @@ def main() -> int:
         try:
             # ``report`` is ``build_report`` over ``cells`` plus the verdict, so it holds
             # the ``_Report`` keys; ``build_report`` returns the shape every script shares.
-            current = cast("_Report", cast("object", report))
-            lines = compare_reports(baseline, current)
+            if not _is_report(report):
+                msg = "build_report assembled a document without the count_queries report keys"
+                raise RuntimeError(msg)
+            lines = compare_reports(baseline, report)
         except ValueError as exc:
             print(f"compare refused: {exc}", file=sys.stderr)
             return EXIT_NOT_MEASURED

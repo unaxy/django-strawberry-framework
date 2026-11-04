@@ -109,7 +109,6 @@ if TYPE_CHECKING:
         """A ``resolve_nodes`` row iterable that also answers ``len()``."""
 
 
-_NodeT = TypeVar("_NodeT")
 _TargetT = TypeVar("_TargetT")
 
 __all__ = ("DjangoNodeField", "DjangoNodesField")
@@ -596,7 +595,7 @@ def _check_nodes_result(
     return result
 
 
-def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: _NodeT) -> _NodeT:
+def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: object) -> object:
     """``strawberry.cast`` a fetched node instance to the decode-resolved ``DjangoType``.
 
     The bare ``node``/``nodes`` fields hand graphql-core a raw model
@@ -626,7 +625,6 @@ def _stamp_node_type(resolved_type: type[_RelayDjangoType], node: _NodeT) -> _No
     """
     if node is None:
         return node
-    # A lazy proxy stands in for the object it wraps, so the unwrapped row is still a ``_NodeT``.
     node = unwrap_lazy_object(node)
     definition = truth.static_attr(resolved_type, "__django_strawberry_definition__", None)
     model = getattr(definition, "model", None)
@@ -679,8 +677,8 @@ def _stamp_nodes(resolved_type: type[_RelayDjangoType], rows: Iterable[object]) 
 
 async def _await_and_stamp(
     resolved_type: type[_RelayDjangoType],
-    awaitable: Awaitable[_NodeT],
-) -> _NodeT:
+    awaitable: Awaitable[object],
+) -> object:
     """Await an async ``resolve_node`` result, then stamp it (async sibling)."""
     return _stamp_node_type(resolved_type, await awaitable)
 

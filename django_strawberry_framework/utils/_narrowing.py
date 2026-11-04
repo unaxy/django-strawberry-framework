@@ -55,7 +55,7 @@ call site narrows the answer like any other consumer value.
 
 ``require_instance`` / ``require`` are the narrowing for a value whose source
 guarantees its class but types it loosely: each checks the guarantee (``isinstance``,
-or a ``TypeIs`` predicate for a generic class) and raises ``TypeError`` the moment it
+or a ``TypeIs`` / ``TypeGuard`` predicate for a generic class) and raises ``TypeError`` the moment it
 stops holding. ``optional_instance`` is ``require_instance`` for a slot that may hold
 ``None``.
 """
@@ -64,7 +64,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
 from collections.abc import Set as AbstractSet
-from typing import TYPE_CHECKING, TypeGuard, TypeVar
+from typing import TYPE_CHECKING, TypeGuard, TypeVar, overload
 
 from django.utils.functional import Promise
 
@@ -73,7 +73,7 @@ from . import truth
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, ItemsView, Iterator
     from enum import Enum
-    from typing import Protocol, TypeAlias, overload
+    from typing import Protocol, TypeAlias
 
     from django.db.models import Model, QuerySet
     from django.db.models.options import Options
@@ -381,8 +381,20 @@ def optional_instance(value: object, cls: type[_InstanceT], /) -> _InstanceT | N
     return None if value is None else require_instance(value, cls)
 
 
-def require(value: object, predicate: Callable[[object], TypeIs[_InstanceT]], /) -> _InstanceT:
-    """Return ``value`` as the type ``predicate`` proves, raising ``TypeError`` when it does not."""
+@overload
+def require(value: object, predicate: Callable[[object], TypeIs[_InstanceT]], /) -> _InstanceT: ...
+@overload
+def require(
+    value: object,
+    predicate: Callable[[object], TypeGuard[_InstanceT]],
+    /,
+) -> _InstanceT: ...
+def require(value: object, predicate: Callable[[object], bool], /) -> object:
+    """Return ``value`` as the type ``predicate`` proves, raising ``TypeError`` when it does not.
+
+    ``predicate`` is a ``TypeIs`` or a ``TypeGuard`` predicate: only its positive
+    answer is read, which both forms prove.
+    """
     if not predicate(value):
         raise TypeError(
             f"expected the type the source guarantees, got {truth.kind(value)}",

@@ -1,7 +1,9 @@
-"""Tests for KANBAN markdown glossary inlining: existing links and the term boundary.
+"""Tests for KANBAN markdown rendering: glossary inlining and card-ref resolution.
 
 Repo tooling: these rows pin ``scripts/build_kanban_md.py::GlossaryInliner``,
-which runs at render time against an in-process glossary snapshot. A live
+which runs at render time against an in-process glossary snapshot, and
+``scripts/build_kanban_md.py::resolve_card_refs``, which resolves a
+``{{card_ref:N}}`` placeholder through its reference row. A live
 ``/graphql/`` request has no wire shape for the markdown link a rendered card
 carries, so none of these rows can move. There is no live sibling in
 ``examples/fakeshop/test_query/``.
@@ -9,7 +11,7 @@ carries, so none of these rows can move. There is no live sibling in
 
 import pytest
 
-from scripts.build_kanban_md import GLOSSARY_MD_PATH, GlossaryInliner
+from scripts.build_kanban_md import GLOSSARY_MD_PATH, GlossaryInliner, resolve_card_refs
 
 LINKED = f"[`DjangoListField`]({GLOSSARY_MD_PATH}#djangolistfield)"
 BARE_LINKED = f"[DjangoListField]({GLOSSARY_MD_PATH}#djangolistfield)"
@@ -435,3 +437,34 @@ def test_inliner_links_a_term_at_a_prose_boundary(text: str, expected: str) -> N
     """
     inliner = GlossaryInliner([{"title": "`DjangoListField`", "anchor": "djangolistfield"}])
     assert inliner.inline(text) == expected
+
+
+def test_card_ref_resolves_to_the_referenced_card_id() -> None:
+    """A placeholder reads the ``cardId`` of the card its reference row links."""
+    references = [{"order": 1, "card": {"cardId": "DSF-7"}}]
+    resolved = resolve_card_refs(
+        "See {{card_ref:1}}.",
+        references,
+        card_field="card",
+        site="Board doc 'x'",
+    )
+    assert resolved == "See DSF-7."
+
+
+@pytest.mark.parametrize(
+    "linked",
+    [
+        pytest.param(None, id="no-linked-card"),
+        pytest.param({"number": 7}, id="linked-card-without-card-id"),
+        pytest.param({"cardId": 7}, id="non-text-card-id"),
+    ],
+)
+def test_card_ref_refuses_a_reference_without_a_card_id(linked: object) -> None:
+    """A reference whose linked card carries no text ``cardId`` fails naming the site."""
+    with pytest.raises(TypeError, match=r"^Board doc 'x' references card_ref:1, but that"):
+        _ = resolve_card_refs(
+            "See {{card_ref:1}}.",
+            [{"order": 1, "card": linked}],
+            card_field="card",
+            site="Board doc 'x'",
+        )

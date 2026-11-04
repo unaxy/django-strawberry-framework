@@ -4650,3 +4650,16 @@ def test_the_markdown_crash_line_prefers_the_assert_line_over_a_custom_message()
         " - crash: `/ws/t.py:1166: assert 6 == 1` (+2 more line(s) in --json)"
     )
     assert prove_failability._crash_suffix(run, "tests/test_x.py::unseen") == ""
+
+
+def test_pre_image_site_without_a_source_refuses_to_apply() -> None:
+    """A pre-image site names the file it swaps in; one that names none raises ``SiteError``."""
+    site = prove_failability.MutationSite(
+        target=prove_failability.REPO_ROOT / "pyproject.toml",
+        kind=prove_failability.PRE_IMAGE_KIND,
+    )
+    with pytest.raises(
+        prove_failability.SiteError,
+        match=r"^the pre-image site for pyproject\.toml names no source$",
+    ):
+        _ = site.apply("text")

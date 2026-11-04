@@ -8,14 +8,14 @@ Locked rules and the budget: `scripts/check_type_suppressions.py` (pre-commit an
 `# pyright: ignore[...]` naming any rule `pyproject.toml` marks `# Locked` (the 65 rules on everywhere with no
 suppression left), every file-level `# pyright:` directive, and any per-site count off the generated ledger
 `scripts/type_suppressions.toml`: each site (`path::QualifiedName`) holds its `typing.cast` calls and its ignore
-comments per unlocked rule (112 casts in all), every count may only fall, and a suppression cannot move to new code by
+comments per unlocked rule (103 casts in all), every count may only fall, and a suppression cannot move to new code by
 giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger and gains the marker. In CI, a commit that raises a
 total (casts, or one rule's ignores) fails unless it carries a `Suppression-Growth-Approved:` trailer, the
 maintainer's consent.
 
 Progress: 33 done, 6 closed (survey verdicts), 6 open (items 42-45 from the 2026-11-02 review; one waits on
 upstream, one is a behavior change outside typing, carded). Ignore comments: 707 lines (1897 at the start of 0.0.15's
-ignore sweep); `typing.cast` calls: 112 (432 at the start of the cast work).
+ignore sweep); `typing.cast` calls: 103 (432 at the start of the cast work).
 
 ## Pre-commit snapshot (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
 
@@ -165,7 +165,8 @@ scope and timing.
   `tuple[X, None] | tuple[None, Defect]` and narrowed by index; an existing raising helper (`require`,
   `require_instance`) where the value's source proves the class; a raising validator returns what it proved. Kept:
   a cast on a line a KANBAN row quotes, and two casts on security paths (`consumers.py::_ConnectionRevocation.close`,
-  `schema.py::_consumer_extension_entries`) where the replacement would be a dead `is not None` that fails silently
+  `schema.py::_consumer_extension_entries`) where the replacement would be a dead `is not None` that fails silently;
+  item 37's fifth pass and item 38's fourth pass retire both with a check that raises or dispatches
 - [x] 37. Cast sweep, phase 2: the fixes phase 1 left because each writes a new raise or branch (with its test),
   changes a public annotation, changes behavior for an input accepted today, or sits on a per-row path that needs a
   benchmark. First pass done (package casts 191 to 153): generic `RelatedSetTargetMixin` and `convert_with_mro`
@@ -218,8 +219,8 @@ scope and timing.
   container (seal time unchanged within noise); `optimizer/_context.py` reads the stashes through
   `planned_resolver_keys`, `fk_id_elision_keys` and `stashed_strictness` (a stash of any other shape than a
   `set` / `frozenset` or a `str` raises `TypeError` rather than reading as absent or `"off"`, so a wrong-shape stash
-  never disarms the N+1 guard); `utils/lazy.py::unwrap_lazy_object` is overloaded checker-only, `LazyObject[_T]` to `_T` and `_T` to
-  itself, so `relay.py::_stamp_node_type` reads the unwrapped row uncast; the
+  never disarms the N+1 guard); `utils/lazy.py::unwrap_lazy_object` answers `object` (item 38, fourth pass), and
+  `relay.py::_stamp_node_type` takes and answers `object`, so it reads the unwrapped row uncast; the
   async many-side reads (`types/resolvers.py::_visible_many_rows` and the many resolver) take the bound through
   `require(..., is_queryset)`, since `bounded_rows_async` honestly answers a `list` for an evaluated queryset and
   only the caller knows its source is unevaluated. Not taken: `optimizer/selections.py`'s `is_fragment` (its
@@ -280,7 +281,28 @@ scope and timing.
   `_null_test_filter_for_relation`'s two; `get_form_fields`, whose `dict()` call is the check); adapted upstream code
   (`_patched_list_connection_resolve_connection`'s three); duck-typed matchers the tests drive with hostile doubles
   (`lateral_fetch.py`'s three, `utils/relations.py::_link_field_tuple`); reads of Django's own slots on a package-built
-  queryset, on the routing and per-row paths (`_snapshot_routing_intent`'s two, `materialized_rows`)
+  queryset, on the routing and per-row paths (`_snapshot_routing_intent`'s two, `materialized_rows`).
+  Fourth pass (package casts 71 to 70): `schema.py::_consumer_extension_entries` dispatches on
+  `_is_exact_resource_policy_entry`, a `TypeGuard` running `_declared_authority`'s own `type()` test, so the
+  narrowing is the dispatch and no branch can skip a declared policy. `mutations/sets.py::_materialize_input_for`
+  reads the override slot `mutations/operations.py::_OPERATION_INPUT_OVERRIDE_ATTR` names for the operation through
+  `read_attr` and `require(..., _is_input_type)` (`utils/_narrowing.py::require` takes a `TypeIs` or a `TypeGuard`
+  predicate); `_validate_input_class` and `_materialize_merged_input` take the kind and the `Meta` key from their
+  callers, so no site re-derives the create-or-update choice. `utils/lazy.py::unwrap_lazy_object` is typed `object`
+  to `object`: an overload answering `_T` for any other `_T` claimed `Model | SimpleLazyObject[int]` unchanged and one
+  answering `_T` for `LazyObject[_T]` claimed a nested proxy's inner proxy, while the body follows nested proxies to
+  the first object that is not one; `relay.py::_stamp_node_type` and `_await_and_stamp` take and answer `object`.
+  Outside the package (example casts 3 to 0, script casts 16 to 11): the example tests check the captured context
+  with `isinstance` and each regex group with `isinstance(..., str)`; `scripts/build_kanban_md.py::resolve_card_refs`
+  reads the linked card's `cardId` through `_is_json_object` and raises `TypeError` when it is not text;
+  `scripts/count_queries.py::main` checks its own report with `_is_report`; `scripts/prove_failability.py::MutationSite.apply`
+  raises `SiteError` for a pre-image site naming no source; `scripts/workspace.py::release` carries each chosen
+  slot's binding. Kept: the decoded GraphQL rows entering their `TypedDict`s
+  (`scripts/_kanban_lib.py::fetch_dashboard_data`'s four, `build_dashboard_snapshot`'s two,
+  `scripts/build_glossary_md.py::fetch_glossary_data`'s two: a check is a per-row validator over every nested row
+  shape), `scripts/build_tree_md.py::fetch_planned_paths` (django-stubs types the model fields as descriptors no
+  protocol property matches), and `scripts/workspace.py::_load_state` / `_admit` (JSON documents only the script
+  writes, whose check is a full validator of `_PoolState` / `_Manifest`)
 - [x] 39. `reportUntypedFunctionDecorator` and `reportOptionalMemberAccess` locked: `filters/base.py` reads
   django-filter's `Filter.method` property off the class (`require_instance(truth.static_attr(Filter, "method"),
   property)`), so the `ArrayFilter` / `ListFilter` setters decorate with a typed `property.setter` and the shared

@@ -22,7 +22,7 @@ This module is Django-aware and sits below every subsystem that unwraps, so
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar, overload
+from typing import TYPE_CHECKING
 
 from django.utils.functional import LazyObject, empty
 
@@ -39,19 +39,6 @@ if TYPE_CHECKING:
 else:
     _LAZY_OBJECT = LazyObject
 
-_T = TypeVar("_T")
-
-
-# A proxy answers for the object it wraps; any other value comes back as itself, so its
-# static type is unchanged. The overloads are checker-only for the same reason as
-# ``_LAZY_OBJECT``: their ``LazyObject[_T]`` annotation is not evaluable at run time.
-if TYPE_CHECKING:
-
-    @overload
-    def unwrap_lazy_object(obj: LazyObject[_T]) -> _T: ...
-    @overload
-    def unwrap_lazy_object(obj: _T) -> _T: ...
-
 
 def unwrap_lazy_object(obj: object) -> object:
     """Return the object a Django lazy proxy stands for; any other value unchanged.
@@ -63,6 +50,10 @@ def unwrap_lazy_object(obj: object) -> object:
     object itself. The factory runs on first use, as any attribute access on
     the proxy would run it; whatever it raises propagates. A proxy whose target
     is itself a proxy is followed to the first object that is not one.
+
+    Typed ``object`` in and out: the answer is whatever the innermost proxy's
+    factory built, which no static type of the argument states, so a caller
+    checks it like any other value of unknown type.
     """
     while truth.is_instance(obj, _LAZY_OBJECT):
         if read_attr(obj, "_wrapped") is empty:

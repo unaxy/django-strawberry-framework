@@ -52,7 +52,7 @@ from strawberry.types.base import StrawberryObjectDefinition
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import require, require_instance
+from django_strawberry_framework.utils._narrowing import read_attr, require, require_instance
 from django_strawberry_framework.utils.inputs import (
     InputFieldSpec,
     get_or_store_shape_build,
@@ -77,9 +77,7 @@ from django_strawberry_framework.write_mixins import (
 )
 
 from .inputs import (
-    CREATE,
     INPUTS_MODULE_PATH,
-    PARTIAL,
     build_mutation_input,
     editable_input_fields,
     materialize_mutation_input_class,
@@ -193,11 +191,15 @@ def _validate_input_class(
     input_class: object,
     *,
     attr_name: str,
+    operation_kind: str,
     model: type[models.Model],
     fields: tuple[str, ...] | None,
     exclude: tuple[str, ...] | None,
 ) -> type[WithStrawberryObjectDefinition]:
     """Validate a consumer ``input_class`` / ``partial_input_class``.
+
+    ``operation_kind`` is the generator kind of the operation the override
+    customizes (``mutations/operations.py::NON_DELETE_OPERATION_INPUT_KIND``).
 
     Two checks (spec-036 Decision 5 error-shapes + Decision 6
     #"Custom inputs follow the generated field-naming scheme"):
@@ -224,8 +226,7 @@ def _validate_input_class(
         model,
         fields=fields,
         exclude=exclude,
-        # ``input_class`` customizes the create input, ``partial_input_class`` the update.
-        operation_kind=CREATE if attr_name == "input_class" else PARTIAL,
+        operation_kind=operation_kind,
     )
     supplied = {field.python_name for field in input_class.__strawberry_definition__.fields}
     diverging = sorted(supplied - expected)
@@ -544,6 +545,8 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
                 name,
                 input_class,
                 attr_name="input_class",
+                # The guard above admits a declared override only on its own operation.
+                operation_kind=NON_DELETE_OPERATION_INPUT_KIND[operation],
                 model=model,
                 fields=fields,
                 exclude=exclude,
@@ -554,6 +557,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
                 name,
                 partial_input_class,
                 attr_name="partial_input_class",
+                operation_kind=NON_DELETE_OPERATION_INPUT_KIND[operation],
                 model=model,
                 fields=fields,
                 exclude=exclude,
@@ -776,15 +780,18 @@ def _materialize_input_for(
     if operation_kind is None:
         return None  # delete: id-only, no input.
 
-    # The snapshot holds a validated input class or ``None`` per operation kind.
-    consumer_input = meta.input_class if operation_kind == CREATE else meta.partial_input_class
+    # The operation table names the override slot this operation honors; the
+    # snapshot holds a validated input class or ``None`` there.
+    override_attr = _OPERATION_INPUT_OVERRIDE_ATTR[meta.operation]
+    consumer_input = read_attr(meta, override_attr)
     if consumer_input is not None:
         return _materialize_merged_input(
             mutation_name,
             meta,
             primary_type,
             operation_kind,
-            consumer_input,
+            require(consumer_input, _is_input_type),
+            override_attr=override_attr,
         )
 
     # Derive the shape ONCE: ``mutation_input_shape`` single-sources the
@@ -826,8 +833,13 @@ def _materialize_merged_input(
     primary_type: type[DjangoType],
     operation_kind: str,
     consumer_input: type[WithStrawberryObjectDefinition],
+    *,
+    override_attr: str,
 ) -> type[WithStrawberryObjectDefinition]:
     """Merge a consumer ``input_class`` with the generated remainder.
+
+    ``override_attr`` is the ``Meta`` key the consumer input came from
+    (``input_class`` / ``partial_input_class``), named in any rejection.
 
     The consumer-authored ``@strawberry.input`` declares only the field(s) it
     customizes (a custom scalar, validator, alias, description), using the
@@ -870,7 +882,7 @@ def _materialize_merged_input(
         mutation_name,
         consumer_input,
         shape,
-        attr_name="input_class" if operation_kind == CREATE else "partial_input_class",
+        attr_name=override_attr,
     )
     remainder = build_mutation_input(
         backing_model_of(meta),

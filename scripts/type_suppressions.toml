@@ -117,7 +117,6 @@
 "django_strawberry_framework/schema.py::DjangoSchema.__init__" = { reportArgumentType = 1, reportUnknownMemberType = 1 }
 "django_strawberry_framework/schema.py::DjangoSchema._stream" = { reportUnknownArgumentType = 1, reportUnknownMemberType = 1 }
 "django_strawberry_framework/schema.py::DjangoSchema.extensions" = { reportIncompatibleUnannotatedOverride = 1, reportPropertyTypeMismatch = 1 }
-"django_strawberry_framework/schema.py::_consumer_extension_entries" = { cast = 1 }
 "django_strawberry_framework/sets_mixins.py::expanded_once" = { cast = 1 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestClientBase._finish_response" = { cast = 1 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestClientBase.request" = { reportArgumentType = 1 }
@@ -210,14 +209,11 @@
 "examples/fakeshop/test_query/test_form_construction_api.py::test_request_scoped_form_queryset_controls_relation_acceptance.CategoryPickForm.__init__" = { reportMissingSuperCall = 1 }
 "examples/fakeshop/test_query/test_globalid_naming_api.py::shadowing_child_schema.ChildCategoryNode.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_library_api.py::_unplanned_relation_holder_schema.HolderOwnLoanType.book" = { reportAny = 1 }
-"examples/fakeshop/test_query/test_library_api.py::test_library_unplanned_relations_keep_their_link_columns" = { cast = 1 }
 "examples/fakeshop/test_query/test_library_shapes_api.py::_hold.Query.parents" = { reportAny = 1 }
 "examples/fakeshop/test_query/test_list_field_api.py::_ProjectQ.resolve_expression" = { reportIncompatibleMethodOverride = 1 }
 "examples/fakeshop/test_query/test_list_field_api.py::_override_untrusted" = { reportArgumentType = 1 }
-"examples/fakeshop/test_query/test_list_field_api.py::test_holder_ordering_leaves_the_consumer_context_exactly_as_found" = { cast = 1 }
 "examples/fakeshop/test_query/test_list_field_async_api.py::_ProjectQ.resolve_expression" = { reportIncompatibleMethodOverride = 1 }
 "examples/fakeshop/test_query/test_list_field_async_api.py::_async_untrusted" = { reportArgumentType = 1 }
-"examples/fakeshop/test_query/test_list_field_async_api.py::test_async_ordering_leaves_the_consumer_context_exactly_as_found" = { cast = 1 }
 "examples/fakeshop/test_query/test_mutation_permissions_api.py::test_async_check_permission_override_is_rejected_not_bypassed.AsyncCheckCreateItem.check_permission" = { reportIncompatibleMethodOverride = 1 }
 "examples/fakeshop/test_query/test_resource_policy_api.py::_AcceptedInstanceQuery.rebind" = { reportAttributeAccessIssue = 1 }
 "examples/fakeshop/test_query/test_resource_policy_api.py::_EscapingQuerySet.__getitem__" = { reportIncompatibleMethodOverride = 1 }
@@ -225,14 +221,10 @@
 "scripts/_kanban_lib.py::build_dashboard_snapshot" = { cast = 2 }
 "scripts/_kanban_lib.py::fetch_dashboard_data" = { cast = 4 }
 "scripts/build_glossary_md.py::fetch_glossary_data" = { cast = 2 }
-"scripts/build_kanban_md.py::resolve_card_refs.replace" = { cast = 1 }
 "scripts/build_tree_md.py::fetch_planned_paths" = { cast = 1 }
 "scripts/check_truthful_reads.py::_scan_node" = { reportAssignmentType = 2 }
-"scripts/count_queries.py::main" = { cast = 2 }
-"scripts/prove_failability.py::MutationSite.apply" = { cast = 1 }
 "scripts/workspace.py::_admit" = { cast = 1 }
 "scripts/workspace.py::_load_state" = { cast = 1 }
-"scripts/workspace.py::release" = { cast = 1 }
 "tests/_connection_field_schemas.py::_HostileConnQuerySet.__getitem__" = { reportIncompatibleMethodOverride = 1 }
 "tests/_connection_field_schemas.py::_ListManager.all" = { reportIncompatibleMethodOverride = 1 }
 "tests/_connection_field_schemas.py::_consumer_edge_schema" = { cast = 1 }

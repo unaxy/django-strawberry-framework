@@ -18,7 +18,7 @@ import sys
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Generator, Mapping, Sequence
 from functools import wraps
-from typing import TYPE_CHECKING, NamedTuple, TypeAlias, cast
+from typing import TYPE_CHECKING, NamedTuple, TypeAlias
 
 import django
 import pytest
@@ -25543,8 +25543,12 @@ def test_library_unplanned_relations_keep_their_link_columns(
 
     payload = response_json(response)
     assert payload.get("errors") is None, payload
-    found = re.findall(rf'"{leaf}": "([^"]*)"', json.dumps(payload["data"]))
-    assert sorted(cast("list[str]", found)) == leaves
+    found: list[str] = []
+    for match in re.finditer(rf'"{leaf}": "([^"]*)"', json.dumps(payload["data"])):
+        value = match.group(1)
+        assert isinstance(value, str), match
+        found.append(value)
+    assert sorted(found) == leaves
     assert len(captured) == statements, [entry["sql"] for entry in captured.captured_queries]
     assert link_column in captured[0]["sql"]
 
