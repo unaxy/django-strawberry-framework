@@ -17,9 +17,13 @@ namespace-clear pair (``materialize_input_class`` /
 
 from __future__ import annotations
 
+import copy
 import datetime
+import decimal
 import enum
 import keyword
+import uuid
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
 from itertools import takewhile
@@ -28,6 +32,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import strawberry
 from django import forms
+from django.core.exceptions import FieldError, ValidationError
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.lookups import FieldGetDbPrepValueMixin
@@ -52,6 +57,7 @@ from django_strawberry_framework.conf import hide_flat_filters_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.converter import FORM_FIELD_SCALARS, form_field_scalar
 from django_strawberry_framework.registry import register_subsystem_clear
+from django_strawberry_framework.scalars import BigInt
 from django_strawberry_framework.sets_mixins import declaration_map
 from django_strawberry_framework.types.converters import (
     _field_label,
@@ -67,9 +73,11 @@ from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_list_or_tuple,
     is_mapping,
+    is_queryset,
     optional_annotation,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.converters import convert_with_mro
 from django_strawberry_framework.utils.input_values import (
@@ -91,6 +99,7 @@ from django_strawberry_framework.utils.inputs import (
     optional_field_kwargs,
 )
 from django_strawberry_framework.utils.strings import flatten_lookup_path, pascal_case_or_raise
+from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.widgets import multi_widget_keys, widget_keys
 
 from .base import (
@@ -113,6 +122,7 @@ from .base import (
     _EnumMemberFilterMixin,
     _filterset_lookup_lhs_path,
     _filterset_lookup_operand,
+    _filterset_model,
     _filterset_model_field,
     _filterset_value_field,
     comparison_form_field,
@@ -760,7 +770,9 @@ def _form_cleaned_value_field(
     arm asks that form, ``_column_cleaned_scalar``). A leaf whose value is a converting
     column (no transform, a ``method=`` filter) is unchanged, as is one whose form field is
     not built unbound or whose converting output django-filter builds no filter for (an
-    index of an array of arrays keeps its array refusal).
+    index of an array of arrays keeps its array refusal); a declared leaf on its column
+    whose own form and lookup answer no value of it is refused by its arm once typed
+    (``_refuse_form_serving_no_value``), never here, which a request reaches too.
     """
     if value_field is None or truth.is_instance(filter_instance, _ColumnCleanedFilter):
         return value_field
@@ -784,6 +796,236 @@ def _form_cleaned_value_field(
     ):
         return value_field
     return None
+
+
+def _member_list(filter_instance: Filter, value: object) -> object:
+    """Return the form value a CSV leaf hands its form for two members ``value``.
+
+    Two: django-filter's CSV ``range`` field takes exactly two, its ``in`` any number.
+    """
+    return normalize_input_value(filter_instance, [value, value])
+
+
+def _range_bounds(filter_instance: Filter, value: object) -> object:
+    """Return the two axis values a range leaf's widget reads for the bounds ``value``, ``value``."""
+    patch = require_instance(
+        normalize_input_value(filter_instance, {"start": value, "end": value}),
+        _RangeFormPatch,
+    )
+    keys = require(patch.axis_keys, is_list_or_tuple)
+    return [patch.get(truth.text(key)) for key in keys]
+
+
+#: One value of each scalar a column's leaf is published as, in the Python kind Strawberry
+#: decodes it to (``_published_samples``): a value every column of that kind holds. A hand
+#: table of inputs, never of verdicts: no Django, django-filter, Strawberry or graphql-core
+#: API yields a value of a scalar or of a column, and whether a value answers is asked of
+#: the filter's own form and lookup (``_answers_sample``). A text scalar has no row: the
+#: form parses text by its own syntax, which no finite set of text samples covers, and a
+#: text column compares every kind as its text.
+_SCALAR_SAMPLES: Mapping[object, tuple[object, ...]] = MappingProxyType(
+    {
+        int: (1,),
+        BigInt: (1,),
+        float: (1.0,),
+        decimal.Decimal: (decimal.Decimal(1),),
+        bool: (True, False),
+        datetime.date: (datetime.date(2000, 1, 1),),
+        datetime.datetime: (datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc),),
+        datetime.time: (datetime.time(12, 0),),
+        uuid.UUID: (uuid.UUID(int=1),),
+    },
+)
+
+
+def _published_samples(element: object) -> tuple[object, ...]:
+    """Return values of the published ``element`` a client can send, as Strawberry decodes them.
+
+    A choice column's enum holds every value: each member outside ``EMPTY_VALUES``, which a
+    filter skips as no constraint (``_refuse_choices_off_the_column`` asks the same set). A
+    scalar answers its row in ``_SCALAR_SAMPLES``; any other (text, a consumer ``SCALAR_MAP``
+    entry) none, and its leaf is not asked.
+    """
+    if truth.is_subclass(element, enum.Enum):
+        return tuple(member for member in element if enum_value(member) not in EMPTY_VALUES)
+    return next(
+        (samples for kind, samples in _SCALAR_SAMPLES.items() if kind is element),
+        (),
+    )
+
+
+def _validates_nothing(value: object) -> None:
+    """Accept any cleaned ``value``: the probe's ``validate`` (``_answers_sample``)."""
+    _ = value
+
+
+def _django_resolves(owner: type[object], *names: str) -> bool:
+    """Whether every method ``names`` the class ``owner`` resolves is defined by Django.
+
+    Read as ``filters/sets.py::_runs_shipped_filter`` reads ``filter``: the function the
+    class's real MRO resolves (``utils/truth.py::mro_attr``, unwrapped by
+    ``stored_function``), for the module that defines it.
+    """
+    return all(
+        truth.module(truth.stored_function(truth.mro_attr(owner, name))).partition(".")[0]
+        == "django"
+        for name in names
+    )
+
+
+def _django_converts(column: ModelField) -> bool:
+    """Whether Django's own code converts each value ``column`` is handed, by its own class.
+
+    The column's class must resolve ``to_python`` and ``get_prep_value`` to Django
+    (``_django_resolves``). A relation (a ``ForeignObject``, ``ForeignKey`` and
+    ``OneToOneField`` included, or a ``ManyToManyField``) prepares its value through the
+    fields it points at, read off its last path step (``path_infos[-1].target_fields``,
+    what Django's ``RelatedLookupMixin.get_prep_lookup`` reads), so each of those is
+    asked the same way, down to the concrete key columns.
+    """
+    if not _django_resolves(truth.class_of(column), "to_python", "get_prep_value"):
+        return False
+    if truth.is_instance(column, models.ForeignObject) or truth.is_instance(
+        column,
+        models.ManyToManyField,
+    ):
+        return all(_django_converts(field) for field in column.path_infos[-1].target_fields)
+    return True
+
+
+def _answers_sample(
+    filter_instance: Filter,
+    model: type[models.Model],
+    form_value: object,
+) -> bool:
+    """Whether the filter's own form and lookup turn ``form_value`` into a predicate on ``model``.
+
+    Asked of upstream, as a request asks it: the form field the filter's class builds (on a
+    deep copy of the filter, as ``copied_form_field`` reads it) cleans the value with its
+    and its axes' validators and ``validate`` removed, and the filter's own ``filter``
+    applies the cleaned value to a fresh queryset of ``model``, holding no predicate,
+    which builds the lookup and prepares the value through the column
+    (``Lookup.get_prep_lookup``) without running SQL.
+    A form refusing the value (``ValidationError``; the ``AttributeError`` a temporal form
+    raises stripping a kind it reads only as text; the ``TypeError`` a ``JSONField`` form
+    raises decoding one), a column refusing what the form cleaned
+    (``filters/sets.py::_PREPARATION_REFUSALS``, what ``_unbindable_predicate`` reads as a
+    value the query cannot bind), and a cleaned value applied as no constraint (a
+    ``BooleanFilter``'s ``None``) answer no. A validator or a ``validate`` bounds which
+    values of the kind pass (``min_value``, a slug's or an email's syntax, a consumer's
+    ``validate`` reading the database), never whether the form reads the kind (Django
+    reads the kind in ``to_python``), and no sample speaks for every bound, so neither
+    runs and no query does. A lookup no field registers (Django's ``FieldError`` building
+    the predicate) is not this probe's to judge: it answers yes, and the leaf builds.
+    """
+    from .sets import _PREPARATION_REFUSALS  # noqa: PLC0415 - import cycle
+
+    probe = copy.deepcopy(filter_instance)
+    form_field = probe.field
+    axes = form_field.fields if isinstance(form_field, forms.MultiValueField) else ()
+    for field in (form_field, *axes):
+        field.validators = []
+        field.validate = _validates_nothing
+    try:
+        cleaned = object_result(form_field.clean, form_value)
+    except (ValidationError, AttributeError, TypeError):
+        return False
+    with warnings.catch_warnings():
+        # A lossy preparation's warning (a ``date`` on a ``DateTimeField``) belongs to no query.
+        warnings.simplefilter("ignore")
+        try:
+            filtered = require(probe.filter(models.QuerySet(model=model), cleaned), is_queryset)
+        except FieldError:
+            return True
+        except _PREPARATION_REFUSALS:
+            return False
+    return bool(filtered.query.where)
+
+
+def _refuse_form_serving_no_value(
+    filter_instance: Filter,
+    element: object,
+    filterset_cls: type[FilterSet],
+    form_value: Callable[[Filter, object], object],
+) -> None:
+    """Refuse a leaf typed by its column whose own form and lookup answer no value of it.
+
+    The leaf compares its column with no transform between them, so it is published as the
+    column (``_form_cleaned_value_field``) while its own form field cleans each value: a
+    ``TimeFilter`` on a ``DateTimeField`` is ``DateTime`` and its ``TimeField`` cannot read a
+    ``datetime``; a ``UUIDFilter`` on an ``IntegerField`` reads no integer; a
+    ``DurationFilter`` on an ``IntegerField`` cleans a ``timedelta`` the column cannot
+    prepare; a ``BooleanFilter`` on a ``DateField`` cleans every date to no constraint. Each
+    sample of the published ``element`` (``_published_samples``), turned by ``form_value``
+    into what the arm hands the form (``normalize_input_value``, ``_member_list``,
+    ``_range_bounds``), is asked of the form and the lookup (``_answers_sample``); a leaf
+    answering none is a declaration no value of its input can serve, refused naming the
+    column, its form field, the lookup and the advice. One answered sample builds, so a leaf
+    answering some values (``DateFilter`` on a ``DateTimeField``, ``CharFilter`` on an
+    integer) is never refused.
+
+    The leaf asked is the filter the consumer wrote, on the set declaring it
+    (``_declaration_of``: a ``RelatedFilter`` expansion's copy is its child filter on the
+    child set). Only a consumer's declaration is asked: a declared filter and a
+    ``Meta.filter_overrides`` selection (``filters/sets.py::filter_generation_provenance``),
+    never a generated leaf, whose class django-filter selects for the column. A ``method=``
+    filter or a consumer ``filter`` override (``filters/sets.py::_runs_shipped_filter``) owns
+    what its value means, a form field whose class defines its own cleaning
+    (``_cleaned_kind``) is a consumer's parser, and a column converting in its own
+    ``to_python`` / ``get_prep_value`` (a relation's target key included,
+    ``_django_converts``) or a lookup preparing in its own
+    ``get_prep_lookup`` (``_django_resolves``) is consumer code bounding which values
+    pass, so none is asked. A transform, a column holding values as given, a package
+    column-cleaned filter and a null test type their leaf on other arms.
+    """
+    from .sets import (  # noqa: PLC0415 - import cycle
+        _FRAMEWORK_GENERATED_ORIGINS,
+        _runs_shipped_filter,
+        filter_generation_provenance,
+    )
+
+    provenance = filter_generation_provenance(filter_instance)
+    if provenance is not None and provenance.origin in _FRAMEWORK_GENERATED_ORIGINS:
+        return
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    declared = declaration.declared
+    owner = declaration.filterset
+    column = _filterset_value_field(owner, declared)
+    operand = _filterset_lookup_operand(owner, declared)
+    if (
+        column is None
+        or truth.is_instance(declared, _ColumnCleanedFilter)
+        or column is not _filterset_model_field(owner, declared)
+        or _holds_values_as_given(column)
+        or operand.null_test
+        or not _runs_shipped_filter(declared)
+        or not _django_converts(column)
+        or (operand.lookup is not None and not _django_resolves(operand.lookup, "get_prep_lookup"))
+    ):
+        return
+    form_fields = _form_value_fields(declared)
+    model = _filterset_model(owner)
+    samples = _published_samples(element)
+    if (
+        model is None
+        or not samples
+        or not form_fields
+        or any(_cleaned_kind(form_field) is None for form_field in form_fields)
+        or any(
+            _answers_sample(declared, model, form_value(declared, sample)) for sample in samples
+        )
+    ):
+        return
+    form_kind = ", ".join(sorted({truth.kind(form_field) for form_field in form_fields}))
+    raise ConfigurationError(
+        f"{_declaration_subject(declaration, filterset_cls)} is published as "
+        f"{_field_label(column)} values, but its own form field ({form_kind}) and lookup "
+        f"{truth.render(declared.lookup_expr)} answer no value of that column, so every value "
+        "of its input would be refused or would constrain nothing (match every row); filter "
+        "a transform of the column whose output its form cleans (a TimeFilter on "
+        '`field_name="<column>__time"`), declare a filter class whose form cleans the '
+        "column's kind, or read the value in `method=`.",
+    )
 
 
 def _range_axis_scalar(filter_instance: Filter, filterset_cls: type[FilterSet]) -> object:
@@ -1094,7 +1336,9 @@ def _element_annotation(
     non-text column (``FilterSet.filter_for_lookup`` gives it ``TextPatternFilter``)
     is ``str``, never the column's scalar or choice enum, because the pattern is
     matched against the column's text rendering. A declared filter or a
-    ``Meta.filter_overrides`` selection keeps the column-driven type.
+    ``Meta.filter_overrides`` selection keeps the column-driven type; its arm
+    refuses one whose own form and lookup answer no value of that type
+    (``_refuse_form_serving_no_value``).
 
     Known contract limit: a custom ``method=`` filter has no backing
     ``model_field``, so its element type is inferred from the
@@ -1380,7 +1624,10 @@ def convert_filter_to_input_annotation(
     filter with no model column whose form field is not built unbound raises
     ``ConfigurationError`` (``_refuse_method_without_form_field``), as does a leaf typed by a
     choice enum that reads no field declaring ``choices``, or whose own form field accepts
-    none of its column's choices (``_choice_enum_from_filter``).
+    none of its column's choices (``_choice_enum_from_filter``), and a declared or
+    ``Meta.filter_overrides`` leaf on its column whose own form and lookup answer no value
+    of it (``_refuse_form_serving_no_value``, on the catch-all, bare ``TypedFilter``, CSV
+    and range arms).
 
     Dispatch rides ``utils/converters.py::convert_with_mro`` with the same
     kind table ``normalize_input_value`` uses.
@@ -1441,6 +1688,7 @@ def convert_filter_to_input_annotation(
         value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
         column = _array_element_column(matched, value_field, filterset_cls)
         element = _element_annotation(matched, column, owner_definition, filterset_cls)
+        _refuse_form_serving_no_value(matched, element, filterset_cls, _member_list)
         return GenericAlias(list, (element,))
 
     def _multiple_choice(matched: Filter) -> object:
@@ -1471,6 +1719,7 @@ def convert_filter_to_input_annotation(
             inner = compared
         elif value_field is not None or model_field is None:
             inner = _scalar_from_model_field(value_field)
+            _refuse_form_serving_no_value(matched, inner, filterset_cls, _range_bounds)
         else:
             inner = _range_axis_scalar(matched, filterset_cls)
         return _build_range_input_class(matched, inner, filterset_cls)
@@ -1489,7 +1738,9 @@ def convert_filter_to_input_annotation(
         # Past a transform, a value the filter's own form cannot clean as the output is typed
         # by that form (``_form_cleaned_value_field``), as the catch-all's is.
         value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
-        return _element_annotation(matched, value_field, owner_definition, filterset_cls)
+        element = _element_annotation(matched, value_field, owner_definition, filterset_cls)
+        _refuse_form_serving_no_value(matched, element, filterset_cls, normalize_input_value)
+        return element
 
     def _choice(matched: Filter) -> object:
         # The array's own ``choices`` are ambiguous (the read side refuses them too).
@@ -1500,12 +1751,14 @@ def convert_filter_to_input_annotation(
 
     def _catchall(matched: Filter) -> object:
         # Catch-all scalar branch (``_catchall_element``).
-        return _catchall_element(
+        element = _catchall_element(
             matched,
             model_field,
             filterset_cls,
             lambda field: _element_annotation(matched, field, owner_definition, filterset_cls),
         )
+        _refuse_form_serving_no_value(matched, element, filterset_cls, normalize_input_value)
+        return element
 
     def _one_key(handler: Callable[[Filter], object]) -> Callable[[Filter], object]:
         def _checked(matched: Filter) -> object:
