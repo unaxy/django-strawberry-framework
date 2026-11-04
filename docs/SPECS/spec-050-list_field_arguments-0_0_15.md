@@ -1000,8 +1000,8 @@ in a package-internal
 [async-only queryset-row adapter][glossary-async-queryset-completion-adapter] whose
 `__aiter__` delegates to Django's safe
 [`django/db/models/query.py::QuerySet.__aiter__`][django-queryset] iteration. The adapter is
-not a public collection type, and it does not implement `__iter__`, so no completion can select synchronous ORM
-iteration on it in an event-loop thread.
+not a public collection type, and it does not implement `__iter__`, so no completion can
+select synchronous ORM iteration on it in an event-loop thread.
 
 [`DjangoOptimizerExtension`][glossary-djangooptimizerextension] recognizes it, applies the
 root plan to its inner final sliced queryset, and rewraps the optimized queryset; without the
@@ -1025,8 +1025,8 @@ Rewrapping is an obligation of every return path out of `_optimize`, not only th
 tail. That method also returns early and unchanged on an already-evaluated queryset and again
 when the return type resolves to no registered [`DjangoType`][glossary-djangotype]; either
 path would hand graphql-core the bare inner queryset, leaving the list field's completion to
-upstream's protocol choice rather than the adapter, if only the plan-applying tail rewrapped. The arm therefore
-wraps whatever `_optimize` returns for an adapter input.
+upstream's protocol choice rather than the adapter, if only the plan-applying tail rewrapped.
+The arm therefore wraps whatever `_optimize` returns for an adapter input.
 `tests/test_list_field.py::test_list_field_optimizer_adapter_unwrap_rewrap_and_early_returns`
 pins the unwrap identity, the inner low/high marks and the wrapper on both early returns, and
 `tests/optimizer/test_extension.py::test_optimizer_preserves_async_adapter_evaluated_cache`,
@@ -1048,10 +1048,10 @@ whether a consumer or visibility hook is awaited.
 The safety claim is scoped to COMPLETING A LAZY QUERYSET and is written that way everywhere it
 appears: the list field's own final queryset and, through graphql-core's asynchronous completion
 (Decision 12), any `QuerySet` a resolver hands a list field under the asynchronous executor.
-Asynchronous completion removes only the row iteration from the event loop. It cannot stop a plain `def` consumer
-resolver from calling `list(qs)`,
-`.exists()`, `.count()`, or any other synchronous ORM method while already running on the
-event-loop thread, and the field keeps the callable-color rule for that resolver. A
+Asynchronous completion removes only the row iteration from the event loop. It cannot stop a
+plain `def` consumer resolver from calling `list(qs)`, `.exists()`, `.count()`, or any other
+synchronous ORM method while already running on the event-loop thread, and the field keeps the
+callable-color rule for that resolver. A
 synchronous `get_queryset` hook is not on the loop: it runs in a `sync_to_async` worker, so
 its body may call those methods. The async acceptance suite accordingly exercises CONFORMING lazy sync
 resolvers - ones that return a queryset or manager without evaluating it
@@ -1692,18 +1692,19 @@ belongs to card [`TODO-BETA-073-0.1.8`][kanban].
 
 ### Decision 12 — graphql-core workarounds have a dependency-owned lifecycle
 
-graphql-core owns asynchronous list completion on every release the
-`graphql-core>=3.3.1,<3.4` pin in `pyproject.toml` admits, and the package patches none of it.
+graphql-core owns asynchronous list completion on graphql-core 3.3.1, the release `uv.lock`
+resolves, and the package patches none of it.
 [`graphql/execution/executor.py::Executor.complete_list_value`][graphql-executor] asks its
 `is_async_iterable` predicate (a `__aiter__` attribute) before the synchronous `Iterable`
 protocol and hands an asynchronous iterable to `Executor.complete_async_iterator_value`, which
 awaits every item's completion before it returns the list. Strawberry replaces that predicate
 with one answering `False` for its synchronous executor only
 ([`strawberry/schema/schema.py::Schema._get_custom_context_kwargs`][strawberry-schema]), so the
-choice follows the executor the operation runs on, never the ambient loop. Under the asynchronous executor a
-`QuerySet` any resolver returns to a list field - a plain `def` root's, a nested resolver's -
-is therefore fetched through Django's `QuerySet.__aiter__` off the event loop, as is any other
-value offering both protocols; the synchronous executor iterates it through `__iter__`.
+choice follows the executor the operation runs on, never the ambient loop. Under the
+asynchronous executor a `QuerySet` any resolver returns to a list field - a plain `def` root's,
+a nested resolver's - is therefore fetched through Django's `QuerySet.__aiter__` off the event
+loop, as is any other value offering both protocols; the synchronous executor iterates it
+through `__iter__`.
 `QuerySet.__aiter__` fetches through `_fetch_all` and never calls `__iter__`, so a project
 `QuerySet` subclass's `__iter__` override is not used on the asynchronous executor, exactly as
 on the list field's own async path. Completion moves the row fetch only: a resolver body still

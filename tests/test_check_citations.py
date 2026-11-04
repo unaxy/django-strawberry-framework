@@ -96,11 +96,8 @@ def _scope_ignoring(root: Path, *ignored: str) -> tuple[frozenset[str], frozense
         relative
         for path in root.rglob("*")
         if path.is_file()
-        and not any(
-            (relative := path.relative_to(root).as_posix()) == name
-            or relative.startswith(f"{name}/")
-            for name in ignored
-        )
+        for relative in (path.relative_to(root).as_posix(),)
+        if not any(relative == name or relative.startswith(f"{name}/") for name in ignored)
     )
     directories = frozenset(
         "/".join(Path(path).parts[:depth])

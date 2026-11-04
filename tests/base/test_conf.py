@@ -49,7 +49,7 @@ from django_strawberry_framework.conf import (
 from django_strawberry_framework.conf import settings as bound_settings
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils._narrowing import read_attr
-from tests._idioms import ClaimsClassBase, ClassReadRaises, hostile_name_instance
+from tests._idioms import ClaimsClassBase, ClassReadRaises, HostileNameMeta
 
 _PATCH_DEPENDENCIES = sorted(conf.UPSTREAM_PATCH_DEPENDENCIES)
 
@@ -838,10 +838,14 @@ def test_normalize_rejection_skips_raising_metaclass_name() -> None:
     The non-mapping rejection assembles its message with the received
     value's type name at the raise site - before any exception object
     exists. That name is read from the interpreter (``truth.kind``), so a
-    metaclass whose ``__name__`` property raises never runs and the message
+    metaclass whose ``__name__`` read raises never runs and the message
     names the real class.
     """
-    evil = hostile_name_instance("Evil", "hostile __name__ boom")
+
+    class Evil(metaclass=HostileNameMeta):
+        pass
+
+    evil = Evil()
 
     with pytest.raises(ConfigurationError, match="must be a mapping or None; got Evil"):
         conf._normalize_user_settings(evil)
@@ -853,7 +857,11 @@ def test_normalize_rejection_skips_raising_metaclass_name() -> None:
 
 def test_upstream_patches_toggle_rejection_skips_raising_metaclass_name() -> None:
     """A non-bool/non-mapping toggle whose metaclass ``__name__`` raises is refused typed."""
-    evil = hostile_name_instance("Evil", "hostile __name__ boom")
+
+    class Evil(metaclass=HostileNameMeta):
+        pass
+
+    evil = Evil()
 
     s = Settings({"APPLY_UPSTREAM_PATCHES": evil})
 
@@ -866,7 +874,11 @@ def test_upstream_patches_toggle_rejection_skips_raising_metaclass_name() -> Non
 
 def test_upstream_patches_mapping_value_rejection_skips_raising_metaclass_name() -> None:
     """A non-bool per-dependency value whose metaclass ``__name__`` raises is refused typed."""
-    evil = hostile_name_instance("Evil", "hostile __name__ boom")
+
+    class Evil(metaclass=HostileNameMeta):
+        pass
+
+    evil = Evil()
 
     s = Settings({"APPLY_UPSTREAM_PATCHES": {"django": evil}})
 

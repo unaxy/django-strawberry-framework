@@ -1707,11 +1707,39 @@ class _EchoQuery:
 _DRIFTING_SCHEMA = strawberry.Schema(query=_EchoQuery, extensions=[_drifting_extension])
 
 
+class _PolicySchema(strawberry.Schema):
+    """A plain ``strawberry.Schema`` declaring the ``resource_policy`` the extension reads."""
+
+    resource_policy: ResourcePolicy
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _drifting_schema_view(
+    request: HttpRequest,
+    *args: object,
+    **kwargs: object,
+) -> HttpResponseBase:
+    """Mount a plain schema carrying a FRESH armed drifting policy, built per request.
+
+    The extension is configured with no policy, so it reads the schema's: whatever
+    object the consumer stored there, its reads its own code. Built per request
+    because the drifting policy counts its reads; a schema shared across requests
+    would hand the second request a policy already past its narrow first read.
+    """
+    policy = _DriftingPolicy()
+    truth.instance_state(policy)["_armed"] = True
+    schema = _PolicySchema(query=_EchoQuery, extensions=[DjangoResourcePolicyExtension])
+    schema.resource_policy = policy
+    built = DjangoGraphQLView.as_view(schema=schema)
+    return built(request, *args, **kwargs)
+
+
 urlpatterns = [
     path("", include("config.urls")),
     path("rp-nested/", _nested_view),
     path("rp-nested-async/", _nested_async_view),
     path("rp-drifting/", DjangoGraphQLView.as_view(schema=_DRIFTING_SCHEMA)),
+    path("rp-drifting-schema/", _drifting_schema_view),
     path("rp-authority/", _authority_view),
     # Mounted from ``ENTRY_MOUNTS`` rather than spelled out, so the mounts and the
     # parametrized rows cannot disagree about which spellings exist.
@@ -5465,4 +5493,19 @@ def test_an_explicit_extension_policy_bounds_the_request_by_its_first_read() -> 
     (``extensions/resource_policy.py::DjangoResourcePolicyExtension.on_operation``).
     """
     extensions = _rejection(_post("/rp-drifting/", "{ echo }"))
+    assert extensions["bound"] == "max_document_tokens"
+
+
+def test_a_schema_policy_bounds_the_request_by_the_snapshot_arming_took() -> None:
+    """The pre-parse scan charges the policy ``begin_resource_budget`` armed, not its source.
+
+    A plain ``strawberry.Schema`` answers ``resource_policy`` with whatever the
+    consumer stored there, so the policy the extension resolves can be a subclass
+    whose reads are its own code. Arming snapshots it (its first read, here the
+    one-token bound); a scan handed the resolved object instead would read it a
+    second time, be answered with a million tokens and admit the document the
+    armed budget refuses
+    (``extensions/resource_policy.py::DjangoResourcePolicyExtension.on_operation``).
+    """
+    extensions = _rejection(_post("/rp-drifting-schema/", "{ echo }"))
     assert extensions["bound"] == "max_document_tokens"

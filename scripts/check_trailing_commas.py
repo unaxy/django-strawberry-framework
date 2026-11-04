@@ -1508,6 +1508,29 @@ def _repo_relative(path: Path) -> str | None:
         return None
 
 
+def git_visible_walk(
+    top: Path,
+    scope: tuple[frozenset[str], frozenset[str]] | None,
+) -> Iterator[tuple[Path, list[str], list[str]]]:
+    """``os.walk(top)`` restricted to what git would accept as repo content.
+
+    Yields ``(directory, subdirectories, files)`` like ``os.walk``, with every
+    subdirectory and file outside ``scope`` already dropped, so a caller that prunes
+    ``subdirectories`` further still never descends into an ignored tree. ``scope``
+    is ``git_visible_scope``'s answer; ``None`` (no git, an unpacked sdist) filters
+    nothing, and neither does a directory outside ``REPO_ROOT``, which git's
+    repo-relative answer says nothing about.
+    """
+    for dirpath, dirnames, filenames in os.walk(top):
+        here = Path(dirpath)
+        relative = _repo_relative(here) if scope is not None else None
+        if scope is not None and relative is not None:
+            base = "" if relative == "." else f"{relative}/"
+            dirnames[:] = [name for name in dirnames if f"{base}{name}" in scope[1]]
+            filenames[:] = [name for name in filenames if f"{base}{name}" in scope[0]]
+        yield here, dirnames, filenames
+
+
 def _walk(
     root: Path,
     suffixes: tuple[str, ...],
@@ -1519,32 +1542,23 @@ def _walk(
     results afterwards; pruning at the directory level never visits them. A
     directory named by ``[tool.ruff] extend-exclude`` is pruned the same way.
 
-    Git-ignored paths are pruned too. A tree-wide run that descended ``.claude/``
-    would report a layout violation against an agent-memory file no commit can
-    contain -- and under ``--fix`` it would not just report: it would WRITE a
-    LINK-DEFINITIONS footer into that file. An ignored path is not repo content,
-    so the sweep does not read it. Paths named explicitly on the command line are
-    still honoured; only the walk is filtered.
+    Git-ignored paths are pruned too (``git_visible_walk``). A tree-wide run that
+    descended ``.claude/`` would report a layout violation against an agent-memory
+    file no commit can contain -- and under ``--fix`` it would not just report: it
+    would WRITE a LINK-DEFINITIONS footer into that file. An ignored path is not
+    repo content, so the sweep does not read it. Paths named explicitly on the
+    command line are still honoured; only the walk is filtered.
 
     A git-visible file with a checked suffix that an exclusion rule drops is
     appended to ``excluded`` (when given), so the run can count what it skipped.
     """
-    scope = git_visible_scope()
-    for dirpath, dirnames, filenames in os.walk(root):
-        here = Path(dirpath)
+    for here, dirnames, filenames in git_visible_walk(root, git_visible_scope()):
         dirnames[:] = sorted(
             d for d in dirnames if d not in EXCLUDE_DIRS and not is_ruff_excluded_name(d)
         )
-        relative = _repo_relative(here) if scope is not None else None
-        base = "" if relative in (None, ".") else f"{relative}/"
-        if scope is not None and relative is not None:
-            visible = scope[1]
-            dirnames[:] = [name for name in dirnames if f"{base}{name}" in visible]
         for name in sorted(filenames):
             path = here / name
             if path.suffix not in suffixes:
-                continue
-            if scope is not None and relative is not None and f"{base}{name}" not in scope[0]:
                 continue
             if is_excluded(path):
                 if excluded is not None:
