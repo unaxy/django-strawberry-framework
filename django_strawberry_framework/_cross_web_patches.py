@@ -41,17 +41,17 @@ returns ``self.request.body.decode()`` - a bare UTF-8 decode with no
 error handling. That has two production consequences before Strawberry's
 ``parse_json`` can own the body:
 
-1. A body that is not valid UTF-8 raises ``UnicodeDecodeError`` from
-   inside the property, so Strawberry's ``400`` handling never runs and
-   the request surfaces as an unhandled ``500``.
-2. A body that *is* UTF-8-decodable but is not UTF-8 JSON - notably
-   BOM-less UTF-16-LE/BE and UTF-32-LE/BE (ASCII code units padded with
-   NUL bytes, which are valid UTF-8) and a UTF-8 BOM payload - returns a
-   ``str`` that ``json.loads`` rejects, while the **async** adapter
-   (``AsyncDjangoHTTPRequestAdapter.get_body``) hands Strawberry the raw
-   ``bytes`` untouched. Upstream's two transports therefore disagree
-   about which bodies are even parseable - the asymmetry, not either
-   answer, is the defect.
+- The undecodable body: a body that is not valid UTF-8 raises
+  ``UnicodeDecodeError`` from inside the property, so Strawberry's ``400``
+  handling never runs and the request surfaces as an unhandled ``500``.
+- The transport asymmetry: a body that *is* UTF-8-decodable but is not
+  UTF-8 JSON - notably BOM-less UTF-16-LE/BE and UTF-32-LE/BE (ASCII code
+  units padded with NUL bytes, which are valid UTF-8) and a UTF-8 BOM
+  payload - returns a ``str`` that ``json.loads`` rejects, while the
+  **async** adapter (``AsyncDjangoHTTPRequestAdapter.get_body``) hands
+  Strawberry the raw ``bytes`` untouched. Upstream's two transports
+  therefore disagree about which bodies are even parseable - the
+  asymmetry, not either answer, is the defect.
 
 The decode is therefore both unsafe and misplaced. This patch replaces
 the sync ``body`` property with the async contract - always return
@@ -72,9 +72,9 @@ subclass of the class patched here) and decodes strictly in its own
 ``parse_json``, so it behaves identically with this patch installed or
 not. What the patch decides is what the *other* mount gets:
 
-- installed - the raw bytes reach ``json.loads``, so gap (1)'s
-  undecodable bodies become a controlled ``400`` (through the Strawberry
-  patch's ``UnicodeDecodeError`` translation when the detected-encoding
+- installed - the raw bytes reach ``json.loads``, so undecodable bodies
+  become a controlled ``400`` (through the Strawberry patch's
+  ``UnicodeDecodeError`` translation when the detected-encoding
   decode raises, or through upstream's own ``json.JSONDecodeError``
   handling when ``surrogatepass`` lets the decode succeed into non-JSON),
   and every other shape keeps upstream's own RFC 8259
@@ -83,17 +83,17 @@ not. What the patch decides is what the *other* mount gets:
 - not installed - an undecodable body raises inside the property and is
   the unhandled ``500`` that is the upstream defect.
 
-Gap (2) survives as the reason the correct fix is "hand over the raw
-bytes" rather than "decode defensively inside the property": a property
-cannot own an error contract. Sync/async parity is still the property
-this patch buys for that mount - without it upstream's two transports
-disagree about which bodies are even parseable, and the asymmetry, not
-either answer, is the defect.
+The transport asymmetry survives as the reason the correct fix is "hand
+over the raw bytes" rather than "decode defensively inside the
+property": a property cannot own an error contract. Sync/async parity
+is still the property this patch buys for that mount - without it
+upstream's two transports disagree about which bodies are even
+parseable, and the asymmetry, not either answer, is the defect.
 
 Upstream's getter is still captured at import time so retirement probes
 and shape validation can see the bare ``.decode()``, but the installed
 property does not call it - calling it would put the decode back inside
-the property and re-introduce gap (1)'s unhandled ``500``.
+the property and re-introduce the undecodable body's unhandled ``500``.
 
 Upstream status
 ---------------

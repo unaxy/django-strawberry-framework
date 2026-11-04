@@ -1002,9 +1002,9 @@ def test_fast_path_total_count_from_annotation_no_query() -> None:
 def test_fast_path_has_next_page_without_edges_on_window() -> None:
     """``hasNextPage`` is correct on the WINDOW path even when ``edges`` is unrequested.
 
-    The Relay invariant (spec-032 Goal 4 / DoD: "the connection MUST resolve
-    ``hasNextPage`` correctly even when the consumer didn't request ``edges``")
-    asserted on the exact path spec-033 introduces - the others assert it only on
+    The Relay invariant spec-032 Decision 9 pins (``hasNextPage`` is correct
+    on a ``pageInfo``-only query that does not request ``edges``) asserted on
+    the exact path spec-033 introduces - the others assert it only on
     the root field and the optimizer-less per-parent fallback. A nested
     ``booksConnection { pageInfo { hasNextPage } }`` with no ``edges`` is
     recognized by field name, window-planned as a scalar-only projection, and

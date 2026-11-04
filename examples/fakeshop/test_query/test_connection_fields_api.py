@@ -1291,7 +1291,7 @@ def test_connection_instance_shadowed_all_hook_is_sealed() -> None:
 
 @pytest.mark.django_db
 def test_connection_query_chain_shadow_hook_is_sealed() -> None:
-    """A hook whose ``query.chain`` is instance-replaced FAILS CLOSED (Decision 2).
+    """A hook whose ``query.chain`` is instance-replaced FAILS CLOSED (spec-045 Decision 2).
 
     ``sql.Query.clone`` shallow-copies the source ``Query.__dict__``, so an
     instance ``chain`` shadow would ride into the sealed query and dispatch on the

@@ -20,7 +20,7 @@ On top of that skeleton the module carries:
   ``Min`` / ``Max`` aggregate, and a term reading a related row a type hides
   as a missing one.
 - The resolver-facing classmethod pair ``apply_sync`` /
-  ``apply_async`` (no ``apply(...)`` dispatcher per spec-028 DoD 4(c)).
+  ``apply_async`` (no ``apply(...)`` dispatcher per spec-028 Decision 8).
 - The classmethod permission pipeline, inherited from
   ``ActiveInputPermissionMixin`` (``_run_permission_checks`` /
   ``_active_permission_targets`` / ``_invoke_permission_method`` /
@@ -454,10 +454,10 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
     ``apply_async`` per spec-028 Decision 8 step 7. Each carries ``info``
     end-to-end so per-field ``check_<field>_permission`` gates and
     active-input-only scope run consistently. There is **no**
-    ``apply(...)`` dispatcher (spec-028 DoD 4(c) -- the filter side's
-    ``apply`` exists to translate a sync-misuse ``RuntimeError`` raised
-    when a ``RelatedFilter`` target declares an async ``get_queryset``;
-    the order side has no equivalent code path).
+    ``apply(...)`` dispatcher (spec-028 Decision 8): the
+    ``SyncMisuseError`` an async-only related order target raises out of
+    ``apply_sync`` is already a ``RuntimeError`` naming ``apply_async``,
+    so there is no second spelling for a dispatcher to translate.
 
     The order side does NOT override ``_field_type_suffix`` -- the
     cookbook's upstream ``AdvancedOrderSet`` keeps the default

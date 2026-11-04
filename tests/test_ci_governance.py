@@ -1983,6 +1983,241 @@ def test_the_plan_label_sweep_reports_nothing_for_a_planted_permitted_form(
     assert violations == [], violations
 
 
+#: The numbered spec sections a pointer may not cite by number: a Definition of
+#: done item, a Goal (or Non-goal) and a Slice, each optionally followed by
+#: ``item`` / ``items`` (a Definition of done first by one or two closing
+#: backticks), then any run of spaces, hyphens or line breaks, at most one ``#``
+#: or ``:``, and an optional ``(`` or builder letter before its number
+#: (``DoD-N``, ``D.o.D. #N``, a wrapped ``Definition-of-done item N``,
+#: ``Goals item N``, ``Goal: N``, ``DoD (N``, ``Slices N-M``, a builder
+#: ``Slice X.Na``). Renumbering such a list strands every citer and no gate
+#: resolves them; ``spec-NNN Decision N`` is the one ordinal
+#: ``scripts/check_citations.py`` resolves, so it is not read here.
+#: Case-insensitive, so a def or class name (read with its underscores as
+#: spaces) matches in lower case.
+SPEC_ORDINAL_PATTERN = re.compile(
+    r"(?<![\w-])(?:"
+    r"(?:DoD|D\.o\.D\.?|Definition[-\s]+of[-\s]+done`{0,2})"
+    r"|(?:Non-)?Goals?(?=[-\s#:])"
+    r"|Slices?(?=[-\s#:])"
+    r")(?:[-\s]+items?)?[-\s]*[#:]?[-\s]*(?:\(|[A-Z]\.)?\d",
+    re.IGNORECASE,
+)
+
+#: The live staged-slice anchor AGENTS.md prescribes for an unbuilt slice; it is
+#: removed in the change that ships the slice, so it is the one Slice ordinal kept.
+TODO_SLICE_ANCHOR_PATTERN = re.compile(r"TODO\(spec-\d{3}\s+slice\s+\d+\w*\)", re.IGNORECASE)
+
+
+def _spec_ordinal_entries_in(
+    paths: Iterable[Path],
+    package_root: Path = PACKAGE_ROOT,
+) -> tuple[list[str], int]:
+    """Return one formatted violation per spec section cited by number, and the texts read.
+
+    The texts are ``_swept_texts``: every file's prose, plus a package file's
+    runtime strings, each read with its staged-slice anchors
+    (``TODO_SLICE_ANCHOR_PATTERN``) blanked. Each violation names the file, the
+    line the match starts on, the kind of text and the match.
+    """
+    violations: list[str] = []
+    read = 0
+    for path in paths:
+        display = path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path
+        source = path.read_text(encoding="utf-8")
+        for first_line, kind, text in _swept_texts(path, source, package_root):
+            read += 1
+            blanked = TODO_SLICE_ANCHOR_PATTERN.sub(lambda anchor: " " * len(anchor[0]), text)
+            for match in SPEC_ORDINAL_PATTERN.finditer(blanked):
+                line = first_line + text.count("\n", 0, match.start())
+                violations.append(f"{display}:{line}: {kind}: {match[0]!r}")
+    return violations, read
+
+
+def test_no_comment_docstring_name_or_package_string_cites_a_spec_section_by_number() -> None:
+    """No first-party prose, and no package string, points into a spec list by its number.
+
+    START.md "Style the maintainer cares about": a contract is cited by content,
+    never by ordinal, and ``spec-NNN Decision N`` is the one gated ordinal. A
+    spec's Definition of done, Goals and Slices are numbered lists a later edit
+    renumbers, so a pointer such as a Definition of done item or a Goal by
+    number goes stale silently. This row reads every comment, string statement
+    and def/class name of the sweep corpus, plus every other ``str`` constant in
+    ``django_strawberry_framework/``, and refuses the forms
+    ``SPEC_ORDINAL_PATTERN`` names: state what the item says, or cite the
+    Decision that owns it as ``spec-NNN Decision N``.
+
+    Deliberate limits. A live ``TODO(spec-NNN slice N)`` anchor is not read (the
+    staged-slice convention). A section named without a number (a spec's
+    Definition of done as a whole) is not read, nor is a number in words or
+    Roman numerals (no spec numbers its sections so). The match is
+    case-insensitive and reads no context, code spans included: a lowercase
+    ``slice``, ``goal`` or ``dod`` followed by a number is refused wherever it
+    appears, so such prose is rephrased. A bare ``Decision N`` is a repo-wide
+    convention graded by its anchor (START.md "Reconciling a spec with the
+    tree"), a step inside a Decision rides on the gated pointer, and a module's
+    own numbered list is local prose: none is read here, each is judged by
+    hand. A non-statement string outside the package (test data, fixtures) is
+    not read.
+    """
+    corpus = _sweep_corpus()
+    violations, read = _spec_ordinal_entries_in(corpus)
+    assert REPO_ROOT / CENSUS_MODULE in corpus, "the sweep corpus does not hold this module"
+    assert PACKAGE_ROOT / "__init__.py" in corpus, "the sweep corpus does not hold the package"
+    assert read, "no comment, docstring, name or string was read; the sweep read nothing"
+    assert not violations, (
+        "spec section(s) cited by number in first-party code:\n"
+        + "\n".join(violations)
+        + "\nState what the item says, or cite the owning decision as "
+        "'spec-NNN Decision N' (START.md, 'Style the maintainer cares about')."
+    )
+
+
+#: One planted shape per refused form: the file it sits in (``package`` or
+#: ``other``), its body, and every violation the report must name (line, kind,
+#: match).
+PLANTED_SPEC_ORDINAL_SHAPES = [
+    (
+        "comment-hyphen",
+        "other",
+        'VALUE = 1\n# the parent (Decision 6 / DoD-4 "no entry")\n',
+        ["2: comment: 'DoD-4'"],
+    ),
+    (
+        "docstring-item-letter",
+        "other",
+        'def run():\n    """Run.\n\n    No dispatcher per spec-028 DoD 4(c).\n    """\n',
+        ["4: docstring: 'DoD 4'"],
+    ),
+    (
+        "docstring-wrapped-long-form",
+        "other",
+        (
+            'def run():\n    """Run.\n\n    spec-027 Decision 8 step 8 + Definition-of-done\n'
+            '    item 4(d).\n    """\n'
+        ),
+        ["4: docstring: 'Definition-of-done\\n    item 4'"],
+    ),
+    (
+        "parenthesized",
+        "other",
+        "# the DoD (2) row\n",
+        ["1: comment: 'DoD (2'"],
+    ),
+    (
+        "goal",
+        "other",
+        'class Probe:\n    """The Relay invariant (spec-032 Goal 4)."""\n',
+        ["2: docstring: 'Goal 4'"],
+    ),
+    (
+        "non-goal",
+        "other",
+        "# out of scope per Non-goal 3\n",
+        ["1: comment: 'Non-goal 3'"],
+    ),
+    (
+        "slice-range",
+        "other",
+        "# spec-033 Slices 1-2: the root fence\n",
+        ["1: comment: 'Slices 1'"],
+    ),
+    (
+        "builder-slice",
+        "other",
+        'VALUE = 1\n"""Captured for Slice C.3a."""\n',
+        ["2: docstring: 'Slice C.3'"],
+    ),
+    (
+        "test-name",
+        "other",
+        "def test_dod_4_dispatcher():\n    pass\n",
+        ["1: name: 'dod 4'"],
+    ),
+    (
+        "class-name",
+        "other",
+        "class Probe_Goal_2:\n    pass\n",
+        ["1: name: 'Goal 2'"],
+    ),
+    (
+        "punctuated",
+        "other",
+        "# per DoD #4, Goal: 2 and D.o.D. item 5\n",
+        ["1: comment: 'DoD #4'", "1: comment: 'Goal: 2'", "1: comment: 'D.o.D. item 5'"],
+    ),
+    (
+        "goals-item",
+        "other",
+        "# per spec Goals item 3 + Test plan\n",
+        ["1: comment: 'Goals item 3'"],
+    ),
+    (
+        "backticked-definition-of-done",
+        "other",
+        "# the spec's `Definition of done` item 4 holds\n",
+        ["1: comment: 'Definition of done` item 4'"],
+    ),
+    (
+        "lowercase-list",
+        "other",
+        "# slice-1 wires goals 1 and 2\n",
+        ["1: comment: 'slice-1'", "1: comment: 'goals 1'"],
+    ),
+    (
+        "package-message",
+        "package",
+        "MESSAGE = 'see spec-028 DoD 4'\n",
+        ["1: string: 'DoD 4'"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("where", "body", "expected"),
+    [(where, body, expected) for _, where, body, expected in PLANTED_SPEC_ORDINAL_SHAPES],
+    ids=[name for name, _, _, _ in PLANTED_SPEC_ORDINAL_SHAPES],
+)
+def test_the_spec_ordinal_sweep_reports_a_planted_shape(
+    tmp_path: Path,
+    where: str,
+    body: str,
+    expected: list[str],
+) -> None:
+    """Each refused form is reported at the line it starts on, with its kind and match."""
+    if where == "package":
+        planted, root = _plant_package(tmp_path, "planted.py", body)
+    else:
+        planted, root = _plant_prose(tmp_path, body), tmp_path / "django_strawberry_framework"
+    violations, _ = _spec_ordinal_entries_in([planted], root)
+    assert violations == [f"{planted}:{entry}" for entry in expected], violations
+
+
+def test_the_spec_ordinal_sweep_reports_nothing_for_a_planted_permitted_form(
+    tmp_path: Path,
+) -> None:
+    """The negative direction: the forms the gate leaves alone are not reported.
+
+    A spec's Definition of done named without a number, a live staged-slice
+    anchor in a comment and quoted in a docstring code span, the gated
+    ``spec-NNN Decision N`` pointer with a step, a section word with no number
+    after it (a sliced queryset, plain goals, a ``goal:`` followed by a word),
+    a section word glued to a longer word, a variable named like a section,
+    and a test-data string outside the package.
+    """
+    planted = _plant_prose(
+        tmp_path,
+        "# spec-036 DoD: every row pinned; TODO(spec-062 Slice 1): wire search\n"
+        'def run():\n    """Wired at the ``TODO(spec-062 Slice 1)`` anchor."""\n'
+        "# spec-045 Decision 2 step 3 seals it; a queryset sliced 0:5; the goals\n"
+        "# DoDs, Goalpost 4, preslice 2 and the goal: keep 3 rows are not pointers\n"
+        "goal_4 = 'DoD 4'\n",
+    )
+    violations, read = _spec_ordinal_entries_in([planted])
+    assert read == 4, read
+    assert violations == [], violations
+
+
 #: The pyproject row each ``*_FLOOR`` constant of ``django_strawberry_framework.utils.imports``
 #: names, by constant name: strawberry-graphql's, then one per soft dependency the package
 #: guards, in ``SOFT_FLOOR_PACKAGES`` order.

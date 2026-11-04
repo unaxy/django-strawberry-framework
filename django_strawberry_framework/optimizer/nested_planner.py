@@ -1382,9 +1382,9 @@ def plan_connection_relation(
         return NestedConnectionPlanResult(plan=plan)
 
     # (c) Build the child plan/queryset exactly like the list prefetch path, but
-    # against a THROWAWAY sub-plan so a strategy refusal below can fall back
-    # without leaking the child's resolver keys / fk-id elisions / cacheable flip
-    # into the parent (Decision 6 / DoD-4 "no planned_resolver_keys entry"). The
+    # against a THROWAWAY sub-plan so a strategy refusal below (spec-033 Decision 6,
+    # the every-response-key strategy refusal) can fall back without leaking the
+    # child's resolver keys / fk-id elisions / cacheable flip into the parent. The
     # parent plan absorbs the child metadata only on the success path.
     sub_plan = OptimizationPlan(introduce_projection=introduce_projection)
     if has_custom_get_queryset:

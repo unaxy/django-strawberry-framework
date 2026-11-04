@@ -313,7 +313,7 @@ _MODEL_DECODED_ARITY = 3
 
 @dataclass(frozen=True)
 class CleanExcludes:
-    """The two ``exclude`` sets the model write validates a decoded row with (spec-036 step 4).
+    """The two ``exclude`` sets the model write validates a decoded row with (spec-036 Decision 8).
 
     ``fields`` (every model field the input did not provide) is what ``clean_fields()``
     and ``clean()`` skip: an unprovided column keeps its stored value or its model
