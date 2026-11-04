@@ -1043,10 +1043,10 @@ def _parse_footer(text: str) -> tuple[str, dict[str, list[str]], list[str]]:
 def render_link_definitions(cats: Mapping[str, Sequence[str]], orphan: Sequence[str] = ()) -> str:
     """Render the canonical footer with existing def lines slotted per category.
 
-    The one renderer of the block: the scaffold fixer here and the generators that
-    emit a footer of their own (``scripts/build_tree_md.py``,
-    ``scripts/capture_pg_predicate_explain.py``) all call it, so the marker list
-    and the layout cannot drift between the gate and what the generators write.
+    The one renderer of the block: the scaffold fixer here and the generator that
+    emits a footer of its own (``scripts/build_tree_md.py``) both call it, so the
+    marker list and the layout cannot drift between the gate and what the
+    generator writes.
 
     Raises:
         ValueError: A key of ``cats`` is not one of ``LINK_DEF_CATEGORIES`` (its def

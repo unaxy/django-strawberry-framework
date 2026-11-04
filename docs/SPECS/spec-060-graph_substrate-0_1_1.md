@@ -408,10 +408,10 @@ of the first foundation card.
     so `connection.py::_keyset_order_state` refuses it as a nullable keyset
     column.
 
-  The measured PostgreSQL 16 shapes are recorded in
-  [`docs/row-preserving-predicates-part1-pg-explain.md`][row-preserving-pg]
+  The PostgreSQL shapes are pinned by
+  [`tests/test_predicate_pg_explain.py`][row-preserving-pg]
   (one routed outer-side `EXISTS`; a walked three-hop target-side fold) and
-  in the spec-027 rationale's
+  measured in the spec-027 rationale's
   [restriction-shape measurements][spec-027-restriction-measured]: under a
   plain-filter hook the target-side `EXISTS` gets the same plan as the
   child-side `IN`, and every `IN` shape loses where Decision 4's rejections
@@ -760,7 +760,7 @@ Decision 2): the restriction every declared `RelatedFilter` branch and
 every walked flat filter leaf already use, and the one search's relational
 arms are specified onto ([search spec][spec-062] Decision 12), measured on
 PostgreSQL 16
-([`docs/row-preserving-predicates-part1-pg-explain.md`][row-preserving-pg],
+([`tests/test_predicate_pg_explain.py`][row-preserving-pg],
 [spec-027 restriction-shape measurements][spec-027-restriction-measured]).
 Predicate *meaning* stays with the caller; the compiler owns validated
 relation planning and row-preserving composition. Compilation mechanics,
@@ -1645,7 +1645,6 @@ version triplet stay untouched (Decision 10).
 [glossary-syncmisuseerror]: ../GLOSSARY.md#syncmisuseerror
 [glossary-visibility-boundary]: ../GLOSSARY.md#visibility-boundary
 [recreation]: ../multi-root-graph-recreation.md
-[row-preserving-pg]: ../row-preserving-predicates-part1-pg-explain.md
 
 <!-- docs/SPECS/ -->
 [spec-027-restriction-measured]: appx/spec-027-filters-0_0_8-rationale.md#restriction-shape-measured
@@ -1658,6 +1657,7 @@ version triplet stay untouched (Decision 10).
 <!-- django_strawberry_framework/ -->
 
 <!-- tests/ -->
+[row-preserving-pg]: ../../tests/test_predicate_pg_explain.py
 
 <!-- examples/ -->
 
