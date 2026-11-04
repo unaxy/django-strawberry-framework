@@ -1805,8 +1805,8 @@ compiler shape.
 - **`EXISTS` vs JOIN-plus-DISTINCT performance regime (Decision 7).** N
   independent arms' nested correlated `EXISTS` OR'd over a large,
   low-selectivity root set can lose to one N-way JOIN + DISTINCT on some
-  planners (the filter side's PostgreSQL 16 measurements in
-  `docs/row-preserving-predicates-part1-pg-explain.md` cover single
+  planners (the filter side's PostgreSQL 16 measurements in the
+  spec-027 rationale's "Restriction shape: measured" cover single
   restrictions, not an N-arm OR). No
   escape hatch ships in `0.1.2` (a `Meta.search_strategy` key stays in
   reserve); the call is deferred until a real workload demonstrates the

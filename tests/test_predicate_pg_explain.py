@@ -1,8 +1,7 @@
 """Postgres planner regression for the row-preserving to-many filter predicates.
 
 A flat filter leaf over a to-many path compiles to one of two shapes, both
-captured by ``scripts/capture_pg_predicate_explain.py`` (artifact
-``docs/row-preserving-predicates-part1-pg-explain.md``) and pinned here:
+pinned here:
 
 - a routed leaf (``scalar_filters.ScalarSpecimenFilter``'s generated reverse-FK relation key
   ``children``, whose relation no ``RelatedFilter`` declares and whose target
