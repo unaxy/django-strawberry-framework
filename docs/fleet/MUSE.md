@@ -32,7 +32,7 @@ supervisor that launches, monitors, relays maintainer decisions, and reports.
 | Flag | Use |
 | --- | --- |
 | `--prompt-file <path>` | The Worker-0 prompt. Always a file, never inline (prompts are 5–7 KB). |
-| `--workspace <path>` | Roots the policy-gated tools at the worktree. This is the ONLY location control; the agent can still `cd` elsewhere in shell, so the prompt must also forbid the main checkout. |
+| `--workspace <path>` | Roots the policy-gated tools at the worktree. This is the ONLY location control; the agent can still `cd` elsewhere in shell, so the prompt must also forbid the main checkout outside the workspace. |
 | `--yolo` | Disables approval prompts AND the sandbox AND trusts the workspace for this run. Required: headless approval prompts would hang, and the sandbox blocks `uv run pytest` writes. Equivalent to `--disable-approval --disable-sandbox --trust-workspace`. |
 | `--model muse-spark-1.3-contributor` | "Contributor mode". Verify from the JSONL, not from the flag (see §3). |
 | `--reasoning-effort max` | Scale is `none|minimal|low|medium|high|xhigh|max|ultra`; default `high`. `max` is what the maintainer asks for; `ultra` is gated by `MUSE_EXPERIMENTAL_ULTRA_REASONING_EFFORT`. |
@@ -327,8 +327,9 @@ Context you must absorb before your first action:
    do not re-trace/re-adjudicate them. Name dropped queue items explicitly.
 3. Order of work as a lettered list, with counts, and how to tell "un-artifacted" (check the
    directory, not memory).
-4. Location: the worktree path + branch; the main checkout is OFF LIMITS (never read, write,
-   run, or cd). HEAD short sha; "confirm with git rev-parse and say so"; whether a Drift line
+4. Location: the worktree path + branch; the main checkout outside that worktree is OFF LIMITS
+   (never read, write, run, or cd there; a worktree under `<main>/.work/` is the workspace, not the
+   main checkout). HEAD short sha; "confirm with git rev-parse and say so"; whether a Drift line
    is owed; whether the last ITEM_BASELINE may be reused (tree hash + target digests match).
 5. Dead dispatches to redo FRESH, one bullet each, W1-vs-W2-only spelled out, dead workspace
    names, "partial expectation files are never to be opened"; on-disk things to KEEP.
@@ -408,7 +409,8 @@ prompts and vice versa.
 
 ## 6. Concurrency contract between the flows
 
-- All Muse agents run in the t3 worktree the maintainer names; the main checkout
+- All Muse agents run in the worktree the maintainer names (a t3 worktree registered in place with
+  `scripts/work.py adopt`, or a `.work/worktrees/<name>` copy); the main checkout's tracked tree
   `~/projects/django-strawberry-framework` on that machine is theirs to never touch. Claude's own
   edits for the maintainer happen in whichever tree the maintainer names (guard deletions on
   2026-09-22 were in the worktree, uncommitted).

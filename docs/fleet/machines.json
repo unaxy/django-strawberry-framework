@@ -1,0 +1,80 @@
+{
+  "machines": [
+    {
+      "name": "rio-desktop",
+      "ssh": "rio-desktop",
+      "os": "linux",
+      "repo": "~/projects/django-strawberry-framework",
+      "weight": {
+        "light": 1.0,
+        "heavy": 1.0
+      },
+      "floors": {
+        "light": {
+          "min_mem_available_gib": 4,
+          "min_disk_free_gib": 6,
+          "max_psi_memory_full_avg10": 5
+        },
+        "heavy": {
+          "min_mem_available_gib": 8,
+          "min_disk_free_gib": 12,
+          "max_psi_memory_full_avg10": 5,
+          "heavy_slots": 3
+        }
+      },
+      "hostnames": [
+        "rio-ubu"
+      ]
+    },
+    {
+      "name": "rio-mac",
+      "ssh": "rio-mac",
+      "os": "macos",
+      "repo": "~/projects/django-strawberry-framework",
+      "weight": {
+        "light": 0.5,
+        "heavy": 0.1
+      },
+      "floors": {
+        "light": {
+          "min_mem_available_gib": 2,
+          "min_disk_free_gib": 6,
+          "max_vm_pressure_level": 2
+        },
+        "heavy": {
+          "min_mem_available_gib": 4,
+          "min_disk_free_gib": 12,
+          "max_vm_pressure_level": 1
+        }
+      },
+      "hostnames": [
+        "Riordens-MacBook-Air"
+      ]
+    },
+    {
+      "name": "rio-mini",
+      "ssh": "rio-mini",
+      "os": "macos",
+      "repo": "~/projects/django-strawberry-framework",
+      "weight": {
+        "light": 1.0,
+        "heavy": 0.7
+      },
+      "floors": {
+        "light": {
+          "min_mem_available_gib": 2,
+          "min_disk_free_gib": 6,
+          "max_vm_pressure_level": 2
+        },
+        "heavy": {
+          "min_mem_available_gib": 4,
+          "min_disk_free_gib": 12,
+          "max_vm_pressure_level": 1
+        }
+      },
+      "hostnames": [
+        "Rios-Mac-mini"
+      ]
+    }
+  ]
+}

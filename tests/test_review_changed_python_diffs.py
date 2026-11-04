@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import _git as _git_runner
 from scripts import review_changed_python_diffs_against_head as diffs
 from tests._idioms import json_at, json_list, json_loads, json_object
 
@@ -65,6 +66,8 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         monkeypatch.setenv(key, value)
     _git(root, "init", "-q", "-b", "main")
     monkeypatch.chdir(root)
+    # The script's checkout guard answers for the throwaway repository the rows run in.
+    monkeypatch.setattr(_git_runner, "CHECKOUT_ROOT", root.resolve())
     return root
 
 
@@ -390,6 +393,36 @@ def test_list_json_reports_changes_head_blobs_and_dirty_group(
     assert json_at(dirty, "pkg/new.py", "status") == "??"
     assert json_at(dirty, "pkg/new.py", "head_blob") is None
     assert not (repo / "docs").exists()
+
+
+def test_list_reads_this_checkout_when_git_dir_points_elsewhere(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A ``GIT_DIR`` a hook or parent git process left set never redirects the script.
+
+    Started from a subdirectory, the checkout guard and the listing both drop it, so the
+    run answers for the checkout around the current directory, not the other repository.
+    """
+    _write(repo, "pkg/mod.py", BASE_MODULE)
+    _commit(repo, "base")
+    _write(repo, "pkg/mod.py", BASE_MODULE + "\nEDIT = 1\n")
+    head = _commit(repo, "edit")
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q", "-b", "main")
+    _write(other, "elsewhere.py", "ELSEWHERE = 1\n")
+    _ = _commit(other, "other")
+    monkeypatch.chdir(repo / "pkg")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+
+    assert diffs.main(["HEAD~1", "--list", "--json"]) == 0
+    payload = json_object(json_loads(capsys.readouterr().out))
+
+    assert payload["head"] == head
+    assert [json_at(row, "path") for row in json_list(payload, "changed")] == ["pkg/mod.py"]
 
 
 def test_prose_captures_a_docstring_only_change_and_skips_code_changes(

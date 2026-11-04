@@ -49,7 +49,7 @@ Each phase finishes completely (every agent it dispatched has reported) before t
 5. **Plan.** Write the plan to the scratchpad (`<id>-plan.md`) and print it in chat: the defect, the decisions with
    their final answers and the rule behind each, what is out of scope (filed as new tracker items), the docs that
    change.
-6. **Implement.** Make a fresh clone at `HEAD` and write the implementer brief (template below), starting from the
+6. **Implement.** Make a fresh copy at `HEAD` (`uv run python scripts/work.py new fix-i<N>-<slug>`, [work.py][work]) and write the implementer brief (template below), starting from the
    researcher's patch. Dispatch one `opus-medium` agent with test runs authorized. A STOP from the implementer (a
    decision proves wrong against the code) comes back to the coordinator, who decides from the rules and the
    evidence and sends the ruling to the same agent (`SendMessage`), never a new one.
@@ -61,8 +61,9 @@ Each phase finishes completely (every agent it dispatched has reported) before t
    and send the list to the same implementer, then send the delta back to the same verifier. Repeat until LAND.
    A change that narrows what worked at the parent commit for a feasible shape is a FIX finding, never a LAND.
    A docs-only last fix may be checked by the coordinator instead of a new verifier round.
-8. **Land.** Apply the clone's `git diff HEAD --binary` to the shared checkout; it must apply cleanly and every
-   path it touches must have been clean. Edit the tracker in the same working tree: move the item to the end of
+8. **Land.** `work.py land fix-i<N>-<slug>` applies the copy's content to the shared working tree as one
+   `git diff --binary` (new files included); it refuses unless the patch applies cleanly and every path it touches
+   is clean there or already identical, and it never touches the shared index. Edit the tracker in the same working tree: move the item to the end of
    "Done", ticked, with an outcome stating the new behaviour, the symbols it changed and the tests that pin it;
    update the Progress counts; add out-of-scope questions under "Waiting on you" (an out-of-scope finding becomes a
    new item only if it passes the phase 1 gate; otherwise it is a robustness row or a new card); new items and
@@ -74,15 +75,15 @@ Each phase finishes completely (every agent it dispatched has reported) before t
    ride. The tick names no hash, because a commit cannot name itself: the commit that ticks an item
    is its fix (`git log -S '- [x] N.' -- docs/bug_hunt/` finds it). No push, no branches, no CHANGELOG edit.
 9. **Close.** Ask the implementer for `<id>-impl-feedback.md` (helpful / misleading / missing about the brief and the
-   standing docs). Delete the item's clones, grids and patches; keep the reports, briefs and feedback. Print three
+   standing docs). `work.py rm` the item's copies (and delete its grids and patches); keep the reports, briefs and feedback. Print three
    lines: what landed, what got filed, what is next.
 
 ## Standing rules for every agent
 
 - Read AGENTS.md, START.md and GOAL.md first.
-- Work only in a private clone under the coordinator's scratchpad (`S/<id>-<role>`, made with
-  `git clone -q --no-local <repo> S/<id>-<role>` then `uv sync -q`; assert `django_strawberry_framework.__file__`
-  lies inside it). The shared checkout is read-only to every agent; only the coordinator writes it, at landing.
+- Work only in the private copy the coordinator names (`.work/clones/fix-i<N>-<slug>`, a `-verify` sibling for
+  the verifier, made with `work.py new`, which syncs its venv; START.md "Private working copies"). Run commands
+  through `work.py run <name> -- <cmd>`, which asserts `django_strawberry_framework.__file__` lies inside it. The shared checkout is read-only to every agent; only the coordinator writes it, at landing.
 - Never touch `~/.t3/` (read-only), any `hunt-ws/`, or `~/dst-handoff/`. Never mention feedback.md / feedback2.md.
 - Pytest only `uv run pytest -q -p no:randomly --no-cov -n 2 <node ids or a narrow -k>`, one run at a time, in the
   foreground (never `run_in_background`), never the full suite and never a whole big live module such as
@@ -92,6 +93,10 @@ Each phase finishes completely (every agent it dispatched has reported) before t
 
 - Downloads only PyPI wheels into a fresh empty dir; read them, never run them; Python reading them runs with `-I`.
 - No commits, branches or stash in any clone. Delete only files you created.
+- A probe kept outside the clone's tree runs pytest with `--rootdir <tree> -c <tree>/pytest.ini`. A run at the parent
+  commit uses a `git archive` copy driven by the clone's venv python. A floor venv pins pytest and pytest-asyncio to
+  their `uv.lock` versions.
+- The tracker and CHANGELOGTODO.md are the coordinator's at landing: an agent drafts its entry in its report.
 - Reports are text in the final message: numbered FACTS with `path::Symbol` or command evidence and counts, then
   OPINIONS. The coordinator saves each report to `S/<id>-report-<role>.md`.
 
@@ -108,6 +113,18 @@ Each phase finishes completely (every agent it dispatched has reported) before t
   test READMEs), no CHANGELOG; verification steps (ruff, trailing commas, citations, generators, pre-commit,
   each targeted test file alone, coverage of changed modules at 100%, the repro grid, `scripts/prove_failability.py`
   per fix, basedpyright main + floor, `check_public_types`, the Python 3.10 floor run last); the report format.
+- **Proof and docs rules** (in both the implementer and the verifier brief):
+  - Every broad `except` the change adds gets a row raising a non-default exception type, and an
+    `except <narrow type>` mutant in the failability manifest.
+  - A mutant that makes the fakeshop schema fail to build turns every live row into a setup error: scope that
+    manifest entry to package rows.
+  - An equivalent mutant (behaviour preserved) is recorded as `"expect_failing": []` with the reason. Its branch stays
+    only when it guards against an upstream detail the code would otherwise depend on.
+  - A spec change covers all five homes (Decision, slice checklist, Edge cases, Test plan, DoD) wherever the contract
+    appears.
+  - Adding a declaration to a shipped fakeshop set for live coverage is fine; the report gives the SDL diff. One
+    fakeshop app never imports another app's helpers.
+  - A new line in a wrapped file keeps that file's wrap width.
 - **Verifier brief:** the clone is read-only (mutate a copy); write expectations from the implementer brief BEFORE
   reading the diff or the report; check every decision, try shapes the tests miss, rerun the grid, run the parent
   commit and the change side by side on the feasible shapes next to the change (`SimpleLazyObject`, `StrEnum`,
@@ -138,6 +155,7 @@ Each phase finishes completely (every agent it dispatched has reported) before t
 <!-- examples/ -->
 
 <!-- scripts/ -->
+[work]: ../../scripts/work.py
 
 <!-- .venv/ -->
 

@@ -37,8 +37,10 @@ Usage:
 The ``uv run`` prefix is required so the script sees the project's virtual
 environment (it imports ``review_inspect`` and the inspector depends on the
 project's pinned Python / dependency versions). Run from anywhere inside
-the repository; the orchestrator resolves ``git rev-parse --show-toplevel``
-and writes outputs under ``docs/shadow/current/`` at the repo root.
+the checkout holding this script; the orchestrator resolves that checkout
+through ``scripts/_git.py::repo_root`` (refusing a current directory git
+resolves to another checkout) and writes outputs under
+``docs/shadow/current/`` at its root.
 
 Example:
     uv run python scripts/review_historical_package_snapshot_at_commit.py \
@@ -60,7 +62,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 if __package__:
     from scripts import _git as _git_runner
@@ -92,24 +94,30 @@ def normalize_package_dir(repo_root: Path, package_dir: str) -> str:
     return relative.as_posix() if relative.parts else "."
 
 
-def _run_git(args: Sequence[str]) -> str:
+def _run_git(args: Sequence[str], *, env_base: Mapping[str, str] | None = None) -> str:
     """Run ``git -C <current directory> --no-pager <args>`` through ``scripts/_git.py``.
 
-    Returns its stdout; a non-zero exit raises ``subprocess.CalledProcessError``.
+    Returns its stdout; a non-zero exit raises ``subprocess.CalledProcessError``. ``env_base``
+    is the environment git runs in (``scripts/_git.py::run_git``, default ``os.environ``):
+    the diff helper passes one without ``GIT_DIR``, as its own git calls run.
     """
-    return _git_runner.run_git(Path.cwd(), *args, check=True).stdout
+    return _git_runner.run_git(Path.cwd(), *args, check=True, base=env_base).stdout
 
 
-def _validate_commit(commit: str) -> None:
-    """Exit with code 2 if ``commit`` does not resolve to a real commit."""
+def _validate_commit(commit: str, *, env_base: Mapping[str, str] | None = None) -> None:
+    """Exit with code 2 if ``commit`` does not resolve to a real commit.
+
+    ``env_base``: :func:`_run_git`.
+    """
     try:
-        _ = _git_runner.run_git(
-            Path.cwd(),
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            f"{commit}^{{commit}}",
-            check=True,
+        _ = _run_git(
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"{commit}^{{commit}}",
+            ],
+            env_base=env_base,
         )
     except subprocess.CalledProcessError:
         print(f"Not a valid commit hash: {commit}", file=sys.stderr)
@@ -169,17 +177,22 @@ def _stem_for(path: str) -> str:
     return Path(path).with_suffix("").as_posix().replace("/", "__")
 
 
-def _file_at_commit(commit: str, path: str) -> str | None:
+def _file_at_commit(
+    commit: str,
+    path: str,
+    *,
+    env_base: Mapping[str, str] | None = None,
+) -> str | None:
     """Return the file contents at ``commit:path``, or ``None`` if absent there.
 
     The ``cat-file -e`` guard lets the diff helper reuse this for added/deleted
     files; the snapshot caller feeds only paths from ``git ls-tree``, so it never
-    reaches the ``None`` branch.
+    reaches the ``None`` branch. ``env_base``: :func:`_run_git`.
     """
-    exists = _git_runner.run_git(Path.cwd(), "cat-file", "-e", f"{commit}:{path}")
+    exists = _git_runner.run_git(Path.cwd(), "cat-file", "-e", f"{commit}:{path}", base=env_base)
     if exists.returncode != 0:
         return None
-    return _run_git(["show", f"{commit}:{path}"])
+    return _run_git(["show", f"{commit}:{path}"], env_base=env_base)
 
 
 def _inspect_quiet(target: Path, output_dir: Path, root: Path) -> None:
@@ -274,7 +287,13 @@ def _publish_staged_snapshot(staging_dir: Path, output_dir: Path) -> None:
             shutil.rmtree(backup_root)
 
 
-def _materialize_and_inspect(commit: str, path: str, out_dir: Path) -> None:
+def _materialize_and_inspect(
+    commit: str,
+    path: str,
+    out_dir: Path,
+    *,
+    env_base: Mapping[str, str] | None = None,
+) -> None:
     """Render ``commit:path`` through ``review_inspect`` into ``out_dir``.
 
     Mirroring the repo-relative path under a temp root lets ``review_inspect``
@@ -284,8 +303,9 @@ def _materialize_and_inspect(commit: str, path: str, out_dir: Path) -> None:
     empty ``*.stripped.py`` placeholder is written so a downstream diff renders.
 
     Shared primitive: both this orchestrator and the diff helper build on it.
+    ``env_base``: :func:`_run_git`.
     """
-    contents = _file_at_commit(commit, path)
+    contents = _file_at_commit(commit, path, env_base=env_base)
     if contents is None:
         _ = (out_dir / f"{_stem_for(path)}.stripped.py").write_text("")
         return
@@ -325,9 +345,14 @@ def _parse_args(argv: Sequence[str]) -> _Args:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the orchestrator and return an exit code."""
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    # The checkout guard runs before any other git call: in a copy whose ``.git`` is
+    # missing every git call fails, and the commit check would misreport a valid hash.
+    try:
+        repo_root = _git_runner.repo_root()
+    except _git_runner.CheckoutError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     _validate_commit(args.commit_hash)
-
-    repo_root = Path(_run_git(["rev-parse", "--show-toplevel"]).strip()).resolve()
     try:
         package_dir = normalize_package_dir(repo_root, args.package_dir)
     except ValueError as error:

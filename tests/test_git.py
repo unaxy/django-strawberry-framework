@@ -15,6 +15,7 @@ of these rows can move. There is no live sibling in
 ``examples/fakeshop/test_query/``.
 """
 
+import ast
 import os
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from scripts import (
     _bench_common,
     _git,
     _plan_common,
+    bug_hunt,
     build_kanban_tracked_path_constants,
     build_tree_md,
     check_trailing_commas,
@@ -34,8 +36,11 @@ from scripts import (
     list_package_python_changes_by_commit,
     review_inspect,
     review_plan,
+    work,
     workspace,
 )
+from scripts import review_changed_python_diffs_against_head as diffs
+from scripts import review_historical_package_snapshot_at_commit as snapshot
 
 PACKAGE = review_plan.PACKAGE_DIR
 # ``git`` 2.35 and later read this test variable as "the checkout belongs to another user".
@@ -620,7 +625,8 @@ def test_the_history_lister_reads_a_real_checkout(
     monkeypatch.chdir(repo / PACKAGE)
     monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'log.showsignature'='true'")
     if operation == "root":
-        assert list_package_python_changes_by_commit.repo_root().resolve() == repo.resolve()
+        monkeypatch.setattr(_git, "CHECKOUT_ROOT", repo.resolve())
+        assert list_package_python_changes_by_commit.repo_root() == repo.resolve()
     elif operation == "shallow":
         assert not list_package_python_changes_by_commit.is_shallow_repository(repo)
     elif operation == "log":
@@ -644,3 +650,216 @@ def test_the_bench_head_reads_a_real_checkout(
     """A real checkout yields its HEAD; a directory outside Git yields the unavailable sentinel."""
     root = repo if checkout else tmp_path
     assert _bench_common.git_head(root) == (_head(repo) if checkout else "unavailable")
+
+
+@pytest.mark.usefixtures("bare_caller")
+def test_the_checkout_guard_answers_only_for_the_checkout_holding_the_scripts(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``repo_root`` returns the toplevel git finds only when it is the scripts' own checkout."""
+    monkeypatch.chdir(repo / PACKAGE)
+    with pytest.raises(_git.CheckoutError, match="this script belongs to") as refused:
+        _ = _git.repo_root()
+    assert str(repo.resolve()) in str(refused.value)
+    assert str(_git.CHECKOUT_ROOT) in str(refused.value)
+    monkeypatch.setattr(_git, "CHECKOUT_ROOT", repo.resolve())
+    assert _git.repo_root() == repo.resolve()
+    assert _git.repo_root(repo) == repo.resolve()
+
+
+@pytest.mark.skipif(
+    not (_git.CHECKOUT_ROOT / ".git").exists(),
+    reason="the scripts do not sit in a git checkout (an sdist)",
+)
+@pytest.mark.usefixtures("bare_caller")
+@pytest.mark.parametrize("where", [".", "scripts"], ids=["root", "subdirectory"])
+def test_the_checkout_guard_answers_for_the_real_checkout_unpatched(
+    monkeypatch: pytest.MonkeyPatch,
+    where: str,
+) -> None:
+    """Run inside the checkout holding the scripts, ``repo_root`` is that checkout."""
+    monkeypatch.chdir(_git.CHECKOUT_ROOT / where)
+    assert _git.repo_root() == _git.CHECKOUT_ROOT
+
+
+def _case_changed(path: Path) -> Path:
+    """Return ``path`` with its last component upper-cased; skip on a case-sensitive disk."""
+    changed = path.with_name(path.name.upper())
+    if changed.name == path.name or not changed.exists():
+        pytest.skip("the filesystem is case-sensitive")
+    return changed
+
+
+@pytest.mark.usefixtures("bare_caller")
+def test_a_checkout_spelled_in_another_case_is_still_the_same_checkout(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a case-insensitive disk, one checkout named in two cases passes every toplevel check.
+
+    ``CHECKOUT_ROOT`` takes the spelling the script was started with, git answers with the
+    spelling on disk: compared as paths they differ, compared as directories they match.
+    """
+    changed = _case_changed(repo.resolve())
+    monkeypatch.setattr(_git, "CHECKOUT_ROOT", changed)
+    assert _git.same_directory(_git.repo_root(repo / PACKAGE), changed)
+    assert _git.same_directory(_git.repo_root(changed), changed)
+    build_tree_md.git_tracked_paths.cache_clear()
+    try:
+        tracked = build_tree_md.git_tracked_paths(changed)
+    finally:
+        build_tree_md.git_tracked_paths.cache_clear()
+    assert tracked is not None
+    assert f"{PACKAGE}/core.py" in tracked.files
+    assert work._is_own_checkout(changed)
+
+
+def test_same_directory_answers_false_for_a_missing_path(tmp_path: Path) -> None:
+    """A path that cannot be looked up is no directory, not a traceback."""
+    assert not _git.same_directory(tmp_path / "missing", tmp_path)
+    assert _git.same_directory(tmp_path / "." / "", tmp_path)
+
+
+@pytest.mark.usefixtures("bare_caller")
+def test_the_checkout_guard_refuses_a_folder_outside_every_checkout(tmp_path: Path) -> None:
+    """A current directory git finds no checkout from is a refusal, not a traceback."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with pytest.raises(_git.CheckoutError, match="finds no checkout"):
+        _ = _git.repo_root(outside)
+
+
+@pytest.mark.usefixtures("bare_caller")
+def test_a_copy_whose_git_is_missing_is_refused_not_resolved_to_the_parent(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy under the checkout without its ``.git`` resolves to the parent; the guard says no.
+
+    With the ``.work/.git`` sentinel in place git finds no checkout at all, which is the
+    same refusal reached one step earlier.
+    """
+    copy = repo / ".work" / "clones" / "fix-broken"
+    _ = _write(copy / PACKAGE / "__init__.py", "VALUE = 1\n")
+    monkeypatch.setattr(_git, "CHECKOUT_ROOT", copy.resolve())
+    with pytest.raises(_git.CheckoutError, match="this script belongs to"):
+        _ = _git.repo_root(copy)
+    _ = _write(repo / ".work" / ".git", "gitdir: /nonexistent/dsf-work-sentinel\n")
+    with pytest.raises(_git.CheckoutError, match="finds no checkout"):
+        _ = _git.repo_root(copy)
+
+
+@pytest.mark.usefixtures("bare_caller")
+@pytest.mark.parametrize("script", ["snapshot", "diffs"])
+def test_a_commit_taking_script_in_a_copy_without_git_reports_the_checkout_not_the_commit(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    script: str,
+) -> None:
+    """The checkout guard answers before the commit check, so a valid hash is never blamed.
+
+    Under the ``.work/.git`` sentinel every git call fails; a commit check run first would
+    report the valid hash as invalid instead of naming the missing checkout.
+    """
+    sha = _head(repo)
+    copy = repo / ".work" / "clones" / "fix-broken"
+    _ = _write(copy / PACKAGE / "__init__.py", "VALUE = 1\n")
+    _ = _write(repo / ".work" / ".git", "gitdir: /nonexistent/dsf-work-sentinel\n")
+    monkeypatch.setattr(_git, "CHECKOUT_ROOT", copy.resolve())
+    monkeypatch.chdir(copy)
+    main = snapshot.main if script == "snapshot" else diffs.main
+    assert main([sha]) == 2
+    stderr = capsys.readouterr().err
+    assert "finds no checkout" in stderr
+    assert "Not a valid commit hash" not in stderr
+
+
+@pytest.mark.usefixtures("bare_caller")
+@pytest.mark.parametrize(
+    "script",
+    [
+        "bug_hunt",
+        "snapshot",
+        "diffs",
+        "history",
+    ],
+)
+def test_every_cwd_rooted_script_refuses_a_checkout_other_than_its_own(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script: str,
+) -> None:
+    """Started from another checkout, each script writes nothing there and exits non-zero."""
+    monkeypatch.chdir(repo)
+    before = sorted(
+        path.relative_to(repo).as_posix() for path in repo.rglob("*") if ".git" not in path.parts
+    )
+    if script == "bug_hunt":
+        assert bug_hunt.main([]) == 2
+    elif script == "snapshot":
+        assert snapshot.main(["HEAD"]) == 2
+    elif script == "diffs":
+        assert diffs.main(["HEAD"]) == 2
+    else:
+        with pytest.raises(
+            list_package_python_changes_by_commit.GitHistoryError,
+            match="belongs to",
+        ):
+            _ = list_package_python_changes_by_commit.main([])
+    after = sorted(
+        path.relative_to(repo).as_posix() for path in repo.rglob("*") if ".git" not in path.parts
+    )
+    assert after == before
+
+
+#: Scripts that read ``rev-parse --show-toplevel`` themselves, each for its own reason.
+TOPLEVEL_READERS = {
+    # The guard itself.
+    "_git.py",
+    # Compares the toplevel with the root it was handed and falls back to the filesystem.
+    "build_tree_md.py",
+    # Asks whether a private copy's own ``.git`` is intact (its toplevel is the copy itself).
+    "work.py",
+}
+
+
+def _reads_the_toplevel(source: str) -> bool:
+    """Return whether any string in ``source`` carries the ``--show-toplevel`` token.
+
+    The token, not an exact argument constant: ``"git rev-parse --show-toplevel".split()``
+    and an f-string reach git the same way a separate ``"--show-toplevel"`` argument does.
+    """
+    return any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "--show-toplevel" in node.value
+        for node in ast.walk(ast.parse(source))
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'run(["git", "rev-parse", "--show-toplevel"])',
+        'run("git rev-parse --show-toplevel".split())',
+        'run(f"git rev-parse --show-toplevel {where}")',
+    ],
+)
+def test_the_toplevel_census_sees_every_spelling_of_the_token(source: str) -> None:
+    assert _reads_the_toplevel(source)
+    assert not _reads_the_toplevel('run(["git", "rev-parse", "HEAD"])')
+
+
+def test_no_script_resolves_its_checkout_from_the_current_directory_but_through_the_guard() -> (
+    None
+):
+    """Every other script reaches the checkout root through ``scripts/_git.py::repo_root``."""
+    scripts_dir = Path(_git.__file__).resolve().parent
+    sources = sorted(scripts_dir.glob("*.py"))
+    assert len(sources) > 10
+    readers = {
+        path.name for path in sources if _reads_the_toplevel(path.read_text(encoding="utf-8"))
+    }
+    assert readers == TOPLEVEL_READERS

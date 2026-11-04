@@ -167,6 +167,10 @@ poetry.toml
 !.claude/agents/
 **/.claude/settings.local.json
 
+# Private working copies: clones, worktrees and their evidence, all under one
+# git-ignored folder; full rule in START.md.
+.work/
+
 # Shared workflow shadow files (static-analysis byproducts)
 # Review/build artifacts, plan files, and worker instructions remain tracked.
 docs/shadow/

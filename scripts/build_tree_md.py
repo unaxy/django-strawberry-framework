@@ -173,7 +173,7 @@ def git_tracked_paths(repo_root: Path) -> TrackedPaths | None:
     back to the raw directory listing.
     """
     toplevel = _run_git(repo_root, "rev-parse", "--show-toplevel")
-    if toplevel is None or Path(toplevel.strip()).resolve() != repo_root.resolve():
+    if toplevel is None or not _git.same_directory(toplevel.strip(), repo_root):
         return None
     listing = _run_git(repo_root, "ls-files", "-z", "--cached")
     if listing is None:

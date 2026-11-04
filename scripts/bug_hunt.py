@@ -454,7 +454,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Build the bug-hunt checklist and return an exit code."""
     args = _parse_args(sys.argv[1:] if argv is None else argv)
 
-    repo_root = Path(_run_git(["rev-parse", "--show-toplevel"]).strip()).resolve()
+    try:
+        repo_root = _git_runner.repo_root()
+    except _git_runner.CheckoutError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     head_sha = _head_sha()
     try:
         release = (

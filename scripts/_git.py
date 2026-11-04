@@ -23,6 +23,14 @@ caller did not trust.
 ``GIT_OPTIONAL_LOCKS=0`` keeps a ``git status`` from refreshing and rewriting
 ``.git/index``, which another session's commit may be reading.
 
+A script that writes into the checkout it was started from finds that checkout
+through :func:`repo_root`, never through a bare ``rev-parse --show-toplevel``:
+git's answer from the current directory must be the checkout holding the script
+itself (:data:`CHECKOUT_ROOT`). A private copy whose ``.git`` went missing
+resolves to whatever repository encloses it, the shared checkout included, so a
+script run there would clear and rewrite the shared checkout's generated files;
+the guard refuses that run instead.
+
 Standard library only and no Django import, so every script, ``workspace.py``
 included, imports it before anything else is set up, on the oldest supported
 Python too.
@@ -33,12 +41,15 @@ from __future__ import annotations
 import functools
 import os
 import subprocess
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
+
+#: The checkout these scripts belong to: the parent of ``scripts/``.
+CHECKOUT_ROOT = Path(__file__).resolve().parents[1]
 
 #: The caller's global and system git config, the system attributes file, the XDG config
 #: directory (global ignore and attributes files) and the optional index refresh never reach a
@@ -185,10 +196,13 @@ def run_git(
     stdin: str | None = None,
     check: bool = False,
     env: Mapping[str, str] | None = None,
+    base: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``git -C root --no-pager args`` in :func:`repository_env` and return the result.
 
-    Text in and out, output captured; ``env`` adds variables last. ``check`` raises
+    Text in and out, output captured; ``base`` is the environment made repository-only
+    (default ``os.environ``; a caller that strips ``GIT_DIR`` and the other locating variables
+    passes its scrubbed environment), ``env`` adds variables last. ``check`` raises
     ``subprocess.CalledProcessError`` on a non-zero exit, and a missing ``git`` raises
     ``OSError`` either way: each caller keeps its own failure contract.
     """
@@ -203,6 +217,57 @@ def run_git(
         capture_output=True,
         text=True,
         input=stdin,
-        env=repository_env(**dict(env or {})),
+        env=repository_env(base, **dict(env or {})),
         check=check,
     )
+
+
+def same_directory(first: Path | str, second: Path | str) -> bool:
+    """Return whether ``first`` and ``second`` name one directory on disk.
+
+    Compared by file identity (``Path.samefile``), not by spelling: on a case-insensitive
+    filesystem a script started through a path typed in another case keeps that spelling in
+    ``__file__`` while git answers with the one on disk, and both name the same directory. A
+    path that cannot be looked up answers ``False``.
+    """
+    try:
+        return Path(first).samefile(second)
+    except OSError:
+        return False
+
+
+class CheckoutError(RuntimeError):
+    """Git found no checkout from the current directory, or a checkout other than the script's."""
+
+
+def repo_root(cwd: Path | str | None = None, *, base: Mapping[str, str] | None = None) -> Path:
+    """Return the checkout git finds from ``cwd`` (default the current directory), resolved.
+
+    The answer must be :data:`CHECKOUT_ROOT`, the checkout holding this file, read when
+    the call runs: a copy whose ``.git`` is missing resolves to the repository around it,
+    and a script started there would write into that repository instead of the copy. The
+    two are compared as directories (:func:`same_directory`), so on a case-insensitive
+    filesystem this checkout named in another case is still this checkout. ``base`` is the
+    environment git runs in (:func:`run_git`); a script whose own git calls drop ``GIT_DIR``
+    passes the same scrubbed environment, so the guard reads the checkout they read.
+
+    Raises:
+        CheckoutError: git finds no checkout from ``cwd``, or finds one other than
+            :data:`CHECKOUT_ROOT`; the message names both.
+
+    """
+    where = Path.cwd() if cwd is None else Path(cwd)
+    completed = run_git(where, "rev-parse", "--show-toplevel", base=base)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit code {completed.returncode}"
+        msg = f"git finds no checkout from {where}: {detail}"
+        raise CheckoutError(msg)
+    toplevel = Path(completed.stdout.strip()).resolve()
+    if not same_directory(toplevel, CHECKOUT_ROOT):
+        msg = (
+            f"git resolves {where} to the checkout {toplevel}, but this script belongs to "
+            f"{CHECKOUT_ROOT}; run the copy's own script from inside the copy (a copy whose "
+            "`.git` is missing resolves to the repository around it)"
+        )
+        raise CheckoutError(msg)
+    return toplevel
