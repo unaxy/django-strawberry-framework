@@ -1,0 +1,4508 @@
+"""Make, list, pin, land and remove the private working copies an agent works in.
+
+An agent that needs a tree of its own (a fix, a spike, a pristine-HEAD
+attribution run, a carved commit to gate) works in a private copy under the
+git-ignored ``.work/`` folder at the repository root, never in the shared
+checkout and never in a copy it built by hand. This script owns that folder.
+The REVIEW, HUNT and DRY flows keep ``scripts/workspace.py``, one manager per
+flow; a name of kind ``review``, ``hunt`` or ``dry`` is refused here.
+
+Layout (all under ``.work/``, which ``.gitignore`` lists)
+    ``clones/<name>/``
+        A ``git clone --no-hardlinks -o parent`` of the shared checkout, its
+        ``HEAD`` detached at the start commit, its push URL ``no-push``. A
+        clone has its own hooks, stash, config and refs: use one for a
+        ref-rewriting experiment, a hook run or a move to another machine.
+    ``worktrees/<name>/``
+        A ``git worktree add --detach``, locked with the reason
+        ``dsf-work <name>`` so ``git worktree prune`` never drops its
+        metadata. A worktree has its own index, so ``git ls-files`` census
+        gates work in it; it shares the shared checkout's hooks, refs and
+        stash list.
+    ``evidence/<stem>/``
+        What a copy's work produced and must outlive it (proof scratch,
+        pre-edit snapshots, database copies). Keyed by the name's
+        stem, so a ``-verify`` or ``-rN`` sibling shares its purpose's folder.
+        ``rm`` never touches it unless asked (``--evidence``); nothing deletes
+        it by age.
+    ``names/<name>/``
+        The claim on a name, one namespace for clones, worktrees and adopted
+        copies, taken before anything else: a folder holding its owner
+        (``<host> <pid>``) renamed into place in one step, so no claim is seen
+        without its owner and of two commands racing for one name (whatever
+        form each asks for) only one wins. ``rm`` releases it; ``repair``
+        releases a claim whose owner is known dead and reports any other claim
+        with no copy.
+    ``pins.git``
+        A bare repository holding every pin (below). Pins live here, never in
+        the shared repository, so no push of the shared repository (``git push
+        --mirror`` included) can publish a snapshot of uncommitted work.
+    ``trash/``
+        Where ``rm`` moves a copy before deleting it, so a copy is never left
+        half deleted under its own name. A replica ``fleet_sync.py`` removes
+        stays there as ``<name>-<seconds>-kept`` for 7 days
+        (``TRASH_RETENTION_SECONDS``), restorable, until ``gc`` deletes it.
+    ``tombstones/<name>@<digest>.json``
+        One per copy its home removed (``rm``, ``rm --discard``, ``gc``): the
+        name, the home, the copy's identity (its note's ``incarnation``, else
+        ``<start>@<created>``; the digest is of it, plus the home and handoff
+        generation once a handoff moved it), the removal time and the machine,
+        the copy's handoff lineage (``generation``, ``formerhomes``), whether
+        ``--drop-saves`` dropped its saves, and the pins the removal dropped. A
+        removal off the copy's home writes none; an ``rm`` of a name holding
+        pins alone, and ``gc`` dropping start or landed pins, write one
+        recording the pins dropped (identity ``pins@<digest>``).
+        ``fleet_sync.py`` carries them to every machine,
+        removes a replica only by one whose identity is the replica's and
+        whose home is the replica's or a later home of it, never carries a
+        recorded pin back, and drops one wherever no copy holds the name; ``gc``
+        deletes them after 30 days (``TOMBSTONE_RETENTION_SECONDS``). A later
+        copy under the same name has another identity, so an old tombstone
+        never removes it.
+    ``land.lock``
+        A file one ``land`` (or ``repair``) at a time holds an exclusive kernel
+        lock on (``flock``; ``msvcrt.locking`` on Windows): released however
+        its holder ends, never taken over.
+    ``land-journal.json``
+        Every touched path's state before and after a landing, written
+        (atomically) before the first path is; a landing that fails or is
+        killed is undone from it by the next ``land`` or ``repair``. A path that
+        cannot be read or written then keeps its entry (and the journal) until a
+        later run can undo it.
+    ``fleet/``, ``fleet.lock``
+        ``scripts/fleet_sync.py``'s holder token and evidence manifests, and the
+        kernel lock one ``fleet_sync.py`` run (or one remote run's hold) takes.
+    ``.git``
+        A file holding ``gitdir: /nonexistent/dsf-work-sentinel``. A copy whose
+        own ``.git`` is missing (or any folder under ``.work/`` without one)
+        then makes git fail ("not a git repository") instead of silently
+        resolving to the shared checkout around it. ``new`` and ``repair``
+        write it.
+
+``.work``, each folder above and each copy folder must be a real directory
+under the real ``.work`` (no symlink anywhere on the way): every command
+refuses a layout that is not, and a copy that is not is never read or changed.
+``.work`` is kept ``0700``.
+
+Every copy gets its own ``.venv`` (``uv sync --frozen``), its own copy of the
+git-ignored ``.python-version``, ``core.longpaths=true`` and
+``core.autocrlf=false`` in its own config (the worktree's ``--worktree``
+config), and a Postgres database name of its own (``run`` rewrites
+``FAKESHOP_PG_DSN`` to ``dsfw_<name>``). A clone also gets the pre-commit hook
+(``pre-commit install`` when ``pre-commit`` is on ``PATH``); a failed sync or
+hook install fails the ``new``.
+
+Names say the purpose, never who made it: ``<kind>[-<id>]-<slug>[-verify|-rN]``,
+lowercase ``[a-z0-9-]``, at most 24 characters (the Windows path budget), no
+empty segment. Kinds: ``build``, ``fix``, ``spike``, ``verify``, ``ci``,
+``bench``, ``head``, ``carve``, ``deps``, ``spec``, ``ship``. The id is
+tracker-prefixed and records the number at creation: ``c051`` (card),
+``i681`` (tracker item), ``s051`` (spec), ``u25`` (upstream item),
+``g<sha7>`` (a commit), ``v0-0-15-2`` (a release, its dots as hyphens). A
+second copy for one purpose takes ``-verify`` or ``-r2``; the stem (the name
+without that suffix) keys the evidence folder.
+
+The registry is derived, never a file: the folders under ``.work/``, ``git
+worktree list --porcelain`` and the pins. Each copy's note (``dsf-work.*``:
+name, form, purpose, owner, host, home, start commit, startshared (whether a
+shared ref reached the start at ``new``; ``adopt`` records false), created,
+incarnation (a random id ``new`` and ``adopt`` write), adopted, landed, pins
+(the ``leaf=commit`` pins it published, :func:`record_pin`; ``new`` and
+``adopt`` write it empty, so a pin another copy left or a sync carried under
+the name is never this copy's; only a note older than the key attributes by
+:func:`legacy_pins`), and the handoff
+lineage ``fleet_sync.py handoff`` writes: generation, formerhomes)
+lives in its own git config: the clone's ``.git/config``, the worktree's
+``config.worktree`` (``extensions.worktreeConfig``, which ``new`` turns on
+when it is off, first moving a repository-level ``core.worktree`` or
+``core.bare = true`` into the main worktree's ``config.worktree`` as git's
+documentation prescribes). Each copy folder is one record, whatever name
+addresses it: a worktree's note names its folder (its git lock included). A note
+naming an invalid copy name or a name other than its folder's, and a name two
+folders claim, make every record involved unsafe: listed, never touched by
+``rm``, ``gc`` or ``repair`` (``--discard`` included), and left for the
+maintainer to fix by hand.
+
+Every copy has one home machine, the only one that edits it: ``home`` in its note
+(:func:`machine_id`: ``$DSF_MACHINE_ID``, else the short hostname, as
+``scripts/load_balancing.py`` matches ``hostnames``; a note older than ``home``
+reads its ``host``). ``scripts/fleet_sync.py`` keeps a replica of it on every
+other fleet machine, marked ``replica=true`` with ``home``, ``syncedtree`` (its
+content when last synced), ``syncedhead``, ``syncedfrom`` and ``syncedat``.
+``save``, ``land`` and ``rm`` refuse a replica and name its home; ``rm
+--discard`` alone removes one (this machine's replica, never the home's copy,
+kept in ``.work/trash`` for 7 days), ``gc`` never does, and
+``fleet_sync.py handoff <name>`` moves the home to this machine first.
+
+Pins are refs in ``.work/pins.git``, not branches:
+``refs/work/<name>/start`` (the commit a copy started from),
+``refs/work/<name>/save-N`` (a snapshot of the copy's content: a commit whose
+parent is the copy's ``HEAD``, built in a private index, so no index is
+touched) and ``refs/work/<name>/landed`` (what the last ``land`` applied). A
+pin is created only where none exists (``update-ref`` against an empty old
+value): two racing saves get two numbers, and no save is ever replaced. A
+pinned commit survives its copy. Restore one with ``new <name> --from
+refs/work/<old>/save-N``: the new copy starts at the save's parent and holds
+the saved content as uncommitted work, so it lands like any other copy.
+
+A copy's content (what ``save`` pins, ``land`` applies and ``rm`` checks) is
+read into a fresh private index from ``HEAD``, so the copy index's
+``assume-unchanged`` bits, its stat cache and ``core.fsmonitor`` never hide an
+edited file. A sparse checkout or a ``skip-worktree`` entry is refused: its
+missing files would read as deletions.
+
+Commands
+    ``new <name> [--worktree] [--from REV] [--purpose TEXT] [--owner TEXT] [--no-setup]``
+        Claim ``<name>``, then make a clone (default) or a worktree at ``REV``
+        (default the shared ``HEAD``; the copy starts from committed content
+        only, or from a pin as above), check git reads it as its own checkout,
+        write its note, pin ``start``, copy ``.python-version``, run ``uv sync
+        --frozen`` and, for a clone, ``pre-commit install``. ``--no-setup``
+        skips the sync and the hook. Refused for a name in use or claimed, a
+        name with pins left from an earlier copy, below 6 GB free disk, and a
+        kind ``workspace.py`` owns. A failure part way removes what it made.
+    ``adopt <path> <name> [--purpose TEXT] [--owner TEXT]``
+        Register, in place, a copy another tool made: a harness worktree
+        (Claude Desktop ``.claude/worktrees/*``, Codex, Cursor, T3, OpenCode,
+        Muse ``--workspace``) anywhere, or a clone already at
+        ``.work/clones/<name>`` whose remote is this checkout (a local path) or
+        a fleet machine's checkout over SSH (``<ssh>:<path>`` or
+        ``ssh://<ssh>/<path>``, ``ssh``, ``repo`` and an optional ``user`` from
+        ``docs/fleet/machines.json``: the account must be that ``user``, or with
+        none listed no user part or this user's own login; the port none or 22;
+        the path that machine's ``repo`` for that account, canonical). Writes the note with ``adopted=true``
+        and pins the copy's ``HEAD``. Never moves, locks or re-branches it:
+        the harness keeps its own cleanup, and a branch the harness made is the
+        harness's, not an agent-created branch. ``rm`` never deletes an
+        adopted copy outside ``.work/``.
+    ``list [--json]``
+        Every known copy: name, form, state (``live``, ``landed``,
+        ``folder-gone``, ``pins-only``, ``broken``, ``unsafe``), ``HEAD``,
+        pins, path, purpose and owner.
+    ``save <name>``
+        Pin the copy's content as the next ``save-N``. Content equal to
+        ``HEAD`` with ``HEAD`` still at the start pin saves nothing.
+    ``land <name> [--dry-run] [--patch FILE]``
+        Patch landing, the default way work reaches the shared checkout:
+        copies do not commit. One ``land`` runs at a time (``land.lock``).
+        The copy's content is diffed (``--binary``, new and deleted files
+        included) against the copy's ``HEAD``, which must be on the shared
+        ``main`` (so no committed work in the copy is dropped); the shared
+        ``HEAD`` must be ``refs/heads/main``. A path the shared tree already
+        holds exactly as the copy does is skipped; every other touched path
+        must hold exactly its ``HEAD`` entry there (bytes hashed and mode read
+        from disk, index entry too, so an ``assume-unchanged`` bit hides
+        nothing), and ``examples/fakeshop/db.sqlite3`` is never patched (carve
+        it by hand, START.md), nor a path under a folder that is a symlink in
+        the shared checkout (refused when planning and again right before each
+        write, so a write never follows a link out of it; a path that is
+        itself a symlink blob is written as a link). The patch is first applied to a private index
+        read from the shared ``HEAD``: that is the expected result, merged with
+        whatever main changed since the copy started, and a patch that does not
+        apply there refuses with nothing written. The journal is written, then
+        each path (deletions first) is written into the working tree only
+        (never the shared index): the new bytes go to a temporary file beside
+        it, the path is re-hashed against its state before, and one
+        ``os.replace`` publishes it. A path that changed, a failed write, or a
+        branch or ``HEAD`` that moved puts every path holding what the landing
+        wrote back as it was, keeps another writer's bytes untouched, names
+        them, and refuses. The window between the last re-hash and the replace
+        stays open: no protocol binds a plain editor in another session. On
+        success the copy is marked landed and ``refs/work/<name>/landed`` pins
+        the merged result on that ``HEAD`` (``landed-copy`` the copy's own
+        content). ``--dry-run`` checks and reports without writing;
+        ``--patch`` also writes the patch. The maintainer commits; main stays
+        linear.
+    ``rm <name> [--discard] [--drop-saves] [--evidence]``
+        Remove one copy: move it into ``.work/trash/`` (one rename, which a
+        running process holding a file refuses on Windows), then delete it,
+        granting the owner ``rwx`` on its folders (never a file's mode, which a
+        hard link shares outside ``.work``; on Windows a read-only file with no
+        other link gets its write bit), drop its worktree metadata, its start pin
+        and its name claim. Files git ignores in the copy are not content:
+        ``rm`` and ``gc`` delete them without a refusal. Refused for an unsafe path (above), a copy a process
+        has its current directory in or one the process census cannot vouch
+        for, a copy modified in the last 10 minutes and after its last save or
+        landing, a copy holding ``scripts/workspace.py`` pool or state folders
+        or ``scripts/prove_failability.py`` state, a worktree locked by anyone
+        but this script, content that is neither ``HEAD``, a save nor the
+        landed pin, a ``HEAD`` commit made in the copy that neither a shared
+        branch, tag or remote-tracking ref nor a pin ``rm`` keeps reaches (a
+        save pins it; a ``HEAD`` still at a start ``new`` found shared passes
+        after main is amended past it), a ref that dies with the copy on such a
+        commit (every ref of a clone, its ``refs/remotes/parent/`` ones passing
+        while the shared repository holds their commit; a worktree's
+        ``refs/bisect/``, ``refs/worktree/`` and ``refs/rewritten/``, its
+        folder present or gone: its other refs are the shared repository's and
+        outlive it; a commit only a reflog reaches counts as discarded), and
+        content that cannot be read at all (a missing or broken
+        ``.git``, a sparse checkout); ``--discard`` drops only those last four.
+        Save and landed pins stay unless ``--drop-saves``; either way ``rm``
+        drops only the pins the copy's own note attributes to it (its ``start``,
+        and the ``pins`` it recorded publishing), so a pin under the name it
+        cannot prove its own (an earlier copy's, or one a fleet sync carried
+        in) is kept and named, for ``rm <name> --drop-saves`` of the name it then holds alone
+        once checked; the evidence folder
+        stays unless ``--evidence`` and no sibling copy of the stem remains.
+        On the copy's home (``--discard`` included) it leaves a tombstone; on a
+        replica (``--discard``) it removes this machine's replica alone and keeps
+        it in ``.work/trash/<name>-<seconds>-kept`` for 7 days (a replica may be
+        the last copy of its work), restorable, until ``gc`` deletes it.
+        A copy moved to the trash that cannot be deleted is reported, its
+        metadata, pins and claim dropped as for a removal, and it stays in
+        ``.work/trash/`` for ``gc``; ``rm`` exits 1.
+    ``gc [--dry-run]``
+        Remove only what is finished: a landed copy whose landed content the
+        shared ``HEAD`` holds (each ``rm`` refusal still applies), worktree
+        metadata of this script's copies whose folder is gone, start and
+        landed pins of names with no copy left once the shared ``HEAD`` holds
+        them, ``.work/trash/`` entries whose ``rm`` is no longer running (a
+        ``-kept`` entry once 7 days have passed), and tombstones older than 30
+        days. A landed copy it removes leaves a tombstone as ``rm`` does, and
+        the pins it drops by age a pins-only one, so no sync carries them back.
+        Never a replica (its note ``replica``, or a home other than this
+        machine, as a former home a handoff demoted): ``fleet_sync.py`` removes
+        a replica, by its home's tombstone. Never a live copy that is not landed,
+        never a landing main has not
+        committed, never a save pin, never evidence. A copy or trash entry it
+        cannot delete, or a trash folder it cannot list, is reported (exit 1)
+        and the rest still runs. A landed copy whose landing the shared
+        ``HEAD`` does not hold (not committed yet, or a later commit changed a
+        landed path) is kept with a ``keep <name>: <reason>`` line in both
+        modes, exit unchanged: ``rm`` it once checked.
+    ``repair``
+        Rewrite the ``.work/.git`` sentinel, repair worktree links (``git
+        worktree repair``), restore a clone's ``no-push`` URL and every copy's
+        ``core.longpaths`` / ``core.autocrlf``, re-pin a missing start pin
+        from the note, release a stale claim (its ``new`` died), and report
+        what it cannot fix: an unsafe copy (never touched), a copy without
+        ``.git``, a leftover ``index.lock`` (never deleted), stray
+        ``.coverage.*`` files at the shared root. Exits 1 while a problem it
+        cannot fix remains.
+    ``run <name> -- <command...>``
+        Run ``<command>`` in the copy: current directory the copy, its
+        ``.venv`` first on ``PATH`` and as ``VIRTUAL_ENV``, without the
+        caller's ``GIT_*``, ``DIRENV_*``, ``DJANGO_*``, ``PYTEST_*``,
+        ``COVERAGE_*`` variables, ``PYTHONPATH``, uv's project redirects and
+        any other virtualenv's ``bin`` on ``PATH`` (direnv's activation of the
+        shared ``.venv`` included); ``PROJECT_ROOT`` is the copy and
+        ``FAKESHOP_PG_DSN``, when set, names the copy's own database. Before
+        the command runs, the copy's interpreter must import
+        ``django_strawberry_framework`` from inside the copy, else the run is
+        refused. A copy whose git directory holds ``dsf-work-venv-stale``
+        (``fleet_sync.py`` writes it on a replica, whose ``.venv`` never travels)
+        has its ``.venv`` rebuilt with ``uv sync --frozen`` first. Returns the
+        command's exit code (``128 + N`` for death by signal ``N``).
+    ``check-name <name>``
+        Validate a name and print its kind, id, slug and stem.
+
+The process census behind ``rm``: Linux reads ``/proc/<pid>/cwd``, other
+systems ask ``lsof -d cwd``. A census that fails, cannot read one of this
+user's own processes, or does not see the process running it is incomplete,
+and an incomplete census refuses. Another user's process it cannot read (and
+``lsof`` never lists) is skipped only while a folder above the copy is this
+user's and closed to everyone else (``.work`` is ``0700``), since no other
+non-root user can then be inside; otherwise the census is incomplete. Root's
+processes stay invisible.
+
+A copy holding a nested repository or a submodule is refused by ``save``,
+``land`` and ``rm`` (``rm --discard`` aside): no tree carries that
+repository's uncommitted work.
+
+Landing a copy from another machine: on that machine, clone with this
+machine's checkout as the ``parent`` remote over SSH (``git clone
+--no-hardlinks -o parent <ssh-host>:<checkout path> .work/clones/<name>``, the
+host and path from ``docs/fleet/machines.json``, then ``git remote set-url
+--push parent no-push``), work
+there, and bring the work back as a patch (``git diff --binary HEAD`` after
+``git add -N .``) applied here by the coordinator, the same rule ``land``
+follows. ``scripts/fleet_sync.py`` replicates a whole copy (its ``.git`` included)
+under its own rules (one writer per copy, never while a process works in it);
+never rsync a ``.git`` by hand.
+
+Every command refuses while ``GIT_DIR``, ``GIT_WORK_TREE`` or
+``GIT_INDEX_FILE`` is set: a command run mid-carve against a private index
+would read or write the wrong repository or index. A folder the registry
+cannot list (``.work/clones``, ``.work/worktrees``) refuses; a copy folder
+that cannot be looked into lists as broken. Exit codes: ``0`` success,
+``1`` a refusal or failure (the reason on stderr, an operating-system error
+too), ``2`` a usage error; ``run``
+returns the command's code and ``125`` when it refused before starting it.
+
+Standard library and ``scripts/_git.py`` only for the git and copy work;
+``scripts/workspace.py`` and ``scripts/prove_failability.py`` are read only to
+find their state folders for a copy, so the two scripts and this one name the
+same paths. Run from the shared checkout as ``uv run python scripts/work.py
+...``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import dataclasses
+import getpass
+import hashlib
+import json
+import os
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import TYPE_CHECKING, NoReturn, TypeGuard
+from urllib.parse import urlsplit, urlunsplit
+
+try:
+    import _git as _git_runner
+    import load_balancing
+except ModuleNotFoundError:  # imported as ``scripts.work`` (repo root on path)
+    from scripts import _git as _git_runner
+    from scripts import load_balancing
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator, Mapping, Sequence
+
+#: ``json.loads``, its result typed ``object`` for the caller to narrow.
+_loads: Callable[[str], object] = json.loads
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+WORK_DIR = ".work"
+CLONES = "clones"
+WORKTREES = "worktrees"
+EVIDENCE = "evidence"
+NAMES = "names"
+TRASH = "trash"
+PIN_STORE = "pins.git"
+LAND_LOCK = "land.lock"
+LAND_JOURNAL = "land-journal.json"
+JOURNAL_KEPT = "the journal is kept for the next land or repair"
+#: ``scripts/fleet_sync.py``'s folder (its holder token, evidence manifests) and its lock.
+FLEET = "fleet"
+FLEET_LOCK = "fleet.lock"
+#: Where a home's removal of a copy leaves its tombstone, the one record a replica is removed by.
+TOMBSTONES = "tombstones"
+DIR_CONTAINERS = (
+    CLONES,
+    WORKTREES,
+    EVIDENCE,
+    NAMES,
+    TRASH,
+    PIN_STORE,
+    FLEET,
+    TOMBSTONES,
+)
+FILE_ENTRIES = (LAND_LOCK, LAND_JOURNAL, FLEET_LOCK)
+SENTINEL_TEXT = "gitdir: /nonexistent/dsf-work-sentinel\n"
+PIN_PREFIX = "refs/work/"
+INCOMING_PREFIX = "refs/work-incoming/"
+START_PIN = "start"
+LANDED_PIN = "landed"
+LANDED_COPY_PIN = "landed-copy"
+CLAIM_GRACE_SECONDS = 60
+SAVE_PIN = re.compile(r"^save-(\d+)$")
+NOTE_SECTION = "dsf-work"
+#: The note key listing the pins a copy published (``leaf=commit``, comma-separated): what
+#: tells its own pins from those another copy left under the name (:func:`pin_belongs`).
+PINS_NOTE = "pins"
+LOCK_REASON_PREFIX = "dsf-work "
+LANDING_BRANCH = "refs/heads/main"
+#: The shared repository's own refs: a commit one of them reaches outlives every copy.
+SHARED_REFS = ("refs/heads/", "refs/tags/", "refs/remotes/")
+#: A clone's remote-tracking refs of the shared repository it was cloned from.
+PARENT_REFS = "refs/remotes/parent/"
+#: The refs git keeps per worktree, in its metadata: they die with the worktree.
+PER_WORKTREE_REFS = ("refs/bisect/", "refs/worktree/", "refs/rewritten/")
+NO_PUSH = "no-push"
+MACHINES_FILE = Path("docs") / "fleet" / "machines.json"
+#: Names this machine in a copy's note instead of its hostname (a hostname that is not its
+#: tailnet name; two fake machines on one host in the tests).
+MACHINE_ENV = "DSF_MACHINE_ID"
+#: A file in a copy's git directory: its ``.venv`` came from another machine or none exists,
+#: so ``run`` rebuilds it (``uv sync --frozen``) first.
+VENV_STALE = "dsf-work-venv-stale"
+#: Paths ``land`` never patches: a binary database carved row by row (START.md).
+CARVE_ONLY_PATHS = frozenset({"examples/fakeshop/db.sqlite3"})
+MIN_FREE_BYTES = 6 * 1024**3
+RECENT_SECONDS = 10 * 60
+#: How long a replica ``fleet_sync.py`` removed stays restorable in ``.work/trash`` before
+#: ``gc`` deletes it.
+TRASH_RETENTION_SECONDS = 7 * 24 * 60 * 60
+#: How long ``gc`` keeps a tombstone: past the trash retention, and long enough for a machine
+#: that was offline to come back and drop its replica.
+TOMBSTONE_RETENTION_SECONDS = 30 * 24 * 60 * 60
+#: The last part of a trash entry kept for :data:`TRASH_RETENTION_SECONDS`, not deleted at once.
+KEPT_TRASH = "kept"
+#: Whether a read-only file refuses its own delete (Windows); elsewhere its folder decides.
+READ_ONLY_FILES_BLOCK_DELETE = os.name == "nt"
+REFUSED = 125
+LOCATING_NAMES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+EXTRA_FILES = (".python-version",)
+COPY_CONFIG = (("core.longpaths", "true"), ("core.autocrlf", "false"))
+#: Index trust a content read never takes from the copy's config.
+UNTRUSTED_CACHES = (
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.untrackedCache=false",
+)
+#: Lets ``pins.git`` fetch a commit by id from a copy that holds no ref to it.
+FETCH_BY_ID = ("-c", "uploadpack.allowAnySHA1InWant=true")
+#: Folders never read when deciding when a copy was last modified.
+UNWATCHED_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+        "node_modules",
+    },
+)
+SCRUBBED_PREFIXES = (
+    "GIT_",
+    "DIRENV_",
+    "DJANGO_",
+    "PYTEST_",
+    "COVERAGE_",
+)
+SCRUBBED_NAMES = frozenset(
+    {
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "VIRTUAL_ENV",
+        "VIRTUAL_ENV_PROMPT",
+        "CONDA_PREFIX",
+        "PROJECT_ROOT",
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_PROJECT",
+        "UV_WORKING_DIRECTORY",
+        "UV_NO_SYNC",
+        "UV_FROZEN",
+        "UV_LOCKED",
+    },
+)
+PG_DSN_ENV = "FAKESHOP_PG_DSN"
+PACKAGE = "django_strawberry_framework"
+SAVE_IDENTITY = {
+    "GIT_AUTHOR_NAME": "work.py",
+    "GIT_AUTHOR_EMAIL": "work@localhost",
+    "GIT_COMMITTER_NAME": "work.py",
+    "GIT_COMMITTER_EMAIL": "work@localhost",
+}
+MAX_SAVE_ATTEMPTS = 100
+
+KINDS = (
+    "build",
+    "fix",
+    "spike",
+    "verify",
+    "ci",
+    "bench",
+    "head",
+    "carve",
+    "deps",
+    "spec",
+    "ship",
+)
+WORKSPACE_KINDS = ("review", "hunt", "dry")
+MAX_NAME_LENGTH = 24
+SEGMENT = re.compile(r"^[a-z0-9]+$")
+ID_SEGMENT = re.compile(r"^(?:c\d+|i\d+|s\d+|u\d+|g[0-9a-f]{7})$")
+VERSION_HEAD = re.compile(r"^v\d+$")
+DIGITS = re.compile(r"^\d+$")
+SUFFIX_SEGMENT = re.compile(r"^(?:verify|r\d+)$")
+
+
+class WorkError(Exception):
+    """A refusal or failure; the message says why and what to do."""
+
+
+# --------------------------------------------------------------------------------------------
+# Names
+# --------------------------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class Name:
+    """A parsed copy name: ``<kind>[-<id>]-<slug>[-<suffix>]``."""
+
+    text: str
+    kind: str
+    id: str | None
+    slug: str
+    suffix: str | None
+
+    @property
+    def stem(self) -> str:
+        """Return the name without its ``-verify`` / ``-rN`` suffix, which keys the evidence."""
+        return self.text if self.suffix is None else self.text[: -len(self.suffix) - 1]
+
+
+def parse_name(text: str) -> Name:
+    """Parse ``text`` as a copy name.
+
+    Raises:
+        WorkError: ``text`` breaks the grammar; the message names the rule.
+
+    """
+    if not text or len(text) > MAX_NAME_LENGTH:
+        msg = f"name {text!r} must be 1 to {MAX_NAME_LENGTH} characters"
+        raise WorkError(msg)
+    segments = text.split("-")
+    if not all(SEGMENT.fullmatch(segment) for segment in segments):
+        msg = f"name {text!r} must be lowercase [a-z0-9] segments joined by single hyphens"
+        raise WorkError(msg)
+    kind, rest = segments[0], segments[1:]
+    if kind in WORKSPACE_KINDS:
+        msg = f"kind {kind!r} belongs to scripts/workspace.py (one manager per flow)"
+        raise WorkError(msg)
+    if kind not in KINDS:
+        msg = f"name {text!r} must start with a kind: {', '.join(KINDS)}"
+        raise WorkError(msg)
+    identifier: str | None = None
+    if rest and ID_SEGMENT.fullmatch(rest[0]):
+        identifier, rest = rest[0], rest[1:]
+    elif rest and VERSION_HEAD.fullmatch(rest[0]):
+        taken = 1
+        while taken < len(rest) and DIGITS.fullmatch(rest[taken]):
+            taken += 1
+        identifier, rest = "-".join(rest[:taken]), rest[taken:]
+    suffix: str | None = None
+    if len(rest) > 1 and SUFFIX_SEGMENT.fullmatch(rest[-1]):
+        suffix, rest = rest[-1], rest[:-1]
+    if not rest:
+        msg = f"name {text!r} needs a slug saying the purpose after the kind and id"
+        raise WorkError(msg)
+    return Name(text, kind, identifier, "-".join(rest), suffix)
+
+
+def _valid(name: str) -> bool:
+    try:
+        _ = parse_name(name)
+    except WorkError:
+        return False
+    return True
+
+
+# --------------------------------------------------------------------------------------------
+# Machines: a copy's home, a replica
+# --------------------------------------------------------------------------------------------
+
+
+def machine_id() -> str:
+    """Return this machine's name in a copy's note: ``$DSF_MACHINE_ID``, else the short hostname.
+
+    The short hostname is the one ``scripts/load_balancing.py`` matches a machine's
+    ``hostnames`` by (up to its first dot, casefolded), so the two scripts and
+    ``scripts/fleet_sync.py`` name a machine the same way.
+    """
+    override = os.environ.get(MACHINE_ENV, "")
+    return load_balancing.short_hostname(override or load_balancing.this_hostname())
+
+
+def home_of(note: Mapping[str, str]) -> str:
+    """Return the machine a copy's note names as its home (a note older than ``home``: its host)."""
+    return note.get("home") or load_balancing.short_hostname(note.get("host", ""))
+
+
+def is_replica(note: Mapping[str, str]) -> bool:
+    """Return whether the note marks the copy a replica ``fleet_sync.py`` keeps of its home's copy."""
+    return note.get("replica") == "true"
+
+
+def refuse_replica(copy: Copy, verb: str) -> None:
+    """Refuse ``verb`` on a replica: only its home edits, saves, lands or removes it.
+
+    Raises:
+        WorkError: the copy is a replica; the message names its home and the handoff.
+
+    """
+    if not is_replica(copy.note):
+        return
+    home = home_of(copy.note)
+    msg = (
+        f"{copy.name} is a replica of {home}'s copy: {verb} it on {home}, or move its home "
+        f"here first (`uv run python scripts/fleet_sync.py handoff {copy.name}`)"
+    )
+    raise WorkError(msg)
+
+
+def copy_identity(note: Mapping[str, str]) -> str:
+    """Return what tells this incarnation of a copy from a later copy reusing its name.
+
+    The note's ``incarnation`` (a random id ``new`` and ``adopt`` write), else, for a note
+    older than it, ``<start>@<created>``; ``""`` when the note holds neither. A replica
+    carries these keys from its home, so both name one incarnation alike.
+    """
+    incarnation = note.get("incarnation", "")
+    if incarnation:
+        return incarnation
+    start, created = note.get("start", ""), note.get("created", "")
+    return f"{start}@{created}" if start and created else ""
+
+
+def handoff_generation(note: Mapping[str, str]) -> int:
+    """Return how many handoffs moved the copy's home (``generation``; ``0`` before any)."""
+    raw = note.get("generation", "")
+    return int(raw) if raw.isdigit() else 0
+
+
+def former_homes(note: Mapping[str, str]) -> tuple[str, ...]:
+    """Return the machines a handoff moved the copy's home away from, oldest first."""
+    return tuple(home for home in note.get("formerhomes", "").split(",") if home)
+
+
+def later_home(newer: Mapping[str, str], older: Mapping[str, str]) -> bool:
+    """Return whether ``newer`` names a later home of the copy ``older`` names.
+
+    The home ``older`` records is one ``newer`` lists as former (``formerhomes``) and
+    ``newer`` is the later handoff (``generation``): a replica a handoff missed (its machine
+    offline) still records the home it was synced from, and the newest home wins. Callers
+    check the identity (``fleet_sync.same_copy``).
+    """
+    return home_of(older) in former_homes(newer) and handoff_generation(
+        newer,
+    ) > handoff_generation(older)
+
+
+@dataclasses.dataclass(frozen=True)
+class Tombstone:
+    """A home's record that it removed one incarnation of a copy (``.work/tombstones/``).
+
+    ``generation`` and ``former_homes`` are the copy's handoff lineage at the removal (its
+    note's ``generation`` and ``formerhomes``), so the removal reaches a replica a handoff
+    missed; ``saves_dropped`` says ``rm --drop-saves`` dropped its saves, and
+    ``dropped_pins`` (``(leaf, commit)`` pairs) are the pins the removal dropped, which no
+    sync carries back and which a machine holding no copy under the name drops too.
+    """
+
+    name: str
+    home: str
+    identity: str
+    removed_at: float
+    removed_by: str
+    generation: int = 0
+    former_homes: tuple[str, ...] = ()
+    saves_dropped: bool = False
+    dropped_pins: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def file_name(self) -> str:
+        """Return the tombstone's file name: one per name, incarnation and handoff generation.
+
+        A removal before any handoff keeps the name the identity alone gives (tombstones
+        older than handoff lineage), a later one adds its home and generation, so two homes
+        of one incarnation (a handoff forced while its home was offline) never share a file.
+        """
+        key = self.identity
+        if self.generation:
+            key = f"{self.identity}\0{self.home}\0{self.generation}"
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+        return f"{self.name}@{digest}.json"
+
+    def buries(self, name: str, note: Mapping[str, str]) -> bool:
+        """Return whether this tombstone removes the replica ``name`` whose note is ``note``.
+
+        Same name and identity, and the replica records this home (from no later
+        generation) or a former home of it (:func:`later_home`): the newest home's removal
+        reaches a replica a handoff missed, an older home's never reaches a newer one's.
+        """
+        identity = copy_identity(note)
+        if not identity or name != self.name or identity != self.identity:
+            return False
+        if home_of(note) == self.home:
+            return self.generation >= handoff_generation(note)
+        return later_home(
+            {
+                "home": self.home,
+                "generation": str(self.generation),
+                "formerhomes": ",".join(self.former_homes),
+            },
+            note,
+        )
+
+    def as_json(self) -> dict[str, object]:
+        """Return the tombstone as its JSON document."""
+        return {
+            "name": self.name,
+            "home": self.home,
+            "identity": self.identity,
+            "removedat": self.removed_at,
+            "removedby": self.removed_by,
+            "generation": self.generation,
+            "formerhomes": list(self.former_homes),
+            "savesdropped": self.saves_dropped,
+            "droppedpins": dict(self.dropped_pins),
+        }
+
+    @classmethod
+    def parse(cls, raw: object) -> Tombstone | None:
+        """Return the tombstone a JSON document holds, ``None`` for anything else."""
+        if not _is_object_map(raw):
+            return None
+        fields = [
+            raw.get(key)
+            for key in (
+                "name",
+                "home",
+                "identity",
+                "removedby",
+            )
+        ]
+        strings = [field for field in fields if isinstance(field, str) and field]
+        removed_at = raw.get("removedat")
+        if (
+            len(strings) != len(fields)
+            or not _valid(strings[0])
+            or isinstance(removed_at, bool)
+            or not isinstance(removed_at, (int, float))
+        ):
+            return None
+        name, home, identity, removed_by = strings
+        generation = raw.get("generation", 0)
+        formers = raw.get("formerhomes", [])
+        dropped = raw.get("savesdropped", False)
+        pinned = raw.get("droppedpins", {})
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 0
+            or not isinstance(dropped, bool)
+            or not _is_object_list(formers)
+            or not _is_object_map(pinned)
+        ):
+            return None
+        homes = [entry for entry in formers if isinstance(entry, str) and entry]
+        pairs = [(leaf, sha) for leaf, sha in pinned.items() if isinstance(sha, str)]
+        if len(homes) != len(formers) or len(pairs) != len(pinned):
+            return None
+        return cls(
+            name,
+            home,
+            identity,
+            float(removed_at),
+            removed_by,
+            generation,
+            tuple(homes),
+            dropped,
+            tuple(sorted(pairs)),
+        )
+
+
+def tombstones(repo: Path) -> list[Tombstone]:
+    """Return every readable tombstone under ``.work/tombstones`` (a broken file is skipped)."""
+    folder = work_dir(repo) / TOMBSTONES
+    if not folder.is_dir():
+        return []
+    found: list[Tombstone] = []
+    for path in sorted(folder.glob("*.json")):
+        try:
+            tombstone = Tombstone.parse(_loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+        if tombstone is not None and tombstone.file_name == path.name:
+            found.append(tombstone)
+    return found
+
+
+def write_tombstone(repo: Path, tombstone: Tombstone) -> bool:
+    """Publish ``tombstone`` create-only; return whether it wrote the file.
+
+    The document is staged in full, then hard-linked into place (``os.link`` fails on an
+    existing name, so no writer replaces a tombstone another already published, and no
+    reader sees a half-written one). A file already there is never replaced: one holding
+    this very tombstone is success (``False``, nothing to write).
+    """
+    folder = _container(repo, TOMBSTONES, create=True)
+    target = folder / tombstone.file_name
+    staged = folder / f".{tombstone.file_name}.{_token()}"
+    _ = staged.write_text(json.dumps(tombstone.as_json(), sort_keys=True), encoding="utf-8")
+    try:
+        os.link(staged, target)
+    except FileExistsError:
+        return False
+    finally:
+        staged.unlink(missing_ok=True)
+    return True
+
+
+def _bury(
+    repo: Path,
+    copy: Copy,
+    dropped: Mapping[str, str],
+    *,
+    saves_dropped: bool,
+) -> None:
+    """Leave a tombstone for a copy its home removes; a replica or another's copy gets none.
+
+    ``dropped`` are the pins the removal drops (leaf to commit). A name holding pins alone
+    has no home: when its ``rm`` drops pins, a tombstone of identity ``pins@<digest of
+    them>`` (no copy's) records them, so no sync brings them back.
+    """
+    here = machine_id()
+    pinned = tuple(sorted(dropped.items()))
+    if copy.form == "pins":
+        bury_pins(repo, copy.name, dropped, saves_dropped=saves_dropped)
+        return
+    identity = copy_identity(copy.note)
+    if not identity or is_replica(copy.note) or home_of(copy.note) != here:
+        return
+    tombstone = Tombstone(
+        copy.name,
+        here,
+        identity,
+        time.time(),
+        here,
+        handoff_generation(copy.note),
+        former_homes(copy.note),
+        saves_dropped,
+        pinned,
+    )
+    _ = write_tombstone(repo, tombstone)
+
+
+def bury_pins(
+    repo: Path,
+    name: str,
+    dropped: Mapping[str, str],
+    *,
+    saves_dropped: bool,
+) -> None:
+    """Leave a pins-only tombstone recording the ``dropped`` pins (leaf to commit) of ``name``.
+
+    Its identity is ``pins@<digest of them>``, no copy's, so it removes no replica; it only
+    stops every sync carrying those pins back and drops them wherever no copy holds the name.
+    Nothing dropped writes none.
+    """
+    pinned = tuple(sorted(dropped.items()))
+    if not pinned:
+        return
+    here = machine_id()
+    listed = "\0".join(f"{leaf}={sha}" for leaf, sha in pinned)
+    identity = f"pins@{hashlib.sha256(listed.encode('utf-8')).hexdigest()[:16]}"
+    tombstone = Tombstone(
+        name,
+        here,
+        identity,
+        time.time(),
+        here,
+        saves_dropped=saves_dropped,
+        dropped_pins=pinned,
+    )
+    _ = write_tombstone(repo, tombstone)
+
+
+def drop_buried_pins(repo: Path, name: str) -> list[str]:
+    """Drop each pin of ``name`` a tombstone records its removal dropped; return the leaves.
+
+    Only while no copy holds the name here (pins alone may), and only a pin still at the
+    commit the tombstone records: a later copy's pin under the leaf is another commit.
+    """
+    copy = discover(repo).get(name)
+    if copy is not None and copy.form != "pins":
+        return []
+    held = pins(repo).get(name, {})
+    dropped: list[str] = []
+    for grave in tombstones(repo):
+        if grave.name != name:
+            continue
+        for leaf, sha in grave.dropped_pins:
+            if leaf not in dropped and held.get(leaf) == sha:
+                drop_pin(repo, name, leaf, sha)
+                dropped.append(leaf)
+    return dropped
+
+
+# --------------------------------------------------------------------------------------------
+# Git
+# --------------------------------------------------------------------------------------------
+
+
+def refuse_locating_env(environ: Mapping[str, str] | None = None) -> None:
+    """Refuse while a variable that relocates git's repository or index is set.
+
+    Raises:
+        WorkError: one of :data:`LOCATING_NAMES` is set.
+
+    """
+    source = os.environ if environ is None else environ
+    present = [name for name in LOCATING_NAMES if name in source]
+    if present:
+        msg = (
+            f"{', '.join(present)} set: unset it first (a command run against a private "
+            "index or another repository would read or write the wrong one)"
+        )
+        raise WorkError(msg)
+
+
+def _git_bytes(
+    root: Path,
+    *args: str,
+    env: Mapping[str, str] | None = None,
+    stdin: bytes | None = None,
+) -> bytes:
+    """Run ``git -C root args`` in the repository-only environment; return stdout bytes.
+
+    Raises:
+        WorkError: git exits non-zero; the message carries its stderr.
+
+    """
+    if shutil.which("git") is None:
+        msg = "git is not on PATH"
+        raise WorkError(msg)
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "--no-pager",
+            *args,
+        ],
+        capture_output=True,
+        input=stdin,
+        env=_git_runner.repository_env(**dict(env or {})),
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip()
+        msg = f"git {' '.join(args)} failed ({completed.returncode}): {detail}"
+        raise WorkError(msg)
+    return completed.stdout
+
+
+def _git(root: Path, *args: str, env: Mapping[str, str] | None = None) -> str:
+    """Run ``git -C root args`` (see :func:`_git_bytes`); return stdout as text."""
+    return _git_bytes(root, *args, env=env).decode("utf-8", "surrogateescape")
+
+
+def _git_ok(root: Path, *args: str) -> bool:
+    """Return whether ``git -C root args`` exits 0, output discarded."""
+    completed = _git_runner.run_git(root, *args)
+    return completed.returncode == 0
+
+
+def _config_values(root: Path, *scope: str) -> dict[str, str]:
+    """Return the ``dsf-work.*`` note at ``scope`` (``--local``, ``--worktree``, ``-f F``).
+
+    Only a clean exit 1 (no ``dsf-work`` key) is an empty note. git also exits 1 for a
+    config file it cannot read, but warns on stderr; that, and every other failure, is no
+    note read, never an empty one.
+
+    Raises:
+        WorkError: git could not read the config at ``scope``.
+
+    """
+    completed = _git_runner.run_git(
+        root,
+        "config",
+        *scope,
+        "-z",
+        "--get-regexp",
+        rf"^{re.escape(NOTE_SECTION)}\.",
+    )
+    if completed.returncode == 1 and not completed.stderr.strip():
+        return {}
+    if completed.returncode != 0:
+        msg = (
+            f"cannot read the dsf-work note of {root} ({' '.join(scope)}): "
+            f"{completed.stderr.strip() or f'git config exited {completed.returncode}'}"
+        )
+        raise WorkError(msg)
+    note: dict[str, str] = {}
+    for record in completed.stdout.split("\0"):
+        if not record:
+            continue
+        key, _, value = record.partition("\n")
+        note[key.removeprefix(f"{NOTE_SECTION}.")] = value
+    return note
+
+
+def _resolve_commit(root: Path, rev: str) -> str:
+    """Return the full commit id ``rev`` names in ``root``, ``""`` when it names none."""
+    completed = _git_runner.run_git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}")
+    return completed.stdout.strip() if completed.returncode == 0 else ""
+
+
+def _common_dir(repo: Path) -> Path:
+    """Return the shared checkout's common git directory, absolute."""
+    return Path(
+        _git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").strip(),
+    ).resolve()
+
+
+def _git_path(root: Path, name: str) -> Path:
+    """Return ``root``'s ``$GIT_DIR/<name>``, absolute."""
+    return Path(_git(root, "rev-parse", "--path-format=absolute", "--git-path", name).strip())
+
+
+def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    """Return whether ``ancestor`` is ``descendant`` or reachable from it in ``repo``."""
+    return _git_ok(repo, "merge-base", "--is-ancestor", ancestor, descendant)
+
+
+def _token() -> str:
+    """Return a name part no other process uses at this moment."""
+    return f"{os.getpid()}-{time.time_ns()}"
+
+
+# --------------------------------------------------------------------------------------------
+# Layout
+# --------------------------------------------------------------------------------------------
+
+
+def work_dir(repo: Path) -> Path:
+    """Return ``<repo>/.work``."""
+    return repo / WORK_DIR
+
+
+def check_layout(repo: Path) -> None:
+    """Refuse a ``.work`` (or an entry of it) that is a symlink, the wrong kind, or not under the repo.
+
+    Raises:
+        WorkError: the layout is unsafe to read or write.
+
+    """
+    work = work_dir(repo)
+    entries = [(work, True)]
+    entries += [(work / name, True) for name in DIR_CONTAINERS]
+    entries += [(work / name, False) for name in FILE_ENTRIES]
+    for path, is_folder in entries:
+        mode = _mode(repo, path)
+        if mode is not None and stat.S_ISLNK(mode):
+            msg = f"{path} is a symlink; .work and its entries must be real"
+            raise WorkError(msg)
+        if mode is not None and stat.S_ISDIR(mode) != is_folder:
+            msg = f"{path} is not a {'directory' if is_folder else 'regular file'}"
+            raise WorkError(msg)
+    if _present(repo, work) and work.resolve() != repo.resolve() / WORK_DIR:
+        msg = f"{work} resolves to {work.resolve()}, outside {repo.resolve()}"
+        raise WorkError(msg)
+
+
+def _container(repo: Path, name: str, *, create: bool = False) -> Path:
+    """Return ``.work/<name>``, made when ``create``, after checking the layout again."""
+    path = work_dir(repo) / name
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    check_layout(repo)
+    return path
+
+
+def copy_hazard(repo: Path, path: Path, container: str) -> str | None:
+    """Return why the copy folder ``path`` under ``.work/<container>`` is unsafe, else ``None``."""
+    real = (repo.resolve() / WORK_DIR / container).resolve()
+    try:
+        mode = _mode(repo, path)
+    except WorkError as error:
+        return str(error)
+    if mode is not None and stat.S_ISLNK(mode):
+        return f"{path} is a symlink"
+    if mode is not None and path.resolve().parent != real:
+        return f"{path} resolves outside {real}"
+    return None
+
+
+def ensure_sentinel(repo: Path) -> bool:
+    """Write the ``.work/.git`` sentinel when it is missing or wrong; return whether it wrote.
+
+    ``.work`` is also kept ``0700``: no other (non-root) user can then enter a copy, which
+    is what lets the process census skip processes it may not read.
+    """
+    check_layout(repo)
+    work = work_dir(repo)
+    work.mkdir(mode=0o700, parents=True, exist_ok=True)
+    check_layout(repo)
+    if work.stat().st_uid == os.getuid() and work.stat().st_mode & 0o077:
+        work.chmod(0o700)
+    sentinel = work / ".git"
+    mode = _mode(repo, sentinel)
+    if mode is not None and not stat.S_ISREG(mode):
+        msg = f"{sentinel} is not a plain file; the sentinel must be one (remove it by hand)"
+        raise WorkError(msg)
+    if mode is not None and sentinel.read_text(encoding="utf-8") == SENTINEL_TEXT:
+        return False
+    _ = sentinel.write_text(SENTINEL_TEXT, encoding="utf-8")
+    return True
+
+
+# --------------------------------------------------------------------------------------------
+# Name claims
+# --------------------------------------------------------------------------------------------
+
+
+def claim_name(repo: Path, name: str) -> Path:
+    """Claim ``name``: a folder holding its owner, renamed into ``.work/names/<name>`` in one step.
+
+    The owner file is written before the rename publishes the claim, so no claim is ever
+    seen without its owner, and of two commands racing for one name only one rename wins.
+
+    Raises:
+        WorkError: another command holds the claim.
+
+    """
+    _ = parse_name(name)
+    claims = _container(repo, NAMES, create=True)
+    claim = claims / name
+    staged = claims / f".{name}.{_token()}"
+    staged.mkdir()
+    _ = (staged / "owner").write_text(
+        f"{load_balancing.this_hostname()} {os.getpid()}\n",
+        encoding="utf-8",
+    )
+    try:
+        if claim.exists() or claim.is_symlink():
+            raise FileExistsError(claim)
+        _ = staged.rename(claim)
+    except OSError:
+        delete_tree(staged)
+        msg = f"{name!r} is claimed (in use, or a `new` is making it now)"
+        raise WorkError(msg) from None
+    return claim
+
+
+def release_name(repo: Path, name: str) -> None:
+    """Drop the claim on ``name`` when there is one.
+
+    Raises:
+        WorkError: ``name`` breaks the name grammar (it would name a path outside the
+            claims), or the claims cannot be looked into.
+
+    """
+    _ = parse_name(name)
+    claim = work_dir(repo) / NAMES / name
+    if _is_kind(repo, claim, stat.S_ISDIR):
+        delete_tree(claim)
+
+
+def _claim_is_stale(claim: Path) -> bool:
+    """Return whether the command that took ``claim`` is known dead.
+
+    Dead means: its owner is this host and its pid is gone, or it never wrote an owner and
+    is older than :data:`CLAIM_GRACE_SECONDS`. A claim from another host is never known dead.
+    """
+    try:
+        host, pid = (claim / "owner").read_text(encoding="utf-8").split()
+    except FileNotFoundError:
+        with contextlib.suppress(OSError):
+            return time.time() - claim.stat().st_mtime > CLAIM_GRACE_SECONDS
+        return False
+    except (OSError, ValueError):
+        return False
+    return host == load_balancing.this_hostname() and pid.isdigit() and not _pid_alive(int(pid))
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+# --------------------------------------------------------------------------------------------
+# Pins
+# --------------------------------------------------------------------------------------------
+
+
+def pin_store(repo: Path) -> Path | None:
+    """Return ``.work/pins.git``, ``None`` while it does not exist.
+
+    Raises:
+        WorkError: the folder exists but is no repository (its pins cannot be read); ``repair``
+            re-initializes it, which keeps every ref and object still there.
+
+    """
+    store = work_dir(repo) / PIN_STORE
+    check_layout(repo)
+    if not _present(repo, store):
+        return None
+    if not _is_kind(repo, store / "HEAD", stat.S_ISREG):
+        msg = f"{store} is damaged (no HEAD); run `repair` before trusting any pin"
+        raise WorkError(msg)
+    return store
+
+
+def make_pin_store(repo: Path) -> Path:
+    """Return ``.work/pins.git``, initializing the bare repository first when it is missing."""
+    store = work_dir(repo) / PIN_STORE
+    check_layout(repo)
+    if _is_kind(repo, store / "HEAD", stat.S_ISREG):
+        return store
+    _ = ensure_sentinel(repo)
+    store.mkdir(exist_ok=True)
+    check_layout(repo)
+    _ = _git(store, "init", "--quiet", "--bare")
+    return store
+
+
+def pins(repo: Path) -> dict[str, dict[str, str]]:
+    """Return ``{name: {leaf: commit}}`` for every ``refs/work/<name>/<leaf>`` pin."""
+    store = pin_store(repo)
+    if store is None:
+        return {}
+    listing = _git(store, "for-each-ref", "--format=%(objectname) %(refname)", PIN_PREFIX)
+    found: dict[str, dict[str, str]] = {}
+    for line in listing.splitlines():
+        sha, _, ref = line.partition(" ")
+        name, _, leaf = ref.removeprefix(PIN_PREFIX).partition("/")
+        if leaf:
+            found.setdefault(name, {})[leaf] = sha
+    return found
+
+
+def save_numbers(leaves: Mapping[str, str]) -> list[int]:
+    """Return the ``N`` of every ``save-N`` leaf, ascending."""
+    return sorted(
+        int(match.group(1)) for leaf in leaves if (match := SAVE_PIN.fullmatch(leaf)) is not None
+    )
+
+
+def _pin_ref(name: str, leaf: str) -> str:
+    return f"{PIN_PREFIX}{name}/{leaf}"
+
+
+def publish_pin(
+    repo: Path,
+    source: Path,
+    commit: str,
+    name: str,
+    leaf: str,
+    *,
+    replacing: str = "",
+) -> bool:
+    """Point the pin ``<name>/<leaf>`` at ``commit``, fetched from ``source``.
+
+    The pin is set only while it holds ``replacing`` (``""``: only while it does not
+    exist), so a racing writer is never overwritten; returns whether it was set.
+    """
+    store = make_pin_store(repo)
+    incoming = f"{INCOMING_PREFIX}{_token()}"
+    _ = _git(
+        store,
+        *FETCH_BY_ID,
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-write-fetch-head",
+        str(source),
+        f"{commit}:{incoming}",
+    )
+    try:
+        return _git_ok(store, "update-ref", _pin_ref(name, leaf), commit, replacing)
+    finally:
+        _ = _git_runner.run_git(store, "update-ref", "-d", incoming)
+
+
+def publish_next_save(
+    repo: Path,
+    source: Path,
+    commit: str,
+    name: str,
+) -> str:
+    """Pin ``commit`` as the first free ``save-N`` of ``name``; return that ref.
+
+    Raises:
+        WorkError: no number could be reserved.
+
+    """
+    for _attempt in range(MAX_SAVE_ATTEMPTS):
+        numbers = save_numbers(pins(repo).get(name, {}))
+        leaf = f"save-{(numbers[-1] if numbers else 0) + 1}"
+        if publish_pin(repo, source, commit, name, leaf):
+            return _pin_ref(name, leaf)
+    msg = f"could not reserve a save number for {name!r}"
+    raise WorkError(msg)
+
+
+def drop_pin(
+    repo: Path,
+    name: str,
+    leaf: str,
+    old: str = "",
+) -> None:
+    """Delete one pin (only while it is at ``old``, when given)."""
+    store = pin_store(repo)
+    if store is not None:
+        _ = _git(store, "update-ref", "-d", _pin_ref(name, leaf), *([old] if old else []))
+
+
+def fetch_pinned(repo: Path, target: Path, commit: str) -> None:
+    """Bring ``commit`` (and its history) from ``pins.git`` into the repository at ``target``."""
+    store = pin_store(repo)
+    if store is None:
+        msg = "there is no pins.git"
+        raise WorkError(msg)
+    _ = _git(
+        target,
+        *FETCH_BY_ID,
+        "fetch",
+        "--quiet",
+        "--no-tags",
+        "--no-write-fetch-head",
+        str(store),
+        commit,
+    )
+
+
+def landing_on_main(repo: Path, landed: str) -> bool:
+    """Return whether the shared ``HEAD`` holds every path the pinned landing changed, entry for entry.
+
+    An entry is mode, type and object id, so a mode-only landing main undid reads as not held.
+    """
+    store = pin_store(repo)
+    if store is None:
+        return False
+    base = _resolve_commit(store, f"{landed}^")
+    if not base:
+        return False
+    names = _git(store, "diff-tree", "-r", "-z", "--no-renames", "--name-only", base, landed)
+    paths = [entry for entry in names.split("\0") if entry]
+    return _tree_entries(store, landed, paths) == _tree_entries(repo, "HEAD", paths)
+
+
+def _tree_entries(root: Path, rev: str, paths: Sequence[str]) -> dict[str, str]:
+    """Return ``{path: "mode type oid"}`` for each of ``paths`` present in ``rev``."""
+    if not paths:
+        return {}
+    listing = _git(root, "ls-tree", "-z", "--full-tree", rev, "--", *paths)
+    entries: dict[str, str] = {}
+    for record in (entry for entry in listing.split("\0") if entry):
+        header, _, path = record.partition("\t")
+        entries[path] = header
+    return entries
+
+
+# --------------------------------------------------------------------------------------------
+# Registry
+# --------------------------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class WorktreeEntry:
+    """One ``git worktree list --porcelain`` record."""
+
+    path: Path
+    head: str | None
+    branch: str | None
+    locked: str | None
+    prunable: bool
+
+
+def worktree_entries(repo: Path) -> list[WorktreeEntry]:
+    """Return every linked worktree of ``repo`` (the main worktree left out)."""
+    text = _git(repo, "worktree", "list", "--porcelain", "-z")
+    entries: list[WorktreeEntry] = []
+    for block in text.split("\0\0"):
+        fields = [field for field in block.split("\0") if field]
+        if not fields or not fields[0].startswith("worktree "):
+            continue
+        values: dict[str, str] = {}
+        for field in fields:
+            key, _, value = field.partition(" ")
+            values[key] = value
+        entries.append(
+            WorktreeEntry(
+                path=Path(values["worktree"]),
+                head=values.get("HEAD"),
+                branch=values.get("branch"),
+                locked=values.get("locked"),
+                prunable="prunable" in values,
+            ),
+        )
+    main = repo.resolve()
+    return [entry for entry in entries if entry.path.resolve() != main]
+
+
+def _abs(path: Path) -> Path:
+    """Return ``path`` made absolute without following symlinks (a gone folder cannot resolve)."""
+    return Path(os.path.abspath(path))  # noqa: PTH100 - resolve() would follow symlinks
+
+
+def _admin_dirs(repo: Path) -> dict[Path, Path]:
+    """Map each linked worktree's path to its ``<common>/worktrees/<id>`` metadata folder."""
+    common = _common_dir(repo)
+    admin_root = common / "worktrees"
+    found: dict[Path, Path] = {}
+    if not _is_kind(common, admin_root, stat.S_ISDIR):
+        return found
+    for admin in sorted(admin_root.iterdir()):
+        gitdir = admin / "gitdir"
+        if not _is_kind(common, gitdir, stat.S_ISREG):
+            continue
+        dot_git = Path(gitdir.read_text(encoding="utf-8").strip())
+        if not dot_git.is_absolute():
+            dot_git = (admin / dot_git).resolve()
+        found[_abs(dot_git.parent)] = admin
+    return found
+
+
+@dataclasses.dataclass(frozen=True)
+class Copy:
+    """One registered copy, live or not."""
+
+    name: str
+    form: str
+    path: Path | None
+    note: Mapping[str, str]
+    admin: Path | None = None
+    locked: str | None = None
+    hazard: str | None = None
+
+    @property
+    def present(self) -> bool:
+        """Return whether the copy's folder exists (links followed).
+
+        Raises:
+            WorkError: the folder's parent cannot be looked into: it is never read as gone.
+
+        """
+        if self.path is None:
+            return False
+        mode = _mode(self.path.parent, self.path, follow=True)
+        return mode is not None and stat.S_ISDIR(mode)
+
+    @property
+    def adopted(self) -> bool:
+        """Return whether another tool made the copy and ``adopt`` registered it."""
+        return self.note.get("adopted") == "true"
+
+    @property
+    def healthy(self) -> bool:
+        """Return whether git reads the folder as its own checkout (its ``.git`` is intact)."""
+        if self.hazard is not None or not self.present or self.path is None:
+            return False
+        return _is_own_checkout(self.path)
+
+
+def _is_own_checkout(path: Path) -> bool:
+    """Return whether git, run in ``path``, finds ``path`` itself as the toplevel."""
+    completed = _git_runner.run_git(path, "rev-parse", "--show-toplevel")
+    return completed.returncode == 0 and _git_runner.same_directory(completed.stdout.strip(), path)
+
+
+def _looks_like(path: Path, kind: Callable[[int], bool]) -> bool:
+    """Return whether ``path`` (links followed) is there and of ``kind``.
+
+    A path that cannot be looked up (its folder is unreadable) answers ``False`` on every
+    Python, as ``Path.is_dir()`` does only from 3.14: the copy then reads as broken.
+    """
+    try:
+        return kind(path.stat().st_mode)
+    except OSError:
+        return False
+
+
+def _clone_note(path: Path) -> dict[str, str]:
+    """Return a clone's note, ``{}`` when its ``.git`` is missing or cannot be looked up."""
+    if not _looks_like(path / ".git", stat.S_ISDIR):
+        return {}
+    return _config_values(path, "--local")
+
+
+def _worktree_note(path: Path | None, admin: Path | None) -> dict[str, str]:
+    """Return a worktree's note, read from its folder or, once that is gone, its metadata.
+
+    A folder git cannot read (its ``.git`` broken) falls back to the metadata's
+    ``config.worktree``, the file the note lives in; that file is read strictly.
+
+    Raises:
+        WorkError: the metadata folder cannot be looked into, or its ``config.worktree``
+            cannot be read.
+
+    """
+    if path is not None and _looks_like(path / ".git", stat.S_ISREG):
+        with contextlib.suppress(WorkError):
+            note = _config_values(path, "--worktree")
+            if note:
+                return note
+    if admin is not None and _is_kind(admin, admin / "config.worktree", stat.S_ISREG):
+        return _config_values(admin, "-f", str(admin / "config.worktree"))
+    return {}
+
+
+def _copy_folders(folder: Path) -> list[Path]:
+    """Return the entries of the copy container ``folder``, ``[]`` when it is not there.
+
+    Raises:
+        WorkError: the container is there but cannot be listed.
+
+    """
+    if not _is_kind(folder.parent, folder, stat.S_ISDIR):
+        return []
+    try:
+        return sorted(folder.iterdir())
+    except OSError as error:
+        msg = f"cannot read {folder}: {error.strerror or error}"
+        raise WorkError(msg) from error
+
+
+def _worktree_hazard(path: Path) -> str | None:
+    """Return why the registered worktree at ``path`` is unsafe, else ``None``.
+
+    Its folder must be one that can be looked up: one that cannot is never read as gone.
+    """
+    try:
+        _ = _mode(path.parent, path)
+    except WorkError as error:
+        return str(error)
+    return None
+
+
+def _name_problems(
+    copy: Copy,
+    folder: str | None,
+    claims: Mapping[str, Sequence[Copy]],
+) -> list[str]:
+    """Return why the names ``copy`` claims make it unsafe (empty = they do not).
+
+    ``folder`` is the copy's folder name when it sits in a ``.work`` container. The note
+    must name a valid copy name, the folder's own when there is one, and no other record
+    may claim any name this one claims.
+    """
+    noted = copy.note.get("name")
+    problems: list[str] = []
+    if noted is not None and not _valid(noted):
+        problems.append(f"its note names {noted!r}, not a valid copy name")
+    elif noted is not None and folder is not None and noted != folder:
+        problems.append(f"its note names {noted!r} but its folder is {folder!r}")
+    for name in _claimed(copy, folder):
+        others = [str(other.path) for other in claims[name] if other is not copy]
+        if others:
+            problems.append(f"{name!r} is also claimed by {', '.join(others)}")
+    return problems
+
+
+def _claimed(copy: Copy, folder: str | None) -> list[str]:
+    """Return every name ``copy`` claims: its folder name in a container, then its note's."""
+    return [name for name in dict.fromkeys((folder, copy.note.get("name"))) if name is not None]
+
+
+def _by_name(found: Sequence[tuple[Copy, str | None]]) -> dict[str, Copy]:
+    """Key each found record (a copy and its folder name in a container) by every name it claims.
+
+    A record whose names conflict (:func:`_name_problems`) is marked unsafe and stays
+    under each of its names, so neither a folder name nor a note name can address it as a
+    safe copy, nor leave its pins and claim to a ``pins`` record. A record whose every
+    name an earlier record took is listed under its name and path.
+    """
+    claims: dict[str, list[Copy]] = {}
+    for copy, folder in found:
+        for name in _claimed(copy, folder):
+            claims.setdefault(name, []).append(copy)
+    records: list[tuple[Copy, list[str]]] = []
+    for copy, folder in found:
+        record = copy
+        problems = _name_problems(copy, folder, claims)
+        if problems:
+            hazard = "; ".join(problems) + "; fix the note or the folder by hand"
+            record = dataclasses.replace(
+                copy,
+                hazard=hazard if copy.hazard is None else f"{copy.hazard}; {hazard}",
+            )
+        records.append((record, _claimed(copy, folder)))
+    copies: dict[str, Copy] = {}
+    keyless: list[Copy] = []
+    for record, names in records:
+        free = [name for name in names if name not in copies]
+        for name in free:
+            copies[name] = record
+        if not free:
+            keyless.append(record)
+    for record in keyless:
+        copies[f"{record.name} ({record.path})"] = record
+    return copies
+
+
+def discover(repo: Path) -> dict[str, Copy]:
+    """Derive the registry: ``.work`` folders, linked worktrees and the pins.
+
+    Each folder is one record. A copy folder that is unsafe (:func:`copy_hazard`, which
+    includes one that cannot be looked up) is listed with its hazard and never read; one
+    that cannot be looked into lists as broken. A worktree whose note names a folder is
+    that folder's record (git's lock on it included), never a second one under the folder
+    name. A record whose note names an invalid copy name, a name other than its folder's,
+    or a name another record claims is unsafe, listed under every name it claims: such a
+    name is never used as a path, and ``rm``, ``gc`` and ``repair`` never touch it.
+
+    Raises:
+        WorkError: ``.work/clones`` or ``.work/worktrees`` cannot be listed, or a
+            worktree's note cannot be read.
+
+    """
+    check_layout(repo)
+    found: list[tuple[Copy, str | None]] = []
+    clones = work_dir(repo) / CLONES
+    for path in _copy_folders(clones):
+        hazard = copy_hazard(repo, path, CLONES)
+        if hazard is not None:
+            found.append((Copy(path.name, "clone", path, {}, hazard=hazard), path.name))
+        elif _is_kind(clones, path, stat.S_ISDIR):
+            note = _clone_note(path)
+            found.append((Copy(note.get("name", path.name), "clone", path, note), path.name))
+    worktrees = work_dir(repo) / WORKTREES
+    worktrees_abs = _abs(worktrees)
+    worktree_folders = _copy_folders(worktrees)
+    unsafe_worktrees: dict[str, str] = {}
+    for path in worktree_folders:
+        hazard = copy_hazard(repo, path, WORKTREES)
+        if hazard is not None:
+            unsafe_worktrees[path.name] = hazard
+    admins = _admin_dirs(repo)
+    registered: set[str] = set()
+    for entry in worktree_entries(repo):
+        path = _abs(entry.path)
+        inside = path.parent == worktrees_abs
+        admin = admins.get(path)
+        if inside:
+            registered.add(path.name)
+        if inside and path.name in unsafe_worktrees:
+            note: dict[str, str] = {}
+            with contextlib.suppress(WorkError):
+                note = _worktree_note(None, admin)
+            hazard = unsafe_worktrees[path.name]
+            record = Copy(path.name, "worktree", path, note, admin, entry.locked, hazard)
+            found.append((record, path.name))
+            continue
+        note = _worktree_note(path, admin)
+        if not inside and "name" not in note:
+            continue
+        record = Copy(
+            note.get("name", path.name),
+            "worktree",
+            path,
+            note,
+            admin,
+            entry.locked,
+            _worktree_hazard(path),
+        )
+        found.append((record, path.name if inside else None))
+    for path in worktree_folders:
+        if path.name in registered:
+            continue
+        if path.name in unsafe_worktrees:
+            hazard = unsafe_worktrees[path.name]
+            found.append((Copy(path.name, "worktree", path, {}, hazard=hazard), path.name))
+        elif _is_kind(worktrees, path, stat.S_ISDIR):
+            found.append((Copy(path.name, "worktree", path, {}), path.name))
+    copies = _by_name(found)
+    for name in pins(repo):
+        if name not in copies:
+            copies[name] = Copy(name, "pins", None, {})
+    return copies
+
+
+def locate(repo: Path, name: str) -> Copy:
+    """Return the registered copy called ``name``.
+
+    Raises:
+        WorkError: no copy, folder or pin has that name.
+
+    """
+    copy = discover(repo).get(name)
+    if copy is None:
+        msg = f"no copy named {name!r} (see `work.py list`)"
+        raise WorkError(msg)
+    return copy
+
+
+def _live(copy: Copy) -> Path:
+    """Return the folder of a safe copy git reads as its own checkout.
+
+    Raises:
+        WorkError: the copy is unsafe, its folder is gone or its ``.git`` is broken.
+
+    """
+    if copy.hazard is not None:
+        msg = f"copy {copy.name!r} is unsafe, never touched: {copy.hazard}"
+        raise WorkError(msg)
+    if copy.path is None or not copy.present:
+        msg = f"copy {copy.name!r} has no folder"
+        raise WorkError(msg)
+    if not copy.healthy:
+        msg = f"copy {copy.name!r} at {copy.path} has a missing or broken .git; run `repair`"
+        raise WorkError(msg)
+    return copy.path
+
+
+# --------------------------------------------------------------------------------------------
+# Content, notes
+# --------------------------------------------------------------------------------------------
+
+
+def _refuse_sparse(copy_root: Path) -> None:
+    """Refuse a sparse checkout or ``skip-worktree`` entries: missing files would read deleted.
+
+    Raises:
+        WorkError: the copy is sparse.
+
+    """
+    sparse = _git_runner.run_git(copy_root, "config", "--bool", "core.sparseCheckout")
+    if sparse.stdout.strip() == "true":
+        msg = f"{copy_root} is a sparse checkout; its content cannot be read whole"
+        raise WorkError(msg)
+    listing = _git(copy_root, "ls-files", "-t", "-z")
+    if any(entry.startswith("S ") for entry in listing.split("\0")):
+        msg = f"{copy_root} has skip-worktree entries; its content cannot be read whole"
+        raise WorkError(msg)
+
+
+def _unreadable(copy_root: Path, where: Path, error: OSError) -> WorkError:
+    """Return the refusal for ``where``, a folder or file there but unreadable.
+
+    ``where`` is named relative to ``copy_root`` when it lies below it, else in full.
+    """
+    if where == copy_root or not where.is_relative_to(copy_root):
+        return WorkError(f"cannot read {where}: {error.strerror or error}")
+    relative = where.relative_to(copy_root).as_posix()
+    return WorkError(f"cannot read {relative} in {copy_root}: {error.strerror or error}")
+
+
+def _mode(copy_root: Path, path: Path, *, follow: bool = False) -> int | None:
+    """Return ``path``'s mode (``lstat``, links followed when ``follow``), ``None`` when absent.
+
+    Only ``FileNotFoundError`` / ``NotADirectoryError`` is absent. ``Path.exists()``,
+    ``is_file()``, ``is_dir()`` and ``is_symlink()`` cannot serve: before Python 3.14 they
+    raise ``PermissionError`` for a path in a folder that cannot be entered, and from 3.14
+    they answer ``False``, which reads a present path as gone.
+
+    Raises:
+        WorkError: ``path``'s folder cannot be looked into (named relative to ``copy_root``).
+
+    """
+    try:
+        return (path.stat() if follow else path.lstat()).st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as error:
+        raise _unreadable(copy_root, path.parent, error) from error
+
+
+def _present(copy_root: Path, path: Path) -> bool:
+    """Return whether ``path`` is there (a dangling symlink is); see :func:`_mode`.
+
+    Raises:
+        WorkError: ``path``'s folder cannot be looked into.
+
+    """
+    return _mode(copy_root, path) is not None
+
+
+def _is_kind(copy_root: Path, path: Path, kind: Callable[[int], bool]) -> bool:
+    """Return whether ``path`` (``lstat``) is there and of ``kind``; see :func:`_mode`.
+
+    Raises:
+        WorkError: ``path``'s folder cannot be looked into.
+
+    """
+    mode = _mode(copy_root, path)
+    return mode is not None and kind(mode)
+
+
+def _misspelled(copy_root: Path, paths: Sequence[str]) -> list[str]:
+    """Return the tracked ``paths`` the folder does not hold under exactly that spelling.
+
+    Only a folder or file that is not there (``FileNotFoundError``,
+    ``NotADirectoryError``) reads as absent; one that is there but cannot be read would
+    record its tracked files as deleted, so it refuses.
+
+    Raises:
+        WorkError: a folder on a tracked path cannot be listed, or a tracked path in it
+            cannot be looked up.
+
+    """
+    listings: dict[Path, set[str]] = {}
+
+    def holds(folder: Path, name: str) -> bool:
+        if folder not in listings:
+            try:
+                listings[folder] = {entry.name for entry in folder.iterdir()}
+            except (FileNotFoundError, NotADirectoryError):
+                listings[folder] = set()
+            except OSError as error:
+                raise _unreadable(copy_root, folder, error) from error
+        return name in listings[folder]
+
+    missing: list[str] = []
+    for path in paths:
+        here = copy_root
+        for part in PurePosixPath(path).parts:
+            if not holds(here, part):
+                missing.append(path)
+                break
+            here = here / part
+        else:
+            if not _present(copy_root, here):
+                missing.append(path)
+    return missing
+
+
+def _refuse_unreadable(copy_root: Path, env: Mapping[str, str]) -> None:
+    """Refuse a folder git would scan for untracked files but cannot list.
+
+    ``git add -A`` only warns on such a folder and stages nothing from it, so new work
+    there would silently miss the tree. Ignored folders git never opens are skipped.
+
+    Raises:
+        WorkError: a folder git would scan cannot be listed.
+
+    """
+    listing = _git(
+        copy_root,
+        *UNTRUSTED_CACHES,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "-z",
+        env=env,
+    )
+    ignored = {entry.rstrip("/") for entry in listing.split("\0") if entry.endswith("/")}
+
+    pending = [copy_root]
+    while pending:
+        folder = pending.pop()
+        try:
+            with os.scandir(folder) as entries:
+                children = [
+                    Path(entry.path)
+                    for entry in entries
+                    if entry.is_dir(follow_symlinks=False) and entry.name != ".git"
+                ]
+        except OSError as error:
+            raise _unreadable(copy_root, folder, error) from error
+        pending.extend(
+            child for child in children if child.relative_to(copy_root).as_posix() not in ignored
+        )
+
+
+def _refuse_nested(copy_root: Path) -> None:
+    """Refuse an untracked folder that is a repository of its own (git would stage it as a gitlink).
+
+    Raises:
+        WorkError: the copy holds one, or a folder git lists cannot be looked into.
+
+    """
+    listing = _git(copy_root, "ls-files", "--others", "--exclude-standard", "--directory", "-z")
+    nested = [
+        entry
+        for entry in listing.split("\0")
+        if entry.endswith("/") and _present(copy_root, copy_root / entry / ".git")
+    ]
+    if nested:
+        msg = (
+            f"{copy_root} holds a nested repository or submodule at {', '.join(nested)}; "
+            "its uncommitted work cannot be saved or landed"
+        )
+        raise WorkError(msg)
+
+
+def content_tree(copy_root: Path) -> str:
+    """Return the tree of the copy's working content, read into a fresh private index.
+
+    The index starts from ``HEAD`` with no stat data or trust bits, so every tracked
+    file is hashed from its bytes (``assume-unchanged``, the stat cache and
+    ``core.fsmonitor`` never hide an edit); a tracked path the folder holds under no
+    exact spelling is dropped first, so a case-only rename reads as that rename on a
+    case-insensitive filesystem; untracked files git does not ignore are added and
+    deletions honoured. The copy's own index is never read or written.
+
+    Raises:
+        WorkError: the copy is sparse (:func:`_refuse_sparse`), holds a gitlink or a nested
+            repository (whose uncommitted work no tree can carry), holds a folder or
+            tracked path that exists but cannot be read (:func:`_misspelled`,
+            :func:`_refuse_unreadable`), or git fails.
+
+    """
+    _refuse_sparse(copy_root)
+    private = _git_path(copy_root, f"dsf-work-index-{_token()}")
+    env = {"GIT_INDEX_FILE": str(private)}
+    try:
+        _ = _git(copy_root, "read-tree", "HEAD", env=env)
+        tracked = [path for path in _git(copy_root, "ls-files", "-z", env=env).split("\0") if path]
+        misspelled = _misspelled(copy_root, tracked)
+        if misspelled:
+            _ = _git_bytes(
+                copy_root,
+                "update-index",
+                "--force-remove",
+                "-z",
+                "--stdin",
+                env=env,
+                stdin="".join(f"{path}\0" for path in misspelled).encode(
+                    "utf-8",
+                    "surrogateescape",
+                ),
+            )
+        _refuse_nested(copy_root)
+        _refuse_unreadable(copy_root, env)
+        _ = _git(copy_root, *UNTRUSTED_CACHES, "add", "-A", env=env)
+        staged = _git(copy_root, "ls-files", "-s", "-z", env=env)
+        nested = [
+            record.partition("\t")[2]
+            for record in staged.split("\0")
+            if record.startswith("160000 ")
+        ]
+        if nested:
+            msg = (
+                f"{copy_root} holds a nested repository or submodule at {', '.join(nested)}; "
+                "its uncommitted work cannot be saved or landed"
+            )
+            raise WorkError(msg)
+        return _git(copy_root, "write-tree", env=env).strip()
+    finally:
+        private.unlink(missing_ok=True)
+
+
+def _head(copy_root: Path) -> str:
+    """Return the copy's ``HEAD`` commit."""
+    return _resolve_commit(copy_root, "HEAD")
+
+
+def _tree_of(root: Path, rev: str) -> str:
+    """Return the tree id of ``rev``."""
+    return _git(root, "rev-parse", f"{rev}^{{tree}}").strip()
+
+
+def _snapshot(
+    copy_root: Path,
+    tree: str,
+    parent: str,
+    message: str,
+) -> str:
+    """Return a commit of ``tree`` on ``parent`` made in the copy (no ref, no index)."""
+    return _git(
+        copy_root,
+        "commit-tree",
+        tree,
+        "-p",
+        parent,
+        "-m",
+        message,
+        env=SAVE_IDENTITY,
+    ).strip()
+
+
+def _scope(form: str) -> str:
+    return "--local" if form == "clone" else "--worktree"
+
+
+def write_note(copy_root: Path, form: str, values: Mapping[str, str]) -> None:
+    """Write ``values`` into the copy's note (``--local`` for a clone, ``--worktree`` else)."""
+    for key, value in values.items():
+        _ = _git(copy_root, "config", _scope(form), f"{NOTE_SECTION}.{key}", value)
+
+
+def recorded_pins(note: Mapping[str, str]) -> dict[str, str]:
+    """Return the ``{leaf: commit}`` pins the note records the copy publishing (:data:`PINS_NOTE`)."""
+    recorded: dict[str, str] = {}
+    for entry in note.get(PINS_NOTE, "").split(","):
+        leaf, _, commit = entry.partition("=")
+        if leaf and commit:
+            recorded[leaf] = commit
+    return recorded
+
+
+def record_pin(
+    repo: Path,
+    copy_root: Path,
+    form: str,
+    leaf: str,
+    commit: str,
+) -> None:
+    """Record in the copy's note that it published the pin ``leaf`` at ``commit``.
+
+    Read from the config at the write (not a note read earlier), so two pins one command
+    publishes both stay recorded; a later pin under the leaf (``landed``) replaces it. A note
+    older than :data:`PINS_NOTE` first records the pins :func:`legacy_pins` attributes to
+    it, so its earlier saves stay its own once the key exists.
+    """
+    recorded = recorded_pins(attributed_note(repo, _config_values(copy_root, _scope(form))))
+    recorded[leaf] = commit
+    listed = ",".join(f"{key}={value}" for key, value in sorted(recorded.items()))
+    write_note(copy_root, form, {PINS_NOTE: listed})
+
+
+def pin_belongs(note: Mapping[str, str], leaf: str, commit: str) -> bool:
+    """Return whether the note attributes the pin ``leaf`` at ``commit`` to its copy.
+
+    Its ``start`` pin at the note's ``start``, or a pin it recorded publishing
+    (:func:`recorded_pins`); anything else under the name is another copy's or cannot be
+    told apart from one, and is never the copy's to drop.
+    """
+    if recorded_pins(note).get(leaf) == commit:
+        return True
+    return leaf == START_PIN and bool(commit) and commit == note.get("start", "")
+
+
+def foreign_pins(note: Mapping[str, str], held: Mapping[str, str]) -> dict[str, str]:
+    """Return the pins of ``held`` (``{leaf: commit}``) the note does not attribute to its copy."""
+    return {leaf: commit for leaf, commit in held.items() if not pin_belongs(note, leaf, commit)}
+
+
+def legacy_pins(repo: Path, note: Mapping[str, str]) -> dict[str, str]:
+    """Return the pins a note older than :data:`PINS_NOTE` attributes to its copy (``{}`` else).
+
+    Such a copy never recorded what it published. Its ``save-N``, ``landed`` and
+    ``landed-copy`` pins under the name are taken as its own when their commit strictly
+    descends from the note's ``start`` (every save and landing is built on the copy's
+    ``HEAD``) and was committed no earlier than the note's ``created``: an earlier copy's
+    pins under the name predate this copy, so they stay another's.
+    """
+    name, start, created = (note.get(key, "") for key in ("name", "start", "created"))
+    if PINS_NOTE in note or not name or not start or not created.isdigit():
+        return {}
+    store = pin_store(repo)
+    if store is None:
+        return {}
+    listing = _git(
+        store,
+        "for-each-ref",
+        "--format=%(objectname) %(committerdate:unix) %(refname)",
+        f"{PIN_PREFIX}{name}/",
+    )
+    found: dict[str, str] = {}
+    for line in listing.splitlines():
+        commit, stamp, ref = line.split(" ", 2)
+        leaf = ref.removeprefix(f"{PIN_PREFIX}{name}/")
+        if (
+            (SAVE_PIN.fullmatch(leaf) or leaf in {LANDED_PIN, LANDED_COPY_PIN})
+            and commit != start
+            and stamp.isdigit()
+            and int(stamp) >= int(created)
+            and _is_ancestor(store, start, commit)
+        ):
+            found[leaf] = commit
+    return found
+
+
+def attributed_note(repo: Path, note: Mapping[str, str]) -> dict[str, str]:
+    """Return ``note`` holding :data:`PINS_NOTE`: a note older than the key gets :func:`legacy_pins`."""
+    attributed = dict(note)
+    if PINS_NOTE not in attributed and attributed.get("name"):
+        legacy = legacy_pins(repo, note)
+        attributed[PINS_NOTE] = ",".join(f"{leaf}={sha}" for leaf, sha in sorted(legacy.items()))
+    return attributed
+
+
+def _apply_copy_config(copy_root: Path, form: str) -> None:
+    """Set :data:`COPY_CONFIG` in the copy's own config."""
+    for key, value in COPY_CONFIG:
+        _ = _git(copy_root, "config", _scope(form), key, value)
+
+
+def _ensure_worktree_config(repo: Path) -> None:
+    """Turn ``extensions.worktreeConfig`` on in the shared checkout when it is off.
+
+    Git's documented procedure first: a repository-level ``core.worktree`` (and a
+    ``core.bare = true``) moves into the main worktree's ``config.worktree``, or every
+    linked worktree would read them and resolve to the main tree.
+    """
+    completed = _git_runner.run_git(repo, "config", "--bool", "extensions.worktreeConfig")
+    if completed.stdout.strip() == "true":
+        return
+    worktree = _git_runner.run_git(repo, "config", "--local", "core.worktree").stdout.strip()
+    bare = _git_runner.run_git(repo, "config", "--local", "--bool", "core.bare").stdout.strip()
+    _ = _git(repo, "config", "extensions.worktreeConfig", "true")
+    if worktree:
+        _ = _git(repo, "config", "--worktree", "core.worktree", worktree)
+        _ = _git(repo, "config", "--local", "--unset", "core.worktree")
+    if bare == "true":
+        _ = _git(repo, "config", "--worktree", "core.bare", "true")
+        _ = _git(repo, "config", "--local", "--unset", "core.bare")
+
+
+# --------------------------------------------------------------------------------------------
+# Environment
+# --------------------------------------------------------------------------------------------
+
+
+def _bin_dir(venv: Path) -> Path:
+    return venv / ("Scripts" if os.name == "nt" else "bin")
+
+
+def copy_database_name(name: str) -> str:
+    """Return the Postgres database name a copy's ``run`` uses: ``dsfw_<name>``."""
+    return "dsfw_" + name.replace("-", "_")
+
+
+def clean_env(copy_root: Path, name: str, base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return the environment ``run`` gives a command in the copy at ``copy_root``.
+
+    The caller's repository-locating, direnv, Django, pytest and coverage variables,
+    ``PYTHONPATH`` and uv's project redirects are dropped, every other virtualenv's
+    ``bin`` leaves ``PATH``, the copy's ``.venv`` leads it, and ``FAKESHOP_PG_DSN`` (when
+    set) names the copy's own database.
+    """
+    source = os.environ if base is None else base
+    env = {
+        key: value
+        for key, value in source.items()
+        if key not in SCRUBBED_NAMES and not key.startswith(SCRUBBED_PREFIXES)
+    }
+    foreign = {
+        str(_bin_dir(Path(source["VIRTUAL_ENV"]))) if "VIRTUAL_ENV" in source else "",
+        str(_bin_dir(REPO_ROOT / ".venv")),
+    }
+    venv = copy_root / ".venv"
+    entries = [
+        entry
+        for entry in source.get("PATH", os.defpath).split(os.pathsep)
+        if entry and entry not in foreign
+    ]
+    env["PATH"] = os.pathsep.join([str(_bin_dir(venv)), *entries])
+    env["VIRTUAL_ENV"] = str(venv)
+    env["PROJECT_ROOT"] = str(copy_root)
+    dsn = source.get(PG_DSN_ENV)
+    if dsn:
+        parts = urlsplit(dsn)
+        env[PG_DSN_ENV] = urlunsplit(parts._replace(path=f"/{copy_database_name(name)}"))
+    return env
+
+
+def _setup_env() -> dict[str, str]:
+    """Return the environment ``uv sync`` and ``pre-commit install`` run in for a new copy."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in SCRUBBED_NAMES and not key.startswith(SCRUBBED_PREFIXES)
+    }
+
+
+def package_location(copy_root: Path, env: Mapping[str, str]) -> Path:
+    """Return where the copy's interpreter imports the package from, in ``env`` and the copy.
+
+    Raises:
+        WorkError: the copy has no interpreter, or the import fails.
+
+    """
+    python = _bin_dir(copy_root / ".venv") / ("python.exe" if os.name == "nt" else "python")
+    if not python.exists():
+        msg = (
+            f"{copy_root} has no .venv; run `uv sync --frozen` in it (or `new` without --no-setup)"
+        )
+        raise WorkError(msg)
+    completed = subprocess.run(
+        [str(python), "-c", f"import {PACKAGE}; print({PACKAGE}.__file__)"],
+        cwd=copy_root,
+        env=dict(env),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        msg = f"the copy's interpreter cannot import {PACKAGE}: {completed.stderr.strip()}"
+        raise WorkError(msg)
+    return Path(completed.stdout.strip()).resolve()
+
+
+# --------------------------------------------------------------------------------------------
+# Safety checks
+# --------------------------------------------------------------------------------------------
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        _ = path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _proc_users(proc: Path, target: Path, *, others_shut_out: bool) -> list[str] | None:
+    """Census ``/proc``: the pids whose cwd lies in ``target``; ``None`` when incomplete.
+
+    A process whose cwd cannot be read is unknown. It is skipped only when it belongs to
+    another user and ``others_shut_out`` (``.work`` is ``0700``, so no other non-root user
+    can be inside); one of this user's own, or any while others could enter, is ``None``.
+    """
+    users: list[str] = []
+    seen_self = False
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cwd = (entry / "cwd").readlink()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except PermissionError:
+            try:
+                owner = entry.stat().st_uid
+            except OSError:
+                continue
+            if owner == os.getuid() or not others_shut_out:
+                return None
+            continue
+        if int(entry.name) == os.getpid():
+            seen_self = True
+        elif _is_within(cwd, target):
+            users.append(entry.name)
+    return users if seen_self else None
+
+
+def _lsof_users(lsof: str, target: Path, *, others_shut_out: bool) -> list[str] | None:
+    """Census through ``lsof -d cwd``; ``None`` when it fails, misses this process, or cannot cover.
+
+    ``lsof`` lists only what this user may see, so it vouches for a copy only while no
+    other (non-root) user can enter it (``others_shut_out``).
+    """
+    if not others_shut_out:
+        return None
+    completed = subprocess.run(
+        [
+            lsof,
+            "-n",
+            "-w",
+            "-d",
+            "cwd",
+            "-F",
+            "pn",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    users: list[str] = []
+    seen_self = False
+    pid = ""
+    for line in completed.stdout.splitlines():
+        if line.startswith("p"):
+            pid = line[1:]
+            seen_self = seen_self or pid == str(os.getpid())
+        elif line.startswith("n") and pid != str(os.getpid()):
+            with contextlib.suppress(OSError, ValueError):
+                if _is_within(Path(line[1:]).resolve(), target):
+                    users.append(pid)
+    return users if seen_self else None
+
+
+def others_shut_out(path: Path) -> bool:
+    """Return whether a folder at or above ``path`` is this user's and closed to everyone else."""
+    for folder in (path, *path.parents):
+        with contextlib.suppress(OSError):
+            info = folder.stat()
+            if info.st_uid == os.getuid() and not info.st_mode & 0o077:
+                return True
+    return False
+
+
+def cwd_users(path: Path) -> list[str] | None:
+    """Return the processes whose current directory lies in ``path``; ``None`` = cannot tell.
+
+    Linux reads ``/proc/<pid>/cwd``; elsewhere ``lsof -d cwd`` is asked. A census that
+    fails, cannot read a process it has to vouch for, or does not list the process asking
+    (a census that ran at all sees its own caller) is incomplete: ``None``. Root's
+    processes stay invisible to both.
+    """
+    target = path.resolve()
+    shut = others_shut_out(target)
+    proc = Path("/proc")
+    if proc.is_dir() and (proc / "self" / "cwd").exists():
+        return _proc_users(proc, target, others_shut_out=shut)
+    lsof = shutil.which("lsof")
+    if lsof is None:
+        return None
+    return _lsof_users(lsof, target, others_shut_out=shut)
+
+
+def newest_mtime(path: Path) -> float:
+    """Return the newest modification time of any file or folder in ``path``.
+
+    ``.git``, ``.venv`` and tool caches are skipped: a sync or a git read moves them
+    without anyone editing the copy.
+    """
+    newest = path.stat().st_mtime
+    for directory, dirnames, filenames in os.walk(path):
+        dirnames[:] = [name for name in dirnames if name not in UNWATCHED_DIRS]
+        for name in (*dirnames, *filenames):
+            with contextlib.suppress(OSError):
+                newest = max(newest, (Path(directory) / name).lstat().st_mtime)
+    return newest
+
+
+def _workspace_state(copy_root: Path) -> list[Path]:
+    """Return the ``workspace.py`` pool and state folders that exist for ``copy_root``."""
+    try:
+        import workspace  # noqa: PLC0415 - read only for a copy's state paths
+    except ModuleNotFoundError:
+        from scripts import workspace  # noqa: PLC0415 - imported as ``scripts.work``
+    resolved = copy_root.resolve()
+    try:
+        base = workspace.workspace_base(resolved)
+    except workspace.WorkspaceError as error:
+        msg = f"cannot tell whether workspace.py holds state for {copy_root}: {error}"
+        raise WorkError(msg) from None
+    return [path for path in (base, workspace.state_root(base)) if _present(path.parent, path)]
+
+
+def _prove_state(copy_root: Path) -> Path | None:
+    """Return the ``prove_failability.py`` state folder of ``copy_root`` when it exists."""
+    try:
+        import prove_failability  # noqa: PLC0415 - read only for a copy's state path
+    except ModuleNotFoundError:
+        from scripts import prove_failability  # noqa: PLC0415 - imported as ``scripts.work``
+    directory = prove_failability.tree_state_directory(copy_root.resolve())
+    return directory if _present(directory.parent, directory) else None
+
+
+def _settled_at(note: Mapping[str, str]) -> float:
+    """Return when the copy's content was last pinned, landed or synced (epoch seconds), else 0."""
+    stamps = [note.get("savedat", ""), note.get("landedat", ""), note.get("syncedat", "")]
+    return max((float(stamp) for stamp in stamps if stamp), default=0.0)
+
+
+def _untouched(copy: Copy) -> bool:
+    """Return whether the copy's content is still the tree it started at (no edit yet).
+
+    A fresh copy's own checkout and setup move its mtimes without anyone editing it, so
+    only content that differs from the ``start`` the note records counts as a recent edit.
+    An unreadable copy is never untouched.
+    """
+    start = copy.note.get("start", "")
+    if not start or copy.path is None or not copy.healthy:
+        return False
+    try:
+        return content_tree(copy.path) == _tree_of(copy.path, start)
+    except WorkError:
+        return False
+
+
+def _complete(store: Path, commit: str) -> bool:
+    """Return whether ``pins.git`` holds every object ``commit`` reaches (its whole content)."""
+    listing = _git_runner.run_git(store, "rev-list", "--objects", "--missing=error", commit)
+    if listing.returncode != 0:
+        return False
+    ids = "".join(f"{line.split(' ', 1)[0]}\n" for line in listing.stdout.splitlines() if line)
+    checked = _git_runner.run_git(
+        store,
+        "cat-file",
+        "--batch-check=%(objectname) %(objecttype)",
+        stdin=ids,
+    )
+    return checked.returncode == 0 and not any(
+        line.endswith(" missing") for line in checked.stdout.splitlines()
+    )
+
+
+def _keeping_leaf(leaf: str) -> bool:
+    """Return whether a pin leaf outlives ``rm`` (a save or landing pin, never ``start``)."""
+    return leaf in {LANDED_PIN, LANDED_COPY_PIN} or bool(SAVE_PIN.fullmatch(leaf))
+
+
+def _pinned_trees(repo: Path, name: str) -> set[str]:
+    """Return the trees of every save and landing pin of ``name`` whose content ``pins.git`` holds whole."""
+    store = pin_store(repo)
+    if store is None:
+        return set()
+    return {
+        _tree_of(store, sha)
+        for leaf, sha in pins(repo).get(name, {}).items()
+        if _keeping_leaf(leaf) and _complete(store, sha)
+    }
+
+
+def _shared_ref_reaches(repo: Path, commit: str) -> bool:
+    """Return whether a branch, tag or remote-tracking ref of the shared repository reaches ``commit``.
+
+    The ``refs/work/`` pins live in ``pins.git``, never here, so none of them counts; a
+    commit the shared repository does not hold (one made in a clone) is reached by none.
+    """
+    listing = _git_runner.run_git(
+        repo,
+        "for-each-ref",
+        f"--contains={commit}",
+        "--count=1",
+        "--format=%(refname)",
+        *SHARED_REFS,
+    )
+    return listing.returncode == 0 and bool(listing.stdout.strip())
+
+
+def _at_durable_start(repo: Path, copy: Copy, head: str) -> bool:
+    """Return whether ``head`` is the copy's start commit and that start is shared work.
+
+    A start is shared when ``new`` found a shared ref reaching it (the note's
+    ``startshared = true``), or when one reaches it now. The first keeps a pristine copy
+    removable after main is amended or rebased past its start: the commit was the shared
+    repository's, and its owner dropped it there. A start is not durable by being one:
+    ``adopt`` pins whatever ``HEAD`` the copy holds (a commit made in it included), and
+    ``new --from`` can start at a commit only another copy or a pin ``gc`` later drops
+    reaches; both record ``startshared = false``, and such a start is work, kept only as
+    :func:`_head_kept` keeps any other commit. A note older than the flag has only the
+    current check.
+    """
+    start = pins(repo).get(copy.name, {}).get(START_PIN) or copy.note.get("start", "")
+    if not head or head != start:
+        return False
+    recorded = copy.note.get("startshared") == "true" and head == copy.note.get("start")
+    return recorded or _shared_ref_reaches(repo, start)
+
+
+def _commit_kept(repo: Path, commit: str) -> bool:
+    """Return whether ``commit`` outlives every copy.
+
+    It does when a branch, tag or remote-tracking ref of the shared repository reaches it
+    (:func:`_shared_ref_reaches`), or when a save or landing pin of any copy reaches it and
+    ``pins.git`` holds that pin whole. No ``start`` pin counts, another copy's included:
+    ``rm`` drops a removed copy's ``start`` pin, so a commit only a ``start`` pin reaches
+    dies with that copy (:func:`_keeping_leaf`).
+    """
+    if _shared_ref_reaches(repo, commit):
+        return True
+    store = pin_store(repo)
+    if store is None:
+        return False
+    listing = _git_runner.run_git(
+        store,
+        "for-each-ref",
+        f"--contains={commit}",
+        "--format=%(objectname) %(refname)",
+        PIN_PREFIX,
+    )
+    if listing.returncode != 0:
+        return False
+    for line in listing.stdout.splitlines():
+        sha, _, ref = line.partition(" ")
+        if _keeping_leaf(ref.rpartition("/")[2]) and _complete(store, sha):
+            return True
+    return False
+
+
+def _head_kept(repo: Path, copy: Copy, head: str) -> bool:
+    """Return whether the copy's ``HEAD`` commit outlives the copy.
+
+    It does when it is the commit the copy started from and a shared ref reaches that
+    start (:func:`_at_durable_start`, as ``save`` agrees), or when :func:`_commit_kept`
+    keeps it (a shared branch or tag, ``main`` among them, or a whole save or landing pin).
+    """
+    return _at_durable_start(repo, copy, head) or _commit_kept(repo, head)
+
+
+def _shared_holds(repo: Path, commit: str) -> bool:
+    """Return whether the shared repository's object store holds ``commit``."""
+    found = _git_runner.run_git(repo, "cat-file", "-e", f"{commit}^{{commit}}")
+    return found.returncode == 0
+
+
+def _lost_ref_refusal(
+    repo: Path,
+    copy: Copy,
+    root: Path,
+    listing_args: Sequence[str],
+    patterns: Sequence[str],
+    hint: str,
+) -> str | None:
+    """Return why a ref that dies with ``copy`` holds commits nothing durable keeps, else ``None``.
+
+    ``git -C root <listing_args> for-each-ref <patterns>`` lists exactly the refs that die
+    with the copy; each must point at a commit :func:`_commit_kept` keeps, or at the
+    copy's start while :func:`_at_durable_start` keeps it (the branch ``git clone`` leaves
+    at it, a pristine copy's own ref). An annotated tag is read through to the commit it
+    names. A ``refs/remotes/parent/`` ref mirrors the shared repository it was fetched
+    from, so one whose commit that repository still holds loses nothing the shared
+    repository's owner has not already dropped there (main amended or rebased past it, a
+    branch deleted); one on a commit made in the clone, or any other remote's ref, is
+    judged like every other ref. ``hint`` says how to keep it.
+    """
+    listing = _git_runner.run_git(
+        root,
+        *listing_args,
+        "for-each-ref",
+        "--format=%(refname) %(objectname) %(*objectname)",
+        *patterns,
+    )
+    if listing.returncode != 0:
+        return f"its refs cannot be listed ({listing.stderr.strip()}); pass --discard"
+    start = copy.note.get("start", "")
+    verdicts: dict[str, bool] = {}
+    for line in listing.stdout.splitlines():
+        ref, _, ids = line.partition(" ")
+        if not ref:
+            continue
+        target, _, peeled = ids.partition(" ")
+        commit = peeled.strip() or target
+        if commit not in verdicts:
+            verdicts[commit] = (commit == start and _at_durable_start(repo, copy, commit)) or (
+                _commit_kept(repo, commit)
+            )
+        if not verdicts[commit] and not (
+            ref.startswith(PARENT_REFS) and _shared_holds(repo, commit)
+        ):
+            return (
+                f"its ref {ref} {commit[:12]} holds commits neither main nor a pin reaches: "
+                f"{hint}, or pass --discard"
+            )
+    return None
+
+
+def _clone_ref_refusal(repo: Path, copy: Copy, copy_root: Path) -> str | None:
+    """Return why a ref of the clone ``copy`` at ``copy_root`` holds unkept commits, else ``None``.
+
+    Every ref of a clone (branches, tags, ``refs/stash``, its remote-tracking refs, any
+    other) lives in its folder and dies with it (:func:`_lost_ref_refusal`). ``save``
+    pins only ``HEAD`` and the content, so a side ref is kept by checking it out and
+    saving it, or by deleting it.
+    """
+    return _lost_ref_refusal(
+        repo,
+        copy,
+        copy_root,
+        (),
+        (),
+        "check it out and `save` it, delete the ref",
+    )
+
+
+def _worktree_ref_refusal(repo: Path, copy: Copy) -> str | None:
+    """Return why a per-worktree ref of the worktree ``copy`` holds unkept commits, else ``None``.
+
+    A worktree's branches and tags are the shared repository's and outlive it, but its
+    per-worktree refs (``refs/bisect/``, ``refs/worktree/``, ``refs/rewritten/``) live in
+    its metadata and die with it (:func:`_lost_ref_refusal`). They are read through the
+    metadata (``--git-dir``), which holds them whether the folder is present or gone; a
+    worktree whose metadata git does not list is read from its folder.
+    """
+    if copy.admin is not None and _is_kind(copy.admin.parent, copy.admin, stat.S_ISDIR):
+        root, listing_args = repo, (f"--git-dir={copy.admin}",)
+    elif copy.path is not None and copy.present:
+        root, listing_args = copy.path, ()
+    else:
+        return None
+    return _lost_ref_refusal(
+        repo,
+        copy,
+        root,
+        listing_args,
+        PER_WORKTREE_REFS,
+        "check it out in a copy and `save` it, delete the ref",
+    )
+
+
+def _content_refusal(repo: Path, copy: Copy) -> str | None:
+    """Return why the copy's content is not known safe to delete, else ``None``.
+
+    Safe means the content is a tree something keeps (``HEAD``'s, or a whole save or
+    landing pin's) and the ``HEAD`` commit itself outlives the copy (:func:`_head_kept`):
+    a commit made in the copy that nothing kept reaches is work, and ``save`` pins it. A
+    clone's refs die with its folder, so each must reach only kept commits
+    (:func:`_clone_ref_refusal`); a worktree's branches and tags live in the shared
+    repository, which removing the worktree leaves as they are, but its per-worktree refs
+    die with it (:func:`_worktree_ref_refusal`). A commit only a reflog reaches (one a
+    ``git reset --hard`` moved past) counts as discarded by its owner: no reflog is read.
+    """
+    if not copy.healthy or copy.path is None:
+        return (
+            "its content cannot be read (missing or broken .git): `repair` it, or pass --discard"
+        )
+    try:
+        tree = content_tree(copy.path)
+    except WorkError as error:
+        return f"its content cannot be read ({error}); pass --discard"
+    if tree != _tree_of(copy.path, "HEAD") and tree not in _pinned_trees(repo, copy.name):
+        return (
+            "its content is neither HEAD, a save nor the landed pin: `save` or `land` it, "
+            "or pass --discard"
+        )
+    head = _head(copy.path)
+    if not _head_kept(repo, copy, head):
+        return (
+            f"its HEAD {head[:12]} is a commit made in the copy that neither main nor a pin "
+            "reaches: `save` it, or pass --discard"
+        )
+    if copy.form == "clone":
+        return _clone_ref_refusal(repo, copy, copy.path)
+    return _worktree_ref_refusal(repo, copy)
+
+
+def _admin_head(repo: Path, admin: Path) -> str:
+    """Return the commit a worktree's metadata records as its ``HEAD``, ``""`` when it names none.
+
+    A symbolic ``HEAD`` (``ref: refs/heads/<branch>``) is resolved in the shared repository.
+    """
+    try:
+        recorded = (admin / "HEAD").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    if recorded.startswith("ref:"):
+        recorded = recorded.removeprefix("ref:").strip()
+    return _resolve_commit(repo, recorded) if recorded else ""
+
+
+def _gone_folder_refusal(repo: Path, copy: Copy) -> str | None:
+    """Return why a copy whose folder is gone must not be forgotten, else ``None``.
+
+    A worktree keeps its objects in the shared repository and its ``HEAD`` in its
+    metadata, so a commit made in it survives its folder until that metadata goes: it is
+    refused unless :func:`_head_kept` keeps that ``HEAD`` and every per-worktree ref the
+    metadata holds reaches only kept commits (:func:`_worktree_ref_refusal`). A clone held
+    its objects in its own folder, so a clone whose folder is gone left nothing to keep and
+    is never refused.
+    """
+    if (
+        copy.form != "worktree"
+        or copy.admin is None
+        or not _is_kind(copy.admin.parent, copy.admin, stat.S_ISDIR)
+    ):
+        return None
+    head = _admin_head(repo, copy.admin)
+    if not head:
+        return "its folder is gone and its metadata names no readable HEAD; pass --discard"
+    if not _head_kept(repo, copy, head):
+        return (
+            f"its folder is gone but its HEAD {head[:12]} is a commit made in the copy that "
+            f"neither main nor a pin reaches: `new <name> --from {head}` and `save` it, or "
+            "pass --discard"
+        )
+    return _worktree_ref_refusal(repo, copy)
+
+
+def removal_refusals(repo: Path, copy: Copy, *, discard: bool) -> list[str]:
+    """Return every reason ``rm`` must not remove ``copy`` (empty = removable)."""
+    if copy.hazard is not None:
+        return [f"unsafe, never touched: {copy.hazard}"]
+    if not _valid(copy.name):
+        return [f"{copy.name!r} is not a valid copy name; remove it by hand"]
+    if copy.path is None:
+        return []
+    allowed = (work_dir(repo) / (CLONES if copy.form == "clone" else WORKTREES)).resolve()
+    if (
+        _is_kind(copy.path.parent, copy.path, stat.S_ISLNK)
+        or copy.path.resolve().parent != allowed
+    ):
+        return [f"{copy.path} is not a folder directly under {allowed}"]
+    reasons: list[str] = []
+    if copy.locked is not None and not copy.locked.startswith(LOCK_REASON_PREFIX):
+        reasons.append(f"its worktree is locked by someone else: {copy.locked or '(no reason)'}")
+    if not copy.present:
+        refusal = None if discard else _gone_folder_refusal(repo, copy)
+        return reasons if refusal is None else [*reasons, refusal]
+    users = cwd_users(copy.path)
+    if users is None and os.name != "nt":
+        reasons.append(
+            "the process census is incomplete, so it cannot tell whether a process works in it",
+        )
+    elif users:
+        reasons.append(f"process {', '.join(users)} has its current directory inside it")
+    modified = newest_mtime(copy.path)
+    if (
+        modified > _settled_at(copy.note)
+        and time.time() - modified < RECENT_SECONDS
+        and not _untouched(copy)
+    ):
+        reasons.append(
+            f"modified {int(time.time() - modified)}s ago, after its last save or landing "
+            f"(wait {RECENT_SECONDS // 60} minutes, or `save` it)",
+        )
+    reasons.extend(
+        f"scripts/workspace.py holds {path} for it; run `workspace.py gc <flow>` in the copy"
+        for path in _workspace_state(copy.path)
+    )
+    proof = _prove_state(copy.path)
+    if proof is not None:
+        reasons.append(
+            f"scripts/prove_failability.py state {proof} exists (a proof may be live or "
+            "unproved); resolve it first",
+        )
+    if not discard:
+        refusal = _content_refusal(repo, copy)
+        if refusal is not None:
+            reasons.append(refusal)
+    return reasons
+
+
+def _grant_owner(path: Path) -> None:
+    """Give the owner what a delete needs where it is missing: ``rwx`` on a folder.
+
+    A folder without ``r``/``x`` cannot be listed or entered and one without ``w`` cannot
+    lose entries. A file's mode is never changed where its folder alone decides its
+    delete, since a hard-linked file shares that mode with every other link to it,
+    outside ``.work`` too; where a read-only file refuses its delete
+    (:data:`READ_ONLY_FILES_BLOCK_DELETE`), only a file with no other link gets the
+    owner's write bit. A symlink is never followed. A refused grant is left for the
+    delete to report.
+    """
+    with contextlib.suppress(OSError):
+        info = path.lstat()
+        mode = info.st_mode
+        if stat.S_ISDIR(mode):
+            wanted = stat.S_IRWXU
+        elif stat.S_ISREG(mode) and READ_ONLY_FILES_BLOCK_DELETE and info.st_nlink == 1:
+            wanted = stat.S_IWRITE
+        else:
+            return
+        if mode & wanted != wanted:
+            path.chmod(stat.S_IMODE(mode) | wanted)
+
+
+def delete_tree(path: Path) -> None:
+    """Delete ``path`` recursively, first granting the owner every bit a delete needs.
+
+    The walk is top-down and never follows a symlink, so each folder is granted before
+    it is listed: a mode-000 folder anywhere in the tree is opened, not skipped. A
+    symlink at ``path`` (read with ``lstat``) is unlinked alone: its target is never
+    walked, granted or deleted.
+    """
+    if stat.S_ISLNK(path.lstat().st_mode):
+        path.unlink()
+        return
+    _grant_owner(path)
+    for directory, dirnames, filenames in os.walk(path):
+        for name in (*dirnames, *filenames):
+            _grant_owner(Path(directory) / name)
+    shutil.rmtree(path)
+
+
+# --------------------------------------------------------------------------------------------
+# new, adopt
+# --------------------------------------------------------------------------------------------
+
+
+def free_bytes(path: Path) -> int:
+    """Return the free bytes on ``path``'s filesystem."""
+    return shutil.disk_usage(path).free
+
+
+def _say(message: str) -> None:
+    print(f"work: {message}", file=sys.stderr)
+
+
+def cmd_check_name(args: _Args) -> int:
+    """Print a valid name's parts, or refuse it."""
+    name = parse_name(args.name)
+    print(
+        f"kind={name.kind} id={name.id or '-'} slug={name.slug} suffix={name.suffix or '-'} "
+        f"stem={name.stem}",
+    )
+    return 0
+
+
+def _run_setup_step(command: Sequence[str], copy_root: Path) -> None:
+    """Run one setup command in the copy; a failure is the ``new``'s failure.
+
+    Raises:
+        WorkError: the command exits non-zero; the message carries its stderr.
+
+    """
+    completed = subprocess.run(
+        list(command),
+        cwd=copy_root,
+        env=_setup_env(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        msg = f"{' '.join(command)} failed in {copy_root} ({completed.returncode}): {detail}"
+        raise WorkError(msg)
+
+
+def _setup(copy_root: Path, form: str) -> None:
+    """Sync the copy's venv and, for a clone, install the pre-commit hook."""
+    if shutil.which("uv") is None:
+        msg = "uv is not on PATH, so the copy's .venv cannot be built"
+        raise WorkError(msg)
+    _run_setup_step(
+        (
+            "uv",
+            "sync",
+            "--frozen",
+            "--quiet",
+        ),
+        copy_root,
+    )
+    if form != "clone":
+        return
+    if shutil.which("pre-commit") is None:
+        _say("pre-commit is not on PATH; the clone has no hook (`pre-commit install` there)")
+        return
+    _run_setup_step(("pre-commit", "install"), copy_root)
+
+
+@dataclasses.dataclass(frozen=True)
+class Start:
+    """Where a new copy starts: its base commit, and pinned content to lay over it."""
+
+    base: str
+    restore: str | None
+
+
+def resolve_start(repo: Path, rev: str) -> Start:
+    """Resolve ``--from``: a shared revision, or a pin (a save or landing restores content).
+
+    Raises:
+        WorkError: ``rev`` names no commit, or a pin's parent cannot be found.
+
+    """
+    if rev.startswith(PIN_PREFIX):
+        store = pin_store(repo)
+        commit = "" if store is None else _resolve_commit(store, rev)
+        if not commit or store is None:
+            msg = f"{rev!r} names no pin"
+            raise WorkError(msg)
+        fetch_pinned(repo, repo, commit)
+        leaf = rev.rsplit("/", 1)[-1]
+        if leaf == LANDED_PIN or SAVE_PIN.fullmatch(leaf):
+            base = _resolve_commit(store, f"{commit}^")
+            if not base:
+                msg = f"{rev!r} has no parent commit to start from"
+                raise WorkError(msg)
+            return Start(base, commit)
+        return Start(commit, None)
+    commit = _resolve_commit(repo, rev)
+    if not commit:
+        msg = f"{rev!r} names no commit in {repo}"
+        raise WorkError(msg)
+    return Start(commit, None)
+
+
+def _make_copy(
+    repo: Path,
+    name: Name,
+    form: str,
+    path: Path,
+    start: Start,
+) -> None:
+    """Fill the claimed, empty ``path`` with a ``form`` copy of ``repo`` at ``start``.
+
+    Raises:
+        WorkError: git fails, or git does not read the new copy as its own checkout.
+
+    """
+    if form == "clone":
+        _ = _git(
+            repo,
+            "clone",
+            "--quiet",
+            "--no-hardlinks",
+            "--no-checkout",
+            "-o",
+            "parent",
+            str(repo),
+            str(path),
+        )
+        if start.restore is not None:
+            fetch_pinned(repo, path, start.restore)
+        _ = _git(path, "checkout", "--quiet", "--detach", start.base)
+        _ = _git(path, "remote", "set-url", "--push", "parent", NO_PUSH)
+    else:
+        _ensure_worktree_config(repo)
+        _ = _git(repo, "worktree", "add", "--quiet", "--detach", str(path), start.base)
+        _ = _git(
+            repo,
+            "worktree",
+            "lock",
+            "--reason",
+            f"{LOCK_REASON_PREFIX}{name.text}",
+            str(path),
+        )
+    if not _is_own_checkout(path):
+        msg = f"git does not read {path} as its own checkout; nothing was made"
+        raise WorkError(msg)
+    _apply_copy_config(path, form)
+    if start.restore is not None:
+        _ = _git(path, "read-tree", "-u", "--reset", start.restore)
+        _ = _git(path, "reset", "--quiet")
+
+
+def _undo_new(
+    repo: Path,
+    form: str,
+    path: Path,
+    name: str,
+) -> None:
+    """Remove what a failed ``new`` made: the folder, its worktree metadata, its pin, its claim."""
+    if form == "worktree":
+        _ = _git_runner.run_git(repo, "worktree", "unlock", str(path))
+        _ = _git_runner.run_git(repo, "worktree", "remove", "--force", "--force", str(path))
+    if path.exists() and not path.is_symlink():
+        delete_tree(path)
+    store = pin_store(repo)
+    if store is not None:
+        _ = _git_runner.run_git(store, "update-ref", "-d", _pin_ref(name, START_PIN))
+    release_name(repo, name)
+
+
+def _refuse_taken(repo: Path, name: str, path: Path | None = None) -> None:
+    """Refuse a ``name`` another copy, folder or pin already holds (``path`` itself excepted).
+
+    Raises:
+        WorkError: the name is taken.
+
+    """
+    existing = discover(repo).get(name)
+    if existing is None or (path is not None and existing.path == path):
+        return
+    if existing.form == "pins":
+        leaves = ", ".join(sorted(pins(repo).get(name, {})))
+        msg = (
+            f"{name!r} already has pins left from an earlier copy ({leaves}): `work.py rm "
+            f"{name} --drop-saves` drops them here and, at the next `fleet_sync.py sync`, on "
+            f"every fleet machine holding no copy under the name; restore a save first with "
+            f"`new <other name> --from refs/work/{name}/save-N`, or take a -verify / -r2 name"
+        )
+        raise WorkError(msg)
+    msg = (
+        f"{name!r} already has a copy; `rm` it (with --drop-saves to free the name) "
+        "or take a -verify / -r2 name"
+    )
+    raise WorkError(msg)
+
+
+def _pin_start(
+    repo: Path,
+    path: Path,
+    commit: str,
+    name: str,
+) -> None:
+    """Pin ``start`` for a new or adopted copy.
+
+    Raises:
+        WorkError: a start pin already exists for the name.
+
+    """
+    if not publish_pin(repo, path, commit, name, START_PIN):
+        msg = f"{_pin_ref(name, START_PIN)} already exists"
+        raise WorkError(msg)
+
+
+def _build_copy(
+    repo: Path,
+    name: Name,
+    form: str,
+    path: Path,
+    args: _Args,
+) -> None:
+    """Make, note, pin and set up the copy at the claimed ``path``."""
+    start = resolve_start(repo, args.from_rev)
+    _make_copy(repo, name, form, path, start)
+    note = {
+        "name": name.text,
+        "form": form,
+        "purpose": args.purpose,
+        "owner": args.owner,
+        "host": load_balancing.this_hostname(),
+        "home": machine_id(),
+        "start": start.base,
+        "startshared": "true" if _shared_ref_reaches(repo, start.base) else "false",
+        "created": str(int(time.time())),
+        "incarnation": secrets.token_hex(8),
+        PINS_NOTE: "",
+    }
+    if start.restore:
+        note["restoredfrom"] = start.restore
+    write_note(path, form, note)
+    _pin_start(repo, path, start.base, name.text)
+    for extra in EXTRA_FILES:
+        if (repo / extra).is_file() and not (path / extra).exists():
+            _ = shutil.copy2(repo / extra, path / extra)
+    if not args.no_setup:
+        _setup(path, form)
+
+
+def cmd_new(args: _Args) -> int:
+    """Claim a name and make its copy."""
+    repo = REPO_ROOT
+    name = parse_name(args.name)
+    form = "worktree" if args.worktree else "clone"
+    if free_bytes(repo) < MIN_FREE_BYTES:
+        msg = f"less than {MIN_FREE_BYTES // 1024**3} GB free; free disk before making a copy"
+        raise WorkError(msg)
+    _ = ensure_sentinel(repo)
+    _ = claim_name(repo, name.text)
+    container = CLONES if form == "clone" else WORKTREES
+    path = work_dir(repo) / container / name.text
+    try:
+        _refuse_taken(repo, name.text)
+        _ = _container(repo, container, create=True)
+        path.mkdir()
+    except BaseException:
+        release_name(repo, name.text)
+        raise
+    try:
+        _build_copy(repo, name, form, path, args)
+    except BaseException:
+        _undo_new(repo, form, path, name.text)
+        raise
+    evidence = _container(repo, EVIDENCE, create=True) / name.stem
+    evidence.mkdir(exist_ok=True)
+    print(path)
+    _say(f"evidence: {evidence}")
+    return 0
+
+
+def _is_object_map(value: object) -> TypeGuard[dict[str, object]]:
+    return isinstance(value, dict)
+
+
+def _is_object_list(value: object) -> TypeGuard[list[object]]:
+    return isinstance(value, list)
+
+
+def fleet_identities(repo: Path) -> list[tuple[str, str, str | None]]:
+    """Return ``(ssh host, checkout path, user)`` for every machine ``docs/fleet/machines.json`` lists."""
+    try:
+        document = _loads((repo / MACHINES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    machines = document.get("machines") if _is_object_map(document) else None
+    found: list[tuple[str, str, str | None]] = []
+    for machine in machines if _is_object_list(machines) else []:
+        if not _is_object_map(machine):
+            continue
+        host, checkout, user = machine.get("ssh"), machine.get("repo"), machine.get("user")
+        if isinstance(host, str) and isinstance(checkout, str):
+            found.append((host, checkout, user if isinstance(user, str) and user else None))
+    return found
+
+
+def _ssh_parts(url: str) -> tuple[str | None, str, int | None, str] | None:
+    """Split ``ssh://[user@]host[:port]/path`` or scp-style ``[user@]host:path``: user, host, port, path."""
+    if url.startswith("ssh://"):
+        parts = urlsplit(url)
+        if not parts.hostname:
+            return None
+        path = parts.path[1:] if parts.path.startswith("/~") else parts.path
+        return parts.username, parts.hostname, parts.port, path
+    if "://" in url or ":" not in url:
+        return None
+    login, _, path = url.partition(":")
+    if "/" in login or not login or not path:
+        return None
+    user, _, host = login.rpartition("@")
+    return user or None, host, None, path
+
+
+def _checkout_matches(path: str, checkout: str, login: str) -> bool:
+    """Return whether the remote ``path`` names the fleet ``checkout`` for the account ``login``.
+
+    The path must be canonical (no ``.`` or ``..`` part, one trailing ``/`` at most); a
+    ``~`` checkout matches ``~/...`` or ``login``'s own home (``/Users/<login>``,
+    ``/home/<login>``), never another account's.
+    """
+    trimmed = path.removesuffix("/")
+    parts = PurePosixPath(trimmed).parts
+    if any(part in {".", ".."} for part in trimmed.split("/")) or "//" in trimmed:
+        return False
+    if trimmed == checkout:
+        return True
+    if not checkout.startswith("~/"):
+        return False
+    rest = PurePosixPath(checkout[2:]).parts
+    return (
+        PurePosixPath(trimmed).is_absolute()
+        and len(parts) == len(rest) + 3
+        and parts[1] in {"Users", "home"}
+        and parts[2] == login
+        and parts[3:] == rest
+    )
+
+
+def is_parent_url(repo: Path, url: str) -> bool:
+    """Return whether a remote ``url`` names this checkout: a local path, or a fleet one over SSH.
+
+    Over SSH the host must be a fleet machine's ``ssh`` name, the account the one that
+    machine lists as ``user`` (none listed: no user part, or this user's own login), the
+    port none or 22, and the path that machine's ``repo`` for that account.
+    """
+    ssh = _ssh_parts(url)
+    if ssh is None:
+        local = url.removeprefix("file://")
+        return Path(local).expanduser().resolve() == repo.resolve()
+    user, host, port, path = ssh
+    if port not in {None, 22}:
+        return False
+    for fleet_host, checkout, fleet_user in fleet_identities(repo):
+        expected = fleet_user or getpass.getuser()
+        allowed_users = {fleet_user} if fleet_user else {None, expected}
+        if (
+            host == fleet_host
+            and user in allowed_users
+            and _checkout_matches(path, checkout, user or expected)
+        ):
+            return True
+    return False
+
+
+def _adoptable(repo: Path, name: Name, path: Path) -> tuple[str, list[str]]:
+    """Return the form of the copy at ``path`` and, for a clone, its remotes naming this checkout.
+
+    Raises:
+        WorkError: ``path`` is no adoptable copy.
+
+    """
+    if not path.is_dir():
+        msg = f"{path} is not a folder"
+        raise WorkError(msg)
+    if path in {_abs(entry.path) for entry in worktree_entries(repo)}:
+        inside = path.parent == _abs(work_dir(repo) / WORKTREES)
+        if inside and (copy_hazard(repo, path, WORKTREES) or path.name != name.text):
+            msg = f"a worktree under .work/worktrees is adopted as a real folder by its name {path.name!r}"
+            raise WorkError(msg)
+        return "worktree", []
+    git = path / ".git"
+    if not (_present(path, git) and git.is_dir()):
+        msg = f"{path} is neither a worktree of {repo} nor a clone"
+        raise WorkError(msg)
+    real = path.parent == (work_dir(repo) / CLONES).resolve() and path.name == name.text
+    if copy_hazard(repo, path, CLONES) or not real:
+        msg = (
+            f"a clone is adopted only as a real folder at .work/clones/{name.text}; "
+            f"make a new copy for {path}"
+        )
+        raise WorkError(msg)
+    parents = [
+        remote
+        for remote in _git(path, "remote").split()
+        if is_parent_url(repo, _git(path, "remote", "get-url", remote).strip())
+    ]
+    if not parents:
+        msg = (
+            f"{path} has no remote pointing at {repo} (a local path, or a fleet checkout over SSH)"
+        )
+        raise WorkError(msg)
+    return "clone", parents
+
+
+def _register(
+    repo: Path,
+    name: Name,
+    path: Path,
+    form: str,
+    parents: Sequence[str],
+    args: _Args,
+) -> None:
+    """Write an adopted copy's note, fence its push, pin its ``HEAD``."""
+    _refuse_taken(repo, name.text, path)
+    if form == "worktree":
+        _ensure_worktree_config(repo)
+    head = _head(path)
+    write_note(
+        path,
+        form,
+        {
+            "name": name.text,
+            "form": form,
+            "purpose": args.purpose,
+            "owner": args.owner,
+            "host": load_balancing.this_hostname(),
+            "home": machine_id(),
+            "start": head,
+            "startshared": "false",
+            "created": str(int(time.time())),
+            "incarnation": secrets.token_hex(8),
+            "adopted": "true",
+            PINS_NOTE: "",
+        },
+    )
+    if form == "clone":
+        for remote in parents:
+            _ = _git(path, "remote", "set-url", "--push", remote, NO_PUSH)
+        _apply_copy_config(path, form)
+    _pin_start(repo, path, head, name.text)
+
+
+def cmd_adopt(args: _Args) -> int:
+    """Register a copy another tool made, in place."""
+    repo = REPO_ROOT
+    name = parse_name(args.name)
+    path = _abs(Path(args.path).expanduser())
+    form, parents = _adoptable(repo, name, path)
+    note = _clone_note(path) if form == "clone" else _worktree_note(path, None)
+    if note.get("name"):
+        msg = f"{path} is already registered"
+        raise WorkError(msg)
+    _ = ensure_sentinel(repo)
+    _ = claim_name(repo, name.text)
+    try:
+        _register(repo, name, path, form, parents, args)
+    except BaseException:
+        release_name(repo, name.text)
+        raise
+    print(path)
+    return 0
+
+
+# --------------------------------------------------------------------------------------------
+# list, save
+# --------------------------------------------------------------------------------------------
+
+
+def _state(copy: Copy) -> str:
+    if copy.hazard is not None:
+        return "unsafe"
+    if copy.form == "pins":
+        return "pins-only"
+    if not copy.present:
+        return "folder-gone"
+    if not copy.healthy:
+        return "broken"
+    return "landed" if copy.note.get("landed") else "live"
+
+
+def cmd_list(args: _Args) -> int:
+    """Print every known copy."""
+    repo = REPO_ROOT
+    all_pins = pins(repo)
+    rows: list[dict[str, str]] = []
+    for name, copy in sorted(discover(repo).items()):
+        head = _head(copy.path) if copy.path is not None and copy.healthy else "-"
+        leaves = all_pins.get(name, {})
+        rows.append(
+            {
+                "name": name,
+                "form": copy.form,
+                "state": _state(copy),
+                "head": head[:12],
+                "pins": ",".join(sorted(leaves)) or "-",
+                "adopted": "yes" if copy.adopted else "no",
+                "home": home_of(copy.note) if copy.note else "",
+                "replica": "yes" if is_replica(copy.note) else "no",
+                "purpose": copy.note.get("purpose", ""),
+                "owner": copy.note.get("owner", ""),
+                "path": str(copy.path) if copy.path is not None else "-",
+            },
+        )
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    for row in rows:
+        print(
+            f"{row['name']:<24} {row['form']:<8} {row['state']:<11} {row['head']:<12} "
+            f"pins={row['pins']} adopted={row['adopted']} "
+            + (f"replica-of={row['home']} " if row["replica"] == "yes" else "")
+            + row["path"]
+            + (f"  # {row['purpose']}" if row["purpose"] else ""),
+        )
+    return 0
+
+
+def save(repo: Path, copy: Copy) -> str | None:
+    """Pin the copy's content as the next ``save-N``; return the ref, or ``None`` if nothing new."""
+    copy_root = _live(copy)
+    head = _head(copy_root)
+    tree = content_tree(copy_root)
+    if tree == _tree_of(copy_root, "HEAD"):
+        if _at_durable_start(repo, copy, head):
+            return None
+        commit = head
+    else:
+        commit = _snapshot(copy_root, tree, head, f"work.py save of {copy.name}")
+    ref = publish_next_save(repo, copy_root, commit, copy.name)
+    record_pin(repo, copy_root, copy.form, ref.rpartition("/")[2], commit)
+    write_note(copy_root, copy.form, {"savedat": str(time.time())})
+    return ref
+
+
+def cmd_save(args: _Args) -> int:
+    """Pin a copy's uncommitted content."""
+    copy = locate(REPO_ROOT, args.name)
+    refuse_replica(copy, "save")
+    ref = save(REPO_ROOT, copy)
+    if ref is None:
+        _say(f"{args.name}: nothing to save (content equals its start commit)")
+        return 0
+    print(ref)
+    return 0
+
+
+# --------------------------------------------------------------------------------------------
+# land
+# --------------------------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class Change:
+    """One path a copy's patch touches: its new mode and blob, or ``None`` for a deletion."""
+
+    path: str
+    mode: str | None
+    blob: str | None
+
+    @property
+    def state(self) -> tuple[str, str] | None:
+        """Return ``(mode, blob)``, or ``None`` for a deletion."""
+        return None if self.mode is None or self.blob is None else (self.mode, self.blob)
+
+
+def copy_changes(copy_root: Path, base: str, tree: str) -> list[Change]:
+    """Return every path that differs between ``base`` and ``tree`` in the copy."""
+    raw = _git(copy_root, "diff-tree", "-r", "-z", "--no-renames", base, tree)
+    fields = [field for field in raw.split("\0") if field]
+    changes: list[Change] = []
+    for header, path in zip(fields[0::2], fields[1::2], strict=True):
+        _old_mode, new_mode, _old, new_blob, status = header.lstrip(":").split(" ")
+        if status == "D":
+            changes.append(Change(path, None, None))
+        else:
+            changes.append(Change(path, new_mode, new_blob))
+    return changes
+
+
+State = tuple[str, str] | None
+
+
+def spelled_exactly(root: Path, path: str) -> bool:
+    """Return whether ``path`` exists under ``root`` with exactly this spelling.
+
+    A case-insensitive filesystem answers ``Case.txt`` for ``case.txt``; each component
+    is looked up in its folder's listing instead. Only a folder that is not there
+    (``FileNotFoundError``, ``NotADirectoryError``) reads as absent.
+
+    Raises:
+        WorkError: a folder on ``path`` is there but cannot be listed.
+
+    """
+    here = root
+    for part in PurePosixPath(path).parts:
+        try:
+            names = {entry.name for entry in here.iterdir()}
+        except (FileNotFoundError, NotADirectoryError):
+            return False
+        except OSError as error:
+            raise _unreadable(root, here, error) from error
+        if part not in names:
+            return False
+        here = here / part
+    return True
+
+
+def symlinked_folder(root: Path, path: str) -> str | None:
+    """Return the first folder on ``path`` under ``root`` that is a symlink (``lstat``), else ``None``.
+
+    Only the folders above ``path`` are read: ``path`` itself may be a symlink (a link
+    blob is written as a link, never followed). A folder that is not there ends the walk.
+
+    Raises:
+        WorkError: a folder on ``path`` is there but cannot be looked into.
+
+    """
+    here = root
+    for part in PurePosixPath(path).parts[:-1]:
+        here = here / part
+        mode = _mode(root, here)
+        if mode is None:
+            return None
+        if stat.S_ISLNK(mode):
+            return here.relative_to(root).as_posix()
+    return None
+
+
+def refuse_symlinked_folder(root: Path, path: str) -> None:
+    """Refuse a ``path`` that a symlinked folder of the checkout at ``root`` would carry outside it.
+
+    Raises:
+        WorkError: a folder on ``path`` is a symlink, or cannot be looked into.
+
+    """
+    link = symlinked_folder(root, path)
+    if link is not None:
+        msg = (
+            f"{path}: its folder {link} in the shared checkout is a symlink, so writing it "
+            "would follow the link; nothing written (remove the link, or land it by hand)"
+        )
+        raise WorkError(msg)
+
+
+def working_state(root: Path, path: str) -> State:
+    """Return ``(mode, blob)`` of ``path`` as the working tree at ``root`` holds it, else ``None``.
+
+    The bytes are hashed as they are (no index, no trust bit): a regular file or a symlink,
+    found by its exact spelling; anything else (absent, a folder) is ``None``.
+
+    Raises:
+        WorkError: a folder on ``path`` is there but cannot be listed or looked into.
+
+    """
+    if not spelled_exactly(root, path):
+        return None
+    target = root / path
+    mode = _mode(root, target)
+    if mode is not None and stat.S_ISLNK(mode):
+        link = str(target.readlink()).encode("utf-8", "surrogateescape")
+        blob = _git_bytes(root, "hash-object", "--stdin", stdin=link).decode().strip()
+        return ("120000", blob)
+    if mode is None or not stat.S_ISREG(mode):
+        return None
+    mode = "100755" if os.access(target, os.X_OK) else "100644"
+    return (mode, _git(root, "hash-object", f"--path={path}", "--", path).strip())
+
+
+def _tree_states(root: Path, rev: str, paths: Sequence[str]) -> dict[str, State]:
+    """Return each of ``paths`` as ``rev``'s tree holds it (``None`` when absent).
+
+    Raises:
+        WorkError: a path is a gitlink (a nested repository's commit).
+
+    """
+    states: dict[str, State] = dict.fromkeys(paths)
+    if not paths:
+        return states
+    listing = _git(root, "ls-tree", "-z", "--full-tree", rev, "--", *paths)
+    for record in (entry for entry in listing.split("\0") if entry):
+        header, _, path = record.partition("\t")
+        mode, kind, oid = header.split(" ")
+        if kind == "commit":
+            msg = f"{path} is a gitlink (a nested repository); land it by hand"
+            raise WorkError(msg)
+        if path in states:
+            states[path] = (mode, oid)
+    return states
+
+
+def _index_states(
+    root: Path,
+    paths: Sequence[str],
+    env: Mapping[str, str] | None = None,
+) -> dict[str, State]:
+    """Return each of ``paths`` as an index holds it at stage 0 (``None`` when absent)."""
+    states: dict[str, State] = dict.fromkeys(paths)
+    if not paths:
+        return states
+    listing = _git(root, "ls-files", "-s", "-z", "--", *paths, env=env)
+    for record in (entry for entry in listing.split("\0") if entry):
+        header, _, path = record.partition("\t")
+        mode, blob, _stage = header.split(" ")
+        if path in states:
+            states[path] = (mode, blob)
+    return states
+
+
+def unclean_paths(repo: Path, head: str, paths: Sequence[str]) -> list[str]:
+    """Return which of ``paths`` the shared tree holds otherwise than ``head``: bytes, mode or index.
+
+    The working bytes are hashed directly, so an ``assume-unchanged`` or
+    ``skip-worktree`` bit, which hides an edit from ``git status``, hides nothing here.
+    """
+    committed = _tree_states(repo, head, paths)
+    staged = _index_states(repo, paths)
+    return sorted(
+        path
+        for path in paths
+        if working_state(repo, path) != committed[path] or staged[path] != committed[path]
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class LandPlan:
+    """What ``land`` would do, against which shared ``HEAD``, with which expected result."""
+
+    patch: bytes
+    applied: list[Change]
+    skipped: list[str]
+    tree: str
+    merged: str
+    base: str
+    head: str
+    before: dict[str, State]
+    expected: dict[str, State]
+
+
+def _branch(repo: Path) -> str:
+    return _git_runner.run_git(repo, "symbolic-ref", "-q", "HEAD").stdout.strip()
+
+
+def _refuse_off_main(repo: Path, copy_root: Path) -> tuple[str, str]:
+    """Return ``(shared HEAD, copy HEAD)``, refusing a shared checkout off main or a committing copy.
+
+    Raises:
+        WorkError: the shared ``HEAD`` is not ``main`` or the copy's ``HEAD`` is not on it.
+
+    """
+    branch = _branch(repo)
+    if branch != LANDING_BRANCH:
+        msg = f"the shared checkout's HEAD is {branch or 'detached'}, not {LANDING_BRANCH}"
+        raise WorkError(msg)
+    head = _resolve_commit(repo, "HEAD")
+    base = _head(copy_root)
+    if not _git_ok(repo, "cat-file", "-e", f"{base}^{{commit}}") or not _is_ancestor(
+        repo,
+        base,
+        head,
+    ):
+        msg = (
+            f"the copy's HEAD {base[:12]} is not on the shared main: copies do not commit "
+            "(their work lands as a patch); move the commits out (`git reset --soft` to the "
+            "start pin in the copy) or rebase the copy onto main"
+        )
+        raise WorkError(msg)
+    return head, base
+
+
+def plan_landing(repo: Path, copy: Copy, index: Path) -> LandPlan:
+    """Return the copy's landing plan; ``index`` receives the expected result.
+
+    Raises:
+        WorkError: the shared ``HEAD`` is not ``main``, the copy's ``HEAD`` is not on it,
+            the patch touches a carve-only path or a path the shared tree holds otherwise
+            than its ``HEAD``, or the patch does not apply onto the shared ``HEAD``.
+
+    """
+    copy_root = _live(copy)
+    head, base = _refuse_off_main(repo, copy_root)
+    tree = content_tree(copy_root)
+    changes = copy_changes(copy_root, base, tree)
+    carved = sorted(change.path for change in changes if change.path in CARVE_ONLY_PATHS)
+    if carved:
+        msg = f"{', '.join(carved)} changed: carve it by hand (START.md), land the rest after"
+        raise WorkError(msg)
+    for change in changes:
+        refuse_symlinked_folder(repo, change.path)
+    applied = [change for change in changes if working_state(repo, change.path) != change.state]
+    skipped = [change.path for change in changes if change not in applied]
+    paths = [change.path for change in applied]
+    unclean = unclean_paths(repo, head, paths)
+    if unclean:
+        msg = (
+            "the shared tree holds other changes in "
+            f"{', '.join(unclean)}; nothing applied (land after they are committed, or carve)"
+        )
+        raise WorkError(msg)
+    env = {"GIT_INDEX_FILE": str(index)}
+    _ = _git(repo, "read-tree", head, env=env)
+    patch = b""
+    if applied:
+        patch = _git_bytes(
+            copy_root,
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-renames",
+            "--no-color",
+            "--no-ext-diff",
+            base,
+            tree,
+            "--",
+            *paths,
+        )
+        try:
+            _ = _git_bytes(
+                repo,
+                "apply",
+                "--cached",
+                "--whitespace=nowarn",
+                "-",
+                env=env,
+                stdin=patch,
+            )
+        except WorkError as error:
+            msg = (
+                f"the copy's patch does not apply onto the shared HEAD {head[:12]}; "
+                f"nothing written ({error})"
+            )
+            raise WorkError(msg) from None
+    merged = _git(repo, "write-tree", env=env).strip()
+    expected = _index_states(repo, paths, env)
+    before = _tree_states(repo, head, paths)
+    return LandPlan(patch, applied, skipped, tree, merged, base, head, before, expected)
+
+
+@contextlib.contextmanager
+def land_lock(repo: Path) -> Generator[None, None, None]:
+    """Hold an exclusive lock on ``.work/land.lock`` for one ``land`` (or ``repair``).
+
+    The file stays; the lock is the kernel's (``flock``, ``msvcrt.locking`` on Windows),
+    so it is released however its holder ends, and nothing ever takes it over.
+
+    Raises:
+        WorkError: another process holds it.
+
+    """
+    _ = ensure_sentinel(repo)
+    lock = work_dir(repo) / LAND_LOCK
+    check_layout(repo)
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            _lock_file(descriptor)
+        except OSError:
+            msg = f"another land holds {lock}; wait for it"
+            raise WorkError(msg) from None
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _lock_file(descriptor: int) -> None:
+    """Take an exclusive, non-blocking lock on ``descriptor``; raise ``OSError`` when held."""
+    if sys.platform == "win32":
+        import msvcrt  # noqa: PLC0415 - Windows only
+
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl  # noqa: PLC0415 - POSIX only
+
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _blob_bytes(repo: Path, path: str, state: tuple[str, str]) -> bytes:
+    """Return what the working file for ``state`` holds: the smudged blob, or a link target."""
+    mode, oid = state
+    if mode == "120000":
+        return _git_bytes(repo, "cat-file", "blob", oid)
+    return _git_bytes(repo, "cat-file", "--filters", f"--path={path}", oid)
+
+
+def _prune_empty_parents(repo: Path, folder: Path) -> None:
+    """Remove the empty folders a deletion left, up to (never including) ``repo``."""
+    while folder != repo and _is_within(folder, repo):
+        try:
+            folder.rmdir()
+        except OSError:
+            return
+        folder = folder.parent
+
+
+def put_path(
+    repo: Path,
+    path: str,
+    state: State,
+    preimage: State,
+) -> bool:
+    """Make ``path`` hold ``state`` only while it still holds ``preimage``; return whether it did.
+
+    The new bytes go to a temporary file beside the target first; the target is
+    re-hashed right before the one ``os.replace`` (or ``unlink``) that publishes the
+    change, so an edit another session made at any earlier moment is never overwritten.
+    The window between that last hash and the replace stays open: no lock binds a
+    plain editor. A symlinked folder on ``path`` is refused before anything is written
+    and again right before the replace or unlink, so the write never follows a link
+    out of the checkout; ``path`` itself as a symlink is replaced as a link.
+
+    Raises:
+        WorkError: a folder on ``path`` is a symlink, or cannot be looked into.
+
+    """
+    target = repo / path
+    refuse_symlinked_folder(repo, path)
+    if working_state(repo, path) != preimage:
+        return False
+    if state is None:
+        refuse_symlinked_folder(repo, path)
+        target.unlink(missing_ok=True)
+        _prune_empty_parents(repo, target.parent)
+        return True
+    target.parent.mkdir(parents=True, exist_ok=True)
+    refuse_symlinked_folder(repo, path)
+    staged = target.parent / f".{target.name}.dsf-work-{_token()}"
+    data = _blob_bytes(repo, path, state)
+    try:
+        if state[0] == "120000":
+            staged.symlink_to(data.decode("utf-8", "surrogateescape"))
+        else:
+            _ = staged.write_bytes(data)
+            staged.chmod(0o755 if state[0] == "100755" else 0o644)
+        if working_state(repo, path) != preimage:
+            return False
+        refuse_symlinked_folder(repo, path)
+        if _is_kind(repo, target, stat.S_ISDIR):
+            target.rmdir()
+        _ = staged.replace(target)
+    finally:
+        if _present(repo, staged):
+            staged.unlink()
+    return True
+
+
+def _journal(repo: Path) -> Path:
+    return work_dir(repo) / LAND_JOURNAL
+
+
+def _store_journal(repo: Path, head: object, entries: Mapping[str, object]) -> None:
+    """Publish the journal for ``entries`` (path to its state before and after) with one rename."""
+    journal = _journal(repo)
+    staged = journal.with_name(f".{journal.name}.{_token()}")
+    _ = staged.write_text(json.dumps({"head": head, "paths": entries}), encoding="utf-8")
+    _ = staged.replace(journal)
+
+
+def _write_journal(repo: Path, plan: LandPlan) -> None:
+    """Record every touched path's state before and after, atomically, before writing any."""
+    entries = {
+        path: {"before": plan.before[path], "after": plan.expected[path]} for path in plan.expected
+    }
+    _store_journal(repo, plan.head, entries)
+
+
+def _journal_state(value: object) -> State:
+    if _is_object_list(value) and len(value) == 2:
+        mode, oid = value
+        if isinstance(mode, str) and isinstance(oid, str):
+            return (mode, oid)
+    return None
+
+
+@dataclasses.dataclass(frozen=True)
+class Recovery:
+    """What undoing a journaled landing left: another writer's paths, and paths it could not undo."""
+
+    foreign: tuple[str, ...] = ()
+    stuck: tuple[str, ...] = ()
+
+    def summary(self) -> str | None:
+        """Return what was left undone, ``None`` when the undo was complete."""
+        parts: list[str] = []
+        if self.foreign:
+            parts.append(f"{', '.join(self.foreign)}, which another writer changed")
+        if self.stuck:
+            parts.append(f"{'; '.join(self.stuck)}; {JOURNAL_KEPT}")
+        return "; ".join(parts) or None
+
+
+def _inside(path: str) -> bool:
+    """Return whether ``path`` is a normalized relative path that stays inside the checkout."""
+    pure = PurePosixPath(path)
+    return (
+        bool(path)
+        and not pure.is_absolute()
+        and not PureWindowsPath(path).drive
+        and str(pure) == path
+        and not any(part in {"", ".", ".."} for part in pure.parts)
+    )
+
+
+def recover_landing(repo: Path) -> Recovery:
+    """Undo a landing the journal shows unfinished; return what it had to leave.
+
+    Each path holding what that landing wrote goes back to its state before; a path
+    holding its state before needs nothing; any other bytes are another writer's and
+    stay. A path that cannot be read or written stays unresolved and keeps its entry:
+    the journal is rewritten to hold only those, and deleted once none is left.
+
+    Raises:
+        WorkError: the journal names a path outside the checkout (absolute, holding ``..``
+            or not normalized); nothing is written and the journal is kept for a human.
+
+    """
+    journal = _journal(repo)
+    if not _is_kind(repo, journal, stat.S_ISREG):
+        return Recovery()
+    document = _loads(journal.read_text(encoding="utf-8"))
+    entries = document.get("paths") if _is_object_map(document) else None
+    hostile = sorted(
+        path for path in (entries if _is_object_map(entries) else {}) if not _inside(path)
+    )
+    if hostile:
+        msg = (
+            f"the land journal names a path outside the checkout: {', '.join(hostile)}; "
+            f"fix or remove {journal} by hand"
+        )
+        raise WorkError(msg)
+    foreign: list[str] = []
+    stuck: list[str] = []
+    unresolved: dict[str, object] = {}
+    for path, entry in sorted(entries.items()) if _is_object_map(entries) else []:
+        if not _is_object_map(entry):
+            continue
+        before, after = _journal_state(entry.get("before")), _journal_state(entry.get("after"))
+        try:
+            current = working_state(repo, path)
+            if current == before:
+                continue
+            if current != after or not put_path(repo, path, before, after):
+                foreign.append(path)
+        except WorkError as error:
+            stuck.append(f"{path}: {error}")
+            unresolved[path] = entry
+        except OSError as error:
+            stuck.append(f"cannot write {path}: {error.strerror or error}")
+            unresolved[path] = entry
+    if unresolved:
+        head = document.get("head") if _is_object_map(document) else None
+        _store_journal(repo, head, unresolved)
+    else:
+        journal.unlink()
+    return Recovery(tuple(foreign), tuple(stuck))
+
+
+def _drifted(repo: Path, plan: LandPlan, states: Mapping[str, State]) -> list[str]:
+    """Return what no longer matches: the branch, ``HEAD``, or a path versus ``states``."""
+    drift: list[str] = []
+    if _branch(repo) != LANDING_BRANCH:
+        drift.append("the shared checkout left main")
+    if _resolve_commit(repo, "HEAD") != plan.head:
+        drift.append("the shared HEAD moved")
+    drift.extend(
+        f"{path} changed" for path, state in states.items() if working_state(repo, path) != state
+    )
+    return drift
+
+
+def _put_all(repo: Path, plan: LandPlan) -> None:
+    """Write every expected path (deletions first), then check the checkout did not move.
+
+    Raises:
+        WorkError: a path changed under the landing, or the checkout moved while it wrote.
+
+    """
+    order = sorted(plan.expected, key=lambda path: (plan.expected[path] is not None, path))
+    for path in order:
+        if not put_path(repo, path, plan.expected[path], plan.before[path]):
+            msg = f"{path} changed under the landing"
+            raise WorkError(msg)
+    drift = _drifted(repo, plan, plan.expected)
+    if drift:
+        msg = "; ".join(drift)
+        raise WorkError(msg)
+
+
+def _write_landing(repo: Path, plan: LandPlan) -> None:
+    """Write the landing, journaled first; undo all of it on any failure or interruption.
+
+    Raises:
+        WorkError: :func:`_put_all` refused; every path holding what this landing wrote is
+            put back, and a path another writer changed meanwhile is named and kept.
+
+    """
+    _write_journal(repo, plan)
+    try:
+        _put_all(repo, plan)
+    except (WorkError, OSError) as error:
+        recovery = recover_landing(repo)
+        kept = (
+            f"; another writer's bytes kept untouched in {', '.join(recovery.foreign)}"
+            if recovery.foreign
+            else ""
+        )
+        stuck = (
+            f"; not undone: {'; '.join(recovery.stuck)}; {JOURNAL_KEPT}" if recovery.stuck else ""
+        )
+        msg = f"rolled back: {error} while landing{kept}{stuck}"
+        raise WorkError(msg) from None
+    except BaseException:
+        _ = recover_landing(repo)
+        raise
+    _journal(repo).unlink()
+
+
+def cmd_land(args: _Args) -> int:
+    """Apply a copy's content to the shared working tree, all or nothing."""
+    repo = REPO_ROOT
+    with land_lock(repo):
+        if _journal(repo).is_file():
+            _say("undoing an interrupted landing from its journal first")
+        left = recover_landing(repo).summary()
+        if left is not None:
+            msg = f"an interrupted landing was undone except {left}"
+            raise WorkError(msg)
+        copy = locate(repo, args.name)
+        index = _git_path(repo, f"dsf-work-land-{_token()}")
+        try:
+            return _land(repo, copy, args, index)
+        finally:
+            index.unlink(missing_ok=True)
+
+
+def _land(
+    repo: Path,
+    copy: Copy,
+    args: _Args,
+    index: Path,
+) -> int:
+    refuse_replica(copy, "land")
+    plan = plan_landing(repo, copy, index)
+    if args.patch:
+        _ = Path(args.patch).write_bytes(plan.patch)
+    for path in plan.skipped:
+        _say(f"already there: {path}")
+    if not plan.applied:
+        _say(f"{copy.name}: nothing to land")
+        return 0
+    if args.dry_run:
+        for change in plan.applied:
+            print(f"would land: {change.path}")
+        return 0
+    drift = _drifted(repo, plan, plan.before)
+    if drift:
+        msg = f"nothing written: {'; '.join(drift)} since the landing was planned"
+        raise WorkError(msg)
+    _write_landing(repo, plan)
+    _pin_landing(repo, copy, plan)
+    for change in plan.applied:
+        print(f"landed: {change.path}")
+    return 0
+
+
+def _pin_landing(repo: Path, copy: Copy, plan: LandPlan) -> None:
+    """Pin what landed: the merged result on the shared ``HEAD``, and the copy's own content."""
+    copy_root = _live(copy)
+    leaves = pins(repo).get(copy.name, {})
+    merged = _snapshot(repo, plan.merged, plan.head, f"work.py landing of {copy.name}")
+    own = _snapshot(copy_root, plan.tree, plan.base, f"work.py content of {copy.name} at landing")
+    for source, commit, leaf in ((repo, merged, LANDED_PIN), (copy_root, own, LANDED_COPY_PIN)):
+        if not publish_pin(repo, source, commit, copy.name, leaf, replacing=leaves.get(leaf, "")):
+            _say(f"{_pin_ref(copy.name, leaf)} moved meanwhile; the copy keeps what landed")
+            continue
+        record_pin(repo, copy_root, copy.form, leaf, commit)
+    write_note(
+        copy_root,
+        copy.form,
+        {"landed": plan.head, "landedtree": plan.tree, "landedat": str(time.time())},
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# rm, gc, repair, run
+# --------------------------------------------------------------------------------------------
+
+
+def _trash_path(repo: Path, name: str, *, kept: bool = False) -> Path:
+    """Return a fresh path in ``.work/trash`` for the copy ``name``.
+
+    ``<name>-<seconds>-<pid>`` while ``rm`` deletes it; ``<name>-<seconds>-kept`` for a copy
+    kept there for :data:`TRASH_RETENTION_SECONDS`.
+
+    Raises:
+        WorkError: ``name`` breaks the name grammar (it would name a path outside the trash).
+
+    """
+    _ = parse_name(name)
+    trash = _container(repo, TRASH, create=True)
+    return trash / f"{name}-{int(time.time())}-{KEPT_TRASH if kept else os.getpid()}"
+
+
+def remove(
+    repo: Path,
+    copy: Copy,
+    *,
+    discard: bool,
+    drop_saves: bool,
+    keep_in_trash: bool = False,
+) -> dict[str, str]:
+    """Remove ``copy`` after every safety check (see :func:`removal_refusals`).
+
+    Drops its ``start`` pin, and with ``drop_saves`` every other pin under the name, but only
+    the pins its note attributes to it (:func:`pin_belongs`): a pin another copy left under
+    the name (an earlier copy's, or one a fleet sync carried in) is kept and returned
+    (``{leaf: commit}``) for the caller to name. A name holding pins alone has no note: its
+    ``rm`` is the request to drop them, and drops them all.
+
+    On the copy's home (its note no replica, its ``home`` this machine) a tombstone records
+    the removal for ``scripts/fleet_sync.py`` to carry. A replica (``rm --discard``, or the
+    fleet sync's removal) and ``keep_in_trash`` leave the folder in ``.work/trash`` for ``gc``
+    to delete once :data:`TRASH_RETENTION_SECONDS` pass: a replica may be the last copy of its
+    work.
+
+    Raises:
+        WorkError: a check refused (the message lists every reason), or the copy, moved
+            to the trash, could not be deleted there.
+
+    """
+    reasons = removal_refusals(repo, copy, discard=discard)
+    if reasons:
+        msg = f"{copy.name}: not removed: " + "; ".join(reasons)
+        raise WorkError(msg)
+    undeleted: str | None = None
+    keep_in_trash = keep_in_trash or is_replica(copy.note)
+    if copy.path is not None and copy.present:
+        trash = _trash_path(repo, copy.name, kept=keep_in_trash)
+        try:
+            _ = copy.path.rename(trash)
+        except OSError as error:
+            msg = f"{copy.name}: cannot move it to {trash} ({error}); is a process holding it?"
+            raise WorkError(msg) from None
+        if copy.form == "worktree":
+            # Unlocked only once moved: a refused move leaves the worktree locked as it was.
+            # git finds the worktree by the path its metadata records, so the moved folder
+            # is still the one unlocked.
+            _ = _git_runner.run_git(repo, "worktree", "unlock", str(copy.path))
+        try:
+            if not keep_in_trash:
+                delete_tree(trash)
+        except OSError as error:
+            undeleted = (
+                f"cannot delete {trash}: {error.strerror or error}; it stays in .work/trash"
+            )
+    wanted = {
+        leaf: sha
+        for leaf, sha in pins(repo).get(copy.name, {}).items()
+        if leaf == START_PIN or drop_saves
+    }
+    kept = {} if copy.form == "pins" else foreign_pins(attributed_note(repo, copy.note), wanted)
+    dropped = {leaf: sha for leaf, sha in wanted.items() if leaf not in kept}
+    _bury(repo, copy, dropped, saves_dropped=drop_saves)
+    if copy.admin is not None and _is_kind(copy.admin.parent, copy.admin, stat.S_ISDIR):
+        delete_tree(copy.admin)
+    for leaf, sha in dropped.items():
+        drop_pin(repo, copy.name, leaf, sha)
+    buried = drop_buried_pins(repo, copy.name)
+    kept = {leaf: sha for leaf, sha in kept.items() if leaf not in buried}
+    release_name(repo, copy.name)
+    if undeleted is not None:
+        msg = f"{copy.name}: removed, but {undeleted}" + kept_pins_note(copy.name, kept)
+        raise WorkError(msg)
+    return kept
+
+
+def kept_pins_note(name: str, kept: Mapping[str, str]) -> str:
+    """Return the sentence naming the pins a removal kept as not provably its own, ``""`` for none."""
+    if not kept:
+        return ""
+    listed = ", ".join(f"{leaf} {sha[:12]}" for leaf, sha in sorted(kept.items()))
+    return (
+        f"; kept pins this copy cannot prove are its own: {listed}; check them, then "
+        f"`work.py rm {name} --drop-saves` drops them"
+    )
+
+
+def cmd_rm(args: _Args) -> int:
+    """Remove one copy."""
+    repo = REPO_ROOT
+    _ = ensure_sentinel(repo)
+    copy = locate(repo, args.name)
+    if (
+        copy.adopted
+        and copy.path is not None
+        and not _is_within(copy.path.resolve(), work_dir(repo).resolve())
+    ):
+        msg = f"{copy.name} is a harness copy at {copy.path}; its harness removes it, not this script"
+        raise WorkError(msg)
+    if not args.discard:
+        refuse_replica(copy, "remove (or `rm --discard`, which drops the replica alone)")
+    stem = parse_name(copy.name).stem if _valid(copy.name) else copy.name
+    kept = remove(repo, copy, discard=args.discard, drop_saves=args.drop_saves)
+    if args.evidence:
+        siblings = [
+            name for name in discover(repo) if _valid(name) and parse_name(name).stem == stem
+        ]
+        evidence = work_dir(repo) / EVIDENCE / stem
+        if siblings:
+            _say(f"evidence {evidence} kept: {', '.join(siblings)} still use it")
+        elif evidence.is_dir() and copy_hazard(repo, evidence, EVIDENCE) is None:
+            delete_tree(evidence)
+    days = TRASH_RETENTION_SECONDS // 86400
+    trashed = f" (a replica: kept in .work/trash for {days} days)" if is_replica(copy.note) else ""
+    print(f"removed {copy.name}{trashed}{kept_pins_note(copy.name, kept)}")
+    return 0
+
+
+def _gc_pins(repo: Path, name: str, *, dry_run: bool) -> None:
+    """Drop the start and landed pins of a name with no copy once the shared ``HEAD`` holds them.
+
+    The pins dropped are recorded in a pins-only tombstone (:func:`bury_pins`), so a replica's
+    machine holding them drops them too and no sync carries them back.
+    """
+    head = _resolve_commit(repo, "HEAD")
+    leaves = pins(repo).get(name, {})
+    dropping: dict[str, str] = {}
+    start = leaves.get(START_PIN)
+    if start is not None and _is_ancestor(repo, start, head):
+        print(f"{'would drop' if dry_run else 'dropped'} start pin of {name}")
+        dropping[START_PIN] = start
+    landed = leaves.get(LANDED_PIN)
+    if landed is not None and landing_on_main(repo, landed):
+        print(f"{'would drop' if dry_run else 'dropped'} landed pins of {name}")
+        dropping[LANDED_PIN] = landed
+        if LANDED_COPY_PIN in leaves:
+            dropping[LANDED_COPY_PIN] = leaves[LANDED_COPY_PIN]
+    if dry_run:
+        return
+    bury_pins(repo, name, dropping, saves_dropped=False)
+    for leaf, sha in dropping.items():
+        drop_pin(repo, name, leaf, sha)
+
+
+def _gc_copy(
+    repo: Path,
+    name: str,
+    copy: Copy,
+    *,
+    dry_run: bool,
+) -> int:
+    """Remove one landed copy whose landing main holds; return 1 when a removal refused.
+
+    A landed copy whose landing main does not hold is kept and says why (``keep <name>:``),
+    in both modes and without a failing exit: the maintainer checks it and removes it with ``rm``.
+    """
+    landed = pins(repo).get(name, {}).get(LANDED_PIN)
+    if landed is None:
+        print(f"keep {name}: its note says landed but it has no landed pin; `rm` it once checked")
+        return 0
+    if not landing_on_main(repo, landed):
+        print(
+            f"keep {name}: the shared HEAD does not hold its landing (not committed yet, or a "
+            "later commit changed a landed path); `rm` it once checked",
+        )
+        return 0
+    if dry_run:
+        reasons = removal_refusals(repo, copy, discard=False)
+        print(f"would remove {name}" if not reasons else f"keep {name}: {'; '.join(reasons)}")
+        return 0
+    try:
+        kept = remove(repo, copy, discard=False, drop_saves=False)
+    except WorkError as error:
+        _say(str(error))
+        return 1
+    except OSError as error:
+        _say(f"{name}: not fully removed: {error}")
+        return 1
+    print(f"removed {name} (landed){kept_pins_note(name, kept)}")
+    _gc_pins(repo, name, dry_run=False)
+    return 0
+
+
+def _gc_gone_worktree(
+    repo: Path,
+    name: str,
+    copy: Copy,
+    admin: Path,
+    *,
+    dry_run: bool,
+) -> int:
+    """Prune a worktree whose folder is gone; return 1 when its ``HEAD`` keeps it."""
+    reasons = removal_refusals(repo, copy, discard=False)
+    if reasons:
+        if dry_run:
+            print(f"keep {name}: {'; '.join(reasons)}")
+            return 0
+        _say(f"{name}: not pruned: {'; '.join(reasons)}")
+        return 1
+    print(f"{'would prune' if dry_run else 'pruned'} {name} (folder gone)")
+    if not dry_run:
+        delete_tree(admin)
+        release_name(repo, name)
+    return 0
+
+
+def cmd_gc(args: _Args) -> int:
+    """Remove only what is finished."""
+    repo = REPO_ROOT
+    _ = ensure_sentinel(repo)
+    status = 0
+    for name, copy in sorted(discover(repo).items()):
+        if copy.hazard is not None:
+            continue
+        if copy.form == "pins":
+            _gc_pins(repo, name, dry_run=args.dry_run)
+        elif not copy.present:
+            if copy.form == "worktree" and copy.admin is not None and not copy.adopted:
+                status |= _gc_gone_worktree(repo, name, copy, copy.admin, dry_run=args.dry_run)
+        elif copy.note.get("landed") and not copy.adopted:
+            if is_replica(copy.note) or home_of(copy.note) != machine_id():
+                print(f"keep {name}: a replica of {home_of(copy.note)}; fleet_sync.py removes it")
+                continue
+            status |= _gc_copy(repo, name, copy, dry_run=args.dry_run)
+    trash = work_dir(repo) / TRASH
+    try:
+        entries = sorted(trash.iterdir()) if trash.is_dir() else []
+    except OSError as error:
+        _say(f"cannot read {trash}: {error.strerror or error}")
+        return 1
+    for entry in entries:
+        rest, _, pid = entry.name.rpartition("-")
+        if pid == KEPT_TRASH:
+            stamp = rest.rpartition("-")[2]
+            if stamp.isdigit() and time.time() - int(stamp) < TRASH_RETENTION_SECONDS:
+                until = time.strftime(
+                    "%Y-%m-%d",
+                    time.localtime(int(stamp) + TRASH_RETENTION_SECONDS),
+                )
+                print(f"keep trash {entry.name}: a replica the fleet sync removed, until {until}")
+                continue
+        elif pid.isdigit() and _pid_alive(int(pid)) and int(pid) != os.getpid():
+            continue
+        if args.dry_run:
+            print(f"would delete trash {entry.name}")
+            continue
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                delete_tree(entry)
+            else:
+                entry.unlink()
+        except OSError as error:
+            print(f"cannot delete trash {entry.name}: {error}", file=sys.stderr)
+            status = 1
+        else:
+            print(f"deleted trash {entry.name}")
+    return status | _gc_tombstones(repo, dry_run=args.dry_run)
+
+
+def _gc_tombstones(repo: Path, *, dry_run: bool) -> int:
+    """Delete tombstones older than :data:`TOMBSTONE_RETENTION_SECONDS`; return 1 on a failure."""
+    status = 0
+    cutoff = time.time() - TOMBSTONE_RETENTION_SECONDS
+    for tombstone in tombstones(repo):
+        if tombstone.removed_at >= cutoff:
+            continue
+        if dry_run:
+            print(f"would delete tombstone {tombstone.file_name}")
+            continue
+        try:
+            (work_dir(repo) / TOMBSTONES / tombstone.file_name).unlink()
+        except OSError as error:
+            print(f"cannot delete tombstone {tombstone.file_name}: {error}", file=sys.stderr)
+            status = 1
+        else:
+            print(f"deleted tombstone {tombstone.file_name}")
+    return status
+
+
+def _repair_copy(
+    repo: Path,
+    name: str,
+    copy: Copy,
+    all_pins: Mapping[str, Mapping[str, str]],
+) -> int:
+    """Repair one copy; return the number of problems it could not fix."""
+    if copy.hazard is not None:
+        print(f"{name}: unsafe, left untouched: {copy.hazard}")
+        return 1
+    if copy.form == "pins" or not copy.present or copy.path is None:
+        return 0
+    if not copy.healthy:
+        print(f"{name}: {copy.path} has a missing or broken .git; git there now fails closed")
+        return 1
+    if copy.form == "clone" and not copy.adopted:
+        _ = _git(copy.path, "remote", "set-url", "--push", "parent", NO_PUSH)
+    if not copy.adopted:
+        _apply_copy_config(copy.path, copy.form)
+    start = copy.note.get("start")
+    if (
+        start
+        and START_PIN not in all_pins.get(name, {})
+        and publish_pin(repo, copy.path, start, name, START_PIN)
+    ):
+        print(f"{name}: re-pinned {_pin_ref(name, START_PIN)}")
+    lock = _git_path(copy.path, "index.lock")
+    if lock.exists():
+        print(f"{name}: {lock} left by a crashed git; delete it only once no git runs there")
+        return 1
+    return 0
+
+
+def _repair_claims(repo: Path, copies: Mapping[str, Copy]) -> int:
+    """Release dead claims, re-claim live copies that lost theirs; return the claims left unresolved."""
+    claims = work_dir(repo) / NAMES
+    problems = 0
+    if claims.is_dir():
+        for claim in sorted(claims.iterdir()):
+            known = claim.name in copies and copies[claim.name].form != "pins"
+            if known:
+                continue
+            if _claim_is_stale(claim):
+                delete_tree(claim)
+                print(f"released dead claim {claim.name}")
+            elif not claim.name.startswith("."):
+                print(
+                    f"claim {claim.name} has no copy and its owner is not known dead; resolve it by hand",
+                )
+                problems += 1
+    for name, copy in sorted(copies.items()):
+        if (
+            copy.form != "pins"
+            and copy.hazard is None
+            and _valid(name)
+            and copy.present
+            and not _present(repo, claims / name)
+        ):
+            _ = claim_name(repo, name)
+            print(f"re-claimed {name}")
+    return problems
+
+
+def cmd_repair(_args: _Args) -> int:
+    """Fix what is safe to fix; report the rest."""
+    repo = REPO_ROOT
+    problems = 0
+    if ensure_sentinel(repo):
+        print(f"wrote {work_dir(repo) / '.git'}")
+    store = work_dir(repo) / PIN_STORE
+    if store.is_dir() and not (store / "HEAD").is_file():
+        _ = make_pin_store(repo)
+        print(f"re-initialized {store}; its refs and objects are kept")
+    worktrees = work_dir(repo) / WORKTREES
+    real = [
+        path
+        for path in _copy_folders(worktrees)
+        if copy_hazard(repo, path, WORKTREES) is None and path.is_dir()
+    ]
+    if real:
+        _ = _git_runner.run_git(repo, "worktree", "repair", *(str(path) for path in real))
+    all_pins = pins(repo)
+    copies = discover(repo)
+    for name, copy in sorted(copies.items()):
+        problems += _repair_copy(repo, name, copy, all_pins)
+    problems += _repair_claims(repo, copies)
+    with land_lock(repo):
+        if _journal(repo).is_file():
+            print("undoing an interrupted landing from its journal")
+        left = recover_landing(repo).summary()
+    if left is not None:
+        print(f"an interrupted landing was undone except {left}")
+        problems += 1
+    for stray in sorted(repo.glob(".coverage.*")):
+        print(f"stray coverage file {stray}; delete it once no test run writes it")
+        problems += 1
+    return 1 if problems else 0
+
+
+def cmd_run(args: _Args) -> int:
+    """Run a command in a copy's own environment."""
+    if not args.tail:
+        msg = "run needs a command after --"
+        raise WorkError(msg)
+    copy = locate(REPO_ROOT, args.name)
+    copy_root = _live(copy).resolve()
+    stale = _git_path(copy_root, VENV_STALE)
+    if stale.exists():
+        _say(f"{copy.name}: its .venv came from another machine or is missing; rebuilding it")
+        _setup(copy_root, "worktree")  # the venv alone: a replica takes no hook
+        stale.unlink()
+    env = clean_env(copy_root, copy.name)
+    location = package_location(copy_root, env)
+    if not _is_within(location, copy_root):
+        msg = f"{PACKAGE} imports from {location}, outside the copy {copy_root}"
+        raise WorkError(msg)
+    executable = shutil.which(args.tail[0], path=env["PATH"]) or args.tail[0]
+    completed = subprocess.run([executable, *args.tail[1:]], cwd=copy_root, env=env, check=False)
+    return 128 - completed.returncode if completed.returncode < 0 else completed.returncode
+
+
+# --------------------------------------------------------------------------------------------
+# Command line
+# --------------------------------------------------------------------------------------------
+
+
+class _Args(argparse.Namespace):
+    """The parsed command line, typed field by field after ``build_parser``'s ``add_argument`` calls."""
+
+    command: str
+    handler: Callable[[_Args], int]
+    tail: list[str]
+    name: str
+    path: str
+    worktree: bool
+    from_rev: str
+    purpose: str
+    owner: str
+    no_setup: bool
+    json: bool
+    dry_run: bool
+    patch: str | None
+    discard: bool
+    drop_saves: bool
+    evidence: bool
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Return the command-line parser."""
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").partition("\n\n")[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    owner = os.environ.get("DSF_WORK_OWNER", "")
+
+    new = commands.add_parser("new", help="claim a name and make its copy")
+    _ = new.add_argument("name")
+    _ = new.add_argument("--worktree", action="store_true", help="a worktree, not a clone")
+    _ = new.add_argument(
+        "--from",
+        dest="from_rev",
+        default="HEAD",
+        help="start commit or pin (HEAD)",
+    )
+    _ = new.add_argument("--purpose", default="", help="what the copy is for")
+    _ = new.add_argument("--owner", default=owner, help="session or agent (DSF_WORK_OWNER)")
+    _ = new.add_argument("--no-setup", action="store_true", help="skip uv sync and pre-commit")
+    new.set_defaults(handler=cmd_new)
+
+    adopt = commands.add_parser("adopt", help="register a harness-made copy in place")
+    _ = adopt.add_argument("path")
+    _ = adopt.add_argument("name")
+    _ = adopt.add_argument("--purpose", default="")
+    _ = adopt.add_argument("--owner", default=owner)
+    adopt.set_defaults(handler=cmd_adopt)
+
+    listing = commands.add_parser("list", help="every known copy")
+    _ = listing.add_argument("--json", action="store_true")
+    listing.set_defaults(handler=cmd_list)
+
+    save_parser = commands.add_parser("save", help="pin a copy's uncommitted content")
+    _ = save_parser.add_argument("name")
+    save_parser.set_defaults(handler=cmd_save)
+
+    land = commands.add_parser("land", help="apply a copy's content to the shared tree")
+    _ = land.add_argument("name")
+    _ = land.add_argument("--dry-run", action="store_true")
+    _ = land.add_argument("--patch", default=None, help="also write the patch to this file")
+    land.set_defaults(handler=cmd_land)
+
+    rm = commands.add_parser("rm", help="remove one copy")
+    _ = rm.add_argument("name")
+    _ = rm.add_argument(
+        "--discard",
+        action="store_true",
+        help="drop unsaved or unreadable content",
+    )
+    _ = rm.add_argument(
+        "--drop-saves",
+        action="store_true",
+        help="also delete its save and landed pins",
+    )
+    _ = rm.add_argument("--evidence", action="store_true", help="also delete its evidence")
+    rm.set_defaults(handler=cmd_rm)
+
+    gc = commands.add_parser("gc", help="remove only what is finished")
+    _ = gc.add_argument("--dry-run", action="store_true")
+    gc.set_defaults(handler=cmd_gc)
+
+    repair = commands.add_parser("repair", help="fix the safe things, report the rest")
+    repair.set_defaults(handler=cmd_repair)
+
+    run = commands.add_parser(
+        "run",
+        help="run a command in a copy's own environment",
+        usage="%(prog)s <name> -- <command...>",
+    )
+    _ = run.add_argument("name")
+    run.set_defaults(handler=cmd_run)
+
+    check = commands.add_parser("check-name", help="validate a name")
+    _ = check.add_argument("name")
+    check.set_defaults(handler=cmd_check_name)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Dispatch one command; a refusal prints its reason and exits 1 (``run``: 125).
+
+    An operating-system error no command turned into a refusal (an unreadable folder
+    under ``.work``) is printed the same way, never as a traceback; the command has
+    already stopped, so this only formats the error and decides nothing.
+    """
+    words = list(sys.argv[1:] if argv is None else argv)
+    tail: list[str] = []
+    if "--" in words:
+        split = words.index("--")
+        words, tail = words[:split], words[split + 1 :]
+    parser = build_parser()
+    args = parser.parse_args(words, namespace=_Args())
+    args.tail = tail
+    if tail and args.command != "run":
+        parser.error(f"{args.command} takes nothing after --")
+    try:
+        refuse_locating_env()
+        if args.command != "check-name":
+            check_layout(REPO_ROOT)
+        return args.handler(args)
+    except (WorkError, OSError) as error:
+        print(f"work: {error}", file=sys.stderr)
+        return REFUSED if args.command == "run" else 1
+
+
+def _cli() -> NoReturn:
+    raise SystemExit(main())
+
+
+if __name__ == "__main__":
+    _cli()

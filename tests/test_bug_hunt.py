@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import _plan_common, bug_hunt
+from scripts import _git, _plan_common, bug_hunt
 from scripts import review_historical_package_snapshot_at_commit as snapshot
 
 
@@ -34,6 +34,15 @@ def _skip_refresh(*_args: object) -> None:
 
 def _accept_commit(_commit: str) -> None:
     return None
+
+
+def _root_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Answer the scripts' checkout guard with ``root``: these rows stub git with no checkout."""
+
+    def fake_repo_root(_cwd: Path | str | None = None) -> Path:
+        return root
+
+    monkeypatch.setattr(_git, "repo_root", fake_repo_root)
 
 
 def _status_listing(listing: str | None) -> Callable[[Path], str | None]:
@@ -80,7 +89,6 @@ def test_generator_writes_autonomous_progress_and_preserves_existing_run(
 
     def fake_run_git(args: Sequence[str]) -> str:
         responses: dict[tuple[str, ...], str] = {
-            ("rev-parse", "--show-toplevel"): f"{tmp_path}\n",
             ("rev-parse", "HEAD"): f"{full_sha}\n",
         }
         return responses[tuple(args)]
@@ -91,6 +99,7 @@ def test_generator_writes_autonomous_progress_and_preserves_existing_run(
         refreshes.append((commit, package_dir, target_dir))
 
     monkeypatch.setattr(bug_hunt, "_run_git", fake_run_git)
+    _root_at(monkeypatch, tmp_path)
     monkeypatch.setattr(
         _plan_common,
         "git_status_short",
@@ -198,12 +207,12 @@ def test_empty_dicta_still_renders_the_package_questions_section(
 
     def fake_run_git(args: Sequence[str]) -> str:
         responses: dict[tuple[str, ...], str] = {
-            ("rev-parse", "--show-toplevel"): f"{tmp_path}\n",
             ("rev-parse", "HEAD"): "1234567890abcdef1234567890abcdef12345678\n",
         }
         return responses[tuple(args)]
 
     monkeypatch.setattr(bug_hunt, "_run_git", fake_run_git)
+    _root_at(monkeypatch, tmp_path)
     monkeypatch.setattr(_plan_common, "git_status_short", _status_listing(""))
     monkeypatch.setattr(snapshot, "_run_git", _one_module_listing)
     monkeypatch.setattr(bug_hunt, "_refresh_historical_package_snapshot", _skip_refresh)
@@ -359,12 +368,11 @@ def test_snapshot_empty_inventory_publishes_an_empty_owned_directory(
     _write(out_dir / "stale.overview.md", "stale\n")
     monkeypatch.setattr(snapshot, "_validate_commit", _accept_commit)
 
-    def fake_run_git(args: Sequence[str]) -> str:
-        if args[0] == "rev-parse":
-            return f"{tmp_path}\n"
+    def fake_run_git(_args: Sequence[str]) -> str:
         return ""
 
     monkeypatch.setattr(snapshot, "_run_git", fake_run_git)
+    _root_at(monkeypatch, tmp_path)
 
     assert snapshot.main(["abc123", "--package-dir", "testing"]) == 0
     assert list(out_dir.iterdir()) == []
@@ -381,9 +389,7 @@ def test_snapshot_failure_never_publishes_partial_staging(
     paths = ["package/one.py", "package/two.py"]
     monkeypatch.setattr(snapshot, "_validate_commit", _accept_commit)
 
-    def fake_run_git(args: Sequence[str]) -> str:
-        if args[0] == "rev-parse":
-            return f"{tmp_path}\n"
+    def fake_run_git(_args: Sequence[str]) -> str:
         return "\0".join([*paths, ""])
 
     def fake_materialize(_commit: str, path: str, target: Path) -> None:
@@ -394,6 +400,7 @@ def test_snapshot_failure_never_publishes_partial_staging(
         _write(target / f"{stem}.overview.md", path)
 
     monkeypatch.setattr(snapshot, "_run_git", fake_run_git)
+    _root_at(monkeypatch, tmp_path)
     monkeypatch.setattr(snapshot, "_materialize_and_inspect", fake_materialize)
 
     with pytest.raises(RuntimeError, match="inspection failed"):
@@ -548,12 +555,12 @@ def test_target_release_overrides_the_package_version(
 
     def fake_run_git(args: Sequence[str]) -> str:
         responses: dict[tuple[str, ...], str] = {
-            ("rev-parse", "--show-toplevel"): f"{tmp_path}\n",
             ("rev-parse", "HEAD"): "1234567890abcdef1234567890abcdef12345678\n",
         }
         return responses[tuple(args)]
 
     monkeypatch.setattr(bug_hunt, "_run_git", fake_run_git)
+    _root_at(monkeypatch, tmp_path)
     monkeypatch.setattr(_plan_common, "git_status_short", _status_listing(""))
     monkeypatch.setattr(snapshot, "_run_git", _one_module_listing)
     monkeypatch.setattr(bug_hunt, "_refresh_historical_package_snapshot", _skip_refresh)
@@ -570,12 +577,12 @@ def test_generator_rejects_invalid_target_release(
 ) -> None:
     def fake_run_git(args: Sequence[str]) -> str:
         responses: dict[tuple[str, ...], str] = {
-            ("rev-parse", "--show-toplevel"): f"{tmp_path}\n",
             ("rev-parse", "HEAD"): "1234567890abcdef1234567890abcdef12345678\n",
         }
         return responses[tuple(args)]
 
     monkeypatch.setattr(bug_hunt, "_run_git", fake_run_git)
+    _root_at(monkeypatch, tmp_path)
 
     assert bug_hunt.main(["--target-release", "0_0_14"]) == 1
     assert "invalid release '0_0_14'" in capsys.readouterr().err
@@ -594,7 +601,6 @@ def test_generator_refuses_when_the_status_baseline_is_unavailable(
 
     def fake_run_git(args: Sequence[str]) -> str:
         responses: dict[tuple[str, ...], str] = {
-            ("rev-parse", "--show-toplevel"): f"{tmp_path}\n",
             ("rev-parse", "HEAD"): "1234567890abcdef1234567890abcdef12345678\n",
         }
         return responses[tuple(args)]
@@ -606,6 +612,7 @@ def test_generator_refuses_when_the_status_baseline_is_unavailable(
         return None
 
     monkeypatch.setattr(bug_hunt, "_run_git", fake_run_git)
+    _root_at(monkeypatch, tmp_path)
     monkeypatch.setattr(_plan_common, "git_status_short", no_status)
     monkeypatch.setattr(snapshot, "_run_git", _one_module_listing)
     monkeypatch.setattr(bug_hunt, "_refresh_historical_package_snapshot", _skip_refresh)

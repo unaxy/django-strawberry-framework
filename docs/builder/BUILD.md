@@ -225,7 +225,7 @@ A **failability proof** is the remedy: transiently mutate the production code so
 ```shell
 grep -c '<anchor line inside the boundary>' <file>  # must print exactly 1, BEFORE the copy
 uv run pytest <focused scope> --no-cov             # pre-mutation: green, or record what fails
-cp <file> <scratch>/dsf-proof-<slug>.orig          # session scratchpad, OUTSIDE the repo
+cp <file> <scratch>/dsf-proof-<slug>.orig          # session scratchpad, OUTSIDE the tree under proof
 # apply the mutation, then:
 uv run pytest <focused scope> --no-cov             # record failing node ids, errors, this scope
 cp <scratch>/dsf-proof-<slug>.orig <file>          # restore
@@ -234,7 +234,7 @@ cmp <file> <scratch>/dsf-proof-<slug>.orig         # the proof: exit 0
 
 **The anchor check is first because nothing else in the loop can tell that its own reference is already mutated.** If a prior proof, or an agent that died mid-proof, left a mutation live, then `cp` copies the *mutated* file, `cmp` passes, the record reads clean, and the boundary stays gone — precisely the `### Mutations are transient` failure, and invisible from inside the loop. A live prior mutation means the anchor is absent, so the entry aborts having written nothing.
 
-**The scratch path must be outside the repository** — the session scratchpad, never bare `/tmp`. A pristine copy under `docs/builder/temp-tests/<NNN>/` satisfies every other word here while putting a copy of the file under proof inside the tree under proof.
+**The scratch path must be outside the tree under proof** — the session scratchpad, or the shared checkout's `.work/evidence/<stem>/` when the proof runs inside a `scripts/work.py` copy (outside that copy, which is the tree under proof; `prove_failability.py` refuses a scratch root inside the tree it mutates; `START.md` "Private working copies"); never bare `/tmp`. A pristine copy under `docs/builder/temp-tests/<NNN>/` satisfies every other word here while putting a copy of the file under proof inside the tree under proof.
 
 The pre-mutation copy is the reference because **the tree is legitimately dirty** with this build's own work: an empty `git diff -- <file>` is therefore NOT the proof (it cannot be empty, and a boundary this build introduces has no HEAD version anyway), and `git checkout -- <file>` is never the restore — it would discard the slice. For a boundary already present at HEAD, the read-only HEAD reference in `## Claims are proven mechanically, never accepted on prose` is equally valid.
 
@@ -397,9 +397,9 @@ Every `bld-*.md` artifact is copied from the template in **[ARTIFACT.md][artifac
 
 Three claim shapes move work or risk out of a build, each cheapest to wave through where it most deserves distrust. All three carry one obligation: the claimant cites its verification, the reader re-derives instead of accepting, and **an unverified claim of any of these shapes is a Medium finding.**
 
-They share a read-only HEAD reference: `git show HEAD:<path>` into a scratch path **outside** the repo, then `diff`; quote the commands and output in the artifact. **`git stash`, `git checkout`, `git restore`, and `git worktree` are never part of verifying a claim** — the maintainer runs concurrent sessions against this same tree, so a stash round-trip races their writes and a `git checkout HEAD` can destroy uncommitted work, theirs or the build's. No verification need waives that ban.
+They share a read-only HEAD reference: `git show HEAD:<path>` into a scratch path **outside** the tracked tree, then `diff`; quote the commands and output in the artifact. **`git stash`, `git checkout` and `git restore` on the shared tree, and a worktree made by hand, are never part of verifying a claim** — the maintainer runs concurrent sessions against this same tree, so a stash round-trip races their writes and a `git checkout HEAD` can destroy uncommitted work, theirs or the build's. No verification need waives that ban. A pristine HEAD tree is a `head-<slug>` copy made by `scripts/work.py` (`START.md` "Private working copies").
 
-- **Pre-existing at HEAD.** A file's content is verifiable read-only as above. A failing test or runtime behavior is **not worker-verifiable at all** — reproducing it needs the whole tree at HEAD, and this tree is legitimately dirty with the build's work and possibly a concurrent session's. Record the claim plus the evidence you have (failing node ids, traceback, HEAD content obtained read-only, whether the failing test or its code is even in the build's diff), then **escalate to the maintainer**, the only party who can run a clean HEAD tree. Recording plus escalating discharges the obligation; the Medium finding is for a claim asserted with neither.
+- **Pre-existing at HEAD.** A file's content is verifiable read-only as above. A failing test or runtime behavior is **not verifiable in this tree** — reproducing it needs the whole tree at HEAD, and this tree is legitimately dirty with the build's work and possibly a concurrent session's. Reproduce it in a `head-<slug>` copy (`work.py new head-<slug>`, then `work.py run head-<slug> -- pytest -n0 --no-cov -p no:randomly <node ids>`, then `work.py rm head-<slug>`) and quote that run; when no copy can be made, record the claim plus the evidence you have (failing node ids, traceback, HEAD content obtained read-only, whether the failing test or its code is even in the build's diff), then **escalate to the maintainer**. Recording plus escalating discharges the obligation; the Medium finding is for a claim asserted with neither.
 - **Relocated, promoted, or carried over unchanged** — a body moved into a seam, a private helper renamed public "rename-only", logic called byte-identical. It is what a "no-regression" gate rests on, and "I only moved it" is the cheapest claim in the build. Prove it with an executable-token or character diff against pristine HEAD, comments and whitespace stripped and any renamed receiver normalized, then token-identity confirmed. Applies equally to a helper promotion and a cross-flavor lift, where BOTH call sites must reproduce their originals' messages and behavior byte-for-byte.
 - **A stated count** — "5 rows fail", "43 boxes", "the delta is exactly the sum". A number reads as measured and every later pass treats it as measured, so a guess propagates silently, invisible to re-reading. Two failure modes recur: a **long grep phrase samples a claim's vocabulary rather than establishing its population** (the same thing spelled another way, or wrapped across a line, does not match) — so search the shortest distinctive token and count *occurrences*, not matching lines; and a count asserted in the same breath as the lesson it illustrates is routinely wrong — **measure as you write the number.** Prefer any form whose count the reader can re-derive, for the reason `### What gets recorded` gives for listing node ids rather than counting them.
 
@@ -536,7 +536,7 @@ Slices touching none of those seams (docs, KANBAN / glossary regeneration, pure-
 
 ### How to build the floor venv
 
-Build it under a scratch path outside the repo, and install with an explicit `--python`:
+Build it under a scratch path outside the tracked tree (the session scratchpad, or the shared checkout's `.work/evidence/<stem>/`), and install with an explicit `--python`:
 
 ```shell
 uv venv <scratch>/dsf-floor --python 3.10
@@ -548,7 +548,7 @@ uv pip install --python <scratch>/dsf-floor/bin/python 'channels[daphne]==4.3.2'
 
 - **Never mutate the shared `.venv`.** `uv pip install` ignores `UV_PROJECT_ENVIRONMENT` and installs into `.venv` if you let it; the explicit `--python <path>` is what keeps it out. A mutated `.venv` silently changes the floor for every later pass and every concurrent session in this repo.
 - **Prove the venv before trusting the run.** Never pipe `uv venv` / `uv pip install` through `tail` or `head`: the pipeline reports the last command's status, so a failed build reads as success. Assert `<scratch>/dsf-floor/bin/python --version` reports the floor interpreter before the focused tests.
-- The floor venv lives outside the working tree, so it needs no `.gitignore` entry. Never create it inside the repo.
+- The floor venv lives in the scratchpad or under the git-ignored `.work/`, so it needs no `.gitignore` entry. Never create it in the tracked tree (`.venv-floor/` at the root is not ignored).
 - **Record the resolved versions** (`uv pip list --python <scratch>/dsf-floor/bin/python`) and each focused command's pass/fail in `bld-<NNN>-final.md`. An unrecorded floor run is not verifiable later.
 - A floor failure blocks `final-accepted` and routes back through the owning slice loop. The fix is production code that works at the floor — never a raised floor, and never a `pragma: no cover` on the divergent branch (`AGENTS.md` allows `pragma: no cover` only for branches unreachable under the test runner, and a floor-divergent branch is reachable at the floor).
 

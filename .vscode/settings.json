@@ -24,6 +24,7 @@
 
   // Keep generated caches and build output out of the explorer and search.
   "files.exclude": {
+    "**/.work": true,
     "**/__pycache__": true,
     "**/.ruff_cache": true,
     "**/.pytest_cache": true,
@@ -31,11 +32,17 @@
     "**/dist": true
   },
   "search.exclude": {
+    "**/.work": true,
     "**/__pycache__": true,
     "**/.ruff_cache": true,
     "**/.pytest_cache": true,
     "**/*.egg-info": true,
     "**/dist": true
+  },
+
+  // Private working copies (scripts/work.py) each hold a whole tree and a venv: never watch them.
+  "files.watcherExclude": {
+    "**/.work/**": true
   },
 
   // Editor and workbench behavior.

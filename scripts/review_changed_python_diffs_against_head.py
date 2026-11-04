@@ -30,8 +30,11 @@ at the repo root, the folders this script owns under ``docs/shadow/``.
 
 Every git call this module makes itself runs through ``workspace._git`` in the
 current directory, so the caller's global and system git config and the XDG
-global ignore and attributes files never reach a listing or a tree. The shared
-git / ``review_inspect`` plumbing, which only reads committed objects --
+global ignore and attributes files never reach a listing or a tree, and a
+``GIT_DIR``, ``GIT_WORK_TREE`` or ``GIT_INDEX_FILE`` a hook or a parent git
+process left set never redirects one (``workspace.clean_env``). The checkout
+guard and the shared helpers below run in that same scrubbed environment. The
+shared git / ``review_inspect`` plumbing, which only reads committed objects --
 ``_validate_commit``, ``_stem_for``, ``_file_at_commit``, the temp-tree
 ``_materialize_and_inspect`` primitive and ``_publish_staged_snapshot`` -- lives in
 ``review_historical_package_snapshot_at_commit`` (the canonical home for the
@@ -78,7 +81,9 @@ Usage:
 The ``uv run`` prefix is required so the script sees the project's virtual
 environment (it transitively imports ``review_inspect``, which depends on the
 project's pinned Python / dependency versions). Run from anywhere inside the
-repository; git paths are resolved from ``git rev-parse --show-toplevel``.
+checkout holding this script; its root is resolved through
+``scripts/_git.py::repo_root``, which refuses a current directory git resolves
+to another checkout.
 
 ``--path`` (repeatable) scopes the diff to one or more git pathspecs so a
 focused review does not have to wade through every changed file -- e.g.
@@ -119,6 +124,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 if __package__:
+    from scripts import _git as _git_runner
     from scripts import workspace
     from scripts.review_historical_package_snapshot_at_commit import (
         _clear_shadow_output,
@@ -135,6 +141,7 @@ if __package__:
         _strip_comments,
     )
 else:
+    import _git as _git_runner
     import workspace
     from review_historical_package_snapshot_at_commit import (
         _clear_shadow_output,
@@ -494,12 +501,12 @@ def _render_change(
 ) -> None:
     """Render both sides of ``change`` (``commit`` and the ``new_rev`` tree-ish) into ``dirs``."""
     old_path = change.old_side_path
-    _materialize_and_inspect(commit, old_path, dirs.old)
-    _materialize_and_inspect(new_rev, change.path, dirs.new)
+    _materialize_and_inspect(commit, old_path, dirs.old, env_base=workspace.clean_env())
+    _materialize_and_inspect(new_rev, change.path, dirs.new, env_base=workspace.clean_env())
     old_src = new_src = None
     if args.keep_literals or args.prose:
-        old_src = _file_at_commit(commit, old_path)
-        new_src = _file_at_commit(new_rev, change.path)
+        old_src = _file_at_commit(commit, old_path, env_base=workspace.clean_env())
+        new_src = _file_at_commit(new_rev, change.path, env_base=workspace.clean_env())
     if args.keep_literals:
         for src, side_path, side_dir in (
             (old_src, old_path, dirs.old),
@@ -743,12 +750,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.json and not args.list:
         print("--json requires --list.", file=sys.stderr)
         return 2
+    # The checkout guard runs before any other git call: in a copy whose ``.git`` is
+    # missing every git call fails, and the base lookup would misreport a valid hash.
+    try:
+        repo_root = _git_runner.repo_root(base=workspace.clean_env())
+    except _git_runner.CheckoutError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     base = _resolve_base(args)
     if base is None:
         return 2
-    _validate_commit(base)
-
-    repo_root = Path(_run_git(["rev-parse", "--show-toplevel"]).strip())
+    _validate_commit(base, env_base=workspace.clean_env())
     head = _run_git(["rev-parse", "HEAD"]).strip()
     if args.list:
         return _run_list(args, base, head, repo_root)

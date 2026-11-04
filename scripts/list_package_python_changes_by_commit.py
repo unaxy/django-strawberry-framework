@@ -103,8 +103,14 @@ def run_git(args: Sequence[str], *, cwd: Path | None = None) -> str:
 
 
 def repo_root() -> Path:
-    """Return the current repository root."""
-    return Path(run_git(["rev-parse", "--show-toplevel"]).strip())
+    """Return the checkout holding this script, refusing a current directory git resolves elsewhere.
+
+    ``scripts/_git.py::repo_root`` owns the check; its refusal is a :class:`GitHistoryError`.
+    """
+    try:
+        return _git.repo_root()
+    except _git.CheckoutError as error:
+        raise GitHistoryError(str(error)) from error
 
 
 def is_shallow_repository(root: Path) -> bool:

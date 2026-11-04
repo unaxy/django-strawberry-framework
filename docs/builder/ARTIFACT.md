@@ -93,7 +93,7 @@ Required when the plan declares this slice hot-path (see "Hot-path budget"). Wri
 
 Required when the plan's floor-verification scope assigns this slice's floor run to this pass (see "Floor verification" — the declaration names the owner; the final test-run gate is the backstop, not a second owner). Write `Not applicable; plan declares floor-verification scope none.` or `Owned by the final gate per the plan's declaration.` otherwise. Never install into the shared `.venv`.
 
-- scratch venv path (outside the repo), resolved versions as read by `uv pip list --python <venv>/bin/python`, the focused scope run, pass/fail.
+- scratch venv path (scratchpad or `.work/evidence/<stem>/`, never the tracked tree), resolved versions as read by `uv pip list --python <venv>/bin/python`, the focused scope run, pass/fail.
 
 ### Implementation notes
 
