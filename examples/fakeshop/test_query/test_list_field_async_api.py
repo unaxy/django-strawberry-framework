@@ -31,7 +31,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING, NoReturn, TypeAlias, TypedDict, TypeGuard, cast
+from typing import TYPE_CHECKING, NoReturn, TypeAlias, TypedDict, TypeGuard
 
 import pytest
 import strawberry
@@ -3633,7 +3633,8 @@ async def test_async_ordering_leaves_the_consumer_context_exactly_as_found(
         _CONTEXT_CAPTURE["marker"] = marker
         payload = await _post_async(schema, query, view_class=_CapturingAsyncContextView)
         assert "errors" not in payload, (label, payload)
-        context = cast("_MarkedContext", _CONTEXT_CAPTURE["context"])
+        context = _CONTEXT_CAPTURE["context"]
+        assert isinstance(context, _MarkedContext), context
         assert context.consumer_marker is marker
         observed[label] = set(vars(context))
     assert observed["ordered"] == observed["control"], observed

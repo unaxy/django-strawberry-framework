@@ -27,13 +27,14 @@ from collections import defaultdict
 from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, TypedDict, cast
+from typing import TYPE_CHECKING, NamedTuple, TypedDict
 
 try:
     from _kanban_lib import (
         CARD_REF_RE,
         PLACEHOLDER_RE,
         REPO_ROOT,
+        _is_json_object,
         build_dashboard_snapshot,
         check_freshness,
         cli_exit,
@@ -55,6 +56,7 @@ except ModuleNotFoundError:  # imported as ``scripts.build_kanban_md`` (repo roo
         CARD_REF_RE,
         PLACEHOLDER_RE,
         REPO_ROOT,
+        _is_json_object,
         build_dashboard_snapshot,
         check_freshness,
         cli_exit,
@@ -314,7 +316,14 @@ def resolve_card_refs(
                 f"{site} references card_ref:{match.group(1)}, "
                 "but no reference with that order exists on it.",
             )
-        return card_key(cast("CardLink", reference[card_field]))
+        linked = reference[card_field]
+        card_id = linked.get("cardId") if _is_json_object(linked) else None
+        if not isinstance(card_id, str):
+            raise TypeError(
+                f"{site} references card_ref:{match.group(1)}, but that reference's "
+                f"{card_field} carries no cardId.",
+            )
+        return card_id
 
     return CARD_REF_RE.sub(replace, text)
 

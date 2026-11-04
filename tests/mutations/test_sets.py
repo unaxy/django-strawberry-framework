@@ -1960,6 +1960,7 @@ def test_validate_input_class_hostile_repr_propagates() -> None:
             "Probe",
             hostile,
             attr_name="input_class",
+            operation_kind=CREATE,
             model=product_models.Item,
             fields=None,
             exclude=None,

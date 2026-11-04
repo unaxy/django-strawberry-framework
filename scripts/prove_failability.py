@@ -298,7 +298,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from itertools import takewhile
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn, cast
+from typing import TYPE_CHECKING, NoReturn
 
 try:
     import _stop_signals
@@ -624,7 +624,9 @@ class MutationSite:
     def apply(self, text: str) -> str:
         """Return ``text`` with this site's mutation applied, or raise :class:`SiteError`."""
         if self.kind == PRE_IMAGE_KIND:
-            source = cast("Path", self.source)
+            source = self.source
+            if source is None:
+                raise SiteError(f"the pre-image site for {self.relative_target} names no source")
             image = source.read_bytes().decode("utf-8")
             if image == text:
                 raise SiteError(
