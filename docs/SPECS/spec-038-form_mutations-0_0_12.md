@@ -350,8 +350,11 @@ package-internal; Slice 4 is the live consumer surface.
     to a storable value (a `BooleanField`'s `False`, a `blank=True` text or
     text-choice column's `""`) → that column's field-keyed `null` error, nothing
     written; the same cleaning on a `null=True` column (a checkbox's `False`, an
-    `ArrayField`'s `[]`; a text column keeps a `""`) of an explicit `null` → `NULL`
-    stored; an update omitting a column keeps its stored value (`NULL` included) where
+    `ArrayField`'s `[]`, a consumer `CharField`'s `""` over a numeric, temporal or UUID
+    column; a text column keeps a `""`) of an explicit `null`, or of a create's omission
+    of a column with no `default` (nothing bound under any key the field's widget reads),
+    → `NULL` stored, a model `clean()`'s value written;
+    an update omitting a column keeps its stored value (`NULL` included) where
     the form field's own cleaning of it would rewrite it, while a value a `get_form` /
     `get_form_kwargs` hook binds, a `clean_<field>` / form `clean()` sets or a model
     `clean()` sets is written, except one equal to the form field's own cleaning of the
@@ -365,7 +368,9 @@ package-internal; Slice 4 is the live consumer surface.
     located row deleted before the update → `conflict`, no top-level error at write), the
     `ModelForm` save also mapping a `null=False` column the form cleaned
     to a value it cannot store (`None`, or `""` on a column that stores no empty string: a non-text choice column, an `ArrayField`) onto that
-    column's field-keyed `null` error; **re-fetch**
+    column's field-keyed `null` error, and a `""` consumer code sets on a `null=True`
+    column onto the column's own `to_python` refusal (code `invalid`) where it raises one;
+    **re-fetch**
     the saved object by pk + optimizer-plan (the `ModelForm` flavor); **return** the
     `<Name>Payload` (`node` / `result` for the `ModelForm`, the pinned `ok` + `errors`
     for the plain form). The whole pipeline runs inside one `transaction.atomic()`
@@ -1777,14 +1782,19 @@ write flavor rides.
    column, an update omitting the field over a stored `NULL`, which the reconstruction
    binds as the row holds it and whose `NULL` the instance already holds again where
    the form field's own cleaning made a value of it, step 4; a `null=False` column
-   stores no `NULL`), a cleaned value
-   equal to the form field's own cleaning of that `None`, on the
-   instance as neither `None` nor a `""` the column cannot store, means the save would
-   succeed with a value the client never sent: `CheckboxInput` reads `None` as `False` on
-   a `BooleanField`, and the `CharField` / `TypedChoiceField` of a text or
+   stores no `NULL`), or, on a create, nothing under any key the field's widget reads, in
+   `form.data` or `form.files`, for a `null=True` column with no `default` (the input
+   omitted it and no hook bound a value or its parts; Django's
+   `construct_instance` keeps a default only for a column that has one), a cleaned value
+   equal to the form field's own cleaning of that `None` or absent key, on the
+   instance as neither `None` nor a `""` a `null=False` column cannot store, means the
+   save would write a value the client never sent: `CheckboxInput` reads `None` as
+   `False` on a `BooleanField`, and the `CharField` / `TypedChoiceField` of a text or
    text-choice column cleans it to `""` (a consumer `CharField` over a `JSONField` or an
    `HStoreField` column does too: both store `""`, the JSON string and the empty hstore,
-   so neither is the `""` the save-time diagnosis names), and PostgreSQL's
+   so neither is the `""` the save-time diagnosis names; a consumer `CharField`,
+   `ChoiceField` or `TypedChoiceField` over a numeric, temporal or UUID `null=True`
+   column cleans it to a `""` that column cannot store), and PostgreSQL's
    `SimpleArrayField` / `SplitArrayField` and `HStoreField` form fields clean it to `[]`
    (a `SplitArrayField` keeping trailing nulls to `size` `None` elements) and `{}`. A
    `null=False` such column is the field-keyed error with the
@@ -1794,12 +1804,15 @@ write flavor rides.
    ([`forms/resolvers.py`][forms-resolvers]`::_store_nulls`): the model field's
    `save_form_data(instance, None)` replaces the cleaned value on the instance before the
    save, so the column keeps the `NULL` the client sent, as the model
-   flavor writes it on a `blank=True` column, and a consumer `save()` running after it may
+   flavor writes it on a `blank=True` column and Django's own form field cleans to there,
+   and a consumer `save()` running after it may
    still write another value; a `null=True` text column (`empty_strings_allowed`) keeps a
    `""` its form field cleaned the `None` to, Django's empty value for it, and any other
    value there stores `NULL`. A
    cleaned value the consumer form supplies instead (a `clean_<field>` / `clean()`
-   default) is written, as is a `disabled` field's initial; one equal to the form field's
+   default) is written, as is a `disabled` field's initial and, on a `null=True` column, a
+   model `clean()`'s value the instance holds in place of the form field's own cleaning
+   (`django_strawberry_framework/forms/resolvers.py::_holds_own_cleaning`); one equal to the form field's
    own cleaning (a `clean_<field>` or `clean()` answering `False` for a checkbox's
    `None`) cannot be told from it and is read as that cleaning, so a consumer `save()` is
    where such a value is written. An M2M empty value clears the relation, a
@@ -1851,8 +1864,8 @@ write flavor rides.
    `ArrayField` (a `ChoiceField`, `TypedChoiceField` or `CharField` whose `clean_<field>`, if
    any, wraps only a non-empty value) cleans to its `empty_value` `""` too, which PostgreSQL
    refuses at the save with a `DataError` (malformed array literal). After that failed save, a form-declared
-   editable non-pk column holding `None` on a `null=False` column, or `""` on a column
-   that stores no empty string, that the refused save of the form's instance writes (no
+   editable non-pk column holding `None` on a `null=False` column, or `""` on a `null=False`
+   column that stores no empty string, that the refused save of the form's instance writes (no
    `update_fields`, or the column named there by field name or `attname`, as recorded at
    `pre_save` by `django_strawberry_framework/utils/write_values.py::attempted_saves`; the
    refused save is the recorded save the caught exception propagated out of, or out of
@@ -1877,11 +1890,19 @@ write flavor rides.
    `django_strawberry_framework/utils/write_values.py::unstorable_columns`), and the column's
    Django `error_messages["null"]` as the message, the model flavor's message too
    (`django_strawberry_framework/utils/errors.py::null_field_error`), so a custom or
-   translated message is sent as is. The check reads only the in-memory instance, so no query runs on a
+   translated message is sent as is. A `""` consumer code sets on a `null=True` column the
+   refused save writes (a `clean_<field>`, a `get_form` / `get_form_kwargs` binding, an
+   update hook dropping the reconstructed key; the form field's own cleaning of a client's
+   `null` or create omission is stored as `NULL` before the save) is named only where the
+   column's own `to_python("")` raises a `ValidationError`, and is that error, keyed and
+   pathed like the `null` error: Django's code `invalid` and message with its `params`
+   applied (`django_strawberry_framework/forms/resolvers.py::_blank_type_errors`), so a custom
+   or translated message is sent as is. The check reads only the in-memory instance, so no query runs on a
    connection the `IntegrityError` / `DataError` left unusable. When no column explains the
    exception (a model `save()` narrowed by `update_fields` away from the column, one
    that raised before saving the instance, one writing the row through a path that sends
-   no `pre_save`, `bulk_create` or `QuerySet.update()`, a save of another row, and a
+   no `pre_save`, `bulk_create` or `QuerySet.update()`, a save of another row, a `""` on a
+   `null=True` column whose `to_python` accepts it or raises no `ValidationError`, and a
    failure another write raises, after a refused save of the instance consumer code caught
    and swallowed or not, or while handling it, included), an `IntegrityError` is the `"__all__"` envelope above, a `ValueError` or
    `DataError` propagates unchanged and a `ValidationError` is the consumer's own, mapped as above. The check runs on the instance after the
@@ -2459,14 +2480,17 @@ Rationale companion: [Decision 14][rationale-d14].
   `null=True` column (next), an M2M, a file and a form-required field are never refused
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
   step 5).
-- **Explicit `null` coerced to a storable value on a `null=True` column.** The same
+- **Explicit `null` coerced to a value on a `null=True` column.** The same
   cleaning on a `null=True` non-text column (`empty_strings_allowed` false: a checkbox
   `BooleanField`'s `False`, a consumer `CharField`'s `""` over a `JSONField`,
   `SimpleArrayField`'s `[]`, `SplitArrayField`'s `[]` or, keeping trailing nulls, `size`
-  `None` elements, an `HStoreField` form field's `{}`), or on a text column any cleaning
+  `None` elements, an `HStoreField` form field's `{}`, and a consumer `CharField`'s,
+  `ChoiceField`'s or `TypedChoiceField`'s `""` over a numeric, temporal or UUID column,
+  which that column cannot store), or on a text column any cleaning
   but `""` (a `CharField(empty_value="n/a")`), of an explicit `null` stores `NULL`, on
   create and update alike, as the model and serializer flavors store it on a
-  `blank=True` column: the value the form field had for the `None` is replaced on the
+  `blank=True` column and Django's own form field cleans to there, never the column's
+  `null` error: the value the form field had for the `None` is replaced on the
   instance before the save. An update omitting the field keeps its stored value, `NULL`
   or another (`update` partial-update preservation, above), a text column's stored
   `NULL` included, and an explicit `[]` is a value (`SplitArrayField` keeping trailing
@@ -2474,11 +2498,22 @@ Rationale companion: [Decision 14][rationale-d14].
   form resolves instead (above) is written; one a `clean_<field>` or `clean()` returns
   equal to the form field's own cleaning cannot be told from it and stores `NULL`, so a
   consumer `save()`, which runs after and may still write another value, is where such a
-  value is written. A `null=True` text column (`empty_strings_allowed`) keeps a `""` its
-  form field cleans `None` to, Django's empty value for it, and a create omitting the
-  field writes whatever the bound
-  form makes of the absent key (a checkbox's `False`, an `ArrayField` with no default's
-  `[]`)
+  value is written; a model `clean()`'s value the instance holds in place of that
+  cleaning is written. A create omitting the field over a column with no `default`, with
+  nothing bound under any key the field's widget reads, is read the same way (a
+  checkbox's `False`, an `ArrayField`'s `[]`, a consumer `CharField`'s `""` stores
+  `NULL`); a value a `get_form_kwargs` hook binds under a multi-key widget's own part
+  keys (a `SplitDateTimeWidget`'s `_0` / `_1`, a `SelectDateWidget`'s `_year` / `_month`
+  / `_day`) is written, while a column with a `default` keeps Django's
+  handling (`construct_instance` skips it, a checkbox excepted, which writes its
+  `False`); a `db_default` alone is no `default`, so the column stores `NULL`, as under
+  Django's own form field. A `null=True` text column (`empty_strings_allowed`) keeps a
+  `""` its form field cleans `None` or the absent key to, Django's empty value for it. A
+  `""` consumer code sets on a non-text `null=True` column (a `clean_<field>`, a
+  `get_form_kwargs` binding, an update hook dropping the reconstructed key) is refused
+  by the save, and answers the column's own `to_python("")` refusal, code `invalid` and
+  Django's message, keyed by the column, nothing written; where `to_python` raises no
+  `ValidationError` the save's own exception propagates
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
   step 5).
 - **A prefixed form.** A form whose prefix comes from its class, a `get_form_kwargs`
@@ -2853,11 +2888,17 @@ behavior reachable through `/graphql/`, package tests own internals.
     `null` on create and on update over `true`, `false` and `NULL`, or omitted over `NULL`,
     stores `NULL`, sync and async, while `true` / `false` are written and an omission over
     a value keeps it, a `CharField` over the JSON column `payload` the same way (a string
-    sent stored, one stored kept when omitted), and the text column `label` sent `null`
-    keeps `""`
+    sent stored, one stored kept when omitted), a create omitting `flag` or `payload`
+    stores `NULL`, a `CharField` over the float column `score` sent `null` on create and
+    on update over a value or `NULL`, or omitted on a create, stores `NULL` with empty
+    `errors` where the column's `null` error would be false, sync and async (an omission
+    over a value kept, a value sent written), and the text column `label` sent `null` or
+    omitted on a create keeps `""`
     (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_checkbox_over_a_nullable_boolean_stores_null_for_null`,
     `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_async_checkbox_over_a_nullable_boolean_stores_null_for_null`,
     `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_char_field_over_a_nullable_json_column_stores_null_for_null`,
+    `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_char_field_over_a_nullable_float_column_stores_null_for_null`,
+    `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_async_char_field_over_a_nullable_float_column_stores_null_for_null`,
     `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_text_column_under_the_flag_form_keeps_the_empty_string_for_null`);
     an update omitting `label` and `payload` keeps a stored
     `"  padded  "`, `NULL`, JSON object and JSON list as stored, sync and async
@@ -2882,8 +2923,28 @@ behavior reachable through `/graphql/`, package tests own internals.
     (`tests/forms/test_resolvers.py::test_modelform_null_a_consumer_form_resolves_on_a_nullable_column`),
     and on PostgreSQL a `null=True` `ArrayField` under `SimpleArrayField` (a `default=None`
     column too) and `SplitArrayField` with and without `remove_trailing_nulls`, sync and
-    async, with `[]` sent and an omission over a list kept as controls
+    async, a create omitting the column under those and a consumer `CharField` too, with
+    `[]` sent and an omission over a list kept as controls
     (`tests/forms/test_resolvers.py::test_modelform_null_on_a_nullable_array_column_stores_null`);
+    a model `clean()` filling a `null=True` integer column a consumer `CharField` cleaned
+    empty (create omitted, create and update `null`) is written, sync and async
+    (`tests/forms/test_resolvers.py::test_modelform_null_a_model_clean_fills_on_a_nullable_column_writes_the_models_value`);
+    a create omitting a `null=True` column keeps a `default=7`, writes a checkbox's `False`
+    over a `default=True` or `default=False` column and stores `NULL` under a `db_default`,
+    sync and async
+    (`tests/forms/test_resolvers.py::test_modelform_create_omitting_a_nullable_column_with_a_default_keeps_djangos_answer`);
+    a value a `get_form_kwargs` hook binds only under a `SplitDateTimeWidget`'s or
+    `SelectDateWidget`'s part keys over such a column with no default is written, sync and
+    async
+    (`tests/forms/test_resolvers.py::test_modelform_create_omitting_a_field_a_hook_binds_under_its_widget_parts_writes_it`);
+    a `""` a `clean_value` (create and update), a `get_form_kwargs` binding or an update hook
+    dropping the reconstructed key sets on an integer, decimal, date or UUID column is the
+    column's own `to_python` refusal (code `invalid`, Django's message) on a `null=True`
+    column and its `null` error on a `null=False` twin, nothing written
+    (`tests/forms/test_resolvers.py::test_modelform_blank_consumer_code_sets_is_the_columns_own_refusal`),
+    while a `to_python` raising another exception names no column and the save's own
+    `ValueError` propagates
+    (`tests/forms/test_resolvers.py::test_modelform_blank_a_nullable_column_to_python_refuses_otherwise_is_not_named`);
     an `isPrivate: null` the consumer form resolves (a
     `clean_is_private`, a `get_form_kwargs` override, a `disabled` field, a declared field
     `Meta.fields` / `Meta.exclude` leaves out) writes with empty `errors`
@@ -3158,8 +3219,12 @@ The completion contract.
    it cannot store (`None`, or `""` on a column that stores no empty string: a non-text choice column, an `ArrayField`) returns that column's
    field-keyed `null` error, as does, before the save, an explicit `null` its own form
    field cleaned to a value such a `null=False` column stores (`False`, `""`), while the
-   same cleaning on a `null=True` column (a text column's `""` kept) of an explicit
-   `null` stores `NULL`, and an update omitting a column keeps its stored value, `NULL`
+   same cleaning on a `null=True` column (a text column's `""` kept, a numeric, temporal
+   or UUID column's `""` included) of an explicit `null`, or of a create's omission of a
+   column with no `default` (nothing bound under any key the field's widget reads), stores
+   `NULL` (a model `clean()`'s value written), a `""`
+   consumer code sets on such a column answering the column's own `to_python` refusal
+   (code `invalid`) where it raises one, and an update omitting a column keeps its stored value, `NULL`
    included, where the form field's own cleaning would rewrite it (a consumer hook's,
    `clean_<field>`'s, form `clean()`'s or model `clean()`'s value written, except one
    equal to that cleaning, which keeps the stored value, and a hook's rebound

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 420 done, 110 to do. The CHANGELOG entries filed here moved to
+Progress: 425 done, 106 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1635,6 +1635,32 @@ Progress: 420 done, 110 to do. The CHANGELOG entries filed here moved to
   `tests/test_ci_governance.py::test_no_comment_docstring_name_or_package_string_cites_a_spec_section_by_number`
   refuses DoD / Goal / Slice ordinals (live `TODO(spec-NNN slice N)` anchors exempt), with planted and permitted-form
   rows; START names it. Stripped ASTs and node ids otherwise unchanged. Filed 766, 767
+- [x] 704. fixed: a `DjangoModelFormMutation` form field cleaning a client's explicit `null`, or a create's omission
+  (nothing bound under any key its widget reads) of a `null=True` column with no `default`, to a value (a consumer
+  `CharField`'s, `ChoiceField`'s or `TypedChoiceField`'s `""` over an integer, float, decimal, date, time or UUID
+  column included) stores `NULL` before the save instead of the false "This field cannot be null."
+  (`forms/resolvers.py::_is_unstorable_blank` gains the `null=False` gate; `::_coerced_null_fields` names the create
+  omission through `::_binds_nothing` and `::_omission_stores_null` and reads a `null=True` column's instance through
+  `::_holds_own_cleaning`); a `""` consumer code sets on a `null=True` column the save refuses answers the column's
+  own `to_python("")` `ValidationError` (code `invalid`, Django's message), keyed like the `null` error
+  (`::_blank_type_errors`, `::_unstorable_column_errors`), and names no column where `to_python` raises nothing or
+  another type. Live rows in `examples/fakeshop/test_query/test_scalars_mutation_api.py` (the fakeshop flag form
+  gains `score`), package rows in `tests/forms/test_resolvers.py`; spec-038, GLOSSARY. PostgreSQL array rows unrun
+  locally. Filed 768
+- [x] 631. decided with 704: client input (explicit `null`, create omission) on a `null=True` column stores `NULL`
+  before the save (no retry); a `""` consumer code sets there is the column's own `to_python` refusal (`invalid`),
+  never `null`
+- [x] 705. fixed with 704: the GLOSSARY `djangomodelformmutation` and `fielderror-envelope` entries scope the
+  save-time `null` mapping to `null=False` (`blank=True`, or `blank=False` behind a consumer `required=False` field)
+  and state the `null=True` answers
+- [x] 710. fixed with 704: a create omitting a `null=True` column with no `default` stores `NULL` whatever its form
+  field cleans the absent key to (a checkbox `False`, a JSON `""`, `[]`, `{}`, a `TypedChoiceField` empty value); a
+  value a hook binds under the widget's own keys is written, and a column with a `default` keeps Django's handling
+- [x] 717. fixed with 704: on a `null=True` column a model `clean()` value the instance holds in place of the form
+  field's own cleaning is written, never replaced by `NULL` (`forms/resolvers.py::_holds_own_cleaning`); the parity
+  pin
+  `tests/forms/test_resolvers.py::test_update_omitting_an_empty_column_a_model_clean_fills_never_converts_it[null-true]`
+  now expects the model's value
 
 ## Outside review of the fixes
 
@@ -1675,14 +1701,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 704. (robustness) A `DjangoModelFormMutation` whose optional form field cleans to `""` over a `null=True`
-  non-text column (`IntegerField(null=True)` behind a consumer `CharField(required=False)`) answers "This field
-  cannot be null." for a column that accepts null: the save-time diagnosis names every `""` the column cannot store
-  under the `null` error, though the refusal is that `""` is not the column's type. Found verifying 574
-- [ ] 705. `docs/GLOSSARY.md` (rendered from the fakeshop glossary DB: the ModelForm mutation entry and the shared
-  error envelope) describes the save-time `null` mapping for a `blank=True, null=False` column only; 574 extends it
-  to a `blank=False` column behind a `required=False` consumer form field. Widen both entries in the DB source and
-  re-render. Found verifying 574
+- [ ] 768. (robustness) A `DjangoModelFormMutation` create omitting a column with a `db_default` writes `NULL`
+  through Django's own form field (and a checkbox over a `BooleanField(default=True)` writes `False`, Django's
+  checkbox exception in `construct_instance`) where the model flavor writes the default; pinned as Django's answer by
+  `tests/forms/test_resolvers.py::test_modelform_create_omitting_a_nullable_column_with_a_default_keeps_djangos_answer`.
+  Found fixing 704
 - [ ] 708. (robustness) A declared filter whose own form cannot clean a value of the column it compares, with no
   transform between them (`django_filters.TimeFilter(field_name="occurred_at")` on a `DateTimeField`), is published
   typed by the column (`exact: DateTime`) and answers every value with the masked error (`AttributeError` from
@@ -1698,23 +1721,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   overrode. docs/README.md's filter section lists "a transform you register with an `IntegerField` output" as a
   supported integer transform; the same class registered as Django's own `ExtractHour` filters. Found fact-finding
   387
-- [ ] 710. (robustness) A `DjangoModelFormMutation` create omitting a `null=True` column that has no default writes
-  whatever its form field cleans the absent key to (an `ArrayField`'s `[]`, a checkbox `False`, an `HStoreField`'s
-  `{}`, a consumer `TypedChoiceField`'s `empty_value`, a consumer `CharField` over a `JSONField`'s `""`) where the
-  model flavor and `SerializerMutation` store `NULL`: Django's `construct_instance` skips an omitted field only when
-  the column has a default. Found fixing 620
 - [ ] 714. (robustness) A `FilterSet` with no `Meta.model` set as a Relay `DjangoType`'s `Meta.filterset_class` and
   served by `DjangoConnectionField` builds and publishes its filter input (a `RangeFilter` over `occurred_at` as
   `LooseOccurredAtRangeInputType` with `String` axes), but any value sent to it answers a masked `ConfigurationError`
   "'span' is not a filter input field; it would apply nothing": the build accepts what every request refuses.
   Found verifying 624
-- [ ] 717. (robustness) `forms/resolvers.py::_store_nulls` overwrites a model `clean()`'s value with `NULL` on a
-  `null=True` column whose form field cleaned the bound `None` (an explicit `null`, or an omitted stored `NULL` whose
-  restore a consumer value skipped) to a value, though `_coerced_null_fields`' docstring says a value other than
-  the field's own cleaning is written: a `CharField(required=False)` over a `null=True` `DecimalField` or JSON
-  column with a model `clean()` filling it when empty. Parity pin
-  `tests/forms/test_resolvers.py::test_update_omitting_an_empty_column_a_model_clean_fills_never_converts_it[null-true]`.
-  Found fixing 524
 - [ ] 719. (robustness) A `DjangoModelFormMutation` update omitting a `disabled` `DateTimeField` over a stored
   datetime with microseconds writes it with the microseconds dropped: `BaseForm.get_initial_for_field` strips them,
   so the field's initial is not the stored value and 524's restore does not apply; spec-038 Decision 8 says omitted
@@ -1952,21 +1963,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `tests/filters/test_sets.py::test_a_filter_a_get_filters_override_adds_is_gated_on_its_field_name`): moving
   a declaration into an override silently swaps `check_extra_permission` for `check_topic_permission`. Found
   researching 599
-- [ ] 631. Decide what a `DjangoModelFormMutation` answers when a consumer-declared form field cleans `""` (an
-  omitted create value, an explicit `null`, or `""` on an `ArrayField`) over a `null=True, blank=True` column that
-  stores no empty string. Today `forms/resolvers.py::_is_unstorable_blank` ignores `null`, so the column answers "This
-  field cannot be null." (code `null`), false on a column that takes NULL, while the model flavor and DRF store NULL
-  for the same client input. Options:
-  - (a) write NULL. This overrides the form's cleaned value ("the form is the input source of truth") and needs a
-    savepointed retry after a PostgreSQL `DataError`.
-  - (b) a truthful field-keyed `invalid` error: the column's own `to_python("")` message (integer, float, decimal,
-    date, UUID) and a package message where it has none (`ArrayField`).
-  - (c) keep it and say so in README / GLOSSARY / spec-038, with `null=True` twins of
-    `tests/forms/test_resolvers.py::test_modelform_blank_choice_save_failure_is_field_keyed_null_error` and the
-    `ArrayField` row pinning it.
-  - (d) narrow the predicate to `not field.null`. This leaves a masked `ValueError` / `DataError`, or an `__all__`
-    `invalid`, depending on the column kind.
-  Row 572's parenthetical follows the answer. Found fixing 573
 - [ ] 377. Decide whether the package supersedes graphql-core 3.2's `ExecutionContext.execute_fields` and
   `complete_list_value` bodies in `django_strawberry_framework/_graphql_core_patches.py` so every awaitable an operation
   created settles inside it before an error propagates. Today a sync field raising on a non-null position after an

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 177 to do.
+Progress: 0 done, 178 to do.
 
 ## From dry-0_0_15_3
 
@@ -730,6 +730,14 @@ Progress: 0 done, 177 to do.
   propagates instead of being re-keyed as the row's `null`. A model `save()` that saves a `None` sibling before its
   own save, or writes its own row without sending `pre_save` (`bulk_create([self])`, muted signals), now answers the
   envelope on the model create
+- [ ] 769. CHANGELOG entry for item 704: `DjangoModelFormMutation`: an explicit `null`, or a create omitting the
+  field, on a `null=True` column whose form field cleans it to a value (a consumer `CharField` / `ChoiceField` /
+  `TypedChoiceField` over a numeric, temporal, UUID or JSON column, a checkbox, an `ArrayField`) now stores `NULL`,
+  as the model and serializer flavors do, instead of answering "This field cannot be null." or writing the form
+  field's empty value; a model `clean()` value is written. On such a create omission a consumer form field's own
+  `empty_value` (e.g. `TypedChoiceField(empty_value=0)`) is now replaced by `NULL`; move such a value to the model
+  field's `default`. A `""` your own form code sets on such a column now answers that column's `invalid` error
+  (Django's message) instead of a `null` error (items 631, 705, 710, 717)
 
 ## From dry-upstream-0_0_15
 

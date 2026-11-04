@@ -46,6 +46,7 @@ import decimal
 import functools
 import itertools
 import json
+import uuid
 from collections.abc import Callable, Generator, Iterator
 from enum import Enum
 from types import SimpleNamespace
@@ -126,6 +127,7 @@ if TYPE_CHECKING:
     # out because the checker runs without the django-stubs mypy plugin that would infer them.
     _Bool: TypeAlias = models.BooleanField[bool | Combinable, bool]
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
+    _NullInt: TypeAlias = models.IntegerField[float | int | str | Combinable | None, int | None]
     _Text: TypeAlias = models.TextField[str | Combinable, str]
     _JSON: TypeAlias = models.JSONField[object, object]
     _NullStamp: TypeAlias = models.DateTimeField[
@@ -2522,6 +2524,11 @@ _UNSTORABLE_BLANK_COLUMNS: list[tuple[models.Field[object, object], bool]] = [
     (models.BooleanField(), True),
     (models.TextField(), False),
     (models.JSONField(), False),
+    (models.IntegerField(null=True), False),
+    (models.DecimalField(max_digits=4, decimal_places=2, null=True), False),
+    (models.DateField(null=True), False),
+    (models.UUIDField(null=True), False),
+    (models.BooleanField(null=True), False),
 ]
 
 
@@ -2536,6 +2543,11 @@ _UNSTORABLE_BLANK_COLUMNS: list[tuple[models.Field[object, object], bool]] = [
         "boolean",
         "text",
         "json",
+        "integer-null",
+        "decimal-null",
+        "date-null",
+        "uuid-null",
+        "boolean-null",
     ],
 )
 def test_is_unstorable_blank_names_only_a_column_that_stores_no_empty_string(
@@ -2543,7 +2555,11 @@ def test_is_unstorable_blank_names_only_a_column_that_stores_no_empty_string(
     column: models.Field[object, object],
     refused: bool,
 ) -> None:
-    """Only the ``""`` a column cannot store is an unstorable blank; any other value is not."""
+    """Only the ``""`` a ``null=False`` column cannot store is an unstorable blank.
+
+    Any other value is not, nor is a ``""`` on a ``null=True`` column, whose form field's
+    own cleaning stores ``NULL`` before the save.
+    """
     assert form_resolvers._is_unstorable_blank(column, "") is refused
     assert form_resolvers._is_unstorable_blank(column, None) is False
     assert form_resolvers._is_unstorable_blank(column, 0) is False
@@ -2562,6 +2578,210 @@ def test_is_unstorable_blank_on_postgres_columns() -> None:
     hstore: models.Field[object, object] = postgres_fields.HStoreField()
     assert form_resolvers._is_unstorable_blank(array, "") is True
     assert form_resolvers._is_unstorable_blank(hstore, "") is False
+
+
+# ---------------------------------------------------------------------------
+# Save-time ``""`` consumer code sets on a ``null=True`` column (``_blank_type_errors``)
+# ---------------------------------------------------------------------------
+
+#: ``kind -> (column factory, value sent, value stored)``: a column a consumer ``CharField``
+#: writes, the input a write sends and the value an update starts from.
+_BLANK_REFUSING_COLUMNS: dict[
+    str,
+    tuple[Callable[[bool], models.Field[object, object]], object, object],
+] = {
+    "integer": (lambda null: models.IntegerField(null=null, blank=True), 5, 3),
+    "decimal": (
+        lambda null: models.DecimalField(max_digits=4, decimal_places=2, null=null, blank=True),
+        "1.50",
+        decimal.Decimal("2.50"),
+    ),
+    "date": (
+        lambda null: models.DateField(null=null, blank=True),
+        "2026-01-01",
+        datetime.date(2025, 6, 1),
+    ),
+    "uuid": (
+        lambda null: models.UUIDField(null=null, blank=True),
+        "12345678-1234-5678-1234-567812345678",
+        uuid.UUID(int=7),
+    ),
+}
+
+
+def _clean_value_to_blank(_form: forms.BaseForm) -> str:
+    """A ``clean_value`` resolving the field to ``""`` whatever was sent."""
+    return ""
+
+
+#: ``shape -> (operation, sends the value, get_form_kwargs bind, form attrs)``: how consumer
+#: code sets ``""`` on the column: a ``clean_value`` (create and update), a
+#: ``get_form_kwargs`` binding ``""``, and an update hook dropping the key the
+#: reconstruction bound for the omitted field.
+_BLANK_SETTING_SHAPES: dict[str, tuple[str, bool, str, dict[str, object]]] = {
+    "clean-value": (
+        "create",
+        True,
+        "dict",
+        {"clean_value": _clean_value_to_blank},
+    ),
+    "update-clean-value": (
+        "update",
+        True,
+        "dict",
+        {"clean_value": _clean_value_to_blank},
+    ),
+    "hook-binds-blank": (
+        "create",
+        True,
+        "blank-value",
+        {},
+    ),
+    "hook-drops-key": (
+        "update",
+        False,
+        "drop-value",
+        {},
+    ),
+}
+
+
+def _blank_setting_write(
+    model_class: type[models.Model],
+    shape: str,
+    *,
+    sent: object,
+    stored: object,
+) -> ExecutionResult:
+    """Write ``model_class`` through a consumer ``CharField`` over ``value`` set to ``""`` by ``shape``.
+
+    An update starts from a row holding ``stored``; ``sent`` is the ``value`` input when the
+    shape sends one.
+    """
+    operation, sends, bind, attrs = _BLANK_SETTING_SHAPES[shape]
+    form_class = _keyed_row_form(
+        model_class,
+        "value",
+        forms.CharField(required=False),
+        attrs=attrs,
+    )
+    schema, create_input, update_input = _keyed_row_schema(form_class, model_class, bind=bind)
+    data: dict[str, object] = {"title": "New", **({"value": sent} if sends else {})}
+    selection = "{ result{ title } errors{ field messages codes path } }"
+    if operation == "create":
+        query = f"mutation($d: {create_input}!){{ createRow(data:$d){selection} }}"
+        return schema.execute_sync(query, variable_values={"d": data})
+    row = model_class._base_manager.create(title="Old", value=stored)
+    query = f"mutation($id: ID!, $d: {update_input}!){{ updateRow(id:$id, data:$d){selection} }}"
+    return schema.execute_sync(query, variable_values={"id": str(saved_pk(row)), "d": data})
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("shape", list(_BLANK_SETTING_SHAPES))
+@pytest.mark.parametrize("kind", list(_BLANK_REFUSING_COLUMNS))
+@pytest.mark.parametrize("null", [True, False], ids=["null-true", "null-false"])
+def test_modelform_blank_consumer_code_sets_is_the_columns_own_refusal(
+    *,
+    null: bool,
+    kind: str,
+    shape: str,
+) -> None:
+    """A ``""`` consumer code sets on a column that cannot store it is that column's refusal.
+
+    A ``clean_value`` answering ``""``, a ``get_form_kwargs`` binding ``""`` and an update
+    hook dropping the key the reconstruction bound each leave ``""`` on an integer,
+    decimal, date or UUID column, which ``save()`` refuses. On a ``null=True`` column the
+    envelope carries the column's own ``to_python("")`` refusal, keyed and pathed like the
+    ``null`` error: code ``invalid`` and Django's message with its ``value`` applied, never
+    "This field cannot be null." for a column that stores ``NULL``. A ``null=False``
+    column keeps its ``null`` error. Nothing is written.
+    """
+    factory, sent, stored = _BLANK_REFUSING_COLUMNS[kind]
+    column = factory(null)
+    message, code = (
+        (str(column.error_messages["invalid"]) % {"value": ""}, "invalid")
+        if null
+        else ("This field cannot be null.", "null")
+    )
+    operation = _BLANK_SETTING_SHAPES[shape][0]
+    model_class = _keyed_row_model("BlankSetRow", value=column)
+    with _blank_choice_table(model_class):
+        res = _blank_setting_write(model_class, shape, sent=sent, stored=stored)
+        assert res.errors is None, res.errors
+        root = "createRow" if operation == "create" else "updateRow"
+        assert _json_at(res.data, root) == {
+            "result": None,
+            "errors": [
+                {
+                    "field": "value",
+                    "messages": [message],
+                    "codes": [code],
+                    "path": ["value"],
+                },
+            ],
+        }
+        rows = list(model_class._base_manager.values_list("title", "value"))
+        assert rows == ([] if operation == "create" else [("Old", stored)])
+
+
+class _TypeRefusingIntegerField(models.IntegerField[object, object]):
+    """An integer column whose ``to_python`` refuses ``""`` with a ``TypeError``.
+
+    Neither ``ValidationError`` nor ``ValueError``: the save-time diagnosis must not let it
+    replace the save's own exception.
+    """
+
+    @override
+    def to_python(self, value: object) -> object:
+        if value == "":
+            raise TypeError("no integer in an empty string")
+        return object_result(super().to_python, value)
+
+
+class _BlankAcceptingIntegerField(models.IntegerField[object, object]):
+    """An integer column whose ``to_python`` reads ``""`` as ``None``, as a nullable boolean's does.
+
+    Its ``get_prep_value`` still refuses ``""`` (``int("")``), so the save fails.
+    """
+
+    @override
+    def to_python(self, value: object) -> object:
+        if value == "":
+            return None
+        return object_result(super().to_python, value)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "column_class",
+    [
+        pytest.param(_TypeRefusingIntegerField, id="to-python-type-error"),
+        pytest.param(_BlankAcceptingIntegerField, id="to-python-accepts"),
+    ],
+)
+def test_modelform_blank_a_nullable_column_to_python_refuses_otherwise_is_not_named(
+    column_class: type[models.IntegerField[object, object]],
+) -> None:
+    """A ``""`` whose column ``to_python`` raises no ``ValidationError`` names no column.
+
+    A ``get_form_kwargs`` binds ``""`` on a ``null=True`` column whose ``to_python``
+    raises a ``TypeError`` for it, or accepts it, while its ``get_prep_value`` refuses the
+    save with a ``ValueError``. No column explains the failure: the save's own
+    ``ValueError`` reaches the response unchanged, never the ``TypeError``, and nothing is
+    written.
+    """
+    model_class = _keyed_row_model(
+        "UnnamedBlankRow",
+        value=column_class(null=True, blank=True),
+    )
+    with _blank_choice_table(model_class):
+        res = _blank_setting_write(model_class, "hook-binds-blank", sent=None, stored=None)
+        assert res.errors is not None
+        assert [type(error.original_error) for error in res.errors] == [ValueError]
+        assert [error.message for error in res.errors] == [
+            "Field 'value' expected a number but got ''.",
+        ]
+        assert not model_class._base_manager.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -3839,12 +4059,200 @@ def test_modelform_null_coerced_on_a_not_null_column_is_refused_before_a_filling
         assert rows == ([] if operation == "create" else [("Old", True)])
 
 
+#: ``(column, form field, expected)``: a create omitting ``value`` over a ``null=True``
+#: column: one with a ``default`` keeps Django's default handling (``construct_instance``
+#: skips the column, a checkbox excepted, which writes its ``False``), one with only a
+#: ``db_default`` stores the ``NULL`` Django's own form field cleans to.
+_DEFAULT_SEVEN: models.Field[object, object] = models.IntegerField(
+    null=True,
+    blank=True,
+    default=7,
+)
+_DEFAULT_TRUE: models.Field[object, object] = models.BooleanField(
+    null=True,
+    blank=True,
+    default=True,
+)
+_DEFAULT_FALSE: models.Field[object, object] = models.BooleanField(
+    null=True,
+    blank=True,
+    default=False,
+)
+_DB_DEFAULT_SEVEN: models.Field[object, object] = models.IntegerField(
+    null=True,
+    blank=True,
+    db_default=7,
+)
+_CREATE_OMISSION_WRITES = [
+    pytest.param(
+        _DEFAULT_SEVEN,
+        forms.CharField(required=False),
+        7,
+        id="default",
+    ),
+    pytest.param(
+        _DEFAULT_TRUE,
+        forms.BooleanField(required=False),
+        False,
+        id="checkbox-over-default",
+    ),
+    pytest.param(
+        _DEFAULT_FALSE,
+        forms.BooleanField(required=False),
+        False,
+        id="checkbox-over-default-false",
+    ),
+    pytest.param(
+        _DB_DEFAULT_SEVEN,
+        forms.CharField(required=False),
+        None,
+        id="db-default",
+    ),
+]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(("column", "form_field", "expected"), _CREATE_OMISSION_WRITES)
+def test_modelform_create_omitting_a_nullable_column_with_a_default_keeps_djangos_answer(
+    column: models.Field[object, object],
+    form_field: forms.Field,
+    expected: object,
+    mode: str,
+) -> None:
+    """A create omitting a ``null=True`` column that has a default writes Django's answer.
+
+    Only a column with no ``default`` reads the omission as the ``None`` it stores as
+    ``NULL``: a ``default=7`` column keeps ``7`` (``construct_instance`` skips it), a
+    checkbox over a ``default=True`` or ``default=False`` column writes the ``False``
+    Django's checkbox exception writes, and a ``db_default`` column, which has no
+    ``default``, stores ``NULL``, as Django's own form field does; sync and async.
+    """
+    _assert_nullable_write(
+        column,
+        form_field,
+        operation="create",
+        data={},
+        stored=None,
+        mode=mode,
+        expected=expected,
+    )
+
+
+#: ``kind -> (column, form field, get_form_kwargs bind, value written)``: a multi-key
+#: widget's field over a ``null=True`` column with no default, its parts bound by a hook.
+_HOOK_BOUND_PARTS: dict[
+    str,
+    Callable[[], tuple[models.Field[object, object], forms.Field, str, object]],
+] = {
+    "split-datetime": lambda: (
+        models.DateTimeField(null=True, blank=True),
+        forms.SplitDateTimeField(required=False),
+        "split-parts",
+        forms.SplitDateTimeField().clean(["2026-01-02", "03:04:05"]),
+    ),
+    "select-date": lambda: (
+        models.DateField(null=True, blank=True),
+        forms.DateField(required=False, widget=forms.SelectDateWidget),
+        "select-date-parts",
+        datetime.date(2026, 1, 2),
+    ),
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("kind", list(_HOOK_BOUND_PARTS))
+def test_modelform_create_omitting_a_field_a_hook_binds_under_its_widget_parts_writes_it(
+    kind: str,
+    mode: str,
+) -> None:
+    """A value a hook binds under a multi-key widget's own keys is no omission.
+
+    The input omits ``value`` and a ``get_form_kwargs`` binds only the part keys its widget
+    reads (a ``SplitDateTimeWidget``'s ``value_0`` / ``value_1``, a ``SelectDateWidget``'s
+    ``value_year`` / ``value_month`` / ``value_day``), nothing under ``value`` itself: the
+    field cleans the parts to a value, which is written over the ``null=True`` column with
+    no default, never replaced by ``NULL``; sync and async.
+    """
+    column, form_field, bind, written = _HOOK_BOUND_PARTS[kind]()
+    model_class = _keyed_row_model("HookPartsRow", value=column)
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _keyed_row_form(model_class, "value", form_field),
+            operation="create",
+            data={"title": "New"},
+            stored=None,
+            mode=mode,
+            bind=bind,
+        )
+        assert payload == {"result": {"title": "New"}, "errors": []}
+        assert list(model_class._base_manager.values_list("title", "value")) == [("New", written)]
+
+
+def _fill_empty_value(row: models.Model) -> None:
+    # A model ``clean()`` that fills an empty ``value`` in.
+    if read_attr(row, "value") in {None, ""}:
+        vars(row)["value"] = 3
+
+
+class _FilledValueRow(models.Model):
+    title: _Text = models.TextField()
+    value: _NullInt = models.IntegerField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        app_label = "products"
+
+    @override
+    def clean(self) -> None:
+        _fill_empty_value(self)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("operation", "data"),
+    [
+        pytest.param("create", {}, id="create-omitted"),
+        pytest.param("create", {"value": None}, id="create-null"),
+        pytest.param("update", {"value": None}, id="update-null"),
+    ],
+)
+def test_modelform_null_a_model_clean_fills_on_a_nullable_column_writes_the_models_value(
+    operation: str,
+    data: dict[str, object],
+    mode: str,
+) -> None:
+    """A model ``clean()`` filling a ``null=True`` column the form cleaned empty is written.
+
+    A consumer ``CharField`` over the integer column cleans an explicit ``null`` or a
+    create's omission to ``""``; the model ``clean()`` sets ``3``, which the instance holds
+    in place of the form field's own cleaning, so it is the consumer's and is written, as
+    the model flavor writes it, never replaced by ``NULL``.
+    """
+    model_class = _FilledValueRow
+    with _blank_choice_table(model_class):
+        payload = _write_keyed_row(
+            model_class,
+            _keyed_row_form(model_class, "value", forms.CharField(required=False)),
+            operation=operation,
+            data={"title": "New", **data},
+            stored=None if operation == "create" else {"value": 5},
+            mode=mode,
+        )
+        assert payload == {"result": {"title": "New"}, "errors": []}
+        assert list(model_class._base_manager.values_list("title", "value")) == [("New", 3)]
+
+
 def _nullable_array_column(
     shape: str,
 ) -> tuple[models.Field[object, object], forms.Field | None]:
-    """The ``null=True`` ``ArrayField`` of ``shape`` and the ``SplitArrayField`` declared over it.
+    """The ``null=True`` ``ArrayField`` of ``shape`` and the form field declared over it.
 
-    ``None`` keeps the column's own ``SimpleArrayField``.
+    A ``SplitArrayField``, or a consumer ``CharField`` (``"char"``); ``None`` keeps the
+    column's own ``SimpleArrayField``.
     """
     from django.contrib.postgres import fields as postgres_fields  # noqa: PLC0415 - needs the Postgres driver
     from django.contrib.postgres import forms as postgres_forms  # noqa: PLC0415 - needs the Postgres driver
@@ -3883,6 +4291,10 @@ def _nullable_array_column(
                 default=None,
             ),
             None,
+        ),
+        "char": lambda: (
+            postgres_fields.ArrayField(models.IntegerField(), null=True, blank=True),
+            forms.CharField(required=False),
         ),
     }
     return shapes[shape]()
@@ -3927,6 +4339,15 @@ _NULLABLE_ARRAY_WRITES = [
             "simple-default-none",
         )
         for case, operation, data, stored in _NULL_ARRAY_BINDINGS
+    ),
+    *(
+        pytest.param(shape, "create", {}, None, None, id=f"{shape}-create-omitted")
+        for shape in (
+            "simple",
+            "split-drop-nulls",
+            "split-keep-nulls",
+            "char",
+        )
     ),
     pytest.param("simple", "update", {}, [5, 6], [5, 6], id="simple-omitted-over-list"),
     pytest.param("simple", "update", {"value": []}, None, [], id="simple-empty-list"),
@@ -3978,10 +4399,12 @@ def test_modelform_null_on_a_nullable_array_column_stores_null(
     expected: list[object] | None,
     mode: str,
 ) -> None:
-    """A ``null=True`` ``ArrayField`` sent ``null``, or omitted over ``NULL``, stores ``NULL``.
+    """A ``null=True`` ``ArrayField`` sent ``null``, or omitted, stores ``NULL``.
 
-    ``SimpleArrayField`` cleans the bound ``None`` to ``[]`` and ``SplitArrayField`` to
-    ``[]`` (``remove_trailing_nulls``) or ``size`` nulls; the column keeps the ``NULL``.
+    ``SimpleArrayField`` cleans the bound ``None`` to ``[]``, ``SplitArrayField`` to ``[]``
+    (``remove_trailing_nulls``) or ``size`` nulls, and a consumer ``CharField`` a create's
+    omission to ``""``; the column keeps the ``NULL`` for an explicit ``null``, an update
+    omitting the field over ``NULL`` and a create omitting it.
     An empty list sent is a value (``SplitArrayField`` keeping trailing nulls cleans it to
     ``size`` nulls, Django's own answer), and an update omitting the field over a list
     keeps the list.
@@ -5463,7 +5886,10 @@ def _prefixed_copy(data: dict[str, object]) -> dict[str, object]:
 #: ``multivalue`` a ``MultiValueDict`` holding each value as its one entry; ``doseq`` the
 #: ``QueryDict`` a query string spelling each list as repeated keys parses to (a list per
 #: key, as text); ``prefixed-copy`` the hook's own ``pfx-<name>`` copy (a form prefixed
-#: ``pfx`` keeps it as bound), as a ``dict`` or a ``MultiValueDict``.
+#: ``pfx`` keeps it as bound), as a ``dict`` or a ``MultiValueDict``; ``blank-value`` a copy
+#: binding ``""`` under ``value``; ``drop-value`` a copy without the ``value`` key;
+#: ``split-parts`` / ``select-date-parts`` a copy binding only the part keys a
+#: ``SplitDateTimeWidget`` / ``SelectDateWidget`` reads for ``value``.
 _BOUND_DATA: dict[str, Callable[[dict[str, object]], Mapping[str, object]]] = {
     "multivalue": lambda data: MultiValueDict({name: [value] for name, value in data.items()}),
     "doseq": lambda data: QueryDict(urlencode(data, doseq=True)),
@@ -5471,6 +5897,15 @@ _BOUND_DATA: dict[str, Callable[[dict[str, object]], Mapping[str, object]]] = {
     "prefixed-copy-multivalue": lambda data: MultiValueDict(
         {name: [value] for name, value in _prefixed_copy(data).items()},
     ),
+    "blank-value": lambda data: {**data, "value": ""},
+    "split-parts": lambda data: {**data, "value_0": "2026-01-02", "value_1": "03:04:05"},
+    "select-date-parts": lambda data: {
+        **data,
+        "value_year": "2026",
+        "value_month": "1",
+        "value_day": "2",
+    },
+    "drop-value": lambda data: {name: value for name, value in data.items() if name != "value"},
 }
 
 
@@ -7111,7 +7546,7 @@ def test_update_omitting_a_column_a_model_clean_sets_writes_the_models_value() -
     ("model", "stored", "tags"),
     [
         pytest.param(_TagsRow, {}, {"k": "v"}, id="null-false"),
-        pytest.param(_NullTagsRow, None, None, id="null-true"),
+        pytest.param(_NullTagsRow, None, {"k": "v"}, id="null-true"),
     ],
 )
 @pytest.mark.django_db(transaction=True)
@@ -7127,7 +7562,8 @@ def test_update_omitting_an_empty_column_a_model_clean_fills_never_converts_it(
     instance holds the model's value, which is written, and the
     ``HStoreField``-shaped ``to_python``, which raises ``JSONDecodeError`` on ``""``, never
     runs. On the ``null=True`` column the bound ``None`` the ``CharField`` cleaned to ``""``
-    is stored as ``NULL`` (``_store_nulls``).
+    is not stored as ``NULL``: the instance holds the model's value in place of the form
+    field's own cleaning (``_holds_own_cleaning``), so it is written there too.
     """
     row = _update_omitting(model, _tags_form(model), {"tags": stored})
     assert row == {"title": "New", "tags": tags}

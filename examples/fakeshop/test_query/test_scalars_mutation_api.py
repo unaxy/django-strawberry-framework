@@ -66,6 +66,12 @@ a string sent is stored as that JSON string and one stored is kept when omitted.
 omitting ``label`` and ``payload`` keeps each column's stored value where the form field's own
 cleaning would rewrite it: a ``"  padded  "`` label is not stripped, a ``NULL`` label is not
 written ``""``, and a JSON object or list is not written as its Python text, sync and async.
+The same form writes the ``null=True`` float column ``score`` through a ``CharField``, whose
+``""`` the column cannot store: an explicit ``score: null`` on create and on update over a
+value or ``NULL``, and a create omitting it, store ``NULL`` with empty ``errors``, sync and
+async, where the column's ``null`` error would be false; an update omitting it keeps the
+stored value. A create omitting ``flag`` or ``payload`` stores ``NULL`` too, while one
+omitting the text column ``label`` keeps ``""``.
 """
 
 from __future__ import annotations
@@ -1174,6 +1180,7 @@ _FLAG_FORM = (
 #: ``flag`` input sent (absent when ``data`` omits it) and the ``flag`` the row holds after.
 _FLAG_WRITES = [
     pytest.param("create", None, {"flag": None}, None, id="create-null"),
+    pytest.param("create", None, {}, None, id="create-omitted"),
     pytest.param("update", True, {"flag": None}, None, id="update-null-over-true"),
     pytest.param("update", False, {"flag": None}, None, id="update-null-over-false"),
     pytest.param("update", None, {"flag": None}, None, id="update-null-over-null"),
@@ -1187,7 +1194,7 @@ _FLAG_WRITES = [
 ]
 
 
-def _flag_document(operation: str) -> tuple[str, str]:
+def _flag_document(operation: str, selection: str = "label flag") -> tuple[str, str]:
     """Return the checkbox form mutation's root field and its document over ``$data``."""
     create_field, create_input, update_field, update_input = _FLAG_FORM
     if operation == "create":
@@ -1199,7 +1206,7 @@ def _flag_document(operation: str) -> tuple[str, str]:
     document = f"""
         mutation Write({arguments}) {{
           {call} {{
-            result {{ label flag }}
+            result {{ {selection} }}
             errors {{ field messages codes path }}
           }}
         }}
@@ -1252,9 +1259,10 @@ def test_checkbox_over_a_nullable_boolean_stores_null_for_null(
 ) -> None:
     """A checkbox over the ``null=True`` ``flag`` stores ``NULL`` for an explicit or kept ``null``.
 
-    The declared ``forms.BooleanField(required=False)`` reads a bound ``None`` as ``False``.
-    An explicit ``flag: null`` on create, on update over ``true``, ``false`` or ``NULL``
-    stores ``NULL``, as the model flavor does, with empty ``errors``, and an update omitting
+    The declared ``forms.BooleanField(required=False)`` reads a bound ``None`` or an absent
+    key as ``False``. An explicit ``flag: null`` on create, on update over ``true``,
+    ``false`` or ``NULL``, and a create omitting ``flag`` (the column has no default)
+    store ``NULL``, as the model flavor does, with empty ``errors``, and an update omitting
     ``flag`` over a stored ``NULL`` keeps it. ``true`` and ``false`` are written as sent,
     and an update omitting ``flag`` over a stored ``true`` or ``false`` keeps it.
     """
@@ -1269,29 +1277,31 @@ def test_checkbox_over_a_nullable_boolean_stores_null_for_null(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    ("operation", "value", "expected"),
+    ("operation", "data", "expected"),
     [
-        pytest.param("create", None, "", id="create-null"),
-        pytest.param("update", None, "", id="update-null"),
-        pytest.param("update", "kept", "kept", id="update-value"),
+        pytest.param("create", {"label": None}, "", id="create-null"),
+        pytest.param("create", {}, "", id="create-omitted"),
+        pytest.param("update", {"label": None}, "", id="update-null"),
+        pytest.param("update", {"label": "kept"}, "kept", id="update-value"),
     ],
 )
 def test_text_column_under_the_flag_form_keeps_the_empty_string_for_null(
     operation: str,
-    value: str | None,
+    data: Mapping[str, object],
     expected: str,
 ) -> None:
     """``label: null`` on the ``null=True`` text column ``label`` stores ``""``, never ``NULL``.
 
-    The column's own ``CharField`` cleans ``None`` to ``""``, Django's empty value for a
-    text column, and the form flavor writes it as cleaned; a value sent is written.
+    The column's own ``CharField`` cleans ``None`` and a create's absent key to ``""``,
+    Django's empty value for a text column, and the form flavor writes it as cleaned; a
+    value sent is written.
     """
     root, document = _flag_document(operation)
     if operation == "create":
-        variables: dict[str, object] = {"data": {"label": value, "flag": True}}
+        variables: dict[str, object] = {"data": {"flag": True, **data}}
     else:
         specimen = models.NullableScalarSpecimen.objects.create(label="stored", flag=True)
-        variables = {"id": str(specimen.pk), "data": {"label": value}}
+        variables = {"id": str(specimen.pk), "data": dict(data)}
 
     payload = response_json(post_graphql(document, variables=variables))
 
@@ -1312,6 +1322,7 @@ def test_text_column_under_the_flag_form_keeps_the_empty_string_for_null(
     ),
     [
         pytest.param("create", None, {"flag": None}, None, id="create-null"),
+        pytest.param("create", None, {}, None, id="create-omitted"),
         pytest.param("update", True, {"flag": None}, None, id="update-null-over-true"),
         pytest.param("update", None, {}, None, id="update-omitted-over-null"),
         pytest.param("update", True, {}, True, id="update-omitted-over-true"),
@@ -1346,6 +1357,7 @@ async def test_async_checkbox_over_a_nullable_boolean_stores_null_for_null(
 #: ``payload`` input sent (absent when ``data`` omits it) and the ``payload`` the row holds.
 _PAYLOAD_WRITES = [
     pytest.param("create", None, {"payload": None}, None, id="create-null"),
+    pytest.param("create", None, {}, None, id="create-omitted"),
     pytest.param("update", "x", {"payload": None}, None, id="update-null-over-value"),
     pytest.param("update", None, {"payload": None}, None, id="update-null-over-null"),
     pytest.param("update", None, {}, None, id="update-omitted-over-null"),
@@ -1376,7 +1388,8 @@ def test_char_field_over_a_nullable_json_column_stores_null_for_null(
     The declared ``forms.CharField(required=False)`` cleans a bound ``None`` to ``""``,
     which the ``JSONField`` would store as the JSON string; the column is no text column
     (``empty_strings_allowed`` is false), so an explicit ``payload: null`` on create and on
-    update over a value or ``NULL`` stores ``NULL`` with empty ``errors``, and an update
+    update over a value or ``NULL``, and a create omitting it (the column has no default),
+    store ``NULL`` with empty ``errors``, and an update
     omitting it over ``NULL`` keeps it. A string sent is stored as that JSON string, and an
     update omitting ``payload`` over a stored string keeps it.
     """
@@ -1399,6 +1412,114 @@ def test_char_field_over_a_nullable_json_column_stores_null_for_null(
     }
     rows = list(models.NullableScalarSpecimen.objects.values_list("label", "payload"))
     assert rows == [(label, expected)], rows
+
+
+#: ``(operation, stored, data, expected)``: the stored ``score`` an update starts from, the
+#: ``score`` input sent (absent when ``data`` omits it) and the ``score`` the row holds.
+_SCORE_WRITES = [
+    pytest.param("create", None, {"score": None}, None, id="create-null"),
+    pytest.param("create", None, {}, None, id="create-omitted"),
+    pytest.param("update", 1.5, {"score": None}, None, id="update-null-over-value"),
+    pytest.param("update", None, {"score": None}, None, id="update-null-over-null"),
+    pytest.param("update", 1.5, {}, 1.5, id="update-omitted-over-value"),
+    pytest.param("update", None, {}, None, id="update-omitted-over-null"),
+    pytest.param("create", None, {"score": 2.5}, 2.5, id="create-value"),
+    pytest.param("update", 1.5, {"score": 2.5}, 2.5, id="update-value-over-value"),
+]
+
+
+def _score_variables(
+    operation: str,
+    data: Mapping[str, object],
+    *,
+    stored: float | None,
+) -> dict[str, object]:
+    """Seed the row an update starts from (``score`` ``stored``) and build the variables."""
+    if operation == "create":
+        return {"data": {"label": "written", **data}}
+    specimen = models.NullableScalarSpecimen.objects.create(label="stored", score=stored)
+    return {"id": str(specimen.pk), "data": {"label": "renamed", **data}}
+
+
+def _assert_score_written(root: str, payload: JSONObject, *, expected: float | None) -> None:
+    """The write succeeded and the one row, read through the base manager, holds ``expected``."""
+    label = "written" if root == _FLAG_FORM[0] else "renamed"
+    assert payload == {
+        "data": {root: {"result": {"label": label, "score": expected}, "errors": []}},
+    }
+    rows = list(models.NullableScalarSpecimen._base_manager.values_list("label", "score"))
+    assert rows == [(label, expected)], rows
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "operation",
+        "stored",
+        "data",
+        "expected",
+    ),
+    _SCORE_WRITES,
+)
+def test_char_field_over_a_nullable_float_column_stores_null_for_null(
+    operation: str,
+    data: Mapping[str, object],
+    *,
+    stored: float | None,
+    expected: float | None,
+) -> None:
+    """A ``CharField`` over the ``null=True`` float ``score`` stores ``NULL`` for ``null``.
+
+    The declared ``forms.CharField(required=False)`` cleans a bound ``None`` and a
+    create's absent key to ``""``, which the float column cannot store; its input stays
+    ``Float``, so the client never sends ``""``. An explicit ``score: null`` on create and
+    on update over a value or ``NULL``, and a create omitting it (the column has no
+    default), store ``NULL`` with empty ``errors``, never the column's ``null`` error, as
+    the model flavor and Django's own form field do. An update omitting ``score`` keeps the
+    stored value, and a value sent is written.
+    """
+    root, document = _flag_document(operation, "label score")
+
+    payload = response_json(
+        post_graphql(document, variables=_score_variables(operation, data, stored=stored)),
+    )
+
+    _assert_score_written(root, payload, expected=expected)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "operation",
+        "stored",
+        "data",
+        "expected",
+    ),
+    _SCORE_WRITES,
+)
+async def test_async_char_field_over_a_nullable_float_column_stores_null_for_null(
+    operation: str,
+    data: Mapping[str, object],
+    *,
+    stored: float | None,
+    expected: float | None,
+) -> None:
+    """The async pipeline stores ``NULL`` for the ``CharField`` ``score``'s ``null`` the same way."""
+    root, document = _flag_document(operation, "label score")
+    variables = await sync_to_async(_score_variables)(operation, data, stored=stored)
+    with override_settings(ROOT_URLCONF=__name__):
+        result = await AsyncTestClient().query(
+            document,
+            variables=variables,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+
+    await sync_to_async(_assert_score_written)(
+        root,
+        response_json(result.response),
+        expected=expected,
+    )
 
 
 #: ``(stored, ...)``: the ``label`` / ``payload`` the row an update omitting both starts from.

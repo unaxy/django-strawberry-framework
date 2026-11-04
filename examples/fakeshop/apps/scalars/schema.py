@@ -43,9 +43,10 @@ widget's ``decompress`` cannot split the text of a datetime (``PostedSplitForm``
 ``ConfigurationError`` before ``is_valid()``. The ``NullableScalarSpecimen`` ``ViaForm``
 pair writes the ``null=True`` ``flag`` column through
 ``forms.NullableScalarSpecimenFlagForm``'s checkbox and the ``null=True`` ``payload`` JSON
-column through its ``CharField``, so an explicit ``null`` stores ``NULL``, while an update
-omitting ``label``, ``flag`` or ``payload`` keeps the stored value, ``NULL`` included, where
-the form field's own cleaning would rewrite it.
+and ``score`` float columns through its ``CharField``, so an explicit ``null``, or a create
+omitting the field, stores ``NULL``, while an update omitting ``label``, ``flag``,
+``payload`` or ``score`` keeps the stored value, ``NULL`` included, where the form field's
+own cleaning would rewrite it.
 
 ``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
 ``FilteredRelation("parent")`` alias named ``par``, filtered by
@@ -784,7 +785,7 @@ class Mutation:
     ``occurredAt`` through a ``SplitDateTimeField``; the ``ViaPosted`` pairs bind posted
     text over the temporal and the split form; the ``NullableScalarSpecimen``
     ``ViaForm`` pair writes the ``null=True`` ``flag`` through a checkbox and ``payload``
-    through a ``CharField``.
+    and ``score`` through a ``CharField``.
     """
 
     create_media_specimen = DjangoMutationField(CreateMediaSpecimen)
