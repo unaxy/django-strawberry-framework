@@ -68,22 +68,16 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   field; `DjangoMutationField` checked ledger membership by equality, so a drained class equal to its redeclaration built a
   schema whose requests failed. Both fixed (`b4d6e06a`). The raw `__name__` labels, the protocol probe and the Payload
   name need no code: no contract row, and the name question is item 26's
-- [x] 18. `optimizer/` robustness rows (not defects: application Python and settings values, no wire input). A
-  `prefetch_obj` whose `__class__` raised escaped `_require_prefetch` raw; a strategy selection or `strictness=` value whose
-  `__class__` raised or claimed `str` (and a lazy proxy of a name) escaped `resolve_strategy` / `_is_valid_strictness` raw on
-  every route, the `NESTED_CONNECTION_STRATEGY` setting included, against their docstrings' typed-error promises. The
-  Prefetch test is now a guarded `isinstance` (subclasses and proxies still pass); the str and class tests ask the real
-  type (`utils/_narrowing.py::is_str`, `is_class`) (`f788edcf`). `unwindowable_child_queryset_reason` needs no code: no
-  contract row, Django-private input
-- [x] 19. `rest_framework/` robustness rows (not defects: consumer hook and serializer Python, no wire input). A field-map,
-  `nested_fields` or hook-return value whose `__class__` raised, a non-string hook key whose `__repr__` raised, a hostile
-  `write_alias` and a hostile `save()` return escaped raw against their docstring / GLOSSARY / spec-039 typed-error
-  promises; the frozen hook view passed `__class__` spoofs and lazy proxies of immutables by reference against its
-  fails-closed promise; and a kept serializer field named by a non-identifier or a keyword passed class creation, then raised
-  an unnamed `SyntaxError` at finalize. Mapping and Field tests are now guarded `isinstance` (proxies still pass); the
-  freeze, the alias and the saved result ask the real type; renders use the guarded repr; kept input names are checked at
-  class creation, root and nested (`5cbe15de`). The raw `__name__` labels need no code (item 26's); `_error_node_children`'s
-  `str(key)` needs none: no contract row, and DRF keeps detail keys as given
+- [x] 18. `optimizer/` robustness rows (not defects, no wire input): a hostile `__class__` on a `prefetch_obj`,
+  strategy selection or `strictness=` value (the `NESTED_CONNECTION_STRATEGY` setting included) escaped
+  `_require_prefetch` / `resolve_strategy` / `_is_valid_strictness` raw against their typed-error promises. Now a
+  guarded `isinstance` and real-type tests (`utils/_narrowing.py::is_str`, `is_class`) (`f788edcf`);
+  `unwindowable_child_queryset_reason` needs no code.
+- [x] 19. `rest_framework/` robustness rows (not defects, no wire input): hostile `__class__` / `__repr__` values in
+  field maps, `nested_fields`, hook returns, `write_alias` and `save()` returns escaped raw, the frozen hook view
+  passed spoofs by reference, and a non-identifier kept serializer field raised an unnamed `SyntaxError` at finalize.
+  Now guarded `isinstance`, real-type reads, the guarded repr, and kept names checked at class creation (`5cbe15de`).
+  The raw `__name__` labels (item 26's) and `_error_node_children` need no code.
 - [x] 20. Filter and order set robustness rows (not defects: application Python, no wire input). The `Meta.fields` shape
   gate let a value whose `__class__` raises escape raw on both families (fixed with item 23). The rest need no code: the
   set-class, owner and Filter-class name reads are message labels (item 26's question), and a hostile `__eq__` / `__ne__`
@@ -95,23 +89,16 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   return whose `__class__` raised escaped `_factory_application` raw against spec-046 Decision 11. The class test now asks
   the real type (`is_class`), both definition reads sit inside the contained read with `origin` read only off the
   registry's own definition, and the coroutine test is a guarded `isinstance` (a lazy-proxied coroutine is still closed)
-- [x] 22. `types/` robustness rows (not defects: application Python and settings, no wire input). A `Meta` value or entry
-  whose `__class__` raised or claimed a type (`model`, `name`, `description`, `primary`, `connection`, `cursor_field`,
-  `relation_shapes`, `globalid_strategy` and `RELAY_GLOBALID_STRATEGY`, `interfaces`, `fields` / `exclude` and the other
-  field sequences, `optimizer_hints`), a class attribute shadowing a model field, a non-string annotation key whose
-  `__repr__` raised, and a `resolve_id_attr` result that is not really a string escaped raw against the GLOSSARY /
-  docstring typed-error promises. Each gate is now a guarded `isinstance` (lazy proxies still pass), `Meta.name` /
-  `Meta.description` and annotation keys ask the real type, keys render through the guarded repr, and the
-  `resolve_id_attr` result is normalized inside its fail-closed guard. Labels, hostile iteration, `__mro__` reads and
-  hostile `str`-subclass methods need no code (no contract row)
-- [x] 23. `utils/` robustness rows (not defects: application Python and settings, no wire input). A `Meta.fields` whose
-  `__class__` raised now gets the typed re-readable rejection on both set families (`canonicalize_set_meta_fields`,
-  `FilterSet.get_fields`, `is_re_readable_field_declaration`); `normalize_field_name_sequence`,
-  `filter_input_type` / `order_input_type`, the string helpers, `session_store_class`, `resolve_policy`,
-  `validated_field_directives`, the `ValidationError` mapper, the input-walk field name and depth label, and the SQL
-  statement classifier now keep their documented typed outcome for a value whose `__class__` raises or claims `str`. The
-  dynamic-set-class rows were stale (code deleted in `899cb35b`); the `__name__` labels in `utils/inputs.py`,
-  `querysets.py` and `write_transaction.py` and the depth-cap knob reads need no code (no contract row)
+- [x] 22. `types/` robustness rows (not defects, no wire input): a `Meta` value whose `__class__` raised or claimed a
+  type, a class attribute shadowing a model field, a hostile annotation key and a non-string `resolve_id_attr` result
+  escaped raw against typed-error promises. Each gate is now a guarded `isinstance` (lazy proxies pass), `Meta.name` /
+  `Meta.description` and annotation keys ask the real type, and the `resolve_id_attr` result is normalized inside its
+  fail-closed guard.
+- [x] 23. `utils/` robustness rows (not defects, no wire input): a `Meta.fields` whose `__class__` raised now gets the
+  typed re-readable rejection (`canonicalize_set_meta_fields`, `FilterSet.get_fields`,
+  `is_re_readable_field_declaration`), and `normalize_field_name_sequence`, the string helpers, `resolve_policy` and
+  the other listed helpers keep their typed outcome for a hostile value. The dynamic-set-class rows were stale (code
+  deleted in `899cb35b`); the `__name__` labels need no code.
 - [x] 24. Trailing-comma lint rows: t3-only (both were in t3's own hunks); `scripts/check_trailing_commas.py --check` passes on
   main
 - [x] 25. Stale test-fixture row: already fixed on main (`a01a2ab8` gave the proxy-target fixtures a private `Meta.apps`)
@@ -206,13 +193,10 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   one copy, and a probe or a racing run recreated an unmarked flow folder; every command now holds a shared lock on the
   flow folder, `gc` holds it exclusive through the removal (marker last), `release` keeps each copy's lock through its
   state write, `lock_is_busy` and `gc --force` are gone (`4ed767bb`)
-- [x] 90. Nested list-of-choice serializer shapes (`ListField(child=MultipleChoiceField)`,
-  `ListField(child=ListField(child=ChoiceField))`) publish `[[String!]!]` by spec-039's one-level peel
-  (`serializer_choice_source`). Not a defect under rule 37 (no contract row: spec-039 states `list[list[str]]`; no wire input
-  writes a wrong value): they are reachable only as serializer-only fields, DRF checks every leaf with a field-keyed error
-  (`f.0.0` under `ListField(child=ListField(child=ChoiceField))`, `f.1` under `ListField(child=MultipleChoiceField)`),
-  declared over any column they are refused at build, and neither graphene-django nor strawberry-django types nested choice
-  lists as enums; no code. Found probing it: items 151-154
+- [x] 90. Not a defect under rule 37 (no contract row): nested list-of-choice serializer shapes
+  (`ListField(child=MultipleChoiceField)`, `ListField(child=ListField(child=ChoiceField))`) publish `[[String!]!]` by
+  spec-039's one-level peel (`serializer_choice_source`); DRF checks every leaf with a field-keyed error and over a
+  column they are refused at build; no code. Found probing it: items 151-154.
 - [x] 128. `testing/relay.py::global_id_for` annotated `schema` with a `TYPE_CHECKING`-only `Schema` in a module without
   `from __future__ import annotations`, so importing the public module raised `NameError` on Python 3.10-3.13 (the CI floor
   cell failed collection; nothing static caught it); the annotation is quoted (`7413c7b5`) and ruff `TC004` (quoting fix)
@@ -241,13 +225,10 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   decoder now matches the index against `0|[1-9][0-9]*` in full (same accepted set); live rows pin the superscript and the
   mixed non-ASCII digit on the root, and every malformed cursor on the planned nested `booksConnection` window (the nested
   field's `errors[].path`, no window statement)
-- [x] 66. The composite-index advisory recommended child-table indexes on columns the child's table does not hold: an MTI
-  child declaring its own FK or generic link and ordered by an inherited column (explicit order, `Meta.ordering`,
-  `Meta.cursor_field`) was told to add `(holder_id, name, ptr)`, which Django refuses (models.E016), and a generic link whose
-  content type sits on the parent got `content_type_id` named on the child. The advisory now resolves every column it names
-  as the window does (`Query.resolve_ref`, the query's base table only) and stays silent when any lives off the child's
-  table; `pk` orders and spans Django trims to a local column now advise, and an MTI `id` names the parent-link column;
-  CHANGELOG item 233; filed 234, 235
+- [x] 66. The composite-index advisory named child-table indexes on columns the child's table does not hold (an MTI
+  child ordered by an inherited column; a generic link whose content type sits on the parent), which Django refuses
+  (models.E016). It now resolves every column as the window does (`Query.resolve_ref`, base table only) and stays
+  silent when one lives off the child's table; `pk` orders now advise. CHANGELOG item 233; filed 234, 235.
 - [x] 67. A Django `ValidationError` names no model and no nested item, so a save-time error about a child or related row
   was re-keyed through the backing model's map (a child's `name` landing on the root's renamed `title`, on every flavor)
   while the README, spec-036, spec-039 and the GLOSSARY promised the input the client sent at every depth. The docs now state
@@ -269,20 +250,15 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   (`a5dc6ea3`, item 5)
 - [x] 195. Re-checked at `8ca6a481`: `test_audit_marks_target_parse_failure_as_incomplete` and the three `async_executor`
   rows in `tests/utils/test_querysets.py` pass; no fix commit identified (possibly stale when filed)
-- [x] 92. A Django `ValidationError` raised at save time (a consumer `Model.save()` / `delete()`, a save / delete /
-  `m2m_changed` signal, `ModelForm.save()`, `perform_mutate`, register's user save) reached the client as a masked
-  top-level error on the model, ModelForm, plain-form and register flavors, while the serializer flavor mapped it; every
-  flavor now returns the `FieldError` envelope, keyed like `full_clean()` / `form.errors` and rolled back, through one
-  catch in `mutations/resolvers.py::save_or_field_errors` (plus the forced-update and delete wrappers), with no new
-  savepoint and no query-count change; a `ValueError` still propagates. The kanban example's hand-written mapping is gone;
-  CHANGELOG item 232; filed 230, 231
-- [x] 97. `isnull` declared on a relation key django-filter's table does not name (a forward `ForeignObject` of any link
-  width, its reverse, a `GenericRelation`) raised "unrecognized field type" at class creation (dropped under WARN /
-  IGNORE) while a `ForeignKey` built a `BooleanFilter`; `filters/sets.py::FilterSet.filter_for_lookup` now replays
-  upstream's isnull branch from the merged `BooleanField` selection for those keys (`_null_test_filter_for_relation`),
-  so every relation key's `isNull` is a Boolean null test (carrier columns on the raw path, "no visible related row" on
-  a scoped target, as on a `ForeignKey`); the policy table still mirrors django-filter. Live row: fakeshop
-  `ShelfLabelFilter` `shelf` through the new `allLibraryShelfLabelsFiltered` root; CHANGELOG item 240; filed 239
+- [x] 92. A Django `ValidationError` raised at save time (consumer `save()` / `delete()`, signals, `ModelForm.save()`,
+  `perform_mutate`) was a masked top-level error on the model, ModelForm, plain-form and register flavors; every
+  flavor now returns the `FieldError` envelope keyed like `full_clean()`, rolled back, through
+  `mutations/resolvers.py::save_or_field_errors`; a `ValueError` still propagates. CHANGELOG item 232; filed 230, 231.
+- [x] 97. `isnull` on a relation key django-filter's table does not name (a forward `ForeignObject`, its reverse, a
+  `GenericRelation`) raised "unrecognized field type" at class creation;
+  `filters/sets.py::FilterSet.filter_for_lookup` now replays upstream's isnull branch for those keys
+  (`_null_test_filter_for_relation`), so every relation key's `isNull` is a Boolean null test as on a `ForeignKey`.
+  Live row: fakeshop `ShelfLabelFilter` via `allLibraryShelfLabelsFiltered`; CHANGELOG item 240; filed 239.
 - [x] 211. A repo-wide `ruff check --fix .` / `ruff format .` rewrote untracked hunt evidence; `[tool.ruff]` now
   `extend-exclude`s `hunt-ws`, so ruff checks only the tracked tree (git-ignored copies such as `.claude/worktrees/` were
   already skipped); `docs/ruffing.md` "Files ruff skips" says so
@@ -299,47 +275,37 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   `str` gate, base-slot read and iteration), so no consumer dunder decides the dedup or the protected refusal and the
   derived tuple holds base `str` only; a `REQUIRED_FIELDS` that is not a list or tuple (Django's `auth.E001`) or a
   non-string entry raises `ConfigurationError` naming the model; spec-040 Decision 6 and Test plan say so
-- [x] 222. Class membership over class objects is an identity scan wherever a consumer metaclass reaches it:
-  `TypeRegistry.register` / `_detach_type_from_model`, `FilterSet._filters_along`, `apply_interfaces`,
-  `guard_nested_recursion`, `apply_cascade_permissions`, the auth `permission_classes` conflict key and the
-  `GeneratedInputArgumentsFactory` subclassing check; an always-equal or raising metaclass `__eq__` no longer drops a type,
-  removes the wrong one, truncates a flat filter path, drops an interface, reports a false cycle, admits a different
-  permission set or escapes raw; specs 001, 015, 018, 027, 034, 039 and 040 say so (before Python 3.12 `inspect` still
-  compares a class with `type` / `object` by equality when Strawberry reads its signature)
+- [x] 222. Class membership over class objects is now an identity scan wherever a consumer metaclass reaches it
+  (`TypeRegistry.register` / `_detach_type_from_model`, `FilterSet._filters_along`, `apply_interfaces` and others), so
+  a lying or raising metaclass `__eq__` no longer drops or removes the wrong type, truncates a filter path, reports a
+  false cycle or escapes raw. Docs: specs 001, 015, 018, 027, 034, 039, 040 (before Python 3.12 `inspect` still
+  compares by equality).
 - [x] 244. A lone surrogate in a raw relation id over a text-pk target (`editionId: "\ud800"`, a `boundWith` member) or
   in an update / delete `id` over a text-pk non-Relay primary escaped as the masked "An unexpected error occurred." in the
   model, form and serializer flavors (the text preflight ran on scalar leaves only): `type_check_relation_id` and
   `coerce_lookup_id` now run it on the coerced pk before any query, keyed `editionId`, `boundWith.<i>` or `id`, `invalid`;
   well-formed non-ASCII ids still write; fakeshop gains `Printing.bound_with` and the Printing / Edition write mutations
   that reach it; specs 038 and 039 say so
-- [x] 224. A `str`-subclass value (a `StrEnum` member, an honest subclass, one whose `__eq__` lies or raises) is read as
-  its text: `DjangoOptimizerExtension(strictness=)` stores the vocabulary's own constant, so a lying `__eq__` no longer
-  disarms the N+1 guard and a raising one no longer fails every request; `FilterSet` / `OrderSet` `Meta.fields` (list,
-  tuple, set, dict keys and lookup values, `filter_fields`, `"__all__"`, any re-readable collection) and `FilterSet`
-  `Meta.exclude` read through `utils/inputs.py::plain_set_meta_fields`, so the field its text spells is filtered,
-  ordered or excluded instead of refused with a false message or escaping raw; a plain declaration keeps its identity
-  and kind; specs 027 and 028 say so
-- [x] 100. A random order on a nested connection's target (`"?"` from a hook or `Meta.ordering`, a `Random()` bare,
-  composed, behind an alias / `F` / transform, or read in a `When` condition) went into the optimizer window, which
-  evaluates the order up to three times per statement: `"?"` raised a masked "Cannot resolve keyword '?'" at plan time
-  (the whole root field lost) and `Random()` served wrong cursors and pageInfo, while the root and the optimizer-off
-  path served both; `optimizer/plans.py::has_random_term` now leaves such a relation to the per-parent pipeline
-  (strictness-visible, a keyset target keeps its own error and its `cursor_field` window), a condition's string value
-  stays a literal; spec-033 lists the arm
+- [x] 224. A `str`-subclass value (a `StrEnum` member, one whose `__eq__` lies or raises) is read as its text:
+  `DjangoOptimizerExtension(strictness=)` stores the vocabulary's own constant, so a lying `__eq__` no longer disarms
+  the N+1 guard, and `FilterSet` / `OrderSet` `Meta.fields` and `Meta.exclude` read through
+  `utils/inputs.py::plain_set_meta_fields`, so the spelled field is filtered, ordered or excluded. Docs: specs 027,
+  028.
+- [x] 100. A random order on a nested connection's target (`"?"` or `Random()`) went into the optimizer window, which
+  evaluates the order up to three times: `"?"` lost the root field to a masked error and `Random()` served wrong
+  cursors and pageInfo. `optimizer/plans.py::has_random_term` now leaves such a relation to the per-parent pipeline
+  (strictness-visible). Docs: spec-033.
 - [x] 101. `manage.py import_spec_terms --check` was red: spec sweeps rewrote terms CSVs without the writing importer
   (14 extra / 5 missing rows on 8 done cards, 119 order shifts, 462 stale `notes`), and `--check` compared anchors only,
   stopped at the first card and missed orphans; it now passes exactly when the writing run writes nothing (every
   written column, every card and planning error in one run, orphan mentions reaped, no restamp of unchanged rows), a
   pre-commit hook and the CI lint step run it, `check_spec_glossary.py` refuses a repeated anchor, the DB is re-synced
   and card 056 / 053 board text it falsified is corrected
-- [x] 107. `DjangoModelFormMutation` and `SerializerMutation` published the model's primary key (a one-to-one
-  `primary_key=True`, a text key, a serializer field whose source resolves to it) on the update input, so another row's
-  key wrote that row and the post-write guard answered a masked error, while `DjangoMutation` dropped every key on
-  create too (a text-key create committed `""` and the next one overwrote it); an update input now never carries the
-  primary key (update `fields` naming it raises at class creation, `exclude` naming it is accepted), a model create
-  takes a client-assigned key under the default / `db_default` required rule (a `db_default` column is optional), a
-  nested serializer field and a non-editable form key are not the key, `build_form_inputs` is gone; specs 036, 038, 039
-  say so
+- [x] 107. `DjangoModelFormMutation` and `SerializerMutation` published the model's primary key on the update input
+  (another row's key wrote that row), while `DjangoMutation` dropped every key on create (a text-key create committed
+  `""`). An update input now never carries the pk (update `fields` naming it raises at class creation), a model create
+  takes a client-assigned key under the default / `db_default` rule, and `build_form_inputs` is gone. Docs: specs 036,
+  038, 039.
 - [x] 110. The item-56 alias message labelling an owner `'category_id' (source 'category_id')`: not a defect (cosmetic,
   no contract row): the label comes from `rest_framework/inputs.py::raise_writable_source_ownership_errors` and the
   refusal stays the typed `ConfigurationError`
@@ -449,20 +415,15 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   a nested proxy) as the object it stands for, so `FilterSet` and `OrderSet` accept every lazy declaration their
   evaluated twin accepts and django-filter's list/tuple declared-filter allowance answers as for the target; 250 is its
   duplicate
-- [x] 252. A nested connection ordered by a relation name windowed on the key column while the pipeline compiled the
-  related model's `Meta.ordering`: fixed, `utils/querysets.py::expand_relation_order` gives the window, the reversed
-  window, the lateral column map, the random-order arm, the scalar-only projection and the index advisory the order as
-  Django's compiler runs it (forward, one-to-one, nullable, reverse, many-to-many, multi-hop and recursive names); a
-  related `Random()` goes per parent; an expanding one-to-one key name gets the pk tiebreak on every path; a multi-column
-  `ForeignObject` name windows on its carrier columns instead of raising; the keyset vocabulary still refuses a relation
-  name on both paths
-- [x] 259. A `RelatedFilter` flat copy was deferred when its form field cleaned an absent key to a value that filters (a
-  consumer field class whose `clean` / `to_python` returns a default, a `TypedChoiceFilter` or `CharFilter` with a nonempty
-  `empty_value`), so the parent connection dropped the constraint a full copy applies: fixed,
-  `filters/sets.py::_absence_filters_nothing` defers only after `_absent_cleaned_value` proves the cleaned absent value
-  from Django's, django-filter's or the package's own field classes (whole MRO) and `_filter_skips` proves the filter
-  skips it; a two-state `BooleanField`, a multi-widget on a single-value field and an empty string reaching a package
-  filter stay eager too; the shipped schema's deferred set is unchanged
+- [x] 252. fixed: a nested connection ordered by a relation name windowed on the key column while the pipeline
+  compiled the related model's `Meta.ordering`; `utils/querysets.py::expand_relation_order` now gives the window,
+  reversed window, lateral map, random arm, projection and index advisory the order Django's compiler runs. A related
+  `Random()` goes per parent; a multi-column `ForeignObject` name windows on its carrier columns; keyset still refuses
+  a relation name.
+- [x] 259. fixed: a `RelatedFilter` flat copy was deferred when its form field cleaned an absent key to a value that
+  filters (a `clean` returning a default, a nonempty `empty_value`), so the parent connection dropped the constraint.
+  `filters/sets.py::_absence_filters_nothing` now defers only after `_absent_cleaned_value` and `_filter_skips` prove
+  the absent value is skipped; the shipped schema's deferred set is unchanged.
 - [x] 260. A partial `ModelForm` update omitting a FK whose stored key names no row (a `db_constraint=False` key left
   dangling) read the stored key under the form's lookup field and could link an unrelated row: fixed,
   `forms/resolvers.py::_reconstruct_partial_data` reports it as the form field's own `invalid_choice` error before the form
@@ -507,97 +468,58 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   no target model now types from the field's `queryset.model` as a serializer-only relation, so the shape plain DRF writes
   works (visibility applies to the decoded id; `many=True` and non-PK fields stay refused); the fakeshop library
   serializers share a `ModelSerializerBase` carrying the one `Meta` suppression
-- [x] 274. A create naming a client-assigned primary key with no `default` / `db_default` (model `DjangoMutation`,
-  register over a user model keyed by a client-named pk, `DjangoModelFormMutation`) saved through Django's
-  UPDATE-then-INSERT, so a row committed concurrently under that key was overwritten and reported as created (a
-  competing account's password hash replaced; an MTI parent row overwritten): fixed,
-  `mutations/resolvers.py::save_new_row` saves with `force_insert=(Model,)` exactly when `adds_by_update_first` says
-  Django would try an UPDATE, so the race is the `__all__` `constraint` envelope; the ModelForm flavor splits such a
-  create as Django's admin does (`form.save(commit=False)`, the forced save, `save_m2m()`); auto, default and
-  `db_default` keys and every update are unchanged; the serializer flavor already inserted through `objects.create`
+- [x] 274. fixed: a create naming a client-assigned pk with no `default` / `db_default` saved through Django's
+  UPDATE-then-INSERT, so a concurrently committed row under that key was overwritten and reported as created.
+  `mutations/resolvers.py::save_new_row` saves with `force_insert=(Model,)` when `adds_by_update_first` says Django
+  would UPDATE, so the race is the `__all__` `constraint` envelope; the ModelForm flavor splits the save as Django's
+  admin does.
 - [x] 120. `prove_failability.py` had no SIGTERM / SIGHUP handler: a terminated run left its mutation in the tree and
   its `ACTIVE-MUTATION.json` marker, and a signal to the run alone orphaned the pytest scope: fixed, `main` routes
   SIGINT / SIGTERM / SIGHUP / SIGQUIT (an inherited `SIG_IGN` stays ignored) to a handler that records the stop and
   forwards it to the scope, now in its own session (a repeat after `STOP_REPEAT_GRACE` kills the group); the run then
   restores and proves the tree through the existing `finally`, writes no record and exits `128 + N` (a direct script
   run dies by the signal); only `SIGKILL` or an interpreter crash still leaves the marker and `restore_with`
-- [x] 282. An update whose located row a concurrent transaction deleted after the locate (`Meta.select_for_update =
-  False`, or a backend without `FOR UPDATE`) was re-inserted and reported as updated on a `DjangoModelFormMutation`
-  (`form.save()` runs UPDATE, 0 rows, then INSERT) and on a model `DjangoMutation` over a multi-table row whose parent
-  row vanished (`force_update` covers only the child table), and was a masked top-level `ConfigurationError` on a
-  `SerializerMutation`: fixed, `mutations/resolvers.py::save_located_row` saves with `force_update=True` plus
-  `update_fields` naming every loaded non-key column of every table on a multi-table row (an existence check first when
-  a table contributes no column), the ModelForm update splits as Django's admin does (`form.save(commit=False)`, the
-  located save, `save_m2m()`) inside `forced_save_or_field_errors`, and the serializer flavor answers a witnessed INSERT
-  under the authorized pk as `conflict`; every flavor now returns the in-band `conflict` envelope on `id`, rolled back;
-  single-table rows keep `update_fields=None`; fakeshop gains the three `UpdateLendingDesk` flavors
-- [x] 121. A crashed `prove_failability.py` run left its `ACTIVE-MUTATION.json` marker where no later run looked (a
-  fresh `failability-*` dir per default-mode run; an explicit `--scratch-root` was checked only under that same root),
-  so a rerun on another entry of the mutated file copied the mutated bytes as pristine and printed a byte-comparison
-  restore claim: fixed, the live crash state (pristine copies, the marker, `RESTORE-FAILED.json`) lives in one per-tree
-  state directory under `$XDG_STATE_HOME` or `~/.local/state`, which every run checks under the tree lock whatever its
-  scratch root (8 of 10 crash-then-rerun cells ran at HEAD, 10 of 10 are refused now); the directory is 0700, empty at
-  rest (a proved restore moves the copies into scratch, a run with no marker sweeps leftovers), and default scratch is
-  `failability/tree-<digest>` under the system temporary directory, refused unless a real directory owned by the user
+- [x] 282. fixed: an update whose located row a concurrent transaction deleted (`Meta.select_for_update = False`, or
+  no `FOR UPDATE`) was re-inserted and reported as updated (ModelForm; multi-table model) or a masked
+  `ConfigurationError` (serializer). `mutations/resolvers.py::save_located_row` saves with `force_update=True` plus
+  per-table `update_fields`, and every flavor returns the in-band `conflict` envelope on `id`, rolled back; fakeshop
+  gains three `UpdateLendingDesk` flavors.
+- [x] 121. fixed: a crashed `prove_failability.py` run left its `ACTIVE-MUTATION.json` marker where no later run
+  looked, so a rerun copied mutated bytes as pristine. The crash state now lives in one per-tree 0700 state directory
+  under `$XDG_STATE_HOME` or `~/.local/state`, checked by every run under the tree lock; default scratch is
+  `failability/tree-<digest>` under the system temporary directory.
 - [x] 123. BUILD.md "Mechanized: `scripts/prove_failability.py`" called the tool's default scratch "a bare `/tmp` path":
   fixed with 121, it names `failability/tree-<digest>` under the system temporary directory and the state directory
-- [x] 132. A `SerializerMutation` whose `Meta.fields` narrowing keeps a relation to a Relay-Node type fails schema build
-  (`TypeError: Mutation fields cannot be resolved. '<...>PartialInput'`), create and update, e.g. `Shelf.branch`; a non-Relay
-  target builds: fixed, the cause was the `data:` reference's name, derived when the root `Mutation` body ran, before
-  finalization made a `Meta.interfaces = (relay.Node,)` target a node, so a digest-named shape (`fields` / `exclude` /
-  `optional_fields` / nested narrowing) folded `Int` into the reference and `ID` into the bound class; the reference now
-  names the mutation's own `<Mutation>Data` slot (`rest_framework/inputs.py::serializer_input_slot`), under which
-  `SerializerMutation.build_input` also publishes the class each bind builds, so a rebuild never resolves a parked `Int`
-  input and a relation target may be declared after the root `Mutation` (69 of 69 grid cells failed "no registered
-  primary" at HEAD); GraphQL type names are unchanged; fakeshop gains `updatePatronProfileGenreViaSerializer`
-- [x] 285. An update or delete whose located row a concurrent transaction deleted after authorization
-  (`Meta.select_for_update = False`, or a backend without `FOR UPDATE`) answered a misleading field error when decode or
-  validation failed before the save (an omitted relation re-read as empty or as a key that vanished with the row on
-  ModelForm / model; a named relation that vanished with the row), or a masked top-level `DoesNotExist` from DRF's
-  `UniqueTogetherValidator` on a serializer: fixed, `mutations/resolvers.py::run_write_pipeline_sync` probes a located
-  row only when its step fails (`utils/write_transaction.py::located_row_vanished`, which the save's own conflict check
-  now reuses) and answers the `conflict` envelope on `id` when the row is gone; a `DoesNotExist` escaping the step is
-  `conflict` the same way, and propagates while the row is present and on create (22 of 102 row-gone cells were not
-  `conflict` at HEAD, 102 of 102 are now; a success runs no extra query, a failure one); a model or serializer update
-  writing back a stale omitted key after a concurrent `SET_NULL` under the opt-out is Django's whole-row-save lost
-  update, refused by the database, and stays out of scope
-- [x] 133. A `PrimaryKeyRelatedField` to a model whose pk is a `OneToOneField` (`PatronProfile`) was refused at schema
-  build, and the defect was wider: a relation id into any non-Relay or unregistered target whose primary key is itself a
-  key (a one-to-one pk, a multi-table-inheritance parent link or grandchild chain, `ForeignKey(primary_key=True)`, a
-  `to_field` naming a key) was refused in every write flavor (280 of 768 grid cells, 54 of 132 column-less), and an id
-  past the range of the column such a key stores was a masked `OverflowError` on `node`, relation GlobalID decode,
-  update `id` (both arms, live on `updatePatronProfile` / `updateLendingDesk`), filter identity and raw write ids:
-  fixed, `utils/relations.py::stored_value_column` follows a key to the column storing its value (the walk the filters
-  already made, now shared), `mutations/inputs.py::relation_id_scalar` types from it and
-  `utils/querysets.py::coerce_field_value_or_none` runs the key's own validators then that column's; all 280 refused
-  cells build and store the right row, the 280 that built keep identical SDL; fakeshop gains `KioskFault` with
-  `createKioskFault` / `ViaForm` / `ViaSerializer`
-- [x] 137. The ModelForm (pk-keyed `ModelChoiceField`) and serializer (`PrimaryKeyRelatedField`) flavors stored `NULL`
-  for a relation id naming a visible row whose `to_field` key is `NULL`, silently clearing an optional FK or one-to-one
-  (16 grid cells; required FKs and M2M gave "cannot be null", a generic constraint error or a raw `ValueError`), where the
-  model flavor refused it since item 130; and `forms/resolvers.py::_to_form_key_value` fell back to `obj.pk` when
-  `to_field_name` did not resolve on the row, linking a colliding row, even a hidden one: fixed,
-  `utils/querysets.py::linkable_rows` drops `NULL`-key rows at every visible-relation read (the single spine, the batched
-  model path, DRF's lookup) from the stored column each builder records on `InputFieldSpec.key_attname`, so all 80
-  `NULL`-key cells are the relation error with nothing written; a `to_field_name` that is not `pk` or a concrete field is
-  a schema-build `ConfigurationError` on any field the operation binds (every declared field for an update) and the
-  fallback is gone (the item's `to_field_name`-keyed half was already fixed by item 266); fakeshop gains `Branch.isil` and
-  `InterlibraryLoan` with create / update in all three flavors
+- [x] 132. fixed: a `SerializerMutation` whose `Meta.fields` narrowing keeps a relation to a Relay-Node type (e.g.
+  `Shelf.branch`) failed schema build, because the `data:` reference's name was derived before finalization made the
+  target a node. It now names the mutation's own `<Mutation>Data` slot
+  (`rest_framework/inputs.py::serializer_input_slot`), so a target may be declared after the root `Mutation`; type
+  names unchanged; fakeshop gains `updatePatronProfileGenreViaSerializer`.
+- [x] 285. fixed: an update or delete whose located row was deleted concurrently after authorization answered a
+  misleading field error, or a masked `DoesNotExist` from DRF's `UniqueTogetherValidator`.
+  `mutations/resolvers.py::run_write_pipeline_sync` probes the row only when its step fails
+  (`utils/write_transaction.py::located_row_vanished`) and answers the `conflict` envelope on `id`; a success runs no
+  extra query. A stale omitted key after a concurrent `SET_NULL` stays out of scope.
+- [x] 133. fixed: a relation id into a non-Relay or unregistered target whose pk is itself a key (one-to-one pk, MTI
+  parent link, `ForeignKey(primary_key=True)`, a `to_field` key) was refused in every write flavor, and an
+  out-of-range id was a masked `OverflowError`. `utils/relations.py::stored_value_column` follows a key to its storing
+  column, `mutations/inputs.py::relation_id_scalar` types from it and `utils/querysets.py::coerce_field_value_or_none`
+  validates; fakeshop gains `KioskFault`.
+- [x] 137. fixed: the ModelForm and serializer flavors stored `NULL` for a relation id naming a row whose `to_field`
+  key is `NULL` (the model flavor refused it since item 130), and `forms/resolvers.py::_to_form_key_value` fell back
+  to `obj.pk`. `utils/querysets.py::linkable_rows` drops `NULL`-key rows at every visible-relation read, so those are
+  the relation error; a non-`pk`, non-concrete `to_field_name` is a build `ConfigurationError` (the other half fixed
+  by item 266).
 - [x] 143. The `.dsf-ws` marker was a regular file written once and only `.exists()`-checked, so its atime never moved
   and the macOS daily `$TMPDIR` purge (regular files whose atime is over 3 days old; directories never removed) deleted
   it 3 days after the flow's first command: `gc` then refused the flow, `release` freed nothing while `state.json` kept
   the bindings, and `status` dropped the flow: fixed, the marker is an empty directory, `Layout.ensure_marked` turns a
   marker file into it under `pool.lock` (re-checking inside the lock), and `_remove_flow_dir` removes it last with
   `rmdir` or `unlink`; `gc` still refuses an unmarked folder (13-row grid: 7/13 at the parent, 13/13 after)
-- [x] 147. `scripts/build_kanban_md.py::GlossaryInliner._protected` lexed only single-backtick code spans, so a
-  glossary link was written inside a URI / email autolink, raw HTML (tag, attribute, comment, PI, declaration), a
-  multi-backtick or multi-line code span, or a GitHub bare URL / `www.` / bare email, a `]` inside an autolink or
-  attribute closed real link text early, and a construct holding a term spent its one link per card (40 of 84 grid
-  rows; latent, no card text held such a shape; `09d0caa0` never lexed double-backtick spans, contrary to the earlier
-  tracker claim): fixed, `_protected_regions` makes one leftmost-wins pass per paragraph (CRLF blank lines included)
-  over escapes, equal-width backtick runs, autolinks and CommonMark 6.6 raw HTML (unclosed openers linear), masks each
-  atomically before bracket pairing, then an over-matching GitHub bare-URL guard; a held mention no longer spends the
-  slot and `_find` retries so nothing linked at the parent stops linking; KANBAN.md renders byte-identical
+- [x] 147. fixed: `scripts/build_kanban_md.py::GlossaryInliner._protected` lexed only single-backtick code spans, so a
+  glossary link could land inside autolinks, raw HTML, multi-backtick spans or bare URLs (latent; `09d0caa0` never
+  lexed double-backtick spans). `_protected_regions` now masks escapes, backtick runs, autolinks and CommonMark raw
+  HTML in one pass before bracket pairing; KANBAN.md renders byte-identical.
 - [x] 145. `workspace.py::_read_json_object` and `::load_runs` tested `exists()` and then read, and `status`, `audit`
   and `gc`'s busy branch read with no lease by design, so a concurrent `gc` raised an uncaught `FileNotFoundError` (16
   in 43,919 `status` calls racing `gc` for 10 s at the parent; 0 in 57,913 after): fixed, `_read_text_if_present` makes
@@ -610,40 +532,28 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   every `uv sync` receive the held flow lease and copy lock (`pass_fds`; `gate`'s sync also `gate.lock`), so a lease lives
   as long as anything holding it; a daemon the command leaves behind keeps the run RUNNING and `gc` / `release` refuse
   until it ends (stated in the docstring)
-- [x] 284. `workspace.py run` / `prove` (`::stream`) started the command in the wrapper's process group and forwarded
-  no signal, so a SIGTERM / SIGHUP / SIGQUIT / SIGINT to the wrapper's pid alone ended the wrapper and dropped its lease
-  while pytest or the prover kept running in the copy (a `gc` under a live mutation left a `RESTORE-FAILED.json`), and
-  no run record was written; terminal Ctrl-C, group-mode `timeout` and `TaskStop` already reached the whole group:
-  fixed, the command runs in its own session and the wrapper relays each stop signal to its group
-  (`scripts/_stop_signals.py`, shared with `prove_failability.py`; an inherited SIG_IGN stays ignored, a repeat inside
-  1 s is uv's duplicate and dropped, no SIGKILL escalation) until the command and whatever holds its output have ended;
-  Ctrl-Z stops the group with the run and `fg` continues both; the record keeps the command's exit and adds
-  `stopped_by`, the wrapper ends by the signal (`128 + N`); a closed output sink no longer hangs the run (36-cell
-  matrix: 0 survivors after, the defect on every relay cell before)
+- [x] 284. fixed: `workspace.py run` / `prove` (`::stream`) ran the command in the wrapper's process group and
+  forwarded no signal, so a stop signal to the wrapper's pid left pytest or the prover running without its lease. The
+  command now runs in its own session and the wrapper relays each stop signal to its group
+  (`scripts/_stop_signals.py`, shared with `prove_failability.py`); the run record adds `stopped_by` and the wrapper
+  exits `128 + N`.
 - [x] 296. `tests/test_workspace.py::test_the_lint_gate_suite_runs_the_ci_lint_job_commands_in_order` failed on main:
   `9a97127c` made CI's lint job run `scripts/check_citations.py --check --substrings` while the `gate` lint suite still
   ran `--check`: fixed in `8e191ea3`, `scripts/workspace.py #"LINT_COMMANDS"` runs `--check --substrings` as CI does
-- [x] 249. A set-shaped `FilterSet` `Meta.fields` (or `filter_fields`, or a set of lookups in a dict declaration)
-  expanded in hash order, so `base_filters`, the generated filter input and each lookup sub-input moved with
-  `PYTHONHASHSEED`: fixed, `filters/sets.py::FilterSet.get_fields` reorders django-filter's field map by
-  `utils/inputs.py::canonicalize_set_meta_fields` (the names upstream kept, `Meta.exclude` applied, in
-  `canonical_sort_key` order; a set of lookups as a sorted list); the declaration is never rewritten as a `list`, so
-  django-filter's declared-filter allowance still refuses a set, and a list / tuple / dict of lists keeps its order. The
-  OrderSet twin's pin now fails without canonicalization in every process
+- [x] 249. fixed: a set-shaped `FilterSet` `Meta.fields` expanded in hash order, so `base_filters` and the generated
+  inputs moved with `PYTHONHASHSEED`; `filters/sets.py::FilterSet.get_fields` reorders by
+  `utils/inputs.py::canonicalize_set_meta_fields` (`canonical_sort_key` order) without rewriting the declaration, and
+  a list / tuple / dict keeps its order. The OrderSet twin's pin now fails without canonicalization.
 - [x] 234. The index advisory on a proxy target (or a proxy of a proxy) read the proxy's own empty `Meta.indexes` /
   `Meta.constraints` / `unique_together`, recommended an index the concrete model already declares, named the proxy
   (where `models.E016` forbids declaring it) and deduplicated under the proxy's label: fixed,
   `optimizer/nested_planner.py::_advise_composite_index` reads the table-owning `_meta.concrete_model` once and feeds it
   to the window columns, the order terms, the coverage check, the dedup key and the message, so a covered proxy is
   silent and an uncovered one warns once naming the concrete model; a non-proxy model is unchanged
-- [x] 241. Duplicate input-object field names escaped the value budget: `charge_arguments` charged
-  `value_from_ast_untyped`'s dict, which dropped an earlier same-named field's subtree uncharged at every spread
-  expansion: fixed, `extensions/resource_policy.py::_DocumentWalk` charges each argument as its AST (`_popped_value`
-  keeps a literal list / object as its node and resolves a variable through graphql-core's own lookup;
-  `_ValueBudget._charge_container` counts an `ObjectValueNode`'s width as every spelled field, a repeated name
-  included), and an unused or used variable default is charged as its literal AST, so a duplicate-name document over a
-  bound gets the resource rejection (spread, untyped, typed-order, directive, unused-default and used-default rows) and
-  one within budget reaches graphql-core's "only one input field" validation; no new bound, code or message
+- [x] 241. fixed: duplicate input-object field names escaped the value budget, since `charge_arguments` charged a dict
+  that dropped earlier same-named subtrees. `extensions/resource_policy.py::_DocumentWalk` now charges each argument
+  as its AST (`_ValueBudget._charge_container` counts every spelled field), variable defaults included, so a
+  duplicate-name document over a bound gets the resource rejection; no new bound, code or message.
 - [x] 271. Fixed with 272: `utils/querysets.py::_raw_sql_node_defect`'s `ExtraWhere` arm admits `params is None`
   (Django's documented `extra(where=[...])` spelling, read by `ExtraWhere.as_sql` as `self.params or ()`); `RawSQL(sql,
   None)` stays refused, since Django raises `TypeError` compiling it
@@ -659,26 +569,20 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   `_normalized_db`, `_normalized_fields`; `_prefetch_path_or_defect` reads a `Prefetch` path once and
   `_rebuilt_prefetch` cannot fail), so a deep walk finds no `str` subclass in sealed state and the live genre-books
   connection, root list, cascaded `values()` hook and enum-routed managers serve what their exact-text twins serve
-- [x] 291. A ModelForm whose bound relation field disagreed with the class-level field the decode reads was bound
-  unchecked (an `__init__` / `get_form` override setting or clearing `to_field_name` linked a hidden row with `errors:
-  []`; a queryset swapped to another model handed `perform_mutate` that model's row): fixed,
-  `forms/resolvers.py::_assert_bound_choice_agreement` runs after `get_form()` and before `is_valid()` over every bound
-  name (a reconstructed update relation included) and raises `ConfigurationError` when the bound queryset's model is not
-  the decode target (a subclass, proxy or MTI child, passes) or the bound key resolves to another column than the basis
-  (every pk spelling is one key); a model-choice field over a scalar column stays unchecked
+- [x] 291. fixed: a ModelForm whose bound relation field disagreed with the class-level field the decode reads (an
+  `__init__` / `get_form` changing `to_field_name` or swapping the queryset's model) was bound unchecked and linked a
+  hidden or wrong-model row. `forms/resolvers.py::_assert_bound_choice_agreement` runs between `get_form()` and
+  `is_valid()` and raises `ConfigurationError` on a model or key mismatch.
 - [x] 292. A relation `to_field_name` naming a concrete non-unique column passed the build guard and then raised
   `MultipleObjectsReturned` (single) or linked every row with the key, a hidden one included (many-to-many): fixed with
   291, `forms/inputs.py::require_readable_choice_keys` requires `pk` or a column unique on its own (`unique=True`, a
   one-field `unique_together`, or an unconditional one-field `UniqueConstraint`), Django's fields.E311 rule; the guard's
   tests moved to unique columns (Branch.name, MembershipCard.patron) and Book.title / shelf are refusal rows
-- [x] 254. Not a code defect: the fingerprint only guards the class-validation vs bind drift of a nondeterministic
-  `get_serializer_for_schema()` hook, and the input, descriptor name and reverse map are built from the bind-time read
-  alone, so a drift on an unrecorded axis (a nested `ListField` grandchild's class or `allow_null`, an attribute a
-  registered converter reads outside the listed axes) builds a self-consistent input instead of failing loud (item 154's
-  "fails loud" holds for recorded axes only). Retracted "EVERY axis" in
-  `rest_framework/inputs.py::serializer_schema_fingerprint`, `_fingerprint_field_map`, `_fingerprint_converter_extra`,
-  the `NestedSerializerConfig` docstring, `rest_framework/sets.py::_checked_schema_field_map` and spec-039's fingerprint
-  section and nested bullet; code digest unchanged.
+- [x] 254. Not a code defect: the fingerprint guards only the recorded axes of a nondeterministic
+  `get_serializer_for_schema()` hook, so a drift on an unrecorded axis builds a self-consistent input instead of
+  failing loud (item 154's "fails loud" holds for recorded axes only). "EVERY axis" retracted in
+  `rest_framework/inputs.py::serializer_schema_fingerprint`, `rest_framework/sets.py::_checked_schema_field_map` and
+  spec-039; code digest unchanged.
 - [x] 160. Still live on HEAD: `filters/base.py::RangeFilter` had no `filter()`, so a range input with one bound left
   out or `null` reached the declared `range` lookup as `[x, None]` and compiled to `BETWEEN x AND NULL`, matching no
   row. `RangeFilter.filter` now applies a lone start as `__gte` and a lone end as `__lte` through `_apply_lookups`
@@ -700,66 +604,41 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   free-space refusal. Docstring and prose only; the docstring-stripped code digest and both `--help` outputs are
   unchanged.
 - [x] 174. BACKLOG.md no longer carries `stable_cursor_field` or `permission_aware_cursor_decoding`, both shipped as
-  `Meta.cursor_field` (spec-030 `## Keyset cursors`); its "Moved out of this file" section records the move, and the
-  `polymorphic_interface_connections` and `cascade_permission_prefetch_enforcement` entries name the shipped surface.
-  The same future-work claim is gone from spec-010's slot table, spec-032 (viewer-scoped decode folded into its
-  `Meta.cursor_field` sentences), `test_library_api.py::test_stale_after_cursor_no_error`'s docstring and the board
-  (CardItems 1386 and 432, card 24's planning note and CardReference 15, re-rendered). Docs and board only; no
-  executable line changes.
+  `Meta.cursor_field` (spec-030); the same future-work claim is gone from spec-010, spec-032,
+  `test_library_api.py::test_stale_after_cursor_no_error`'s docstring and the board (re-rendered). Docs and board
+  only; no executable line changes.
 - [x] 155. Already fixed by `a9e7963d`: none of the nine sentences names `0.324.0` any more; specs 030, 031, 032 and the
   spec-030 / spec-032 rationale companions now carry no locked Strawberry version literal (0 hits under `docs/SPECS/`
   and `docs/spec-*.md`). The citation-gate rule the item left open stays unbuilt.
 - [x] 235. Already fixed by `9a97127c`: both `optimizer/nested_planner.py` comments now state the invariant without the
   "P2-3" review label ("covering the general page;", "naming a duplicated column."); 0 hits for `P2-3` in the file.
-- [x] 269. A filter holding a `filter` of its own (a `Filter` subclass whose `__init__` stores `self.filter`) raised
-  `FieldError` on every walked path and was negated twice under `exclude=True`, because `filters/sets.py` tested
-  `method` where the condition is "holds a `filter` of its own": fixed, `sets.py::_own_filter` reads the instance
-  `filter` and replaces the `method` test in `_owner_bound_child` (a child-expanded leaf is projected and runs inside
-  its child set), `FilterSet._flat_leaf_walk` (a parent-declared leaf is not walked, as a parent `method=`),
-  `FilterSet._apply_active_leaf`'s negate line (its `filter` owns `exclude`) and `_decodes_before_binding`, which also
-  reads a projected copy through to the child filter it runs (a GlobalID filter holding its own `filter` refuses
-  unstorable text `FILTER_INVALID` flat, nested and on its own set; one whose `filter` delegates to the decode now
-  answers it `FILTER_INVALID`, not `GLOBALID_INVALID`, as `method=` does); null extension and a class-level `filter`
-  override unchanged. Live rows on `BookFilter.title_starts` (an example own-`filter` `CharFilter`), package grid,
-  mutations M1-M7 red
-- [x] 290. A GlobalID filter into a type whose `relay.NodeID[...]` names a column other than the primary key (fakeshop
-  `PublisherType.house_code`) coerced the id against `_meta.pk` and compiled on the pk path, refusing the id the
-  server emits or selecting the row whose pk equals it: fixed, `filters/base.py::_globalid_target` resolves the
-  target, its row path and its id slot once per call, the node id coerces through `relay.py::_coerce_pk_or_none` and
-  compiles on `<row path>__<id_attr>` (over the `__pk` to_field marker) in `GlobalIDFilter` and both
-  `GlobalIDMultipleChoiceFilter` arms; a slot over a `get_queryset` annotation compares on the type's own rows and a
-  relation key into it refuses `GLOBALID_UNVALIDATABLE`; `FilterSet._leaf_applies` reads a terminal its unscoped probe
-  cannot compile as active, which also repairs a flat leaf onto a filter over a target-type annotation. Primary-key
-  targets byte-identical. Fixture `Series`, `Printing.licensor` / `co_publishers` / `series` (migration 0017), live
-  grid, mutations M1-M8 red
+- [x] 269. fixed: a filter holding its own `filter` (a `Filter` subclass storing `self.filter`) raised `FieldError` on
+  every walked path and was negated twice under `exclude=True`, because `filters/sets.py` tested `method`.
+  `sets.py::_own_filter` now replaces that test in `_owner_bound_child`, `FilterSet._flat_leaf_walk`,
+  `FilterSet._apply_active_leaf` and `_decodes_before_binding`. Live rows on `BookFilter.title_starts`; mutations
+  M1-M7 red.
+- [x] 290. fixed: a GlobalID filter into a type whose `relay.NodeID[...]` names a non-pk column
+  (`PublisherType.house_code`) coerced and compiled against the pk, refusing the server's own id or selecting the
+  wrong row. `filters/base.py::_globalid_target` resolves the target, row path and id slot once and compiles on `<row
+  path>__<id_attr>` in `GlobalIDFilter` and `GlobalIDMultipleChoiceFilter`; pk targets byte-identical; fixture
+  `Series` (migration 0017).
 - [x] 173. fixed: the KANBAN release-readiness checklist (BoardDoc 11) runs `ruff check --fix .` before `ruff format .`,
   as AGENTS and pre-commit do; CardItem 1248 states the same pair in that order (its stale `AGENTS.md:15` line cite
   dropped) and CONTRIBUTING.md lists the hooks as ruff-check then ruff-format. Both rows written with `.update()`
   (`updated_date` kept), KANBAN.md / KANBAN.html re-rendered; archived specs keep the old order as history
-- [x] 178. fixed: `scope` and `--changed` resolve a changed path through one resolver,
-  `scripts/review_plan.py::_changed_folder` / `_changed_item`, so a deleted path or a rename's old path names its
-  nearest surviving folder's item (else Project integration) in `build_scope`'s committed `item` fields, and
-  `ScopeReport.folders` counts every rename's old folder (staged ones too); dirty paths stay lexical and the JSON shape
-  is unchanged. REVIEW.md and the module docstring say so;
-  `tests/test_review_plan.py::test_scope_resolves_deleted_and_renamed_paths_like_changed` (10 rows) pins it, mutations
-  M1-M4 red
-- [x] 276. A model-backed `SerializerMutation` field whose serializer kind disagreed with its column (a
-  `PrimaryKeyRelatedField` or `FileField` over a scalar column, anything but a `FileField` over a file column, a
-  relation over a scalar primary key's `pk` alias) built as the column's kind and failed every write with a masked
-  error: fixed, `rest_framework/serializer_converter.py::serializer_field_fits_kind` is the one kind reading (shared
-  with `resolvers.py::_assert_field_agreement`) and `_reject_kind_mismatch` refuses the field at schema build, declared,
-  auto-generated or added in `get_fields()`, as `get_serializer_for_schema()` returns it; existing refusal texts
-  unchanged. Two shapes that wrote at the parent now refuse: a relation over a text primary key's `pk` alias (it stored
-  the related row's `str()` as the key) and a schema-map field of another kind than its runtime twin (spec-039
-  Decision 7)
-- [x] 163. fixed in code, not docs (the `queryset & Model.objects.<method>()` recipe drops annotations and slices):
-  `utils/querysets.py::_seal_or_defect` takes `keep_class`, passed only by `apply_type_visibility_sync` / `_async`, so
-  the hook's input is rebuilt from the source's validated state as the source's own `QuerySet` class (Django's `_clone`
-  constructor shape) and a project method works on every read path (root, connection, node, nested, sync and async,
-  optimizer on or off); the hook's result and the cascade's source seal stay plain. spec-045 Decision 1, spec-020,
-  `DjangoType.get_queryset`, README and GLOSSARY pks 468 / 553 / 554 say so, including the limit (instance attributes
-  set outside the constructor arguments are not carried). Fakeshop `LoanQuerySet.with_note()` behind a default-off
-  `LoanType` hook flag; live sync + async rows and package rows, mutations M1-M5 red
+- [x] 178. fixed: `scope` and `--changed` resolve a changed path through one resolver
+  (`scripts/review_plan.py::_changed_folder` / `_changed_item`), so a deleted or renamed-away path names its nearest
+  surviving folder's item and `ScopeReport.folders` counts every rename's old folder; JSON shape unchanged. Pinned by
+  `tests/test_review_plan.py::test_scope_resolves_deleted_and_renamed_paths_like_changed`.
+- [x] 276. fixed: a model-backed `SerializerMutation` field whose serializer kind disagreed with its column built as
+  the column's kind and failed every write masked.
+  `rest_framework/serializer_converter.py::serializer_field_fits_kind` is the one kind reading (shared with
+  `resolvers.py::_assert_field_agreement`) and `_reject_kind_mismatch` refuses the field at schema build; a relation
+  over a text pk's `pk` alias now refuses too (spec-039 Decision 7).
+- [x] 163. fixed in code, not docs: `utils/querysets.py::_seal_or_defect` takes `keep_class` (passed only by
+  `apply_type_visibility_sync` / `_async`), so the hook's input is rebuilt as the source's own `QuerySet` class and a
+  project method works on every read path; instance attributes set outside the constructor are not carried. Docs:
+  spec-045, README; fakeshop `LoanQuerySet.with_note()` live rows; mutations M1-M5 red.
 - [x] 333. The KANBAN release-readiness checklist (BoardDoc 11) asked for a local `uv run pytest` passing with 100%
   package coverage, against AGENTS rule 16 (the full suite and the coverage gate run only in GitHub Actions): fixed: the
   bullet requires the full dispatched `django.yml` matrix (`gh workflow run django.yml`: every Python / Django cell,
@@ -785,48 +664,25 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
 - [x] 338. BACKLOG.md carried the unused link definition `[card-full-relay-story-node-connection-root-validation]`:
   fixed: the definition is dropped; the LINK DEFINITIONS block has no unused or undefined reference and keeps its ten
   group headers
-- [x] 295. A `ModelForm` field named after a model column but of another kind (a relation field over a scalar, JSON or
-  file column, a file field over a non-file column, a scalar field over a file column, a single / multi relation
-  mismatch) typed, decoded and routed by the column while the bound form read by its own kind: it wrote the chosen
-  row's `str()` unchecked (a row the type hides included), dropped the value while reporting success, or never
-  succeeded, and one left out of an update input failed every update: fixed,
-  `forms/inputs.py::require_column_kind_agreement` refuses the field at schema build on every field the operation
-  binds (an update: every declared field), reading the field through `forms/converter.py::form_field_kind` (class, or
-  a `forms.FileInput` widget; `convert_form_field` reads the same, so a column-less `FileInput` field is an `Upload`);
-  a scalar field over a relation column still takes the relation id. Supersedes 125. Three shapes that built at the
-  parent now refuse: a `FileField` over text or a `CharField` over a file column left out of an update-only input
-  (inert there), and a custom widget that reads `files` without subclassing `forms.FileInput` (remedy: subclass it).
-  Mutations M1-M7 red
-- [x] 303. A partial update or create over a `DjangoMutation` skipped Django's uniqueness and constraint checks a
-  provided field joined when the declaration sat on a parent (a proxy, a proxy of a proxy, a multi-table child, a proxy
-  of one), when a `UniqueConstraint`'s condition or expressions named the unprovided column, for every
-  `CheckConstraint` reading one, and for `unique_for_date` / `_month` / `_year`; the duplicate reached the database and
-  answered the generic `constraint` envelope (not a raw `IntegrityError`), or was saved silently for `unique_for_*`:
-  fixed, `mutations/resolvers.py::_constraint_groups` (was `_unique_constraint_groups`) walks the model and
-  `_meta.all_parents` and takes every column each constraint's `validate()` tests against `exclude`, and
-  `::_full_clean_or_field_errors` runs `full_clean` with two excludes (`CleanExcludes`: `clean_fields` / `clean` skip
-  every unprovided column, `validate_unique` / `validate_constraints` keep the co-members), as Django's
-  `ModelForm._post_clean` splits them; `forms/inputs.py::_names_one_row` reads the `to_field_name` target's inherited
-  declarations too. The `updateItem` rejected-save paths run one query fewer (no co-member field validation).
-- [x] 304. A selected annotation whose node had run a row fetch was refused by the visibility seal on every policy
-  ("binds a function bound value"): Django caches the row converter `BaseExpression.convert_value` (a function) in the
-  node's `__dict__` at row fetch, and canonical reconstruction carried it to
-  `utils/querysets.py::_normalized_bound_value`. Wider than filed: any selected non-`Col` expression, a plain
-  `QuerySet` and a project subclass alike, evaluated or fetched only through a clone sharing the node (Django clones
-  share annotation nodes); plainest reach a consumer `Prefetch("loans", queryset=Loan.objects.annotate(...))` with no
-  hook: fixed, `utils/querysets.py::_reconstructed_value` leaves out of a rebuilt node exactly the caches Django's own
-  copy leaves out (`_EXPRESSION_COPY_DROPPED`, `BaseExpression.__getstate__`; `_QUERY_CLONE_DROPPED`, plus
-  `sql.Query.clone`'s `base_table`), pinned against the running Django, so the rebuilt node recomputes them and a
-  value planted under those names is never carried or called; the outer query still refuses one. A sidecar result that
-  was evaluated now answers `evaluated` instead of `untrusted`. Mutations M1-M3 red
-- [x] 301. `workspace.py`'s locks (`pool.lock`, `slots/slot-N.lock`, `gate.lock`) were regular files, and the macOS
-  `$TMPDIR` purge (`dirhelper`, 03:35 daily: a regular file whose birth time and access time are both over 3 days old,
-  held or not; directories never) unlinked one a command held, so a later command locked a new inode beside it: two
-  holders of one copy or of `state.json`, `release` freeing a copy a command runs in, `status` reading it free, a
-  `bind` race losing a binding, two gates at once (7 of 12 probe rows at the parent): fixed, every lock is an empty
-  directory (`workspace.py::file_lock` through `_lock_directory`, as the flow lease and 143's marker), and a lock file
-  an older version left is replaced by its directory under that file's own lock (`_replace_lock_file`), so an older
-  opener fails loudly instead of holding another inode (0 of 12 after; mutations red)
+- [x] 295. fixed: a `ModelForm` field named after a model column but of another kind was typed and decoded by the
+  column while the form read its own kind, writing a row's `str()` unchecked or dropping the value.
+  `forms/inputs.py::require_column_kind_agreement` refuses it at schema build, reading
+  `forms/converter.py::form_field_kind`; a scalar field over a relation column still takes the id. Supersedes 125;
+  three shapes that built now refuse.
+- [x] 303. fixed: a partial `DjangoMutation` write skipped uniqueness and constraint checks a provided field joined
+  when declared on a parent, named in a `UniqueConstraint` condition, a `CheckConstraint` or `unique_for_*`, so the
+  duplicate hit the database or saved silently. `mutations/resolvers.py::_constraint_groups` walks `_meta.all_parents`
+  and `::_full_clean_or_field_errors` runs `full_clean` with split excludes (`CleanExcludes`) as Django's
+  `ModelForm._post_clean` does.
+- [x] 304. fixed: a selected annotation whose node had run a row fetch was refused by the visibility seal ("binds a
+  function bound value"), because Django caches `BaseExpression.convert_value` in the node and reconstruction carried
+  it; reachable from a plain consumer `Prefetch` with an annotated queryset.
+  `utils/querysets.py::_reconstructed_value` now drops exactly the caches Django's own copy drops; an evaluated
+  sidecar answers `evaluated`.
+- [x] 301. fixed: `workspace.py`'s lock files could be unlinked by the macOS `$TMPDIR` purge while held, so a later
+  command locked a new inode (two holders of a copy or `state.json`, two gates at once). Every lock is now an empty
+  directory (`workspace.py::file_lock` through `_lock_directory`, as 143's marker), and an older version's lock file
+  is replaced under its own lock (`_replace_lock_file`).
 - [x] 149. `scripts/count_queries.py` exited 1 (its "scales with cardinality" code) by traceback on a missing or
   unmatched operation, an empty or fragment-only document, and an unreadable `--query`, `--compare` or `--json` path:
   `select_operation` (Strawberry's rule) and `load_baseline` refuse up front through `parser.error` (exit 2) before
@@ -861,36 +717,22 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   `snapshot_commit` commits the mirrored copy under its lock (parent HEAD read after the sync; for `gate`, its `head`)
   through `content_tree`, refuses a copy edited since the sync, never moves the shared index or refs, and the gate
   result's key is `snapshot`
-- [x] 339. `scripts/bug_hunt.py::_final_gate_block` rendered "Run `uv run pytest`; require a passing suite and 100%
-  configured package coverage" into every generated hunt, against AGENTS rules 15 / 16, and the same drift (missed
-  by the rule-16 rewrite) sat in HUNT.md, REVIEW.md, the DRY / hunt worker docs, `scripts/review_plan.py::_GATE_ITEM`
-  and `scripts/workspace.py`'s `gate --suites` default (every suite): fixed at the root, a bare `workspace.py gate`
-  runs CI's lint job only (`LOCAL_GATE_SUITE`; a maintainer still names other suites), and every agentflow gate reads
-  "lint locally, every other suite in the dispatched `django.yml` matrix" in BoardDoc 11's words; closed per-cycle
-  hunt and review docs left as written
-- [x] 340. A `ModelForm` relation field whose class-level queryset is over another model than its column's target
-  (neither the target nor a subclass) built and failed every request that bound it with the request-time
-  `ConfigurationError`: fixed, `forms/inputs.py::require_class_choice_models` refuses it at `finalize_django_types()`
-  with the same subclass rule and target, only where the refusal is certain: the form keeps Django's `__init__` and
-  `order_fields` (`form_binds_class_fields`), the mutation keeps the default `get_form`, and the field is bound by every
-  write (any update; a create whose input requires it). A queryset assigned in `__init__` / `order_fields` /
-  `get_form`, an optional create field (omitted works, sent is refused at request time) and a class-level `None` are
-  unchanged
-- [x] 343. The visibility seal dropped Django 6.1's `QuerySet._fetch_mode`, so a `get_queryset` hook or manager
-  returning `.fetch_mode(FETCH_PEERS)` / `FETCH_RAISE` read `FETCH_ONE` on every sealed surface (PEERS 1+3 patron
-  loads for 3 loans, RAISE never raised), against `_seal_or_defect`'s "reproduce what `QuerySet._clone` copies"
-  comment: fixed, `utils/querysets.py::_seal_or_defect` carries the mode, admitting only an exact Django `FetchOne` /
-  `FetchPeers` / `FetchRaise` (`utils/_queryset_private.py::is_django_fetch_mode`; any other object is the
-  `untrusted` defect), so the source seed, hook, sidecar, prefetch-child and subclass seals all keep it, and
-  `utils/write_transaction.py::base_visible_queryset` carries the validated mode onto the locked locate; Django 5.2
-  (no fetch modes) is unchanged
-- [x] 162. a declared `RangeFilter` handed its raw bounds to the ORM (`RangeField.to_python` cleaned nothing), so a
-  Decimal "NaN" / "Infinity" bound answered a masked `ValidationError`: `RangeField(bound_field=...)` cleans each
-  non-None bound with the form field of the column's django-filter `gte` filter (`filters/base.py::_column_form_field`;
-  `gte`, not `exact`, so a choice column's off-choice bound still compares), so a non-finite or past-1e50 bound is
-  `FILTER_INVALID`, a naive datetime is made aware and text is stripped; relation bounds pass through as sent (an
-  existence oracle otherwise), and a class-level declaration's `.field` is built by `unkept_form_field` without writing
-  to it
+- [x] 339. fixed: `scripts/bug_hunt.py::_final_gate_block`, several process docs, `scripts/review_plan.py::_GATE_ITEM`
+  and `workspace.py gate`'s default told agents to run the full `uv run pytest` locally, against AGENTS rules 15 / 16.
+  A bare `workspace.py gate` now runs CI's lint job only (`LOCAL_GATE_SUITE`), and every gate reads "lint locally,
+  every other suite in the dispatched `django.yml` matrix".
+- [x] 340. fixed: a `ModelForm` relation field whose class-level queryset is over a model other than the column's
+  target (or a subclass) built and failed every request. `forms/inputs.py::require_class_choice_models` refuses it at
+  `finalize_django_types()` where the refusal is certain (default `__init__`, `order_fields` and `get_form`; bound by
+  every write); runtime-assigned querysets and optional create fields are unchanged.
+- [x] 343. fixed: the visibility seal dropped Django 6.1's `QuerySet._fetch_mode`, so a hook returning
+  `.fetch_mode(FETCH_PEERS)` / `FETCH_RAISE` read `FETCH_ONE`. `utils/querysets.py::_seal_or_defect` carries the mode,
+  admitting only an exact Django mode (`utils/_queryset_private.py::is_django_fetch_mode`), and
+  `utils/write_transaction.py::base_visible_queryset` carries it to the locked locate; Django 5.2 unchanged.
+- [x] 162. A declared `RangeFilter` handed raw bounds to the ORM, so a Decimal "NaN" / "Infinity" bound answered a
+  masked `ValidationError`. Each non-None bound is now cleaned with the column's `gte` form field
+  (`filters/base.py::_column_form_field`), so a non-finite bound is `FILTER_INVALID`; relation bounds pass through as
+  sent.
 - [x] 370. `ListFilter` / `ArrayFilter` elements are cleaned by the same column `gte` form field through `_ElementField`
   (an ArrayField column's `base_field`), so a non-finite or past-1e50 element is `FILTER_INVALID` as on the generated
   `in`; relation elements, a non-list value and an unbound filter pass through; `_ElementField` joins
@@ -901,90 +743,57 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   per `suffixes`, else `widgets_names`; audited django-filter 21.1-26.2, Django 5.2.16-6.1.2),
   `inputs.py::range_form_keys` refuses a widget not reading exactly two keys at schema build, and
   `sets.py::_absent_widget_value` reads the same keys
-- [x] 158. the operation gate (`walker.py::_enable_only_for_operation`) stopped every projection writer under a
-  mutation, so a hook / manager / resolver `.only()` or `.defer()` was never widened (a hook `.only("name")` ran 77
-  statements where the query ran 2; the async `DjangoMutation` re-fetch raised `SynchronousOnlyOperation`): writers
-  record columns under every operation and the plan carries a cached `introduce_projection`
-  (`walker.py::_introduces_projection_for_operation`), so `plans.py::apply_projection(..., introduce=False)` leaves an
-  unprojected queryset whole and widens a consumer projection; mutation counts now equal the query's, the hook-free
-  mutation stays one full-row statement, QUERY SQL is byte-identical; the prune (`prune_unsupportable_select_related`,
-  `_select_path_traversable`, `select_path_resolver_keys`, `_record_select_path_keys`) is deleted;
-  `types/resolvers.py::_FK_ELISION_UNSAFE` stays for a row the plan did not project (a consumer-owned `Prefetch`),
-  pinned live; specs 002, 004, 033, 035, 036, 038, 039, 040 and GLOSSARY / KANBAN restated
+- [x] 158. The operation gate (`walker.py::_enable_only_for_operation`) stopped projection writers under a mutation,
+  so a consumer `.only()` / `.defer()` was never widened (77 statements vs 2; an async re-fetch raised
+  `SynchronousOnlyOperation`). Writers now record under every operation and `plans.py::apply_projection(...,
+  introduce=False)` widens a consumer projection; mutation counts equal the query's; the select-path prune is deleted.
+  Docs: spec-002 and others.
 - [x] 371. `walker.py::_ensure_connector_only_fields(base_queryset=...)` records the attach columns whenever the child
   plan reads a column or the child base queryset carries a consumer projection, so a typename-only child over a
   projecting hook loads its connector with the hook's columns (27 statements -> 2, query and mutation); the hook-free
   child SQL is unchanged; live row `test_library_child_reading_no_column_keeps_the_attach_connector` (sync; the async
   per-row load runs inside the sync evaluation thread and never raised)
-- [x] 165. no defect: a payload relation hop past a deadline that ends after the write failing and rolling the mutation
-  back, and every later subscription frame's relation hop failing once the stream's budget is spent, are spec-047
-  Decision 9's contract; pinned by live sync / async rows in `test_query/test_relation_deadline_api.py` (the budget
-  narrowed after the write by a resolve hook per Decision 2; each hop rejects at its own path past the written node and
-  0 rows remain, the hop-free selection commits), live async rows with an already-loaded forward / reverse one-to-one
-  hop that tell the head `check_deadline` from one inside the `_resolve_async` body, and
-  `tests/test_resource_policy.py::test_a_budget_spent_between_frames_fails_every_later_frames_relation_hop`; the
-  GLOSSARY `check_deadline` entry states both
+- [x] 165. no defect: a relation hop past a deadline after the write failing and rolling back, and later subscription
+  frames' hops failing once the budget is spent, are spec-047 Decision 9's contract; pinned by
+  `test_query/test_relation_deadline_api.py` and
+  `tests/test_resource_policy.py::test_a_budget_spent_between_frames_fails_every_later_frames_relation_hop`.
 - [x] 170. no defect: `workspace.py prove` was pinned only through `run`'s shared `execute`, so its own routing (flow,
   layout, cell, fresh, manifest refusal, exit code) had no row; 13 rows in `tests/test_workspace.py` drive
   `main(["prove", ...])` in-process (the proof command on the flow's copy under the flow lease and the copy lock,
   relative and `~` manifests resolved, the command's exit code returned and logged, cell / fresh forwarded, a missing or
   directory manifest refused before a copy binds) and through the actor harness (gc refuses while a prove waits for its
   copy; a second prove waits for the first)
-- [x] 166. no defect: the async many-side rows answered the same rows whether `many_resolver` found the prefetch cache
-  or missed it (a miss falls through to the manager), so they pinned neither the lookup key nor the `_check_n1` probe
-  key; the async planned row now asserts its exact SELECT count over a childless venue (a missed lookup re-reads through
-  the target hook), the async consumer-prefetch row also runs under `strictness="raise"`, the sync strictness row also
-  prefetches the reverse FK `repairticket_set`, and one `test_query/conftest.py::record_compiled_sql` recorder serves
-  the async suites; gaps (b)-(d) need no rows: an unhooked reverse M2M miss is an equivalent mutant, the window
-  resolver-key collision needs a second shipped keyset type and is pinned by the async twin plus package key rows, and
-  the C11 hook-order rows are live on a holder mount
-- [x] 183. `[tool.ruff.format] exclude` bound only directory discovery, so `ruff format <x.md>` (the touched-paths
-  command the process docs prescribe) rewrote fenced blocks (27 tracked `.md` would change, the rendered GLOSSARY among
-  them): `force-exclude = true` under `[tool.ruff]` binds every exclude to named paths and `--stdin-filename`;
-  `scripts/check_trailing_commas.py` reads `[tool.ruff] extend-exclude` at run time (repo-relative name segments, an
-  anchored entry refused) and its own `ruff format` calls pass `--no-force-exclude`, so every file `--fix` edits is
-  reflowed; rows in `tests/test_ci_governance.py` and `tests/test_check_trailing_commas.py`; START and docs/ruffing.md
-  state it
+- [x] 166. no defect: the async many-side rows answered the same whether `many_resolver` hit or missed the prefetch
+  cache, so they pinned no key; the async planned row now asserts its exact SELECT count, the consumer-prefetch row
+  also runs under `strictness="raise"`, and one `test_query/conftest.py::record_compiled_sql` recorder serves the
+  async suites; gaps (b)-(d) need no rows.
+- [x] 183. `[tool.ruff.format] exclude` bound only directory discovery, so `ruff format <x.md>` rewrote fenced blocks;
+  `force-exclude = true` now binds every exclude to named paths, and `scripts/check_trailing_commas.py` reads
+  `extend-exclude` and passes `--no-force-exclude` to its own `ruff format` calls. Rows in
+  `tests/test_ci_governance.py` and `tests/test_check_trailing_commas.py`.
 - [x] 185. no defect:
-  `tests/mutations/test_write_transaction.py::test_every_success_payload_under_steady_pings_is_a_committed_row` is
-  selected by `postgres.yml`'s `package-core` shard and passed in every Postgres run since `1b6a09b1` (11 of 11), and
-  fails 3 of 3 against the pre-fix `schema.py`; the blocked-sync-caller nesting is documented in `schema.py` and pinned,
-  so docs/README.md, GLOSSARY `DjangoSchema`, the KANBAN card item and the spec-044 rationale now carry that exception
-  instead of an unconditional private window; the async window has no owning spec, card 079 owns the surrounding
-  transaction
+  `tests/mutations/test_write_transaction.py::test_every_success_payload_under_steady_pings_is_a_committed_row` runs
+  in `postgres.yml`'s `package-core` shard and passed in every run since `1b6a09b1`; docs/README.md, GLOSSARY
+  `DjangoSchema` and spec-044 now carry the blocked-sync-caller exception instead of an unconditional private window;
+  card 079 owns the surrounding transaction.
 - [x] 186. docs/README.md now states how the optimizer cooperates with a consumer queryset (kept `select_related` /
-  `prefetch_related`, a consumer `Prefetch` in place of the planned one and unused on a joined forward relation, a
-  prefetch onto a hooked target re-read per parent, a consumer `.only()` / `.defer()` widened under every operation, a
-  consumer `Prefetch(queryset=...)` never widened and its deferred column failing on async), the identity arm ("Five
-  empty-value rules"), and the nested-connection shapes that resolve per parent (`filter:` / `orderBy:`, a backward page
-  from a cursor, an unwindowable target queryset; it was unqualified); GLOSSARY `queryset-diffing` and
-  `Meta.relation_shapes` match; live rows pin the async deferred-column failure and `orderBy:` under
-  `strictness="raise"`
+  `prefetch_related`, a consumer `Prefetch`, `.only()` / `.defer()` widened, a `Prefetch(queryset=...)` never
+  widened), the identity arm, and which nested-connection shapes resolve per parent; GLOSSARY matches; live rows pin
+  the async deferred-column failure and `orderBy:` under `strictness="raise"`.
 - [x] 231. fixed in the kanban DB by `CardItem` 1479 (the FieldError keying scope bullet now states the per-flavor key
   maps from `utils/errors.py::build_error_key_map`, the package-tier multi-word matrix in
   `tests/utils/test_error_keys.py` and the live rows per flavor), `CardItem` 1500 (card 72's gap list no longer calls
   the keying a wire format no test can see; it still owes its `CAMELCASE_ERRORS` disposition row) and `CardReference`
   23-25 (copies of `CardItem` 142 that still said a model field name); a sweep of every kanban text column finds no
   stale sentence of the family left
-- [x] 302. `scripts/check_spec_glossary.py::auto_link_terms` (NEXT.md Step 7 `--auto-link`) protected only column-0
-  backtick fences and inline links, matched with no term boundary and never retried past a protected mention, so it
-  wrote `[term][glossary-x]` into code spans, headings, reference text, autolinks, raw HTML, URLs and longer
-  identifiers (39 of 63 probe rows; replaying every spec's CSV over link-stripped specs put 69 of 1216 writes in a
-  protected shape), and `spec_link_anchors` counted a link inside code as a use: fixed, the KANBAN inliner's lexer
-  moved verbatim to the stdlib-only `scripts/_markdown_lex.py` (KANBAN.md byte-identical), which adds a CommonMark
-  block scanner (`block_regions` / `mask_blocks`: ATX and setext headings, link-reference definitions, backtick and
-  tilde fences and HTML blocks inside list items and block quotes, ending with their container, indented code, tabs
-  counted from their real column); the writer masks blocks, matches with `PROSE_TERM_BOUNDARY_AFTER` and moves to the
-  next mention past a protected one, the checker counts only links outside code (`headings=False`); NEXT.md Step 7
-  reads "non-code, non-link, non-heading" (protected writes 69 -> 0, the 57 archived specs check as before,
-  markdown-it block oracle 0 under-masks over 1229 shapes and 210 files)
-- [x] 187. test gap closed: the C11 live rows run on Postgres only under the default windowed strategy, so
-  `tests/test_lateral_pg_parity.py::test_hook_ordered_window_pages_in_branch_with_parity` now pages hook-ordered and
-  reversed keyset and offset windows (fk and m2m; title, -id and a bare `.reverse()`) through `CROSS JOIN LATERAL` with
-  windowed parity, the exact `ROW_NUMBER` order and the seek operator; 53 of 53 pass on Postgres 17 locally, and the
-  rows fail under the pre-fix `effective_cursor_state` (8), a dropped `normalize_order_direction` reversal (12), a
-  flipped seek (10) and a flipped window direction (20); no lateral defect found; `postgres.yml`'s `package-core` shard
-  (Postgres 16) runs them
+- [x] 302. fixed: `scripts/check_spec_glossary.py::auto_link_terms` protected only column-0 fences and inline links
+  with no term boundary, so it wrote glossary links into code spans, headings, autolinks, HTML and identifiers. The
+  KANBAN lexer moved to `scripts/_markdown_lex.py` with a CommonMark block scanner (`block_regions` / `mask_blocks`);
+  the writer masks blocks and matches on `PROSE_TERM_BOUNDARY_AFTER`, and the checker counts only links outside code.
+- [x] 187. test gap closed, no lateral defect:
+  `tests/test_lateral_pg_parity.py::test_hook_ordered_window_pages_in_branch_with_parity` pages hook-ordered and
+  reversed keyset and offset windows through `CROSS JOIN LATERAL` with windowed parity; it passes on Postgres 17
+  locally and fails under each seeded mutant; `postgres.yml`'s `package-core` shard (Postgres 16) runs it.
 - [x] 255. fixed: both terms CSVs moved to `docs/SPECS/appx/` and spec-068's `[templates-terms]` definition points
   there; `tests/test_ci_governance.py::_misplaced_archive_files` now refuses any file in `docs/SPECS/` other than an
   archived spec and `NEXT.md`, and anything in `docs/SPECS/appx/` other than a spec's `-terms.csv` or `-rationale.md`
@@ -995,13 +804,10 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   `scripts/workspace.py::LINT_COMMANDS`; the item's "all 57 pass" was wrong: spec-034 failed (a `Meta.relation_shapes`
   CSV row and link definition left after its body link was dropped), so both are removed and DONE-034's glossary rows
   re-imported; START and CONTRIBUTING list the hook
-- [x] 378. A killed `workspace.py prove` no longer locks its copy: a resync (first bind, rebind, `--fresh`) and `gc`
-  remove the copy's `prove_failability.py` state directory (one function names it for both scripts), first restoring
-  a `.venv` mutation (which the mirror keeps) from its pristine copy with a byte compare; a marker that cannot be read
-  or restored is kept with a stderr notice and the resync completes; a `prove` extra that argparse would bind to
-  `--workspace` / `--scratch-root` / `--json` is refused; `uv`, `git` or `docker` missing from PATH is a refusal
-  before the header (it was a raw traceback, raised before the header, not after), and the prover refuses a missing
-  scope executable before writing anything
+- [x] 378. A killed `workspace.py prove` no longer locks its copy: a resync and `gc` remove the copy's
+  `prove_failability.py` state directory after restoring a `.venv` mutation byte-compared from its pristine copy; an
+  unreadable marker is kept with a notice. A `prove` extra argparse would bind to a wrapper flag is refused, and
+  missing `uv` / `git` / `docker` is a refusal, not a traceback.
 - [x] 379. A consumer `Prefetch(queryset=...)` owns its path's rows on a forward relation too: the planned JOIN, the
   FK-id elision and the `only()` columns at that path are withdrawn with their resolver keys, JOINs beneath it become
   prefetch lookups over the consumer's rows, and the consumer queryset is not widened, so a row it hides stays hidden
@@ -1011,124 +817,79 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   sealed through the hook as the seed in one batched query (two statements at any parent count, sync and async) and
   the relation's key stays planned; a seed over another model is still re-read per parent, a sliced one fails as it
   does without the optimizer; a hint seal is recorded only for a generated resolver at the relation's own accessor
-- [x] 305. A ModelForm `MultipleChoiceField` / `TypedMultipleChoiceField` over a single-value column that lists no
-  choices (neither an `ArrayField` nor a `JSONField`) is typed as the same form field off-column (`[String!]!` on
-  create, `[String!]` on update; `forms/inputs.py::_writes_list_over_single_value`), and an update build logs one
-  `logger.warning` per such field; an update omitting it binds the built form's `get_initial_for_field` under
-  `form.add_prefix` (a `QueryDict` from `get_form` is copied and given the initial with `setlist`, any other mapping
-  merged into a `dict`), so a form splitting the stored value into its initial keeps it and one that does not is
-  refused "Enter a list of values." with nothing written; a `JSONField` column keeps `JSON`, the serializer twin is
-  unchanged (spec-039); spec-038 Decision 7 and 8 and the `DjangoModelFormMutation` glossary entry say so (create 0/3
-  and update 0/4 before, all green after, live under `FAKESHOP_TEST_BRANCH_CITY_PICKS`)
-- [x] 326. A Django `ValidationError` raised at save time on the primary key of a serializer field written through
-  `source="pk"` (integer or text key), declared as `pk`, or on a multi-table child (the parent link and its attname)
-  arrives under the renamed input instead of the model's pk name (`id`, `isbn_13`, `venue_ptr`):
-  `rest_framework/serializer_converter.py::written_model_field` moved verbatim to `utils/relations.py` (no shim) and
-  `utils/errors.py::save_time_error_key_map` resolves the spec's source through it; the docstring and the spec-039
-  citation say so (the 4 wrong grid rows flip, the 7 correct rows stay; live under
-  `FAKESHOP_TEST_PK_SOURCE_SERIALIZERS`)
-- [x] 190. fixed: a temporal filter value the database the queryset runs on cannot bind answers `FILTER_INVALID` keyed
-  to its form field (`"Enter a value the database can represent."` / `"invalid"`) instead of the masked uncoded error:
-  `FilterSet._validate_form_or_raise` asks that connection's own operations through
-  `utils/errors.py::unbindable_temporal`, resolving the alias lazily and only for a temporal leaf; refused on SQLite,
-  MySQL and Oracle are an aware datetime outside years 1..9999 once projected (a naive one made aware under a non-UTC
-  `TIME_ZONE` included), any aware datetime when `USE_TZ` is false and an aware time, and on every backend a `year` /
-  `iso_year` comparison bound outside 1..9999; Django's PostgreSQL adapters pass those datetimes and times through;
-  generated leaves, `not` / `or` / `and`, relation paths, declared filters, list and range members, sync and async
-  (`node` -> `decisionsConnection`) all answer it; spec-027, docs/README.md and the GLOSSARY FilterSet entry state the
-  rule
-- [x] 328. Every floor run installs each soft dependency at its pinned lower bound, not only Django and
-  strawberry-graphql: the CI floor cell (`django.yml`, every `compatibility_only` node) gains a step installing
-  `channels[daphne]==4.3.2`, `cryptography==44.0.0`, `django-debug-toolbar==7.0.0` and `djangorestframework==3.17.0`
-  after `uv sync`, `scripts/workspace.py::floor_pins` reads them from pyproject `[dependency-groups].dev`
-  (`SOFT_FLOOR_PACKAGES`, `_floor_declarations`; a pin that is not `>=`, a dropped extra or a missing soft dependency
-  is a `WorkspaceError`), a `tests/test_ci_governance.py` row gates every floor literal in `django.yml` (the
-  strawberry ones included) against pyproject, and BUILD.md "Floor verification" (recipe, supported floor, and a soft
-  dependency's seam in "When it is required") and START.md say so (each soft dependency probed green at its floor on
-  Python 3.10)
-- [x] 312. fixed: the visibility seal accepts a `TextChoices` / `StrEnum` / plain `str`-subclass member wherever Django
-  serves one as SQL text (a `RawSQL` text, a `Func` function / template / argument joiner / base template and its
-  `extra` keys and values, a combined expression's operator, a `Meta.db_table` the base table is baked from, a lookup
-  value's mapping key) and seals it to the exact text it spells, so the sealed query holds no `str` subclass and
-  compiles to the exact-text twin's SQL; a pending deferred filter's arguments are rebuilt before they are baked (a
-  consumer-held subquery is never relabelled; an opaque bound value or an unrebuildable graph fails closed) and a
-  combinator's `pk__in` rewrite is rebuilt in turn; spec-045 and the GLOSSARY prove-then-clone entry state it
+- [x] 305. A ModelForm `MultipleChoiceField` / `TypedMultipleChoiceField` over a choice-less single-value column is
+  now typed as the form field (`[String!]!` create, `[String!]` update;
+  `forms/inputs.py::_writes_list_over_single_value`), with one build warning per field; an update omitting it binds
+  the form's initial, so an unsplittable stored value is refused with nothing written. Docs: spec-038 Decisions 7, 8;
+  live under `FAKESHOP_TEST_BRANCH_CITY_PICKS`.
+- [x] 326. A save-time `ValidationError` on the pk of a serializer field written through `source="pk"`, declared as
+  `pk`, or on an MTI child arrived under the renamed input instead of the model's pk name;
+  `rest_framework/serializer_converter.py::written_model_field` moved to `utils/relations.py` and
+  `utils/errors.py::save_time_error_key_map` resolves the source through it. Live under
+  `FAKESHOP_TEST_PK_SOURCE_SERIALIZERS`.
+- [x] 190. fixed: a temporal filter value the queryset's database cannot bind (an aware datetime outside years 1..9999
+  on SQLite / MySQL / Oracle, any aware datetime when `USE_TZ` is false, an out-of-range `year`) answers
+  `FILTER_INVALID` "Enter a value the database can represent." instead of a masked error:
+  `FilterSet._validate_form_or_raise` asks the connection through `utils/errors.py::unbindable_temporal`. Docs:
+  spec-027, README.
+- [x] 328. Every floor run installs each soft dependency at its pinned lower bound: the CI floor cell installs the
+  `channels[daphne]`, `cryptography`, `django-debug-toolbar` and `djangorestframework` floors after `uv sync`,
+  `scripts/workspace.py::floor_pins` reads them from pyproject (`SOFT_FLOOR_PACKAGES`), and a
+  `tests/test_ci_governance.py` row gates every floor literal in `django.yml` against pyproject. Docs: BUILD.md,
+  START.md.
+- [x] 312. fixed: the visibility seal accepts a `TextChoices` / `StrEnum` / `str`-subclass member wherever Django
+  serves one as SQL text (`RawSQL`, `Func` parts, operators, `Meta.db_table`, lookup mapping keys) and seals it to its
+  exact text, so the sealed query compiles to the exact-text twin's SQL; pending deferred-filter arguments and a
+  combinator's `pk__in` rewrite are rebuilt before baking. Docs: spec-045.
 - [x] 313. fixed: reproduced (a database router whose `db_for_read` / `db_for_write` answers a `TextChoices` / `StrEnum`
   alias was refused with `ConfigurationError` on an `orderBy` read through the sidecar);
   `utils/querysets.py::_snapshot_routing_intent` admits a member and keeps its exact text as the routed alias, a
   non-string answer is still refused; spec-050 states it
-- [x] 323. Inside a `get_queryset` hook, `apply_cascade_permissions` / `aapply_cascade_permissions` return a fresh
-  instance of the source's own `QuerySet` class, so a project method chains after the cascade (it raised
-  `AttributeError`): the source is still sealed plain and narrowed plain, so no consumer `filter` override sees the
-  cascade predicate (the FilterEraser pin unedited), and the walked result is restated as the source's class at both
-  exits (the walk and the re-entrant `fields=[]` return) by `utils/querysets.py::_restated_as_source_class`, sharing
-  the walked `sql.Query` (no clone, no SQL, about 2.5 us; a plain source is returned as is) through `_built_queryset`,
-  now the one constructor path `_seal_or_defect` uses too; both signatures take and return a QuerySet-bound TypeVar;
-  README, spec-034, spec-045 Decision 1, the module docstring and the `apply_cascade_permissions` and
-  sealed-execution-queryset glossary entries say so (live under `FAKESHOP_TEST_LOAN_CASCADE_BEFORE_METHOD`, every
-  shape including the sync root list)
-- [x] 314. Not a defect: only application Python (a `get_queryset` hook, a project `QuerySet` method) puts a value in
-  `extra(params=)` / `RawSQL` params, and a model instance there fails in the driver exactly as in plain Django; the
-  seal admits a raw-SQL parameter by plain-data ancestry, never by driver adaptability (an exact `UUID`, `time` or
-  `timedelta` passes it and fails in the driver, as before 272), and refusing a model instance would break a project
-  that registered a driver adapter for it. The `utils/querysets.py` retention and raw-parameter docstrings and
-  spec-045 state that a model instance in a raw-SQL parameter is retained and reaches the driver as is, and
-  `tests/utils/test_querysets.py::test_raw_sql_parameter_model_instance_is_retained_by_reference` pins the admission
-- [x] 409. not a defect: a `check_<field>_permission` gate is application Python (GOAL "Trust boundary") and no wire
-  input produces its slot; a non-callable non-`None` slot already fails closed, since
-  `utils/permissions.py::invoke_permission_method` raises `ConfigurationError` on every request that names the gated
-  input (masked to the client, never recorded in `fired`), pinned by
+- [x] 323. Inside a `get_queryset` hook, `apply_cascade_permissions` / `aapply_cascade_permissions` return the
+  source's own `QuerySet` class, so a project method chains after the cascade (it raised `AttributeError`); the walked
+  result is restated by `utils/querysets.py::_restated_as_source_class`, sharing the walked query, through
+  `_built_queryset`. Docs: README, spec-034, spec-045; live under `FAKESHOP_TEST_LOAN_CASCADE_BEFORE_METHOD`.
+- [x] 314. Not a defect: only application Python puts a value in `extra(params=)` / `RawSQL` params, and a model
+  instance there fails in the driver exactly as in plain Django (an exact `UUID` passes the seal and fails there, as
+  before 272); refusing it would break a registered driver adapter. The docstrings and spec-045 say so, pinned by
+  `tests/utils/test_querysets.py::test_raw_sql_parameter_model_instance_is_retained_by_reference`.
+- [x] 409. not a defect: a `check_<field>_permission` gate is application Python and no wire input sets its slot; a
+  non-callable slot already fails closed through `utils/permissions.py::invoke_permission_method` raising
+  `ConfigurationError`, pinned by
   `tests/utils/test_permissions.py::test_invoke_permission_method_rejects_a_non_callable_gate_slot`; a class-creation
-  `callable()` check would refuse the shipped `classmethod` gate and a `property` gate and cannot see a slot set after
-  creation, and DRF and django-graphene-filters check at call time too
+  check would refuse `classmethod` / `property` gates.
 - [x] 410. not a defect: only a write through `object.__setattr__` / `type.__setattr__` passes the seal, and that is
-  trusted application code (GOAL "Trust boundary"); the sentence promising more is retracted, so
-  `write_mixins.py::_ValidatedMutationMeta.__delattr__`'s message ends "captured once at class creation." (pinned
-  verbatim by `tests/test_write_mixins.py::test_validated_mutation_meta_record_refuses_slot_writes_and_deletes`) and
-  the seal family's docstrings, comments and test prose (`make_meta_validating_metaclass`,
-  `_AuthMutationMetaSnapshot`, the comment above `_SealedAuthHolderMeta`) say the record's or class's own
-  `__setattr__` / `__delattr__` refuse reassignment and deletion, with no release provenance
-- [x] 307. fixed: a Ctrl-Z (`SIGTSTP`, `SIGTTIN`, `SIGTTOU`) that lands while `workspace.py` is starting its command
-  waits in `scripts/_stop_signals.py::_JobControl` (`pending`) and `stream` delivers it through `settle()` once the
-  command's group is recorded, so the command stops with the run (it ran on, holding its leases, until `fg`); a
-  `SIGCONT` before then drops it. A reader gone from the output (`| head`, `2>&1 | head`, a closed terminal) no
-  longer turns the run's exit into 120: `_pump` points every one of the sink's fd, 1 and 2 that shares the dead file
-  at `/dev/null` on `EPIPE` / `EIO` only, so `run` and `prove` return the command's own code and a full disk still
-  surfaces. The suspend-before-recorded, continue-before-recorded, shared-fd reader-gone and errno rows pin it, a
-  `gate(layout, ["floor"])` row pins the floor install's lock holding, and the two `SIGCONT` routes were already
-  told apart by their own rows (not a defect)
-- [x] 135. fixed: a malformed GlobalID in a relation input, single (`categoryId: "not-base64!!"`) or an `[ID!]`
-  element (`genres: ["not-base64!!"]`), is the field-keyed relation `FieldError` (`Invalid id for relation ...`) in
-  the payload in the model, ModelForm and serializer flavors, never a masked top-level error: a relation into a Relay
-  target is typed `strawberry.ID` and decoded server-side, the decode branching on the target
-  (`utils/write_values.py::relation_takes_global_id`), and a consumer override of such a relation must be
-  `strawberry.ID` (a `relay.GlobalID` override is refused at finalize). The error-policy, products and library
-  live rows pin it; spec-036, 038, 039, 053 and the `input-type-generation` glossary term say so
+  trusted application code; the overpromising sentence is retracted, so
+  `write_mixins.py::_ValidatedMutationMeta.__delattr__`'s message ends "captured once at class creation." (pinned by
+  `tests/test_write_mixins.py::test_validated_mutation_meta_record_refuses_slot_writes_and_deletes`).
+- [x] 307. fixed: a Ctrl-Z landing while `workspace.py` starts its command waits in
+  `scripts/_stop_signals.py::_JobControl` and is delivered by `settle()` once the group is recorded, so the command
+  stops with the run; a reader gone from the output (`| head`) no longer turns the exit into 120, since `_pump` points
+  the dead fds at `/dev/null` on `EPIPE` / `EIO` only. The two `SIGCONT` routes were not a defect.
+- [x] 135. fixed: a malformed GlobalID in a relation input (single or an `[ID!]` element) is the field-keyed relation
+  `FieldError` in the payload in the model, ModelForm and serializer flavors, not a masked top-level error: a
+  Relay-target relation is typed `strawberry.ID` and decoded server-side
+  (`utils/write_values.py::relation_takes_global_id`), and a `relay.GlobalID` override is refused at finalize. Docs:
+  spec-036, 038, 039, 053.
 - [x] 324. fixed: `tests/utils/test_querysets.py::test_additive_only_subclass_result_is_sealed_to_plain_queryset`
   states behaviour only: the hook result is rebuilt as a plain `QuerySet` from its validated state, the subclass
   identity dropped whatever methods the subclass defines, the predicate kept; the same file's other history phrasings
   ("previously", "used to", "pre-fix", "the old inventory", "before the accessor scan existed", "new guard") are
   restated the same way, each counterfactual checked by running the test's probe with its guard patched out. Comments
   and docstrings only (code digest unchanged)
-- [x] 424. fixed: a `DjangoModelFormMutation` whose form carries a prefix (a class-level `prefix`, a
-  `get_form_kwargs` `prefix=`, or a `get_form` passing the package's data or a copy of it to a prefixed form) is bound
-  under it: the package keys the client's values through the form's `add_prefix`, so the form reads every value sent
-  and the explicit-`null` and required-file checks answer as on an unprefixed form; only renamed form-field keys move,
-  no consumer mapping is mutated, and a mapping already holding a prefixed key is kept as bound. The products
-  prefixed-form live rows and the forms resolver rows pin it; spec-038, the README and the `djangomodelformmutation`
-  glossary term say so
+- [x] 424. fixed: a `DjangoModelFormMutation` whose form carries a prefix (class-level, `get_form_kwargs` or
+  `get_form`) is bound under it: values are keyed through the form's `add_prefix`, so every value is read and the
+  explicit-`null` and required-file checks answer as unprefixed; no consumer mapping is mutated. Pinned by the
+  products prefixed-form live rows and forms resolver rows; docs: spec-038, README.
 - [x] 408. fixed: a `SerializerMutation` hook returning a mapping keyed by a `TextChoices` or `StrEnum` member is
   admitted: `rest_framework/resolvers.py::_hook_mapping` refuses only a non-`str` key and keys the result by each key's
   exact text, so the member answers like its plain-`str` twin and a member spelling a reserved, undeclared or
   model-field name is refused with the plain name's message. The library member-key live rows pin it; spec-039 says so.
   The `rest_framework/sets.py` Meta-map key gates stay exact-`str` (dry-0_0_15_3 item 44)
-- [x] 429. fixed: under the async executor a plain sync root or nested resolver that returns a lazy `QuerySet` to a list
-  field answers with the sync view's rows and SQL: the dependency-owned `_graphql_core_patches` list-completion arm wraps
-  a Django `QuerySet` in the async completion adapter so it is fetched through `__aiter__` off the loop (a sentinel
-  retires it once graphql-core completes async-first), and `DjangoOptimizerExtension.resolve` builds a sync root's plan
-  in one `sync_to_async` worker, so planned targets' `get_queryset` hooks never run on the loop. The library loan grid
-  (all 15 cases), the fetched-annotation twin and the scalars, kanban and generic-connection async rows pin it; the
-  README, spec-002, 035, 050 and the glossary say so
+- [x] 429. fixed: under the async executor a sync resolver returning a lazy `QuerySet` to a list field answers with
+  the sync rows and SQL: the `_graphql_core_patches` list-completion arm fetches a Django `QuerySet` through
+  `__aiter__` off the loop, and `DjangoOptimizerExtension.resolve` builds a sync root's plan in one `sync_to_async`
+  worker. Pinned by the library loan grid and async rows; docs: README, spec-002, 035, 050.
 - [x] 390. fixed with 429: `allScalarSpecimens` and `allCards` answer on the async view with the sync view's rows and SQL.
   A plain `def` resolver still runs on the loop, so code that evaluates a queryset, and an `apply_sync` call's
   validation, permission gates and related `get_queryset` hooks, belong in an `async def` resolver awaiting
@@ -1136,30 +897,19 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   eager-evaluation library root pins the raise
 - [x] 53. superseded by 429: a hand-written `@strawberry.field` returning a lazy QuerySet completes off the loop on the
   async executor, and the README async paragraph under `DjangoListField` says so
-- [x] 318. fixed: the cited row (`tests/filters/test_sets.py::test_an_unordered_meta_fields_expands_in_canonical_order[set
-  of lookups in a dict]` under `PYTHONHASHSEED=28`) already passes since `bf370934`; the residual is fixed here. Every
-  row that needs a set iterating out of canonical order now builds it through one shared helper,
-  `tests/_idioms.py::scrambled` (subsets x layouts: the constructor, `dict.fromkeys`, sets grown through padding, and
-  `frozenset` copies of them; fails loudly when none scrambles, and asserts the result really does), with
-  `canonical_order` beside it. The filters (`_CATEGORY_COLUMNS` plus `"id"`, both kinds), orders and utils rows use it,
-  the two `read_set_meta_fields` rows over 4-name pools, so the frozenset rows no longer flake (seed 10332), the orders
-  twin no longer flakes (4124 / 4176 / 18433), and the utils rows fail on every seed with `_sorted_meta_values`
-  unsorted (they passed on 25% / 50%). 0 misses over seeds 0..20000 for every pool used (3.14), 0..4999 on 3.10;
-  `tests/test_idioms.py` pins the helper
+- [x] 318. fixed: the cited row already passes since `bf370934`; the residual flakes are fixed by building every
+  out-of-order set through one helper, `tests/_idioms.py::scrambled` (with `canonical_order`), which fails loudly when
+  nothing scrambles; the filters, orders and utils rows use it and no longer flake. `tests/test_idioms.py` pins the
+  helper.
 - [x] 330. fixed: `scripts/prove_failability.py::_resolve_scratch_root` names the default scratch parent per user,
   `<system temporary directory>/failability-<uid>` (`DEFAULT_SCRATCH_DIRECTORY_PREFIX` plus `os.getuid()`, as pytest's
   `pytest-of-<user>`), so a second user on a shared Linux `/tmp` gets a parent of their own instead of a refusal on
   every default run; the owner / symlink refusal is unchanged and still guards a squatted per-user name, and an
   explicit `--scratch-root` behaves as before. A two-uid row pins it (it fails through the real refusal with the
   shared name); the module docstring, the `--scratch-root` help and `docs/builder/BUILD.md` say per user
-- [x] 585. Not a defect under rule 37: no contract row covers a `RawQuerySet`. The async completion arm, the
-  `async-queryset-completion-adapter` glossary term and spec-050 Decision 12 adapt a Django `QuerySet` only and leave
-  every other value on graphql-core 3.2's synchronous completion, and the `get_queryset` seal already refuses a
-  `RawQuerySet`; the README async sentence now says "lazy `QuerySet`". Fact finding: a plain or `async def` root, or a
-  nested resolver, returning `.raw(...)` raises `SynchronousOnlyOperation` on the async executor with the optimizer on
-  or off and answers on the sync one; a `DjangoListField` / `DjangoConnectionField` `resolver=` returning one raises
-  there in the package's own row iteration. Widening the arm to `RawQuerySet` is two lines, and graphql-core 3.3
-  completes it async-first
+- [x] 585. Not a defect under rule 37: no contract row covers a `RawQuerySet`; the async completion arm adapts a
+  Django `QuerySet` only and the `get_queryset` seal refuses a `RawQuerySet`, so the README async sentence now says
+  "lazy `QuerySet`". A resolver returning `.raw(...)` still raises `SynchronousOnlyOperation` on the async executor.
 - [x] 583. not a defect: a hook's mapping keys are application Python (GOAL "Trust boundary") and no wire input
   reaches them; `utils/truth.py::render` documents that a value outside the builtin scalars renders through its own
   `__repr__`, which is what a lazy translation proxy's `'a'` is, and the refusal states the rule ("every key must be a
@@ -1169,763 +919,376 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   name at request time, as DRF's `validate_<field>` methods are, so a misspelled one is never called there either.
   A finalize audit of gate names would be a new card, not a fix
 - [x] 331. fixed: `scripts/workspace.py::ensure_floor_venv` decides reuse with one read
-  (`_read_text_if_present(key_path) == key`), so a key the macOS `$TMPDIR` purge removes after the check reads as "no
-  key, rebuild" instead of a `FileNotFoundError` traceback out of `gate`. The same file's other purge-reachable
-  check-then-act windows read a vanished entry as already gone: `gc`'s size sum (`_stat_key`), `_remove_flow_dir`'s
-  file and legacy-marker-file unlinks, `_same_entry` (one `_stat_key` read; a destination gone before its hash reads
-  as not the same, so it is copied), and the `_copy_entry` / `_remove_unwanted` unlinks (`missing_ok`); only a
-  missing entry is absorbed. One row per window (`_run_once_before_reading` / `_run_once_after_checking`), each red
-  with its fix reverted
-- [x] 406. not a defect: the README "Single-parent fast path" paragraph promises the fast path for exactly one parent
-  and calls every other shape "a performance downgrade, never a wrong page"; a root `first: N` page's probe row
-  (Strawberry's `ListConnection` overfetch, the keyset `NEXT_PAGE_PROBE_ROWS`) is a fetched parent, so its pk joins
-  the nested prefetch's parent `IN` list and the planned window runs. Every page is correct and the statement count
-  is unchanged; a plain list relation prefetches the probe parent's children too. Upstream strawberry-django
-  prefetches the probe row the same way. Prefetching only the page rows touches every root connection path (offset,
-  keyset, async, `hasNextPage`); that is a new card, not a fix
-- [x] 407. test gap closed, not a defect (behaviour matches the README transport-support paragraph and the "younger
-  than" window in `consumers.py` / spec-046): `tests/auth/test_sessions.py` pins that a custom client-side engine
-  outside the signed-cookie hierarchy reads as server-side (WebSocket logout supported), and `tests/test_routers.py`
-  pins `_actor_is_current`'s strict window edge (ages 7.5 / 8.0 / 8.5 on an 8.0 window: 0 / 1 / 1 session reads, the
-  stamp rewritten only on a read) and that a 0.0 window never writes the revalidation stamp; each row kills a mutant
-  the suite let through (a non-DB-store test, `<=`, an unconditional write-back). Package tier: fakeshop has no
-  WebSocket mount
-- [x] 329. fixed: no signal-forwarding `uv` sits in the process group a stop is sent to.
-  `scripts/_stop_signals.py::uv_run_launch` resolves the environment `uv run` gives a command once (`uv run ... --
-  env -0`, the same sync) and the command is started directly in it, so `scripts/prove_failability.py`'s scope is
-  pytest itself and `scripts/workspace.py`'s `run` / `prove` and the gate's non-floor suites start their command with
-  no uv between; each process gets each stop once. The second `SIGINT` uv sent about 0.2 s later aborted a pytest
-  teardown still running (a `-n0` scope's finalizer, interrupted 0.07 s in), which now completes; group signalling,
-  the grandchild ending on the first stop and the `SIGKILL` escalation are unchanged, and the env, cwd, `sys.path`,
-  plugins and settings match `uv run`'s field for field. The docstrings say `SIGINT`'s teardown is allowed to finish
-  and `SIGTERM` / `SIGHUP` / `SIGQUIT` end pytest without one; a wrapper a user's own command starts still
-  double-delivers. Uv-shaped forwarding stand-in rows pin both tools, and the gate row pins the suite's cwd
+  (`_read_text_if_present(key_path) == key`), so a key the macOS `$TMPDIR` purge removes reads as "rebuild" instead of
+  a `FileNotFoundError`; the file's other purge-reachable check-then-act windows (`gc` sizes, `_remove_flow_dir`,
+  `_same_entry`, `_copy_entry` / `_remove_unwanted`) read a vanished entry as gone. One red row per window.
+- [x] 406. not a defect: the README "Single-parent fast path" promises it for one parent only; a root `first: N`
+  page's probe row is a fetched parent, so the planned window runs, every page is correct and the statement count is
+  unchanged. Prefetching only page rows would be a new card, not a fix.
+- [x] 407. test gap closed, not a defect: `tests/auth/test_sessions.py` pins that a custom engine outside the
+  signed-cookie hierarchy reads as server-side, and `tests/test_routers.py` pins `_actor_is_current`'s strict window
+  edge and that a 0.0 window never writes the revalidation stamp; each row kills a surviving mutant. Package tier:
+  fakeshop has no WebSocket mount.
+- [x] 329. fixed: no signal-forwarding `uv` sits in the stopped process group:
+  `scripts/_stop_signals.py::uv_run_launch` resolves `uv run`'s environment once and starts the command directly in it
+  (`scripts/prove_failability.py`, and `scripts/workspace.py`'s `run` / `prove` and non-floor gate suites), so each
+  process gets each stop once and a `SIGINT` teardown completes. A wrapper a user's own command starts still
+  double-delivers.
 - [x] 404. fixture gap closed for the reverse-FK serializer path (not a defect): fakeshop's library app gains
   `BranchShelvesSerializer` (`shelves = PrimaryKeyRelatedField(many=True)` over the reverse FK) and
   `createBranchViaShelvesSerializer` / `updateBranchViaShelvesSerializer`, whose live rows pin the `[Int!]` input, one
   batched visibility read, attach-only writes and the hidden-shelf `shelves` relation error with no write; the
   package stand-in `test_many_pk_related_field_over_reverse_fk_column_emits_multi` is deleted, its lines and mutants
   all covered live. The `CompositePrimaryKey` and `db_column=` gaps are `docs/builder/TODO.md` item 27's
-- [x] 405. the package row was not yet redundant, so it is promoted, then deleted: the live
-  `_NEGATIVE_CURSOR_ROWS` gain a `before` + `last` row (sync and async sequence resolvers; the only live killer of a
-  `before` decode skipped unless `first` is set or `last` is unset), and `test_minted_offset_cursors_still_page` now
-  pages the root `QuerySet`, the list resolver and the tuple resolver from a minted `after` (a valid `after` serving
-  an empty sequence page now fails live). `tests/test_connection.py::
-  test_consumer_resolver_sequence_negative_cursor_raises_graphql_error` is deleted, every mutant it killed failing a
-  live row
-- [x] 319. fixed at the root: a flat copy of a child leaf (`books__probe`, from a `RelatedFilter`) is a spelling of
-  the request, never a field of the parent's form. `filters/sets.py::FilterSet.get_filters` defers every copy, a
-  request binds only the copies whose widgets read a key it sends (`ExpansionSnapshot.copy_keys`, exact keys:
-  `__low` / `_min` widget keys included, so `booksProbeMin` never binds `books__probe`), `get_form_class` builds the
-  bound form from the set's own filters and those named copies, and `_apply_flat_leaves` never applies an unnamed
-  one; the static "absence filters nothing" proof (`_absence_filters_nothing` and its helpers) and the form-reading
-  exemption are gone. A leaf whose absence acts (`required`, a checkbox, `empty_value`, `null_value`, a disabled
-  `initial`, a project `filter` that does not skip the empty value) acts only on the form of the set that declares
-  it: its own root, or an active nested branch. So `{}` and unrelated leaves no longer return nothing or
-  `FILTER_INVALID`, `books: {probe: ...}` answers as `booksProbe` does (it ran the leaf twice, once with the absent
-  value), and `or` / `not` arms agree; a nested sibling leaf still runs the child's form. A project form `clean` that
-  reads an unnamed copy uses `.get`, and an unnamed copy on a form of your own is never applied but still validates.
-  Package rows pin the grid, the gate and async paths and the exact naming; fakeshop gains `IssueFilter`
-  (`embargoed`, a `CheckboxInput` `BooleanFilter`) and `PeriodicalFilter` (`issues = RelatedFilter`) with live
-  rows, sync and async. README, the `filterset` glossary term and spec-027 say so. Breaking (pre-1.0)
-- [x] 332. fixed: `scripts/workspace.py::_remove_flow_dir` clears the marker's contents before `marker.rmdir()`, through
-  the one per-entry loop it empties the flow folder with (`_empty_folder`: a real directory through `rmtree`, anything
-  else unlinked, a symlink never followed), so a Finder `.DS_Store`, a stray folder or a symlink inside `.dsf-ws` no
-  longer makes `gc` raise `OSError` (Errno 66) on every rerun; the marker proves ownership by existing, never by being
-  empty. A `.dsf-ws` that is itself a symlink is unlinked, never emptied through. The marker still goes last (a new
-  row pins it: a `gc` cut short inside the flow folder keeps the marker and the next one finishes), and the parametrized
-  litter row covers a file, a folder, a symlink inside and a symlinked marker, outside targets intact
-- [x] 345. fixed: `scripts/workspace.py` keeps a flow's bindings in the XDG state home
-  (`<state home>/dsf-ws/<sha16 of the workspace base>/<flow>/state.json`, through the prover's `state_home`, folders
-  at `0o700`), never in the system temporary directory, so neither the macOS `$TMPDIR` purge (birth time and atime
-  both over 3 days; a read does not renew atime on APFS, so a flow used only through `run` aged out) nor a Linux
-  `/tmp` that a reboot empties (tmpfs) or systemd-tmpfiles cleans loses them: the next command no longer renumbers
-  slots, resyncs other slots over their edits or runs a duplicate of a held address. `gc` and `release` remove or
-  rewrite the state, also for a flow whose temporary folder is gone, and `status` lists flows from both; a state file
-  an older version left in the flow folder moves to the state home under `pool.lock`. The module docstring and
-  START.md say what survives where on macOS and Linux. Rows pin the location and mode, a purge of every file, a
-  removed base, the lifecycle, the migration and its read race
-- [x] 402. not a defect, confirmed: `mutations/inputs.py::build_mutation_input` reads
-  `relation_bool(field, "many_to_many")`, and only the model and user flavors call it, over
-  `editable_input_fields`, which drops every reverse and virtual relation (no column or `editable=False`) and
-  refuses one named in `Meta.fields` / `exclude` with `ConfigurationError`; a reverse kind never reaches the read. Over
-  775 reaching (model, operation, field) rows the read and `model_column_write_kind(...) == RELATION_MULTI` agree,
-  and routing it through the classifier leaves the printed schema and every generated input byte-identical. The
-  forward-M2M optional rule is pinned live by `test_input_shapes_api.py`. No code
+- [x] 405. The package row is promoted, then deleted: the live `_NEGATIVE_CURSOR_ROWS` gain a `before` + `last` row
+  (sync and async) and `test_minted_offset_cursors_still_page` pages the root `QuerySet`, list and tuple resolvers
+  from a minted `after`;
+  `tests/test_connection.py::test_consumer_resolver_sequence_negative_cursor_raises_graphql_error` is deleted, every
+  mutant it killed failing a live row.
+- [x] 319. fixed at the root (breaking, pre-1.0): a flat copy of a child leaf (`books__probe`) is a spelling of the
+  request, not a parent form field: `filters/sets.py::FilterSet.get_filters` defers every copy, a request binds only
+  copies whose widget keys it sends (`ExpansionSnapshot.copy_keys`), and `_absence_filters_nothing` is gone. `{}` and
+  unrelated leaves no longer return nothing or `FILTER_INVALID`, and `books: {probe: ...}` answers as `booksProbe`;
+  fakeshop gains `IssueFilter` / `PeriodicalFilter`.
+- [x] 332. fixed: `scripts/workspace.py::_remove_flow_dir` empties the marker through `_empty_folder` (symlinks never
+  followed) before `marker.rmdir()`, so a `.DS_Store`, stray folder or symlink inside `.dsf-ws` no longer makes `gc`
+  raise `OSError` on every rerun; a symlinked marker is unlinked, and the marker still goes last.
+- [x] 345. fixed: `scripts/workspace.py` keeps a flow's bindings under the XDG state home (`<state home>/dsf-ws/<sha16
+  of the workspace base>/<flow>/state.json`, `0o700`), not the temporary directory, so the macOS `$TMPDIR` purge or a
+  cleaned Linux `/tmp` no longer loses them (renumbered slots, resynced edits, duplicate addresses); `gc` / `release`
+  / `status` handle both locations and an older state file migrates under `pool.lock`.
+- [x] 402. not a defect, confirmed: `mutations/inputs.py::build_mutation_input` reads `relation_bool(field,
+  "many_to_many")` only over `editable_input_fields`, which drops every reverse and virtual relation, so a reverse
+  kind never reaches it; routing it through the classifier leaves every generated input byte-identical. No code.
 - [x] 403. fixed (docs): spec-027 and spec-028 gain an Edge-cases row each, and the `filterset` and `orderset`
   glossary terms one sentence each, stating that a one-shot (`iter(...)`, a generator, `map(...)`) or bare-string
   `Meta.fields` / `filter_fields` / `Meta.exclude` is a `ConfigurationError`: a FilterSet's at class creation, an
   OrderSet's at the first `get_fields()` expansion (finalize); a `SimpleLazyObject` is judged as the object it stands
   for and `filter_fields` is reported as `Meta.fields`. No code
-- [x] 381. fixed: a write input datetime or time the target database cannot store (on SQLite / MySQL / Oracle the
-  values `unbindable_temporal` refuses; on PostgreSQL also an aware datetime whose wall clock in the connection's zone
-  leaves years 1..9999, stored but not loadable at the re-fetch; each element of an `ArrayField` of either) is the
-  field-keyed `FieldError` "Enter a value the database can represent." code `invalid` in the payload, nothing
-  written, in the model, ModelForm and serializer flavors, checked on the value each flavor will store after its own
-  validation (`utils/errors.py::unstorable_temporal`, `utils/write_values.py::unstorable_temporal_error`) against the
-  pinned write alias; the serializer cells where DRF itself raises a raw `OverflowError` stay masked (540). A new
-  fakeshop scalars write surface and its live rows pin it, with package rows for PostgreSQL and the MySQL / Oracle
-  adapters; the README, spec-036, 038, 039 and the `fielderror-envelope` glossary term say so
-- [x] 401. fixed: the model flavor's create answers an input that leaves out a `blank=True, null=False` column with
-  no default (fakeshop `createItemHold` without `itemId`) with that column's field-keyed `null` error (`itemId`, "This
-  field cannot be null.", code `null`), nothing written, as the ModelForm flavor does; the diagnosis reads the
-  in-memory instance after the failed INSERT (`mutations/resolvers.py::_created_row_integrity_errors`), so a
-  consumer `save()` that fills the value still writes, and shares one predicate with the ModelForm
-  (`utils/write_values.py::unstorable_columns`). Live rows pin omitted and `null` on both flavors, sync and async;
-  spec-036, spec-038, the README and the `DjangoMutation` / `fielderror-envelope` glossary terms say so
-- [x] 586. fixed: an update input over a model with a `CompositePrimaryKey` leaves out every member column of the
-  key, as it does a `OneToOneField(primary_key=True)` or a text key, in the model, ModelForm and serializer flavors;
-  one predicate (`utils/relations.py::is_row_key_column`: the column's own pk flag, or membership in its declaring
-  model's `pk_fields`) answers row identity for the three input builders and `located_row_update_fields`. Package
-  rows pin the predicate over auto, one-to-one, text, multi-table and composite keys, each flavor's input and a sync
-  and async update over a real composite table; the live row waits on a fakeshop composite model
-  (`docs/builder/TODO.md` item 27). The README, spec-036, 038, 039 and three glossary terms say so
+- [x] 381. fixed: a write datetime or time the target database cannot store (SQLite / MySQL / Oracle per
+  `unbindable_temporal`; on PostgreSQL also an aware datetime leaving years 1..9999 in the connection's zone;
+  `ArrayField` elements) is the field-keyed `FieldError` "Enter a value the database can represent." with nothing
+  written in all three flavors (`utils/errors.py::unstorable_temporal`,
+  `utils/write_values.py::unstorable_temporal_error`); DRF's raw `OverflowError` cells stay masked (540).
+- [x] 401. fixed: the model flavor's create answers an input omitting a `blank=True, null=False` column with no
+  default (`createItemHold` without `itemId`) with that column's field-keyed `null` error, nothing written, as the
+  ModelForm flavor does; the diagnosis reads the instance after the failed INSERT
+  (`mutations/resolvers.py::_created_row_integrity_errors`), sharing `utils/write_values.py::unstorable_columns`.
+  Docs: spec-036, spec-038, README.
+- [x] 586. fixed: an update input over a `CompositePrimaryKey` model leaves out every key member column in all three
+  flavors; one predicate (`utils/relations.py::is_row_key_column`) answers row identity for the input builders and
+  `located_row_update_fields`. Package rows pin it; the live row waits on a fakeshop composite model
+  (`docs/builder/TODO.md` item 27).
 - [x] 353. fixed: `nodes(ids:)` keeps Django 6.1 peer batching. `relay.py::_stamp_nodes` stamps each `resolve_nodes`
   group, then gives the copies whose originals shared one `_state.peers` list a fresh list of weak references to the
   copies, so a lazy FK across 3 loans under `FETCH_PEERS` costs 1 query instead of 3 (sync and async, a repeated id
   included), as the connection and list roots already did; a consumer `resolve_nodes` override's rows batch the same
   way, a row with no peers is left alone, and the shallow copy that keeps a shared row free of the routing hint
   stays. The `_state.peers` read and write live in `utils/_queryset_private.py`. Found verifying 353: row 506
-- [x] 503. fixed: a `FILTER_INVALID` error's `errors` keys carry the field's path from the filter root, so a nested
-  `RelatedFilter` branch's leaf is `<declared branch>__<leaf>` (`shelf__branch__name`, the flat copy's own key), an
-  `and` / `or` arm's is `<op>_<index>__<leaf>` with `not` bare (`or_0__title`, `not__title`, upstream's arm token),
-  nesting either way in request order, and a nested form's non-field error is `<path>____all__`; root keys stay
-  bare. One owner spells the segment (`filters/sets.py::_branch_key`, the arm token by
-  `filters/inputs.py::LogicOperatorDescriptor.arm_key`), the path rides where the nesting depth already travels, and
-  the one raise site keys every entry, sync and async alike. Permission denials are unchanged and not a defect: the
-  documented message names the gate, which the nested and flat spellings already answer identically. Live rows pin
-  branches, arms, both nestings, flat copies inside each and a fakeshop `ShelfFilter` form-level refusal, sync and
-  async; the README, spec-027 and the `FilterSet` glossary term say so
-- [x] 383. fixed: a per-field `"__all__"` publishes Django's text-pattern lookups (`iexact`, `contains`,
-  `startswith`, `endswith`, `regex` and their case-insensitive forms) only on a text column, one whose package default
-  filter is `CharFilter` (`CharField` and subclasses, `TextField`, `GenericIPAddressField`, `FilePathField`); a date,
-  time, number, Boolean or UUID column keeps `exact`, `in`, `isNull` and its comparisons. A column whose filter the
-  consumer supplies (`Meta.filter_overrides`, a `FILTER_DEFAULTS` of its own) keeps the whole bag as before. A pattern
-  lookup listed by name on a non-text column generates a `TextPatternFilter` (a `CharFilter`) typed `String`, matched
-  against the backend's text rendering of the column as Django's ORM matches it, so no generated leaf answers the masked
-  error or a silent `[]` for a value the backend cannot use; the right-hand side of a leaf is typed by what Django
-  compares (spec-027). Live rows on SQLite and PostgreSQL, sync and async; package rows per column kind and override
-  shape; README, spec-027 and the `FilterSet` glossary term say so
-- [x] 423. fixed: a `DjangoModelFormMutation` input is typed by the shape its form field reads wherever that shape
-  disagrees with the column: besides 305's multiple-choice field over a single-value column, a built-in single-value
-  form field (`ChoiceField`, `TypedChoiceField`, `CharField`, `IntegerField`, `DecimalField`, ...) over an `ArrayField`
-  takes one value (a `ChoiceField` over an `ArrayField` whose base field lists choices takes that element enum,
-  narrowed by the form's choices), the form's `clean_<field>` turning it into the column's list; the package never
-  wraps it. Which form fields read a list is one converter-owned fact
-  (`forms/converter.py::form_field_reads_list`, `form_field_reads_one_value`), so the default `SimpleArrayField`,
-  `SplitArrayField`, `MultipleChoiceField`, `JSONField` and any form field the converter does not register stay typed
-  by the column as before. An omitted update binds the form's initial, one build warning per such field names its
-  direction, and the predicate and helpers are renamed for the shape disagreement. Package rows on SQLite and a real
-  PostgreSQL `ArrayField`; spec-038 Decisions 7 and 8, the README and the `DjangoModelFormMutation` glossary term say
-  so
-- [x] 372. fixed: a declared package `RangeFilter(lookup_expr="range")` with both bounds on an integer column applies
-  them as `gte` + `lte` in one `_apply_lookups` call (as `filters/base.py::IntegerRangeFilter` does), so a bound past
-  the column's range widens or matches nothing through Django's range-aware lookups instead of reaching `BETWEEN` as a
-  masked `OverflowError`; other column types keep `BETWEEN`. A declared `ListFilter(lookup_expr="in")` on an integer
-  column drops the members outside the column's integer range on the queryset's database
-  (`filters/base.py::_backend_storable_int_members`) and matches nothing when none is left, without applying the
-  column's own validators. Each declared cell on `ScalarSpecimen.signed_big` / `unsigned_big` answers as the generated
-  `range` / `in` does, flat and under `not`. Found verifying 372: rows 507-509
-- [x] 375. Not a defect under AGENTS rule 37 (no wire input reaches it): a declared `RangeFilter` / `ListFilter` whose
-  `field_name` names a relation (`fk`, `fk_id`, a reverse or many-to-many accessor) fails the schema build with a
-  `ConfigurationError` (`filters/inputs.py::_scalar_from_model_field`) for every primary key type, so no GraphQL
-  request carries a bound; a `<relation>__id` path resolves to the target's column, whose `gte` form field cleans it
-  (`FILTER_INVALID` for `NaN` / `Infinity`), and on every shape that builds a target row its `get_queryset` hides
-  answers `[]` as a missing one does, so no existence oracle exists. The pass-through is spec-027's written
-  `RangeFilter` / `ListFilter` rule ("a relation's bound reaches the ORM as sent"), pinned by
-  `tests/filters/test_base.py::test_range_filter_without_a_column_form_field_passes_bounds_through`. Under a
-  consumer's `DjangoFilterBackend` (no schema build) a range on a relation raises `FieldError` for every value, valid
-  ones included, as django-filter's own `RangeFilter` does. Probed over 5 primary key types x 6 relation kinds x 4
-  spellings. Found checking it: rows 510-512
-- [x] 376. A package `RangeFilter` / `ListFilter` / `ArrayFilter` declared on a plain `django_filters.FilterSet`
-  (a consumer view with DRF's `DjangoFilterBackend`) cleaned no bound or element: `filters/base.py::_column_form_field`
-  answered a cleaner only under a package `FilterSet` parent, so a query-string bound the column cannot hold
-  (`?price_span_0=NaN`, a malformed UUID or datetime, a NUL on PostgreSQL) reached the ORM and raised (HTTP 500). Any
-  django-filter `FilterSet` parent now cleans, so the backend answers the form error with its 400; the field is the
-  one the parent's class selects without the package `FilterSet`'s own `filter_for_lookup` override (a package
-  subclass reads the method behind that override as before, any other set its own `filter_for_lookup`). A package
-  parent's generated filters and cleaners are unchanged. Found verifying it: row 514
+- [x] 503. fixed: `FILTER_INVALID` `errors` keys carry the field's path from the filter root (`shelf__branch__name`,
+  `or_0__title`, `not__title`, `<path>____all__` for a nested non-field error); root keys stay bare. Segments are
+  spelled by `filters/sets.py::_branch_key` and `filters/inputs.py::LogicOperatorDescriptor.arm_key`. Permission
+  denials unchanged, not a defect; docs: README, spec-027.
+- [x] 383. fixed: a per-field `"__all__"` publishes Django's text-pattern lookups only on a text column (package
+  default `CharFilter`); other columns keep `exact`, `in`, `isNull` and comparisons, and a consumer-supplied filter
+  keeps the whole bag. A pattern lookup listed by name on a non-text column generates a `TextPatternFilter` typed
+  `String`, so no leaf answers a masked error or a silent `[]`. Docs: spec-027, README.
+- [x] 423. fixed: a `DjangoModelFormMutation` input is typed by the shape its form field reads where it disagrees with
+  the column: besides 305's case, a built-in single-value form field over an `ArrayField` takes one value, the form's
+  `clean_<field>` making it a list. One converter-owned fact (`forms/converter.py::form_field_reads_list`,
+  `form_field_reads_one_value`); unregistered fields stay column-typed. Docs: spec-038 Decisions 7, 8.
+- [x] 372. fixed: a declared `RangeFilter(lookup_expr="range")` on an integer column applies both bounds as `gte` +
+  `lte`, so an out-of-range bound widens or matches nothing instead of a masked `OverflowError`, and a declared
+  `ListFilter(lookup_expr="in")` drops members outside the column's range
+  (`filters/base.py::_backend_storable_int_members`). Found verifying 372: rows 507-509.
+- [x] 375. Not a defect under AGENTS rule 37: a declared `RangeFilter` / `ListFilter` on a relation fails schema build
+  with `ConfigurationError` (`filters/inputs.py::_scalar_from_model_field`), so no request carries a bound, and a
+  `<relation>__id` path is cleaned by the target's form field; spec-027's pass-through rule, pinned by
+  `tests/filters/test_base.py::test_range_filter_without_a_column_form_field_passes_bounds_through`. Found checking
+  it: rows 510-512.
+- [x] 376. A package `RangeFilter` / `ListFilter` / `ArrayFilter` on a plain `django_filters.FilterSet` (DRF
+  `DjangoFilterBackend`) cleaned nothing, so a bad bound raised an HTTP 500; `filters/base.py::_column_form_field` now
+  cleans under any django-filter parent, so the backend answers its 400; package-parent filters are unchanged. Found
+  verifying it: row 514.
 - [x] 382. fixed: on PostgreSQL a temporal filter or write value whose UTC offset the server refuses answers the
-  documented envelope (`FILTER_INVALID` "Enter a value the database can represent." on the read side, the field-keyed
-  `FieldError` on the write side, nothing written) instead of the masked error:
-  `utils/errors.py::unbindable_temporal` reads the connection's binding mode without opening it; an aware time is
-  refused at an offset of 16:00 or more, and, when the connection binds on the client (psycopg2, psycopg 3's default),
-  an aware datetime or time also at a sub-second offset; under server-side binding a datetime's offset never refuses
-  it. An `ArrayField` write element is bound as text in either mode, so it is held to the client-side rule through
-  `unstorable_temporal`. A `date` / `year` transform never binds the offset and keeps filtering. Live rows on SQLite and
-  PostgreSQL (filter and the three write flavors, sync and async), package rows per binding mode on a real server;
-  spec-027, spec-036, spec-039, the README and the `FilterSet` and `FieldError` envelope glossary terms say so
-- [x] 509. fixed: an identity decode (the generated integer `in` and the declared `ListFilter`, `node` / `nodes`, the
-  GlobalID filter, the raw-pk relation filters, raw-pk and GlobalID write ids) finds a stored row whose value a
-  validator would refuse: `utils/querysets.py::coerce_field_value_or_none` never runs validators; it casts with
-  `to_python`, binds through `Field.get_db_prep_value` on the database the lookup reads (the queryset's `db`, else
-  `lookup_read_alias`), and holds the value to the column's storage domain (PostgreSQL's refused UTC offsets, the
-  integer range, a decimal the column can hold, read by value not spelling), so a value the backend cannot bind still
-  names no row. Fakeshop `signed_big` and `Publisher.house_code` carry validators; live rows pin flat and `not`
-  parity, `node` / `nodes`, the GlobalID filter and `createEdition`; spec-032 Decision 5 says so.
-- [x] 400. fixed: a `FilterSet` whose `Meta.exclude` is set and whose `Meta.fields` is not is the whole-set sweep,
-  exactly as `fields = "__all__"` with the same exclude: the primary key is added (a Relay owner's own pk as its
-  GlobalID filter) and every forward many-to-many is removed, where it published django-filter's raw sweep (no auto pk,
-  many-to-many keys included). A primary key named in `Meta.exclude` is never added back by the sweep (auto, non-auto,
-  a multi-table child's parent link), under either spelling. One owner (`filters/sets.py::FilterSet.get_fields`); an
-  explicit field list or dict with `Meta.exclude` is unchanged. The library example gains an exclude-only and a
-  pk-excluding whole-set filterset on secondary types; live rows plus package rows over the shape grid; spec-027, its
-  rationale, the README and the `FilterSet` glossary term say so
-- [x] 373. A declared `django_filters.LookupChoiceFilter` filters by a value plus a `<name>_lookup` key, which no
-  GraphQL input carries, so it refused every non-empty value; declared without `lookup_choices` it was worse: building
-  the schema read `.field` on the class-level declaration (`filters/inputs.py` catch-all and `method=` fallback, and an
-  unbound projected child leaf in `filters/sets.py::ProjectedChildFilter.field`), which cached a half-built field there,
-  so every later request raised an unmasked `AttributeError` and a `DjangoFilterBackend` view on the same `FilterSet`
-  broke too. Those reads now run on a deep copy (`filters/base.py::copied_form_field`), so building the schema writes
-  nothing to any declaration, and a `LookupChoiceFilter` (or subclass) on a served `FilterSet` is refused with
-  `ConfigurationError` at schema build, before its field is read; the declaration still filters under django-filter
-  and DRF
-- [x] 399. fixed: a hop-walking flat leaf (an owner-bound projected copy or a plain walked copy) whose value is
-  supplied runs its child filter body once per value, over the hop's visible rows, where it ran twice (an unscoped
-  activity probe whose result was discarded, then the apply), so a consumer `method=` body ran twice and one reading
-  the database cost a query more flat than nested; a result that is its input by identity is inactive and leaves the
-  parent unchanged, the hop chain is derived once, and a supplied-but-inactive leaf (`""`) now derives its hops once
-  on sync as on async. An absent leaf keeps the unscoped probe (an inactive one runs no `get_queryset`), so a consumer
-  filter acting on an omitted value behaves as before. A projected copy through an unresolved `RelatedFilter(None,
-  ...)` hop answers `ConfigurationError` like a plain walked leaf, where it raised `RecursionError`. One owner
-  (`filters/sets.py::FilterSet._apply_relation_leaf`); package rows count body runs, queries and derivations sync and
-  async, live empty-value rows pin the identity exit; spec-027 and the `FilterSet` glossary term say so
+  documented envelope (`FILTER_INVALID`, or the field-keyed `FieldError` with nothing written) instead of a masked
+  error: `utils/errors.py::unbindable_temporal` reads the binding mode without opening the connection and refuses by
+  offset per mode; `ArrayField` elements follow the client-side rule. Docs: spec-027, 036, 039, README.
+- [x] 509. fixed: an identity decode (integer `in`, `ListFilter`, `node` / `nodes`, GlobalID and raw-pk filters and
+  write ids) finds a stored row a validator would refuse: `utils/querysets.py::coerce_field_value_or_none` never runs
+  validators, casting with `to_python` and binding through `Field.get_db_prep_value` on the read database within the
+  column's storage domain. Live rows on fakeshop `signed_big` / `Publisher.house_code`; docs: spec-032 Decision 5.
+- [x] 400. fixed: a `FilterSet` with `Meta.exclude` and no `Meta.fields` is the whole-set sweep, exactly as `fields =
+  "__all__"` with that exclude (pk added, forward many-to-many removed), and a pk named in `Meta.exclude` is never
+  added back; one owner (`filters/sets.py::FilterSet.get_fields`); explicit field lists unchanged. Docs: spec-027,
+  README.
+- [x] 373. A declared `django_filters.LookupChoiceFilter` refused every non-empty value (no GraphQL input carries
+  `<name>_lookup`), and without `lookup_choices` schema build cached a half-built `.field` on the declaration,
+  breaking later requests and a `DjangoFilterBackend` view. Those reads now run on a deep copy
+  (`filters/base.py::copied_form_field`), and a `LookupChoiceFilter` on a served `FilterSet` is a schema-build
+  `ConfigurationError`.
+- [x] 399. fixed: a supplied hop-walking flat leaf runs its child filter body once per value over the hop's visible
+  rows, not twice (a discarded unscoped probe, then the apply), so a consumer `method=` body no longer runs twice; an
+  absent leaf keeps the probe, and a projected copy through an unresolved `RelatedFilter(None, ...)` hop answers
+  `ConfigurationError`, not `RecursionError`. Owner: `filters/sets.py::FilterSet._apply_relation_leaf`.
 
 - [x] 500. fixed: `tests/test_ci_governance.py::test_no_comment_docstring_or_name_carries_a_provenance_phrase` refuses
-  `pre-fix`, `post-fix`, `before the fix`, `after the fix`, `formerly`, `exactly as before`, `used to`, `previously`
-  and `as of 0.0.` in every comment, docstring and def/class name of the sweep corpus (case-insensitive, word-bounded,
-  matched across line wraps; no exclusion, no marker), with a planted row per phrase and per wrap shape; the 137 hits
-  it found (package, four test trees, examples and scripts) state behaviour, each counterfactual checked against the
-  test that asserts it or a guard-removed probe, the 16 non-historical uses rephrased; the item's named sites, the
-  rest of their functions and 324's two residual sites restated too, with the `apply_cascade_permissions` glossary
-  twin. Code digest unchanged outside the gate row and two renamed tests; START's rule names the gate and its phrases
+  provenance phrases (`pre-fix`, `formerly`, `previously`, `as of 0.0.` and others) in every comment, docstring and
+  def/class name of the sweep corpus; the 137 hits it found now state behaviour, 324's two residual sites included.
+  Code digest unchanged outside the gate row and two renamed tests.
 - [x] 567. fixed: the flow docs cite each prose rule at its home: no process provenance at START.md "Style the
   maintainer cares about", `path::Symbol` citations and the test tier at AGENTS.md (`docs/bug_hunt/HUNT.md`
   step 8, `docs/bug_hunt/worker-2.md` and `docs/dry/worker-2.md` step 7, `docs/dry/DRY.md` Worker-2,
   `docs/review/REVIEW.md`'s process-provenance grade); no rule is added to AGENTS.md
 - [x] 506. fixed: `tests/base/test_init.py::test_annotations_evaluate_without_django_stubs_ext_patch` binds the real
-  object for every `if TYPE_CHECKING:` import that resolves at runtime to a class or module (per alias, nested
-  `if`/`try` branches included, `django_stubs_ext` never bound, the process asserted unpatched after the binding), so
-  a TYPE_CHECKING-only head hides no subscript; the 25 annotations it then finds (the item's five plus 20
-  masked ones: `Options` x16, `BaseIterable` x2, `UploadedFile`, `Lookup`, `Field` x2 in
-  `utils/write_values.py::unstorable_columns`) go through a module-private `if TYPE_CHECKING:` alias with a bare-class
-  `else:`, so no package annotation subscripts a Django class without `__class_getitem__`; static types unchanged; red
-  on every Python/Django cell, not only the floor
-- [x] 549. not a defect: no README, GLOSSARY, spec or test row promises what a pattern value the backend refuses
-  answers; `FILTER_INVALID` covers a closed list (a value the form field rejects, text the package refuses to store, a
-  temporal value the database cannot bind, an unholdable range or list bound) and spec-027 keeps pattern lookups out
-  of the temporal check, while a `regex` / `iRegex` operand is a plain `CharField` value the form accepts and the
-  backend refuses only when the lazy queryset runs (SQLite: `OperationalError` from Django's Python `re` user
-  function, only when a non-NULL row is scanned; PostgreSQL: `DataError` SQLSTATE 2201B on any table), masked as
-  GOAL's error policy intends. Django, django-filter, DRF `SearchFilter`, graphene-django, django-graphene-filters and
-  strawberry-graphql-django validate no pattern and map no such error. The promise question is row 571
-- [x] 541. fixed: on PostgreSQL a `DjangoModelFormMutation` whose optional single-value form field (`ChoiceField`,
-  `TypedChoiceField`, `CharField`, with no `clean_<field>` or one wrapping only a non-empty value) cleans `""`, an
-  explicit `null` or an omitted create value to `""` over a `blank=True, null=False` `ArrayField` answers that
-  column's field-keyed `null` error with nothing written (create, update, client-assigned-key create, sync and async),
-  since the save-time diagnosis runs on the save's `DataError` (malformed array literal) as on an `IntegrityError` /
-  `ValueError`; a `DataError` no column explains propagates. Not a defect: a non-empty value the consumer's form
-  leaves un-wrapped fails inside `is_valid()` with Django's own `JSONDecodeError` / `TypeError`, as the docs now say
-  (the form owns the wrap, as upstream). README, GLOSSARY and spec-038 name the `ArrayField` beside the non-text
-  choice column; package rows on PostgreSQL
-- [x] 551. not a defect: spec-038 Decision 7 types a model-less form field by its registered class through a
-  `type(field).__mro__` walk, with no row for a PostgreSQL form field, so `SimpleArrayField` (a `CharField` subclass)
-  is `String`, pinned by `tests/forms/test_converter.py::test_postgres_array_form_fields_read_a_list`; no README,
-  GLOSSARY or spec row gives it another type, `form_field_reads_list` is read only for a field over an `ArrayField`
-  column (423), and graphene-django publishes it as `String` too. Every wire value either cleans (delimited text split
-  on the field's `delimiter`, each item cleaned by the base field; an empty or omitted optional value is `[]`) or
-  answers a field-keyed `required` / `item_invalid` error. Whether it should publish the base field's list is row 576
-- [x] 542. not a defect: on PostgreSQL only a consumer-declared DRF `ChoiceField` reaches it (every other single-value
-  DRF field over an `ArrayField` is refused at build, row 46); `is_valid()` accepts the choice and the save fails on
-  the scalar the serializer never wrapped (`DataError` on a text array, `ProgrammingError` on an integer one), which
-  plain DRF answers with a 500 and the README answers as a top-level error ("any other exception from that code ... is
-  a top-level error"); no README, GLOSSARY or spec-039 row types the field or promises a field-keyed answer. Whether
-  it should build at all, or carry a documented `validate_<field>` wrap as the form flavor's `clean_<field>` does, is
-  Waiting row 45 (now with the Postgres evidence). The serializer's own empty-value and omitted-create gap is row 577
+  object for every runtime-resolvable `if TYPE_CHECKING:` import, and the 25 annotations it finds subscripting a
+  Django class without `__class_getitem__` (e.g. in `utils/write_values.py::unstorable_columns`) go through a private
+  `TYPE_CHECKING` alias with a bare-class `else:`; static types unchanged.
+- [x] 549. not a defect: no contract row promises what a pattern value the backend refuses answers; a `regex` /
+  `iRegex` operand is a plain `CharField` value the backend refuses only when the queryset runs (SQLite
+  `OperationalError`, PostgreSQL `DataError`), masked as GOAL's error policy intends, and no upstream validates
+  patterns. The promise question is row 571.
+- [x] 541. fixed: on PostgreSQL a `DjangoModelFormMutation` optional single-value form field cleaning to `""` over a
+  `blank=True, null=False` `ArrayField` answers that column's field-keyed `null` error with nothing written, since the
+  save-time diagnosis also runs on the save's `DataError`; an unexplained `DataError` propagates. Not a defect: a
+  non-empty value the consumer's form leaves un-wrapped fails in `is_valid()`, as the docs now say.
+- [x] 551. not a defect: spec-038 Decision 7 types a model-less form field by its registered class, so
+  `SimpleArrayField` (a `CharField` subclass) is `String`, pinned by
+  `tests/forms/test_converter.py::test_postgres_array_form_fields_read_a_list`; graphene-django agrees, every wire
+  value cleans or gets a field-keyed error, and `form_field_reads_list` applies only over an `ArrayField` column
+  (423). Whether it should publish a list is row 576.
+- [x] 542. not a defect: on PostgreSQL only a consumer-declared DRF `ChoiceField` over an `ArrayField` reaches it
+  (others are refused at build, row 46); the save fails on the unwrapped scalar, a top-level error as the README
+  promises, with no contract row for a field-keyed answer. Whether it should build is Waiting row 45 (now with the
+  Postgres evidence); the serializer's empty-value gap is row 577.
 - [x] 552. not a defect: the refusal is the converter's written fail-loud contract; spec-038 Decision 7 registers each
   supported form-field class individually and "requires NOT registering a base-`forms.Field` catch-all", so a field
   with no registered ancestor raises `ConfigurationError` naming the field and class
   (`forms/converter.py::_unsupported_form_field`), and `SplitArrayField` subclasses `forms.Field` directly (Django
   5.2.16 and 6.1.2 alike). graphene-django types it `String` only through the catch-all the package refuses. Whether a
   column-less PostgreSQL form field should publish a type is Waiting row 576 (facts gathered fixing 551)
-- [x] 553. fixed: a `ModelForm` field over a column whose widget reads other keys than its name is bound under the
-  keys that widget reads, at every place the package puts a value into the form's data (the decoded input, the
-  omitted-update reconstruction, an omitted field's initial, the prefix re-key, and a mapping a `get_form` hook keyed
-  itself, a `QueryDict` holding a list per key included): a `SplitArrayWidget` reads `<key>_0 .. <key>_{size-1}`,
-  padded with `None` so an explicit `[]` is not omitted, and a `MultiWidget` its own suffixes, split by its
-  `decompress` (recursively); the whole value stays under the field's key beside its parts, and a `disabled` field is
-  bound whole. So a `SplitArrayField` over an `ArrayField` writes the list sent (where every write answered "This
-  field is required.", or an optional field reported success writing `[]`, the column default or `[null, ...]`, and an
-  update omitting it erased the stored list), and a `SplitDateTimeField` over a `DateTimeField` writes the datetime
-  sent; a list longer than `size`, sent or reconstructed, is refused with `ArrayMaxLengthValidator`'s `max_length`
-  error instead of being truncated. `utils/widgets.py` owns which keys a widget reads for filters and forms
-  (`multi_widget_keys` moved there unchanged; Django 5.2.16 to 6.1.2 audited). Live rows through a fakeshop scalars
-  split-datetime form, package rows on PostgreSQL; README, GLOSSARY and spec-038 say so
-- [x] 507. not a defect: spec-027's integer-range promise names the package's `RangeFilter` and `ListFilter` (and the
-  generated `IntegerRangeFilter` / `IntegerInFilter`), README keeps a filter you declare yourself on django-filter's
-  own rules, and `FilterSet._apply_flat_leaves` runs a declared django-filter class byte-for-byte, so django-filter's
-  `RangeFilter`, a `BaseRangeFilter` or `BaseInFilter` over `NumberFilter` on a `BigIntegerField` /
-  `PositiveBigIntegerField` column (the only columns whose `BigInt` input carries a value past int64) answers a
-  two-bound range or a member past int64 as Django and plain django-filter answer it: a masked `OverflowError` on
-  SQLite and on PostgreSQL under server-side binding, the right rows under psycopg 3 client-side binding; a lone bound
-  and `exact` / `gt` / `lt` are right everywhere. spec-027's `RangeFilter` row claimed django-filter's bounds are
-  cleaned by the column's `gte` field and held to its `1e50` cap; it now scopes that to the package's class and states
-  django-filter's own `RangeField` cleaning. Whether to hold declared django-filter range / `in` classes to the
-  backend's integer range is Waiting row 622
-- [x] 554. not a defect: the write is the stated contract. spec-038 Decision 8 binds an omitted shape-disagreeing
-  field from the form's initial (`forms/resolvers.py::_bind_omitted_shape_disagreeing_initials`), so a form presenting
-  one stored element keeps the row and one that does not fails validation or, through a field that accepts the stored
-  list itself (a `CharField` reads its text, a `BooleanField` its truthiness), "writes the value it makes of it"; the
-  GLOSSARY `DjangoModelFormMutation` term says the same, and the update's schema build logs a warning naming the field
-  and the initial it needs (`forms/inputs.py::_advise_shape_disagreement`). The form owns the wrap and its initial, as
-  for 541 and 542. Whether the package should refuse such an update instead is Waiting row 623
+- [x] 553. fixed: a `ModelForm` field whose widget reads other keys than its name (`SplitArrayWidget`, `MultiWidget`)
+  is bound under the keys that widget reads wherever the package fills form data, so a `SplitArrayField` over an
+  `ArrayField` writes the list sent (it answered "This field is required.") and a `SplitDateTimeField` the datetime
+  sent; an over-`size` list gets `max_length`. `utils/widgets.py` owns widget keys (`multi_widget_keys` moved there).
+  Live fakeshop split-datetime form rows, package rows on PostgreSQL; spec-038
+- [x] 507. not a defect: a declared django-filter `RangeFilter` / `BaseRangeFilter` / `BaseInFilter` over a
+  `BigIntegerField` answers a value past int64 as Django and plain django-filter do (`FilterSet._apply_flat_leaves`
+  runs it byte-for-byte); spec-027's `RangeFilter` row now scopes the `1e50` cap to the package's class. Whether to
+  hold declared range / `in` classes to the backend's integer range is Waiting row 622
+- [x] 554. not a defect: spec-038 Decision 8 binds an omitted shape-disagreeing field from the form's initial
+  (`forms/resolvers.py::_bind_omitted_shape_disagreeing_initials`), so such an update keeps the row, fails validation,
+  or writes the value the field makes of the stored list; the build warns
+  (`forms/inputs.py::_advise_shape_disagreement`). As for 541 and 542. Whether to refuse such an update is Waiting row
+  623
 - [x] 508. parked into Waiting row 316, which asks the maintainer this same question; 316 now carries the evidence and
   a third option (two bounds compare as a range, input unchanged), prototyped and verified with no cell narrowed
-- [x] 510. fixed: a declared filter whose `field_name` is `pk` or `<relation>__pk` reads the column the key stores, as
-  the column's own name does: `filters/base.py::_filterset_resolved_field` resolves the path through the package's own
-  walker (`utils/relations.py::_classify_path_cached`, which reads `pk` at any segment; a path it refuses keeps
-  django-filter's `get_model_field` answer) and follows a relation-valued key (a multi-table parent link, a one-to-one
-  primary key) to its stored column with `utils/relations.py::stored_value_link`. So a `RangeFilter` / `ListFilter` /
-  `IntegerInFilter` / `CharFilter` leaf on `pk` is typed by that column (`Int`, `BigInt`, `Decimal`, `UUID`, where it
-  was `String`), its bounds and elements are cleaned by the column's form field (`FILTER_INVALID` or a coercion error
-  where a malformed value was a masked error), the integer range rules apply, and a `RangeFilter` over a
-  relation-valued key binds every bound on the stored column's path (`pk__id`) with no added join, where a two-bound
-  range was Django's refusal. 375's refusal for a relation named explicitly stands. Live rows on library `ShelfFilter`
-  / `PatronProfileFilter` `pk` leaves, package rows for Decimal, UUID, multi-table and composite keys; spec-027 says
-  so
-- [x] 593. AGENTS.md is cited by content, not by line ordinal: 32 drifted cites (6 "rule 27" in `django.yml`,
-  `.pre-commit-config.yaml`, `scripts/check_citations.py`, `scripts/review_inspect.py`; 3 in
-  `docs/review/REVIEW.md`; 6 in `MUSE.md`; 17 in 13 KANBAN `CardItem` rows) and the still-correct ones
-  (HUNT.md, FIX.md, FIX-PROMPT.md, spec-048, `tests/test_ci_governance.py`, gated `AGENTS.md #"..."` pinpoints
-  there) now name the rule; `docs/builder/ARTIFACT.md` sends the kept spec-pointer rule to START.md "Style the
-  maintainer cares about"; FIX.md phase 4 sends exported surface to docs/TREE.md and the check-public-types
-  hook; START.md stops calling AGENTS numbered; three stale AGENTS-heading cites in scripts/tests fixed.
-  Closed history left as written
-- [x] 511. fixed: a raw-key relation filter coerces its key through the column the compared key stores, wherever the
-  leaf runs: a to-many key leaf (forward many-to-many, reverse foreign key, reverse many-to-many) walking a visibility
-  hop (a target type with its own `get_queryset`, or a `RelatedFilter` declared on the relation) compares the target
-  rows' own key column, and `filters/base.py::_raw_identity_column` now reads that column (a plain column, or a
-  relation-valued primary key followed to the column it stores, a one-to-one onto a non-pk `to_field` included), where
-  `_coerce_relation_identity` passed the value through. So a `Decimal` key `NaN` / `Infinity` or an aware datetime the
-  backend cannot hold matches nothing there, as it does on the unhopped leaf, instead of a masked error, and a visible
-  key into a target keyed by a one-to-one onto a non-pk `to_field` matches its rows instead of nothing. Single-valued
-  relation leaves, marked non-pk `to_field` forward keys (still the target's primary key) and the published types are
-  unchanged. The item named forward many-to-many only; every to-many kind behind a hop failed alike. Package rows over
-  Decimal, DateTime and one-to-one-onto-`to_field` keyed targets, scoped and declared, with the unhopped leaf as
-  control
-- [x] 547. A `date`, or a naive `datetime`, held by a `DateTimeField` column escaped the temporal storability
-  preflight: `utils/errors.py::unstorable_temporal` let every `date` through and read a naive datetime as already
-  made aware, so a `SerializerMutation` whose serializer `validate_<field>` returns `value.date()` (or a naive wall
-  clock), a `DateField` subclass under `serializer_field_mapping`, and an `ArrayField(DateTimeField)` date element
-  reached `save()`, where Django makes the value aware in the default zone and the adapter's `OverflowError` (year 1
-  under a zone such as `Asia/Tokyo`, year 9999 under a `DATABASES` `TIME_ZONE`) answered the masked error. The shared
-  rule now checks such a value as the datetime Django binds for it (a date as its midnight, made aware in the default
-  zone when the connection runs under `USE_TZ`), so it is the field's `invalid` `FieldError` with nothing written;
-  a date in a `DateField` column and every aware datetime take the same path as before. The item overstated the
-  reach: the `ModelForm` scalar path was already covered (`Model.clean_fields` writes the aware midnight back before
-  the preflight reads the instance), a declared `serializers.DateField` over a `DateTimeField` is a build-time
-  `ConfigurationError`, and the model flavor never carries a date. Package rows in `tests/utils/test_errors.py` and
-  `tests/rest_framework/test_resolvers.py`; README, spec-038, spec-039 and the `fielderror-envelope` glossary term
-- [x] 512. A declared `ListFilter` or `ArrayFilter` read raw form data (a `QueryDict`: DRF's `DjangoFilterBackend`,
-  a django-filter view) through Django's default `TextInput`, so every `?name=` value, valid ones included, reached
-  `ListFilter.filter` as a string and answered `GraphQLError("Invalid filter value: expected a list.")`, a 500,
-  under a package or a plain django-filter `FilterSet` parent. Their form field (`filters/base.py::_ElementField`)
-  now reads raw form data by the generated `in`'s rule (`_MembershipCSVWidget`): `?name=a,b` is the list
-  `["a", "b"]`, `?name=` and an absent key apply no constraint, a list or tuple passes through unchanged (the
-  GraphQL input, so an explicit `[]` keeps its meaning), each element is cleaned by the column's `gte` form field
-  (a junk element is that form's error, a 400 under the backend), and a consumer `widget=` wins. The shared widget
-  now passes a non-text value through and reads a lazy translation string as text. The item's mechanism was wrong:
-  no schema build is involved (the build mutates no filter; the answers are identical before and after it). Its
-  `RangeFilter` half is not a defect: only a `RangeFilter` whose `field_name` is the relation itself raises
-  `FieldError` (with both bounds), a consumer declaration django-filter's own `RangeFilter` refuses the same way and
-  the schema build refuses; a relation path to a column filters with no build. Package rows in
-  `tests/filters/test_base.py` (both parents, through a real `DjangoFilterBackend` view and a `QueryDict`); spec-027.
-- [x] 514. Not a defect (AGENTS defect rule: no contract row). A declared `RangeFilter` bound or `ListFilter` element
-  on a `BooleanField` is cleaned by the column's `gte` form field, django-filter's `BooleanFilter` field, Django's
-  `forms.NullBooleanField`, whose documented `to_python` reads any unrecognized string (`"yes"`, `"junk"`, `""`) as
-  `None`. That is the raw-form rule of every Boolean filter under `DjangoFilterBackend`: the package's generated
-  Boolean `exact` (`filters/sets.py` maps `models.BooleanField` to django-filter's `BooleanFilter`) and
-  django-filter's own `BooleanFilter` read `?flag=yes` as no constraint the same way, and spec-027 promises the
-  declared filters exactly that column cleaner. GraphQL types the value `Boolean` and cannot send the string. No code.
-- [x] 556. On PostgreSQL through psycopg 3 an `ArrayField(TimeField)` write mixing naive and aware times escaped
-  the temporal storability preflight: psycopg picks one array type for the whole list from its elements (in 3.3.4
-  the last non-`None` one, `types/array.py::BaseListDumper._find_list_element`), so `[naive, aware]` went to the
-  `timetz[]` dumper, whose `DataError` "cannot calculate the offset of tzinfo 'None' without a date" answered a
-  masked top-level error on every write flavor (model, `ModelForm` `SimpleArrayField` / `SplitArrayField`, DRF
-  `ListField`), nothing written, while `[aware, naive]` stores. `utils/errors.py::unstorable_temporal` now also asks
-  the driver about an `ArrayField` list as a whole (`_psycopg_refuses_list`): the flattened list, each element as
-  the column stores it (a `DateTimeField` element through `_stored_datetime`, a datetime in a `TimeField` list as
-  its naive `.time()`), is dumped as text with the open connection's adapters or the driver's, and only when every
-  element is `None` or the column's stored type; the driver's `DataError` is the field's `invalid` `FieldError`
-  "Enter a value the database can represent.", any other exception propagates, psycopg 2 is not asked, and no
-  connection is opened. Restating psycopg's ordering was rejected (it differs across psycopg 3 versions), and so was
-  refusing every mixed list (it would refuse `[aware, naive]`, which stores). Whether PostgreSQL stores
-  `[aware, naive]` into `time[]` is unchanged and unverified on a server. Package rows in
-  `tests/utils/test_errors.py` (a stand-in driver and the real psycopg module); README, spec-036, spec-038,
-  spec-039 and the `fielderror-envelope` glossary term
-- [x] 545. `scripts/prove_failability.py::_pattern_matches` matched an `expect_failing` pattern by equality or plain
-  `fnmatch`, which reads `[*]` as a character class, so a glob over a parametrized id (`test_x[*]`) never matched
-  and the module docstring offered "node id or glob" without saying so. A pattern now also matches when `fnmatch`
-  matches it with every `[` read literally: `test_x[*]` names every parametrized row of `test_x`, `test_x[a-*]` the
-  rows whose id starts `a-`, and equality and plain `fnmatch` stay first, so every pattern that matched still
-  matches (a character class such as `test_[ab]` included; an exhaustive parent-vs-change grid lost no pair).
-  `isolates` stays equality only. Rows in `tests/test_prove_failability.py`; the module and function docstrings
-- [x] 557. Not a defect (AGENTS defect rule; GOAL "Trust boundary": application Python is trusted). The package
-  never iterates a queryset with a named cursor (`rg '\.iterator\(|aiterator\(' django_strawberry_framework` finds
-  nothing), so every query it evaluates binds the way `utils/errors.py::unbindable_temporal` reads the connection
-  (server-side under a consumer `OPTIONS["cursor_factory"]` that is not a `ClientCursor`), and a filter value at an
-  offset of 16:00 or more filters there as the README says. Only consumer code that takes a package-filtered
-  queryset and calls `QuerySet.iterator()` under such a cursor factory gets Django's client-bound named cursor and
-  the server's refusal, which is that code's own choice of cursor. No code.
-- [x] 543. `utils/errors.py` and `types/converters.py` each soft-imported `django.contrib.postgres`'s `ArrayField`
-  and unwrapped `base_field` their own way, and tests patched each copy separately, so a test patching one left the
-  other unpatched. One private owner, `utils/_array_field.py` (`ARRAY_FIELD_CLS`, `array_element_field`), now serves
-  `types/converters.py`, `utils/errors.py` (`_array_leaf`), `forms/inputs.py`, `rest_framework/serializer_converter.py`
-  and `filters/base.py`, and every test patches it through `tests/_postgres_fields.py::patch_array_field`. No
-  behaviour changes: test verdicts, the schema SDL and a 131,904-cell `unstorable_temporal` grid over nested arrays
-  are identical to the parent. A `tests/utils/test_errors.py` row pins that a non-list item inside an outer array
-  list holds no element. spec-017, spec-019, docs/TREE.md, the kanban tracked-path constants and the type-suppression
-  ledger follow the move
-- [x] 591. Under Django 6.1 a `DecimalField` with no `max_digits` is an unconstrained `numeric` on PostgreSQL, and
-  `utils/querysets.py::_stored_decimal_or_none` passed its value through, so an identity decode (a Relay `node` /
-  `nodes` id, a raw pk, a raw-pk or GlobalID relation filter, a relation write id) carrying `"1e1000000"`,
-  `"1e-1000000"` or `"1E+131072"` bound a value PostgreSQL's `numeric_in` refuses ("value overflows numeric
-  format"), a masked `DataError` where `coerce_field_value_or_none` names no row. On PostgreSQL such a value now binds
-  as written when its spelling fits numeric's format (up to 131072 digits before the point and 16383 after); a
-  spelling past it loses its trailing fractional zeros exactly, without rounding, a zero becomes `0`, and what still
-  does not fit names no row (`None`). Other backends bind the value as given, and bounded columns are unchanged. The
-  generated `"1e1000000"` filter value never reached the bind (django-filter caps a positive value at `1e50`); the
-  negative and tiny spellings that do reach it on any `DecimalField`, and the write flavors, are filed below. The
-  limits are source-derived (`numeric.c`), not checked on a server. Package rows in `tests/utils/test_querysets.py`
-  (a PostgreSQL stand-in alias and SQLite); spec-032 Decision 5 and the `coerce_field_value_or_none` docstring
-- [x] 558. `OrderSet` accepted `Meta.exclude` and read it nowhere, so `fields = "__all__"` with `exclude` still
-  published and ordered by the excluded column (a column the type never returns ranked rows over a real query) and an
-  exclude-only set expanded to nothing and failed at `finalize_django_types()`. The order family now honours
-  `Meta.exclude` as the filter family does (README: `exclude` means what a DRF user thinks; no upstream order surface
-  defines it, `AdvancedOrderSet` ignores it): `orders/sets.py::OrderSet._expand_meta_fields` drops a listed name, the
-  primary key included, from the `"__all__"` sweep or the declared names by exact name; `exclude` with no
-  `Meta.fields` is the sweep minus those names, `RelatedOrder` branches or not, so it needs `Meta.model`; a
-  `RelatedOrder` declared under an excluded name stays; a name matching no field drops nothing; a bare string, a
-  one-shot iterator or a non-string entry raises `ConfigurationError` (`_read_meta_exclude`, the filter family's shape
-  gate). Excluding a `ForeignObject` carrier column keeps the link, which still orders by it. Live rows in
-  `test_library_api.py` over a new fakeshop `PublicPatronOrder` (mirrors `PublicPatronType.Meta.exclude`; the public
-  patrons field takes `orderBy`), package rows in `tests/orders/test_sets.py`; spec-028, README, fakeshop README,
-  GlossaryTerm 474 and 489
-- [x] 517. The catch-all's `ConfigurationError` for a `method=` filter with no form field
-  (`filters/inputs.py::convert_filter_to_input_annotation`) advised `Filter(method=..., field_class=...)`, a spelling
-  whose `.field` raises `TypeError` at schema build (django-filter forwards `field_class` to the form field). It now
-  names the declared filter's class and advises the spellings that work: a typed primitive (`CharFilter(method=...)`,
-  `NumberFilter(method=...)`, `ListFilter(method=...)` for a list value) or a `Filter` subclass declaring
-  `field_class` at class level. What reaches it is a filter whose form field cannot be built on the unbound
-  declaration (`AllValuesMultipleFilter(method=...)`); a bare `Filter(method=...)` types as `String`. The message is
-  pinned in `tests/filters/test_inputs.py`; live holder rows in `test_library_api.py` prove each advised spelling
-  filters, column-backed and not
-- [x] 518. The choice refusal (`filters/inputs.py::_choice_enum_from_filter`) named "ChoiceFilter" for every reacher
-  and advised a `Choices` enum or a `SCALAR_MAP` scalar, neither of which the arm reads. It now names the declared
-  filter's class (`AllValuesFilter`, `DateRangeFilter`, `TypedChoiceFilter`, a consumer subclass) and states the cause
-  that holds for each: no model field declaring `choices` backs it. Its advice is to declare `choices` on the column,
-  or to filter the column through a non-choice filter (`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its
-  `Meta.fields` lookups, `CharFilter(method=...)`). No refused or typed shape moved. Pinned by equality in
-  `tests/filters/test_inputs.py`; spec-027's ChoiceFilter row follows
-- [x] 516. Not a defect under the AGENTS defect rule: no contract row breaks. spec-027 Decision 4's `BaseCSVFilter`
-  row covers the `in` / `range` lookups django-filter generates from `Meta.fields`; a consumer-declared bare
-  `class CharCSV(BaseCSVFilter, CharFilter)` keeping `exact` is a declaration django-filter itself never makes match.
-  Plain django-filter 26.1 runs the same `title = '[''aa'']'` SQL for `?title=aa` and returns 0 rows, and raises the
-  same `TypeError` for a `NumberFilter` element. The schema publishes the list the declared form field cleans, and a
-  scalar would change nothing, because `BaseCSVWidget` still splits it into a list. The same declaration is
-  meaningful with `in`, with `range`, and with `method=` (the method receives the list), so a class-keyed refusal
-  would break working shapes. Build-time refusal of a list-shaped filter over a lookup that cannot consume a list is
-  folded into robustness row 625, which now covers the bare CSV family beside `ListFilter`
-- [x] 519. A declared filter a deep copy refuses (a bound `method=` over an object holding a lock or a Django cache
-  handler, a `functools.partial` over one, a lock in `extra` or in a `Meta.filter_overrides` `extra`) is refused at
-  schema build by a `ConfigurationError` naming the set, the attribute and the filter's class, with the copy's error
-  as `__cause__`. A new finalizer subpass 1.5 (`types/finalizer.py::_audit_filter_copies`) copies every served set's
-  `base_filters` through `filters/base.py::copied_declared_filter` before expansion, and `_expand_related_filter`
-  copies a `RelatedFilter` child through the same helper, naming the `RelatedFilter` it was reached through. A
-  `ListFilter(method=...)` of that kind, which built and failed every filtered request on its set with a raw
-  `TypeError`, is now refused at build too. The advice names the `method=` spellings only when the method itself
-  refuses the copy. Class-level service objects, string method names, plain functions and shallow-copy widgets
-  build and filter as before. spec-027's Decision 6, Error shapes and Layer 4 text follow; package rows in
-  `tests/filters/test_finalizer.py`
-- [x] 520. A filter a `RelatedFilter` expansion copies from a child set, rebound or projected as a
-  `ProjectedChildFilter`, is named as the child set declares it in every input-conversion refusal: the declared class
-  (never `Projected<Class>`), its attribute on the child set, and each `RelatedFilter` it was reached through,
-  outermost first (`ShelfFilter.code_l: LookupChoiceFilter on 'code' (reached through BookFilter.shelf)`). One
-  helper owns the answer (`filters/sets.py::_leaf_declaration`); `_expand_related_filter` records each rebound
-  copy's origin in a weakly held side map, so nothing rides the copy's state, deepcopy or pickle. The LookupChoice,
-  raw-pk, model-choice, choice-enum, `method=` and range-widget refusals use it, and the hand-built-value errors
-  (`apply_sync` list / range / dict values) name the declared class. A filter declared on the set that holds it
-  keeps byte-identical messages; filtering results and the fakeshop SDL are unchanged. spec-027's LookupChoiceFilter
-  row states the rule; package rows in `tests/filters/test_inputs.py` and `tests/filters/test_sets.py`
-- [x] 560. Not a defect: the repeated predicate is what keeps an arm's meaning. `FilterSet.filter_queryset` builds
-  each `and` / `or` / `not` arm's sibling over the flat-narrowed queryset (`_q_for_branch`, `cls(data=...,
-  queryset=queryset)`), so an arm selects among the rows the flat leaves kept, and composes it onto that same
-  queryset, keeping the annotations, ordering and `distinct()` the flat leaves and consumer methods put on it.
-  Building the arms over the unnarrowed queryset would drop the inner copy only for row-local predicates: a
-  consumer `method=` or `qs` override that is not row-local (a top-N slice, an aggregate over the rows it is given)
-  answers differently, and a `not` arm over a wider base removes rows by what they match outside the flat set.
-  Dropping the outer copy instead would lose the flat queryset's shape and is wrong for `not`, whose complement
-  is not a subset of the flat rows. Same rows, no contract row; the planner sees a redundant conjunct inside a
-  semi-join
-- [x] 515. A declared `MultipleChoiceFilter` / `TypedMultipleChoiceFilter` / `AllValuesMultipleFilter` (or one
-  `Meta.filter_overrides` names) publishes a list typed from its column: `filters/inputs.py` gains a
-  `MultipleChoiceFilter` kind-table row, last before the catch-all so every class another row dispatched (the
-  GlobalID / model / relation-pk multiple filters, the generated `in` / `range` wrappers, a consumer class pairing
-  it with a range, list, array, choice or `TypedFilter` kind) keeps that row. Convert gives
-  `list[<column enum on a choices column, the column scalar otherwise, str with no column>]`, never typed from
-  `coerce`; normalize hands the form a list, each enum member unwrapped, a non-list refused. The catch-all still
-  builds every leaf's form field at schema build, and `AllValuesMultipleFilter(method=)` keeps its refusal. A bare
-  `TypedFilter` normalizes as the scalar it converts to. spec-027 Decision 4 and GLOSSARY "Choice leaves" state the
-  family and that `AllValues*` choices come from the default manager; live rows over a holder schema in
-  `examples/fakeshop/test_query/test_library_api.py`, package rows in `tests/filters/test_inputs.py` and
-  `tests/filters/test_sets.py`
-- [x] 640. A flat field copied from a child set's declared filter fires its nested spelling's gates whatever
-  the `RelatedFilter` attribute is called: `PrintingFilter.in_series = RelatedFilter("SeriesFilter",
-  field_name="series")` let `inSeriesHandle` past `SeriesFilter.check_handle_permission` and
-  `PrintingFilter.check_in_series_permission`, which `inSeries { handle }` fires (the gate path walked the key
-  by declaration `field_name`, so a renamed hop walked nothing). Every expanded copy, rebound or projected,
-  now carries one `filters/sets.py::ChildProjection` (child set, child name, branch) that rides deepcopy and
-  pickle; gates (`FilterSet._leaf_gates`, `_supplied_leaf_gates`), the declared-head test
-  (`filters/inputs.py::_is_declared_head`) and refusal naming (`_leaf_declaration`) all read it, so a
-  `get_filters()` override that deep-copies or re-keys the copies keeps both.
-  `FilterGenerationProvenance.expanded_from`, the weak `_REBOUND_ORIGINS` map and
-  `FilterSet._expansion_origin` are gone. A copy borrowed onto a set that does not expand that branch into
-  that child set is that set's own filter (`ChildProjection.holds_in`). spec-027 states it; live rows in
-  `examples/fakeshop/test_query/test_library_api.py`, package rows in `tests/filters/test_sets.py` and
-  `tests/filters/test_inputs.py`
-- [x] 346. Every git call in `scripts/` (and `tests/test_ci_governance.py`'s committable listings) runs through one
-  runner, `scripts/_git.py::run_git`, under `scripts/_git.py::repository_env`: only the repository's own config and
-  ignore/attribute files count (`REPOSITORY_CONFIG_ONLY` drops global, system and XDG config and the system
-  attributes file), every `GIT_*` variable except the repository-locating ones is dropped (a hook's or the private-index
-  procedure's `GIT_INDEX_FILE` still reaches the generators), and `GIT_OPTIONAL_LOCKS=0` keeps every `status` from
-  rewriting the shared index. `bug_hunt.py` reuses `_plan_common.git_status_short`, `check_type_suppressions` lists
-  with `-z`, `workspace.py` takes its mapping from the same module, and `.gitignore` gains
-  `**/.claude/settings.local.json` (a file only a caller-global rule hid). Tests: `tests/test_git.py` (hostile caller
-  setups per site, index untouched, private index, trust)
+- [x] 510. fixed: a declared filter on `pk` or `<relation>__pk` reads the column the key stores:
+  `filters/base.py::_filterset_resolved_field` resolves the path through `utils/relations.py::_classify_path_cached`
+  and follows a relation-valued key with `utils/relations.py::stored_value_link`, so the leaf is typed by that column
+  (`Int`, `Decimal`, `UUID`, where it was `String`) and cleaned by its form field. 375's refusal stands. Live rows on
+  library `ShelfFilter` / `PatronProfileFilter` `pk` leaves, package rows; spec-027
+- [x] 593. AGENTS.md is cited by content, not line ordinal: 32 drifted cites (CI, scripts, REVIEW.md, MUSE.md, KANBAN
+  `CardItem` rows) and the still-correct ones now name the rule; START.md stops calling AGENTS numbered. Closed
+  history left as written
+- [x] 511. fixed: a raw-key to-many relation leaf behind a visibility hop compares the target rows' own key column:
+  `filters/base.py::_raw_identity_column` reads that column (a relation-valued pk followed to its stored column),
+  where `_coerce_relation_identity` passed the value through. So a `Decimal` `NaN` or unstorable datetime key matches
+  nothing instead of a masked error, and a target keyed by a one-to-one onto a non-pk `to_field` matches its rows.
+  Package rows with the unhopped leaf as control
+- [x] 547. A `date` or naive `datetime` in a `DateTimeField` column escaped the temporal preflight
+  (`utils/errors.py::unstorable_temporal`) and answered a masked `OverflowError` at `save()`; it is now checked as the
+  datetime Django binds, so an unstorable one is the field's `invalid` `FieldError`, nothing written. The `ModelForm`
+  scalar path was already covered. Tests: `tests/utils/test_errors.py`, `tests/rest_framework/test_resolvers.py`
+- [x] 512. A declared `ListFilter` / `ArrayFilter` read raw form data through `TextInput`, so every `?name=` answered
+  "expected a list." (a 500); `filters/base.py::_ElementField` now reads it by the generated `in`'s rule
+  (`_MembershipCSVWidget`): `?name=a,b` is `["a", "b"]`, each element cleaned by the column's form field (a junk one
+  is a 400). The `RangeFilter` half is not a defect. Tests: `tests/filters/test_base.py`; spec-027
+- [x] 514. Not a defect: a declared `RangeFilter` bound or `ListFilter` element on a `BooleanField` is cleaned by
+  `forms.NullBooleanField`, which reads an unrecognized string as `None`, the raw-form rule of every Boolean filter
+  under `DjangoFilterBackend`; GraphQL types it `Boolean`. No code
+- [x] 556. On PostgreSQL through psycopg 3 an `ArrayField(TimeField)` write mixing naive and aware times answered a
+  masked `DataError`; `utils/errors.py::unstorable_temporal` now asks the driver about the whole list
+  (`_psycopg_refuses_list`), so a list psycopg refuses is the field's `invalid` `FieldError`, nothing written. Whether
+  PostgreSQL stores `[aware, naive]` into `time[]` is unverified on a server. Tests: `tests/utils/test_errors.py`
+- [x] 545. `scripts/prove_failability.py::_pattern_matches` read `[*]` as a character class, so a glob over a
+  parametrized id never matched; a pattern now also matches with every `[` literal (`test_x[*]` names every row),
+  equality and plain `fnmatch` first, so every pattern that matched still matches. Tests:
+  `tests/test_prove_failability.py`
+- [x] 557. Not a defect (application Python is trusted): the package never iterates with a named cursor, so a filter
+  value at offset 16:00 or more filters as the README says; only consumer code calling `QuerySet.iterator()` under a
+  server-side cursor factory gets the server's refusal. No code
+- [x] 543. `utils/errors.py` and `types/converters.py` each soft-imported `ArrayField`, so tests patched each copy
+  separately; one private owner, `utils/_array_field.py` (`ARRAY_FIELD_CLS`, `array_element_field`), now serves every
+  site and tests patch it through `tests/_postgres_fields.py::patch_array_field`. No behaviour changes. Tests:
+  `tests/utils/test_errors.py`
+- [x] 591. Under Django 6.1 an unconstrained `DecimalField` identity decode (Relay id, raw pk, relation filter or
+  write id) carrying `"1e1000000"` bound a value PostgreSQL's `numeric` refuses (masked `DataError`);
+  `utils/querysets.py::_stored_decimal_or_none` now binds a fitting spelling as written, trims trailing fractional
+  zeros otherwise, and answers no row (`None`) for what still does not fit. Limits are source-derived, not checked on
+  a server. Tests: `tests/utils/test_querysets.py`
+- [x] 558. `OrderSet` ignored `Meta.exclude`, so an excluded column stayed orderable and an exclude-only set failed at
+  finalize; `orders/sets.py::OrderSet._expand_meta_fields` now drops listed names (pk included) from the sweep or
+  declared names, and a malformed `exclude` raises `ConfigurationError` (`_read_meta_exclude`). Live rows in
+  `test_library_api.py` over a new fakeshop `PublicPatronOrder`, package rows in `tests/orders/test_sets.py`; docs:
+  spec-028, README
+- [x] 517. The `ConfigurationError` for a `method=` filter with no form field
+  (`filters/inputs.py::convert_filter_to_input_annotation`) advised a `field_class=` spelling that raises `TypeError`;
+  it now names the filter's class and advises the spellings that work (a typed primitive, or a `Filter` subclass
+  declaring `field_class`). Tests: `tests/filters/test_inputs.py`, live rows in `test_library_api.py`
+- [x] 518. The choice refusal (`filters/inputs.py::_choice_enum_from_filter`) named "ChoiceFilter" for every filter
+  and gave advice the arm never reads; it now names the declared class and the real cause (no `choices` column backs
+  it) and advises declaring `choices` or a non-choice filter. No shape moved. Tests: `tests/filters/test_inputs.py`;
+  spec-027
+- [x] 516. Not a defect: a consumer-declared bare `BaseCSVFilter` keeping `exact` runs as plain django-filter runs it
+  (same SQL, 0 rows; same `TypeError`), and the declaration is meaningful with `in`, `range` and `method=`, so a
+  class-keyed refusal would break working shapes. Build-time refusal of a list over a non-list lookup is folded into
+  robustness row 625
+- [x] 519. A declared filter a deep copy refuses (a `method=` bound over a lock or cache handler, a lock in `extra`)
+  is refused at schema build with a `ConfigurationError` naming set, attribute and class, where it failed every
+  request with a raw `TypeError`: finalizer subpass `types/finalizer.py::_audit_filter_copies` copies each set's
+  filters through `filters/base.py::copied_declared_filter`. Tests: `tests/filters/test_finalizer.py`; spec-027
+- [x] 520. A filter a `RelatedFilter` expansion copies is named as the child set declares it in every input-conversion
+  refusal (class, attribute, the `RelatedFilter` chain it was reached through), never `Projected<Class>`; one helper,
+  `filters/sets.py::_leaf_declaration`, owns it. Own-set messages are byte-identical. Tests:
+  `tests/filters/test_inputs.py`, `tests/filters/test_sets.py`; spec-027
+- [x] 560. Not a defect: `FilterSet.filter_queryset` builds each `and` / `or` / `not` arm over the flat-narrowed
+  queryset (`_q_for_branch`), and the repeated predicate keeps an arm's meaning for non-row-local consumer methods and
+  for `not`. Same rows, no contract row; the planner sees a redundant conjunct
+- [x] 515. A declared `MultipleChoiceFilter` / `TypedMultipleChoiceFilter` / `AllValuesMultipleFilter` publishes a
+  list typed from its column (its enum, scalar, or `str`): `filters/inputs.py` gains a `MultipleChoiceFilter`
+  kind-table row before the catch-all, and normalize hands the form a list. Live rows in
+  `examples/fakeshop/test_query/test_library_api.py`, package rows in `tests/filters/test_inputs.py`,
+  `tests/filters/test_sets.py`; spec-027
+- [x] 640. A flat copy of a child set's filter fires its nested spelling's permission gates whatever the
+  `RelatedFilter` attribute is called (a renamed hop let `inSeriesHandle` past
+  `SeriesFilter.check_handle_permission`): every copy now carries one `filters/sets.py::ChildProjection`, read by
+  `FilterSet._leaf_gates` and `filters/inputs.py::_is_declared_head`. Live rows in
+  `examples/fakeshop/test_query/test_library_api.py`, package rows in `tests/filters/test_sets.py`; spec-027
+- [x] 346. Every git call in `scripts/` runs through `scripts/_git.py::run_git` under
+  `scripts/_git.py::repository_env`: only repository config counts, non-locating `GIT_*` variables are dropped
+  (`GIT_INDEX_FILE` kept), and `GIT_OPTIONAL_LOCKS=0` stops `status` rewriting the shared index. Tests:
+  `tests/test_git.py`
 - [x] 348. The caller's ownership trust is kept under the isolation: `scripts/_git.py::caller_safe_directories` reads
   `safe.directory` from the caller's protected sources only (system, global, command scope; never `GIT_CONFIG` or
   repository config) and passes it as command scope, so `workspace.py` and every other script read a checkout the
   caller marked safe and refuse one the caller did not, exactly as the caller's git does. Fixed with 346
-- [x] 347. `scripts/workspace.py::item_diff` keeps the baseline's blob for every name `is_excluded` reports (cycle
-  scratch, a parked `*-ws` copy, `output/`, `docs/shadow/`), the rule `snapshot_commit` already applies, so a
-  pre-existing untracked file there is never the item's addition and a tracked one's edit or deletion is never the
-  item's; the filter is `content_index`'s keyword-only `excluded`, applied to the default listing only (explicit
-  `names` are never filtered). The `diff` manual, START.md's scripts row and the item-diff sentences in HUNT.md,
-  DRY.md and REVIEW.md say so. Tests: `tests/test_workspace.py` (untracked and tracked edit/delete rows per excluded
-  shape at scope `.` and narrower, snapshot agreement, explicit names refreshed)
+- [x] 347. `scripts/workspace.py::item_diff` keeps the baseline's blob for every `is_excluded` name, as
+  `snapshot_commit` does, so a pre-existing file there is never the item's addition or edit; explicit `names` are
+  never filtered. Tests: `tests/test_workspace.py`
 - [x] 349. `scripts/workspace.py::audit_record` turns an unreadable record (missing, a directory, no permission, not
   UTF-8) into a refusal: `workspace: audit <path>: <reason>` on stderr, exit 1, no traceback; records audited before
   it keep their report lines. The `audit` manual says so. Tests: `tests/test_workspace.py` (each unreadable shape,
   the CLI refusal, a readable record before a missing one)
-- [x] 374. A one-value filter whose form field's widget reads other form-data keys (`django_filters.NumericRangeFilter`,
-  any lookup or `method=`; a consumer `Filter` over a `MultiValueField`; a `CharFilter`, `ModelChoiceFilter` or
-  `DateTimeFilter` given a `MultiWidget`) is refused when the schema is built, naming the declaration, the keys its
-  widget reads and the `RangeFilter` remedy (`filters/inputs.py::_refuse_widget_reading_other_keys`, every arm but the
-  range arm); it used to publish one scalar under `<name>`, which the widget never read, so every send answered every
-  row. Routing it as a range was not taken: upstream rewrites a lone bound to a text `startswith` / `endswith`, and
-  PostgreSQL range columns stay unsupported. spec-027 row. Tests: `tests/filters/test_inputs.py`
-- [x] 566. The four test trees state behaviour where they narrated history: about 300 comment, docstring and name
-  sites ("now X instead of Y", "the old / previous implementation", "the fix", "(hardened)", "hoisted", "relocated",
-  "this slice", "Pins finding-2", review-doc and severity attributions, "(#N)" review tags, version banners) restate
-  what the enclosing test asserts, counterfactuals the test does not assert becoming positive statements; 16 test and
-  helper names renamed with their spec, DONE-plan and suppression-ledger citers. The provenance gate
-  `tests/test_ci_governance.py::test_no_comment_docstring_or_name_carries_a_provenance_phrase` also refuses `the
-  hardening pass`, `(hardened)`, `(hardening)`, `pre-0.0.`, `the old implementation`, `the previous implementation`,
-  `task report` and `finding-` (17 phrases; `historically`, `this slice`, `the original implementation`, `hoisted`,
-  `relocated`, `this card` and `the old <noun>` have behaviour uses and stay ungated), with the package and example
-  sites they caught restated and START.md's bullet listing the set. Executable code unchanged (code digest per file).
-  Out of scope, filed: 629, 630
+- [x] 374. A one-value filter whose widget reads other form keys (`NumericRangeFilter`, a `MultiWidget` field) is
+  refused at schema build naming the keys and the `RangeFilter` remedy
+  (`filters/inputs.py::_refuse_widget_reading_other_keys`), where it published a scalar the widget never read and
+  answered every row. Tests: `tests/filters/test_inputs.py`; spec-027
+- [x] 566. The four test trees state behaviour where they narrated history (about 300 sites, 16 tests renamed), and
+  `tests/test_ci_governance.py::test_no_comment_docstring_or_name_carries_a_provenance_phrase` refuses 17 phrases.
+  Executable code unchanged. Out of scope, filed: 629, 630
 - [x] 570. Fixed by the shard split (`d0073edf`): every `django.yml` test cell runs as two jobs on separate runners
   (`library-keyset`: `test_library_api.py` + `test_keyset_api.py`, `--dist load`; `remainder`: the rest, `--dist
   loadscope`) and a `coverage` job combines the latest cell's two traces and owns the gate; the 45-minute
   `timeout-minutes` is unchanged. Measured on the three push runs since (`40301105850`, `40339630011`,
   `40405314085`): the slowest shard job took 17 minutes (floor `remainder`), the rest 8 to 14; none was cancelled.
   Trimming the suite itself stays the maintainer's call
-- [x] 573. not a defect: no contract row covers it. README, the GLOSSARY `DjangoModelFormMutation` and `FieldError`
-  terms and spec-038 Decision 8 scope the save-time `null` answer to a `blank=True, null=False` column, and nothing
-  pins a `null=True` one. The shape needs a consumer-declared form field cleaning `""` (`ChoiceField`,
-  `TypedChoiceField(empty_value="")`, `CharField`) over a nullable non-text column, since Django's own form field
-  cleans `""` to `None` there (`empty_value=None`), and plain Django's `save()` raises on it (graphene-django
-  likewise). Measured on SQLite and PostgreSQL, sync and async: those 30 cells plus 3 PostgreSQL `ArrayField` cells
-  answer the field-keyed "This field cannot be null." (code `null`), nothing written. A client reaches it only by an
-  omitted create value or an explicit `null` (plus `""` on an `ArrayField`), since every other input is typed by the
-  column. Which answer a nullable column should give is row 631
-- [x] 420. `scripts/_markdown_lex.py::block_regions` reads each line's containers as CommonMark appendix A does: one
-  stack of block quotes and list items opened in any order (a quote inside a list item, a list inside a quote inside
-  a list), matched outermost first, with lazy continuation and a fence or HTML block ending when its container closes;
-  a link reference definition is read when its paragraph closes (4.7: label, destination and title each on its own
-  line, a title spanning lines), so neither shape can take a term link. A CRLF line's `\r` ends a list or heading
-  marker. All 652 CommonMark 0.31.2 examples mask as the spec renders them (HEAD: 270 of 286 in 4.1-5.3); over the
-  repo's `.md` files only the `.claude/agents` front matter's opening `---` moves (now a thematic break). Tests:
-  `tests/test_check_spec_glossary.py`
-- [x] 599. A FilterSet's `get_filters()` override is the set's filter table everywhere: its own input and
-  form, a direct `Set(data, queryset)`, the nested branch, the parent's flat copies (rebound or projected) and
-  a cycle member's contribution. `FilterSet.get_filters` published `base_filters` and the expansion snapshot
-  from inside the override's `super()` call, so an added filter was published on the input and filtered
-  nothing (all rows, no error), a child with an `__init__` override raised `KeyError` at schema build, a cycle
-  member's rename or removal raised `KeyError`, and an in-place `del` override raised on its second call. Now
-  `filters/sets.py::FilterSet._publish_filters` runs the override once and publishes its result,
-  `FilterSet._filter_table` is the one read (input lookup table, projections, finalizer audits, `__init__`),
-  cycle contributions pass through the override (`FilterSet._reshape`), `get_filters()` returns a fresh map
-  per call, and the override runs twice at schema build and never per request. A flat copy is deferred by its
-  `ChildProjection` record, not by its name, so a copy under a key the set's own `Meta.fields` also generates
-  is deferred and a filter the override adds is the set's own. spec-027 and docs/README state it; live rows in
-  `examples/fakeshop/test_query/test_library_api.py` (`PatronFilter` and `IssueFilter` overrides), package
-  rows in `tests/filters/test_sets.py`
-- [x] 598. `HIDE_FLAT_FILTERS` hides each flat copy of a `RelatedFilter` expansion, under whatever key a
-  `get_filters()` override holds it, and never a filter the set holds itself.
-  `filters/inputs.py::_build_input_fields` decided by the key's first segment, so a re-keyed copy stayed
-  published and a set's own filter spelled under a relation's name was hidden: fakeshop `PrintingFilter`
-  `edition__printings__co_publishers` had no nested twin and was unreachable, against spec-027's "Nothing
-  becomes unreachable". The skip now asks `filters/sets.py::_is_flat_copy` per lookup, so a head mixing an own
-  lookup with copies keeps only its own; the lookup table and gates do not depend on the setting. spec-027,
-  docs/README and GLOSSARY (`RelatedFilter`) state it; the library example adds a re-keyed alias
-  (`PatronFilter.borrowed_title`) and a mixed head (`PrintingFilter` `edition__imprint` istartswith); live
-  rows in `examples/fakeshop/test_query/test_library_api.py` replace the pin that hid `bookLoansPatronEmail`;
-  a package row in `tests/filters/test_inputs.py` pins a borrowed copy
+- [x] 573. not a defect: no contract row covers a consumer form field cleaning `""` over a nullable non-text column
+  (plain Django's `save()` raises on it too); measured on SQLite and PostgreSQL it answers the field-keyed "This field
+  cannot be null.", nothing written. Which answer a nullable column should give is row 631
+- [x] 420. `scripts/_markdown_lex.py::block_regions` reads containers as CommonMark appendix A does (one stack of
+  quotes and list items, lazy continuation) and link reference definitions per 4.7, so neither takes a term link; all
+  652 CommonMark 0.31.2 examples mask as the spec renders them. Tests: `tests/test_check_spec_glossary.py`
+- [x] 599. A FilterSet's `get_filters()` override is the set's filter table everywhere (an added filter was published
+  but filtered nothing; renames raised `KeyError`): `filters/sets.py::FilterSet._publish_filters` runs the override
+  once and publishes its result, read through `FilterSet._filter_table`. Live rows in
+  `examples/fakeshop/test_query/test_library_api.py`, package rows in `tests/filters/test_sets.py`; spec-027
+- [x] 598. `HIDE_FLAT_FILTERS` hides each flat copy of a `RelatedFilter` expansion under any key and never the set's
+  own filter: `filters/inputs.py::_build_input_fields` decided by the key's first segment (hiding fakeshop
+  `PrintingFilter` `edition__printings__co_publishers`); it now asks `filters/sets.py::_is_flat_copy` per lookup. Live
+  rows in `examples/fakeshop/test_query/test_library_api.py`, a package row in `tests/filters/test_inputs.py`;
+  spec-027
 - [x] 646. Not a defect under the AGENTS defect rule: `scripts/_markdown_lex.py` states its contract as
   CommonMark (its module docstring cites CommonMark 4.1-4.7 for `block_regions`), and on a type-7 HTML tag
   line in a lazy continuation position it does what the CommonMark spec, commonmark.js and markdown-it do
   (lazy paragraph text); only cmark-gfm opens an HTML block there. No repo markdown file has the shape
   (measured verifying 420), so no feasible project input reaches the difference. Lexing to cmark-gfm's reading
   instead would be a new card
-- [x] 630. `examples/fakeshop/test_query/README.md` states its teaching as present practice: each worked
-  example keeps its lesson in present tense and cites the live row it describes by `path::Symbol` (no copied
-  test bodies, which had drifted from the rows); the Before / What moved narration, the deleted-test list and
-  the eleven citations of package rows that no longer exist are gone; "Gotchas the sweep surfaced" is
-  "Gotchas" without the bullets stated elsewhere in the file; the "Second sweep" section is deleted, its queue
-  empty with every row moved or kept by design, so no row needed a card. The one leftover package row it named
-  is filed as 603
-- [x] 603. The package stand-in `tests/optimizer/test_relay_id_projection.py` is deleted: a mutation table
-  over the walker's Relay-id projection, `_resolve_id_default`, the id-attr stamp and `encode_typename` found
-  no mutant only it killed (one statement, no lazy load and the node id are pinned by the live
-  `test_library_shapes_api.py` twin, the GlobalID type name by four live rows, the `only()` projection by the
-  two `tests/optimizer/test_walker.py` relay-id rows), and every line it ran is reached by other rows.
-  spec-015 and spec-031 cite those rows; docs/TREE.md and the kanban tracked-path constants are regenerated.
-  Writing a live pin for a non-pk `NodeID` found 604
-- [x] 604. A Relay `id` selection projects the column the type's id reads, at every page, join and prefetch
-  position: `optimizer/walker.py::_walk_selections` routes `id` on a `relay.Node` type first to
-  `_relay_id_column`, which reads `types/relay.py::_node_id_slot` (a concrete field's attname; an id read by a
-  consumer `resolve_id` or from no concrete column resolves through the field map). It matched the model field
-  literally named `id` first and looked the id column up only among `Meta.fields`, so fakeshop `PublisherType`
-  (`house_code: relay.NodeID[str]`) loaded `id` and refetched `house_code` once per row, and on the async
-  executor that refetch raised `SynchronousOnlyOperation` (field error, data null). spec-015 Decision 7 states
-  the id-column projection; live rows in `examples/fakeshop/test_query/test_library_shapes_api.py` (six
-  positions, the Series annotation control) and `test_library_api.py` (async), package rows in
-  `tests/optimizer/test_walker.py` for a NodeID column outside `Meta.fields`, a reverse-key child, a consumer
-  `resolve_id` and a property NodeID
-- [x] 421. The board and the spec auto-linker share one `scripts/_markdown_lex.py` after-boundary,
-  `TERM_BOUNDARY_AFTER`: a `.`, `:`, `/` or `-` run after a term bars the link only when an identifier character
-  follows the run, so a term ending a sentence or clause is linked (`... a DjangoType.`) and one opening a path or
-  compound is not (`Meta.fields.get`, `DjangoType-style`, `Term.5`). The strict variant and the `PROSE_` name are gone.
-  `KANBAN.md` re-rendered: 182 glossary links against 175 (7 first mentions newly linked, 10 links moved to the true
-  first mention, 0 links on a non-mention); `KANBAN.html` is unchanged (it embeds stored glossary rows). Tests:
-  `tests/test_build_kanban_md.py`
+- [x] 630. `examples/fakeshop/test_query/README.md` states its teaching as present practice, citing live rows by
+  `path::Symbol`; history narration, stale citations and the "Second sweep" section are gone. The leftover package row
+  it named is filed as 603
+- [x] 603. `tests/optimizer/test_relay_id_projection.py` is deleted: a mutation table found no mutant only it killed,
+  and live and `tests/optimizer/test_walker.py` rows reach its lines. Writing a live pin for a non-pk `NodeID` found
+  604
+- [x] 604. A Relay `id` selection projects the column the type's id reads at every position:
+  `optimizer/walker.py::_walk_selections` routes `id` to `_relay_id_column` (via `types/relay.py::_node_id_slot`),
+  where fakeshop `PublisherType` loaded `id` and refetched its NodeID column per row (`SynchronousOnlyOperation`
+  async). Live rows in `examples/fakeshop/test_query/test_library_shapes_api.py`, `test_library_api.py`, package rows
+  in `tests/optimizer/test_walker.py`; spec-015
+- [x] 421. The board and the spec auto-linker share `scripts/_markdown_lex.py` `TERM_BOUNDARY_AFTER`: a punctuation
+  run after a term bars the link only when an identifier character follows, so a sentence-ending term is linked and
+  `Meta.fields.get` is not. `KANBAN.md` re-rendered. Tests: `tests/test_build_kanban_md.py`
 - [x] 422. (robustness) `scripts/check_spec_glossary.py::_insert_glossary_ref_def` slots the new
   `[glossary-<anchor>]: ...` def before the group's first def whose label sorts after it (codepoint), else at the
   group's end, and never re-sorts the rest: every existing line keeps its order and bytes. The whole-line `sorted()`
   rebuild reordered hand-written lines in 44 of the 188 tracked `.md` files with a `<!-- docs/ -->` group (whole-line
   order puts `[foo-bar]` before `[foo]`); a census of 2186 inserts across those files adds one line each and moves
   none. Tests: `tests/test_check_spec_glossary.py`
-- [x] 568. The provenance gate reads every string statement: a docstring, an attribute docstring after an assignment,
-  a later or nested string statement and an f-string's literal parts (a replacement field splits a phrase); a `+` or
-  bytes statement (refused by ruff B018 and basedpyright `reportUnusedExpression`) and a t-string stay unread, and a
-  trailing comment never joins the full-line comment below it (0 of 66 such pairs is one sentence), all stated in the
-  gate's limits. Five planted rows and the permitted-form row pin it; 20 more segments are read, 0 hits.
-  `scripts/review_inspect.py::PROVENANCE_PATTERNS` stays a separate report-only list (one shared word), each list's
-  comment naming the other; START's provenance bullet names string statements
-- [x] 564. The four error strings state the invariant without a release: the `RelatedFilter` `lookups=` TypeError
-  names the remedy (the target FilterSet's `Meta.fields`), `Meta.connection`'s unknown-sub-key error reads "Only
-  'total_count' is recognized.", `decode_global_id` gives the rejecting strategy's own reason (it decodes only a
-  model-label or only a type-name payload, or is encode-only) where it appended the callable / custom note to every
-  rejection, and the router hint keeps its migration prose without the number. The first three are pinned exactly;
-  the docstrings, spec-046 "Error shapes" and the GLOSSARY `Meta.connection` body are restated; dry-0_0_15_3 item 28
-  is ticked
+- [x] 568. The provenance gate reads every string statement (docstrings, attribute docstrings, nested strings,
+  f-string literal parts), its limits stated; five planted rows pin it.
+  `scripts/review_inspect.py::PROVENANCE_PATTERNS` stays a separate report-only list
+- [x] 564. Four error strings state the invariant without a release number (`RelatedFilter` `lookups=`,
+  `Meta.connection`'s sub-key, `decode_global_id`'s per-strategy reason, the router hint); the first three are pinned
+  exactly. dry-0_0_15_3 item 28 is ticked
 - [x] 575. A create's build advises like an update's: `forms/inputs.py::build_form_input_class` runs
   `_advise_shape_disagreement` for every input it builds, over the fields that input binds, with the first clause
   (the form must turn the input into the column's value) for both and the omitted-field initial advice for the
   update only; one warning per input build, so a form serving a create and an update logs one of each. Package rows
   in `tests/forms/test_inputs.py` pin the texts and counts; the docstrings, spec-038 and the GLOSSARY
   `DjangoModelFormMutation` body are restated
-- [x] 634. No release number of this package is left in .py source: the seven `Target release:` module lines, the
-  "shipped / since 0.0.N" banners, the release-history narration in `mutations/sets.py`, the "0.0.9 model-label
-  default", "(hunt 0.0.15)" and the format examples in scripts are restated as behaviour, and release-carrying card ids
-  in prose (the `needs TODO-BETA-...` labels included) name their spec or the card's topic. A new gate,
-  `tests/test_ci_governance.py::test_no_comment_docstring_name_or_package_string_carries_a_release_of_this_package`,
-  refuses a release of the current series (pattern built from `__version__`) or a release-carrying card id in every
-  comment, string statement and name of the sweep corpus and in every package string but `__version__`; upstream
-  ranges, IPs and test data pass. 90 sites to 0; the `types/finalizer.py` strictness paragraph, false at HEAD, now
-  states the rule (spec-033 Decision 8). Maintainer request. The road-to-1.0.0 vocabulary of `scripts/_kanban_lib.py`
-  is refused once `__version__` reaches 1.0
-- [x] 460. A hinted `OptimizerHint.prefetch(Prefetch(lookup, queryset=...))` without `to_attr` whose queryset is not
-  over the lookup's leaf target (or a proxy of it sharing its table) is refused when the type is built, naming
-  `Type.field`, the row model and the target (`types/base.py::_hinted_prefetch_seed_defect`, read by
-  `_validate_optimizer_hints`): both the `Query.model` Django builds rows from and `QuerySet.model` must pass, a
-  `TextChoices` lookup is read as its text, and a non-QuerySet seed fails closed. It filled the relation with rows the
-  target type's `is_type_of` refuses (a `Branch` seed on a `ProxyBranch` target, a sibling proxy, an MTI child or
-  parent, an unrelated table), hooked or not, FK or M2M. A `to_attr` Prefetch stays the consumer resolver's own; an
-  unresolvable leaf (generic FK) is left to Django. The consumer `prefetch_related(Prefetch(...))` path keeps its
-  per-parent re-read. spec-045 row. Tests: `tests/types/test_base.py`, `test_library_api.py`
-- [x] 462. A reverse relation whose `related_query_name` differs from its accessor is planned in both of Django's
-  spellings: the walker carries a query-name prefix for `select_related`, `only()` and select keys and an accessor
-  prefix for every prefetch lookup, prefetch key, seal, hint rebase and nested-connection window
-  (`optimizer/walker.py::_walk_selections` `lookup_prefix`, `optimizer/plans.py::JoinPrefix`), and the diff readers
-  (`_consumer_owned_paths`, `_withdraw_owned_select_paths`, `_release_select_related_to_prefetches`) compare consumer
-  paths respelled through Django's relation metadata (`utils/relations.py::respell_relation_path`). It served a row a
-  consumer `Prefetch` hid (the planned JOIN kept the reverse one-to-one), joined past a target type's `get_queryset`
-  hook (a consumer `select_related` never released), raised `AttributeError` for a prefetch planned beneath the JOIN,
-  and refused an accessor-spelled hinted `Prefetch` beneath a JOIN. Tests:
-  `tests/optimizer/test_relation_spelling_execution.py`, `test_walker.py`, `test_plans.py`, `tests/utils/test_relations.py`
-- [x] 384. A filter value the database cannot bind is refused by asking Django, not a model of it: each temporal leaf's
-  predicate is built by its own shipped `filter()` over the filterset's queryset with its WHERE and limits cleared, and
-  only that clause is compiled on `queryset.db` (`filters/sets.py::_unbindable_predicate`); a build `OverflowError` /
-  `ValueError` / `TypeError` / `ValidationError` or a compile `OverflowError` / `ValueError` is the coded
-  `FILTER_INVALID`, and the compiled params meet the PostgreSQL server-offset rule
-  (`utils/errors.py::refuses_utc_offset`, the one rule no Django call answers). A declared filter whose value kind
-  differs from its column (a `date` on a `DateTimeField` east of UTC, a `datetime` on a `DateField` or through
-  `__date`) overflowed as the masked uncoded error. The value-kind walk, lookup and year tables in
-  `unbindable_temporal` are gone (-80 lines). spec-027 row. Tests: `tests/filters/test_sets.py`,
-  `tests/utils/test_errors.py`, `test_scalars_filter_api.py`
+- [x] 634. No release number of this package is left in .py source (90 sites to 0);
+  `tests/test_ci_governance.py::test_no_comment_docstring_name_or_package_string_carries_a_release_of_this_package`
+  refuses a current-series release or release-carrying card id in comments, strings and names. Maintainer request
+- [x] 460. A hinted `OptimizerHint.prefetch(Prefetch(...))` without `to_attr` whose queryset is not over the lookup's
+  target is refused at type build naming `Type.field` (`types/base.py::_hinted_prefetch_seed_defect`), where it filled
+  the relation with rows the target's `is_type_of` refuses. Tests: `tests/types/test_base.py`, `test_library_api.py`;
+  spec-045
+- [x] 462. A reverse relation whose `related_query_name` differs from its accessor is planned in both spellings
+  (`optimizer/walker.py::_walk_selections` `lookup_prefix`, `optimizer/plans.py::JoinPrefix`,
+  `utils/relations.py::respell_relation_path`), where it served rows a consumer `Prefetch` hid, joined past
+  `get_queryset`, or raised `AttributeError`. Tests: `tests/optimizer/test_relation_spelling_execution.py`,
+  `tests/utils/test_relations.py`
+- [x] 384. A filter value the database cannot bind is refused by asking Django: each temporal leaf's predicate is
+  built by its own `filter()` and compiled on `queryset.db` (`filters/sets.py::_unbindable_predicate`), and a failure
+  is the coded `FILTER_INVALID` where a kind-mismatched value overflowed as a masked error;
+  `utils/errors.py::refuses_utc_offset` keeps the PostgreSQL offset rule. Tests: `tests/filters/test_sets.py`,
+  `tests/utils/test_errors.py`
 - [x] 388. A class-level `Filter.filter()` override owns its value like `method=`: the unbindable-value ask runs only a
   `filter` defined by django-filter or this package (`filters/sets.py::_runs_shipped_filter`, the MRO owner's module),
   so consumer code never runs to validate; documented in `_unbindable_temporal_errors`. Tests: `tests/filters/test_sets.py`
 - [x] 398. A class-level `GlobalIDFilter.filter` override is read by `filters/sets.py::_decodes_before_binding` through
   `utils/truth.py::overrides`, so its lone-surrogate value is the coded `FILTER_INVALID` instead of a masked
   `UnicodeEncodeError`. Tests: `tests/filters/test_sets.py`
-- [x] 385. A filter value that compiles but carries an integer the connection's driver cannot bind is the coded
-  `FILTER_INVALID`: after 384's build and compile, every integer each bound lookup's own `process_rhs` yields (found
-  through expressions and into subquery WHEREs, `filters/sets.py::_bound_value_lookups`) is held to the connection's
-  `integer_field_range` for the type its lookup binds (`utils/querysets.py::binds_integer`, shared with
-  `coerce_field_value_or_none`). A declared `ListFilter` `in` / `RangeFilter` over `__year` / `__iso_year` with a member
-  past the range (2**63 on SQLite) raised the masked `OverflowError` at bind. Non-numeric / inf / nan members were
-  already refused by 384's build; `Decimal("1E+300000")` reaches no shipped filter (django-filter's 1e50 cap). Tests:
-  `tests/filters/test_sets.py`, `test_scalars_filter_api.py` (new `occurredYearAmong` / `occurredYearSpan` filters)
+- [x] 385. A filter integer the driver cannot bind (a `__year` `in` / range member past 2**63) is the coded
+  `FILTER_INVALID` instead of a masked `OverflowError`: after 384's compile, `filters/sets.py::_bound_value_lookups`
+  holds each bound integer to the connection's range via `utils/querysets.py::binds_integer`. Tests:
+  `tests/filters/test_sets.py`, `test_scalars_filter_api.py`
 - [x] 386. A `DurationField` filter leaf is asked like a temporal one: on a backend that binds durations as integer
   microseconds (SQLite, MySQL) a value past 64 bits of microseconds is the coded `FILTER_INVALID` instead of the masked
   bind `OverflowError` (`filters/sets.py::_unbindable_temporal_errors` gate, `binds_integer` with the
   `BigIntegerField` range). Tests: `tests/filters/test_sets.py`
-- [x] 389. A PostgreSQL `ArrayField` of datetimes, times or durations (nested too) is asked like a temporal column:
-  the gate reads its innermost element (`utils/_array_field.py::array_leaf_field`, shared with the write side), and
-  `utils/errors.py::refuses_utc_offset` holds a list param's elements to the text rule (psycopg dumps a list as text
-  even under server-side binding) while an `ARRAY[...]`-wrapped element or an index value keeps the binding-mode rule;
-  a list param psycopg cannot dump (a naive and an aware time) is refused through `_psycopg_refuses_list`. An element
-  whose UTC offset PostgreSQL refuses raised the masked `DataError` at evaluation. By source and the recorded real-server
-  facts; the pg-marked rows run on the PostgreSQL tier. Tests: `tests/filters/test_sets.py`, `tests/utils/test_errors.py`
+- [x] 389. A PostgreSQL `ArrayField` of datetimes, times or durations is asked like a temporal column
+  (`utils/_array_field.py::array_leaf_field`; `utils/errors.py::refuses_utc_offset` holds list elements to the text
+  rule), so an element whose offset PostgreSQL refuses is refused instead of a masked `DataError`. By source and
+  recorded server facts; pg rows run on the PostgreSQL tier. Tests: `tests/filters/test_sets.py`,
+  `tests/utils/test_errors.py`
 - [x] 427. (robustness) The django.yml floor-cell check (`tests/test_ci_governance.py::_floor_cell_problems`) holds
-  step order (the Django install, the strawberry floor step and the soft-floor step each after `uv sync`, the floor
-  steps after the Django install), refuses a later `uv sync` or `uv run` without `--no-sync` that would put the lock
-  back over the pins, and finds floor nodes by their `(python, django)` content so every one must carry
-  `compatibility_only` and every marked node must be at the floor; mutation rows pin each. `scripts/workspace.py::
-  _lower_bounds` refuses a dependency stated by two or more rows (a marker-split floor) instead of the last winning, and
-  the `[dependency-groups]`-not-a-table / `dev`-not-an-array refusals have rows. Tests: `tests/test_ci_governance.py`,
+  step order, refuses a later `uv sync` that puts the lock back over the pins, and finds floor nodes by content;
+  `scripts/workspace.py::_lower_bounds` refuses a marker-split floor. Tests: `tests/test_ci_governance.py`,
   `tests/test_workspace.py`
-- [x] 428. (robustness) `tests/test_workspace.py`'s stop-relay rows drive the repeat-stop grace with a held clock
-  instead of wall-clock sleeps: `scripts/workspace.py::_StopRelay` takes a `clock` (default `time.monotonic`), the
-  child harness swaps in a relay whose clock reads a file the test writes and which records each stop it handles, and
-  the test waits until the relay has handled a stop before moving the clock past `STOP_REPEAT_GRACE` (which pins the
-  `<` boundary). Waits on real child events are bounded by `_LOADED_WAIT` (60 s), and every stand-in command outlives
-  it so a stop that never lands still fails. Green 15/15 at load ~100 where the parent failed 2-3. Tests:
-  `tests/test_workspace.py`
+- [x] 428. (robustness) `tests/test_workspace.py`'s stop-relay rows use a held clock instead of sleeps:
+  `scripts/workspace.py::_StopRelay` takes a `clock`, and the test moves it past `STOP_REPEAT_GRACE` only after the
+  relay handled a stop. Green 15/15 under load where the parent failed 2-3
 - [x] 392. `utils/querysets.py::_where_tree_defect` holds a where-node connector to the text-term rule
   (`_is_text_term`, the rule `CombinedExpression.connector` takes): a `TextChoices` / `StrEnum` member seals and is
   rebound as exact `str`, its SQL equal to Django's; a hostile object stays refused. Tests: `tests/utils/test_querysets.py`
@@ -1944,13 +1307,10 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   stream unbuffered. `status`, `audit`, a large `diff`, and `run` with stderr gone before or after its header exited
   120 or 1 with a traceback, and `run` with stderr gone before the header never started its command. Tests:
   `tests/test_workspace.py`
-- [x] 501. (robustness) The workspace pool's default root is claimed as this user's own: `scripts/workspace.py::
-  default_root` resolves the temp dir first and keeps `dsf-ws` when that dir is a real directory this user owns (so
-  macOS keys do not move) and names it `dsf-ws-<uid>` on a shared one; `workspace_base` refuses a symlinked or foreign
-  root as a typed `WorkspaceError` and creates nothing, and `_make_flow_dir` claims it (mode 0700, owner, lstat)
-  through `prove_failability.py::claim_private_directory`, shared with the prover's scratch parent and state home and
-  `forget_proof_state`'s check. A foreign root raised an uncaught `PermissionError`; a planted symlink was followed.
-  `DSF_WS_ROOT` stays the caller's. Tests: `tests/test_workspace.py`, `tests/test_prove_failability.py`
+- [x] 501. (robustness) The workspace pool root is claimed as this user's own: `scripts/workspace.py::default_root`
+  names it `dsf-ws-<uid>` on a shared temp dir, `workspace_base` refuses a symlinked or foreign root as
+  `WorkspaceError`, and `_make_flow_dir` claims it through `prove_failability.py::claim_private_directory`. Tests:
+  `tests/test_workspace.py`, `tests/test_prove_failability.py`
 - [x] 502. (robustness) `scripts/prove_failability.py::_new_capture` and `_read_probe` read their temp-resident file
   once (`_read_text_if_present`), a missing one counting as absent, so the purge removing it between a check and the
   read no longer raises `FileNotFoundError`. Tests: `tests/test_prove_failability.py`
@@ -1960,13 +1320,10 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   without following symlinks); a copy gone with its manifest (a reboot, or a purge that left only folders and links)
   resyncs into its slot. The manifest is not renewed on reuse, so it stays the copy's age canary. Module docstring and
   START.md "Machine budget" say so. Tests: `tests/test_workspace.py`
-- [x] 587. A lazy translation string (any `Promise`) in a set's field declaration is read as text, never iterated:
-  `utils/_narrowing.py::is_text_atom` (char-wise, or a real `Promise` class, read without evaluating it; the rule
-  `utils/errors.py::_str_list` already used) backs `sets_mixins.py::is_re_readable_field_declaration`, so FilterSet
-  `Meta.exclude`, OrderSet `Meta.exclude` and OrderSet `Meta.fields` refuse a lazy string as the bare-string
-  `ConfigurationError` (it excluded by substring, excluded nothing, or expanded per character), and a lazy `"__all__"`
-  is the shorthand in both families' `Meta.fields`. spec-027 and spec-028 say so. Tests: `tests/filters/test_sets.py`,
-  `tests/orders/test_sets.py`, `tests/test_sets_mixins.py`, `tests/utils/test_narrowing.py`
+- [x] 587. A lazy translation string in a set's field declaration is read as text: `utils/_narrowing.py::is_text_atom`
+  backs `sets_mixins.py::is_re_readable_field_declaration`, so FilterSet / OrderSet `Meta.exclude` and OrderSet
+  `Meta.fields` refuse it as a bare string (it excluded by substring or expanded per character), and a lazy
+  `"__all__"` is the shorthand. Tests: `tests/filters/test_sets.py`, `tests/orders/test_sets.py`
 - [x] 900. The lookup iterator's return annotation uses a private runtime-safe alias, preserving
   `Lookup[object]` for static checking without subscripting Django's runtime class. The unpatched annotation gate
   passes; no filtering behavior or supported introspection contract changes. Tests: `tests/base/test_init.py`.
@@ -1976,56 +1333,31 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
 - [x] 607. Not a defect against the shipped contract: spec-015 explicitly leaves optimizer cooperation
   out of both node defaults, and the glossary states that node refetch receives no optimizer plan. The capability
   decision and its query-count evidence remain under Waiting item 327; this row adds no separate defect.
-- [x] 540. (robustness) The serializer flavor answers DRF's own field-keyed `overflow` ("Datetime value out of range.")
-  for a datetime DRF's `DateTimeField.enforce_timezone` cannot place (a naive one near year 1 or 9999 under a non-UTC
-  `TIME_ZONE`, an aware out-of-range one under `USE_TZ=False`), at every depth (`ListField` child, nested, `many=True`):
-  `rest_framework/resolvers.py::_translate_datetime_overflow` wraps each request's own `DateTimeField` instances'
-  `to_internal_value` and turns a raw `OverflowError` into `fail("overflow")`, the answer DRF gives the sibling cell;
-  a consumer override that answers it itself is left to it. These answered the masked top-level error. One walk
-  (`_validation_tree`) shared with `_pin_validator_querysets`. Live grid cells, README, spec-039 and the
-  `fielderror-envelope` glossary term say so. Tests: `examples/fakeshop/test_query/test_scalars_mutation_api.py`,
-  `tests/rest_framework/test_resolvers.py`
-- [x] 569. (robustness) `scripts/check_annotation_subscripts.py` (pre-commit hook, `django.yml` lint step,
-  `workspace.py` `LINT_COMMANDS`) sweeps every annotation by AST, strings inside annotations, runtime `TypeAlias`
-  values and unquoted `cast` arguments, resolves each subscripted name through its imports, and fails closed on a
-  class absent from its audited `SUBSCRIPTABLE` table (version-gated: `classmethod` / `staticmethod` take a hook only
-  from Python 3.14), on a hookless class at an evaluated site, and on an unaudited or stale never-evaluated site
-  (`AUDITED_SITES`, the item's seven). `tests/base/test_init.py` re-checks both tables at runtime without the
-  `django_stubs_ext` patch on every cell. The sweep found `utils/truth.py`'s overloads subscripting `classmethod` /
-  `staticmethod` (evaluable on 3.11-3.13), now `TYPE_CHECKING` aliases. Tests:
+- [x] 540. (robustness) The serializer flavor answers DRF's field-keyed `overflow` for a datetime `enforce_timezone`
+  cannot place, at every depth, instead of the masked error:
+  `rest_framework/resolvers.py::_translate_datetime_overflow` turns a raw `OverflowError` into `fail("overflow")`.
+  Tests: `examples/fakeshop/test_query/test_scalars_mutation_api.py`, `tests/rest_framework/test_resolvers.py`
+- [x] 569. (robustness) `scripts/check_annotation_subscripts.py` sweeps every annotation and fails closed on a
+  subscripted class outside its audited `SUBSCRIPTABLE` table or an unaudited site; it found `utils/truth.py`
+  subscripting `classmethod` / `staticmethod`, now `TYPE_CHECKING` aliases. Tests:
   `tests/test_check_annotation_subscripts.py`, `tests/base/test_init.py`
-- [x] 562. (robustness) The async pre-pass derives a hop only for a flat leaf the form data names: a range naming no
-  bound (`{start: null, end: null}`, `{}`, inside `or_` / `not_` arms, package or django-filter `RangeFilter`,
-  `DateFromToRangeFilter`) writes no form key, so `apply_async` runs the hop target's `get_queryset` no more than
-  `apply_sync` does. `filters/sets.py::FilterSet._leaf_form_data` (the keys one lookup writes, shared with
-  `_normalize_input`) backs `_named_leaf_filters`, which `_derive_flat_hop_visibility_async` reads; a malformed value
-  raises before any hop hook. `_supplied_leaf_filters` and the permission walk are unchanged. spec-027 says so. Tests:
-  `tests/filters/test_sets.py`
-- [x] 628. A many-to-many leaf, forward or reverse, whose through model's foreign key onto the leaf's target has a
-  non-pk `to_field` is compared by the target's primary key, as its wire type says: `filters/base.py::
-  _relation_uses_non_pk_to_field` asks `utils/relations.py::non_pk_forward_link` of that foreign key
-  (`m2m_through_link_fields` resolves the side), so the leaf carries 511's marker and compiles through `<relation>__pk`
-  in plain, scoped-hop and declared modes and as a Relay GlobalID leaf. It compared the `to_field` column: a linked
-  row's pk matched nothing unless it equalled that row's `code`, and a code value matched some other row. A pk-target
-  or source-side `to_field` link compiles byte-identically. spec-027 and the `filterset` glossary term say so. Tests:
-  `tests/filters/test_base.py`
-- [x] 577. A `SerializerMutation` save refused over a `blank=True, null=False` column the input left out, or a declared
-  `allow_null` field set to `None`, is that column's field-keyed `null` error ("This field cannot be null."), as in the
-  model and `ModelForm` flavors: `rest_framework/resolvers.py::_write_witness` records this write's attempted
-  backing-model rows (a `pre_save` receiver scoped to the write's thread; a completed save drops out), and
-  `_attempted_row_integrity_errors` runs `utils/write_values.py::unstorable_columns` over the row whose save was
-  refused, falling back to the `"__all__"` `constraint` error. It answered that `"__all__"` error for every such cell.
-  The `""`-over-`ArrayField` cell stays with row 45. A fakeshop `createItemHoldViaSerializer` pins it live; README,
-  spec-039 and the `fielderror-envelope` / `djangomodelformmutation` glossary terms say so. Tests:
-  `tests/rest_framework/test_resolvers.py`, `examples/fakeshop/test_query/test_products_api.py`
-- [x] 523. A `DjangoModelFormMutation` whose form declares a built-in temporal field over a temporal column whose value
-  it cannot read is refused at build (`forms/inputs.py::_require_temporal_reader`, beside the kind check, over the same
-  binding sets): a Time column takes only the `TimeField` its own `formfield()` builds; a Date column also takes a
-  `DateTimeField`; a DateTime column also takes a `SplitDateTimeField` (admin's pairing), and refuses a `DateField`,
-  which stored midnight. Those pairs answered the masked `AttributeError` / `TypeError` (on every update too), a
-  useless field-keyed error, or a silent truncation. A `CharField`, a subclass overriding `to_python` / `clean`, and a
-  Duration column pass. spec-038, README and the `djangomodelformmutation` glossary term say so. Tests:
-  `tests/forms/test_inputs.py`
+- [x] 562. (robustness) The async pre-pass derives a hop only for a flat leaf the form data names, so a range naming
+  no bound runs the hop target's `get_queryset` no more than `apply_sync`:
+  `filters/sets.py::FilterSet._leaf_form_data` backs `_named_leaf_filters`. Tests: `tests/filters/test_sets.py`;
+  spec-027
+- [x] 628. A many-to-many leaf whose through model's FK onto the target has a non-pk `to_field` is compared by the
+  target's pk, as its wire type says (`filters/base.py::_relation_uses_non_pk_to_field` via
+  `utils/relations.py::non_pk_forward_link`, 511's marker), where it compared the `to_field` column and matched the
+  wrong rows. Tests: `tests/filters/test_base.py`; spec-027
+- [x] 577. A `SerializerMutation` save refused over a `blank=True, null=False` column left out or set to `None` is
+  that column's field-keyed `null` error, not the `"__all__"` `constraint` error:
+  `rest_framework/resolvers.py::_write_witness` records attempted rows and `_attempted_row_integrity_errors` runs
+  `utils/write_values.py::unstorable_columns` over the refused one. The `""`-over-`ArrayField` cell stays with row 45.
+  Tests: `tests/rest_framework/test_resolvers.py`, `examples/fakeshop/test_query/test_products_api.py`
+- [x] 523. A `DjangoModelFormMutation` form declaring a built-in temporal field that cannot read its temporal column
+  (a `DateField` over a DateTime column, a non-`TimeField` over a Time column) is refused at build
+  (`forms/inputs.py::_require_temporal_reader`), where it answered masked errors or silently truncated. Tests:
+  `tests/forms/test_inputs.py`; spec-038
 - [x] 645. Async generated-mutation completion drains running field/list siblings inside its atomic after
   ordinary failures, preserving shared awaitables; caller cancellation cancels them once and drains cleanup across
   repeated cancellation. Active production masking snapshots managed and standalone result error lists at teardown,
@@ -2040,36 +1372,23 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
 - [x] 643. Corrupt run-log/state evidence is an input to repository workspace tooling, not a supported
   package API or GraphQL wire/configuration path. Closed as tooling robustness outside the package defect gate;
   no malformed-evidence runtime fix is claimed (`scripts/workspace.py::load_runs`).
-- [x] 529. A decimal filter value whose spelling falls outside PostgreSQL `numeric`'s format (more than 131072 digits
-  before the point or 16383 after, a huge negative or a tiny exponent) is refused by the filter ask as the field-keyed
-  `FILTER_INVALID` "Enter a value the database can represent." on every filter family (generated `exact` / `in` /
-  `range` / comparisons, declared `ListFilter` / `RangeFilter`, nested, `not`, decimal `ArrayField` elements) instead
-  of the masked `DataError`: the filter ask (`filters/sets.py::_unbindable_value_errors`) reads each compiled
-  `Decimal` through `utils/errors.py::refuses_numeric_format`, the one model of `numeric_in` the identity decode (591)
-  shares; a zero is held only by its scale and its written exponent's bound. Other backends bind as given.
-  spec-027, README and the `filterset` glossary term say so. Tests: `tests/utils/test_errors.py`,
-  `tests/filters/test_sets.py`
-- [x] 531. `node` / `nodes` and the relation-id decodes of the model (FK and M2M) and serializer (M2M) flavors match a
-  requested id to its row by the id column's own value (`utils/querysets.py::identity_key`, the column's `to_python`,
-  on both sides of `types/relay.py::_order_nodes`, `utils/querysets.py::pks_present` / `pks_all_present` and
-  `utils/write_values.py::decode_visible_relation_ids`), not by `str()`: an unconstrained decimal key spelled with other
-  trailing zeros or an exponent (`"2.50"` for a stored `2.5`, `"7E+1"` for `70`; PostgreSQL's kept scale) and an aware
-  datetime key spelled in another UTC offset find their row instead of answering null or "Invalid id". A NodeID slot
-  naming no model field keeps the string. spec-032, spec-036 and spec-039 say so. Tests:
-  `tests/test_relay_node_field.py`, `tests/mutations/test_resolvers.py`, `tests/rest_framework/test_resolvers.py`,
+- [x] 529. A decimal filter value outside PostgreSQL `numeric`'s format is refused as the field-keyed `FILTER_INVALID`
+  on every filter family instead of the masked `DataError`: `filters/sets.py::_unbindable_value_errors` reads each
+  compiled `Decimal` through `utils/errors.py::refuses_numeric_format`, shared with 591's identity decode. Other
+  backends bind as given. Tests: `tests/utils/test_errors.py`, `tests/filters/test_sets.py`
+- [x] 531. `node` / `nodes` and relation-id decodes match a requested id by the id column's own value
+  (`utils/querysets.py::identity_key`), not `str()`, so `"2.50"` for a stored `2.5` or an aware datetime in another
+  offset finds its row instead of null or "Invalid id". Tests: `tests/test_relay_node_field.py`,
   `tests/utils/test_querysets.py`
 - [x] 534. `FilterSet` and `OrderSet` refuse an unknown `Meta` key at class creation, through the one typo guard every
   write flavor runs (`utils/inputs.py::reject_unknown_meta_keys`): a `FilterSet` takes the keys django-filter's
   `FilterSetOptions` reads plus the `filter_fields` synonym, an `OrderSet` `model`, `fields` and `exclude`; a `Meta` that
   is not a class is refused too. spec-027, spec-028 and the `filterset` / `orderset` glossary terms say so. Tests:
   `tests/filters/test_sets.py`, `tests/orders/test_sets.py`, `tests/utils/test_inputs.py`
-- [x] 535. A `Meta.exclude` name is held in both set families (`sets_mixins.py::reject_unknown_exclude_names`): a name
-  the set declares, own or inherited, is refused with the remedy (remove it, or `<name> = None`), as DRF refuses an
-  excluded declared field; any other name outside the model's fields and the `Meta.fields` entries is refused naming
-  the legal ones, as on a `DjangoType`. A non-string `Meta.exclude` or `Meta.fields` entry is a `ConfigurationError`
-  naming the set in both families (`sets_mixins.py::require_field_name`), not a raw `AttributeError`. The `meta.exclude`
-  glossary term, spec-027, spec-028 and the README say so. Tests: `tests/filters/test_sets.py`,
-  `tests/orders/test_sets.py`
+- [x] 535. A `Meta.exclude` name is checked in both set families (`sets_mixins.py::reject_unknown_exclude_names`): a
+  declared name is refused with the remedy, an unknown one naming the legal ones; a non-string entry is a
+  `ConfigurationError` (`sets_mixins.py::require_field_name`), not `AttributeError`. Tests:
+  `tests/filters/test_sets.py`, `tests/orders/test_sets.py`
 - [x] 536. A model-less `FilterSet` whose `Meta` sweeps (`"__all__"`, or `Meta.exclude` without `Meta.fields`) raises a
   `ConfigurationError` naming the set from `get_fields` (`sets_mixins.py::require_sweep_model`, the wording an
   `OrderSet` uses), not upstream's raw `AttributeError`; a model-less base whose subclass supplies `Meta.model` still
@@ -2079,27 +1398,20 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   content (the spec-046 Decision a test pins, the equivalence-matrix case it proves, the named test it defers to)
   instead of a test-plan row, matrix row, gap or test ordinal; comments and docstrings only (stripped ASTs and
   collected node ids identical).
-- [x] 596. A `ProjectedChildFilter` a set does not hold (borrowed from another set's `get_filters()` without the
-  branch it projects through) is a `ConfigurationError` at publish naming the set, the key, the donor child set and
-  the branch (`filters/sets.py::FilterSet._reject_foreign_projection`), instead of a raw `KeyError` on supply or, under
-  a same-named branch, the donor's child filter run silently across the borrower's branch. `FilterSetMetaclass`
-  deep-copies a class-body filter another set already owns before stamping it, as django-filter never writes
-  set-specific state on a shared filter, so the donor's record stays its own. spec-027 and the `filterset` glossary
-  term say so. Tests: `tests/filters/test_sets.py`
+- [x] 596. A `ProjectedChildFilter` borrowed without its branch is a `ConfigurationError` at publish naming set, key,
+  donor and branch (`filters/sets.py::FilterSet._reject_foreign_projection`), instead of a raw `KeyError` or the
+  donor's filter run silently; `FilterSetMetaclass` deep-copies a filter another set owns. Tests:
+  `tests/filters/test_sets.py`
 - [x] 597. A declared head's name is never walked as a relation path: `run_active_input_permission_checks` asks the
   set's `_gate_path_spells_relations` seam, which a `FilterSet` answers "no" for a declared head, and
   `FilterSet._gate_path_walk_gates` walks a non-declared leaf's `field_name` even where a declared name spells the
   same string; so a flat expanded copy (`shelf__named` beside `real_shelf = RelatedFilter(..., field_name="shelf")`)
   and a plain declared filter named like another branch's accessor fire exactly their nested twin's gates. spec-027
   says so. Tests: `tests/filters/test_sets.py`
-- [x] 650. The write-side check `utils/errors.py::unstorable_temporal` asks Django's own save-time preparation
-  (`Field.get_db_prep_save` on the write connection) for every date, date-time, time and duration value it converts,
-  instead of hand-modelling the conversions: an aware datetime a `DateField` cannot make naive in the default zone
-  (year 1 / 9999 across an offset) is the field-keyed "Enter a value the database can represent." instead of the
-  masked `OverflowError`. A naive datetime or a date bound to a date-time column is projected as Django binds it (the
-  adapted `DateTimeField` naive branch; `LICENSE.django` ships beside ours), so no warnings filter is touched; the
-  PostgreSQL rules run over the prepared values. spec-036, spec-038, spec-039, README and the `fielderror-envelope`
-  glossary term say so. Tests: `tests/utils/test_errors.py`, `tests/rest_framework/test_resolvers.py`
+- [x] 650. `utils/errors.py::unstorable_temporal` asks Django's `Field.get_db_prep_save` for every temporal value
+  instead of modelling conversions, so an aware datetime a `DateField` cannot make naive is the field-keyed "Enter a
+  value the database can represent." instead of a masked `OverflowError`; `LICENSE.django` ships for the adapted
+  branch. Tests: `tests/utils/test_errors.py`, `tests/rest_framework/test_resolvers.py`
 - [x] 653. A `DurationField` write past 64 bits of microseconds on a backend without a native interval (SQLite, MySQL)
   is the field-keyed "Enter a value the database can represent." in every write flavor instead of the masked
   `OverflowError` at bind: `unstorable_temporal` holds the integer `get_db_prep_save` prepares to
@@ -2111,49 +1423,26 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   `Meta.fields` omit the pk or the pk is not named `id` (`isbn_13`); a NodeID on another column or a consumer
   `resolve_id` keeps the JOIN. spec-015, spec-004 and the `fk-id-elision` glossary term say so. Tests:
   `tests/optimizer/test_walker.py`, `examples/fakeshop/test_query/test_library_api.py`
-- [x] 652. Generated integer `in` / `range` leaves over a transform (`year`, `iso_year`, `month`, `day`, `week`,
-  `week_day`, `iso_week_day`, `quarter`, `hour`, `minute`, `second`, an `ArrayField`'s `len`) bind the transform's own
-  output: `filters/base.py::IntegerInFilter` hands a transform's members to the lookup's own prep instead of coercing
-  them through the column (which dropped every member), and `IntegerRangeFilter` applies its bounds through the
-  transform (`<col>__year__gte`), so `year__in` / `year__range` answer the rows of those years; the value field is
-  upstream's `django_filters.utils.resolve_field` output (`_bound_value_field`, cached). A member or bound past the
-  database's integer range of any integer transform (a project-registered one and `len` included, whatever the column)
-  is the field-keyed `FILTER_INVALID` through the filter ask (`filters/base.py::_reads_integer_transform`). spec-027,
-  README and the `filterset` glossary term say so. Tests: `tests/filters/test_base.py`, `tests/filters/test_sets.py`
-- [x] 663. Every configuration slot that reads a field-name or entry sequence refuses a whole text atom by its class
-  (`utils/_narrowing.py::is_text_atom`, after `unwrap_lazy_object`): a lazy translation string (`gettext_lazy("name")`),
-  any lazy `Promise` whatever it wraps, bytes, `bytearray`, `memoryview` and a `SimpleLazyObject` over any of them are
-  the bare-string refusal instead of being read one name per character, at `utils/inputs.py::
-  normalize_field_name_sequence` (all three mutation flavors' `Meta.fields` / `exclude` / `optional_fields` /
-  `injected_fields` and the nested serializer config; the message names the slot), `utils/directives.py::
-  validated_field_directives`, `permissions.py::_validate_fields`, `mutations/inputs.py::_frozenset_of_attr_names`,
-  `utils/write_values.py::materialize_relation_id_container`, `write_mixins.py::_validate_permission_classes` and
-  `types/converters.py::_unpack_choice_entry` (a lazy choice label stays a label). Specs 020, 029, 034, 038, 039 and
-  053 and the `apply_cascade_permissions` glossary term say so. Tests: `tests/utils/test_inputs.py`,
-  `tests/test_permissions.py`, `tests/utils/test_directives.py`, `tests/mutations/test_inputs.py`,
-  `tests/utils/test_write_values.py`, `tests/test_write_mixins.py`, `tests/types/test_choice_entry_shapes.py`, and one
-  lazy `Meta.exclude` row per mutation flavor
-- [x] 579. The filter side names a flat copy and reads a supplied leaf by every form-data key its widget reads
-  (`utils/widgets.py::widget_keys`): `filters/sets.py::_widget_keys` and `FilterSet._leaf_absent` read a
-  `SplitArrayWidget`'s per-index keys (`<name>_0 ..`) and a nested `MultiWidget`'s deeper keys, so a child set's
-  split-array copy on a set built outside the schema is bound and filters by `<prefix>-shelves__arr_0 ..` instead of
-  being dropped, and the leaf reads as supplied; a widget reading no key keeps its bare name. Range bounds keep the
-  two-key `multi_widget_keys`. spec-027 and the `utils/widgets.py` module docstring say so. Tests:
-  `tests/filters/test_sets.py`
-- [x] 654. The filter ask reads only the lookups a leaf binds for the user's value: `filters/sets.py::
-  _bound_value_lookups` skips every expression that is one of the queryset's own annotations (by identity, per query
-  and subquery), so a consumer annotation's out-of-range constant a leaf goes through never refuses an in-range value,
-  while a leaf filtering on an annotation is still asked; and `utils/errors.py::binds_integer` holds no range for an
-  `IntegerField` subclass whose internal type the backend states none for, instead of raising `KeyError` (the filter
-  ask and `utils/querysets.py::coerce_field_value_or_none`). spec-027, spec-032 and README say so. Tests:
-  `tests/filters/test_sets.py`, `tests/utils/test_errors.py`, `tests/utils/test_querysets.py`
-- [x] 657. An `ArrayField` of integers is asked like the temporal and decimal arrays: each integer a lookup over the
-  array or a slice of it binds for its right-hand side (an `ARRAY[...]` element, a slice element, a member of a list
-  parameter) is held to its element column's range (`utils/errors.py::refuses_integer_range`) and a member past it is
-  the field-keyed `FILTER_INVALID`, never dropped; a slice's bounds are no element, and an index `in` member or an
-  array's `len` is held to its transform's own output range. A flat integer column stays unasked. spec-027, README
-  and the `filterset` glossary term say so. Tests: `tests/filters/test_sets.py` (real `ArrayField` rows and a
-  prepared-element double that runs without psycopg), `tests/utils/test_errors.py`
+- [x] 652. Generated integer `in` / `range` leaves over a transform (`year`, `month`, `len`, ...) bind the transform's
+  output: `filters/base.py::IntegerInFilter` hands members to the lookup's prep (it dropped every member) and
+  `IntegerRangeFilter` applies bounds through the transform, so `year__in` answers those years; a value past the
+  integer range is `FILTER_INVALID` (`filters/base.py::_reads_integer_transform`). Tests:
+  `tests/filters/test_base.py`, `tests/filters/test_sets.py`
+- [x] 663. Every configuration slot reading a field-name sequence refuses a whole text atom (lazy string, bytes,
+  `memoryview`, a `SimpleLazyObject` over one) as the bare-string refusal instead of reading it per character, via
+  `utils/_narrowing.py::is_text_atom` at `utils/inputs.py::normalize_field_name_sequence` and six other slots. Tests:
+  `tests/utils/test_inputs.py`, `tests/test_permissions.py`, one lazy `Meta.exclude` row per mutation flavor
+- [x] 579. The filter side reads a supplied leaf by every key its widget reads (`utils/widgets.py::widget_keys`):
+  `filters/sets.py::_widget_keys` and `FilterSet._leaf_absent` read a `SplitArrayWidget`'s per-index keys, so a child
+  set's split-array copy is bound and filters instead of being dropped. Tests: `tests/filters/test_sets.py`; spec-027
+- [x] 654. The filter ask reads only lookups a leaf binds for the user's value:
+  `filters/sets.py::_bound_value_lookups` skips the queryset's own annotations, so an annotation's out-of-range
+  constant never refuses an in-range value; `utils/errors.py::binds_integer` holds no range for an `IntegerField`
+  subclass the backend gives none, instead of `KeyError`. Tests: `tests/filters/test_sets.py`,
+  `tests/utils/test_errors.py`
+- [x] 657. An integer `ArrayField` is asked like the temporal and decimal arrays: each bound element is held to its
+  element column's range (`utils/errors.py::refuses_integer_range`) and a member past it is `FILTER_INVALID`, never
+  dropped. Tests: `tests/filters/test_sets.py`, `tests/utils/test_errors.py`
 - [x] 670. A `DjangoModelFormMutation` form declaring `forms.DateTimeField` over a `DateField` column is refused at
   schema build (`forms/inputs.py::_TEMPORAL_COLUMN_FORM_CLASSES`, `_require_temporal_reader`), as the serializer flavor
   refuses the pair: the wire is the column's `Date`, and the form field made it midnight in the current time zone, so a
@@ -2166,400 +1455,167 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   consumer save narrowed to other columns answers the constraint envelope and a deferred column the save left out is
   never loaded. spec-039 says so. Tests: `tests/rest_framework/test_resolvers.py`. The swallowed-save half and the
   ModelForm flavor are rows 695 and 696
-- [x] 672. On SQLite a decimal filter value the form accepts is compared as a double, not refused for its spelling: a
-  non-zero value below the smallest double (`1e-1000000`) compares as zero (`exact`, an `in` member and a `range` start
-  match a stored `0`; `lt` leaves it out) and values differing only past a double's 15 to 17 significant digits can
-  compare equal, while PostgreSQL refuses a value its `numeric` cannot hold. `-1e1000000` compares as an infinity and
-  answers the right rows, so the row's second half did not hold. Documented in README, spec-027, the `filterset`
-  glossary term and `utils/errors.py::refuses_numeric_format`; pinned by `tests/filters/test_sets.py::
-  test_decimal_filter_value_compares_as_a_double_on_sqlite`. No refusal rule: the value binds
-- [x] 666. `FilterSet.apply_async` awaits the hops of every absent walking leaf whose filter acts on its absent value:
-  its first sync boundary validates the form and probes each absent leaf with hops once (`_probe_absent_relation_leaves`,
-  verdicts cached by name), the async code awaits the acting leaves' hops into the request's hop map through the shared
-  `_await_hop_visibility_async`, and `.qs` runs in a second boundary only when hops were awaited; `_apply_relation_leaf`
-  reads the cached verdict, so a consumer filter body and an async-only `get_queryset` run as often as on `apply_sync`.
-  A relation-key leaf's probe reads the rows the set was built over on both colors, and a walking leaf a consumer `__init__` adds is probed too. spec-027 says so. Tests:
-  `tests/filters/test_sets.py`
+- [x] 672. Documented, no refusal rule: on SQLite a decimal filter value is compared as a double, so `1e-1000000`
+  compares as zero and values differing past 15-17 digits can compare equal; the row's `-1e1000000` half did not hold.
+  docs: README, spec-027, `utils/errors.py::refuses_numeric_format`; pinned by
+  `tests/filters/test_sets.py::test_decimal_filter_value_compares_as_a_double_on_sqlite`
+- [x] 666. `FilterSet.apply_async` awaits the hops of every absent walking leaf that acts on its absent value: the
+  first sync boundary probes each once (`_probe_absent_relation_leaves`) and the async code awaits them via
+  `_await_hop_visibility_async`, so consumer filter bodies and an async `get_queryset` run as often as on
+  `apply_sync`. Tests: `tests/filters/test_sets.py`; spec-027
 - [x] 675. On SQLite a `DecimalField` key is not reliably addressable by `node` / `nodes` or a relation id: SQLite
   stores a non-integral or past-64-bit value as a float, Django reads decimals through 15 significant digits (an
   integral one too before Django 6.1), and a column with decimal places binds even an integral key in a spelling SQLite
   compares as a float, so neither the written spelling nor the emitted id need name the row. README's Relay paragraph
   and spec-032 say so with the remedy (a key the column holds exactly); `tests/test_relay_node_field.py` pins it. No code
   change: the key does not round-trip through Django itself
-- [x] 676. A naive datetime id on a `DateTimeField` key is read as Django's own lookup binds it, aware in the default
-  time zone, with no naive-datetime warning: `utils/querysets.py::column_python_value` (through the public
-  `utils/errors.py::datetime_django_binds`) serves `coerce_field_value_or_none` and `identity_key`, and `identity_key`
-  keys an aware datetime by its instant, so `node`, `nodes` and relation ids find the row, also in a repeated or skipped
-  DST hour; an id past the representable range answers null. The datetime spelled-key relation tests own stamp-only
-  owner models, so the Django floor never reads an unconstrained decimal column there. README and spec-032 say so. Tests:
-  `tests/utils/test_querysets.py`, `tests/test_relay_node_field.py`, `tests/mutations/test_resolvers.py`,
-  `tests/rest_framework/test_resolvers.py`
-- [x] 682. FK-id elision fires into a type listing its relation primary key: for a target whose pk is a relation
-  (a one-to-one or `*_ptr` key), `types/definition.py::origin_has_custom_id_resolver` / `has_custom_id_resolver_for`
-  (`pk_is_relation`, threaded by `optimizer/walker.py::_plan_select_relation`) count only `resolve_id` and the NodeID
-  off-pk check, never the relation resolver the framework installs under the key's name, so `annotation { profile { id }
-  }` over a type listing `patron` reads the stored key with no JOIN. spec-015 and the `fk-id-elision` glossary term say
-  so. Tests: `tests/types/test_definition_relations.py`, `tests/optimizer/test_walker.py`,
-  `examples/fakeshop/test_query/test_library_api.py`
+- [x] 676. A naive datetime id on a `DateTimeField` key is read aware in the default zone as Django binds it, with no
+  warning (`utils/querysets.py::column_python_value`), and `identity_key` keys an aware datetime by its instant, so
+  `node`, `nodes` and relation ids find the row across DST; an out-of-range id answers null. Tests:
+  `tests/utils/test_querysets.py`, `tests/test_relay_node_field.py`
+- [x] 682. FK-id elision fires into a type listing its relation primary key:
+  `types/definition.py::origin_has_custom_id_resolver` / `has_custom_id_resolver_for` (`pk_is_relation`) ignore the
+  framework-installed relation resolver, so `profile { id }` reads the stored key with no JOIN. Tests:
+  `tests/types/test_definition_relations.py`, `tests/optimizer/test_walker.py`; spec-015
 - [x] 693. The filter ask's params-wide rules read only what the leaf's own lookups bind: `filters/sets.py::
   _unbindable_predicate` runs `refuses_utc_offset`, `refuses_numeric_format` and `psycopg_refuses_list_parameter` over
   each `_bound_value_lookups` lookup's `process_rhs` params, as the integer rules do, so a constant inside a consumer
   annotation the leaf goes through never refuses the user's value, while the user's own past-rule value is still
   refused. spec-027, the `filterset` glossary term and the `utils/errors.py` docstrings say so. Tests:
   `tests/filters/test_sets.py`
-- [x] 699. The absent-leaf verdict is request-wide and a filter-path sync misuse names the filter recourse: both colors
-  probe the root's absent walking leaves once (`FilterSet._probed_filterset`) and every `and` / `or` / `not` arm reads the
-  root's verdict for a leaf that cleaned to the same value (`_q_for_branch`), so an arm never derives an unawaited hop
-  for a leaf the root asked about; `_derive_related_visibility_querysets_sync`, `_hop_visible_rows` and `_scoped_rows`
-  pass `_FILTER_ASYNC_RECOURSE`, so a `SyncMisuseError` there names `FilterSet.apply_async`, not the Relay node defaults.
-  spec-027, spec-028 and the `syncmisuseerror` glossary term say so. Tests: `tests/filters/test_sets.py`. Arm-only
-  absent leaves are row 700
-- [x] 685. A fractional number on an integer column names no row: `utils/querysets.py::truncates_to_integer` asks a
-  finite `float` / `Decimal` its own integrality (no cast), `coerce_field_value_or_none` answers None for it, and
-  `filters/base.py::IntegerInFilter`'s integer-transform branch drops it, so a generated or declared integer `in` leaf on
-  raw form data (`signed_big__in=1.5,2`, `occurred_at__year__in=2020.5`) drops the member instead of truncating it to a
-  matching integer. README, spec-027 and spec-032 say so. Tests: `tests/utils/test_querysets.py`,
-  `tests/filters/test_base.py`, `tests/filters/test_sets.py`. The comparison leaves are row 701; the cost of a huge
-  negative decimal is row 673
-- [x] 700. `FilterSet.apply_async` awaits the hops of an absent walking leaf only an arm asks about: both colors probe
-  every `and` / `or` / `not` arm inside `_probed_filterset` (`_probe_logic_arms`: each arm's sibling built over the rows
-  the set was built over, validated, and asked about each absent leaf its parent's verdicts miss or cleaned to another
-  value), the async code awaits those hops before the `.qs` read, and `_q_for_branch` reuses the probed sibling
-  (`_ProbedArm`), so a consumer `__init__`, form `clean` and filter body run once per arm on both colors; an arm whose
-  input a `filter_queryset` override swapped, or whose `__init__` replaced its queryset, is built again. spec-027 says so.
-  Tests: `tests/filters/test_sets.py`
+- [x] 699. The absent-leaf verdict is request-wide (`FilterSet._probed_filterset`, reused by arms in `_q_for_branch`),
+  so an arm never derives an unawaited hop, and a filter-path `SyncMisuseError` names `FilterSet.apply_async`
+  (`_FILTER_ASYNC_RECOURSE`). Tests: `tests/filters/test_sets.py`. Arm-only absent leaves are row 700
+- [x] 685. A fractional number on an integer column names no row: `utils/querysets.py::truncates_to_integer` checks
+  integrality, `coerce_field_value_or_none` answers None, and `filters/base.py::IntegerInFilter` drops it, so
+  `signed_big__in=1.5,2` drops the member instead of truncating it. Tests: `tests/utils/test_querysets.py`,
+  `tests/filters/test_base.py`. Comparison leaves are row 701; a huge negative decimal's cost is row 673
+- [x] 700. `FilterSet.apply_async` awaits the hops of an absent leaf only an arm asks about: `_probe_logic_arms`
+  probes every `and` / `or` / `not` arm inside `_probed_filterset` and `_q_for_branch` reuses the probed sibling
+  (`_ProbedArm`), so a consumer `__init__`, form `clean` and filter body run once per arm on both colors. Tests:
+  `tests/filters/test_sets.py`; spec-027
 - [x] 702. Both colors answer the same first error for a filter input carrying several: `apply_sync` derives every
   `and` / `or` / `not` arm's related branches in tree order before the permission pass and form validation, as
   `apply_async` does (`FilterSet._iter_logic_arms`, read by `_collect_nested_visibility_querysets_sync` and its async
   twin), so an arm branch's `FILTER_INVALID` answers before an arm or root form error or a permission denial on both,
   and the depth cap raises from the same set. spec-027 says so. Tests: `tests/filters/test_sets.py`,
   `examples/fakeshop/test_query/test_library_api.py`
-- [x] 701. On raw form data the integer comparisons (`exact`, `gt`, `gte`, `lt`, `lte`, `range`) truncate a fractional
-  value toward zero, as a stock django-filter `NumberFilter` does: its `DecimalField` cleans `"1.5"` to a `Decimal`,
-  which skips Django's float ceiling (`IntegerFieldFloatRounding`) and reaches the column's `int()`, so `gte=1.5`
-  matches a row holding 1 and `lt=1.5` drops it, while an `in` member is dropped (685). Documented, not changed: the
-  GraphQL `Int` / `BigInt` scalars refuse a fraction first, and an integer-aware filter would add a `NumberFilter`
-  subclass to the seam under refactor. README, spec-027; pinned by `tests/filters/test_sets.py::
-  test_integer_comparison_truncates_a_fractional_value`
-- [x] 679. Ordinal citations outside 629's six files restated by contract: `_strawberry_patches.py` names its three
-  gaps by content (decode failure, non-envelope body, multipart map) in its headings, shield comment, retirement
-  diagnostic and probe print literals, and its "probe 2 for gap 1" pointer names the installed-version probe; the
-  plan-section labels in `tests/filters/test_sets.py` and `test_library_api.py`, the `#N` tags in the
-  `rest_framework` tests and `test_library_api.py`, "Test-6" in `tests/test_routers.py`, and the "DoD item N" /
-  "Goal N" tags in eight more test files name the contract each pins (`spec-NNN Decision N` kept). Comments,
-  docstrings and docstring examples only: docstring-stripped ASTs and collected node ids unchanged
-- [x] 574. fixed: a `DjangoModelFormMutation` whose consumer form declares a `required=False` field over a
-  `blank=False, null=False` column that stores no empty string (an integer / decimal / date / UUID / boolean column,
-  an `ArrayField`) answers that column's field-keyed `null` error when the field cleans to `""`, as the
-  `blank=True` shape does, instead of the masked save error: Django's `_get_validation_exclusions` leaves such a
-  column out of `full_clean`, so `_is_unstorable_blank` keys on the column's storage alone, not on `blank`. A
-  `JSONField` and an `HStoreField` (which store `""` despite `empty_strings_allowed=False`) are never named, so an
-  explicit `null` a consumer `CharField` cleans to `""` over a JSON column is the pre-save `null` error, blank or
-  not. README, spec-038; pinned by `tests/forms/test_resolvers.py::
-  test_modelform_optional_field_over_required_column_cleaned_to_empty_string_is_null_error`, `::
-  test_modelform_optional_field_over_required_column_filled_in_by_model_save_writes`, `::
-  test_modelform_optional_char_field_over_json_column_explicit_null_is_null_error` and `::
-  test_is_unstorable_blank_names_only_a_column_that_stores_no_empty_string`
+- [x] 701. Documented, not changed: on raw form data integer comparisons truncate a fractional value toward zero as a
+  stock `NumberFilter` does (`gte=1.5` matches 1), while an `in` member is dropped (685); GraphQL `Int` refuses a
+  fraction first. Pinned by `tests/filters/test_sets.py::test_integer_comparison_truncates_a_fractional_value`
+- [x] 679. Ordinal citations outside 629's six files name their contract: `_strawberry_patches.py`'s three gaps by
+  content, and the plan-section labels, `#N` tags, "Test-6" and "DoD item N" tags in tests by what they pin. Comments
+  and docstrings only; ASTs and node ids unchanged
+- [x] 574. fixed: a `DjangoModelFormMutation` `required=False` field over a `blank=False, null=False` non-text column
+  cleaning to `""` answers the column's field-keyed `null` error instead of the masked save error
+  (`_is_unstorable_blank` keys on storage, not `blank`); `JSONField` / `HStoreField` are never named. Pinned by
+  `tests/forms/test_resolvers.py::test_is_unstorable_blank_names_only_a_column_that_stores_no_empty_string`
 - [x] 696. A refused `ModelForm` save reports a field-keyed `null` only for a column the save of `form.instance`
-  writes: the serializer witness's attempted-save recorder moved to `utils/write_values.py::attempted_saves` (a
-  thread-scoped `pre_save` record of `(instance, update_fields)`, removed at `post_save`), which
-  `rest_framework/resolvers.py::_write_witness` and `forms/resolvers.py::_modelform_save_or_field_errors` both use,
-  and `forms/resolvers.py::_unstorable_cleaned_fields` passes the latest attempt of `form.instance`'s `update_fields`
-  to `utils/write_values.py::unstorable_columns`, so a model `save()` narrowed away from the `None` column answers
-  the constraint envelope, and a consumer `save()` that raises before saving the row (or a failure after it saved)
-  is never diagnosed from it. spec-038 says so. Tests: `tests/forms/test_resolvers.py`
+  writes: `utils/write_values.py::attempted_saves` (shared with the serializer witness) records `update_fields`, which
+  `forms/resolvers.py::_unstorable_cleaned_fields` passes on, so a narrowed or pre-save failure answers the constraint
+  envelope. Tests: `tests/forms/test_resolvers.py`; spec-038
 - [x] 387. Already fixed by dry item 92 (dry-0_0_15_3): `filters/inputs.py::_build_input_fields` types each leaf
-  through `filters/base.py::_filterset_value_field`, the field its lookup compares to, not the column, so a generated
-  `year` / `iso_year` leaf (and every `Extract` transform) takes `Int`, `time` takes `Time` and `date` takes `Date`, on
-  a `DateTimeField` and a `DateField` alike, and each filters by the value sent. Pinned live in the
-  `generated_year_schema` holder: `examples/fakeshop/test_query/test_scalars_filter_api.py::
-  test_generated_year_leaf_is_typed_by_the_transforms_output` (now `isoYear`, `isoYearLte`, `time`, `timeGt`, `date` and
-  the `occurredOn` head too) and `::test_generated_iso_year_time_and_date_leaves_filter_by_the_value_sent` (10 rows; a
-  2021-01-01 row whose ISO year is 2020 tells `iso_year` from `year`), failable against the column-typed `_leaf_of`
-- [x] 563. Package comments, docstrings and string statements state the invariant where they narrated this package's
-  own history: about 107 sites in 43 files ("the previous shape", "grew separately", "independently grew", "v1",
-  "pre-033", "pre-1.0", "back-compat", "now-fixed", "the hardened hooks", "today's behavior", "as spec-047 shipped
-  them", "predates the boundary middleware", ...), plus five test-tree sites and a kanban migration docstring;
-  `routers.py::_MISSING_DJANGO_APPLICATION_HINT` keeps naming its migration (spec-046 Decision 3). The item's own words
-  ("now", "no longer", "the former", "byte-unchanged") were almost all present-tense invariants and stay judged by
-  hand. The gate, renamed `tests/test_ci_governance.py::
-  test_no_comment_docstring_name_or_package_string_carries_a_provenance_phrase`, reads every package runtime string
-  (`_swept_texts`, shared with the release sibling) and refuses 11 more phrases, each history in every corpus hit
-  (`pre-NNN`, `pre-1.0`, back(wards)-compat, `independently grew`, `grew separately`, `historically`,
-  `byte-unchanged`, `moved verbatim`, `net-new`, `now-fixed`, `the original implementation`), with planted rows;
-  START's rule and REVIEW.md's Comments axis say so. Every changed package file's docstring-stripped AST is
-  unchanged
-- [x] 565. Optimizer plan labels (spec-002 O1-O6, spec-004 B1-B8, spec-035 G1-G3) no longer tag .py prose or test
-  names: the package was down to two G1 lines (dry-0_0_15_3 item 48 took the rest), and about 83 test and example
-  sites plus 14 test names remained. Banners drop the label, a cross-reference names its content ("the N+1
-  strictness check", "the evaluated-queryset guard", "fragment-narrowing"), a G1 / G2 beside spec-035 is the gated
-  `spec-035 Decision 3` / `Decision 4`, the G3 `TODO(BACKLOG ...)` anchors keep their first lines and pseudocode, and
-  the 14 tests (`test_b2_*`, `test_b8_*`, `test_g2_*`, `test_o1_*`, the scalars `o6` test) are renamed with every
-  citer swept (spec-003 / 035 / 036 / 039, `tests/optimizer/test_definition_order.py`, `bug_hunt-0_0_15.md`); ten
-  "live twin of <deleted test>" clauses in `test_library_api.py` are gone. The new gate
+  through `filters/base.py::_filterset_value_field`, so a generated `year` / `iso_year` leaf takes `Int`, `time`
+  `Time`, `date` `Date`, and filters by the value sent. Pinned live by
+  `examples/fakeshop/test_query/test_scalars_filter_api.py::test_generated_year_leaf_is_typed_by_the_transforms_output`
+  and `::test_generated_iso_year_time_and_date_leaves_filter_by_the_value_sent`
+- [x] 563. Package comments, docstrings and strings state the invariant where they narrated history (about 107 sites);
+  the renamed gate
+  `tests/test_ci_governance.py::test_no_comment_docstring_name_or_package_string_carries_a_provenance_phrase` reads
+  every package runtime string and refuses 11 more phrases. Docstring-stripped ASTs unchanged
+- [x] 565. Optimizer plan labels (O1-O6, B1-B8, G1-G3) no longer tag .py prose or test names (about 83 sites, 14 tests
+  renamed);
   `tests/test_ci_governance.py::test_no_comment_docstring_name_or_package_string_carries_an_optimizer_plan_label`
-  refuses a label in prose (case-sensitive; a code span is exempt unless it holds a bare label) and in def / class
-  names (read at underscores and camel-case boundaries), with planted rows; START says so. Spec headings, the board,
-  the glossary and BACKLOG keep the labels as spec structure and published names
-- [x] 620. fixed: a `DjangoModelFormMutation` write over a `null=True` column whose own form field cleans a bound
-  `None` to a value (an `ArrayField`'s `SimpleArrayField` / `SplitArrayField` to `[]` or `[None] * size`, a checkbox
-  `BooleanField` to `False`, an `HStoreField` to `{}`, a consumer `CharField` over a `JSONField` to `""`) stores
-  `NULL` for an explicit `null` and keeps a stored `NULL` on an update omitting the field, as the model flavor and
-  `SerializerMutation` do on a `blank=True` column, where it wrote that value. `forms/resolvers.py::
-  _coerced_null_fields` names those columns too (it skipped every `null=True` one), keeping a text column's `""`
-  (`empty_strings_allowed` and the value `""`: Django's empty value, Waiting 262's question);
-  `_modelform_write_step` refuses the `null=False` ones as before and writes `NULL` into the rest through the new
-  `_store_nulls` (`Field.save_form_data`), before the temporal check and the save. A `clean_<field>` or `clean()`
-  answering exactly the field's own cleaning cannot be told from it and stores `NULL` too (spec-038's own-cleaning
-  rule, as on a `null=False` column); a consumer `save()` runs after and writes any value. Live rows through a new
-  fakeshop scalars `NullableScalarSpecimenFlagForm` (checkbox `flag`, `CharField` `payload`, text `label`) and its
-  `createNullableScalarSpecimenViaForm` / `updateNullableScalarSpecimenViaForm` in `test_scalars_mutation_api.py`
-  (sync and async), package rows for the `ArrayField` shapes on PostgreSQL, a text form field cleaning to a
-  non-empty value, a consumer hook, and a `null=False` refusal ahead of a filling `save()`; spec-038, GLOSSARY and
-  the `test_query` README say so. Not yet run on PostgreSQL: the `ArrayField` rows
-  (`tests/forms/test_resolvers.py::test_modelform_null_on_a_nullable_array_column_stores_null`, 42 ids) ran locally
-  only through an SQLite `ArrayField` storage double; they need a `postgres.yml` run
-- [x] 621. fixed: a value a `MultiWidget`'s own `decompress` cannot split (it raises, or answers no list or tuple),
-  such as a `SplitDateTimeField`'s datetime that a `get_form` / `get_form_kwargs` hook or a form's or filter
-  `Meta.form`'s `__init__` rebinds as its text (`QueryDict(urlencode(data))`), is a `ConfigurationError` naming the
-  key and the widget's part keys, raised while the form is bound, before `is_valid()`, with nothing written and the
-  wire masked as any unexpected error; it answered Django's raw `AttributeError` (a non-list answer a `TypeError`).
-  Django calls `decompress` only on a valid compressed value and never on form data, and no upstream seam turns text
-  into one, so the package names the hook contract instead of guessing (leaving the field unbound as plain Django
-  does would store `NULL` over a sent or stored datetime). A `ValidationError` from `decompress` stays the field's
-  refusal. `utils/widgets.py::widget_entries` splits through the new `_decompressed` (message `_unsplittable`: kinds
-  and keys, never the value's text), shared by the form binders in `forms/resolvers.py` and the filter side's
-  `filters/form_binding.py::NormalizedFormValue.render`. Live rows through new fakeshop scalars
-  `createScalarSpecimenViaPostedSplitForm` / `updateScalarSpecimenViaPostedSplitForm` (hook `as_posted_text`) and
-  their one-key controls in `test_scalars_mutation_api.py`, a text-binding `Meta.form` in
-  `test_filter_widget_binding_api.py`, package rows in `tests/utils/test_widgets.py` (text, any exception, a non-list
-  answer, the `ValidationError` kept); spec-038, README, GLOSSARY and the `test_query` README say so
-- [x] 624. fixed: the `date__range` lone bound and the transform-output cleaning the item names were already right at
-  HEAD (7bd478bf); what remained was a package `RangeFilter` whose `lookup_expr` ends on a transform with Django's
-  implicit `exact` (`date`, `year`, `month`, `time`, `hour`, a consumer-registered one), whose lone bound hit the bare
-  column: `{end: "2021-12-31"}` under `date` left out the later rows of that day, and a lone `year` / `month` /
-  `time` / `hour` bound answered `FILTER_INVALID` (an aware `date` a masked error). The lone bound now applies through
-  every transform Django's query applies ahead of the lookup: `filters/base.py::_lookup_lhs_path` (Django's
-  `solve_lookup_type` split plus `utils/relations.py::lookup_transform_parts`, factored out of `_membership_path`)
-  over the queryset the filter runs on, so relation, multi-table, alias and annotation paths walk too; a
-  `lookup_expr` no walk accepts is refused with `LookupValidationError` instead of filtering the column. Two bounds
-  are unchanged (Waiting 316). The range input type is stemmed the same way
-  (`filters/base.py::_filterset_lookup_lhs_path` in `filters/inputs.py::_build_range_input_class`, the spelled
-  stem kept where no build-time query answers), so `range` and `date` over one column mint two names instead of
-  colliding at finalize; no shipped name moves. Live rows through the scalars `generated_year_schema` holder (bare
-  `year` / `date`, an end-date 09:30 row kept) and a new `ScalarSpecimenParentStampFilter.parent_days_span` over the
-  `par` `FilteredRelation` alias in `test_scalars_filter_api.py`, package rows for naming and the refusal; the
-  `RangeFilter`, `RangeField`, `ListFilter`, `ArrayFilter` docstrings and spec-027 say so
-- [x] 625. not a defect: no contract row says which lookup a package `ListFilter` applies (spec-027's rows type and
-  clean by the declared lookup and never name `in` as its default; README and GLOSSARY do not mention it), so a
-  `ListFilter` keeping django-filter's default `exact`, or declared `gte`, hands the whole list to that lookup as
-  graphene-django's `ListFilter` does: one element `["beta"]` over text compares `'[''beta'']'` (0 rows; `gte` every
-  row), an integer or relation key answers a masked `TypeError`, a decimal or temporal column `FILTER_INVALID`, and a
-  one-element `range` a masked `IndexError` from Django's `Range`. `in`, its transforms, a two-element `range`,
-  `has_keys` / `has_any_keys` and every `method=` filter answer right (1680 wire cells). A bare `BaseCSVFilter` /
-  `BaseInFilter` / `BaseRangeFilter` declaration runs as plain django-filter runs it, rows identical in 1008 of 1008
-  cells (507 and 516). Django marks only `in` and `range` as taking an iterable (`get_db_prep_lookup_value_is_iterable`),
-  so no upstream seam names every list-consuming lookup. Whether to default `in`, refuse, or reinterpret is Waiting
-  row 716, beside 316
-- [x] 524. fixed: a `DjangoModelFormMutation` update keeps each omitted non-relation column `construct_instance`
-  writes (editable, inside `Meta.fields`, outside `Meta.exclude`) at its stored value where the form field's own
-  cleaning of the reconstructed value rewrote it: a `CharField`'s strip of a text column, its text of a JSON value,
-  a lossy temporal subclass's midnight (and the Asia/Tokyo year-1 `invalid` refusal), `""` for a stored `NULL`, and
-  `None` for a stored `{}` / `[]` under the default `forms.JSONField` (refused as `null` before). The form and the
-  model still validate the cleaned value, so their refusals of a stored value stay. A value a `get_form` /
-  `get_form_kwargs` hook binds (in a copy or in place), a `clean_<field>` / form `clean()` sets, a model `clean()`
-  sets, or a hook's rebound instance holds is written; one equal to the field's own cleaning keeps the stored
-  value (a consumer `save()` writes it). `forms/resolvers.py::_omitted_column_values` snapshots before `is_valid()`,
-  `::_keep_omitted_columns` restores through `Field.save_form_data` where `::_holds_own_cleaning` reads the form
-  field's own cleaning (`Field._clean_bound_field`, `Field.to_python` behind an empty-value guard), and
-  `::_modelform_decode_step` carries the omitted names in the `_DecodedForm` 3-tuple. Live rows
-  `test_scalars_mutation_api.py::test_update_omitting_a_column_keeps_its_stored_value` /
-  `::test_async_update_omitting_a_column_keeps_its_stored_value`, package rows `tests/forms/test_resolvers.py`
-  `test_update_omitting_*`; README "One sharp edge", the GLOSSARY `DjangoModelFormMutation` term and spec-038
-  Decision 8 say so. Closes 711's omitted half and 262's omitted half
+  refuses one in prose and def / class names. Specs, the board and BACKLOG keep the labels
+- [x] 620. fixed: a `DjangoModelFormMutation` write over a `null=True` column whose form field cleans `None` to a
+  value (`[]`, `False`) stores `NULL` for an explicit `null` and keeps a stored `NULL` on omission
+  (`forms/resolvers.py::_coerced_null_fields`, `_store_nulls`; text `""` kept, Waiting 262). Not yet run on
+  PostgreSQL: `tests/forms/test_resolvers.py::test_modelform_null_on_a_nullable_array_column_stores_null` needs a
+  `postgres.yml` run
+- [x] 621. fixed: a value a `MultiWidget`'s `decompress` cannot split (a hook rebinding a datetime as text) is a
+  `ConfigurationError` naming the key and part keys, raised at bind with nothing written, instead of Django's raw
+  `AttributeError`; `utils/widgets.py::widget_entries` splits through `_decompressed`. Live rows in
+  `test_scalars_mutation_api.py`, `test_filter_widget_binding_api.py`, package rows in `tests/utils/test_widgets.py`;
+  spec-038
+- [x] 624. fixed: the `date__range` lone bound was already right at HEAD (7bd478bf); a package `RangeFilter` whose
+  `lookup_expr` ends on a transform (`date`, `year`, ...) now applies a lone bound through it
+  (`filters/base.py::_lookup_lhs_path`), where it hit the bare column and dropped rows or answered `FILTER_INVALID`;
+  an unwalkable `lookup_expr` is `LookupValidationError`. Two bounds unchanged (Waiting 316). Live rows in
+  `test_scalars_filter_api.py`; spec-027
+- [x] 625. not a defect: no contract row names a package `ListFilter`'s lookup, so one keeping `exact` or `gte` hands
+  the whole list to it as graphene-django does (0 rows, masked `TypeError`); `in`, a two-element `range` and `method=`
+  answer right, and bare CSV declarations run as plain django-filter (507 and 516). Whether to default `in`, refuse,
+  or reinterpret is Waiting row 716, beside 316
+- [x] 524. fixed: a `DjangoModelFormMutation` update keeps each omitted column at its stored value where the form
+  field's own cleaning rewrote it (a stripped text, a midnight, `""` for `NULL`):
+  `forms/resolvers.py::_omitted_column_values` snapshots, `::_keep_omitted_columns` restores; a hook- or clean-set
+  value is written. Pinned by `test_scalars_mutation_api.py::test_update_omitting_a_column_keeps_its_stored_value`,
+  `tests/forms/test_resolvers.py`; spec-038. Closes 711's and 262's omitted halves
 - [x] 711. fixed with 524 for the omitted case: an update omitting `payload` through fakeshop
   `updateNullableScalarSpecimenViaForm` keeps a stored JSON object or list
   (`test_scalars_mutation_api.py::test_update_omitting_a_column_keeps_its_stored_value[json-object|json-list]`).
   The `str()` of a `payload` the client sends is item 720
-- [x] 527. fixed (the `ListFilter` / `ArrayFilter` half; a `RangeFilter` on a relation fails for valid bounds too, item
-  375, and stays): a declared `ListFilter` / `ArrayFilter` whose `field_name` is a relation, under a lookup Django
-  applies to the relation itself, cleans each element as the target column the relation compares on (its `to_field`,
-  else the primary key), as `<relation>__<that column>` does, through the column Django's related lookups prepare a
-  value through (`filters/base.py::_compared_value_column` over `::_compared_columns`, into `::_column_form_field`'s
-  `comparison_form_field`), never a row lookup. A junk raw element under `DjangoFilterBackend` / `FilterSet(data=...)`
-  is the form's 400 (`FILTER_INVALID` under a consumer string `SCALAR_MAP` entry) where Django's related lookup
-  raised a 500; an `in` over an integer column, or a relation compared on one, drops an overflowing or fractional
-  element for `ArrayFilter` as `ListFilter` already did (`::_integer_in_column`); a `RangeFilter` lone bound under
-  `gte` / `exact` on a relation is cleaned the same way. A `method=` filter, `range` on a relation, a multi-column
-  `ForeignObject`, a `GenericForeignKey` and a `lookup_expr` continuing across the relation pass through as sent.
-  Live rows in `test_raw_filter_forms_api.py` (`test_a_declared_list_over_an_integer_keyed_relation_*`,
-  `..._text_keyed_relation_*`, `..._cleans_only_where_its_lookup_compares_the_relation`,
-  `test_a_method_filter_over_a_relation_receives_each_raw_element_as_sent`, the `array-*` rows of
-  `test_a_public_integer_list_primitive_drops_members_the_column_cannot_convert`), package rows in
-  `tests/filters/test_base.py` (`test_declared_list_over_a_relation_*`); spec-027 Decision 4 rows and its fractional
-  edge case say so
-- [x] 530. fixed (the PostgreSQL half; SQLite stores a decimal as its nearest double, documented): a decimal its
-  column's own validators accept, read as the column's `to_python` gives it (the value the save binds), but
-  PostgreSQL's `numeric` refuses (more than 131072 digits before the point or 16383 after, or a zero whose written
-  exponent `numeric_in` refuses) is refused before the write on every flavor as the field's `invalid` error "Enter a
-  value the database can represent.", nothing written, instead of a masked `DataError`: any such spelling in a Django
-  6.1 `DecimalField` with no `max_digits`, and a zero with a huge exponent in a bounded column, whose
-  `DecimalValidator` counts no digit for it. One write-side storability rule, `utils/errors.py::unstorable_value`
-  (`unstorable_temporal` or the new `unstorable_decimal`, through `::_validated` and `::_leaf_elements`), asked by
-  the renamed preflights `utils/write_values.py::unstorable_value_error`, `forms/resolvers.py::_unstorable_value_errors`
-  and `rest_framework/resolvers.py::_unstorable_value_errors`; a value the column's validators refuse keeps their own
-  error. Nested serializer values stay unread (spec-039 Decision 8). Package rows `tests/utils/test_errors.py`
-  (`test_unstorable_decimal_*`), flavor rows on `tests/_postgresql_stand_in.py::numeric_refusing_postgresql`
-  (`tests/{mutations,forms,rest_framework}/test_resolvers.py::*_write_refuses_a_decimal_past_postgresql_numeric`,
-  `*_holds_the_decimal_its_column_to_python_gives`,
-  `test_model_write_leaves_a_decimal_a_project_validator_refuses_to_it`), live
-  `test_scalars_mutation_api.py::test_decimal_postgresql_cannot_bind_*` (the `pg` row unrun locally); README "Writing
-  data", the `FieldError envelope` glossary term and spec-027 / 036 / 038 / 039 say so
-- [x] 537. A `method=` filter whose form field is built only per request (`AllValuesMultipleFilter`, a consumer
-  `field` reading `self.model` / `self.parent`) is typed from the model field its `field_name` names, as every
-  `method=` filter keeps its column, instead of refused at schema build; its form field, built per request, validates
-  each value (`invalid_choice` for a value no row holds) before the method receives the cleaned list, as plain
-  django-filter does. `filters/inputs.py::_refuse_method_without_form_field` takes the caller's `model_field` and
-  reads the form field only without one; a declaration with neither is still refused, its message now advising a model
-  field. Live rows `test_library_api.py::test_an_all_values_multiple_method_filter_*`, the multiple-choice publishes
-  row and the advised-spelling row; package rows in `tests/filters/test_inputs.py` (the `method-without-field` refusal
-  rows now columnless, the per-request `isnull` row); spec-027 Decision 4 says so
-- [x] 538. A declared choice filter over a choice column whose own form field accepts no member of the column's enum
-  (asked through Django's `ChoiceField.valid_value` per member outside django-filter's `EMPTY_VALUES`:
-  `DateRangeFilter`'s date-range keys, a disjoint `choices=` list or another column's `Choices` class, a choice filter
-  declared with no `choices`) now refuses the schema with `ConfigurationError` naming the column
-  (`filters/inputs.py::_refuse_choices_off_the_column`, from `_choice_enum_from_filter`) instead of publishing the
-  column's enum and answering every value `invalid_choice`; a subset, the column's own choices, a callable or lazy
-  `choices` (never evaluated by this check), `AllValuesFilter`, a model-choice form field and a column whose only
-  choice is blank build as before. The no-`choices` refusal names what the leaf reads, a column, a transform's output
-  or no model field (`_no_choices_refusal`), and every leaf refusal names `<owner>: <Class> on '<field_name>'<route>`
-  through `_declaration_subject`, so no refusal prints the filter's repr. Live rows
-  `test_filter_declarations_api.py::test_a_choice_declaration_no_value_of_its_input_can_serve_refuses_the_schema`,
-  `::test_a_choice_declaration_sharing_a_value_with_its_column_serves_its_own_choices` and
-  `::test_deferred_choices_are_evaluated_per_request_never_at_schema_build`; package rows in
-  `tests/filters/test_inputs.py`; spec-027 Decision 4 and the `FilterSet` glossary term say so
-- [x] 656. Not a defect on main: already fixed by the dry-0_0_15_3 sweep (its item 77, commit 7bd478bf), which landed
-  two days after this item was filed. A list filter (`ArrayFilter`, `ListFilter`, an `ArrayFilter`-shaped CSV filter)
-  over an `ArrayField` column with `exact` / `contains` / `contained_by` / `overlap` is typed from the array's
-  `base_field` (`filters/inputs.py::_array_element_column`; a choice element shares the read side's enum), every other
-  filter or lookup over the column is refused at build (`_array_column_refusal`), and a nested array takes the read
-  side's refusal (`types/converters.py::refuse_nested_array`). Measured: "Unsupported Django field type 'ArrayField'"
-  in 0 of 1071 real-`ArrayField` and 615 stand-in cells, declared and through `Meta.filter_overrides`; spec-027
-  Decision 4 states the contract and
-  `tests/filters/test_inputs.py::test_an_array_column_filter_is_typed_from_its_element_column` and its siblings pin
-  it. No code change
-- [x] 673. A decimal a filter's form cleans past an integer column's range (django-filter's `NumberFilter` caps only a
-  positive value, at `1e50`, so `"-1e1000000"` cleans through raw form data, a JSON `where` handed to `apply_sync` /
-  `apply_async`, or the typed `Decimal` of a declared `NumberFilter` over an annotation or `FilteredRelation` path)
-  was converted with `int()` on every integer path, in time quadratic in its exponent (~18 s CPU at `1e6`,
-  `MemoryError` at `1e18`, per `in` member); it is now held, before Django prepares it, to the integer one past the
-  end its truncated whole part lies past, compared and never converted, so every answer the parent gave is kept at
-  once: a comparison matches nothing or every row, an `in` member drops, a `range` widens or empties, a `year` bound
-  the bind ask refuses stays `FILTER_INVALID`. Only Django's own lookups that prepare the value are held
-  (`filters/base.py::_django_prepares`); a text pattern, `iexact`, `isnull`, a project lookup, a `method=` filter and
-  a consumer `filter` override receive the value their form cleaned. Holds: `filters/sets.py::_held_integer_value`
-  (the flat loop and the bind ask; queryset-only paths and their transforms through `_queryset_integer_column`) and
-  `filters/base.py::_held_column_value` (`RangeFilter` / `ListFilter` / `ArrayFilter` under any django-filter parent),
-  over `utils/errors.py::integer_past_range` / `held_past_integer_range`; float columns unchanged. Live rows in
-  `test_raw_filter_forms_api.py`, `test_filter_apply_arguments_api.py` and `test_scalar_predicate_binding_api.py`;
-  package rows in `tests/utils/test_errors.py`, `tests/filters/test_base.py`, `tests/filters/test_sets.py`; README and
-  spec-027 say so
+- [x] 527. fixed (the `ListFilter` / `ArrayFilter` half; `RangeFilter` on a relation stays, item 375): a declared list
+  filter over a relation cleans each element as the target column the relation compares on
+  (`filters/base.py::_compared_value_column`), so a junk raw element is the form's 400 instead of a 500, and
+  overflowing or fractional `in` elements drop (`::_integer_in_column`). Live rows in `test_raw_filter_forms_api.py`,
+  package rows in `tests/filters/test_base.py`; spec-027
+- [x] 530. fixed (PostgreSQL half; SQLite's nearest-double storage documented): a decimal its validators accept but
+  PostgreSQL `numeric` refuses is refused before the write on every flavor as the field's `invalid` error, nothing
+  written, instead of a masked `DataError`, via `utils/errors.py::unstorable_value` (new `unstorable_decimal`). Tests:
+  `tests/utils/test_errors.py`, `tests/{mutations,forms,rest_framework}/test_resolvers.py`; the live `pg` row is unrun
+  locally
+- [x] 537. A `method=` filter whose form field is built only per request (`AllValuesMultipleFilter`) is typed from its
+  `field_name` column instead of refused at build, and the per-request form field validates each value before the
+  method runs (`filters/inputs.py::_refuse_method_without_form_field`). Live rows in `test_library_api.py`, package
+  rows in `tests/filters/test_inputs.py`; spec-027
+- [x] 538. A declared choice filter whose form field accepts no member of its column's enum (`DateRangeFilter`, a
+  disjoint `choices=`) refuses the schema with `ConfigurationError` naming the column
+  (`filters/inputs.py::_refuse_choices_off_the_column`) instead of answering every value `invalid_choice`; leaf
+  refusals name the declaration via `_declaration_subject`. Live rows in `test_filter_declarations_api.py`, package
+  rows in `tests/filters/test_inputs.py`; spec-027
+- [x] 656. Not a defect on main: already fixed by dry-0_0_15_3 item 77 (commit 7bd478bf): a list filter over an
+  `ArrayField` is typed from its `base_field` (`filters/inputs.py::_array_element_column`) and other filters over the
+  column are refused at build. Pinned by
+  `tests/filters/test_inputs.py::test_an_array_column_filter_is_typed_from_its_element_column`. No code change
+- [x] 673. A decimal a filter's form cleans past an integer column's range (`"-1e1000000"`) was converted with `int()`
+  in quadratic time (`MemoryError` at `1e18`); it is now held to the integer one past the range end and compared,
+  never converted, keeping every prior answer (`filters/sets.py::_held_integer_value`,
+  `filters/base.py::_held_column_value`, `utils/errors.py::integer_past_range`). Live rows in
+  `test_raw_filter_forms_api.py`, package rows in `tests/filters/test_sets.py`; spec-027
 - [x] 680. `filters/inputs.py::_is_declared_head`'s docstring no longer says a set borrowing the same filter object
   restamps it: since 596 a class-body filter another set owns is deep-copied before it is stamped, and a
   `get_filters()` override sharing an object writes nothing to it. It now states why the child set's declarations
   answer rather than the copy's provenance stamp (`origin="declared"` says a consumer owns the object, not which set
   declares it). Docstring only; pinned by
   `tests/filters/test_sets.py::test_a_borrowed_expanded_copy_is_its_borrowers_own_filter`
-- [x] 681. A value a write flavor's own validation turns into one the database cannot store answers the field's
-  `invalid` "Enter a value the database can represent." instead of the masked error, with nothing written: on the form
-  flavor, a `clean_<field>`, form `clean()`, model `clean()`, field subclass or `__init__`-swapped field leaving an
-  aware datetime on a `DateField` (or a unique column bound by `validate_unique`) that Django's conversion inside
-  `is_valid()` overflows is answered from the write rule beside the form's earlier errors, without a second
-  `is_valid()` (`forms/resolvers.py::_bound_form_or_field_errors`); a plain form's overflow, or one naming no such
-  column, stays the application's. On the model flavor each provided column `clean_fields()` or a model `clean()`
-  leaves unstorable (a text-mapped `DurationField` past 64 bits, a `clean()`'s aware datetime) is held before the
-  uniqueness and constraint checks (`mutations/resolvers.py::_unstorable_cleaned_errors`). A `SplitDateTimeWidget`
-  handed an aware datetime whose wall clock in the current time zone leaves years 1..9999 answers `invalid` "Enter a
-  value the current time zone can represent." (`utils/errors.py::UNREPRESENTABLE_IN_ZONE_MESSAGE`,
-  `utils/widgets.py::_decompressed`) instead of the masked `ConfigurationError`, on a write (an update omitting the
-  field included) and as a filter's `FILTER_INVALID` (`filters/sets.py::FilterSet._validate_form_or_raise`). Live rows
-  in `test_scalars_mutation_api.py` (the new `ScalarSpecimenDayInstantForm` pair) and
-  `test_filter_widget_binding_api.py`; package rows in `tests/forms`, `tests/mutations` and
-  `tests/utils/test_widgets.py`; README, the glossary and spec-027 / 036 / 038 say so
-- [x] 683. Not a defect against the shipped contract, and the same design call as 607: spec-015 Decision 3 leaves both
-  node defaults without an optimizer pass (`types/relay.py::_resolve_nodes_default` returns rows, which
-  `optimizer/extension.py::DjangoOptimizerExtension._optimize` passes through), and the glossary's Relay Node
-  integration entry states that node refetch receives no optimizer plan; a to-one relation's `id` under a node root
-  (`AnnotationType`, `profile { id }`) is one more nested selection that root leaves unplanned, so FK-id elision never
-  runs there. The capability decision and its query-count evidence stay under Waiting item 327; no commit after the
-  filing touched the node path or root-field recognition
-- [x] 684. Already fixed on main by 7bd478bf, which ticked no row: `filters/base.py::_column_form_field` reads
-  `_bound_value_field`, the output of the transforms between the column and the lookup, so a declared `ListFilter` /
-  `RangeFilter` with a transform in `lookup_expr` (`year__in`, `year__range`, `month__in`, `date__in`, a chained
-  `date__year__in`, a relation path, a project-registered transform) cleans each member as that output (an integer
-  transform through `DecimalField`, `date` through `DateField`, `time` through `TimeField`) and answers what the
-  generated leaf answers: `"2020"` matches the 2020 rows and `"abc"` answers "Enter a number." on both parents, raw
-  form data and `apply_sync` alike (424 raw cells: the 292 declared ones moved at 7bd478bf, the 132 generated ones
-  never moved). Pinned (each fails with `_bound_model_field` restored):
-  `tests/filters/test_sets.py::test_declared_filter_through_a_lookup_expr_transform_cleans_values_as_its_output`
-  (`list-in`, `range`),
-  `examples/fakeshop/test_query/test_scalars_filter_api.py::test_lookup_expr_transform_leaf_filters_by_its_output_and_a_method_by_its_column`
-  (`list-in`, `range`, `range-start`, `range-end`, `bare-year-start`, `bare-year-end`) and
-  `test_raw_filter_forms_api.py::test_a_plain_parents_two_bound_year_range_past_the_range_answers_as_one_past_it`.
+- [x] 681. A value a write flavor's own validation makes unstorable (a `clean()`'s aware datetime on a `DateField`)
+  answers the field's `invalid` "Enter a value the database can represent.", nothing written, instead of the masked
+  error (`forms/resolvers.py::_bound_form_or_field_errors`, `mutations/resolvers.py::_unstorable_cleaned_errors`); a
+  `SplitDateTimeWidget` value outside years 1..9999 in the current zone is `invalid` too. Live rows in
+  `test_scalars_mutation_api.py`, `test_filter_widget_binding_api.py`
+- [x] 683. Not a defect: spec-015 Decision 3 leaves both node defaults without an optimizer pass
+  (`types/relay.py::_resolve_nodes_default`), so FK-id elision never runs under a node root, the same call as 607. The
+  capability decision stays under Waiting item 327
+- [x] 684. Already fixed on main by 7bd478bf: `filters/base.py::_column_form_field` reads `_bound_value_field`, so a
+  declared `ListFilter` / `RangeFilter` with a transform in `lookup_expr` cleans each member as the transform's output
+  (`"2020"` matches, `"abc"` is "Enter a number."). Pinned by
+  `tests/filters/test_sets.py::test_declared_filter_through_a_lookup_expr_transform_cleans_values_as_its_output`.
   Residuals filed as 758 and 759
-- [x] 688. Already fixed on main by 7bd478bf, which ticked no row, and pinned here: a declared
-  `ListFilter(field_name="<col>__year", lookup_expr="in")` cleans each member as the transform's integer output
-  (`filters/base.py::_column_form_field` reads `_bound_value_field`), so an integral decimal member (`"2021.0"`,
-  `"2.021e3"`) and a `RangeFilter` bound `"2021.0"` (start, end, both) select the rows the plain `"2021"` selects.
-  Live rows in
-  `examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_declared_year_filters_keep_their_matching_rows_and_exclusion_complements`
-  (`year-in-integral-decimal`, `year-in-integral-exponent`, `year-range-integral-decimal`,
-  `year-range-start-integral-decimal`, `year-range-end-integral-decimal`), each failing with `_bound_model_field`
-  restored ("Enter a value the database can represent."). No production change. Filed 760
-- [x] 692. A `ListFilter` / `ArrayFilter` over an `ArrayField` (reached by a JSON `where` on an unwired set via
-  `apply_sync` / `apply_async`, or raw `FilterSet(data=...)`; the GraphQL input refuses a nested array at build)
-  cleans every member as the innermost column: `filters/base.py::_column_form_field` reads `array_leaf_field`'s leaf
-  and `::_ElementField` descends list / tuple members at any depth over an array of arrays (`element_nests`), so
-  `[["abc"]]` is the leaf's "Enter a number.", a date leaf's bad text "Enter a valid date.", and an integer member
-  past the leaf's range `FILTER_INVALID` ("Enter a value the database can represent.") where the ask runs, instead of
-  text bound to the database; a flat list of leaves and a deeper nest still bind, as cleaned leaves. Under an `in`
-  whose lookup is Django's `ArrayInLookup` (`utils/_array_field.py::is_array_in_lookup`, read from the resolved lookup
-  class; `members_are_arrays` set by `::_ElementCleanedFilter._hand_column_field`), flat or nested, each member is one
-  whole array value: a flat `[[1, 2]]` (was "Enter a number.") is cleaned and binds, and a member that is no list
-  (`[1]`, `None`, raw `?name=1,2`) is `FILTER_INVALID` / the form's `invalid_list` "Enter a list of values." where the
-  parent raised `TypeError` from `.qs` (flat, and any `None` member) or bound a digit split (nested); a `None` inside
-  a member stays `None`. `LICENSE.django` now ships beside the other upstream licenses (sdist and wheel) for the
-  Django-adapted test doubles in `tests/_postgres_fields.py`. Pinned by
-  `tests/filters/test_sets.py::test_nested_array_leaf_is_cleaned_as_its_innermost_column`,
-  `::test_nested_array_leaf_the_innermost_column_cannot_hold_is_a_form_error`,
-  `::test_nested_integer_array_leaf_past_its_range_is_asked`,
-  `::test_an_array_in_member_that_is_no_array_is_invalid_list`,
-  `tests/filters/test_base.py::test_list_filter_field_cleans_each_element_with_its_element_field`; the live
-  `examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::test_nested_array_members_are_cleaned_as_the_innermost_column`
-  rows are unverified until the PostgreSQL tier runs them. spec-027 states it in all five homes. Filed 761 and 762
+- [x] 688. Already fixed on main by 7bd478bf, pinned here: a declared `year` `ListFilter` / `RangeFilter` cleans
+  members as the transform's integer output (`filters/base.py::_column_form_field`), so `"2021.0"` selects the
+  `"2021"` rows. Live rows in `examples/fakeshop/test_query/test_scalar_predicate_binding_api.py`. No production
+  change. Filed 760
+- [x] 692. A `ListFilter` / `ArrayFilter` over an `ArrayField` cleans every member as the innermost column at any
+  depth (`filters/base.py::_column_form_field`, `::_ElementField`), and under `ArrayInLookup` each member is one whole
+  array (a non-list member is `invalid_list` where `.qs` raised `TypeError`); `LICENSE.django` now ships. Pinned in
+  `tests/filters/test_sets.py`; the live PostgreSQL rows are unverified until the PostgreSQL tier runs them. Filed 761
+  and 762
 - [x] 695. A save-time failure is diagnosed only from the save that raised it:
-  `utils/write_values.py::attempted_saves` records each backing-model save with the frame of the `Model.save_base`
-  call that sent its `pre_save` (`::_signal_sender_frame`, found by `Signal.send.__code__`), and `::refused_save`
-  picks the innermost recorded save on the traceback of the caught exception, of its explicit cause, or of the refusal
-  consumer code translated without `from` (raised in the handler's own frame, or a database error raised anywhere
-  other than Django's causeless `ProtectedError` / `RestrictedError`, `::_DJANGO_CAUSELESS_REFUSALS`, since Django
-  raises every other database error it translates `from` the driver's error). The serializer
-  (`rest_framework/resolvers.py::_attempted_row_integrity_errors`), ModelForm
-  (`forms/resolvers.py::_unstorable_cleaned_fields`, `form.instance` only) and model create
-  (`mutations/resolvers.py::_created_row_integrity_errors`, its own target only; the create now records through
-  `attempted_saves` and `::save_or_field_errors` passes the caught exception to `integrity_errors(exc)`) read that
-  row. A refused save the consumer swallowed, another model's or row's save, raw SQL, `QuerySet.update()`, a fallback
-  write or a collector-refused delete in the handler (directly or through a helper), or a row written without
-  `pre_save` answers the `"__all__"` `constraint` envelope; another model's `ValueError` propagates through the
-  ModelForm. Residue, documented in spec-036 / 038 / 039: on MySQL / Oracle a fallback failure re-raised inside the
-  row's handler reads as the row's `null`, as before; a non-database exception a helper raises over the refusal
-  without `from` is not followed. Pinned by `examples/fakeshop/test_query/test_save_time_refused_row_api.py` (97 rows,
-  48 failing at the parent),
-  `tests/utils/test_write_values.py::test_refused_save_follows_a_cause_or_the_handlers_reraise_never_another_frames_context`
-  and siblings, and the audited subclass set `::test_django_defines_exactly_the_audited_database_errors`; the
-  multi-table parent refusal by
-  `tests/mutations/test_resolvers.py::test_child_create_refused_at_its_parent_table_names_the_childs_null_column`.
-  PostgreSQL rows unverified until the PostgreSQL tier runs them. Bundles 707; filed 764
+  `utils/write_values.py::attempted_saves` records each save's frame and `::refused_save` picks the innermost one on
+  the exception's traceback or cause (all three flavors); any other failure answers the `"__all__"` `constraint`
+  envelope. Pinned by `examples/fakeshop/test_query/test_save_time_refused_row_api.py`. PostgreSQL rows unverified.
+  Bundles 707; filed 764
 - [x] 706. Not a defect (GOAL "Trust boundary", spec-038 Decision 8 step 5 "the refused save of the form's instance"):
   a field-keyed error claims the client's input field, and only `form.instance` is established as built from it
   (`ModelForm._post_clean`); a row a consumer `save()` builds and returns is the consumer's, so its refusal is the
@@ -2607,27 +1663,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-
-  Fact finding done at d9f1c52b (FIX.md phases 1-2; next is phase 3, research). The built-in `forms.DateField` over
-  a `DateTimeField` is refused at schema build since 523 (`forms/inputs.py::_require_temporal_reader`), but the
-  mechanism is live and is 711's too: `forms/resolvers.py::_reconstruct_partial_data` binds
-  `model_to_dict(instance)` for every omitted scalar, `is_valid()` cleans it, and `construct_instance` writes
-  `clean(stored)`; nothing in `_modelform_write_step` after `is_valid()` tells an omitted column from a sent one. It
-  rewrites with a `DateField` subclass overriding `to_python` (midnight; year 1 under `Asia/Tokyo` the `invalid`
-  error, via `_unstorable_temporal_errors`), a consumer `forms.CharField` over a `JSONField` (`{"a": 1}` stored as
-  `"{'a': 1}"`, live through fakeshop `updateNullableScalarSpecimenViaForm`), and the default
-  `CharField(strip=True)` over a `TextField` (stored `"  padded  "` becomes `"padded"`, no consumer declaration
-  needed): 36 of 180 omitted-update cells, the same 36 plain Django rewrites when bound to `model_to_dict`; the model
-  flavor and `SerializerMutation` (`partial=True`) rewrite 0. Candidate fix, probed: after `is_valid()` write each
-  omitted column's stored value back onto `form.instance` with `Field.save_form_data`, from a snapshot taken before
-  binding (`construct_instance` mutates the located row in place), as `_store_nulls` does for `NULL`: 36 rewrites
-  became 0, the Tokyo refusal went away, no other cell moved; full-form validation still runs on the re-cleaned value
-  (its refusals of a stored value, README "One sharp edge", stay). Rejected seams: `changed_data` / `has_changed`
-  (40 false positives, a `None` / `""` false negative), `disabled`, `_meta.exclude` and `update_fields` (both skip
-  `unique_together` or `auto_now`). Open for the rules check: spec-038 Decision 8 step 4 says omitted scalars are
-  "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
-  field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
-  settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
 - [ ] 703. Ordinal citations outside 679's files: `optimizer/nested_planner.py` "(Decision 6 / DoD-4 "no
   planned_resolver_keys entry")" (spec-less Decision, DoD ordinal), `orders/sets.py`'s module docstring and one more
   docstring "spec-028 DoD 4(c)", `_cross_web_patches.py` "gap (1)" / "Gap (2)" (the sibling of 679's
