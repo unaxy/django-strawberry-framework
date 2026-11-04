@@ -22,11 +22,12 @@ so a day whose midnight falls outside years 1..9999 there is refused over a live
 
 ``NullableScalarSpecimenFlagForm`` writes the ``null=True`` ``flag`` column through a
 checkbox, whose widget reads an absent or ``None`` value as ``False``, and the ``null=True``
-``payload`` JSON column through a ``CharField``, which cleans ``None`` to ``""``, so an
-explicit ``null`` is read as the form field's own cleaning and stores ``NULL``. An update
-omitting a field keeps its column's stored value, ``NULL`` included, where the form field's
-own cleaning would rewrite it (the ``label`` ``CharField``'s strip, the ``payload``
-``CharField``'s text of a JSON object or list).
+``payload`` JSON and ``score`` float columns through a ``CharField``, which cleans ``None``
+to ``""``, so an explicit ``null``, or a create omitting the field, is read as the form
+field's own cleaning and stores ``NULL``. An update omitting a field keeps its column's
+stored value, ``NULL`` included, where the form field's own cleaning would rewrite it (the
+``label`` ``CharField``'s strip, the ``payload`` ``CharField``'s text of a JSON object or
+list).
 """
 
 from __future__ import annotations
@@ -130,16 +131,25 @@ class NullableScalarSpecimenFlagForm(forms.ModelForm[models.NullableScalarSpecim
 
     ``flag`` is a ``BooleanField(null=True)``, whose own form field is a
     ``NullBooleanField``; the declared ``BooleanField(required=False)`` is a checkbox
-    instead, whose ``CheckboxInput`` reads an explicit ``null`` as ``False``. ``payload`` is
-    a ``JSONField(null=True)`` written through a declared ``CharField(required=False)``,
-    which cleans an explicit ``null`` to ``""``, a JSON string the column would store. The
-    mutation stores ``NULL`` for either, while a value sent is written as sent and an
-    update omitting one keeps its stored value as stored.
+    instead, whose ``CheckboxInput`` reads an explicit ``null`` or an absent key as
+    ``False``. ``payload`` is a ``JSONField(null=True)`` written through a declared
+    ``CharField(required=False)``, which cleans an explicit ``null`` to ``""``, a JSON string
+    the column would store, and ``score`` a ``FloatField(null=True)`` written through one
+    too, whose ``""`` the column cannot store (its input stays ``Float``, the column's). The
+    mutation stores ``NULL`` for an explicit ``null`` or a create omitting the field, while
+    a value sent is written as sent and an update omitting one keeps its stored value as
+    stored.
     """
 
     flag = forms.BooleanField(required=False)
     payload = forms.CharField(required=False)
+    score = forms.CharField(required=False)
 
     class Meta:
         model = models.NullableScalarSpecimen
-        fields = ("label", "flag", "payload")
+        fields = (
+            "label",
+            "flag",
+            "payload",
+            "score",
+        )
