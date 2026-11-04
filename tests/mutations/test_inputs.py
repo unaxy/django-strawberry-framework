@@ -375,8 +375,10 @@ class _CompositeLine(models.Model):
     """An unmanaged owner of a ``CompositePrimaryKey`` over a foreign key and a text column."""
 
     pk = models.CompositePrimaryKey("category_id", "tag")
+    # DO_NOTHING, not CASCADE: this unmanaged model has no table, so a cascade would make
+    # every Category delete in the session query a missing table.
     category: models.ForeignKey[product_models.Category | Combinable, product_models.Category] = (
-        models.ForeignKey(product_models.Category, on_delete=models.CASCADE)
+        models.ForeignKey(product_models.Category, on_delete=models.DO_NOTHING)
     )
     tag: models.TextField[str | Combinable, str] = models.TextField()
     note: models.TextField[str | Combinable, str] = models.TextField()

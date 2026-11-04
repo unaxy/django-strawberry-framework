@@ -1839,10 +1839,12 @@ class _GroupedBook(models.Model):
 class _PickedShelfNote(models.Model):
     """An unmanaged owner of a ``shelf`` foreign key that declares ``choices``."""
 
+    # DO_NOTHING, not CASCADE: this unmanaged model has no table, so a cascade would make
+    # every Shelf delete in the session query a missing table.
     shelf: models.ForeignKey[library_models.Shelf | Combinable, library_models.Shelf] = (
         models.ForeignKey(
             library_models.Shelf,
-            on_delete=models.CASCADE,
+            on_delete=models.DO_NOTHING,
             choices=[(1, "First"), (2, "Second")],
         )
     )

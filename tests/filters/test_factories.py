@@ -16,7 +16,7 @@ import pytest
 import strawberry
 from apps.library import models as library_models
 from apps.products.models import Category
-from django.db.models import CASCADE, ForeignKey, IntegerField, Model, TextField
+from django.db.models import DO_NOTHING, ForeignKey, IntegerField, Model, TextField
 from django_filters import CharFilter
 from strawberry import relay
 from strawberry.types.base import get_object_definition
@@ -499,9 +499,11 @@ def _range_field_paths() -> type[FilterSet]:
     """Ranges over ``shelf__code`` (text) and ``shelf_code`` (integer) mint one range name."""
 
     class _ShelfCodeRow(Model):
+        # DO_NOTHING, not CASCADE: this unmanaged model has no table, so a cascade would
+        # make every Shelf delete in the session query a missing table.
         shelf: ForeignKey[library_models.Shelf | Combinable, library_models.Shelf] = ForeignKey(
             library_models.Shelf,
-            on_delete=CASCADE,
+            on_delete=DO_NOTHING,
             related_name="+",
         )
         shelf_code: IntegerField[float | int | str | Combinable, int] = IntegerField()

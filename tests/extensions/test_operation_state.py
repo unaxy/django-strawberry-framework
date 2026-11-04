@@ -1103,8 +1103,13 @@ def _ticking_schema(
     frames: int = 3,
     extensions: Iterable[Callable[[], SchemaExtension]] = (),
     rows: int | None = None,
+    held: asyncio.Event | None = None,
 ) -> DjangoSchema:
-    """A subscription whose resolver records what each frame is bound to."""
+    """A subscription whose resolver records what each frame is bound to.
+
+    With ``held``, every frame after the first waits for that event first, so a
+    pull of the second frame stays pending until the event is set.
+    """
 
     @strawberry.type
     class TickingSubscription:
@@ -1113,6 +1118,8 @@ def _ticking_schema(
             """Record one row per frame, then yield it."""
             try:
                 for index in range(frames):
+                    if held is not None and index:
+                        _ = await held.wait()
                     frame_rows = seen["rows"]
                     assert _is_list(frame_rows)
                     frame_rows.append(
@@ -1249,7 +1256,7 @@ async def test_a_stream_cancelled_in_one_task_is_closable_from_another() -> None
     teardown, and it must not raise a token error on the way.
     """
     seen: dict[str, object] = {"rows": []}
-    schema = _ticking_schema(seen)
+    schema = _ticking_schema(seen, held=asyncio.Event())
     stream = await schema.subscribe("subscription { ticks }")
 
     await _frame_in_its_own_task(stream)
