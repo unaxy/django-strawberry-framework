@@ -752,10 +752,13 @@ def test_the_sweep_corpus_covers_every_committable_python_file() -> None:
     ``check_citations`` itself stays green, because no citation happens to
     point into the files that left.
 
-    Only the missing direction is asserted. A path the corpus holds and git does
-    not list (local scratch inside a source tree) makes the gate stricter, never
-    blinder; asserting equality instead would fail on a developer machine while
-    passing in CI.
+    Both directions are asserted. The sweep walks through
+    ``scripts/check_citations.py::iter_python_sources``, which drops every path
+    git ignores whenever git answers, so local scratch inside a source tree is
+    absent from both sides and the two sets are equal on a developer machine as in
+    CI. A path the corpus holds and git does not list therefore means the walk
+    stopped asking git, and the gate is reading files no commit can contain.
+    Without git this row cannot run at all: ``_committable_files`` raises.
 
     The same fail-open shape one level up is why the oracle is checked before it
     is believed: this row subtracts the corpus FROM git's answer, so an answer
@@ -780,6 +783,12 @@ def test_the_sweep_corpus_covers_every_committable_python_file() -> None:
         + "\n".join(missing)
         + "\nAdd the tree to check_citations.SOURCE_TREES, or the file to "
         "EXTRA_SOURCE_FILES."
+    )
+    unlisted = sorted(swept - committable)
+    assert not unlisted, (
+        f"{len(unlisted)} .py file(s) in the forbidden-form sweep's corpus are not "
+        "committable (git ignores them), so the walk is reading files outside the "
+        "repository's content:\n" + "\n".join(unlisted)
     )
 
 

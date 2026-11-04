@@ -3799,15 +3799,15 @@ def test_an_explicit_extension_policy_is_read_once_across_an_operation() -> None
     assert object.__getattribute__(drifting, "__dict__")["_reads"] == 1
 
 
-def test_the_document_scan_charges_the_armed_snapshot_not_the_resolved_policy() -> None:
-    """The pre-parse scan reads the policy ``begin_resource_budget`` armed, not its source.
+def test_a_schema_policy_is_read_once_across_an_operation() -> None:
+    """A schema's policy is read once, by arming, never again by the document scan.
 
     A plain ``strawberry.Schema`` answers ``resource_policy`` with whatever the
     consumer stored there, so the object ``_resolved_policy`` returns can be a
-    subclass whose reads are its own code. Arming snapshots it (its first read,
-    here the narrow one); a scan handed the resolved object instead would read it
-    a second time and be answered with the wide bound, admitting a document the
-    armed budget refuses.
+    subclass whose reads are its own code; the scan reads the snapshot arming
+    took. The bound the request is refused by is pinned over HTTP in
+    ``examples/fakeshop/test_query/test_resource_policy_api.py::test_a_schema_policy_bounds_the_request_by_the_snapshot_arming_took``;
+    what stays here is the read count, which no response shows.
     """
     drifting = _DriftingPolicy()
     object.__getattribute__(drifting, "__dict__")["_armed"] = True
@@ -3824,11 +3824,7 @@ def test_the_document_scan_charges_the_armed_snapshot_not_the_resolved_policy() 
     schema = _PolicySchema(query=_Query, extensions=[DjangoResourcePolicyExtension])
     schema.resource_policy = drifting
     result = schema.execute_sync("{ echo }")
-
     assert result.errors is not None
-    [error] = result.errors
-    assert isinstance(error, ResourceLimitExceeded)
-    assert error.bound == "max_document_tokens"
     assert object.__getattribute__(drifting, "__dict__")["_reads"] == 1
 
 

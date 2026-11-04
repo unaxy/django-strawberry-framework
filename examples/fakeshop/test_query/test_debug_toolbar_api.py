@@ -173,7 +173,7 @@ def _unrelated_json_view(_request: HttpRequest) -> HttpResponse:
 
 @runtime_checkable
 class _ClearableCache(Protocol):
-    """The one ``functools.cache`` wrapper method ``_debug_toolbar_cache_state`` calls."""
+    """The one ``functools.cache`` wrapper method ``_clear_show_toolbar_cache`` calls."""
 
     def cache_clear(self) -> None: ...
 

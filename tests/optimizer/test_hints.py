@@ -23,7 +23,7 @@ from django_strawberry_framework.optimizer.nested_fetch import (
     resolve_strategy,
 )
 from django_strawberry_framework.utils.typing import object_result
-from tests._idioms import ClaimsClassBase, ClassReadRaisesBase, hostile_name_instance
+from tests._idioms import ClaimsClassBase, ClassReadRaisesBase, HostileNameMeta
 
 _RAISING_CLASS_ERRORS = [RuntimeError, TypeError, KeyboardInterrupt]
 
@@ -211,7 +211,11 @@ class TestStrategyFactory:
 
     def test_strategy_rejects_hostile_type_name_safely(self) -> None:
         """A hostile metaclass cannot replace the typed strategy rejection."""
-        notstrategy = hostile_name_instance("NotStrategy", "type name should never run")
+
+        class NotStrategy(metaclass=HostileNameMeta):
+            pass
+
+        notstrategy = NotStrategy()
 
         with pytest.raises(ConfigurationError, match="nested_connection_strategy"):
             # basedpyright: the non-strategy object is the hostile input under test;
@@ -454,7 +458,11 @@ class TestInvalidStatesRejected:
 
     def test_prefetch_obj_rejects_hostile_type_name_safely(self) -> None:
         """A hostile metaclass cannot replace the typed Prefetch rejection."""
-        notprefetch = hostile_name_instance("NotPrefetch", "type name should never run")
+
+        class NotPrefetch(metaclass=HostileNameMeta):
+            pass
+
+        notprefetch = NotPrefetch()
 
         with pytest.raises(ConfigurationError, match="Prefetch"):
             # basedpyright: the non-Prefetch object is the hostile input under test;
