@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 178 to do.
+Progress: 0 done, 179 to do.
 
 ## From dry-0_0_15_3
 
@@ -738,6 +738,18 @@ Progress: 0 done, 178 to do.
   `empty_value` (e.g. `TypedChoiceField(empty_value=0)`) is now replaced by `NULL`; move such a value to the model
   field's `default`. A `""` your own form code sets on such a column now answers that column's `invalid` error
   (Django's message) instead of a `null` error (items 631, 705, 710, 717)
+- [ ] 773. CHANGELOG entry for item 708: a declared filter or a `Meta.filter_overrides` selection applied to its
+  column with no transform, whose own form and lookup answer no value of that column, now raises `ConfigurationError`
+  when the schema is built, where it built before and then failed every request (a masked error or `FILTER_INVALID` on
+  every value) or matched every row for every value: a `TimeFilter` on a `DateTimeField` (any lookup), a `UUIDFilter`
+  or `DurationFilter` on an integer or decimal column, a `BooleanFilter` on a date, datetime, time or UUID column, a
+  temporal filter on an integer or choice column, a consumer CSV or django-filter range filter of those kinds, the
+  same through `filter_overrides` or a `RelatedFilter` child. Filter a transform of the column whose output the form
+  cleans (`TimeFilter(field_name="occurred_at__time")`), declare a filter class whose form cleans the column's kind
+  (`DateTimeFilter`, `NumberFilter`), or read the value in `method=`. Not checked: generated `Meta.fields` leaves,
+  `method=` filters, filters overriding `filter`, form fields with their own cleaning, a column converting in its own
+  `to_python` / `get_prep_value` (a relation whose target key does), a lookup preparing in its own `get_prep_lookup`,
+  a `lookup_expr` no field registers; validators and a form field's `validate` never run at build
 
 ## From dry-upstream-0_0_15
 

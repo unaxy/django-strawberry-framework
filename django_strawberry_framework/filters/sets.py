@@ -1811,12 +1811,15 @@ class _LeafDeclaration:
     names that filter on its set and ``through`` the ``RelatedFilter``
     attributes the copy was reached across, outermost first
     (``BookFilter.shelf``); both are empty for a leaf declared on the set that
-    holds it, whose messages read as they do for any root filter.
+    holds it, whose messages read as they do for any root filter. ``filterset``
+    is the set that declares ``declared``: the caller's set for a leaf declared
+    on it, ``None`` when the caller builds for no set.
     """
 
     declared: Filter
     attribute: str | None
     through: tuple[str, ...]
+    filterset: type[FilterSet] | None
 
     @property
     def kind(self) -> str:
@@ -1870,7 +1873,7 @@ def _leaf_declaration(
         owner = projection.filterset
         attribute = f"{truth.name(owner)}.{projection.name}"
         current = _projection_child_filter(projection)
-    return _LeafDeclaration(current, attribute, tuple(through))
+    return _LeafDeclaration(current, attribute, tuple(through), owner)
 
 
 def _restrict_to_related(
@@ -2414,6 +2417,17 @@ def _runs_shipped_filter(filter_instance: Filter) -> bool:
     return truth.module(method).partition(".")[0] in _SHIPPED_FILTER_PACKAGES
 
 
+#: What Django's preparation of a value for a lookup raises when the lookup cannot bind it
+#: (``Lookup.get_prep_lookup``, building the predicate): read per request by
+#: ``_unbindable_predicate`` and at schema build by ``filters/inputs.py::_answers_sample``.
+_PREPARATION_REFUSALS: tuple[type[Exception], ...] = (
+    OverflowError,
+    ValueError,
+    TypeError,
+    ValidationError,
+)
+
+
 def _unbindable_predicate(
     filter_instance: Filter,
     queryset: models.QuerySet[models.Model, object],
@@ -2470,12 +2484,7 @@ def _unbindable_predicate(
     base.query.where = WhereNode()
     try:
         filtered = require(filter_instance.filter(base, value), is_queryset)
-    except (
-        OverflowError,
-        ValueError,
-        TypeError,
-        ValidationError,
-    ):
+    except _PREPARATION_REFUSALS:
         return True
     alias = require(read_attr(filtered, "db"), is_str)
     try:

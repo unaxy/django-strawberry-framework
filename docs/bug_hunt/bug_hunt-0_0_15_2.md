@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 425 done, 106 to do. The CHANGELOG entries filed here moved to
+Progress: 426 done, 109 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1661,6 +1661,20 @@ Progress: 425 done, 106 to do. The CHANGELOG entries filed here moved to
   pin
   `tests/forms/test_resolvers.py::test_update_omitting_an_empty_column_a_model_clean_fills_never_converts_it[null-true]`
   now expects the model's value
+- [x] 708. fixed: a declared or `Meta.filter_overrides` filter applied to its column with no transform whose own form
+  and lookup answer no value of the column (a `TimeFilter` on a `DateTimeField`, a `UUIDFilter` or `DurationFilter` on
+  an integer column, a `BooleanFilter` on a date) is refused with `ConfigurationError` when the schema is built,
+  naming the declaration, the column, the form field and the lookup
+  (`filters/inputs.py::_refuse_form_serving_no_value`: each sample of the published scalar, or every member of the
+  published choice enum, through the filter's own `field.clean` with validators and `validate` off and its own
+  `filter` on a fresh queryset of the declaring set's model, `::_answers_sample`; preparation errors shared with
+  `_unbindable_predicate` as `filters/sets.py::_PREPARATION_REFUSALS`). Not asked: generated, `method=`,
+  `filter`-override and consumer-parser leaves, a column (a relation through the keys it points at,
+  `::_django_converts`) converting in its own `to_python` / `get_prep_value`, a lookup preparing in its own
+  `get_prep_lookup`; a lookup no field registers is not judged; a `RelatedFilter` copy is asked on its child set
+  (`_LeafDeclaration.filterset`). 418 grid cells refused (411 failing every value, 7 matching every row); every
+  working, partial and warning cell builds. Package rows in `tests/filters/test_inputs.py`; spec-027, README, GLOSSARY
+  `FilterSet`. PostgreSQL columns unrun locally. Filed 770, 771, 772, 774
 
 ## Outside review of the fixes
 
@@ -1701,17 +1715,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 768. (robustness) A `DjangoModelFormMutation` create omitting a column with a `db_default` writes `NULL`
-  through Django's own form field (and a checkbox over a `BooleanField(default=True)` writes `False`, Django's
-  checkbox exception in `construct_instance`) where the model flavor writes the default; pinned as Django's answer by
-  `tests/forms/test_resolvers.py::test_modelform_create_omitting_a_nullable_column_with_a_default_keeps_djangos_answer`.
-  Found fixing 704
-- [ ] 708. (robustness) A declared filter whose own form cannot clean a value of the column it compares, with no
-  transform between them (`django_filters.TimeFilter(field_name="occurred_at")` on a `DateTimeField`), is published
-  typed by the column (`exact: DateTime`) and answers every value with the masked error (`AttributeError` from
-  `forms.TimeField` clean; typed by its form it would be a `TypeError` at the column's prep, and plain django-filter
-  fails at `.qs`): refuse it when the schema is built (`filters/inputs.py::_form_cleaned_value_field` keeps the column
-  on purpose). Found fact-finding 387
 - [ ] 709. A generated `FilterSet` leaf over a project-defined transform or lookup class
   (`DateTimeField.register_lookup(HourOfDay)`, named in `Meta.fields`) is published on a `DjangoConnectionField`'s
   `filter:` input, but every request naming it answers the masked `ConfigurationError` "`<Set>.apply_sync` must return
@@ -1947,6 +1950,29 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 767. spec-040's Helper-reuse labels in first-party prose: `spec-040 D<N>` 26 sites, bare `D<N>` 17, `P<N>` 2
   (mainly `auth/mutations.py`, `mutations/resolvers.py`, `mutations/fields.py`, `mutations/inputs.py`); a plan-label
   family (565's class): name the behaviour, or widen the plan-label row. Found fixing 703
+- [ ] 768. (robustness) A `DjangoModelFormMutation` create omitting a column with a `db_default` writes `NULL`
+  through Django's own form field (and a checkbox over a `BooleanField(default=True)` writes `False`, Django's
+  checkbox exception in `construct_instance`) where the model flavor writes the default; pinned as Django's answer by
+  `tests/forms/test_resolvers.py::test_modelform_create_omitting_a_nullable_column_with_a_default_keeps_djangos_answer`.
+  Found fixing 704
+- [ ] 770. (robustness) A declared non-Boolean filter with `lookup_expr="isnull"` publishes `Boolean`, and its own
+  form cleans the bool as its own kind: 205 of 240 grid cells answer every value with an error (96 masked). Django's
+  `IsNull` refuses a non-bool only at SQL compile, so 708's probe does not decide it
+  (`filters/inputs.py::_catchall_element`'s null test). Found fixing 708
+- [ ] 771. (robustness) A declared `class X(BaseInFilter, BooleanFilter)` answers every value with the masked
+  `TypeError` from django-filter's `BooleanWidget.value_from_datadict` hashing the list the package binds, on every
+  column; the generated `in` (`MembershipInFilter`) answers (`{"cBool": {"in": [true]}}` matches). Found fixing 708
+- [ ] 772. (robustness) A declared filter past a transform whose own form cleans a kind the transform's lookup cannot
+  prepare (`DateFilter(field_name="occurred_on", lookup_expr="year")`, published `Date`) answers `FILTER_INVALID` for
+  every value; pinned as such by `examples/fakeshop/test_query/test_declared_temporal_bindability_api.py::_REFUSALS`
+  (`year-of-a-date`, `typed-year-of-a-date`, `years-of-csv-dates`, `year-span-of-dates`), so refusing it at build
+  moves pinned behaviour. Found fixing 708
+- [ ] 774. (robustness) A declared filter whose `lookup_expr` names a lookup no field registers
+  (`NumberFilter(lookup_expr="unaccent")` without `django.contrib.postgres`) builds and answers every request with the
+  masked `FieldError` (`Unsupported lookup 'unaccent' for IntegerField`); 708's probe treats the `FieldError` as
+  inconclusive and builds it (`filters/inputs.py::_answers_sample`; pinned building by
+  `tests/filters/test_inputs.py::test_a_declared_filter_some_value_of_its_column_answers_builds[lookup-no-field-registers]`).
+  Found fixing 708
 
 ## To do: holes found re-checking the fixes
 

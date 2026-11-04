@@ -37,16 +37,18 @@ from typing import TYPE_CHECKING, Protocol, TypeAlias, get_args, get_origin, run
 
 import django_filters
 import pytest
+import pytest_django
 import strawberry
 from apps.library import models as library_models
 from apps.products.models import Category, Item
 from apps.scalars import models as scalar_models
 from django import forms
+from django.core.exceptions import ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 from django.db.models import QuerySet
 from django.db.models.functions import ExtractYear
-from django.db.models.lookups import GreaterThanOrEqual
+from django.db.models.lookups import Exact, GreaterThanOrEqual
 from django.http import HttpRequest
 from django.test.utils import isolate_apps, register_lookup
 from django.utils.functional import SimpleLazyObject, lazy
@@ -144,6 +146,7 @@ from django_strawberry_framework.types import converters as converters_mod
 from django_strawberry_framework.types.finalizer import finalize_django_types
 from django_strawberry_framework.utils._narrowing import dict_of, read_attr
 from django_strawberry_framework.utils.input_values import UNSET
+from django_strawberry_framework.utils.typing import object_result
 from tests._cleaned_filter_sets import cleaned_specimen
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
 from tests._idioms import (
@@ -158,6 +161,8 @@ from tests._info import make_info
 from tests._postgres_fields import FakeArrayField, patch_array_field, real_array_of
 from tests._soft_dependency import blocked_modules
 
+_M = typing.TypeVar("_M", bound=models.Model)
+
 if TYPE_CHECKING:
     from django.db.backends.base.base import BaseDatabaseWrapper
     from django.db.models.expressions import Combinable
@@ -169,6 +174,10 @@ if TYPE_CHECKING:
     _Char: TypeAlias = models.CharField[str | int | Combinable, str]
     _Int: TypeAlias = models.IntegerField[float | int | str | Combinable, int]
     _JSON: TypeAlias = models.JSONField[object, object]
+    _FK: TypeAlias = models.ForeignKey[_M | Combinable, _M]
+    _O2O: TypeAlias = models.OneToOneField[_M | Combinable, _M]
+    _FObj: TypeAlias = models.ForeignObject[_M, _M]
+    _M2M: TypeAlias = models.ManyToManyField[_M, models.Model]
 
 
 def _args(annotation: object) -> tuple[object, ...]:
@@ -4671,3 +4680,532 @@ def test_a_multiple_choice_filter_past_a_transform_keeps_the_output_scalar(
     Deliberate control: ``[Int!]`` before the rule too.
     """
     assert list(_value_leaves(_payload_set(declare())).values()) == [list[int] | None]
+
+
+class _UUIDTypedFilter(TypedFilter):
+    """A package ``TypedFilter`` whose form field reads a UUID."""
+
+    field_class: type[forms.UUIDField] = forms.UUIDField
+
+
+class _OwnFilterTimeFilter(TimeFilter):
+    """A consumer ``TimeFilter`` whose own ``filter`` decides what its value means."""
+
+    @override
+    def filter(self, qs: QuerySet[models.Model], value: object) -> QuerySet[models.Model]:
+        return qs
+
+
+class _TimeOfDateTimeField(forms.TimeField):
+    """A consumer ``TimeField`` that also reads a ``datetime``, as its time of day."""
+
+    @override
+    def to_python(self, value: str | datetime.time | None) -> datetime.time | None:
+        if isinstance(value, datetime.datetime):
+            return value.time()
+        return super().to_python(value)
+
+
+class _TimeOfDateTimeFilter(TimeFilter):
+    """A ``TimeFilter`` whose form field is a consumer parser (``_TimeOfDateTimeField``)."""
+
+    field_class: type[forms.TimeField] = _TimeOfDateTimeField
+
+
+class _EvenField(forms.IntegerField):
+    """A consumer form field whose ``validate`` accepts even integers only."""
+
+    @override
+    def validate(self, value: object) -> None:
+        super().validate(value)
+        if isinstance(value, int) and value % 2:
+            raise ValidationError("odd")
+
+
+class _EvenFilter(Filter):
+    """A filter whose form field bounds its integers in ``validate`` (``_EvenField``)."""
+
+    field_class: type[forms.IntegerField] = _EvenField
+
+
+class _IssuedNumberField(forms.IntegerField):
+    """A consumer form field whose ``validate`` accepts only a number some ``Issue`` holds."""
+
+    @override
+    def validate(self, value: object) -> None:
+        super().validate(value)
+        if not library_models.Issue.objects.filter(number=value).exists():
+            raise ValidationError("no such issue")
+
+
+class _IssuedNumberFilter(Filter):
+    """A filter whose form field's ``validate`` reads the database (``_IssuedNumberField``)."""
+
+    field_class: type[forms.IntegerField] = _IssuedNumberField
+
+
+def _overridden_set(filter_class: type[Filter]) -> type[FilterSet]:
+    """A ``ScalarSpecimen`` set selecting ``filter_class`` for ``occurred_at`` by override."""
+    meta = {
+        "model": scalar_models.ScalarSpecimen,
+        "fields": {"occurred_at": ["exact"]},
+        "filter_overrides": {models.DateTimeField: {"filter_class": filter_class}},
+    }
+    return type("OverriddenSpecimenSet", (FilterSet,), {"Meta": type("Meta", (), meta)})
+
+
+def _no_value_refusal(
+    subject: str,
+    column: str,
+    form: str,
+    lookup: str,
+) -> str:
+    """The refusal of a leaf whose own form and lookup answer no value of its column."""
+    return (
+        f"{subject} is published as {column} values, but its own form field ({form}) and "
+        f"lookup {lookup!r} answer no value of that column, so every value of its input would "
+        "be refused or would constrain nothing (match every row); filter a transform of the "
+        "column whose output its form cleans (a "
+        'TimeFilter on `field_name="<column>__time"`), declare a filter class whose form '
+        "cleans the column's kind, or read the value in `method=`."
+    )
+
+
+@dataclass(frozen=True)
+class _NoValueCase:
+    """A set whose one consumer leaf answers no value of its column, and what its refusal names."""
+
+    make_set: Callable[[], type[FilterSet]]
+    subject: str
+    column: str
+    form: str
+    lookup: str
+
+
+_NO_VALUE_CASES: dict[str, _NoValueCase] = {
+    "time-on-a-datetime": _NoValueCase(
+        lambda: _payload_set(TimeFilter(field_name="occurred_at")),
+        "PayloadValueSet: TimeFilter on 'occurred_at'",
+        "ScalarSpecimen.occurred_at",
+        "TimeField",
+        "exact",
+    ),
+    "uuid-on-an-integer": _NoValueCase(
+        lambda: _payload_set(UUIDFilter(field_name="number"), model=library_models.Issue),
+        "PayloadValueSet: UUIDFilter on 'number'",
+        "Issue.number",
+        "UUIDField",
+        "exact",
+    ),
+    "uuid-on-a-big-integer": _NoValueCase(
+        lambda: _payload_set(UUIDFilter(field_name="signed_big")),
+        "PayloadValueSet: UUIDFilter on 'signed_big'",
+        "ScalarSpecimen.signed_big",
+        "UUIDField",
+        "exact",
+    ),
+    "duration-on-an-integer": _NoValueCase(
+        lambda: _payload_set(DurationFilter(field_name="number"), model=library_models.Issue),
+        "PayloadValueSet: DurationFilter on 'number'",
+        "Issue.number",
+        "DurationField",
+        "exact",
+    ),
+    "duration-on-a-decimal": _NoValueCase(
+        lambda: _payload_set(DurationFilter(field_name="price")),
+        "PayloadValueSet: DurationFilter on 'price'",
+        "ScalarSpecimen.price",
+        "DurationField",
+        "exact",
+    ),
+    "typed-uuid-on-an-integer": _NoValueCase(
+        lambda: _payload_set(_UUIDTypedFilter(field_name="number"), model=library_models.Issue),
+        "PayloadValueSet: _UUIDTypedFilter on 'number'",
+        "Issue.number",
+        "UUIDField",
+        "exact",
+    ),
+    "boolean-on-a-date": _NoValueCase(
+        lambda: _payload_set(BooleanFilter(field_name="occurred_on")),
+        "PayloadValueSet: BooleanFilter on 'occurred_on'",
+        "ScalarSpecimen.occurred_on",
+        "NullBooleanField",
+        "exact",
+    ),
+    "time-icontains-on-a-datetime": _NoValueCase(
+        lambda: _payload_set(TimeFilter(field_name="occurred_at", lookup_expr="icontains")),
+        "PayloadValueSet: TimeFilter on 'occurred_at'",
+        "ScalarSpecimen.occurred_at",
+        "TimeField",
+        "icontains",
+    ),
+    "time-gte-on-a-datetime": _NoValueCase(
+        lambda: _payload_set(TimeFilter(field_name="occurred_at", lookup_expr="gte")),
+        "PayloadValueSet: TimeFilter on 'occurred_at'",
+        "ScalarSpecimen.occurred_at",
+        "TimeField",
+        "gte",
+    ),
+    "times-in-on-a-datetime": _NoValueCase(
+        lambda: _payload_set(_TimesInFilter(field_name="occurred_at", lookup_expr="in")),
+        "PayloadValueSet: _TimesInFilter on 'occurred_at'",
+        "ScalarSpecimen.occurred_at",
+        "TimeInField",
+        "in",
+    ),
+    "date-range-on-an-integer": _NoValueCase(
+        lambda: _payload_set(
+            DateFromToRangeFilter(field_name="number"),
+            model=library_models.Issue,
+        ),
+        "PayloadValueSet: DateFromToRangeFilter on 'number'",
+        "Issue.number",
+        "DateField",
+        "exact",
+    ),
+    "override-time-on-a-datetime": _NoValueCase(
+        lambda: _overridden_set(TimeFilter),
+        "OverriddenSpecimenSet: TimeFilter on 'occurred_at'",
+        "ScalarSpecimen.occurred_at",
+        "TimeField",
+        "exact",
+    ),
+    "date-on-an-integer-choice-column": _NoValueCase(
+        lambda: _payload_set(DateFilter(field_name="tier"), model=_SHELF),
+        "PayloadValueSet: DateFilter on 'tier'",
+        "Shelf.tier",
+        "DateField",
+        "exact",
+    ),
+    "json-form-on-a-date": _NoValueCase(
+        lambda: _payload_set(_JSONFormFilter(field_name="occurred_on")),
+        "PayloadValueSet: _JSONFormFilter on 'occurred_on'",
+        "ScalarSpecimen.occurred_on",
+        "JSONField",
+        "exact",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_NO_VALUE_CASES))
+def test_a_declared_filter_no_value_of_its_column_answers_is_refused(case: str) -> None:
+    """A consumer leaf typed by its column whose own form and lookup answer none of it is refused.
+
+    The leaf compares the column with no transform, so it publishes the column's scalar or
+    choice enum, and each value of it is asked of the filter's own form field (validators
+    off) and lookup on the declaring set's model: a ``TimeField`` cannot read a ``datetime``
+    (nor a ``JSONField`` form decode a ``date``), a ``UUIDField`` reads no integer, a
+    ``timedelta`` cannot be prepared for an integer or a decimal, and a ``BooleanFilter``
+    cleans every date to no constraint. Every member of a CSV filter and each axis of a
+    range filter is asked as that arm hands it, a ``Meta.filter_overrides`` selection as a
+    declaration, and a choice column by every member of its enum.
+    """
+    entry = _NO_VALUE_CASES[case]
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(entry.make_set())
+    assert str(excinfo.value) == _no_value_refusal(
+        entry.subject,
+        entry.column,
+        entry.form,
+        entry.lookup,
+    )
+
+
+@pytest.mark.parametrize(
+    "base",
+    [FilterSet, _CustomizingFilterSet],
+    ids=["rebound-child", "projected-child"],
+)
+def test_a_child_leaf_no_value_of_its_column_answers_is_refused_under_its_declaration(
+    base: type[FilterSet],
+) -> None:
+    """A ``RelatedFilter`` copy is asked as the child set declares it, and named so.
+
+    The copy is rebound onto the parent's path (``shelf__tier``) or projected as a
+    runtime-built ``Projected<Class>`` bound to the child set; either way the child's own
+    filter is asked on the child set's model, and the refusal names its attribute there
+    and the ``RelatedFilter`` it was reached through.
+    """
+    child = _shelf_leaf_set(DateFilter(field_name="tier"), base)
+    parent = _book_shelf_set(child, FilterSet)
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, parent)
+
+    assert _build_refusal() == _no_value_refusal(
+        f"{child.__name__}.leaf: DateFilter on 'tier' (reached through {parent.__name__}.shelf)",
+        "Shelf.tier",
+        "DateField",
+        "exact",
+    )
+
+
+def _generated_specimen_set() -> type[FilterSet]:
+    """A ``ScalarSpecimen`` set whose leaves django-filter generates from ``Meta.fields``."""
+    meta = {
+        "model": scalar_models.ScalarSpecimen,
+        "fields": {
+            "occurred_at": [
+                "exact",
+                "lt",
+                "in",
+                "range",
+            ],
+            "signed_big": ["exact", "in"],
+        },
+    }
+    return type("GeneratedSpecimenSet", (FilterSet,), {"Meta": type("Meta", (), meta)})
+
+
+@pytest.mark.parametrize(
+    "make_set",
+    [
+        pytest.param(
+            lambda: _payload_set(DateFilter(field_name="occurred_at")),
+            id="date-on-a-datetime",
+        ),
+        pytest.param(
+            lambda: _payload_set(CharFilter(field_name="number"), model=library_models.Issue),
+            id="text-on-an-integer",
+        ),
+        pytest.param(
+            lambda: _payload_set(NumberFilter(field_name="number"), model=library_models.Issue),
+            id="number-on-an-integer",
+        ),
+        pytest.param(
+            lambda: _payload_set(BooleanFilter(field_name="number"), model=library_models.Issue),
+            id="boolean-on-an-integer",
+        ),
+        pytest.param(
+            lambda: _payload_set(BooleanFilter(field_name="tier"), model=_SHELF),
+            id="boolean-on-an-integer-choice-column",
+        ),
+        pytest.param(
+            lambda: _payload_set(
+                NumberFilter(field_name="number", min_value=18),
+                model=library_models.Issue,
+            ),
+            id="number-bounded-by-a-validator",
+        ),
+        pytest.param(
+            lambda: _payload_set(TimeFilter(field_name="occurred_at", method="filter_value")),
+            id="time-method",
+        ),
+        pytest.param(
+            lambda: _payload_set(_OwnFilterTimeFilter(field_name="occurred_at")),
+            id="time-own-filter",
+        ),
+        pytest.param(
+            lambda: _payload_set(_TimeOfDateTimeFilter(field_name="occurred_at")),
+            id="time-consumer-parser",
+        ),
+        pytest.param(
+            lambda: _payload_set(TimeFilter(field_name="occurred_at__time")),
+            id="time-of-a-transform",
+        ),
+        pytest.param(
+            lambda: _payload_set(TimeFilter(field_name="occurred_at", lookup_expr="isnull")),
+            id="time-null-test",
+        ),
+        pytest.param(lambda: _overridden_set(DateFilter), id="override-date-on-a-datetime"),
+        pytest.param(
+            lambda: _payload_set(_EvenFilter(field_name="number"), model=library_models.Issue),
+            id="integer-bounded-by-validate",
+        ),
+        pytest.param(
+            lambda: _payload_set(
+                NumberFilter(field_name="number", lookup_expr="unaccent"),
+                model=library_models.Issue,
+            ),
+            id="lookup-no-field-registers",
+        ),
+        pytest.param(_generated_specimen_set, id="generated-leaves"),
+    ],
+)
+def test_a_declared_filter_some_value_of_its_column_answers_builds(
+    make_set: Callable[[], type[FilterSet]],
+) -> None:
+    """A leaf one value of its column answers builds, and leaves the probe does not ask build.
+
+    A ``DateFilter`` on a ``DateTimeField`` answers a date (lossy: Django warns, the probe
+    raises nothing under ``filterwarnings = error``), a text or number form an integer, a
+    ``BooleanFilter`` an integer and a member of an integer choice enum, and a validator
+    or a ``validate`` bounding the values of a kind never refuses it. A ``method=`` filter,
+    a consumer ``filter`` override and a consumer parser own what a value means; a
+    transform and a null test type their leaf on other arms; generated leaves are
+    django-filter's choice; a lookup no field registers is not judged at build.
+    """
+    assert _build_input_fields(make_set())
+
+
+def test_a_projected_child_leaf_some_value_of_its_column_answers_builds() -> None:
+    """A projected child leaf is asked on the child set, where its own ``filter`` runs.
+
+    The runtime-built ``Projected<Class>`` reads its owner per request, so the probe asks
+    the child set's own ``NumberFilter``, which cleans a member of the tier enum.
+    """
+    child = _shelf_leaf_set(NumberFilter(field_name="tier"), _CustomizingFilterSet)
+    parent = _book_shelf_set(child, FilterSet)
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, parent)
+
+    finalize_django_types()
+
+
+@pytest.mark.django_db
+def test_a_validate_reading_the_database_is_not_run_at_schema_build(
+    django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
+) -> None:
+    """The probe judges the kind only: a form field's ``validate`` never runs, nor its query."""
+    with django_assert_num_queries(0):
+        assert _build_input_fields(
+            _payload_set(_IssuedNumberFilter(field_name="number"), model=library_models.Issue),
+        )
+
+
+class _CodedIntegerField(models.IntegerField[int, int]):
+    """A consumer column storing known codes only: ``get_prep_value`` raises ``KeyError`` on others."""
+
+    CODES: typing.ClassVar[dict[int, int]] = {5: 5, 7: 7}
+
+    @override
+    def get_prep_value(self, value: object) -> object:
+        return None if value is None else self.CODES[int(str(value))]
+
+
+class _CheckedCodeField(models.IntegerField[int, int]):
+    """A consumer column refusing an unknown code with ``ValueError`` in ``get_prep_value``."""
+
+    CODES: typing.ClassVar[frozenset[int]] = frozenset({5, 7})
+
+    @override
+    def get_prep_value(self, value: object) -> object:
+        if value is None:
+            return None
+        code = int(str(value))
+        if code not in self.CODES:
+            raise ValueError(f"unknown code {code}")
+        return code
+
+
+@isolate_apps("apps.scalars")
+@pytest.mark.parametrize("column", ["coded", "checked"])
+@pytest.mark.parametrize(
+    "filter_class",
+    [NumberFilter, CharFilter],
+    ids=["number", "text"],
+)
+def test_a_column_converting_in_consumer_code_is_not_asked(
+    column: str,
+    filter_class: type[Filter],
+) -> None:
+    """A column whose ``get_prep_value`` is the consumer's own bounds which values pass.
+
+    One sample cannot speak for it (``1`` is no known code, ``5`` and ``7`` filter), so the
+    leaf builds as any other does and the column answers each request.
+    """
+
+    class CodedSpecimen(models.Model):
+        coded = _CodedIntegerField()
+        checked = _CheckedCodeField()
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    assert _build_input_fields(_payload_set(filter_class(field_name=column), model=CodedSpecimen))
+
+
+@isolate_apps("apps.scalars")
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "coded_id",
+        "coded",
+        "coded__pk",
+        "keyed_id",
+        "joined",
+        "tagged",
+    ],
+)
+def test_a_relation_to_a_key_converting_in_consumer_code_is_not_asked(
+    field_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relation converts through the key it points at, so that key's conversion is read.
+
+    Django prepares a relation's value through the fields its last path step targets
+    (``RelatedLookupMixin.get_prep_lookup``): a key whose ``get_prep_value`` is the
+    consumer's own bounds which values of the relation pass (``1`` is no known code), so a
+    leaf on a foreign key, its attname, the target's ``pk``, a one-to-one, a plain
+    ``ForeignObject`` and a many-to-many builds under a consumer ``SCALAR_MAP`` entry for
+    the relation.
+    """
+    for relation in (
+        models.ForeignKey,
+        models.OneToOneField,
+        models.ForeignObject,
+        models.ManyToManyField,
+    ):
+        monkeypatch.setitem(converters_mod.SCALAR_MAP, relation, int)
+
+    class CodedTarget(models.Model):
+        code = _CodedIntegerField(primary_key=True)
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class CodedHolder(models.Model):
+        coded: _FK[CodedTarget] = models.ForeignKey(CodedTarget, on_delete=models.CASCADE)
+        keyed: _O2O[CodedTarget] = models.OneToOneField(
+            CodedTarget,
+            on_delete=models.CASCADE,
+            related_name="+",
+        )
+        joined_code: _Int = models.IntegerField()
+        joined: _FObj[CodedTarget] = models.ForeignObject(
+            CodedTarget,
+            from_fields=["joined_code"],
+            to_fields=["code"],
+            on_delete=models.CASCADE,
+            related_name="+",
+        )
+        tagged: _M2M[CodedTarget] = models.ManyToManyField(CodedTarget, related_name="+")
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    assert _build_input_fields(
+        _payload_set(NumberFilter(field_name=field_name), model=CodedHolder),
+    )
+
+
+class _EvenExact(Exact):
+    """A consumer lookup preparing even integers only: ``get_prep_lookup`` refuses odd ones."""
+
+    lookup_name = "even"
+
+    @override
+    def get_prep_lookup(self) -> object:
+        rhs = read_attr(self, "rhs")
+        if isinstance(rhs, (int, decimal.Decimal)) and rhs % 2:
+            raise ValueError("odd")
+        return object_result(super().get_prep_lookup)
+
+
+def test_a_lookup_preparing_in_consumer_code_is_not_asked() -> None:
+    """A lookup whose ``get_prep_lookup`` is the consumer's own bounds which values pass."""
+    _lookup_operand.cache_clear()
+    _model_lookup_operand.cache_clear()
+    try:
+        with register_lookup(models.IntegerField, _EvenExact):
+            assert _build_input_fields(
+                _payload_set(
+                    NumberFilter(field_name="number", lookup_expr="even"),
+                    model=library_models.Issue,
+                ),
+            )
+    finally:
+        _lookup_operand.cache_clear()
+        _model_lookup_operand.cache_clear()
