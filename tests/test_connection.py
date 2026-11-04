@@ -1039,11 +1039,11 @@ def test_registry_clear_also_clears_offset_cursor_prefix_memo() -> None:
     assert not _offset_cursor_prefix.cache_info().currsize
 
 
-# spec-033 Slices 1-2: the root-connection fence. The
-# root-connection planning pins here (edges { node } extraction ->
-# select_related / Prefetch on the pre-slice queryset) hold the ROOT half; the
-# shared helper (Decision 9) and the fast path (Decision 5) touch only the
-# NESTED half (the spec-033 "no root-connection regression" contract).
+# The spec-033 root-connection fence. The root-connection planning pins here
+# (edges { node } extraction -> select_related / Prefetch on the pre-slice
+# queryset) hold the ROOT half; the shared helper (Decision 9) and the fast path
+# (Decision 5) touch only the NESTED half (spec-033 keeps root-connection
+# planning's coverage green).
 
 
 # =============================================================================

@@ -6902,7 +6902,8 @@ class FilterSet(
     def filter_queryset(self, queryset: models.QuerySet[_M]) -> models.QuerySet[_M]:
         """Compose the tree-form ``and`` / ``or`` / ``not`` keys on top of the leaves.
 
-        spec-027 Decision 8 step 8 + Definition-of-done item 4(d). The flat leaf
+        spec-027 Decision 8 step 8, the tree-form override that is not the
+        resolver-facing ``apply_sync`` / ``apply_async`` pair. The flat leaf
         clauses are applied by ``self._apply_flat_leaves(queryset)`` -- a
         framework-owned loop that mirrors ``BaseFilterSet.filter_queryset``
         while applying each leaf walking a declared ``RelatedFilter`` hop over the

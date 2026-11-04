@@ -880,8 +880,8 @@ class SerializerMutation(DjangoMutation):
     ) -> dict[str, object]:
         """Return the default serializer-construction kwargs - CONSTRUCTOR-ONLY, resolver-consumed.
 
-        The graphene ``get_serializer_kwargs`` parity seam (spec-039 Decision 7 step 4 /
-        Decision 8) as a CONSTRUCTOR-ONLY hook: a consumer overrides this to add
+        The graphene ``get_serializer_kwargs`` parity seam (spec-039 Decision 8, the
+        serializer-construction step) as a CONSTRUCTOR-ONLY hook: a consumer overrides this to add
         constructor kwargs (an extra ``context`` key, a constructor argument like ``tenant``) -
         never to reshape the write itself.
 

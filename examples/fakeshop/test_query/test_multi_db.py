@@ -2,8 +2,8 @@
 
 Scope: live ``/graphql/`` HTTP rows against the sharded fakeshop layout.
 
-Resolver isolation and debug capture (per spec Goals item 3 + Test plan
-``### examples/fakeshop/test_query/test_multi_db.py``):
+Resolver isolation and debug capture (the live suite spec-023's Test plan
+names under ``### examples/fakeshop/test_query/test_multi_db.py``):
 
 - Seeding rows on ``shard_b`` and reading them through ``/graphql/`` via a
   ``.using("shard_b")`` root resolver returns the seeded rows.

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
+Progress: 420 done, 110 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1623,6 +1623,18 @@ Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
   No code
 - [x] 707. One rule: `utils/write_values.py::refused_save` is the row picker every flavor calls; each keeps its spec's
   row scope (model target, `form.instance`, any serializer backing-model row). Landed with 695
+- [x] 703. Spec-section ordinals in first-party prose are restated by content or as the gated `spec-NNN Decision N`:
+  `optimizer/nested_planner.py::plan_connection_relation`, the `orders/sets.py` module and `OrderSet` docstrings,
+  `_cross_web_patches.py` (named gaps: the undecodable body, the transport asymmetry),
+  `filters/sets.py::FilterSet.filter_queryset`, `mutations/resolvers.py::CleanExcludes` and
+  `rest_framework/sets.py::SerializerMutation.get_serializer_kwargs` (a dangling spec-039 step), and test prose in
+  `test_relation_connections_api.py`, `tests/test_connection.py`, `test_connection_fields_api.py` and
+  `test_multi_db.py`; the retired capture script needed nothing (f9dc0724). `OrderSet`'s false "no sync-misuse path"
+  claim is corrected (`apply_sync` lets an async-only related target's `SyncMisuseError` out directly), with spec-028
+  DoD 4(c) and a new Edge-cases row. New gate
+  `tests/test_ci_governance.py::test_no_comment_docstring_name_or_package_string_cites_a_spec_section_by_number`
+  refuses DoD / Goal / Slice ordinals (live `TODO(spec-NNN slice N)` anchors exempt), with planted and permitted-form
+  rows; START names it. Stripped ASTs and node ids otherwise unchanged. Filed 766, 767
 
 ## Outside review of the fixes
 
@@ -1663,11 +1675,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 703. Ordinal citations outside 679's files: `optimizer/nested_planner.py` "(Decision 6 / DoD-4 "no
-  planned_resolver_keys entry")" (spec-less Decision, DoD ordinal), `orders/sets.py`'s module docstring and one more
-  docstring "spec-028 DoD 4(c)", `_cross_web_patches.py` "gap (1)" / "Gap (2)" (the sibling of 679's
-  `_strawberry_patches.py` gap names), and `scripts/capture_pg_predicate_explain.py` "Slice C.3a" (docstring and a
-  runtime string); restate each by content (package files sit in the comment-sweep area). Found fixing 679
 - [ ] 704. (robustness) A `DjangoModelFormMutation` whose optional form field cleans to `""` over a `null=True`
   non-text column (`IntegerField(null=True)` behind a consumer `CharField(required=False)`) answers "This field
   cannot be null." for a column that accepts null: the save-time diagnosis names every `""` the column cannot store
@@ -1922,6 +1929,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `create()` / `update()` saving a proxy or subclass row of the backing model leaves no record and a refused save of
   it answers the envelope where its `None` column's `null` applies (spec-039 Decision 8). Envelope at the parent and
   after 695. Found researching 695
+- [ ] 766. `Decision N step M` sub-ordinals in first-party prose are ungated: 53 sites plus one `spec-NNN step M`, 52
+  resolving (703 fixed the dangling spec-039 Decision 7 step 4 and the Decision-less spec-036 step). Root-cause
+  choice: extend `scripts/check_citations.py` to resolve `spec-NNN Decision N step M` against the Decision's numbered
+  steps, or restate each by content. Found fixing 703
+- [ ] 767. spec-040's Helper-reuse labels in first-party prose: `spec-040 D<N>` 26 sites, bare `D<N>` 17, `P<N>` 2
+  (mainly `auth/mutations.py`, `mutations/resolvers.py`, `mutations/fields.py`, `mutations/inputs.py`); a plan-label
+  family (565's class): name the behaviour, or widen the plan-label row. Found fixing 703
 
 ## To do: holes found re-checking the fixes
 
