@@ -1854,7 +1854,22 @@ write flavor rides.
    editable non-pk column holding `None` on a `null=False` column, or `""` on a column
    that stores no empty string, that the refused save of the form's instance writes (no
    `update_fields`, or the column named there by field name or `attname`, as recorded at
-   `pre_save` by `django_strawberry_framework/utils/write_values.py::attempted_saves`), is reported
+   `pre_save` by `django_strawberry_framework/utils/write_values.py::attempted_saves`; the
+   refused save is the recorded save the caught exception propagated out of, or out of
+   its explicit `raise ... from` cause or the refusal consumer code raised it over
+   without `from` (or `from None`): in the handler's own frame, or, for a database
+   error, anywhere (a helper, a class context manager's `__exit__`), since Django raises
+   every database error it translates `from` the driver's error; among the errors a
+   write flavor catches, its own causeless raisers are its delete refusals
+   (`ProtectedError`, `RestrictedError`, read as a fallback's own failure) and the MySQL /
+   Oracle cursor wrappers, which raise inside the driver error's handler (the walk stops
+   at the driver error). So a helper's `IntegrityError("taken")` after its own check reads
+   as the instance's refusal, and on MySQL / Oracle a fallback's failure consumer code
+   re-raises inside the instance's handler (`raise err`, `async_to_sync`) does too, as at
+   the parent; a non-database exception raised outside the handler's frame
+   without `from` is not followed. The
+   innermost such save wins when saves nest,
+   `django_strawberry_framework/utils/write_values.py::refused_save`), is reported
    (`django_strawberry_framework/forms/resolvers.py::_unstorable_cleaned_fields`) as the
    field-keyed error with the same field, code `null` and path the model flavor answers
    the same input with (an explicit `null` on a non-nullable column or foreign key at
@@ -1865,8 +1880,10 @@ write flavor rides.
    translated message is sent as is. The check reads only the in-memory instance, so no query runs on a
    connection the `IntegrityError` / `DataError` left unusable. When no column explains the
    exception (a model `save()` narrowed by `update_fields` away from the column, one
-   that raised before saving the instance, or one writing the row through a path that sends
-   no `pre_save`, `bulk_create` or `QuerySet.update()`, included), an `IntegrityError` is the `"__all__"` envelope above, a `ValueError` or
+   that raised before saving the instance, one writing the row through a path that sends
+   no `pre_save`, `bulk_create` or `QuerySet.update()`, a save of another row, and a
+   failure another write raises, after a refused save of the instance consumer code caught
+   and swallowed or not, or while handling it, included), an `IntegrityError` is the `"__all__"` envelope above, a `ValueError` or
    `DataError` propagates unchanged and a `ValidationError` is the consumer's own, mapped as above. The check runs on the instance after the
    save attempt, never before it, so a model `save()` that fills the blank value in
    (the reason Django keeps the shape) still writes. The returned envelope rolls the
@@ -2417,7 +2434,13 @@ Rationale companion: [Decision 14][rationale-d14].
   nothing written. A consumer `save()` that fills the value in writes; any other
   `ValueError` or `DataError` out of `save()` propagates and any other `IntegrityError` is the
   `"__all__"` envelope, among them a refused save whose `update_fields` leaves the `None`
-  column out
+  column out, and a failure another write raises after consumer code swallowed a refused
+  save of the instance (another model's `ValueError` then propagates as raised); an
+  exception consumer code raises over the instance's own refusal (`from` it, or without
+  `from` / `from None` in the handler, or a database error from a helper or a class
+  `__exit__`) keeps that column's `null` error, while a non-database exception a helper
+  raises over it without `from`, a fallback write refused through a helper and a delete
+  the collector refuses (`ProtectedError`, `RestrictedError`) do not
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
   step 5).
 - **Explicit `null` coerced to a storable value on a `null=False` column.** A
@@ -2804,6 +2827,13 @@ behavior reachable through `/graphql/`, package tests own internals.
     (`tests/forms/test_resolvers.py::test_modelform_save_time_null_is_read_from_the_refused_row_only`,
     `tests/forms/test_resolvers.py::test_modelform_failure_after_the_row_saved_names_no_column`,
     `tests/forms/test_resolvers.py::test_modelform_save_time_null_reads_the_latest_attempt_of_the_row`);
+    a `save()` override that swallows the instance's refused save (an `IntegrityError`, or a
+    `ValueError` before any statement) and then fails another write answers the envelope, or
+    lets another model's `ValueError` propagate (a fallback refused through a helper
+    and a delete the collector refuses too), and one that raises over the instance's
+    refusal (`from` it, without `from` or `from None` in the handler, a helper or a class
+    `__exit__`) keeps its `null` error, on create and update
+    ([`test_save_time_refused_row_api.py`][test-save-time-refused-row-api]);
     **explicit `null` coerced to a storable value** — `isPrivate: null` on create and on
     update over a `True` row, a `blank=True` text choice column sent `null` on create
     and update, and a consumer `CharField` over a `blank=True` or `blank=False`
@@ -3299,6 +3329,7 @@ The completion contract.
 [products-forms]: ../../examples/fakeshop/apps/products/forms.py
 [products-schema]: ../../examples/fakeshop/apps/products/schema.py
 [test-products-api]: ../../examples/fakeshop/test_query/test_products_api.py
+[test-save-time-refused-row-api]: ../../examples/fakeshop/test_query/test_save_time_refused_row_api.py
 
 <!-- scripts/ -->
 

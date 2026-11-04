@@ -8,9 +8,13 @@ relation ids, batched ``pk__in`` cost, duplicate members, and empty M2M clears l
 ``examples/fakeshop/test_query/test_library_api.py``.
 """
 
+import importlib
+import inspect
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from enum import Enum
+from functools import wraps
+from types import FrameType
 from typing import TYPE_CHECKING, NoReturn
 from unittest import mock
 
@@ -20,9 +24,11 @@ from apps.library.models import Genre
 from apps.scalars.models import NullableScalarSpecimen
 from django.apps.registry import Apps
 from django.core.validators import MinValueValidator
-from django.db import connection, models
+from django.db import Error as DjangoDatabaseError
+from django.db import IntegrityError, connection, models, transaction
 from django.db.models import Model
 from django.db.models.expressions import Combinable
+from django.dispatch import Signal
 from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject, lazy
 from django.utils.translation import gettext_lazy
@@ -37,6 +43,7 @@ from django_strawberry_framework.rest_framework import resolvers as serializer_r
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.base import DjangoType
 from django_strawberry_framework.types.finalizer import finalize_django_types
+from django_strawberry_framework.utils import write_values
 from django_strawberry_framework.utils.errors import field_error
 from django_strawberry_framework.utils.inputs import (
     FILE,
@@ -48,6 +55,7 @@ from django_strawberry_framework.utils.inputs import (
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.write_transaction import write_pipeline
 from django_strawberry_framework.utils.write_values import (
+    attempted_saves,
     coerce_relation_pk_or_none,
     decode_field_handlers,
     decode_provided_fields,
@@ -58,6 +66,7 @@ from django_strawberry_framework.utils.write_values import (
     file_into,
     materialize_relation_id_container,
     raw_choice_value,
+    refused_save,
     relation_into,
     scalar_into,
     store_decoded,
@@ -67,8 +76,9 @@ from tests._idioms import module_binding, saved_pk
 from tests._info import make_info, unread_info
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from typing import TypeAlias
+
+    from django_strawberry_framework.utils.write_values import AttemptedSave
 
     _FieldHandler: TypeAlias = Callable[[InputFieldSpec, object], FieldError | None]
 
@@ -1407,3 +1417,249 @@ def test_decode_field_handlers_extra_handlers_override_the_scalar_kind() -> None
     )
     assert error is None
     assert dest == {"name": "custom-x"}
+
+
+# ===========================================================================
+# refused_save: the recorded save a caught exception propagated out of
+# ===========================================================================
+
+
+def _refuse() -> NoReturn:
+    msg = "refused"
+    raise IntegrityError(msg)
+
+
+def _innermost_frame(error: BaseException) -> FrameType:
+    """Return the frame ``error`` was raised in, the innermost one on its traceback."""
+    trace = error.__traceback__
+    assert trace is not None
+    while trace.tb_next is not None:
+        trace = trace.tb_next
+    return trace.tb_frame
+
+
+def _caught_refusal() -> IntegrityError:
+    try:
+        _refuse()
+    except IntegrityError as exc:
+        return exc
+
+
+def _refuse_as_django_does() -> NoReturn:
+    """Raise the ``IntegrityError`` Django raises: translated ``from`` the driver's error."""
+    msg = "refused"
+    try:
+        _translate(RuntimeError)
+    except RuntimeError as driver:
+        raise IntegrityError(msg) from driver
+
+
+def _translate(error_class: type[Exception]) -> NoReturn:
+    msg = "translated"
+    raise error_class(msg)
+
+
+@pytest.mark.parametrize(
+    ("link", "paired"),
+    [
+        pytest.param("cause", True, id="cause"),
+        pytest.param("handler-reraise", True, id="handler-reraise"),
+        pytest.param("handler-from-none", True, id="handler-from-none"),
+        pytest.param("helper-database-error", True, id="helper-database-error"),
+        pytest.param("helper-other-error", False, id="helper-other-error"),
+        pytest.param("raised-by-django-elsewhere", False, id="raised-by-django-elsewhere"),
+    ],
+)
+def test_refused_save_follows_a_cause_or_the_handlers_reraise_never_another_frames_context(
+    link: str,
+    *,
+    paired: bool,
+) -> None:
+    """A save is the refusal of an exception raised from it or translated over it by consumer code.
+
+    ``raise ... from exc`` names the save's exception as the cause. A ``raise`` without
+    ``from``, or ``from None``, in the handler that caught the save's exception is raised
+    in a frame that exception passed through: the handler translated it. A database error
+    with no cause raised elsewhere (a helper the handler calls) is consumer code's too,
+    since Django raises every database error it translates ``from`` the driver's error;
+    such a Django error (a fallback write's own failure) carries the save's exception only
+    as ``__context__``, and that save did not raise it. A non-database exception a
+    helper raises without ``from`` is not followed.
+    """
+    row = Genre(name="refused")
+    msg = "wrapped"
+    error: BaseException
+    refusal: BaseException | None = None
+    try:
+        try:
+            _refuse()
+        except IntegrityError as own:
+            refusal = own
+            if link == "cause":
+                raise IntegrityError(msg) from own
+            if link == "handler-from-none":
+                raise IntegrityError(msg) from None
+            if link == "handler-reraise":
+                raise IntegrityError(msg)  # noqa: B904
+            if link == "helper-database-error":
+                _translate(IntegrityError)
+            if link == "helper-other-error":
+                _translate(LookupError)
+            _refuse_as_django_does()
+    except (IntegrityError, LookupError) as exc:
+        error = exc
+    assert refusal is not None
+    attempted: list[AttemptedSave] = [(row, frozenset({"name"}), _innermost_frame(refusal))]
+    expected = (row, frozenset({"name"})) if paired else None
+    assert refused_save(attempted, error) == expected
+
+
+#: Every ``django.db.Error`` subclass Django defines, audited on Django 5.2.16 and 6.1.2
+#: for a causeless ``raise`` a write flavor catches (``IntegrityError``, ``DataError``):
+#: of these only ``ProtectedError`` / ``RestrictedError`` are, the set
+#: ``django_strawberry_framework/utils/write_values.py #"_DJANGO_CAUSELESS_REFUSALS = ("`` leaves out.
+#: Django 6.1.2 adds each model's ``NotUpdated`` (``ObjectNotUpdated`` and
+#: ``DatabaseError``), raised with no cause by a forced or ``update_fields`` save that
+#: matches no row: a ``DatabaseError`` no flavor catches, counted as one entry.
+_AUDITED_DJANGO_DATABASE_ERRORS = frozenset(
+    {
+        "django.db.migrations.exceptions.MigrationSchemaMissing",
+        "django.db.models.deletion.ProtectedError",
+        "django.db.models.deletion.RestrictedError",
+        "django.db.transaction.TransactionManagementError",
+        "django.db.utils.DataError",
+        "django.db.utils.DatabaseError",
+        "django.db.utils.IntegrityError",
+        "django.db.utils.InterfaceError",
+        "django.db.utils.InternalError",
+        "django.db.utils.NotSupportedError",
+        "django.db.utils.OperationalError",
+        "django.db.utils.ProgrammingError",
+    },
+)
+
+
+def test_django_defines_exactly_the_audited_database_errors() -> None:
+    """A Django release adding a ``django.db.Error`` subclass fails until it is audited.
+
+    ``refused_save`` reads a causeless database error as consumer code's translation
+    unless it is one Django raises itself without a cause; the set it leaves out is
+    audited against every subclass Django defines, so a new one is a red row on every
+    matrix cell, never a silent misreading.
+    """
+    _ = importlib.import_module("django.db.models.deletion")
+    _ = importlib.import_module("django.db.migrations.exceptions")
+    _ = importlib.import_module("django.db.transaction")
+    seen: set[type[BaseException]] = set()
+    stack: list[type[BaseException]] = [DjangoDatabaseError]
+    while stack:
+        for subclass in stack.pop().__subclasses__():
+            if subclass not in seen:
+                seen.add(subclass)
+                stack.append(subclass)
+    not_updated = vars(importlib.import_module("django.core.exceptions")).get("ObjectNotUpdated")
+    defined = {
+        "<model>.NotUpdated"
+        if isinstance(not_updated, type) and issubclass(subclass, not_updated)
+        else f"{subclass.__module__}.{subclass.__qualname__}"
+        for subclass in seen
+        if subclass.__module__.startswith("django.")
+    }
+    expected = set(_AUDITED_DJANGO_DATABASE_ERRORS)
+    if not_updated is not None:
+        expected.add("<model>.NotUpdated")
+    assert defined == expected
+
+
+def test_refused_save_terminates_on_a_cause_cycle() -> None:
+    """A cause chain that loops back on itself ends; an unpaired or senderless record is ``None``."""
+    first = _caught_refusal()
+    second = _caught_refusal()
+    first.__cause__ = second
+    second.__cause__ = first
+    unrelated = inspect.currentframe()
+    assert unrelated is not None
+    attempted: list[AttemptedSave] = [
+        (Genre(name="a"), None, unrelated),
+        (Genre(name="b"), None, None),
+    ]
+    assert refused_save(attempted, first) is None
+    first.__cause__ = first
+    assert refused_save(attempted, first) is None
+
+
+def test_refused_save_reads_the_innermost_save_on_the_traceback() -> None:
+    """Two recorded saves both on the traceback: the inner one, which raised, is the refusal."""
+    outer_row, inner_row = Genre(name="outer"), Genre(name="inner")
+    frames: list[FrameType] = []
+
+    def _inner() -> NoReturn:
+        frame = inspect.currentframe()
+        assert frame is not None
+        frames.append(frame)
+        _refuse()
+
+    def _outer() -> NoReturn:
+        frame = inspect.currentframe()
+        assert frame is not None
+        frames.append(frame)
+        _inner()
+
+    try:
+        _outer()
+    except IntegrityError as exc:
+        error = exc
+    outer_frame, inner_frame = frames
+    attempted: list[AttemptedSave] = [
+        (outer_row, None, outer_frame),
+        (inner_row, None, inner_frame),
+    ]
+    assert refused_save(attempted, error) == (inner_row, None)
+    frames.clear()
+
+
+def test_a_record_made_outside_a_signal_dispatch_names_no_sender() -> None:
+    """With no ``Signal.send`` on the stack the record has no sender and pairs with nothing."""
+    assert write_values._signal_sender_frame() is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("wrapped", [False, True], ids=["plain", "apm-wrapped"])
+def test_a_refused_save_is_found_under_a_receiver_wrapping_integration(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    wrapped: bool,
+) -> None:
+    """A receiver an APM integration wraps still records the save that sent its signal.
+
+    Sentry's Django integration replaces ``Signal._live_receivers`` and wraps every sync
+    receiver in a function of its own, which adds a frame between ``Signal.send`` and the
+    receiver; the recorded sender is found by the ``Signal.send`` frame, never a fixed
+    depth, so the refused save is still the one on the exception's traceback. No dev
+    dependency ships such an integration; the patch here is its shape.
+    """
+    if wrapped:
+        live_receivers = Signal._live_receivers
+
+        def _wrapping_live_receivers(
+            signal: Signal,
+            sender: object,
+        ) -> tuple[list[Callable[..., object]], list[Callable[..., object]]]:
+            sync_receivers, async_receivers = live_receivers(signal, sender)
+
+            def _wrap(receiver: Callable[..., object]) -> Callable[..., object]:
+                @wraps(receiver)
+                def _wrapper(*args: object, **kwargs: object) -> object:
+                    return receiver(*args, **kwargs)
+
+                return _wrapper
+
+            return [_wrap(receiver) for receiver in sync_receivers], async_receivers
+
+        monkeypatch.setattr(Signal, "_live_receivers", _wrapping_live_receivers)
+    _ = Genre.objects.create(name="taken")
+    row = Genre(name="taken")
+    with attempted_saves(Genre) as attempted:
+        with pytest.raises(IntegrityError) as excinfo, transaction.atomic():
+            row.save()
+        assert refused_save(attempted, excinfo.value) == (row, None)

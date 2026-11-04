@@ -200,11 +200,13 @@ from django_strawberry_framework.utils.write_transaction import (
     snapshot_target_state,
 )
 from django_strawberry_framework.utils.write_values import (
+    attempted_saves,
     coerce_relation_pk_or_none,
     decode_provided_fields,
     decode_scalar_leaf,
     decode_visible_relation_ids,
     decoded_into,
+    refused_save,
     relation_into,
     unstorable_columns,
     unstorable_text_error,
@@ -1390,11 +1392,16 @@ def _model_write_step(
     # under the pipeline's phased alias guard.
     with pipeline_write_phase():
         if instance is None:
-            write_error = save_or_field_errors(
-                lambda: save_new_row(target),
-                error_key_map=error_key_map,
-                integrity_errors=lambda: _created_row_integrity_errors(target, error_key_map()),
-            )
+            with attempted_saves(type(target)) as attempted:
+                write_error = save_or_field_errors(
+                    lambda: save_new_row(target),
+                    error_key_map=error_key_map,
+                    integrity_errors=lambda exc: _created_row_integrity_errors(
+                        target,
+                        refused_save(attempted, exc),
+                        error_key_map(),
+                    ),
+                )
         else:
             # A direct model UPDATE saves through ``save_located_row``: a located
             # row a concurrent transaction deleted would otherwise be silently
@@ -1414,6 +1421,7 @@ def _model_write_step(
 
 def _created_row_integrity_errors(
     target: models.Model,
+    refused: tuple[models.Model, frozenset[str] | None] | None,
     error_key_map: ErrorKeyMap,
 ) -> list[FieldError]:
     """Map a create's failed INSERT to the envelope, naming each input column it left null.
@@ -1428,11 +1436,17 @@ def _created_row_integrity_errors(
     field-keyed ``null`` error under its published input name, the error the same
     column's explicit ``null`` gets at decode. The input's columns and their names are
     the step's error key map (``_model_error_key_map``), keyed by each column's model
-    field name. An ``IntegrityError`` no such column explains is the ``"__all__"``
-    ``constraint`` envelope. Read after the save, never before, so a consumer ``save()``
-    that fills the value in still writes.
+    field name. ``refused`` is the recorded save the ``IntegrityError`` came out of
+    (``utils/write_values.py::refused_save``): only a refusal of ``target``'s own save is
+    read, so a failure a consumer ``save()`` raises from another write (another row, an
+    M2M row, raw SQL), or after swallowing a refused save of ``target``, is never read
+    as ``target``'s column. An ``IntegrityError`` no such column explains is the
+    ``"__all__"`` ``constraint`` envelope. Read after the save, never before, so a
+    consumer ``save()`` that fills the value in still writes.
     """
-    columns = unstorable_columns(target, error_key_map)
+    if refused is None or refused[0] is not target:
+        return integrity_error_field_errors()
+    columns = unstorable_columns(target, error_key_map, update_fields=refused[1])
     if not columns:
         return integrity_error_field_errors()
     return [null_field_error(error_key_map[column.name][0], column) for column in columns]
@@ -1919,7 +1933,7 @@ def save_or_field_errors(
     save_callable: Callable[[], object],
     *,
     error_key_map: Callable[[], ErrorKeyMap | None],
-    integrity_errors: Callable[[], list[FieldError]] = integrity_error_field_errors,
+    integrity_errors: Callable[[IntegrityError], list[FieldError]] | None = None,
 ) -> list[FieldError] | None:
     """Run ``save_callable()``; map a save-time failure to the envelope else ``None``.
 
@@ -1933,9 +1947,10 @@ def save_or_field_errors(
     else:
 
     - a post-validation ``IntegrityError`` (a race, or a constraint validation
-      did not cover) returns ``integrity_errors()``: the ``"__all__"``
-      ``integrity_error_field_errors`` envelope, unless the caller diagnoses the
-      failure from in-memory state (the model create's
+      did not cover) returns ``integrity_errors(exc)`` with the caught exception: the
+      ``"__all__"`` ``integrity_error_field_errors`` envelope when no ``integrity_errors``
+      is given, else the caller's diagnosis of the row whose save raised ``exc``
+      (``utils/write_values.py::refused_save``) from in-memory state (the model create's
       ``_created_row_integrity_errors``, the serializer write's
       ``rest_framework/resolvers.py::_attempted_row_integrity_errors``);
     - a Django ``ValidationError`` raised by consumer save-time code (a
@@ -1959,8 +1974,10 @@ def save_or_field_errors(
     """
     try:
         _ = save_callable()
-    except IntegrityError:
-        return integrity_errors()
+    except IntegrityError as exc:
+        if integrity_errors is None:
+            return integrity_error_field_errors()
+        return integrity_errors(exc)
     except ValidationError as exc:
         return validation_error_to_field_errors(exc, error_key_map())
     return None

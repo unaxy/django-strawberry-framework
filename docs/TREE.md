@@ -828,6 +828,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_relation_spelling_api.py # Live HTTP optimizer execution over a reverse one-to-one whose query name and accessor differ.
 ├── test_relations_async_api.py   # Live GraphQL proof that generated relations lazy-load and read prefetches in async.
 ├── test_resource_policy_api.py   # Live ``/graphql/`` execution-resource-policy acceptance tests.
+├── test_save_time_refused_row_api.py  # Live HTTP: a save-time failure names a column only of the save that raised it.
 ├── test_scalar_predicate_binding_api.py  # Native scalar predicates preserve Django's transformed, duration and backend binding semantics.
 ├── test_scalars_api.py           # Live GraphQL HTTP tests for scalar wire formats, filtering, relations, and optimizer behavior.
 ├── test_scalars_filter_api.py    # Live GraphQL HTTP tests for scalar filtering, ordering, and related-queryset behavior.

@@ -663,6 +663,7 @@ Module docstring = authoritative description; this = index. Read the docstring b
 | [`test_filter_publication_api.py`][test-filter-publication-api] | Cyclic filter publication, registration order, canonical input ordering, constructor-edited fields, prefixed flat copies, deferred choice binding, and generated input names shared by one shape or split across two schemas. |
 | [`test_filter_logic_customization_api.py`][test-filter-logic-customization-api] | Consumer logic customization preserves AND, OR, exclusion and nullable-key worlds. |
 | [`test_filter_widget_binding_api.py`][test-filter-widget-binding-api] | Real bound widgets preserve normalized values, physical form keys, prefixes and consumer form edits; a form rebinding values as their text keeps a one-key widget's value and is a masked `ConfigurationError` over split date/time widgets; a nested split range bound whose wall clock in the current time zone leaves years 1..9999 is `FILTER_INVALID` keyed to the field. |
+| [`test_save_time_refused_row_api.py`][test-save-time-refused-row-api] | A save-time failure names a `None` column only of the save that raised it, on the model create, `ModelForm` create / update and serializer create / update over a test-local schema (sync, and async over a module-local mount): consumer code swallowing the row's refused save, or failing another model's save, raw SQL, `QuerySet.update()` or a fallback write in its handler, answers the `"__all__"` envelope (another model's `ValueError` propagates through the `ModelForm`); an exception consumer code raises over the refusal (`from` it, or without `from` / `from None` in the handler, a helper or a class `__exit__`) keeps its `itemId` `null` error, a fallback refused through a helper, or a delete the collector refuses (`ProtectedError` / `RestrictedError`), the envelope; a second hold refused inside the write is named only by the serializer. |
 | [`test_globalid_filter_strategies_api.py`][test-globalid-filter-strategies-api] | Emitted Relay IDs preserve model, type and combined naming strategies through consumer filters (`global_id_for` mints the combined strategy's emitted id); a GlobalID filter into an untyped model or through a `GenericRelation` compares the related key, and one on a `GenericForeignKey` is refused when its set publishes. |
 | [`test_raw_relation_key_forms_api.py`][test-raw-relation-key-forms-api] | Raw relation-key forms preserve consumer coercion and upstream form defaults. |
 
@@ -799,6 +800,7 @@ Outside this dir: [`../tests/`][fakeshop-tests] = project-level rows (urls, sett
 [test-scalars-api]: test_scalars_api.py
 [test-scalars-filter-api]: test_scalars_filter_api.py
 [test-scalars-mutation-api]: test_scalars_mutation_api.py
+[test-save-time-refused-row-api]: test_save_time_refused_row_api.py
 [test-schema-composition-api]: test_schema_composition_api.py
 [test-serializer-runtime-api]: test_serializer_runtime_api.py
 [test-single-parent-fastpath-api]: test_single_parent_fastpath_api.py

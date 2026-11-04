@@ -190,6 +190,7 @@ from django_strawberry_framework.utils.write_transaction import (
     snapshot_target_state,
     write_pipeline,
 )
+from django_strawberry_framework.utils.write_values import refused_save
 from django_strawberry_framework.write_mixins import _ValidatedMutationMeta
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._generated_inputs import keyword_constructor as _keyword_constructor
@@ -1616,15 +1617,19 @@ def test_save_time_diagnosis_never_loads_a_deferred_column_the_save_left_out() -
         "default",
     ) as witness:
         loaded.name = second.name
-        with pytest.raises(IntegrityError), transaction.atomic():
+        with pytest.raises(IntegrityError) as excinfo, transaction.atomic():
             loaded.save()
-        [(_, update_fields)] = witness.attempted
+        [(row, update_fields, _sender)] = witness.attempted
+        assert row is loaded
+        # The refused save pairs, so the diagnosis below reaches the column walk.
+        assert refused_save(witness.attempted, excinfo.value) == (loaded, update_fields)
         assert update_fields is not None
         assert "name" in update_fields
         assert "description" not in update_fields
         with CaptureQueriesContext(connections["default"]) as queries:
             errors = serializer_resolvers._attempted_row_integrity_errors(
                 witness.attempted,
+                excinfo.value,
                 key_map,
             )
     assert [(fe.field, fe.codes) for fe in errors] == [(NON_FIELD_ERROR_KEY, ["constraint"])]
@@ -5007,7 +5012,11 @@ def test_write_witness_blocks_cross_alias_pre_save() -> None:
             instance=own_attempt,
             using="default",
         )
-        assert witness.attempted == [(own_attempt, None)]
+        [(row, update_fields, sender)] = witness.attempted
+        assert row is own_attempt
+        assert update_fields is None
+        # The record names the call that sent ``pre_save``: this test's own frame.
+        assert sender is inspect.currentframe()
 
         # A DIFFERENT thread's cross-alias save is not this request's to police - and its
         # writes are not recorded on this request's witness either.

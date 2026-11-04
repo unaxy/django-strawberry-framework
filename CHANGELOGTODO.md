@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 176 to do.
+Progress: 0 done, 177 to do.
 
 ## From dry-0_0_15_3
 
@@ -715,6 +715,21 @@ Progress: 0 done, 176 to do.
   queryset raised `TypeError` or bound the text split into characters. Members bind as the cleaned values (an integer
   leaf as a `Decimal`, a text leaf stripped, a naive datetime made aware). The source distribution and wheel now
   include Django's license (`LICENSE.django`)
+- [ ] 765. CHANGELOG entry for item 695: a save-time `IntegrityError` names a `blank=True, null=False` input column's
+  `null` error only when the row's own save raised it, or consumer code raised an exception over that refusal: `from`
+  it, without `from` (or `from None`) in the handler itself, or a database error raised without `from` by a helper or
+  a class context manager's `__exit__` (a consumer's own `IntegrityError` raised over the refusal after its own check
+  reads the same way). A non-database exception a helper raises over the refusal without `from` is not read as the
+  row's (use `raise ... from`). A refused save consumer code caught and swallowed (the `get_or_create` shape), a
+  failure from another model's or row's save, raw SQL or `QuerySet.update()`, a fallback write refused while handling
+  the row's refusal (directly or through a helper), and a delete Django's collector refuses there (`ProtectedError`,
+  `RestrictedError`) now answer the `"__all__"` `constraint` envelope on the model create, `ModelForm` and serializer
+  flavors, where the swallowed row's `null` was answered. On MySQL / Oracle, whose cursor wrappers raise their
+  refusals without a cause, a fallback failure consumer code re-raises inside the row's handler (`raise err`,
+  `async_to_sync`) still reads as the row's `null`, as before. Through a `ModelForm`, another model's `ValueError` now
+  propagates instead of being re-keyed as the row's `null`. A model `save()` that saves a `None` sibling before its
+  own save, or writes its own row without sending `pre_save` (`bulk_create([self])`, muted signals), now answers the
+  envelope on the model create
 
 ## From dry-upstream-0_0_15
 

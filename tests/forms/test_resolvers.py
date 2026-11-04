@@ -25,7 +25,7 @@ on SQLite) and a plain integer column; a model ``save()`` narrowing an update's
 by field name or ``attname`` (its ``null`` error); a consumer ``ValidationError``
 raised before the row saves (mapped as raised); a refused save of a sibling row
 or a failure after the row saved (the ``"__all__"`` envelope); a retried save
-(its latest attempt is read); a ``ModelForm.save()`` override over a
+(the attempt that raised is read); a ``ModelForm.save()`` override over a
 client-assigned key; fields whose widget reads several form-data keys
 (PostgreSQL's ``SplitArrayField``, a consumer ``MultiValueField``); and an update
 omitting a column through consumer code fakeshop's forms do not declare (a lossy
@@ -3214,13 +3214,14 @@ def test_modelform_save_time_null_is_read_from_the_refused_row_only() -> None:
 def test_modelform_save_time_null_reads_the_latest_attempt_of_the_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The refused save the diagnosis reads is the row's latest attempt, not an earlier one.
+    """The refused save the diagnosis reads is the row's attempt that raised, not a swallowed one.
 
     The model ``save()`` first tries an update narrowed to ``update_fields=["label"]``
     that the database refuses (a duplicate ``label``; the form's uniqueness check is turned
     off) and swallows, then retries the whole row with a free ``label``, which the database
     refuses for the client's ``null`` ``amount``. Both attempts are recorded and only the
-    latest writes ``amount``, so the failure is ``amount``'s field-keyed ``null`` error.
+    retry, the attempt that raised, writes ``amount``, so the failure is ``amount``'s
+    field-keyed ``null`` error.
     """
 
     class RetryingRow(models.Model):

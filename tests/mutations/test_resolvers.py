@@ -579,6 +579,18 @@ class BareDesk(BareVenue):
     """
 
 
+class SlugVenue(_UnmanagedProductsModel):
+    """The multi-table parent of ``SlugDesk``, keyed by Django, unique on ``slug``."""
+
+    slug: _Text = models.TextField(unique=True)
+
+
+class SlugDesk(SlugVenue):
+    """A multi-table child whose ``seats`` is ``blank=True, null=False`` with no default."""
+
+    seats: _Int = models.IntegerField(blank=True)
+
+
 class BareDeskForm(forms.ModelForm[BareDesk]):
     """A ``ModelForm`` over ``BareDesk``'s inherited ``name``."""
 
@@ -787,6 +799,47 @@ def test_create_omitting_a_column_a_save_override_fills_in_writes() -> None:
 
     assert errors == []
     assert stored == [5]
+
+
+_COMPETING_SLUG_DISPATCH_UID = "tests.mutations.competing_slug_venue"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_child_create_refused_at_its_parent_table_names_the_childs_null_column() -> None:
+    """A multi-table child's refused save answers the ``None`` column that save writes.
+
+    A competing writer takes the parent's unique ``slug`` after validation, so the
+    parent-table INSERT is refused, while the omitted ``seats`` the same save writes to
+    the child table holds ``None``. One ``Model.save()`` writes both tables and Django
+    records one save for it, the save that raised, so its ``seats`` is named, as for a
+    single-table row. No fakeshop model inherits a parent with a unique column.
+    """
+
+    def _insert_competing_venue(**_kwargs: object) -> None:
+        _ = SlugVenue._base_manager.bulk_create([SlugVenue(slug="taken")])
+
+    with _tables(SlugVenue, SlugDesk):
+        pre_save.connect(
+            _insert_competing_venue,
+            sender=SlugDesk,
+            weak=False,
+            dispatch_uid=_COMPETING_SLUG_DISPATCH_UID,
+        )
+        try:
+            errors = _create_row(SlugDesk, ("slug", "seats"), {"slug": "taken"})
+        finally:
+            _ = pre_save.disconnect(sender=SlugDesk, dispatch_uid=_COMPETING_SLUG_DISPATCH_UID)
+        stored = list(SlugDesk._base_manager.values_list("slug", flat=True))
+
+    assert errors == [
+        {
+            "field": "seats",
+            "messages": ["This field cannot be null."],
+            "codes": ["null"],
+            "path": ["seats"],
+        },
+    ]
+    assert stored == []
 
 
 @pytest.mark.parametrize(
