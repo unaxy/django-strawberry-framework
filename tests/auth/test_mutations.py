@@ -3279,7 +3279,7 @@ async def test_channels_http_anonymous_logout_is_false_but_flushes_residue() -> 
 
 async def _ws_open(router: ProtocolTypeRouter, cookie: str | None = None) -> WebsocketCommunicator:
     """Open a graphql-transport-ws socket and complete connection_init/ack."""
-    headers = [(b"origin", b"http://testserver")]
+    headers = [(b"host", b"testserver"), (b"origin", b"http://testserver")]
     if cookie is not None:
         headers.append((b"cookie", cookie.encode()))
     communicator = WebsocketCommunicator(

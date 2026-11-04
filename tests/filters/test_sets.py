@@ -388,9 +388,11 @@ class _CrDeskNote(django_models.Model):
     pk under ``_CrNoteDesk``'s content type with no ``_CrNoteDesk`` row extending it.
     """
 
+    # DO_NOTHING, not CASCADE: this unmanaged model has no table, so a cascade would make
+    # every ContentType delete in the session query a missing table.
     content_type: _FK[ContentType] = django_models.ForeignKey(
         ContentType,
-        on_delete=django_models.CASCADE,
+        on_delete=django_models.DO_NOTHING,
         related_name="+",
     )
     object_id: _PositiveInt = django_models.PositiveIntegerField()

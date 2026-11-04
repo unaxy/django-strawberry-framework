@@ -443,12 +443,15 @@ class _IdxChildGin(models.Model):
         indexes = [GinIndex(fields=["parent", "title", "id"], name="idx_gin_cover")]
 
 
+# Every ``ContentType`` key below is DO_NOTHING, not CASCADE: these unmanaged models
+# have no table, so a cascade would make every ContentType delete in the session
+# query a missing table.
 class _IdxMtiTagBase(models.Model):
     """Unmanaged multi-table-inheritance parent declaring a generic foreign key."""
 
     content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = models.ForeignKey(
         ContentType,
-        on_delete=models.CASCADE,
+        on_delete=models.DO_NOTHING,
         related_name="+",
     )
     object_id: "models.PositiveIntegerField[float | int | str | Combinable, int]" = (
@@ -562,7 +565,7 @@ class _IdxMtiNoteBase(models.Model):
     base_content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = (
         models.ForeignKey(
             ContentType,
-            on_delete=models.CASCADE,
+            on_delete=models.DO_NOTHING,
             related_name="+",
         )
     )
@@ -590,7 +593,7 @@ class _IdxMtiNote(_IdxMtiNoteBase):
     )
     content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = models.ForeignKey(
         ContentType,
-        on_delete=models.CASCADE,
+        on_delete=models.DO_NOTHING,
         related_name="+",
     )
     object_id: "models.PositiveIntegerField[float | int | str | Combinable, int]" = (
@@ -635,7 +638,7 @@ class _IdxGenTagBare(models.Model):
 
     content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = models.ForeignKey(
         ContentType,
-        on_delete=models.CASCADE,
+        on_delete=models.DO_NOTHING,
         related_name="+",
     )
     object_id: "models.PositiveIntegerField[float | int | str | Combinable, int]" = (
@@ -654,7 +657,7 @@ class _IdxGenTagIndexed(models.Model):
 
     content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = models.ForeignKey(
         ContentType,
-        on_delete=models.CASCADE,
+        on_delete=models.DO_NOTHING,
         related_name="+",
     )
     object_id: "models.PositiveIntegerField[float | int | str | Combinable, int]" = (
@@ -683,7 +686,7 @@ class _IdxGenTagUnique(models.Model):
 
     content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = models.ForeignKey(
         ContentType,
-        on_delete=models.CASCADE,
+        on_delete=models.DO_NOTHING,
         related_name="+",
     )
     object_id: "models.PositiveIntegerField[float | int | str | Combinable, int]" = (
@@ -713,7 +716,7 @@ class _IdxGenTagTogether(models.Model):
 
     content_type: "models.ForeignKey[ContentType | Combinable, ContentType]" = models.ForeignKey(
         ContentType,
-        on_delete=models.CASCADE,
+        on_delete=models.DO_NOTHING,
         related_name="+",
     )
     object_id: "models.PositiveIntegerField[float | int | str | Combinable, int]" = (
