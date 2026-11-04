@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 416 done, 111 to do. The CHANGELOG entries filed here moved to
+Progress: 419 done, 109 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2537,6 +2537,36 @@ Progress: 416 done, 111 to do. The CHANGELOG entries filed here moved to
   `tests/filters/test_base.py::test_list_filter_field_cleans_each_element_with_its_element_field`; the live
   `examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::test_nested_array_members_are_cleaned_as_the_innermost_column`
   rows are unverified until the PostgreSQL tier runs them. spec-027 states it in all five homes. Filed 761 and 762
+- [x] 695. A save-time failure is diagnosed only from the save that raised it:
+  `utils/write_values.py::attempted_saves` records each backing-model save with the frame of the `Model.save_base`
+  call that sent its `pre_save` (`::_signal_sender_frame`, found by `Signal.send.__code__`), and `::refused_save`
+  picks the innermost recorded save on the traceback of the caught exception, of its explicit cause, or of the refusal
+  consumer code translated without `from` (raised in the handler's own frame, or a database error raised anywhere
+  other than Django's causeless `ProtectedError` / `RestrictedError`, `::_DJANGO_CAUSELESS_REFUSALS`, since Django
+  raises every other database error it translates `from` the driver's error). The serializer
+  (`rest_framework/resolvers.py::_attempted_row_integrity_errors`), ModelForm
+  (`forms/resolvers.py::_unstorable_cleaned_fields`, `form.instance` only) and model create
+  (`mutations/resolvers.py::_created_row_integrity_errors`, its own target only; the create now records through
+  `attempted_saves` and `::save_or_field_errors` passes the caught exception to `integrity_errors(exc)`) read that
+  row. A refused save the consumer swallowed, another model's or row's save, raw SQL, `QuerySet.update()`, a fallback
+  write or a collector-refused delete in the handler (directly or through a helper), or a row written without
+  `pre_save` answers the `"__all__"` `constraint` envelope; another model's `ValueError` propagates through the
+  ModelForm. Residue, documented in spec-036 / 038 / 039: on MySQL / Oracle a fallback failure re-raised inside the
+  row's handler reads as the row's `null`, as before; a non-database exception a helper raises over the refusal
+  without `from` is not followed. Pinned by `examples/fakeshop/test_query/test_save_time_refused_row_api.py` (97 rows,
+  48 failing at the parent),
+  `tests/utils/test_write_values.py::test_refused_save_follows_a_cause_or_the_handlers_reraise_never_another_frames_context`
+  and siblings, and the audited subclass set `::test_django_defines_exactly_the_audited_database_errors`; the
+  multi-table parent refusal by
+  `tests/mutations/test_resolvers.py::test_child_create_refused_at_its_parent_table_names_the_childs_null_column`.
+  PostgreSQL rows unverified until the PostgreSQL tier runs them. Bundles 707; filed 764
+- [x] 706. Not a defect (GOAL "Trust boundary", spec-038 Decision 8 step 5 "the refused save of the form's instance"):
+  a field-keyed error claims the client's input field, and only `form.instance` is established as built from it
+  (`ModelForm._post_clean`); a row a consumer `save()` builds and returns is the consumer's, so its refusal is the
+  envelope. `tests/forms/test_resolvers.py::test_modelform_save_time_null_is_read_from_the_refused_row_only` pins it.
+  No code
+- [x] 707. One rule: `utils/write_values.py::refused_save` is the row picker every flavor calls; each keeps its spec's
+  row scope (model target, `form.instance`, any serializer backing-model row). Landed with 695
 
 ## Outside review of the fixes
 
@@ -2598,12 +2628,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   "preserved" while the docs also say the form revalidates the full merged set, and 554 ruled a shape-disagreeing
   field's re-clean is written (Waiting 623; Waiting 262 is the `NULL` text slice), so decide whether the rules
   settle "preserved" or the choice goes to Waiting beside 623; fix 711 in the same change if it lands
-- [ ] 695. (robustness) A refused save the consumer swallows before a different `IntegrityError` escapes is still
-  diagnosed as the swallowed row's `null` (serializer `_attempted_row_integrity_errors` reads `attempted[-1]`; model
-  `_created_row_integrity_errors` reads the create target; ModelForm `_modelform_save_or_field_errors` reads
-  `form.instance`): Django sends no signal for a failed save, so telling the escaping save apart needs the exception
-  passed to `mutations/resolvers.py::save_or_field_errors` and a seam naming the row whose save raised. Design call;
-  the ModelForm half waits on `forms/resolvers.py`. Found fact-finding 668
 - [ ] 703. Ordinal citations outside 679's files: `optimizer/nested_planner.py` "(Decision 6 / DoD-4 "no
   planned_resolver_keys entry")" (spec-less Decision, DoD ordinal), `orders/sets.py`'s module docstring and one more
   docstring "spec-028 DoD 4(c)", `_cross_web_patches.py` "gap (1)" / "Gap (2)" (the sibling of 679's
@@ -2617,13 +2641,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   error envelope) describes the save-time `null` mapping for a `blank=True, null=False` column only; 574 extends it
   to a `blank=False` column behind a `required=False` consumer form field. Widen both entries in the DB source and
   re-render. Found verifying 574
-- [ ] 706. (robustness) A consumer `ModelForm.save()` override that saves and returns an instance other than
-  `form.instance` leaves no attempted-save record for `form.instance`, so a refused write of the returned row answers
-  the constraint envelope where its `None` column's `null` error applies: key the save-time diagnosis
-  (`forms/resolvers.py::_unstorable_cleaned_fields`) by the row the save attempted. Found verifying 696
-- [ ] 707. The two flavors pick the refused row by different rules: `rest_framework/resolvers.py` reads
-  `attempted[-1]` whichever row it is, `forms/resolvers.py::_unstorable_cleaned_fields` the latest attempt of
-  `form.instance`; give `utils/write_values.py` one rule both call. Found verifying 696
 - [ ] 708. (robustness) A declared filter whose own form cannot clean a value of the column it compares, with no
   transform between them (`django_filters.TimeFilter(field_name="occurred_at")` on a `DateTimeField`), is published
   typed by the column (`exact: DateTime`) and answers every value with the masked error (`AttributeError` from
@@ -2866,6 +2883,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `apply_sync` JSON `where`, or raw form data) raises an unmasked `TypeError` ("Field 'igrid' expected a number") from
   `.qs` and `apply_sync` instead of a field-keyed `FILTER_INVALID`; the same at the parent of 692. PostgreSQL refuses
   ragged arrays anyway. Found verifying 692
+- [ ] 764. (robustness) `utils/write_values.py::attempted_saves` connects `sender=model` exactly, so a serializer
+  `create()` / `update()` saving a proxy or subclass row of the backing model leaves no record and a refused save of
+  it answers the envelope where its `None` column's `null` applies (spec-039 Decision 8). Envelope at the parent and
+  after 695. Found researching 695
 
 ## To do: holes found re-checking the fixes
 

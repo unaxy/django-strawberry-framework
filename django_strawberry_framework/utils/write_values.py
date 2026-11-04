@@ -25,20 +25,28 @@ runs at decode time:
   declared columns holding a value the column cannot store (``None`` on a
   ``null=False`` column), read from the in-memory instance after a failed save;
 - ``attempted_saves`` - the thread-scoped ``pre_save`` / ``post_save`` record of the
-  saves that started and have not completed, each with its ``update_fields``: the
-  row a refused save leaves and the columns it wrote, which that diagnosis reads.
+  saves that started and have not completed, each with its ``update_fields`` and the
+  call that sent its ``pre_save``;
+- ``refused_save`` - the one rule every flavor reads that record by: the innermost
+  recorded save the caught exception (or the refusal it was raised from, or re-raised
+  by that refusal's handler) propagated out of, the row that diagnosis reads and the
+  columns its save wrote.
 """
 
 from __future__ import annotations
 
+import inspect
 import threading
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from django.db import Error as DatabaseError
+from django.db.models.deletion import ProtectedError, RestrictedError
 from django.db.models.fields import Field
 from django.db.models.signals import post_save, pre_save
+from django.dispatch import Signal
 from strawberry import relay
 
 from django_strawberry_framework.registry import registry
@@ -74,6 +82,7 @@ from .typing import strawberry_schema_from_info
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, Generator
+    from types import FrameType
     from typing import TypeAlias
 
     from django.db import models
@@ -92,8 +101,9 @@ if TYPE_CHECKING:
     _RelationDecoder: TypeAlias = Callable[..., tuple[object, FieldError | None]]
     #: Any model field, its set and get types unread.
     _FieldAny: TypeAlias = Field[object, object]
-    #: One ``attempted_saves`` record: (instance, the save's ``update_fields``).
-    AttemptedSave: TypeAlias = tuple[models.Model, frozenset[str] | None]
+    #: One ``attempted_saves`` record: (instance, the save's ``update_fields``, the frame
+    #: of the call that sent its ``pre_save``).
+    AttemptedSave: TypeAlias = tuple[models.Model, frozenset[str] | None, FrameType | None]
 else:
     # ``Field`` has no ``__class_getitem__`` at runtime: the hint stays the class.
     _FieldAny = Field
@@ -793,19 +803,45 @@ def unstorable_columns(
     return columns
 
 
+# The code of the dispatch every ``pre_save`` receiver runs under: the frame above it
+# is the save call that sent the signal.
+_SIGNAL_SEND_CODE = Signal.send.__code__
+
+
+def _signal_sender_frame() -> FrameType | None:
+    """Return the frame of the call that sent the signal this receiver is running under.
+
+    Django calls a synchronous receiver from inside ``Signal.send`` ("signals are sent
+    synchronously"), so the frame above the innermost ``Signal.send`` on the stack is
+    the call that sent the signal: for ``pre_save``, the save's ``Model.save_base``, below
+    any consumer ``save()`` override. That ``pre_save`` is sent from the frame that then
+    writes the row is observed upstream behaviour (Django 5.2.16 through 6.1.2), not a
+    documented one; a release that moved the send would leave the record unpaired, the
+    envelope, never a wrong row. A receiver another receiver wrapper calls (an APM
+    integration) adds frames below ``Signal.send``, never above it; no ``Signal.send``
+    frame at all leaves the record without a sender, paired with nothing.
+    """
+    frame = inspect.currentframe()
+    while frame is not None and frame.f_code is not _SIGNAL_SEND_CODE:
+        frame = frame.f_back
+    return None if frame is None else frame.f_back
+
+
 @contextmanager
 def attempted_saves(model: type[models.Model]) -> Generator[list[AttemptedSave], None, None]:
     """Record the saves of ``model`` rows that start on this thread and do not complete.
 
-    The yielded list holds one ``(instance, update_fields)`` record per save whose
+    The yielded list holds one ``(instance, update_fields, sender)`` record per save whose
     ``pre_save`` fired, with that save's ``update_fields`` (``None`` for a save of every
-    column); its ``post_save`` takes the record back out, by identity, never ``==`` (two
-    saved instances of one row compare equal). Django sends no signal for a failed save,
-    so after a refused write the list's records are the rows whose save the database
-    refused and the columns each wrote: the input ``unstorable_columns`` reads after the
-    failure. ``pre_save`` and ``post_save`` are global signals, so a save on another
-    thread (a concurrent request) is never recorded. ``model`` is the signals' sender,
-    the class of the instance saved.
+    column) and ``sender``, the frame of the save call that sent the signal
+    (``_signal_sender_frame``);
+    its ``post_save`` takes the record back out, by identity, never ``==`` (two saved
+    instances of one row compare equal). Django sends no signal for a failed save, so a
+    refused save's record stays, a save the consumer caught and swallowed among them:
+    ``refused_save`` names the one a given exception propagated out of. ``pre_save`` and
+    ``post_save`` are global signals, so a save on another thread (a concurrent request)
+    is never recorded. ``model`` is the signals' sender, the class of the instance saved.
+    The records are dropped when the block exits, so no frame outlives it.
     """
     owner = threading.get_ident()
     attempted: list[AttemptedSave] = []
@@ -819,7 +855,7 @@ def attempted_saves(model: type[models.Model]) -> Generator[list[AttemptedSave],
     ) -> None:
         del sender, kwargs
         if threading.get_ident() == owner:
-            attempted.append((instance, update_fields))
+            attempted.append((instance, update_fields, _signal_sender_frame()))
 
     def _complete(sender: object, instance: models.Model, **kwargs: object) -> None:
         del sender, kwargs
@@ -837,3 +873,95 @@ def attempted_saves(model: type[models.Model]) -> Generator[list[AttemptedSave],
     finally:
         _ = post_save.disconnect(_complete, sender=model)
         _ = pre_save.disconnect(_attempt, sender=model)
+        attempted.clear()
+
+
+# The database errors Django raises itself with no cause, a delete the collector refuses
+# (``django/db/models/deletion.py``): read as a fallback's own failure, never as a
+# translation. Audited on Django 5.2.16 and 6.1.2 (the same set on both): the causeless
+# ``raise`` of a ``django.db.Error`` subclass a write flavor catches (``IntegrityError``,
+# ``DataError``) outside the backends' cursor wrappers, which re-raise over the driver's
+# error, and ``DatabaseWrapper.check_constraints``, which no write calls (6.1.2's
+# causeless ``Model.NotUpdated`` is a ``DatabaseError`` no flavor catches).
+# ``tests/utils/test_write_values.py::test_django_defines_exactly_the_audited_database_errors``
+# fails on a release that adds a ``django.db.Error`` subclass.
+_DJANGO_CAUSELESS_REFUSALS = (ProtectedError, RestrictedError)
+
+
+def _on_traceback(frame: FrameType | None, error: BaseException) -> bool:
+    """Return whether ``frame`` is one of the frames ``error``'s traceback passes through."""
+    trace = error.__traceback__
+    while trace is not None:
+        if trace.tb_frame is frame:
+            return True
+        trace = trace.tb_next
+    return False
+
+
+def refused_save(
+    attempted: list[AttemptedSave],
+    error: BaseException,
+) -> tuple[models.Model, frozenset[str] | None] | None:
+    """Return the row and ``update_fields`` of the recorded save ``error`` came out of.
+
+    ``attempted`` is an ``attempted_saves`` record and ``error`` the exception a write
+    flavor caught around the save. The refused save is the innermost recorded save whose
+    save call ``error`` propagated out of: its sending frame is on ``error``'s traceback, or
+    on the traceback of an exception ``error`` stands for. ``error`` stands for its explicit
+    cause (``raise ... from``) and, with none, for the exception it was raised while
+    handling (``raise`` without ``from``, or ``from None``) when consumer code raised it
+    over that exception: either it was raised in a frame that exception passed through (the
+    handler itself), or it is a database error (``django.db.Error``) other than Django's own
+    causeless refusals, which consumer code raised wherever it was raised (a helper the
+    handler calls, a class context manager's ``__exit__``). Django raises every database
+    error it translates ``from`` the driver's error (``DatabaseErrorWrapper.__exit__``);
+    among the errors a write flavor catches, its own causeless raisers are its delete
+    refusals (``ProtectedError``, ``RestrictedError``, ``_DJANGO_CAUSELESS_REFUSALS``,
+    excluded) and the MySQL / Oracle cursor wrappers, which raise inside the driver error's
+    handler, so the walk follows them to the driver error and stops. So a consumer
+    translating the row's own refusal keeps it, while a fallback write or delete Django
+    refused inside the handler, directly or through a helper, does not stand for it; a
+    release that stopped chaining the driver's cause would read a fallback's failure as the
+    row's, which the live fallback rows pin. On MySQL / Oracle, a fallback's failure
+    consumer code re-raises inside the row's handler (``raise err``, ``async_to_sync``) has
+    the row's refusal as its context and reads as the row's; no fail-closed separation
+    exists without backend frame names or argument matching. A database error consumer code
+    raises over the refusal for its own reason (``IntegrityError("taken")`` after its own
+    check) cannot be told from a translation and reads as the row's. A non-database
+    exception raised over the refusal outside the handler's frame without ``from`` is not
+    followed; ``raise ... from`` names it. A save that failed and was caught, a save that
+    completed, and a write that sends no ``pre_save`` (``bulk_create``,
+    ``QuerySet.update()``, raw SQL, another model's save) are on no such traceback, so a
+    failure they did not raise is never pinned on them; ``None`` when no recorded save
+    raised ``error``.
+    """
+    frames: set[FrameType] = set()
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        trace = cause.__traceback__
+        raised_in: FrameType | None = None
+        while trace is not None:
+            frames.add(trace.tb_frame)
+            raised_in = trace.tb_frame
+            trace = trace.tb_next
+        context = cause.__context__
+        if (
+            cause.__cause__ is None
+            and context is not None
+            and (
+                (
+                    isinstance(cause, DatabaseError)
+                    and not isinstance(cause, _DJANGO_CAUSELESS_REFUSALS)
+                )
+                or _on_traceback(raised_in, context)
+            )
+        ):
+            cause = context
+        else:
+            cause = cause.__cause__
+    for instance, update_fields, sender in reversed(attempted):
+        if sender in frames:
+            return instance, update_fields
+    return None

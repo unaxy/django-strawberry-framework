@@ -2068,9 +2068,23 @@ The pipeline steps:
    loud rather than looping.
 6. **Write** via `serializer.save()`, **wrapped by the `036` `IntegrityError` → envelope
    mapper** (`utils/errors.py::integrity_error_field_errors` — no top-level error on a
-   save-time race; a refusal over a `blank=True, null=False` input column the attempted
-   row holds `None` on and the refused save writes (no `update_fields`, or the column
-   named there by field name or `attname`), left out of a generated `required=False`
+   save-time race; a refusal over a `blank=True, null=False` input column the refused
+   backing-model row holds `None` on and its save writes (no `update_fields`, or the column
+   named there by field name or `attname`; the refused save is the recorded save the
+   caught exception propagated out of, or out of its explicit `raise ... from` cause or
+   the refusal consumer code raised it over without `from` (or `from None`): in the
+   handler's own frame, or, for a database error, anywhere (a helper, a class context
+   manager's `__exit__`), since Django raises every database error it translates `from`
+   the driver's error; among the errors a write flavor catches, its own causeless raisers
+   are its delete refusals (`ProtectedError`, `RestrictedError`, read as a fallback's own
+   failure) and the MySQL / Oracle cursor wrappers, which raise inside the driver error's
+   handler (the walk stops at the driver error). So a helper's `IntegrityError("taken")`
+   after its own check reads as the row's refusal, and on MySQL / Oracle a fallback's
+   failure consumer code re-raises inside the row's handler (`raise err`,
+   `async_to_sync`) does too, as at the parent; a non-database exception raised
+   outside the handler's frame without `from` is not followed. The innermost such save
+   wins when saves nest,
+   `django_strawberry_framework/utils/write_values.py::refused_save`), left out of a generated `required=False`
    field or sent `null` through a declared `allow_null=True` field, is that column's
    field-keyed `null` error, as in the model and `ModelForm` flavors:
    `django_strawberry_framework/rest_framework/resolvers.py::_attempted_row_integrity_errors`); `serializer.save()` runs `create()` / `update()` and handles M2M
@@ -2894,10 +2908,16 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   `GraphQLError`. One the database raises over a `blank=True, null=False` column with no
   default (a generated `required=False` field left out, a declared `allow_null=True`
   field sent `null`) is that column's field-keyed `null` error instead, read from the
-  backing-model row the write witness saw attempted on the request's own thread; a
-  `create()` / `update()` that raises without saving a backing-model row, or a refused
-  save whose `update_fields` leaves the `None` column out, stays the `"__all__"`
-  envelope.
+  backing-model row the write witness saw attempted on the request's own thread whose
+  save raised the caught exception; a `create()` / `update()` that raises without saving
+  a backing-model row, one whose failing write is another model's, raw SQL or
+  `QuerySet.update()` (after a refused backing-model save it swallowed or not, or while
+  handling one), or a refused save whose `update_fields` leaves the `None` column out,
+  stays the `"__all__"` envelope, a fallback refused through a helper the handler calls
+  and a delete the collector refuses in the handler (`ProtectedError`,
+  `RestrictedError`) included; an exception consumer code raises over the row's own
+  refusal (`from` it, or without `from` / `from None` in the handler, or a database error
+  from a helper or a class `__exit__`) keeps that column's `null`.
 - **Write-time disappearing row.** An update whose located row a concurrent transaction
   deleted after the locate (reachable under `Meta.select_for_update = False` or on a
   backend without `FOR UPDATE`) is re-inserted by DRF's update-else-insert save; the
@@ -3093,7 +3113,13 @@ same transport, different app.
   A `createItemHoldViaSerializer` leaving `itemId` out or sending it `null`
   (`::test_create_item_hold_null_item_is_a_field_error`, the omission also over
   `/graphql-async/`) answers the `itemId` `null` error the model and `ModelForm`
-  flavors answer, with no row written.
+  flavors answer, with no row written; a `create()` / `update()` that swallows the row's
+  refused save, or fails another write (directly, through a helper, or a delete the
+  collector refuses), answers the
+  envelope, one that raises over the row's refusal (`from` it, without `from` or `from
+  None` in the handler, a helper or a class `__exit__`) keeps its `null`, and a second
+  hold refused inside the write is named by its own `itemId`
+  ([`test_save_time_refused_row_api.py`][test-save-time-refused-row-api]).
 - **Package-internal** ([`tests/rest_framework/`][test-rest-framework]):
   - `tests/rest_framework/test_resolvers.py::test_serializer_write_refuses_a_decimal_past_postgresql_numeric`
     — on an alias that reads as PostgreSQL and refuses what `numeric` refuses
@@ -3228,7 +3254,9 @@ same transport, different app.
     under `update_fields` by field name or `attname`; a model `save()` filling the value in
     writes, and a `create()` raising before any row save, another thread's attempted row,
     or a `None` column outside the refused save's `update_fields` stays the `"__all__"`
-    envelope);
+    envelope; the row read is the one whose save raised, found by the call that sent its
+    `pre_save` under a receiver-wrapping integration too:
+    `tests/utils/test_write_values.py::test_a_refused_save_is_found_under_a_receiver_wrapping_integration`);
     **the value-preserving save** — `serializer.save()` is called **exactly once** (a
     save spy) and the re-fetch uses the returned object (not a second save, not a stale
     `serializer.instance`); **`get_serializer_kwargs` precedence** — an override that
@@ -4073,6 +4101,7 @@ re-keying / opt-in-gated-fingerprint branches are package-tested.
 [test-library-inheritance-api]: ../../examples/fakeshop/test_query/test_library_inheritance_api.py
 [test-products-api]: ../../examples/fakeshop/test_query/test_products_api.py
 [test-query-readme]: ../../examples/fakeshop/test_query/README.md
+[test-save-time-refused-row-api]: ../../examples/fakeshop/test_query/test_save_time_refused_row_api.py
 [test-uploads-api]: ../../examples/fakeshop/test_query/test_uploads_api.py
 
 <!-- scripts/ -->

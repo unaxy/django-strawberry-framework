@@ -263,6 +263,7 @@ from django_strawberry_framework.utils.write_values import (
     decode_provided_fields,
     decode_visible_relation,
     materialize_relation_id_container,
+    refused_save,
     unstorable_columns,
 )
 from django_strawberry_framework.write_mixins import backing_model_of
@@ -1495,18 +1496,21 @@ def _holds_own_cleaning(
 def _unstorable_cleaned_fields(
     form: _ModelFormAny,
     attempted: list[AttemptedSave],
+    error: BaseException,
 ) -> list[_FieldAny]:
     """Return the columns the refused save of ``form.instance`` wrote and cannot store.
 
     ``attempted`` is the ``utils/write_values.py::attempted_saves`` record of the saves
-    that started and did not complete; the latest one of ``form.instance`` is the refused
-    save. Only a column that save writes counts: a save with ``update_fields`` (a model
-    ``save()`` narrowing its write, or a deferred-load row's loaded fields) leaves every
-    column outside it untouched, so its value cannot be what the database refused, and it
-    is never read (a deferred column is never loaded). No such record (a consumer
-    ``save()`` that raised before saving the row, a failure after its save completed, or a
-    write that sends no ``pre_save``: ``bulk_create``, ``QuerySet.update()``) names no
-    column.
+    that started and did not complete, and ``error`` the caught exception; the refused
+    save is the recorded save that raised it (``utils/write_values.py::refused_save``),
+    read only when it is a save of ``form.instance``. Only a column that save writes
+    counts: a save with ``update_fields`` (a model ``save()`` narrowing its write, or a
+    deferred-load row's loaded fields) leaves every column outside it untouched, so its
+    value cannot be what the database refused, and it is never read (a deferred column is
+    never loaded). No such record (a consumer ``save()`` that raised before saving the
+    row, a failure after its save completed, a refused save of the row the consumer caught
+    before another write raised, a save of another row, or a write that sends no
+    ``pre_save``: ``bulk_create``, ``QuerySet.update()``) names no column.
 
     Reads the instance the save was attempted on, never the database, so it is safe
     after a failed write left the transaction unusable. An optional form field cleans an
@@ -1539,16 +1543,15 @@ def _unstorable_cleaned_fields(
     the ``None`` rule are the model flavor's too (``utils/write_values.py::unstorable_columns``);
     the ``""`` rule is this flavor's, since only a form field cleans to it.
     """
-    instance = form.instance
-    for row, update_fields in reversed(attempted):
-        if row is instance:
-            return unstorable_columns(
-                instance,
-                form.fields,
-                also=_is_unstorable_blank,
-                update_fields=update_fields,
-            )
-    return []
+    refused = refused_save(attempted, error)
+    if refused is None or refused[0] is not form.instance:
+        return []
+    return unstorable_columns(
+        form.instance,
+        form.fields,
+        also=_is_unstorable_blank,
+        update_fields=refused[1],
+    )
 
 
 # ``django.contrib.postgres.fields.HStoreField``, or ``None`` without a PostgreSQL driver
@@ -1787,9 +1790,10 @@ def _modelform_save_or_field_errors(
     field's ``empty_value``) by PostgreSQL with a ``DataError``. The exception is the
     trigger, never the diagnosis: the failure is re-raised as that column's
     field-keyed ``ValidationError`` only when
-    ``_unstorable_cleaned_fields`` finds such a column on the instance the save was
-    attempted on, among the columns that refused save writes (its ``update_fields``,
-    recorded at ``pre_save`` by ``utils/write_values.py::attempted_saves``), so the
+    ``_unstorable_cleaned_fields`` finds such a column on ``form.instance`` when its own
+    save raised the exception (``utils/write_values.py::refused_save``), among the
+    columns that save writes (its ``update_fields``, recorded at ``pre_save`` by
+    ``utils/write_values.py::attempted_saves``), so the
     error carries the field, code ``null``, path and message the model flavor gives the
     same input (``mutations/resolvers.py::_explicit_null_error`` for an explicit
     ``null`` scalar, ``mutations/resolvers.py::_decode_single_relation_id``
@@ -1800,9 +1804,11 @@ def _modelform_save_or_field_errors(
     the ``IntegrityError`` / ``DataError`` left unusable; the shared mapper's envelope
     then rolls the pipeline transaction back (an update's failed save is already
     contained in ``forced_save_or_field_errors``'s savepoint). An ``IntegrityError`` no
-    such column explains reaches the shared mapper unchanged (the ``"__all__"``
-    envelope), such a ``ValueError`` or ``DataError`` propagates unchanged, and any
-    other ``ValidationError`` is the consumer's own and maps as raised. Checking the
+    such column explains (among them a refused save of ``form.instance`` the consumer
+    caught before another write raised, and a failure of another row's save) reaches
+    the shared mapper unchanged (the ``"__all__"`` envelope), such a ``ValueError`` or
+    ``DataError`` propagates unchanged, and any other ``ValidationError`` is the
+    consumer's own and maps as raised. Checking the
     instance AFTER the save attempt, not before, keeps Django's own ``blank=True,
     null=False`` contract (django-trac 13776 / 20205): a consumer ``save()`` that fills
     the value in never sees the guard.
@@ -1824,8 +1830,8 @@ def _modelform_save_or_field_errors(
                 DataError,
                 ValueError,
                 ValidationError,
-            ):
-                unstorable_fields = _unstorable_cleaned_fields(form, attempted)
+            ) as exc:
+                unstorable_fields = _unstorable_cleaned_fields(form, attempted, exc)
                 if not unstorable_fields:
                     raise
                 raise ValidationError(_column_null_errors(unstorable_fields)) from None
