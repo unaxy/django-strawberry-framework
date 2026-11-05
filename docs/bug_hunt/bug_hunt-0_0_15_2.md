@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 427 done, 109 to do. The CHANGELOG entries filed here moved to
+Progress: 428 done, 108 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1675,6 +1675,8 @@ Progress: 427 done, 109 to do. The CHANGELOG entries filed here moved to
   (`_LeafDeclaration.filterset`). 418 grid cells refused (411 failing every value, 7 matching every row); every
   working, partial and warning cell builds. Package rows in `tests/filters/test_inputs.py`; spec-027, README, GLOSSARY
   `FilterSet`. PostgreSQL columns unrun locally. Filed 770, 771, 772, 774
+- [x] 733. A declared filter publishing a value kind its own form refuses for every value: duplicate of 770 (the
+  `NumberFilter(lookup_expr="isnull")` half) and 772 (the `AllValuesMultipleFilter(lookup_expr="year")` half)
 - [x] 709. fixed: a `FilterSet` a connection serves (a root `DjangoConnectionField`, a nested `<relation>Connection`,
   and every set reached through a `RelatedFilter` branch the set's published filter table still holds or a flat copy
   the schema publishes, each judged on itself) is refused with `ConfigurationError` when the schema is built if a
@@ -1737,21 +1739,22 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `LooseOccurredAtRangeInputType` with `String` axes), but any value sent to it answers a masked `ConfigurationError`
   "'span' is not a filter input field; it would apply nothing": the build accepts what every request refuses.
   Found verifying 624
-- [ ] 719. (robustness) A `DjangoModelFormMutation` update omitting a `disabled` `DateTimeField` over a stored
+- [ ] 719. A `DjangoModelFormMutation` update omitting a `disabled` `DateTimeField` over a stored
   datetime with microseconds writes it with the microseconds dropped: `BaseForm.get_initial_for_field` strips them,
   so the field's initial is not the stored value and 524's restore does not apply; spec-038 Decision 8 says omitted
   scalars are preserved. Found verifying 524
-- [ ] 720. A `DjangoModelFormMutation` whose consumer `forms.CharField` sits over a `JSONField` writes a `payload` the
-  client sends as its Python `str()` (`{"a": 1}` stored as `"{'a': 1}"`): the field cleans the decoded value as
-  text. Split from 711 (its omitted half closed with 524); fact finding owes what the form's published input type
-  is and whether the write is the consumer form's own choice
+- [ ] 720. (robustness) A `DjangoModelFormMutation` whose consumer `forms.CharField` sits over a `JSONField` writes a
+  `payload` the client sends as its Python `str()` (`{"a": 1}` stored as `"{'a': 1}"`): the field cleans the decoded
+  value as text. Split from 711 (its omitted half closed with 524); fact finding owes what the form's published input
+  type is and whether the write is the consumer form's own choice
 - [ ] 721. (robustness) A declared `ListFilter` / `ArrayFilter` whose `lookup_expr` continues across a relation
   (`ListFilter(field_name="holders", lookup_expr="year__in")`, `lookup_expr="pk__in"` / `"id__in"` over a relation)
   or whose `field_name` is a `FilteredRelation` alias leaves its elements uncleaned, so `?f=x` under
   `DjangoFilterBackend` / `FilterSet(data=...)` answers Django's `ValueError`, a 500. Typing question for the fix:
   clean and type the element as the crossed column (`holders__year`'s `IntegerField`, the target pk for `pk__in`),
   resolving `_bound_value_field` through the crossing walk (and the queryset for an alias) instead of answering the
-  relation. Found fixing 527
+  relation. The crossing half shares 749's root (read `utils/querysets.py::split_lookup`'s joined path, rebinding
+  `field_name` and the lookup tail); the `FilteredRelation` alias half is its own. Found fixing 527
 - [ ] 724. (robustness) A `ListFilter` / `ArrayFilter` `in` over a `DurationField` binds a member past the backend's
   range raw: `?f=999999999 00:00:00` under `DjangoFilterBackend` / `FilterSet(data=...)` raises `OverflowError`
   ("Python int too large to convert to SQLite INTEGER"), a 500, where an integer column's `in` drops a member
@@ -1762,10 +1765,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   the database refuses when `USE_TZ = False` (SQLite's adapter `ValueError`, which 681's `OverflowError` seam does not
   catch); the `OverflowError` cells on SQLite closed with 681. Shared with 381's temporal preflight. Found fixing 530
 - [ ] 726. (robustness) On SQLite a bounded `DecimalField` (`max_digits` set) holding a value SQLite stores as an
-  infinity (a lax serializer field's value, or `1E+309` in `DecimalField(max_digits=400, decimal_places=0)`) is
-  written, then the post-write re-fetch raises `decimal.InvalidOperation` from the converter's `quantize`: a masked
-  top-level error and a rolled-back write where README "Writing data" says a value the database cannot store is
-  refused before the write. A column with no `max_digits` reads the same row back as `Infinity`. Found fixing 530
+  infinity (`1E+309` in `DecimalField(max_digits=400, decimal_places=0)`) is written, then the post-write re-fetch
+  raises `decimal.InvalidOperation` from the converter's `quantize`: a masked top-level error and a rolled-back write.
+  README "Writing data" says SQLite refuses none and documents only that a column with no `max_digits` reads the
+  infinity back as `Infinity`. A lax serializer field over the column is Waiting 727. Found fixing 530
 - [ ] 729. spec-027's `apply_async` paragraph says a "present-but-empty nested branch" constrains nothing, but a
   present branch is active whatever its inner value (`utils/permissions.py::active_related_branches`), so
   `{shelves: {}}` keeps only the parents with a visible, admitted shelf (`_restrict_through_branch`) and
@@ -1779,30 +1782,27 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `types/converters.py::scalar_for_field`'s DjangoType advice ("Unsupported Django field type 'ForeignKey' ... Add an
   entry to SCALAR_MAP or exclude this field via Meta.exclude"), which names no FilterSet remedy, though django-filter
   serves a forward key and the package types relation keys for its raw-pk filters
-  (`filters/base.py::_compared_columns`). Related: 375, 722. Found researching 537
-- [ ] 733. (robustness) A declared filter can publish a value kind its own form refuses for every value:
-  `NumberFilter(field_name=<decimal column>, lookup_expr="isnull")` publishes `Boolean` and answers `true` / `false`
-  with `FILTER_INVALID` "Enter a number." (plain django-filter refuses `"true"` too and raises `ValueError` for
-  `"1"`), and a plain `AllValuesMultipleFilter(lookup_expr="year")` publishes the transform's `[Int!]` while its
-  choices are the column's dates (`invalid_choice` for every year). The build-time analogue of 538. Found verifying
-  537
+  (`filters/base.py::_compared_columns`). The fix owed is the advice; serving a relation key through these classes
+  reverses 375 and is Waiting 722's decision. Found researching 537
 - [ ] 734. A plain `AllValuesMultipleFilter(field_name="code")` on a `RelatedFilter` child set (Shelf under Book),
   served flat on the parent (`shelfPick`), answers an uncoded "Cannot resolve keyword 'code' into field", while the
-  nested branch and the same declaration with `method=` both work. Found verifying 537
+  nested branch and the same declaration with `method=` both work; docs/README.md's filter section serves flat copies
+  of a child filter on the parent. Found verifying 537
 - [ ] 735. (robustness) `DateRangeFilter` inside django-filter's CSV `in` wrapper (`BaseInFilter` + `DateRangeFilter`,
   declared, or the `ConcreteInFilter` django-filter generates for `Meta.fields={col: ["in"]}` under
   `Meta.filter_overrides={models.DateField: {"filter_class": DateRangeFilter}}`) on a column without `choices` builds
   through the CSV arm as `[Date!]` / `[DateTime!]` / `[String!]`, and every value answers a coercion error,
   `invalid_choice` or a masked `TypeError` (django-filter's `DateRangeFilter.filter` tests `value in self.filters`
-  with the list; plain django-filter raises the same). On a choice column 538's refusal covers it. Found researching
-  538
+  with the list; plain django-filter raises the same). The declared `BaseInFilter` + `DateRangeFilter` half runs as
+  plain django-filter runs it (516); the package's half is the `Meta.filter_overrides` one. On a choice column 538's
+  refusal covers it. Found researching 538
 - [ ] 738. (robustness) `TypedChoiceFilter` / `TypedMultipleChoiceFilter(choices=SimpleLazyObject(fn))` is evaluated
   at schema build: `filters/inputs.py::_refuse_widget_reading_other_keys` builds the unbound form field
   (`_declared_form_field`), whose `TypedChoiceField.__init__` runs `normalize_choices` and forces the lazy object, so
   choices reading the database query it while the schema is built ("Database access not allowed" before `migrate`); a
   `lazy()` promise and the same object on `ChoiceFilter` / `MultipleChoiceFilter` are not evaluated. Found verifying
   538
-- [ ] 739. spec-027 Decision 4's `FilterSet.get_fields` paragraph and `filters/sets.py::_lookups_for_field` say a
+- [ ] 739. spec-027 Decision 3's `FilterSet.get_fields` paragraph and `filters/sets.py::_lookups_for_field` say a
   column made filterable through `Meta.filter_overrides` ("a `JSONField`, a `FileField`, an `ArrayField`") keeps the
   whole lookup set "since its filter class owns the lookups it accepts", but `Meta.filter_overrides={ArrayField:
   {"filter_class": ArrayFilter}}` with `Meta.fields={<col>: "__all__"}` (or the list form's generated lookups beyond
@@ -1810,24 +1810,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `ArrayFilter(lookup_expr="isnull")` is refused with advice naming the four list lookups where a `BooleanFilter` is
   the spelling that builds. No schema-build row pins `contains` / `contained_by` / `overlap` or the
   `Meta.filter_overrides` route. Found fact-finding 656
-- [ ] 740. `ArrayFilter(field_name="ints", lookup_expr="len")`, `ArrayFilter(field_name="ints__len")` and
-  `ArrayFilter(field_name="ints__0")` over an `ArrayField(IntegerField())` build and publish `[Int!]`, though the
-  transform's output is one integer; applying `[2]` raises a masked `TypeError` ("Field 'ints' expected a number but
-  got [Decimal('1')]", `filters/base.py`) and a scalar value is refused by
-  `filters/inputs.py::_require_list_container`. `ListFilter(field_name="ints__len", lookup_expr="in")` serves. The
-  array-transform counterpart of 716. Found fact-finding 656
 - [ ] 741. A JSON request body holding an integer of 4301 or more digits anywhere (an unused variable, `extensions`)
   answers HTTP 500 HTML on `DjangoGraphQLView`, DEBUG on and off: CPython's int-digits `ValueError` out of
   `json.loads` escapes upstream's `except json.JSONDecodeError`, and `views.py::DjangoGraphQLView.parse_json` /
   `_strawberry_patches.py::_patched_parse_json` translate the `UnicodeDecodeError` / `RecursionError` siblings but not
   this one; the KANBAN row saying an oversized numeric literal is already refused and only its envelope is wrong does
-  not hold for this path. Found researching 673
-- [ ] 742. In production a literal validation error carrying a scalar's parse exception is masked as "An unexpected
-  error occurred.": graphql-core's `validate_input_literal` attaches the exception as `original_error`, which
-  `extensions/error_policy.py::_is_unexpected` reads as unexpected, contrary to its docstring and spec-048 Decision 8
-  (a parse, syntax or validation error is not masked). A `BigInt` literal `-1e50` / `1.5` / `NaN` and an `Int` literal
-  of 4301+ digits reach it (1,120 cells of 673's production grid; DEBUG shows "Expected value of type ..."). Found
-  researching 673
+  not hold for this path, and the fix corrects that row in the same change. Found researching 673
 - [ ] 743. (robustness) A raw-form driver (`FilterSet(data=...).qs`, `DjangoFilterBackend`, `FilterView`) never runs
   the bind ask (`filters/sets.py::_validate_form_or_raise` / `_unbindable_value_errors`), so a value the ask refuses
   as `FILTER_INVALID` over GraphQL escapes there as Django's or the driver's exception: a raw
@@ -1863,7 +1851,7 @@ tracker number are recorded there; open remainders and new defects are filed as 
   simple path: six sets each related to every other give about 11k flat keys per set, seven about 94k). The bound
   landed in `47dd4daa`; the maintainer ruled the per-declaration opt-out `RelatedFilter(flat=False)`. Plan:
   `docs/related-filter-flat-opt-out-plan.md` (v7, reviewed five rounds). Blocked on 745 and on 748 / 749, which land
-  first. Moved from Waiting on you
+  first. Tracked on BACKLOG.md `related_filter_flat_opt_out`, removed when this lands. Moved from Waiting on you
 - [ ] 749. A filter whose `lookup_expr` crosses a relation (`RelationPkMultipleFilter(field_name="shelf",
   lookup_expr="branch__in")`, `CharFilter(field_name="shelf", lookup_expr="branch__name")`, the shape
   `filters/base.py::_filterset_lookup_operand` documents) skips that hop's visibility and gates:
@@ -1912,14 +1900,16 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 757. Under `FAKESHOP_TEST_BOUND_SETS`, `node(id:)` for a type-strategy Relay secondary over Shelf
   (`BindingPlainShelfType:1`, `BindingHidingShelfType:1`) fails for a visible row, anonymous and staff, with "Abstract
   type 'Node' must resolve to an Object type at runtime for field 'Query.node'"; the Book secondaries resolve. Reported
-  by a probe, not yet reproduced on main. Found probing 748
+  by a probe, not yet reproduced on main; not a defect until reproduced through a public-API shape outside the
+  test-only override. Found probing 748
 - [ ] 68. A model's default manager hides rows from declared filter hops but not from undeclared filter hops or
   ordering. Answered 2026-11-03 from AGENTS and GOAL: a filtered default manager is not declared visibility (GOAL:
   visibility is a model rule or a type's `get_queryset`; a project manager is trusted code), and Django reads no
   manager across a join and `_base_manager` for related access (AGENTS: upstream is asked). So every hop seeds from
   the same rows Django's join reads, roots and writes keep `_default_manager`, and the GLOSSARY cascade line ("a
   registered proxy type whose filtered `_default_manager` IS its visibility policy") and the fakeshop `VisibleBranch`
-  docstring are corrected; a fixture that needs the policy declares a hook or rule. Moved from Waiting on you
+  docstring are corrected, and so is START.md's "Verified and rejected" `_branch_visibility_seed` row, which this
+  reverses; a fixture that needs the policy declares a hook or rule. Moved from Waiting on you
 - [ ] 758. (robustness) A declared bare-transform `RangeFilter` (`lookup_expr="year"` or `"date"` over a datetime
   column, whose lone bounds the live `bare-year-*` / `bare-date-*` rows pin) sent both bounds hands django-filter's
   `RangeFilter.filter` a `(start, stop)` tuple under the bare transform (`occurred_at__year=(a, b)`): raw form data
@@ -1932,17 +1922,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   nothing fails if a declared `date__in` / `date__range` over a datetime column goes back to cleaning as a
   `DateTimeField` (accepting `"2020-06-15T11:00:00Z"`, which the generated leaf and the published `Date` refuse, and
   keeping only the earlier rows for a lone end bound `"2020-06-15"`). Found regrading 684
-- [ ] 760. A declared `ListFilter(field_name="occurred_on__year", lookup_expr="in")` handed a fractional member
-  (`"2021.5"` through an `apply_sync` JSON `where`) truncates it and returns the 2021 rows, where the generated
-  `year__in` leaf drops it and returns none, as 685's outcome says an integer `in` does:
-  `filters/base.py::_integer_in_column` reads `_bound_model_field` (the `DateField`), so `ListFilter.filter`'s
-  fractional-drop branch never runs for a declared transform path. Reading `_bound_value_field` there instead fails
-  existing refusal rows in `test_scalar_predicate_binding_api.py` (past-int64 members, the `in-below-min` /
-  `in-above-max` bounds), so the fix needs its own ruling. Found verifying 688
-- [ ] 761. A fractional member of an integer `ArrayField` element has no contract: flat `["1.5"]` binds `int(1)`
-  (Django's `IntegerField.get_prep_value` truncates), nested `[["1.5"]]` and `[[1.5]]` bind `Decimal("1.5")`, which
-  PostgreSQL's numeric-to-integer cast rounds to 2 (a JSON `1.5` already reached that cast nested before 692). Against
-  685's drop rule for a fractional integer `in` member. Unwired `apply_sync` / raw form only. Found fixing 692
 - [ ] 762. (robustness) A ragged or over-deep member of an `in` over a nested `ArrayField` (`[[[1, [2]]]]` through an
   `apply_sync` JSON `where`, or raw form data) raises an unmasked `TypeError` ("Field 'igrid' expected a number") from
   `.qs` and `apply_sync` instead of a field-keyed `FILTER_INVALID`; the same at the parent of 692. PostgreSQL refuses
@@ -1952,12 +1931,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
   it answers the envelope where its `None` column's `null` applies (spec-039 Decision 8). Envelope at the parent and
   after 695. Found researching 695
 - [ ] 766. `Decision N step M` sub-ordinals in first-party prose are ungated: 53 sites plus one `spec-NNN step M`, 52
-  resolving (703 fixed the dangling spec-039 Decision 7 step 4 and the Decision-less spec-036 step). Root-cause
-  choice: extend `scripts/check_citations.py` to resolve `spec-NNN Decision N step M` against the Decision's numbered
-  steps, or restate each by content. Found fixing 703
+  resolving (703 fixed the dangling spec-039 Decision 7 step 4 and the Decision-less spec-036 step). Root-cause fix:
+  restate each by content and refuse `Decision N step M` in the citation gate, amending START.md's "a Decision's step
+  ... judged by hand" in the same change; resolving step ordinals in `scripts/check_citations.py` would make them a
+  second gated ordinal against START.md's "Cite contract by CONTENT, never ordinal". Found fixing 703
 - [ ] 767. spec-040's Helper-reuse labels in first-party prose: `spec-040 D<N>` 26 sites, bare `D<N>` 17, `P<N>` 2
   (mainly `auth/mutations.py`, `mutations/resolvers.py`, `mutations/fields.py`, `mutations/inputs.py`); a plan-label
-  family (565's class): name the behaviour, or widen the plan-label row. Found fixing 703
+  family (565's class): name the behaviour and widen the plan-label row (START.md "Rule w/o gate rots"). Found
+  fixing 703
 - [ ] 768. (robustness) A `DjangoModelFormMutation` create omitting a column with a `db_default` writes `NULL`
   through Django's own form field (and a checkbox over a `BooleanField(default=True)` writes `False`, Django's
   checkbox exception in `construct_instance`) where the model flavor writes the default; pinned as Django's answer by
@@ -1974,7 +1955,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
   prepare (`DateFilter(field_name="occurred_on", lookup_expr="year")`, published `Date`) answers `FILTER_INVALID` for
   every value; pinned as such by `examples/fakeshop/test_query/test_declared_temporal_bindability_api.py::_REFUSALS`
   (`year-of-a-date`, `typed-year-of-a-date`, `years-of-csv-dates`, `year-span-of-dates`), so refusing it at build
-  moves pinned behaviour. Found fixing 708
+  moves pinned behaviour. A plain `AllValuesMultipleFilter(lookup_expr="year")` is the same class: it publishes the
+  transform's `[Int!]` while its choices are the column's dates (`invalid_choice` for every year; from 733). Found
+  fixing 708
 - [ ] 774. (robustness) A declared filter whose `lookup_expr` names a lookup no field registers
   (`NumberFilter(lookup_expr="unaccent")` without `django.contrib.postgres`) builds and answers every request with the
   masked `FieldError` (`Unsupported lookup 'unaccent' for IntegerField`); 708's probe treats the `FieldError` as
@@ -2307,6 +2290,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `ListFilter` checking its length is part of (b) or (c). Declared django-filter CSV classes stay as django-filter
   runs them (507, 516). 316 and this row are one decision: a list- or range-shaped package filter declared with a
   scalar lookup
+- [ ] 740. `ArrayFilter(field_name="ints", lookup_expr="len")`, `ArrayFilter(field_name="ints__len")` and
+  `ArrayFilter(field_name="ints__0")` over an `ArrayField(IntegerField())` build and publish `[Int!]`, though the
+  transform's output is one integer; applying `[2]` raises a masked `TypeError` ("Field 'ints' expected a number but
+  got [Decimal('1')]", `filters/base.py`) and a scalar value is refused by
+  `filters/inputs.py::_require_list_container`. `ListFilter(field_name="ints__len", lookup_expr="in")` serves. The
+  array-transform counterpart of 716, decided with it (options (a) to (c)). Found fact-finding 656
 - [ ] 722. Decide whether a `RangeFilter` whose `field_name` is a relation should continue to its key column. Since
   527 a lone bound under a non-range `lookup_expr` (`gte`, `exact`) is cleaned as the key column, but an overflowing
   bound still binds raw through Django's related lookups (`OverflowError`, a 500); continuing to the key column would
@@ -2334,6 +2323,27 @@ tracker number are recorded there; open remainders and new defects are filed as 
   it shares none of, and says the filter's own `choices` never feed the enum; GOAL success criterion 7 and "Coming
   from DRF + django-filter" lean toward serving it, and no `DateRangeFilter` spelling is served through the typed
   input today (it is through `apply_sync`'s JSON `where`). Found fixing 538
+- [ ] 742. Decide: in production a literal validation error carrying a scalar's parse exception is masked as "An
+  unexpected error occurred.": graphql-core's `validate_input_literal` attaches the exception as `original_error`,
+  which `extensions/error_policy.py::_is_unexpected` reads as unexpected, contrary to its docstring and spec-048
+  Decision 8 (a parse, syntax or validation error is not masked). A `BigInt` literal `-1e50` / `1.5` / `NaN` and an
+  `Int` literal of 4301+ digits reach it (1,120 cells of 673's production grid; DEBUG shows "Expected value of type
+  ..."). But examples/fakeshop/test_query/README.md "The error policy masks validation errors too: `BigInt` literals"
+  documents the masking as shipped and
+  `test_scalars_api.py::test_filter_specimens_by_bigint_exact_rejects_non_integer_literal`'s docstring pins it.
+  Unmask, and rewrite that README section and docstring; or keep the masking, and amend spec-048 Decision 8 and the
+  `_is_unexpected` docstring? Found researching 673
+- [ ] 760. A declared `ListFilter(field_name="occurred_on__year", lookup_expr="in")` handed a fractional member
+  (`"2021.5"` through an `apply_sync` JSON `where`) truncates it and returns the 2021 rows, where the generated
+  `year__in` leaf drops it and returns none, as 685's outcome says an integer `in` does:
+  `filters/base.py::_integer_in_column` reads `_bound_model_field` (the `DateField`), so `ListFilter.filter`'s
+  fractional-drop branch never runs for a declared transform path. Reading `_bound_value_field` there instead fails
+  existing refusal rows in `test_scalar_predicate_binding_api.py` (past-int64 members, the `in-below-min` /
+  `in-above-max` bounds), so the fix needs its own ruling. Found verifying 688
+- [ ] 761. Decide the contract for a fractional member of an integer `ArrayField` element: flat `["1.5"]` binds
+  `int(1)` (Django's `IntegerField.get_prep_value` truncates), nested `[["1.5"]]` and `[[1.5]]` bind `Decimal("1.5")`,
+  which PostgreSQL's numeric-to-integer cast rounds to 2 (a JSON `1.5` already reached that cast nested before 692).
+  Against 685's drop rule for a fractional integer `in` member. Unwired `apply_sync` / raw form only. Found fixing 692
 
 ## Hunt not finished in t3
 
