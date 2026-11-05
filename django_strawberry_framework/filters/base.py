@@ -131,6 +131,7 @@ from django_strawberry_framework.utils.querysets import (
 )
 from django_strawberry_framework.utils.relations import (
     _classify_path_cached,
+    _lookup_node_types,
     generated_column_source,
     is_model_class,
     lookup_operand,
@@ -478,11 +479,16 @@ class _LookupOperand(NamedTuple):
     class, ``None`` where no walk resolved one (a ``method=`` filter, whose method applies
     no lookup of the filter's, a path the walk refuses): ``filters/inputs.py`` asks it
     whether the value is prepared through the column (Django's ``FieldGetDbPrepValueMixin``).
+    ``node_types`` are the classes the predicate holds past the column, each transform's then
+    the lookup's (``utils/relations.py::_LookupWalk.node_types``), a reverse relation key's
+    too (``_reverse_relation_node_types``, its ``lookup`` left ``None``), empty where no walk
+    resolved them.
     """
 
     field: ModelField | None
     null_test: bool
     lookup: type[models.lookups.Lookup] | None = None
+    node_types: tuple[type[object], ...] = ()
 
 
 @cache
@@ -508,10 +514,13 @@ def _lookup_operand(column: ConcreteField, lookup_expr: str) -> _LookupOperand |
     answers as the computed column.
     """
     try:
-        output, lookup = lookup_operand(generated_column_source(column) or column, lookup_expr)
+        output, lookup, node_types = lookup_operand(
+            generated_column_source(column) or column,
+            lookup_expr,
+        )
     except (LookupValidationError, FieldError):
         return None
-    return _LookupOperand(output, issubclass(lookup, models.lookups.IsNull), lookup)
+    return _LookupOperand(output, issubclass(lookup, models.lookups.IsNull), lookup, node_types)
 
 
 class _ResolvedField(NamedTuple):
@@ -703,9 +712,31 @@ def _model_lookup_operand(
         operand = _lookup_operand(path_column, LOOKUP_SEP.join((*transforms, lookup_expr)))
         return _LookupOperand(None, _names_null_test(lookup_expr)) if operand is None else operand
     if not is_concrete_field(column):
-        return _LookupOperand(column, _names_null_test(lookup_expr))
+        return _LookupOperand(
+            column,
+            _names_null_test(lookup_expr),
+            node_types=_reverse_relation_node_types(column, lookup_expr),
+        )
     operand = _lookup_operand(column, lookup_expr)
     return _LookupOperand(column, _names_null_test(lookup_expr)) if operand is None else operand
+
+
+def _reverse_relation_node_types(
+    relation: models.ForeignObjectRel,
+    lookup_expr: str,
+) -> tuple[type[object], ...]:
+    """Return the classes the predicate of a reverse relation key holds.
+
+    A reverse ``ForeignObjectRel`` has no column; Django's query resolves its lookups
+    through its forward field (``RelatedExact`` / ``RelatedIn`` / ``RelatedIsNull``, or a
+    class a project registers on the forward field's class), which the walk from the
+    relation asks (``utils/relations.py::_lookup_node_types``). The operand's field and
+    lookup stay the relation's own reading. Empty where the walk refuses the expression.
+    """
+    try:
+        return _lookup_node_types(relation, lookup_expr)
+    except LookupValidationError:
+        return ()
 
 
 def _filterset_lookup_lhs_path(

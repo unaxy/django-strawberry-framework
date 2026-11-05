@@ -137,7 +137,7 @@ FieldSpec = GeneratedInputFieldSpec
 build_input_class = build_strawberry_input_class
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
 
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.inputs import SetInputNamespace
@@ -1025,6 +1025,135 @@ def _refuse_form_serving_no_value(
         "a transform of the column whose output its form cleans (a TimeFilter on "
         '`field_name="<column>__time"`), declare a filter class whose form cleans the '
         "column's kind, or read the value in `method=`.",
+    )
+
+
+def _is_hidden_flat_copy(filterset_cls: type[FilterSet], filter_instance: Filter) -> bool:
+    """Whether ``HIDE_FLAT_FILTERS`` keeps ``filter_instance`` out of ``filterset_cls``'s input.
+
+    A ``RelatedFilter`` expansion's copy of one of the set's own declarations
+    (``filters/sets.py::_is_flat_copy``) is hidden when the key is set (its truthiness is
+    this consumer's own semantics); every other filter of the set's table is published.
+    The input builder (``_build_input_fields``) and the served-leaf audit
+    (``_refuse_unsealable_served_leaves``) read the one answer, so the set the build checks
+    is the set the schema publishes.
+    """
+    from .sets import _is_flat_copy  # noqa: PLC0415 - import cycle
+
+    return bool(hide_flat_filters_setting()) and _is_flat_copy(filterset_cls, filter_instance)
+
+
+def _refuse_unsealable_served_leaves(served: Iterable[type[FilterSet]]) -> None:
+    """Refuse a leaf of a connection-served set whose predicate holds a class the seal refuses.
+
+    A ``DjangoConnectionField`` (root, or the ``<relation>Connection`` a Relay type grows)
+    applies its ``filter:`` argument inside the visibility boundary
+    (``utils/querysets.py::apply_filterset_sync``), whose seal admits only Django's own node
+    classes (``utils/querysets.py::_type_is_genuinely_django``, spec-045 Decision 2). A leaf
+    whose path resolves to any other transform or lookup class (a project ``Transform`` or
+    ``Lookup``, a ``Func``-based transform, a subclass of a Django class, a third-party
+    app's lookup; registered on a field class, on an instance, or on a transform) is
+    published on that argument yet refused on every request, so the build refuses it. The
+    classes asked are the ones Django's query resolves for the leaf's ``field_name`` and
+    ``lookup_expr`` (``filters/base.py::_filterset_lookup_operand``, the ``get_transform`` /
+    ``get_lookup`` walk), each asked of the seal's own predicate, so the build and the
+    request cannot disagree.
+
+    Every set a served set reaches through a ``RelatedFilter`` is served too, as its nested
+    branch, through a branch the set's published filter table still holds (the declared
+    ``RelatedFilter`` itself or one held under its declared name, never an expansion copy)
+    or a flat copy the schema publishes (each copy's child set, ``ChildProjection.filterset``,
+    unless ``HIDE_FLAT_FILTERS`` hides the copy: ``_is_hidden_flat_copy``, the input
+    builder's own rule); a ``get_filters`` override that drops both serves no request
+    through the branch. Each
+    reached set's own filter table is asked, its expansion copies skipped
+    (``filters/sets.py::_expansion_record``), so every leaf is judged once, on the set that
+    declares it, and named there with the ``RelatedFilter`` path it was
+    reached through. A leaf whose ``filter`` is consumer code on its own set (a ``method=``
+    filter, a ``filter`` override, a ``filter`` held on the instance:
+    ``filters/sets.py::_runs_shipped_filter``) owns its query, and a path the model alone
+    cannot resolve (a queryset annotation) has no walk; the seal judges both per request. A
+    set no connection serves, applied from the project's own resolver, is never sealed and
+    is not asked.
+    """
+    from django_strawberry_framework.utils.querysets import (  # noqa: PLC0415 - import cycle
+        _type_is_genuinely_django,
+    )
+
+    from .sets import _expansion_record, _runs_shipped_filter  # noqa: PLC0415 - import cycle
+
+    # Breadth first: the list grows while it is walked, each reached set once.
+    pending: list[tuple[type[FilterSet], tuple[str, ...]]] = [
+        (filterset_cls, ()) for filterset_cls in served
+    ]
+    seen = {filterset_cls for filterset_cls, _through in pending}
+    for filterset_cls, through in pending:
+        table = filterset_cls._filter_table()
+        heads = {
+            name: leaf
+            for name, leaf in table.items()
+            if truth.is_instance(leaf, RelatedFilter) and _expansion_record(leaf) is None
+        }
+        branches: list[tuple[type[FilterSet] | None, str]] = [
+            (record.filterset, record.branch)
+            for leaf in table.values()
+            if (record := _expansion_record(leaf)) is not None
+            and not _is_hidden_flat_copy(filterset_cls, leaf)
+        ]
+        related_filters = declaration_map(
+            truth.static_attr(filterset_cls, "related_filters", OrderedDict[str, object]()),
+            RelatedFilter,
+        )
+        branches.extend(
+            (related_filter.filterset, name)
+            for name, related_filter in related_filters.items()
+            if name in heads or any(head is related_filter for head in heads.values())
+        )
+        for child, branch in branches:
+            if child is not None and child not in seen:
+                seen.add(child)
+                pending.append((child, (*through, f"{truth.name(filterset_cls)}.{branch}")))
+        for name, leaf in table.items():
+            if (
+                truth.is_instance(leaf, RelatedFilter)
+                or _expansion_record(leaf) is not None
+                or not _runs_shipped_filter(leaf)
+            ):
+                continue
+            node_types = _filterset_lookup_operand(filterset_cls, leaf).node_types
+            refused = next((t for t in node_types if not _type_is_genuinely_django(t)), None)
+            if refused is not None:
+                raise _unsealable_leaf_refusal(leaf, name, filterset_cls, through, refused)
+
+
+def _unsealable_leaf_refusal(
+    leaf: Filter,
+    name: str,
+    filterset_cls: type[FilterSet],
+    through: tuple[str, ...],
+    refused: type[object],
+) -> ConfigurationError:
+    """Build the refusal of a served leaf whose predicate holds ``refused``, a class not Django's own.
+
+    ``leaf`` is ``name`` on ``filterset_cls``, the set declaring it, reached from the served
+    set across the ``RelatedFilter`` attributes ``through`` (empty for the served set's own).
+    """
+    from .sets import _LeafDeclaration  # noqa: PLC0415 - import cycle
+
+    attribute = f"{truth.name(filterset_cls)}.{name}" if through else None
+    declaration = _LeafDeclaration(leaf, attribute, through, filterset_cls)
+    return ConfigurationError(
+        f"{_declaration_subject(declaration, filterset_cls)} with lookup "
+        f"{truth.render(leaf.lookup_expr)} resolves to "
+        f"{truth.module(refused)}.{truth.qualname(refused)}, which is not one of Django's own "
+        "lookup or transform classes. A connection serves this filter (a "
+        "DjangoConnectionField, or the <relation>Connection a Relay type grows for a to-many "
+        "relation) and runs its filter: argument inside the visibility boundary, which admits "
+        "only Django's own lookup and transform classes, so every request naming the filter "
+        "would be refused. Filter through a Django class (registered under any lookup name), "
+        "apply a FilterSet no connection serves from a resolver of your own (FilterInput[...] "
+        'and apply_sync), or set Meta.relation_shapes = {"<relation>": "list"} on the type '
+        "whose to-many relation grows the connection.",
     )
 
 
@@ -2497,7 +2626,6 @@ def _build_input_fields(
     # read through its ``conf.py`` named reader; truthiness coercion is this
     # consumer's own semantics (the reader stays thin).
     hide_flat_filters = bool(hide_flat_filters_setting())
-    from .sets import _is_flat_copy  # noqa: PLC0415 - import cycle
 
     def _visible_entries() -> Iterator[tuple[str, Mapping[str, FormKeyedFilter]]]:
         """Yield the grouped entries minus the ``HIDE_FLAT_FILTERS`` expanded copies.
@@ -2520,7 +2648,7 @@ def _build_input_fields(
             own_lookups = {
                 token: entry
                 for token, entry in lookup_bag.items()
-                if not _is_flat_copy(filterset_cls, entry[1])
+                if not _is_hidden_flat_copy(filterset_cls, entry[1])
             }
             if own_lookups:
                 yield top_name, own_lookups

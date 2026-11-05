@@ -4,11 +4,12 @@
 lookups ``django.contrib.postgres`` registers onto a field that is not its own: its range
 module registers ``contained_by`` onto the core numeric and temporal fields at import, and
 its app config registers ``search`` / ``trigram_*`` onto the core text fields. A
-``django.contrib.postgres`` field keeps its whole set, and a consumer-registered lookup is
-published like a built-in one: a class registration on every field of the class, whenever
-it is made, and an instance registration on that field alone. The
-``django.contrib.postgres`` rows skip where the module is unimportable (no PostgreSQL
-driver installed).
+``django.contrib.postgres`` field keeps its whole set. A Django lookup class the consumer
+registers under a new name is published like a built-in one: a class registration on
+every field of the class, whenever it is made, and an instance registration on that field
+alone. A lookup class that is not Django's own (a project lookup, a subclass of a Django
+lookup) is never published. The ``django.contrib.postgres`` rows skip where the module is
+unimportable (no PostgreSQL driver installed).
 
 Django's text-pattern lookups (``iexact``, the ``contains`` / ``startswith`` / ``endswith``
 families, ``regex`` / ``iregex``) join the set only on a text column, one whose default
@@ -188,21 +189,56 @@ class _DivisibleBy(models.Lookup[int]):
     lookup_name = "divisible_by"
 
 
+class _AtLeast(model_lookups.GreaterThanOrEqual):
+    """A subclass of Django's ``gte`` that overrides nothing but its name."""
+
+    lookup_name = "at_least"
+
+
 def test_consumer_registered_lookup_is_published() -> None:
-    """A lookup the consumer registers on a core field joins its ``"__all__"`` set."""
-    with register_lookup(models.IntegerField, _DivisibleBy):
+    """A Django lookup class the consumer registers on a core field under a new name joins its set."""
+    with register_lookup(models.IntegerField, model_lookups.GreaterThan, lookup_name="above"):
         lookups = _lookups_for_field(models.IntegerField())
-    assert "divisible_by" in lookups
+    assert "above" in lookups
     assert "exact" in lookups
 
 
 def test_class_registration_after_a_first_read_is_published() -> None:
     """A class registration made after the field's set was first read joins the next read."""
     field: models.IntegerField[int, int] = models.IntegerField()
-    assert "divisible_by" not in _lookups_for_field(field)
-    with register_lookup(models.IntegerField, _DivisibleBy):
-        assert "divisible_by" in _lookups_for_field(field)
-    assert "divisible_by" not in _lookups_for_field(field)
+    assert "above" not in _lookups_for_field(field)
+    with register_lookup(models.IntegerField, model_lookups.GreaterThan, lookup_name="above"):
+        assert "above" in _lookups_for_field(field)
+    assert "above" not in _lookups_for_field(field)
+
+
+@pytest.mark.parametrize(
+    ("lookup", "lookup_name"),
+    [(_DivisibleBy, "divisible_by"), (_AtLeast, "at_least")],
+    ids=["project-lookup", "subclass-of-a-django-lookup"],
+)
+def test_a_lookup_class_that_is_not_djangos_own_is_left_out(
+    lookup: type[models.Lookup[int]],
+    lookup_name: str,
+) -> None:
+    """A registered lookup class that is not Django's own never joins the ``"__all__"`` set.
+
+    A connection runs its ``filter:`` argument inside the visibility boundary, which
+    refuses such a class on every request; the set leaves it out whatever wires it, a
+    class registration and an instance registration alike.
+    """
+    field: models.IntegerField[int, int] = models.IntegerField()
+    with register_lookup(models.IntegerField, lookup):
+        class_lookups = _lookups_for_field(models.IntegerField())
+    _ = field.register_instance_lookup(lookup, lookup_name)
+    try:
+        instance_lookups = _lookups_for_field(field)
+    finally:
+        field._unregister_instance_lookup(lookup, lookup_name)
+    assert lookup_name not in class_lookups
+    assert lookup_name not in instance_lookups
+    assert "exact" in class_lookups
+    assert "exact" in instance_lookups
 
 
 @pytest.mark.parametrize(

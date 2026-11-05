@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 426 done, 109 to do. The CHANGELOG entries filed here moved to
+Progress: 427 done, 109 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1675,6 +1675,23 @@ Progress: 426 done, 109 to do. The CHANGELOG entries filed here moved to
   (`_LeafDeclaration.filterset`). 418 grid cells refused (411 failing every value, 7 matching every row); every
   working, partial and warning cell builds. Package rows in `tests/filters/test_inputs.py`; spec-027, README, GLOSSARY
   `FilterSet`. PostgreSQL columns unrun locally. Filed 770, 771, 772, 774
+- [x] 709. fixed: a `FilterSet` a connection serves (a root `DjangoConnectionField`, a nested `<relation>Connection`,
+  and every set reached through a `RelatedFilter` branch the set's published filter table still holds or a flat copy
+  the schema publishes, each judged on itself) is refused with `ConfigurationError` when the schema is built if a
+  leaf's lookup path resolves to a transform or lookup class that is not Django's own, naming the declaring set, the
+  filter, the path it is reached through, the lookup and the class, with the remedies
+  (`filters/inputs.py::_refuse_unsealable_served_leaves`, run by `types/finalizer.py::_audit_filterset_subpass_2_5`;
+  served sets recorded by `connection.py::_synthesized_signature`, which refuses a connection declared after finalize
+  itself; hidden copies read through `filters/inputs.py::_is_hidden_flat_copy`, shared with the input builder). The
+  predicate is `utils/querysets.py::_type_is_genuinely_django` itself and the classes are Django's own
+  `get_transform` / `get_lookup` walk (`utils/relations.py::_LookupWalk`, reverse relation keys included); a leaf
+  whose `filter` is consumer code on its own set is left to the request seal, which is unchanged. `"__all__"` leaves
+  out every lookup class that is not Django's own on every set (`filters/sets.py::_lookups_for_field`). A set no
+  connection serves keeps building and answering through `FilterInput[...]` + `apply_sync`; a served set the project
+  also applies from its own resolver is refused (GOAL "Trust boundary"). 65 sealed grid cells refused at build, 118
+  working cells unchanged. Package rows in `tests/filters/test_finalizer.py` and `tests/filters/test_all_lookups.py`;
+  README, spec-027, spec-045 and its rationale, GLOSSARY `FilterSet` and prove-then-clone. `django.contrib.postgres`
+  lookups typed only, unrun. Filed 776
 
 ## Outside review of the fixes
 
@@ -1715,15 +1732,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 709. A generated `FilterSet` leaf over a project-defined transform or lookup class
-  (`DateTimeField.register_lookup(HourOfDay)`, named in `Meta.fields`) is published on a `DjangoConnectionField`'s
-  `filter:` input, but every request naming it answers the masked `ConfigurationError` "`<Set>.apply_sync` must return
-  an unevaluated, unsliced QuerySet ... untrusted defect (where clause carries a HourOfDay node)": the visibility seal
-  refuses any non-Django node class (`utils/querysets.py::_type_is_genuinely_django`, spec-045 Decision 2), so the
-  schema build accepts a configuration no request can use, and the message blames an `apply_sync` the project never
-  overrode. docs/README.md's filter section lists "a transform you register with an `IntegerField` output" as a
-  supported integer transform; the same class registered as Django's own `ExtractHour` filters. Found fact-finding
-  387
 - [ ] 714. (robustness) A `FilterSet` with no `Meta.model` set as a Relay `DjangoType`'s `Meta.filterset_class` and
   served by `DjangoConnectionField` builds and publishes its filter input (a `RangeFilter` over `occurred_at` as
   `LooseOccurredAtRangeInputType` with `String` axes), but any value sent to it answers a masked `ConfigurationError`
@@ -1973,6 +1981,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
   inconclusive and builds it (`filters/inputs.py::_answers_sample`; pinned building by
   `tests/filters/test_inputs.py::test_a_declared_filter_some_value_of_its_column_answers_builds[lookup-no-field-registers]`).
   Found fixing 708
+- [ ] 776. (robustness) A declared filter whose `field_name` names a model field followed by a part that is no
+  transform (`NumberFilter(field_name="signed_big__gt")`), or a reverse relation key whose `lookup_expr` no relation
+  resolves (`ModelMultipleChoiceFilter(field_name="children", lookup_expr="unknown")`), builds on a served set and
+  every request answers Django's masked `FieldError` (`Unsupported lookup 'gt__exact'`): a
+  `<column>__<non-transform>` path can never resolve, so the build accepts what every request refuses (the reverse
+  key pinned building by
+  `tests/filters/test_finalizer.py::test_a_served_leaf_the_build_does_not_walk_builds[reverse-key-lookup-no-relation-resolves]`).
+  Found fixing 709
 
 ## To do: holes found re-checking the fixes
 
@@ -2285,11 +2301,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `has_any_keys` and every `method=` filter; Django flags only `in` and `range`
   (`get_db_prep_lookup_value_is_iterable`), so the rest is a named list, and the existing `ArrayField` refusal's
   four-name list (`filters/inputs.py::_ARRAY_ELEMENT_LIST_LOOKUPS`) already refuses `gt`, which consumes an array on
-  PostgreSQL; a consumer-registered lookup is refused at request by the visibility boundary whatever it does; (c)
-  keep the declaration and apply a list as membership whatever the lookup, as 316's (c) does for two bounds. A
-  `range` `ListFilter` checking its length is part of (b) or (c). Declared django-filter CSV classes stay as
-  django-filter runs them (507, 516). 316 and this row are one decision: a list- or range-shaped package filter
-  declared with a scalar lookup
+  PostgreSQL; a consumer-registered lookup or transform (any class that is not Django's own) is refused at schema
+  build on a set a connection serves and runs on a set the project applies from its own resolver; (c) keep the
+  declaration and apply a list as membership whatever the lookup, as 316's (c) does for two bounds. A `range`
+  `ListFilter` checking its length is part of (b) or (c). Declared django-filter CSV classes stay as django-filter
+  runs them (507, 516). 316 and this row are one decision: a list- or range-shaped package filter declared with a
+  scalar lookup
 - [ ] 722. Decide whether a `RangeFilter` whose `field_name` is a relation should continue to its key column. Since
   527 a lone bound under a non-range `lookup_expr` (`gte`, `exact`) is cleaned as the key column, but an overflowing
   bound still binds raw through Django's related lookups (`OverflowError`, a 500); continuing to the key column would
