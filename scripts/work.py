@@ -138,9 +138,13 @@ Pins are refs in ``.work/pins.git``, not branches:
 ``refs/work/<name>/start`` (the commit a copy started from),
 ``refs/work/<name>/save-N`` (a snapshot of the copy's content: a commit whose
 parent is the copy's ``HEAD``, built in a private index, so no index is
-touched) and ``refs/work/<name>/landed`` (what the last ``land`` applied). A
-pin is created only where none exists (``update-ref`` against an empty old
-value): two racing saves get two numbers, and no save is ever replaced. A
+touched), ``refs/work/<name>/landed`` (what the last ``land`` applied) and
+``refs/work/<name>/landed-copy`` (the copy's own content at that landing). A
+``start`` or ``save-N`` pin is created only where none exists (``update-ref``
+against an empty old value): two racing saves get two numbers, and no save is
+ever replaced. ``landed`` and ``landed-copy`` are replaced on each landing by
+compare-and-swap (``update-ref`` against the value read before), so a racing
+landing is never overwritten. A
 pinned commit survives its copy. Restore one with ``new <name> --from
 refs/work/<old>/save-N``: the new copy starts at the save's parent and holds
 the saved content as uncommitted work, so it lands like any other copy.
@@ -182,24 +186,40 @@ Commands
     ``save <name>``
         Pin the copy's content as the next ``save-N``. Content equal to
         ``HEAD`` with ``HEAD`` still at the start pin saves nothing.
-    ``land <name> [--dry-run] [--patch FILE]``
+    ``land <name> [--dry-run] [--patch FILE] [--from-start]``
         Patch landing, the default way work reaches the shared checkout:
         copies do not commit. One ``land`` runs at a time (``land.lock``).
         The copy's content is diffed (``--binary``, new and deleted files
         included) against the copy's ``HEAD``, which must be on the shared
         ``main`` (so no committed work in the copy is dropped); the shared
-        ``HEAD`` must be ``refs/heads/main``. A path the shared tree already
-        holds exactly as the copy does is skipped; every other touched path
-        must hold exactly its ``HEAD`` entry there (bytes hashed and mode read
-        from disk, index entry too, so an ``assume-unchanged`` bit hides
-        nothing), and ``examples/fakeshop/db.sqlite3`` is never patched (carve
-        it by hand, START.md), nor a path under a folder that is a symlink in
-        the shared checkout (refused when planning and again right before each
+        ``HEAD`` must be ``refs/heads/main``. After a landing it is diffed
+        against the ``landed-copy`` pin instead (the copy's whole content at
+        its last landing): only the copy's work since then lands, and a path
+        unchanged since is never re-applied, whatever main did to it. Such an
+        earlier-landed path that neither the shared ``HEAD`` nor the shared
+        working tree holds as landed (reverted, never committed, changed
+        since) is named in a note; ``--from-start`` diffs against the copy's
+        ``HEAD`` again to land it. Without ``--from-start`` a copy whose note
+        records a landing whose ``landed`` or ``landed-copy`` pin is missing,
+        another copy's or incomplete refuses, and so does a path the copy put
+        back at its ``HEAD`` entry (``reset --hard``, ``checkout --``) where
+        its last landing held other content and the shared ``HEAD`` is not
+        at that start entry (``--from-start`` lands the rest and leaves those
+        paths as main holds them); a reset path main also has at the start
+        changes nothing. An edit back to the start in part of a file lands like any
+        edit. A path the shared tree already
+        holds exactly as the copy does is skipped; every other touched path must
+        hold exactly its ``HEAD`` entry there (bytes hashed and mode read from
+        disk, index entry too, so an ``assume-unchanged`` bit hides nothing),
+        and ``examples/fakeshop/db.sqlite3`` is never patched (carve it by
+        hand, START.md), nor a path under a folder that is a symlink in the
+        shared checkout (refused when planning and again right before each
         write, so a write never follows a link out of it; a path that is
-        itself a symlink blob is written as a link). The patch is first applied to a private index
-        read from the shared ``HEAD``: that is the expected result, merged with
-        whatever main changed since the copy started, and a patch that does not
-        apply there refuses with nothing written. The journal is written, then
+        itself a symlink blob is written as a link). The patch is first
+        applied to a private index read from the shared ``HEAD``: that is the
+        expected result, merged with whatever main changed since, and a patch
+        that does not apply there refuses with nothing written, naming each
+        path whose own patch does not apply. The journal is written, then
         each path (deletions first) is written into the working tree only
         (never the shared index): the new bytes go to a temporary file beside
         it, the path is re-hashed against its state before, and one
@@ -2330,10 +2350,17 @@ def newest_mtime(path: Path) -> float:
 
 
 def _workspace_state(copy_root: Path) -> list[Path]:
-    """Return the ``workspace.py`` pool and state folders that exist for ``copy_root``."""
+    """Return the ``workspace.py`` pool and state folders that exist for ``copy_root``.
+
+    ``scripts.workspace`` is the fallback only when ``workspace`` itself is not on the
+    path (``work`` imported as ``scripts.work``); a module ``workspace.py`` needs and
+    lacks (``tomli`` under a bare interpreter) is raised under its own name.
+    """
     try:
         import workspace  # noqa: PLC0415 - read only for a copy's state paths
-    except ModuleNotFoundError:
+    except ModuleNotFoundError as error:
+        if error.name != "workspace":
+            raise
         from scripts import workspace  # noqa: PLC0415 - imported as ``scripts.work``
     resolved = copy_root.resolve()
     try:
@@ -3505,6 +3532,7 @@ class LandPlan:
     head: str
     before: dict[str, State]
     expected: dict[str, State]
+    unheld: list[str]
 
 
 def _branch(repo: Path) -> str:
@@ -3538,19 +3566,327 @@ def _refuse_off_main(repo: Path, copy_root: Path) -> tuple[str, str]:
     return head, base
 
 
-def plan_landing(repo: Path, copy: Copy, index: Path) -> LandPlan:
+def _pin_readable(store: Path, commit: str, *, parent: bool) -> bool:
+    """Return whether ``pins.git`` holds ``commit`` and its trees (and its parent, when asked)."""
+    return (
+        _git_ok(store, "cat-file", "-e", f"{commit}^{{commit}}")
+        and _git_ok(store, "ls-tree", "-r", "--full-tree", commit)
+        and (not parent or _git_ok(store, "cat-file", "-e", f"{commit}^^{{commit}}"))
+    )
+
+
+def _landing_pins(repo: Path, copy: Copy) -> tuple[Path | None, str, str, list[str]]:
+    """Return ``(pins.git, landed-copy, landed, problems)`` for the copy's landing pins.
+
+    ``problems`` names each landing pin that is missing, not this copy's
+    (:func:`pin_belongs` against the attributed note) or incomplete in ``pins.git``;
+    ``pins.git`` is ``None`` when there is none. Nothing is fetched, and a pin that
+    fails a check is reported, not raised.
+
+    Raises:
+        WorkError: ``pins.git``, its refs or a legacy copy's pins cannot be read
+            (:func:`pin_store`, :func:`pins`, :func:`attributed_note`).
+
+    """
+    note = attributed_note(repo, copy.note)
+    store = pin_store(repo)
+    held = pins(repo).get(copy.name, {})
+    merged, own = held.get(LANDED_PIN, ""), held.get(LANDED_COPY_PIN, "")
+    problems = [
+        _pin_ref(copy.name, leaf)
+        for leaf, commit in ((LANDED_PIN, merged), (LANDED_COPY_PIN, own))
+        if store is None
+        or not commit
+        or not pin_belongs(note, leaf, commit)
+        or not _pin_readable(store, commit, parent=leaf == LANDED_PIN)
+    ]
+    return store, own, merged, problems
+
+
+def _landing_wrote(store: Path, merged: str) -> set[str]:
+    """Return the paths the landing pinned as ``merged`` wrote (its diff from its parent)."""
+    names = _git(
+        store,
+        "diff-tree",
+        "-r",
+        "-z",
+        "--no-renames",
+        "--name-only",
+        f"{merged}^",
+        merged,
+    )
+    return {entry for entry in names.split("\0") if entry}
+
+
+def own_landing_paths(
+    repo: Path,
+    copy: Copy,
+    head: str,
+    paths: Sequence[str],
+) -> list[str]:
+    """Return which of ``paths`` the shared tree holds exactly as the copy's last landing wrote them.
+
+    Strict, since it only words a refusal: a path counts only where the ``landed`` pin
+    wrote it (its diff from its parent), the shared working tree holds that pin's entry
+    (bytes and mode; a deleted path counts while absent), the shared ``head`` still holds
+    the pin parent's entry, so main has not moved there since, and the shared index holds
+    either of those two entries (``land`` writes the working tree alone; a maintainer may
+    have staged the landing). Bytes another writer made identical to the landing read
+    as the copy's, and only the last landing counts: a path an earlier uncommitted
+    landing wrote reads as another writer's. Only pins passing
+    :func:`earlier_landing`'s checks count: a copy that never landed, or whose landing
+    pins are missing, not its own or incomplete, owns none. A path that fails any test
+    reads as another writer's.
+
+    Raises:
+        WorkError: ``pins.git`` or its refs cannot be read (:func:`_landing_pins`).
+
+    """
+    if not paths or not copy.note.get("landed"):
+        return []
+    store, _own, merged, problems = _landing_pins(repo, copy)
+    if store is None or problems:
+        return []
+    wrote = _landing_wrote(store, merged)
+    landed = _tree_states(store, merged, paths)
+    before = _tree_states(store, f"{merged}^", paths)
+    committed = _tree_states(repo, head, paths)
+    staged = _index_states(repo, paths)
+    return [
+        path
+        for path in paths
+        if path in wrote
+        and committed[path] == before[path]
+        and staged[path] in (before[path], landed[path])
+        and working_state(repo, path) == landed[path]
+    ]
+
+
+def earlier_landing(repo: Path, copy: Copy, copy_root: Path) -> tuple[Path, str, str] | None:
+    """Return ``(pins.git, landed-copy, landed)`` for the copy's last landing, else ``None``.
+
+    ``None`` only for a copy whose note records no landing. Only pins the note attributes
+    to this copy count (:func:`pin_belongs`), so another copy's landing under the name is
+    never a patch base. The ``landed-copy`` commit is fetched into the copy when its
+    objects are not there, so its tree can be diffed.
+
+    Raises:
+        WorkError: the note records a landing but a landing pin is missing, is not this
+            copy's, or ``pins.git`` lacks its objects: patching from the start instead
+            could re-apply that landing over main without a word (``land --from-start``
+            is the explicit choice).
+
+    """
+    if not copy.note.get("landed"):
+        return None
+    store, own, merged, problems = _landing_pins(repo, copy)
+    if store is None or problems:
+        verb = "is" if len(problems) == 1 else "are"
+        msg = (
+            f"{copy.name} records a landing, but {', '.join(problems)} {verb} missing, not "
+            "this copy's, or incomplete in pins.git, so its work since that landing cannot be "
+            "told apart; nothing applied (`land --from-start` patches from the copy's "
+            "start, re-applying what main does not hold)"
+        )
+        raise WorkError(msg)
+    if not _git_ok(copy_root, "cat-file", "-e", f"{own}^{{commit}}"):
+        fetch_pinned(repo, copy_root, own)
+    return store, own, merged
+
+
+@dataclasses.dataclass(frozen=True)
+class PatchBase:
+    """The tree a landing's patch starts from, its changes, and what ``land`` must name."""
+
+    since: str
+    changes: list[Change]
+    unheld: list[str]
+    reset: list[str]
+
+
+def patch_base(
+    repo: Path,
+    copy: Copy,
+    copy_root: Path,
+    tree: str,
+    *,
+    from_start: bool,
+) -> PatchBase:
+    """Return where the copy's patch to ``tree`` starts, and which changes it carries.
+
+    A copy that never landed, or ``from_start``, patches from its ``HEAD``. After a
+    landing the patch is the copy's work since then: ``landed-copy`` (the copy's whole
+    content at its last landing, so every earlier landing and every path skipped as
+    already there) to ``tree``; a copy whose note records a landing whose pins are
+    missing, not its own or incomplete is refused (:func:`earlier_landing`), never
+    patched from its start unasked. A path unchanged since that landing is never in the
+    patch, whatever main did to it. A path counts as held as landed where it is as the
+    copy held it then, or, for a path the last landing wrote, as that landing left it.
+    ``unheld`` names the untouched paths the copy's landings changed from its ``HEAD``
+    that neither the shared ``HEAD`` nor the shared working tree holds as landed, for
+    ``land`` to note; ``reset`` names the patch's paths the copy put back at its
+    ``HEAD`` entry (a ``reset --hard`` or ``checkout --`` in the copy) where its last
+    landing held other content and the shared ``HEAD`` is not at that start entry
+    either, which :func:`plan_landing` refuses rather than undo that landing on main
+    (also where main reverted it and edited the file since: ``land --from-start``
+    lands the rest and leaves those paths as main holds them). Where the shared
+    ``HEAD`` is at the start too, the patch
+    changes nothing there; a file the start lacks is never among them (neither command
+    puts it back, so deleting a landed new file is ordinary work). Only the whole-path
+    return to the start is guarded: an edit back to the start in part of a file lands
+    like any edit.
+    """
+    base = _head(copy_root)
+    landing = None if from_start else earlier_landing(repo, copy, copy_root)
+    if landing is None:
+        return PatchBase(base, copy_changes(copy_root, base, tree), [], [])
+    store, own, merged = landing
+    since = _tree_of(copy_root, own)
+    changes = copy_changes(copy_root, since, tree)
+    touched = [change.path for change in changes]
+    earlier = sorted(
+        change.path
+        for change in copy_changes(copy_root, base, since)
+        if change.path not in set(touched)
+    )
+    wrote = _landing_wrote(store, merged)
+    paths = [*earlier, *touched]
+    at_head = _tree_states(repo, "HEAD", paths)
+    owned = _tree_states(store, own, paths)
+    landed = _tree_states(store, merged, paths)
+    started = _tree_states(copy_root, base, touched)
+
+    def as_landed(path: str) -> set[State]:
+        return {owned[path], *([landed[path]] if path in wrote else [])}
+
+    unheld = [
+        path
+        for path in earlier
+        if at_head[path] not in as_landed(path)
+        and working_state(repo, path) not in as_landed(path)
+    ]
+    reset = [
+        change.path
+        for change in changes
+        if started[change.path] is not None
+        and change.state == started[change.path]
+        and owned[change.path] != started[change.path]
+        and at_head[change.path] != started[change.path]
+    ]
+    return PatchBase(since, changes, unheld, reset)
+
+
+def _diff(
+    copy_root: Path,
+    base: str,
+    tree: str,
+    paths: Sequence[str],
+) -> bytes:
+    """Return the binary patch from ``base`` to ``tree`` over ``paths`` (empty for none)."""
+    if not paths:
+        return b""
+    return _git_bytes(
+        copy_root,
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-renames",
+        "--no-color",
+        "--no-ext-diff",
+        base,
+        tree,
+        "--",
+        *paths,
+    )
+
+
+def _not_applying(
+    repo: Path,
+    copy_root: Path,
+    base: PatchBase,
+    plan: tuple[str, Sequence[str], Mapping[str, str]],
+) -> list[str]:
+    """Return which of the paths' own patches do not apply onto the private index alone.
+
+    ``plan`` is ``(tree, paths, env)``; ``--check`` writes nothing.
+    """
+    tree, paths, env = plan
+    failing: list[str] = []
+    for path in paths:
+        try:
+            _ = _git_bytes(
+                repo,
+                "apply",
+                "--cached",
+                "--check",
+                "--whitespace=nowarn",
+                "-",
+                env=env,
+                stdin=_diff(copy_root, base.since, tree, [path]),
+            )
+        except WorkError:
+            failing.append(path)
+    return failing
+
+
+def _unclean_message(unclean: Sequence[str], own: Sequence[str]) -> str:
+    """Return ``land``'s refusal for ``unclean`` paths, naming those that hold ``own`` landing.
+
+    The copy's own uncommitted landing waits for the maintainer's commit; any other
+    path is another writer's change, to commit or carve first.
+    """
+    mine = [path for path in unclean if path in own]
+    other = [path for path in unclean if path not in own]
+    parts: list[str] = []
+    if mine:
+        parts.append(
+            f"the shared tree holds this copy's own uncommitted landing in {', '.join(mine)} "
+            "(the maintainer commits it first)",
+        )
+    if other:
+        parts.append(
+            f"the shared tree holds other changes in {', '.join(other)} "
+            "(land after they are committed, or carve)",
+        )
+    return f"{'; '.join(parts)}; nothing applied"
+
+
+def plan_landing(
+    repo: Path,
+    copy: Copy,
+    index: Path,
+    *,
+    from_start: bool = False,
+) -> LandPlan:
     """Return the copy's landing plan; ``index`` receives the expected result.
+
+    The patch starts where :func:`patch_base` says: the copy's ``HEAD`` before its first
+    landing (or with ``from_start``), its ``landed-copy`` pin after one.
 
     Raises:
         WorkError: the shared ``HEAD`` is not ``main``, the copy's ``HEAD`` is not on it,
-            the patch touches a carve-only path or a path the shared tree holds otherwise
-            than its ``HEAD``, or the patch does not apply onto the shared ``HEAD``.
+            the copy's landing pins cannot be trusted (:func:`earlier_landing`), the patch
+            touches a carve-only path, puts a path back at the copy's start where its last
+            landing held other content and the shared ``HEAD`` is not at that start
+            (``PatchBase.reset``), or touches a path the shared tree holds otherwise than
+            its ``HEAD`` (paths holding the copy's own uncommitted landing,
+            :func:`own_landing_paths`, are named apart from another writer's), or the patch
+            does not apply onto the shared ``HEAD`` (the paths whose own patch does not
+            apply are named).
 
     """
     copy_root = _live(copy)
     head, base = _refuse_off_main(repo, copy_root)
     tree = content_tree(copy_root)
-    changes = copy_changes(copy_root, base, tree)
+    start = patch_base(repo, copy, copy_root, tree, from_start=from_start)
+    if start.reset:
+        msg = (
+            f"the copy is back at its start in {', '.join(start.reset)}, where its last "
+            "landing held other content, and main is not at that start; nothing applied "
+            "(`land --from-start` lands the rest and leaves those paths as main holds them)"
+        )
+        raise WorkError(msg)
+    changes = start.changes
     carved = sorted(change.path for change in changes if change.path in CARVE_ONLY_PATHS)
     if carved:
         msg = f"{', '.join(carved)} changed: carve it by hand (START.md), land the rest after"
@@ -3562,28 +3898,12 @@ def plan_landing(repo: Path, copy: Copy, index: Path) -> LandPlan:
     paths = [change.path for change in applied]
     unclean = unclean_paths(repo, head, paths)
     if unclean:
-        msg = (
-            "the shared tree holds other changes in "
-            f"{', '.join(unclean)}; nothing applied (land after they are committed, or carve)"
-        )
-        raise WorkError(msg)
+        own = own_landing_paths(repo, copy, head, unclean)
+        raise WorkError(_unclean_message(unclean, own))
     env = {"GIT_INDEX_FILE": str(index)}
     _ = _git(repo, "read-tree", head, env=env)
-    patch = b""
-    if applied:
-        patch = _git_bytes(
-            copy_root,
-            "diff",
-            "--binary",
-            "--full-index",
-            "--no-renames",
-            "--no-color",
-            "--no-ext-diff",
-            base,
-            tree,
-            "--",
-            *paths,
-        )
+    patch = _diff(copy_root, start.since, tree, paths)
+    if patch:
         try:
             _ = _git_bytes(
                 repo,
@@ -3595,15 +3915,28 @@ def plan_landing(repo: Path, copy: Copy, index: Path) -> LandPlan:
                 stdin=patch,
             )
         except WorkError as error:
+            failing = _not_applying(repo, copy_root, start, (tree, paths, env))
+            named = f" in {', '.join(failing)}" if failing else ""
             msg = (
-                f"the copy's patch does not apply onto the shared HEAD {head[:12]}; "
+                f"the copy's patch does not apply onto the shared HEAD {head[:12]}{named}; "
                 f"nothing written ({error})"
             )
             raise WorkError(msg) from None
     merged = _git(repo, "write-tree", env=env).strip()
     expected = _index_states(repo, paths, env)
     before = _tree_states(repo, head, paths)
-    return LandPlan(patch, applied, skipped, tree, merged, base, head, before, expected)
+    return LandPlan(
+        patch,
+        applied,
+        skipped,
+        tree,
+        merged,
+        base,
+        head,
+        before,
+        expected,
+        start.unheld,
+    )
 
 
 @contextlib.contextmanager
@@ -3909,9 +4242,16 @@ def _land(
     index: Path,
 ) -> int:
     refuse_replica(copy, "land")
-    plan = plan_landing(repo, copy, index)
+    plan = plan_landing(repo, copy, index, from_start=args.from_start)
     if args.patch:
         _ = Path(args.patch).write_bytes(plan.patch)
+    if plan.unheld:
+        _say(
+            f"not re-applied: main does not hold the copy's earlier landing of "
+            f"{', '.join(plan.unheld)} (reverted, never committed, or changed since), and "
+            "the copy has not changed it since; `land --from-start` patches from the copy's "
+            "start to land it again",
+        )
     for path in plan.skipped:
         _say(f"already there: {path}")
     if not plan.applied:
@@ -4388,6 +4728,7 @@ class _Args(argparse.Namespace):
     json: bool
     dry_run: bool
     patch: str | None
+    from_start: bool
     discard: bool
     drop_saves: bool
     evidence: bool
@@ -4435,6 +4776,11 @@ def build_parser() -> argparse.ArgumentParser:
     _ = land.add_argument("name")
     _ = land.add_argument("--dry-run", action="store_true")
     _ = land.add_argument("--patch", default=None, help="also write the patch to this file")
+    _ = land.add_argument(
+        "--from-start",
+        action="store_true",
+        help="patch from the copy's start, not its last landing",
+    )
     land.set_defaults(handler=cmd_land)
 
     rm = commands.add_parser("rm", help="remove one copy")
