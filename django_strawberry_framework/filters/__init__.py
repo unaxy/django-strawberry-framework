@@ -54,6 +54,15 @@ _helper_referenced_filtersets: set[type[FilterSet]] = set()
 
 register_subsystem_clear(_helper_referenced_filtersets.clear, owner="filters.helper_references")
 
+# Ledger of `FilterSet`s a `DjangoConnectionField` (root, or a nested
+# `<relation>Connection`) serves as its `filter:` argument, recorded by
+# `connection.py::_synthesized_signature`. The finalizer's subpass 2.5 refuses a leaf
+# of one of them (or of a set it reaches through a `RelatedFilter`) that the visibility
+# seal would refuse on every request (`filters/inputs.py::_refuse_unsealable_served_leaves`).
+_connection_served_filtersets: set[type[FilterSet]] = set()
+
+register_subsystem_clear(_connection_served_filtersets.clear, owner="filters.connection_served")
+
 
 def _filter_input_annotation(filterset_class: object, *, helper_spelling: str) -> object:
     """Validate, ledger-record and annotate ``filterset_class`` for either helper spelling."""

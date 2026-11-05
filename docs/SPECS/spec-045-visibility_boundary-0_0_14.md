@@ -790,7 +790,10 @@ These are deliberate constraints of the contract above, not defects:
   the framework's own `VisibleRowExists`, the `OrderSet` visibility test, is the
   only non-Django node admitted. A
   consumer needing a custom expression in a visibility filter expresses it through
-  genuine Django primitives. The constraint is documented here and in the
+  genuine Django primitives. A connection's `filter:` argument runs inside the
+  boundary, so a `FilterSet` leaf a connection serves that resolves to such a class
+  is refused when the schema is built (spec-027 Decision 6). The constraint is
+  documented here and in the
   [prove-then-clone AST trust][glossary-prove-then-clone-ast-trust] glossary entry.
 - **An opaque object bound into an expression payload fails closed.** A
   `Value(...)` (or any expression payload slot) carrying an object that is neither

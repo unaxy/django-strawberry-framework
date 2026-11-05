@@ -484,8 +484,8 @@ def validate_lookup_expr(terminal: ModelField, lookup_expr: str) -> type[models.
 def lookup_operand(
     field: ConcreteField,
     lookup_expr: str,
-) -> tuple[ConcreteField, type[models.lookups.Lookup]]:
-    """Return the field ``lookup_expr``'s final lookup compares on ``field``, and that lookup.
+) -> tuple[ConcreteField, type[models.lookups.Lookup], tuple[type[object], ...]]:
+    """Return the field ``lookup_expr``'s final lookup compares on ``field``, that lookup, and its nodes.
 
     The walk is ``validate_lookup_expr``'s, from ``field.cached_col``, the column Django's
     ``Query.build_lookup`` starts from, so every transform and lookup is the one Django's
@@ -495,13 +495,24 @@ def lookup_operand(
     expression applies (the lookup's left-hand side), the column's own output when it
     applies none; an output that is a ``GeneratedField``'s ``output_field`` instance
     answers as the column it computes (``generated_column``), so an identity test
-    against that column holds. Raises ``LookupValidationError`` as the walk does.
+    against that column holds. The nodes are the classes the predicate holds past the
+    column (``_LookupWalk.node_types``). Raises ``LookupValidationError`` as the walk does.
     """
     walk = _walk_lookup_expr(field, lookup_expr)
     output = require(read_attr(walk.lhs, "output_field"), is_concrete_field)
     if output is lookup_registry(field):
         output = generated_column(field) or output
-    return output, walk.lookup
+    return output, walk.lookup, walk.node_types
+
+
+def _lookup_node_types(terminal: ModelField, lookup_expr: str) -> tuple[type[object], ...]:
+    """Return the classes the predicate Django builds for ``lookup_expr`` on ``terminal`` holds.
+
+    ``_LookupWalk.node_types`` of ``validate_lookup_expr``'s walk, which starts a reverse
+    ``ForeignObjectRel`` as itself, answering through its forward field. Raises
+    ``LookupValidationError`` as the walk does.
+    """
+    return _walk_lookup_expr(terminal, lookup_expr).node_types
 
 
 def lookup_transform_parts(terminal: ModelField | Expression, lookup_expr: str) -> tuple[str, ...]:
@@ -518,11 +529,17 @@ def lookup_transform_parts(terminal: ModelField | Expression, lookup_expr: str) 
 
 
 class _LookupWalk(NamedTuple):
-    """``_walk_lookup_expr``'s answer: the lookup's left-hand side, the lookup, the transforms applied."""
+    """``_walk_lookup_expr``'s answer: the lookup's left-hand side, the lookup, the transforms applied.
+
+    ``node_types`` are the classes the predicate Django builds for the expression holds
+    past its column, in order: each transform's (the class of the node ``get_transform``'s
+    answer builds, a factory's product included), then the lookup's.
+    """
 
     lhs: Expression | models.ForeignObjectRel
     lookup: type[models.lookups.Lookup]
     transforms: tuple[str, ...]
+    node_types: tuple[type[object], ...]
 
 
 def lookup_registry(field: ModelField) -> ModelField:
@@ -562,20 +579,27 @@ def _walk_lookup_expr(terminal: ModelField | Expression, lookup_expr: str) -> _L
     )
     # ``str.split`` always yields at least one part, so the final part always exists.
     *transform_parts, final_part = parts
+    node_types: list[type[object]] = []
     for part in transform_parts:
         transform = cursor.get_transform(part)
         if transform is None:
             raise LookupValidationError(terminal, lookup_expr, part)
         cursor = transform(cursor)
+        node_types.append(type(cursor))
     lookup = cursor.get_lookup(final_part)
     if lookup is not None:
-        return _LookupWalk(cursor, lookup, tuple(transform_parts))
+        return _LookupWalk(cursor, lookup, tuple(transform_parts), (*node_types, lookup))
     transform = cursor.get_transform(final_part)
     if transform is not None:
         transformed = transform(cursor)
         exact = transformed.get_lookup("exact")
         if exact is not None:
-            return _LookupWalk(transformed, exact, tuple(parts))
+            return _LookupWalk(
+                transformed,
+                exact,
+                tuple(parts),
+                (*node_types, type(transformed), exact),
+            )
     raise LookupValidationError(terminal, lookup_expr, final_part)
 
 

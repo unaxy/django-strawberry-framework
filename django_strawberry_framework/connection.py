@@ -109,7 +109,7 @@ from .optimizer.selections import (
     info_selections,
     prime_selected_fields,
 )
-from .registry import register_subsystem_clear
+from .registry import register_subsystem_clear, registry
 from .resource_policy import check_deadline
 from .types.resolvers import _check_n1
 from .utils import truth
@@ -2297,8 +2297,12 @@ def _synthesized_signature(
     those helpers ALSO registers the FilterSet / OrderSet against the
     ``_helper_referenced_filtersets`` / ``_helper_referenced_ordersets`` orphan
     ledgers, so ``finalize_django_types`` orphan validation stays honest - no
-    separate ``.add(...)`` is needed or wanted. The ``search:`` argument is NOT
-    generated (search is the planned spec-062 surface).
+    separate ``.add(...)`` is needed or wanted. The FilterSet is also recorded as
+    served (``filters._connection_served_filtersets``): the finalizer refuses a leaf
+    of it whose predicate the visibility seal would refuse on every request
+    (``filters/inputs.py::_refuse_unsealable_served_leaves``), and a connection
+    declared once the registry is finalized is refused here, when it is declared. The
+    ``search:`` argument is NOT generated (search is the planned spec-062 surface).
     """
     # Imported at call time (schema build), not module scope: a module-level
     # import would make bare ``import django_strawberry_framework`` (which pulls
@@ -2308,7 +2312,10 @@ def _synthesized_signature(
     # These helpers are only needed when building a field's synthesized
     # signature, so a function-local import keeps the top-level package import
     # lazy while preserving the generated ``filter:`` / ``orderBy:`` arguments.
-    from .filters import filter_input_type  # noqa: PLC0415 - keeps orders/filters out of the root graph
+    from .filters import (  # noqa: PLC0415 - keeps orders/filters out of the root graph
+        _connection_served_filtersets,
+        filter_input_type,
+    )
     from .orders import order_input_type  # noqa: PLC0415 - keeps orders/filters out of the root graph
 
     # ``root`` and ``info`` are Strawberry reserved parameter names: the engine
@@ -2326,6 +2333,14 @@ def _synthesized_signature(
         # ``filter_input_type`` returns a ``strawberry.LazyType``, whose ``__or__`` widens
         # with ``| None``
         filter_ann = optional_annotation(filter_input_type(definition.filterset_class))
+        _connection_served_filtersets.add(definition.filterset_class)
+        if registry.is_finalized():
+            # A connection declared after ``finalize_django_types()`` missed its audit.
+            from .filters.inputs import (  # noqa: PLC0415 - keeps orders/filters out of the root graph
+                _refuse_unsealable_served_leaves,
+            )
+
+            _refuse_unsealable_served_leaves([definition.filterset_class])
         params.append(
             inspect.Parameter(
                 CONNECTION_FILTER_KWARG,

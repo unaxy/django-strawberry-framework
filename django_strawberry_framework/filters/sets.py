@@ -161,6 +161,7 @@ from django_strawberry_framework.utils.permissions import (
 )
 from django_strawberry_framework.utils.querysets import (
     SyncMisuseError,
+    _type_is_genuinely_django,
     apply_type_visibility_async,
     apply_type_visibility_sync,
     base_queryset,
@@ -365,9 +366,17 @@ def _lookups_for_field(
     them runs off PostgreSQL, ``contained_by`` takes a range no scalar input can
     carry, and publishing them would make the input schema depend on whether a
     driver is installed. A ``django.contrib.postgres`` field (``ArrayField``,
-    ``HStoreField``, the range fields, or a subclass) keeps its full set, and a
-    lookup the consumer registers is published like a built-in one. A consumer
+    ``HStoreField``, the range fields, or a subclass) keeps its full set. A consumer
     who wants ``search`` or a trigram lookup declares it explicitly.
+
+    A lookup class that is not Django's own (``utils/querysets.py::_type_is_genuinely_django``:
+    one a project or a third-party app registers, ``django_mysql``'s ``case_exact`` and
+    ``sounds_like`` on text columns, a subclass of a Django lookup) is EXCLUDED too, on
+    every set whether a connection serves it or not, so the generated surface never depends
+    on how the set is wired: a ``DjangoConnectionField`` runs its ``filter:`` argument inside
+    the visibility boundary, which refuses such a class on every request. Named in
+    ``Meta.fields`` it is published, and refused at schema build when a connection serves
+    the set (``filters/inputs.py::_refuse_unsealable_served_leaves``).
 
     The set is read on every call from the registry Django's query resolves the
     column's lookups on (``utils/relations.py::lookup_registry``): ``Field.get_lookups()`` on that
@@ -384,7 +393,16 @@ def _lookups_for_field(
         return []
     field_class = type(generated_output_field(model_field) or model_field)
     registered = lookup_registry(model_field).get_lookups()
-    lookups = _non_transform_lookups(_without_foreign_postgres_lookups(field_class, registered))
+    lookups = _non_transform_lookups(
+        {
+            lookup_expr: lookup
+            for lookup_expr, lookup in _without_foreign_postgres_lookups(
+                field_class,
+                registered,
+            ).items()
+            if truth.is_type(lookup) and _type_is_genuinely_django(lookup)
+        },
+    )
     if not package_default or _is_text_column(field_class):
         return lookups
     return [
@@ -415,7 +433,7 @@ def _generated_filter_field(
     expression the walk refuses.
     """
     try:
-        output, lookup = lookup_operand(field, lookup_expr)
+        output, lookup, _node_types = lookup_operand(field, lookup_expr)
     except (LookupValidationError, FieldError) as error:
         raise FieldLookupError(field, lookup_expr) from error
     resolved = field if output is generated_column(field) else output

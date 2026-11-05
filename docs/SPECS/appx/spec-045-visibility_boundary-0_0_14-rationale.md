@@ -80,7 +80,9 @@ Spec decision: [Decision 2][spec-decision-2] (`#decision-2--fail-closed-prove-th
   buys a capability a consumer can already reach by expressing the predicate through
   genuine Django primitives. The guarantee is narrowed instead: a genuinely custom `Func`
   or `Lookup` fails closed as `untrusted`. A future allowlist remains the named fallback
-  if that constraint ever proves too tight.
+  if that constraint ever proves too tight. A `FilterSet` leaf a connection serves that
+  resolves to such a class is refused when the schema is built, never per request
+  (spec-027 Decision 6, the served-leaf visibility-seal audit).
 - *Extending the walk one dispatch site at a time as each new one is reported.* Rejected
   in favour of canonical reconstruction; the argument is recorded under Decision 8.
 

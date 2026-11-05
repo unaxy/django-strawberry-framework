@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 179 to do.
+Progress: 0 done, 180 to do.
 
 ## From dry-0_0_15_3
 
@@ -750,6 +750,14 @@ Progress: 0 done, 179 to do.
   `method=` filters, filters overriding `filter`, form fields with their own cleaning, a column converting in its own
   `to_python` / `get_prep_value` (a relation whose target key does), a lookup preparing in its own `get_prep_lookup`,
   a `lookup_expr` no field registers; validators and a form field's `validate` never run at build
+- [ ] 775. CHANGELOG entry for item 709: a `FilterSet` a connection serves (a `DjangoConnectionField`'s `filter:`, a
+  Relay type's nested `<relation>Connection`, or any set reached through a `RelatedFilter`) whose leaf resolves to a
+  lookup or transform class that is not Django's own (a project `Transform` or `Lookup`, a subclass of a Django
+  class, a third-party app's lookup) now raises `ConfigurationError` when the schema is built, naming the set,
+  filter, lookup and class, where it built before and every request naming the leaf answered a masked error.
+  `Meta.fields` `"__all__"` no longer includes such a lookup class on any set. Remedies: register a Django class
+  under the name you want, apply a set no connection serves from your own resolver (`FilterInput[...]` and
+  `apply_sync`), or set `Meta.relation_shapes = {"<relation>": "list"}` to drop a nested connection
 
 ## From dry-upstream-0_0_15
 

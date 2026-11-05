@@ -531,12 +531,6 @@ def test_node_id_over_a_generated_column_refetches_its_row_over_http() -> None:
     assert json_at(past, "data") == {"node": None}
 
 
-class _Has(Contains):
-    """``contains`` under a project's own name, a text pattern over the column's rendering."""
-
-    lookup_name = "has"
-
-
 @contextlib.contextmanager
 def _instance_lookup(
     field: django_models.Field[object, object],
@@ -723,13 +717,13 @@ def test_text_pattern_registered_on_the_generated_output_takes_a_string_over_htt
 ) -> None:
     """A text-pattern lookup registered on the generated output publishes a ``String`` operand.
 
-    ``has`` (a ``contains``) is registered on ``Shelf.code_length``'s ``output_field``
-    instance only, the registry Django's query reads it from: the leaf takes the text
-    pattern it compares the column's rendering against, never a ``BigInt``.
+    Django's ``Contains`` is registered as ``has`` on ``Shelf.code_length``'s
+    ``output_field`` instance only, the registry Django's query reads it from: the leaf
+    takes the text pattern it compares the column's rendering against, never a ``BigInt``.
     """
     del private_registry
 
-    with _output_lookup_schema(("output",), _Has, "has"):
+    with _output_lookup_schema(("output",), Contains, "has", lookup_name="has"):
         assert _operand_types("codeLength") == {"has": "String"}
 
 
@@ -760,12 +754,6 @@ def test_all_lookups_on_a_generated_column_read_the_registry_its_query_resolves_
             assert [shelf.code for shelf in orm] == ["CC"]
             assert _operand_types("codeLength")["same"] == "BigInt"
             assert _row_codes('codeLength: {same: "2"}') == ["CC"]
-
-
-class _ContainsAsExact(Exact):
-    """Django's ``Exact`` under its own ``lookup_name`` ``contains``, an equality."""
-
-    lookup_name = "contains"
 
 
 def _replace_contains(registration: str, lookup: type[Lookup]) -> contextlib.ExitStack:
@@ -807,31 +795,6 @@ def test_a_lookup_replaced_on_the_generated_output_is_the_one_its_query_resolves
         assert [shelf.code for shelf in orm] == ["A"]
         assert _operand_types("codeLength")["contains"] == "BigInt"
         assert _row_codes("codeLength: {contains: 1}") == ["A"]
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("lookup_expr", ["contains", "__all__"], ids=["declared", "all"])
-@pytest.mark.parametrize("registration", ["output-instance", "late-class"])
-def test_a_lookup_named_like_a_text_pattern_on_the_generated_output_takes_the_column_over_http(
-    registration: str,
-    lookup_expr: str,
-    private_registry: None,
-) -> None:
-    """An equality whose own ``lookup_name`` is ``contains`` publishes the column's ``BigInt``.
-
-    Registered as ``contains`` on ``Shelf.code_length``'s ``output_field`` instance, or on
-    ``BigIntegerField`` after the model class was built, it is the lookup Django's query
-    resolves for ``code_length__contains``, never the text pattern the generated field's
-    own copy of its output class's lookups holds under that name.
-    """
-    del private_registry
-
-    owners = ("output",) if registration == "output-instance" else ()
-    with (
-        _replace_contains(registration, _ContainsAsExact),
-        _output_lookup_schema(owners, _ContainsAsExact, lookup_expr),
-    ):
-        assert _operand_types("codeLength")["contains"] == "BigInt"
 
 
 @pytest.mark.usefixtures("_chr_takes_a_bigint")
