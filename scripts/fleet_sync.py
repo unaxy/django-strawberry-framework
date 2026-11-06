@@ -13,10 +13,11 @@ Machines
     ``/usr/bin/tailscale`` or the macOS app's). A peer matches a
     ``docs/fleet/machines.json`` row when its hostname or MagicDNS name, up to the
     first dot and casefolded, is one of the row's ``hostnames`` (the match
-    ``scripts/load_balancing.py`` makes); it is then reached as the row's ``ssh``
-    alias, else as its MagicDNS name. Every remote call is one ``ssh -o
-    BatchMode=yes -o ConnectTimeout=5`` running the peer's own
-    ``scripts/fleet_sync.py agent`` (its ``.venv`` Python, else ``python3``), so
+    ``scripts/fleet.py`` makes); it is then reached as the row's ``ssh`` alias,
+    else as its MagicDNS name. Every remote call is one ssh with the fleet's
+    options (``fleet.ssh_argv``: batch mode, a connect timeout, a keepalive)
+    running the peer's own ``scripts/fleet_sync.py agent`` (its ``.venv``
+    Python, else ``python3``), so
     both ends apply the same rules; ``--remote-scripts DIR`` runs the scripts in
     ``DIR`` on the peer instead, for a peer whose main predates this script. A
     peer qualifies when that call answers, its checkout is at
@@ -236,8 +237,9 @@ Running it periodically
     agent with ``StartInterval`` on macOS each fit; a run that finds another
     holding the lock skips, so overlapping runs are harmless.
 
-Standard library plus ``scripts/work.py``, ``scripts/load_balancing.py`` and
-``scripts/_git.py`` for the copy, machine and git rules. Every agent, this
+Standard library plus ``scripts/work.py``, ``scripts/fleet.py`` and
+``scripts/_git.py`` for the copy, machine and git rules (``scripts/fleet.py``
+owns the machine list and the ssh options, ``scripts/_git.py`` the repository root). Every agent, this
 machine's included, runs on its checkout's ``.venv`` Python (``python3`` when there
 is none): removing a replica goes through work.py's ``remove``, which reads
 ``scripts/workspace.py`` and needs the project's packages. Run it from the
@@ -265,11 +267,11 @@ from typing import IO, TYPE_CHECKING, NoReturn
 
 try:
     import _git as _git_runner
-    import load_balancing
+    import fleet
     import work
 except ModuleNotFoundError:  # imported as ``scripts.fleet_sync`` (repo root on path)
     from scripts import _git as _git_runner
-    from scripts import load_balancing, work
+    from scripts import fleet, work
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
@@ -277,19 +279,9 @@ if TYPE_CHECKING:
 #: ``json.loads``, its result typed ``object`` for the caller to narrow.
 _loads: Callable[[str], object] = json.loads
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = _git_runner.CHECKOUT_ROOT
 #: Where the checkout lives on every machine, relative to the home folder.
 CHECKOUT = PurePosixPath("projects") / "django-strawberry-framework"
-#: ``load_balancing``'s options plus a keepalive: a peer silent for 45s drops the connection,
-#: so no ssh, rsync or fetch of a run waits forever on a stalled machine.
-SSH_OPTIONS = (
-    *load_balancing.SSH_OPTIONS,
-    "-o",
-    "ServerAliveInterval=15",
-    "-o",
-    "ServerAliveCountMax=3",
-)
-SSH_FAILED = load_balancing.SSH_FAILED
 TAILSCALE_PATHS = (
     "/usr/local/bin/tailscale",
     "/usr/bin/tailscale",
@@ -427,7 +419,7 @@ class ConflictError(FleetError):
 
 
 def _object(value: object) -> dict[str, object]:
-    return value if load_balancing.is_json_object(value) else {}
+    return value if fleet.is_json_object(value) else {}
 
 
 def _string(mapping: Mapping[str, object], key: str) -> str:
@@ -436,11 +428,7 @@ def _string(mapping: Mapping[str, object], key: str) -> str:
 
 
 def _strings(value: object) -> list[str]:
-    return (
-        [item for item in value if isinstance(item, str)]
-        if load_balancing.is_json_array(value)
-        else []
-    )
+    return [item for item in value if isinstance(item, str)] if fleet.is_json_array(value) else []
 
 
 def _string_map(value: object) -> dict[str, str]:
@@ -1373,7 +1361,7 @@ def agent_tombstones_import(repo: Path, data: bytes) -> dict[str, object]:
     created: list[str] = []
     listed = _decode(data, "tombstones").get("tombstones")
     names: set[str] = set()
-    for raw in listed if load_balancing.is_json_array(listed) else []:
+    for raw in listed if fleet.is_json_array(listed) else []:
         tombstone = work.Tombstone.parse(raw)
         if tombstone is not None and work.write_tombstone(repo, tombstone):
             created.append(tombstone.file_name)
@@ -1774,12 +1762,7 @@ class Endpoint:
                 *(shlex.quote(arg) for arg in args),
             ],
         )
-        return [
-            "ssh",
-            *SSH_OPTIONS,
-            self.ssh,
-            command,
-        ]
+        return fleet.ssh_argv(self.ssh, command)
 
     def run(
         self,
@@ -2008,16 +1991,16 @@ def tailscale_status() -> dict[str, object]:
 
 def _labels(peer: Mapping[str, object]) -> tuple[str, ...]:
     dns = _string(peer, "DNSName").rstrip(".")
-    found = [load_balancing.short_hostname(dns)] if dns else []
+    found = [fleet.short_hostname(dns)] if dns else []
     host = _string(peer, "HostName")
     if host:
-        found.append(load_balancing.short_hostname(host))
+        found.append(fleet.short_hostname(host))
     return tuple(dict.fromkeys(label for label in found if label))
 
 
 def discover_machines(
     status: Mapping[str, object],
-    rows: Sequence[load_balancing.Machine],
+    rows: Sequence[fleet.Machine],
     scripts: str,
 ) -> list[Machine]:
     """Return this machine and every online peer, each matched to its ``machines.json`` row."""
@@ -2064,7 +2047,7 @@ def qualify(machine: Machine, local: Probe | None) -> None:
     if endpoint is None:
         return
     completed = endpoint.run("probe", timeout=PROBE_TIMEOUT)
-    if completed.returncode == SSH_FAILED and not machine.local:
+    if completed.returncode == fleet.SSH_FAILED and not machine.local:
         machine.reason = f"unreachable over ssh {machine.ssh}: {_last_line(completed.stderr)}"
     elif completed.returncode == NO_CHECKOUT:
         machine.reason = f"no checkout at ~/{CHECKOUT} (a repository elsewhere is never synced)"
@@ -2124,8 +2107,8 @@ def find_machines(scripts: str, only: Sequence[str]) -> tuple[Machine, list[Mach
         msg = "fleet_sync.py does not run on Windows yet"
         raise SetupError(msg)
     try:
-        rows = load_balancing.load_machines(REPO_ROOT / work.MACHINES_FILE)
-    except load_balancing.MachineListError as error:
+        rows = fleet.machines(REPO_ROOT)
+    except fleet.MachineListError as error:
         msg = f"machine list: {error}"
         raise SetupError(msg) from None
     machines = discover_machines(tailscale_status(), rows, scripts)
@@ -2306,15 +2289,14 @@ class Inventory:
         for stem, files in _object(answer.get("evidence")).items():
             entries: dict[str, tuple[int, int]] = {}
             for rel, state in _object(files).items():
-                if load_balancing.is_json_array(state) and len(state) == 2:
+                if fleet.is_json_array(state) and len(state) == 2:
                     size, mtime = state
                     if isinstance(size, int) and isinstance(mtime, int):
                         entries[rel] = (size, mtime)
             evidence[stem] = entries
         graves = answer.get("tombstones")
         parsed = [
-            work.Tombstone.parse(raw)
-            for raw in (graves if load_balancing.is_json_array(graves) else [])
+            work.Tombstone.parse(raw) for raw in (graves if fleet.is_json_array(graves) else [])
         ]
         return cls(
             copies={
@@ -2664,7 +2646,7 @@ def rsync(
     """
     argv = ["rsync", "-rlpt", f"--timeout={RSYNC_IO_TIMEOUT}"]
     argv += [f"--exclude={pattern}" for pattern in excludes]
-    argv += ["-e", " ".join(["ssh", *SSH_OPTIONS])]
+    argv += ["-e", fleet.ssh_command()]
     listing: Path | None = None
     if files is None:
         argv.append("--delete")
@@ -3012,7 +2994,7 @@ def _read_manifest(peer: str) -> dict[str, dict[str, tuple[int, int]]]:
     for stem, files in document.items():
         entries: dict[str, tuple[int, int]] = {}
         for rel, state in _object(files).items():
-            if load_balancing.is_json_array(state) and len(state) == 2:
+            if fleet.is_json_array(state) and len(state) == 2:
                 size, mtime = state
                 if isinstance(size, int) and isinstance(mtime, int):
                     entries[rel] = (size, mtime)
@@ -3146,7 +3128,7 @@ def fetch_main(machine: Machine) -> bool:
                 work.LANDING_BRANCH,
             ],
             capture_output=True,
-            env=_git_runner.repository_env(GIT_SSH_COMMAND=shlex.join(["ssh", *SSH_OPTIONS])),
+            env=_git_runner.repository_env(GIT_SSH_COMMAND=fleet.ssh_command()),
             timeout=FETCH_TIMEOUT,
             check=False,
         )
@@ -3395,7 +3377,7 @@ def _render(document: Mapping[str, object], *, as_json: bool) -> None:
         return
     print("machines")
     machines = document.get("machines")
-    for raw in machines if load_balancing.is_json_array(machines) else []:
+    for raw in machines if fleet.is_json_array(machines) else []:
         entry = _object(raw)
         where = "this machine" if entry.get("local") is True else f"ssh {_string(entry, 'ssh')}"
         state = (
@@ -3408,7 +3390,7 @@ def _render(document: Mapping[str, object], *, as_json: bool) -> None:
             print(f"    not in machines.json; suggested row: {json.dumps(entry['suggested_row'])}")
     for section in ("copies", "rows"):
         items = document.get(section)
-        if not load_balancing.is_json_array(items) or not items:
+        if not fleet.is_json_array(items) or not items:
             continue
         print(section if section == "copies" else "results")
         for raw in items:

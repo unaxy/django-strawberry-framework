@@ -538,6 +538,8 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
+├── test_fleet.py                 # Script tests for ``scripts/fleet.py``, the machine list's one reader.
+├── test_fleet_sync.py            # Repo-tooling tests for the fleet sync of private working copies, pins, evidence and main.
 ├── test_git.py                   # Repo-tooling tests for the scripts' one git runner and every site that reads through it.
 ├── test_idioms.py                # Smoke tests proving the shared ``tests/_idioms.py`` order helpers hand out what they promise.
 ├── test_info.py                  # Smoke tests proving the shared ``tests/_info.py`` builders hand out what they promise.
@@ -545,6 +547,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_keyset_connection.py     # Package-side keyset connection tests for cursor state, window fallbacks and planner helpers.
 ├── test_lateral_pg_parity.py     # PostgreSQL tests for internal JSON adapters, connection cleanup and EXPLAIN index usability.
 ├── test_list_field.py            # Package-side DjangoListField tests for construction-time validation, helper mechanics and internals.
+├── test_load_balancing.py        # Script tests for ``scripts/load_balancing.py``, the fleet machine picker.
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
 ├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
 ├── test_permissions.py           # Package-only cascade-permission pins that no live GraphQL request can express.
@@ -566,6 +569,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_strawberry_patches.py    # Tests for the Strawberry request-body and Relay patches.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
+├── test_work.py                  # Repo-tooling tests for the private-working-copy manager's names, copies, pins, landing and cleanup.
 ├── test_workspace.py             # Repo-tooling tests for the agentflow workspace tool's copies, pool, evidence and cleanup.
 ├── test_write_mixins.py          # Pins for the write-flavor substrate shared by every ``Mutation`` family.
 ├── auth/    # Package-internal tests for the opt-in auth subsystem.
@@ -907,6 +911,8 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
+├── test_fleet.py                 # Script tests for ``scripts/fleet.py``, the machine list's one reader.
+├── test_fleet_sync.py            # Repo-tooling tests for the fleet sync of private working copies, pins, evidence and main.
 ├── test_git.py                   # Repo-tooling tests for the scripts' one git runner and every site that reads through it.
 ├── test_idioms.py                # Smoke tests proving the shared ``tests/_idioms.py`` order helpers hand out what they promise.
 ├── test_info.py                  # Smoke tests proving the shared ``tests/_info.py`` builders hand out what they promise.
@@ -914,6 +920,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_keyset_connection.py     # Package-side keyset connection tests for cursor state, window fallbacks and planner helpers.
 ├── test_lateral_pg_parity.py     # PostgreSQL tests for internal JSON adapters, connection cleanup and EXPLAIN index usability.
 ├── test_list_field.py            # Package-side DjangoListField tests for construction-time validation, helper mechanics and internals.
+├── test_load_balancing.py        # Script tests for ``scripts/load_balancing.py``, the fleet machine picker.
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
 ├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
 ├── test_permissions.py           # Package-only cascade-permission pins that no live GraphQL request can express.
@@ -935,6 +942,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_strawberry_patches.py    # Tests for the Strawberry request-body and Relay patches.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
+├── test_work.py                  # Repo-tooling tests for the private-working-copy manager's names, copies, pins, landing and cleanup.
 ├── test_workspace.py             # Repo-tooling tests for the agentflow workspace tool's copies, pool, evidence and cleanup.
 ├── test_write_mixins.py          # Pins for the write-flavor substrate shared by every ``Mutation`` family.
 ├── aggregates/    # planned by TODO-BETA-064-0.1.3 - Mirrored package tests for the aggregates subsystem.

@@ -29,6 +29,7 @@ import pytest
 from typing_extensions import override
 
 from scripts import _git, fleet_sync, work, workspace
+from scripts import fleet as fleet_rules
 from tests._idioms import json_list, json_loads, json_object
 
 NAME = "spike-fleet-probe"
@@ -1531,13 +1532,6 @@ def test_an_agent_write_outside_a_held_run_is_refused(fleet: Fleet) -> None:
 # Deadlines: a stalled peer never hangs a run
 # --------------------------------------------------------------------------------------------
 
-KEEPALIVE = [
-    "-o",
-    "ServerAliveInterval=15",
-    "-o",
-    "ServerAliveCountMax=3",
-]
-
 
 class _SilentPeer(fleet_sync.Endpoint):
     """A peer whose ``hold`` connects and then never answers."""
@@ -1564,14 +1558,13 @@ def test_a_peers_ssh_and_rsync_carry_the_keepalive_and_rsync_an_io_timeout(
 ) -> None:
     peer = fleet_sync.Endpoint("b", "rio-b", "b-ssh", SCRIPTS)
     argv = peer.argv("probe")
-    assert argv[: 1 + len(fleet_sync.SSH_OPTIONS)] == ["ssh", *fleet_sync.SSH_OPTIONS]
-    assert " ".join(KEEPALIVE) in " ".join(argv)
+    assert argv == fleet_rules.ssh_argv("b-ssh", argv[-1])
     seen: list[tuple[list[str], dict[str, str]]] = []
     _capture_run(monkeypatch, seen)
     fleet_sync.rsync(fleet_sync.Endpoint("a", "rio-a", ""), "/x", peer, "/y")
     rsync_argv = seen[0][0]
     assert "--timeout=120" in rsync_argv
-    assert " ".join(KEEPALIVE) in rsync_argv[rsync_argv.index("-e") + 1]
+    assert rsync_argv[rsync_argv.index("-e") + 1] == fleet_rules.ssh_command()
 
 
 def test_fetch_main_runs_git_with_the_batch_mode_keepalive_ssh(
@@ -1597,9 +1590,7 @@ def test_fetch_main_runs_git_with_the_batch_mode_keepalive_ssh(
     assert not fleet_sync.fetch_main(machine)
     argv, env = next((argv, env) for argv, env in seen if "fetch" in argv)
     assert f"b-ssh:{probe.repo}" in argv
-    assert "BatchMode=yes" in env["GIT_SSH_COMMAND"]
-    assert "ConnectTimeout=5" in env["GIT_SSH_COMMAND"]
-    assert " ".join(KEEPALIVE) in env["GIT_SSH_COMMAND"]
+    assert env["GIT_SSH_COMMAND"] == fleet_rules.ssh_command()
     assert env["DSF_FETCH_PROBE"] == "kept"
 
 

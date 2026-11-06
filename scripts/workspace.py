@@ -362,7 +362,7 @@ if TYPE_CHECKING:
 # ``json.loads`` returns ``Any``; this alias hands callers an ``object`` to narrow.
 _loads: Callable[[str], object] = json.loads
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = _git_runner.CHECKOUT_ROOT
 PACKAGE_DIR = "django_strawberry_framework"
 COMPOSE_FILE = "docker-compose.postgres.yml"
 

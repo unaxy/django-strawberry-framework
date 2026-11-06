@@ -125,7 +125,7 @@ maintainer to fix by hand.
 
 Every copy has one home machine, the only one that edits it: ``home`` in its note
 (:func:`machine_id`: ``$DSF_MACHINE_ID``, else the short hostname, as
-``scripts/load_balancing.py`` matches ``hostnames``; a note older than ``home``
+``scripts/fleet.py`` matches ``hostnames``; a note older than ``home``
 reads its ``host``). ``scripts/fleet_sync.py`` keeps a replica of it on every
 other fleet machine, marked ``replica=true`` with ``home``, ``syncedtree`` (its
 content when last synced), ``syncedhead``, ``syncedfrom`` and ``syncedat``.
@@ -373,15 +373,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import TYPE_CHECKING, NoReturn, TypeGuard
+from typing import TYPE_CHECKING, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 try:
     import _git as _git_runner
-    import load_balancing
+    import fleet
 except ModuleNotFoundError:  # imported as ``scripts.work`` (repo root on path)
     from scripts import _git as _git_runner
-    from scripts import load_balancing
+    from scripts import fleet
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
@@ -389,7 +389,7 @@ if TYPE_CHECKING:
 #: ``json.loads``, its result typed ``object`` for the caller to narrow.
 _loads: Callable[[str], object] = json.loads
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = _git_runner.CHECKOUT_ROOT
 WORK_DIR = ".work"
 CLONES = "clones"
 WORKTREES = "worktrees"
@@ -437,7 +437,6 @@ PARENT_REFS = "refs/remotes/parent/"
 #: The refs git keeps per worktree, in its metadata: they die with the worktree.
 PER_WORKTREE_REFS = ("refs/bisect/", "refs/worktree/", "refs/rewritten/")
 NO_PUSH = "no-push"
-MACHINES_FILE = Path("docs") / "fleet" / "machines.json"
 #: Names this machine in a copy's note instead of its hostname (a hostname that is not its
 #: tailnet name; two fake machines on one host in the tests).
 MACHINE_ENV = "DSF_MACHINE_ID"
@@ -617,17 +616,17 @@ def _valid(name: str) -> bool:
 def machine_id() -> str:
     """Return this machine's name in a copy's note: ``$DSF_MACHINE_ID``, else the short hostname.
 
-    The short hostname is the one ``scripts/load_balancing.py`` matches a machine's
-    ``hostnames`` by (up to its first dot, casefolded), so the two scripts and
-    ``scripts/fleet_sync.py`` name a machine the same way.
+    The short hostname is ``scripts/fleet.py``'s (up to its first dot, casefolded),
+    the one a machine's ``hostnames`` are matched by, so every fleet script names a
+    machine the same way.
     """
     override = os.environ.get(MACHINE_ENV, "")
-    return load_balancing.short_hostname(override or load_balancing.this_hostname())
+    return fleet.short_hostname(override or fleet.this_hostname())
 
 
 def home_of(note: Mapping[str, str]) -> str:
     """Return the machine a copy's note names as its home (a note older than ``home``: its host)."""
-    return note.get("home") or load_balancing.short_hostname(note.get("host", ""))
+    return note.get("home") or fleet.short_hostname(note.get("host", ""))
 
 
 def is_replica(note: Mapping[str, str]) -> bool:
@@ -763,7 +762,7 @@ class Tombstone:
     @classmethod
     def parse(cls, raw: object) -> Tombstone | None:
         """Return the tombstone a JSON document holds, ``None`` for anything else."""
-        if not _is_object_map(raw):
+        if not fleet.is_json_object(raw):
             return None
         fields = [
             raw.get(key)
@@ -793,8 +792,8 @@ class Tombstone:
             or not isinstance(generation, int)
             or generation < 0
             or not isinstance(dropped, bool)
-            or not _is_object_list(formers)
-            or not _is_object_map(pinned)
+            or not fleet.is_json_array(formers)
+            or not fleet.is_json_object(pinned)
         ):
             return None
         homes = [entry for entry in formers if isinstance(entry, str) and entry]
@@ -1171,7 +1170,7 @@ def claim_name(repo: Path, name: str) -> Path:
     staged = claims / f".{name}.{_token()}"
     staged.mkdir()
     _ = (staged / "owner").write_text(
-        f"{load_balancing.this_hostname()} {os.getpid()}\n",
+        f"{fleet.this_hostname()} {os.getpid()}\n",
         encoding="utf-8",
     )
     try:
@@ -1213,7 +1212,7 @@ def _claim_is_stale(claim: Path) -> bool:
         return False
     except (OSError, ValueError):
         return False
-    return host == load_balancing.this_hostname() and pid.isdigit() and not _pid_alive(int(pid))
+    return host == fleet.this_hostname() and pid.isdigit() and not _pid_alive(int(pid))
 
 
 def _pid_alive(pid: int) -> bool:
@@ -3017,7 +3016,7 @@ def _build_copy(
         "form": form,
         "purpose": args.purpose,
         "owner": args.owner,
-        "host": load_balancing.this_hostname(),
+        "host": fleet.this_hostname(),
         "home": machine_id(),
         "start": start.base,
         "startshared": "true" if _shared_ref_reaches(repo, start.base) else "false",
@@ -3067,24 +3066,16 @@ def cmd_new(args: _Args) -> int:
     return 0
 
 
-def _is_object_map(value: object) -> TypeGuard[dict[str, object]]:
-    return isinstance(value, dict)
-
-
-def _is_object_list(value: object) -> TypeGuard[list[object]]:
-    return isinstance(value, list)
-
-
 def fleet_identities(repo: Path) -> list[tuple[str, str, str | None]]:
     """Return ``(ssh host, checkout path, user)`` for every machine ``docs/fleet/machines.json`` lists."""
     try:
-        document = _loads((repo / MACHINES_FILE).read_text(encoding="utf-8"))
+        document = _loads((repo / fleet.MACHINES_PATH).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    machines = document.get("machines") if _is_object_map(document) else None
+    machines = document.get("machines") if fleet.is_json_object(document) else None
     found: list[tuple[str, str, str | None]] = []
-    for machine in machines if _is_object_list(machines) else []:
-        if not _is_object_map(machine):
+    for machine in machines if fleet.is_json_array(machines) else []:
+        if not fleet.is_json_object(machine):
             continue
         host, checkout, user = machine.get("ssh"), machine.get("repo"), machine.get("user")
         if isinstance(host, str) and isinstance(checkout, str):
@@ -3221,7 +3212,7 @@ def _register(
             "form": form,
             "purpose": args.purpose,
             "owner": args.owner,
-            "host": load_balancing.this_hostname(),
+            "host": fleet.this_hostname(),
             "home": machine_id(),
             "start": head,
             "startshared": "false",
@@ -4067,7 +4058,7 @@ def _write_journal(repo: Path, plan: LandPlan) -> None:
 
 
 def _journal_state(value: object) -> State:
-    if _is_object_list(value) and len(value) == 2:
+    if fleet.is_json_array(value) and len(value) == 2:
         mode, oid = value
         if isinstance(mode, str) and isinstance(oid, str):
             return (mode, oid)
@@ -4120,9 +4111,9 @@ def recover_landing(repo: Path) -> Recovery:
     if not _is_kind(repo, journal, stat.S_ISREG):
         return Recovery()
     document = _loads(journal.read_text(encoding="utf-8"))
-    entries = document.get("paths") if _is_object_map(document) else None
+    entries = document.get("paths") if fleet.is_json_object(document) else None
     hostile = sorted(
-        path for path in (entries if _is_object_map(entries) else {}) if not _inside(path)
+        path for path in (entries if fleet.is_json_object(entries) else {}) if not _inside(path)
     )
     if hostile:
         msg = (
@@ -4133,8 +4124,8 @@ def recover_landing(repo: Path) -> Recovery:
     foreign: list[str] = []
     stuck: list[str] = []
     unresolved: dict[str, object] = {}
-    for path, entry in sorted(entries.items()) if _is_object_map(entries) else []:
-        if not _is_object_map(entry):
+    for path, entry in sorted(entries.items()) if fleet.is_json_object(entries) else []:
+        if not fleet.is_json_object(entry):
             continue
         before, after = _journal_state(entry.get("before")), _journal_state(entry.get("after"))
         try:
@@ -4150,7 +4141,7 @@ def recover_landing(repo: Path) -> Recovery:
             stuck.append(f"cannot write {path}: {error.strerror or error}")
             unresolved[path] = entry
     if unresolved:
-        head = document.get("head") if _is_object_map(document) else None
+        head = document.get("head") if fleet.is_json_object(document) else None
         _store_journal(repo, head, unresolved)
     else:
         journal.unlink()

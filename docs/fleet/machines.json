@@ -1,8 +1,8 @@
 {
   "machines": [
     {
-      "name": "rio-desktop",
-      "ssh": "rio-desktop",
+      "name": "rio-ubu",
+      "ssh": "rio-ubu",
       "os": "linux",
       "repo": "~/projects/django-strawberry-framework",
       "weight": {
@@ -27,8 +27,8 @@
       ]
     },
     {
-      "name": "rio-mac",
-      "ssh": "rio-mac",
+      "name": "rio-air",
+      "ssh": "rio-air",
       "os": "macos",
       "repo": "~/projects/django-strawberry-framework",
       "weight": {
@@ -48,6 +48,7 @@
         }
       },
       "hostnames": [
+        "rio-air",
         "Riordens-MacBook-Air"
       ]
     },
@@ -73,6 +74,7 @@
         }
       },
       "hostnames": [
+        "rio-mini",
         "Rios-Mac-mini"
       ]
     }

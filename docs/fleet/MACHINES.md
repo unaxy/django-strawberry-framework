@@ -9,7 +9,7 @@ has the capacity, not whichever has the tool.
 
 ## 1. Machines
 
-### Mac (MacBook Air)
+### MacBook Air (`rio-air`)
 
 | | |
 | --- | --- |
@@ -17,10 +17,10 @@ has the capacity, not whichever has the tool.
 | Hardware | Apple M3, 8 cores, 16 GB RAM, small free disk. |
 | OS | macOS. |
 | Availability | Whenever the maintainer has it open; it sleeps and travels. |
-| Reach it as | `rio-mac`, from the Linux desktop, only while the Mac is awake (a closed lid or idle sleep takes it offline). |
+| Reach it as | `rio-air`, from the other two, only while the Air is awake (a closed lid or idle sleep takes it offline). |
 | Expect | Connecting in is for reading, git and handing work back, not for running work. Light work only: editing, git, single targeted tests, supervising. Never benchmark or stress it; several agents share it with the maintainer's own apps. Do not park large copies or caches on its disk. Some Linux-standard tools are missing (`timeout(1)`, `tmux`). |
 
-### Linux desktop
+### Linux desktop (`rio-ubu`)
 
 | | |
 | --- | --- |
@@ -28,10 +28,10 @@ has the capacity, not whichever has the tool.
 | Hardware | Intel i7-8700, 6 cores / 12 threads, 45 GiB RAM, roomy NVMe; AMD GPU with no CUDA/ROCm. |
 | OS | Ubuntu Desktop 26.04 LTS, GNOME. |
 | Availability | Usually on. It dual-boots Windows, and while booted there this machine is offline: if it does not answer, it is not broken; tell the maintainer and stop. |
-| Reach it as | `rio-desktop`, from the Mac. |
+| Reach it as | `rio-ubu`, from the other two. |
 | Expect | Read its house rules first: `~/MACHINE.md` on the machine. In short: check `pressure` before heavy work and run heavy work through `heavy` (at most 3 heavy jobs machine-wide); repos live in `~/projects/` and fast-forward from origin every few minutes while their tree is clean; no passwordless `sudo` (stop and hand root commands to the maintainer); rootless Docker; run long jobs in a `tmux` window, not under `nohup` or a bare `&`. The maintainer also sits at it: never close windows or kill GUI apps. |
 
-### Mac mini
+### Mac mini (`rio-mini`)
 
 | | |
 | --- | --- |
@@ -39,8 +39,8 @@ has the capacity, not whichever has the tool.
 | Hardware | Apple M1, 8 cores (4 performance, 4 efficiency), 16 GB RAM, roomy free disk. |
 | OS | macOS. |
 | Availability | Not yet established; treat it as offline when it does not answer. |
-| Reach it as | `rio-mini`, from the Mac. |
-| Expect | Not set up for this repo yet: no checkout under `~/projects/` and no `uv`. Has a fan, so sustained runs do not throttle the way the MacBook Air does, but its 16 GB caps heavy runs below the Linux desktop's. |
+| Reach it as | `rio-mini`, from the other two. |
+| Expect | Set up like the other two: the checkout under `~/projects/`, the same `uv`, Python, direnv, node and agent CLIs. Has a fan, so sustained runs do not throttle the way the MacBook Air does, but its 16 GB caps heavy runs below the Linux desktop's. |
 
 Connection details (transport, addresses, credentials) are kept in each machine's private
 configuration, never in this repo. If a "reach it as" name does not answer from where you are,
@@ -51,11 +51,11 @@ the machine is not set up for you or is offline: report it and stop, do not hunt
 Target: every row present on every machine. A gap is a setup task for the maintainer, not
 something an agent installs on its own.
 
-| Tool | Mac | Linux desktop | Mac mini |
+| Tool | `rio-air` | `rio-ubu` | `rio-mini` |
 | --- | --- | --- | --- |
 | Claude Code (CLI) | yes | yes | yes |
 | Claude Desktop | yes | yes | yes |
-| Codex CLI | bundled in the ChatGPT app, not on `PATH` | yes | yes |
+| Codex CLI | yes | yes (npm global under nvm) | yes |
 | ChatGPT / Codex desktop | yes | yes | yes |
 | Muse Code (`muse`) | yes | yes | yes |
 | OpenCode (CLI) | yes | yes | no |
@@ -65,6 +65,11 @@ something an agent installs on its own.
 | T3 Code | yes | yes | yes |
 | VS Code | yes | yes | yes |
 | Warp | yes | yes | yes |
+| `uv` (standalone, `~/.local/bin`) | yes | yes | yes |
+| CPython 3.10 to 3.14 via `uv python install`; 3.14 is `python3` (`--default`) | yes | yes | yes |
+| direnv, hooked into the login shell (zsh on the Macs, bash on `rio-ubu`) | yes | yes | yes |
+| node LTS via nvm | yes | yes | yes |
+| `pre-commit` as a `uv tool`, hook installed in the checkout | yes | yes | yes |
 
 Versions drift per machine as each one updates; check with the tool's `--version` on the
 machine itself rather than trusting a number written here.

@@ -2,14 +2,12 @@
 
 The rule: a new thread starts on the machine with the most free CPU and memory,
 weighted by that machine's preference, among the machines that clear every hard
-floor. ``docs/fleet/machines.json`` is the one machine list: each entry names the
-machine, the ssh host it is reached as, its OS (``linux``, ``macos`` or
-``windows``), the checkout path the thread would work in (``repo``, ``~``
-allowed), a preference weight per mode, the hard floors per mode and the
-``hostnames`` the machine reports for itself (optional). A machine joins the fleet
-by a row there and its block in ``docs/fleet/MACHINES.md``. Every weight and floor
-is a finite number of at least 0, an ssh host never starts with ``-`` (ssh would
-read it as an option), and no hostname belongs to two machines.
+floor. The machines are ``docs/fleet/machines.json``'s, read through
+``scripts/fleet.py`` (its docstring states the list's schema): each entry names
+the machine, the ssh host it is reached as, its OS, the checkout path the thread
+would work in (``repo``), a preference weight per mode, the hard floors per mode
+and the ``hostnames`` the machine reports for itself. A machine joins the fleet
+by a row there and its block in ``docs/fleet/MACHINES.md``.
 
 Modes
     ``light`` (the default) is an ordinary agent thread: editing, git, targeted
@@ -18,12 +16,12 @@ Modes
 
 Measurement
     Every machine is measured by one probe script: the machine this script runs on
-    locally (no ssh), every other one in one ``ssh -o BatchMode=yes -o
-    ConnectTimeout=5 <host>`` call, all machines in parallel. The local machine is
-    the one ``--here`` names, else the machine whose ``hostnames`` holds this
-    host's name (:func:`this_hostname` up to its first dot, either compared
-    without case); with neither, the script cannot tell which machine it is on and
-    reaches every machine over ssh, its own included.
+    locally (no ssh), every other one in one ssh call with the fleet's options
+    (``fleet.ssh_argv``: batch mode, a 5-second connect timeout, a keepalive), all
+    machines in parallel. The local machine is the one ``--here`` names, else the
+    machine whose ``hostnames`` holds this host's name (``fleet.local_machine``);
+    with neither, the script cannot tell which machine it is on and reaches every
+    machine over ssh, its own included.
 
     - Linux: ``/proc/loadavg`` (1-minute load), ``nproc`` (threads),
       ``/proc/meminfo`` ``MemTotal`` and ``MemAvailable``, ``/proc/pressure/memory``
@@ -71,8 +69,8 @@ Output
     (the winning machine's ssh host alone). Exit 0 when a machine qualifies, 1
     when none does, 2 for an unreadable machine list.
 
-Standard library only, so it runs on the oldest supported Python with no
-project environment.
+Standard library plus ``scripts/fleet.py``, so it runs on the oldest supported
+Python with no project environment.
 """
 
 from __future__ import annotations
@@ -84,41 +82,25 @@ import dataclasses
 import json
 import math
 import shlex
-import socket
 import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+try:
+    import fleet
+except ModuleNotFoundError:  # imported as ``scripts.load_balancing`` (repo root on path)
+    from scripts import fleet
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from typing_extensions import TypeIs
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-MACHINES_FILE = REPO_ROOT / "docs" / "fleet" / "machines.json"
-MODES = ("light", "heavy")
-OSES = ("linux", "macos", "windows")
-SSH_OPTIONS = (
-    "-o",
-    "BatchMode=yes",
-    "-o",
-    "ConnectTimeout=5",
-)
 #: Seconds one probe may take, ssh connection included.
 PROBE_TIMEOUT = 30.0
-#: ssh's own exit status for a connection or authentication failure.
-SSH_FAILED = 255
 GIB = 1024**3
 #: The bound on every measured count: past it a byte count or a thread count is no machine's.
 MAX_COUNT = 2**63
 KIB = 1024
-COMMON_FLOORS = frozenset({"min_mem_available_gib", "min_disk_free_gib"})
-FLOORS_BY_OS: Mapping[str, frozenset[str]] = {
-    "linux": COMMON_FLOORS | {"max_psi_memory_full_avg10", "heavy_slots"},
-    "macos": COMMON_FLOORS | {"max_vm_pressure_level"},
-    "windows": COMMON_FLOORS,
-}
 #: What ``uname -s`` prints on each POSIX OS of the machine list.
 UNAME_OS = {"Linux": "linux", "Darwin": "macos"}
 
@@ -177,25 +159,8 @@ Write-Output '@@ windows'
 """
 
 
-class MachineListError(ValueError):
-    """The machine list is missing, unreadable, or breaks its schema."""
-
-
 class ProbeOutputError(ValueError):
     """A probe's output lacks a section or a value the parser needs."""
-
-
-@dataclasses.dataclass(frozen=True)
-class Machine:
-    """One entry of the machine list."""
-
-    name: str
-    ssh: str
-    os: str
-    repo: str
-    weights: Mapping[str, float]
-    floors: Mapping[str, Mapping[str, float]]
-    hostnames: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -261,191 +226,12 @@ class Measurement:
 class Verdict:
     """One machine's result for a mode: ``ok``, ``disqualified`` or ``unreachable``."""
 
-    machine: Machine
+    machine: fleet.Machine
     local: bool
     status: str
     reasons: tuple[str, ...]
     score: float | None
     measurement: Measurement | None
-
-
-# -- machine list -------------------------------------------------------------------------
-
-
-def _number(value: object, where: str) -> float:
-    """Return ``value`` as a finite number of at least 0 (JSON admits ``NaN`` and overflow)."""
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        msg = f"{where} must be a number, got {value!r}"
-        raise MachineListError(msg)
-    try:
-        number = float(value)
-    except OverflowError as error:
-        msg = f"{where} must be finite, got {value!r}"
-        raise MachineListError(msg) from error
-    if not math.isfinite(number) or number < 0:
-        msg = f"{where} must be a finite number of at least 0, got {value!r}"
-        raise MachineListError(msg)
-    return number
-
-
-def _text(entry: Mapping[str, object], key: str, where: str) -> str:
-    value = entry.get(key)
-    if not isinstance(value, str) or not value:
-        msg = f"{where}.{key} must be a non-empty string"
-        raise MachineListError(msg)
-    return value
-
-
-def is_json_object(value: object) -> TypeIs[dict[str, object]]:
-    """Return whether ``value`` is a decoded JSON object (whose keys are always strings)."""
-    return isinstance(value, dict)
-
-
-def is_json_array(value: object) -> TypeIs[list[object]]:
-    """Return whether ``value`` is a decoded JSON array."""
-    return isinstance(value, list)
-
-
-def _object(value: object, where: str) -> dict[str, object]:
-    if not is_json_object(value):
-        msg = f"{where} must be an object"
-        raise MachineListError(msg)
-    return value
-
-
-def _machine(raw: object, index: int) -> Machine:
-    where = f"machines[{index}]"
-    entry = _object(raw, where)
-    name = _text(entry, "name", where)
-    os_name = _text(entry, "os", where)
-    if os_name not in OSES:
-        msg = f"{where}.os {os_name!r} is not one of {', '.join(OSES)}"
-        raise MachineListError(msg)
-    weights_raw = _object(entry.get("weight"), f"{where}.weight")
-    floors_raw = _object(entry.get("floors"), f"{where}.floors")
-    weights: dict[str, float] = {}
-    floors: dict[str, dict[str, float]] = {}
-    for mode in MODES:
-        if mode not in weights_raw:
-            msg = f"{where}.weight has no {mode!r} weight"
-            raise MachineListError(msg)
-        weights[mode] = _number(weights_raw[mode], f"{where}.weight.{mode}")
-        mode_floors = _object(floors_raw.get(mode, {}), f"{where}.floors.{mode}")
-        unknown = sorted(set(mode_floors) - FLOORS_BY_OS[os_name])
-        if unknown:
-            msg = f"{where}.floors.{mode}: {', '.join(unknown)} cannot be measured on {os_name}"
-            raise MachineListError(msg)
-        floors[mode] = {
-            key: _number(value, f"{where}.floors.{mode}.{key}")
-            for key, value in mode_floors.items()
-        }
-    extra = sorted(set(weights_raw) - set(MODES)) + sorted(set(floors_raw) - set(MODES))
-    if extra:
-        msg = f"{where}: unknown mode(s) {', '.join(extra)}"
-        raise MachineListError(msg)
-    ssh = _text(entry, "ssh", where)
-    if ssh.startswith("-"):
-        msg = f"{where}.ssh {ssh!r} starts with '-', which ssh reads as an option"
-        raise MachineListError(msg)
-    hostnames_raw = entry.get("hostnames", [])
-    if not is_json_array(hostnames_raw) or not all(
-        isinstance(item, str) and item for item in hostnames_raw
-    ):
-        msg = f"{where}.hostnames must be a list of non-empty strings"
-        raise MachineListError(msg)
-    return Machine(
-        name=name,
-        ssh=ssh,
-        os=os_name,
-        repo=_text(entry, "repo", where),
-        weights=weights,
-        floors=floors,
-        hostnames=tuple(short_hostname(str(item)) for item in hostnames_raw),
-    )
-
-
-def this_hostname() -> str:
-    """Return this machine's own name, stable across the networks it joins.
-
-    macOS: ``scutil --get LocalHostName``, since :func:`socket.gethostname` there
-    follows the network (a DHCP lease renames the Mac ``mac.lan`` at home); when
-    scutil fails, :func:`socket.gethostname`. Elsewhere :func:`socket.gethostname`.
-    """
-    if sys.platform == "darwin":
-        try:
-            result = subprocess.run(
-                ["scutil", "--get", "LocalHostName"],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
-            )
-        except (OSError, subprocess.SubprocessError):
-            result = None
-        if result is not None and result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    return socket.gethostname()
-
-
-def short_hostname(hostname: str) -> str:
-    """Return ``hostname`` up to its first dot, casefolded: how a machine is matched and named."""
-    return hostname.split(".", 1)[0].casefold()
-
-
-def load_machines(path: Path = MACHINES_FILE) -> tuple[Machine, ...]:
-    """Return the machine list at ``path``, in file order.
-
-    Raises:
-        MachineListError: the file is missing, not JSON, or breaks the schema the
-            module docstring states (names must be unique).
-
-    """
-    try:
-        document = _loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as error:
-        msg = f"{path}: {error}"
-        raise MachineListError(msg) from error
-    entries = _object(document, str(path)).get("machines")
-    if not is_json_array(entries) or not entries:
-        msg = f"{path}: 'machines' must be a non-empty list"
-        raise MachineListError(msg)
-    machines = tuple(_machine(raw, index) for index, raw in enumerate(entries))
-    names = [machine.name for machine in machines]
-    duplicates = sorted({name for name in names if names.count(name) > 1})
-    if duplicates:
-        msg = f"{path}: duplicate machine name(s) {', '.join(duplicates)}"
-        raise MachineListError(msg)
-    claimed = [hostname for machine in machines for hostname in machine.hostnames]
-    shared = sorted({hostname for hostname in claimed if claimed.count(hostname) > 1})
-    if shared:
-        msg = f"{path}: hostname(s) {', '.join(shared)} belong to more than one machine"
-        raise MachineListError(msg)
-    return machines
-
-
-def local_machine(
-    machines: Sequence[Machine],
-    here: str | None,
-    hostname: str | None = None,
-) -> Machine | None:
-    """Return the machine this script runs on, or ``None`` to reach every machine over ssh.
-
-    ``here`` names it outright; otherwise it is the machine whose ``hostnames`` holds
-    ``hostname`` (default :func:`this_hostname`) up to its first dot, compared
-    without case. Nothing else identifies it: a machine of the same OS is not this one.
-
-    Raises:
-        MachineListError: ``here`` names no machine of the list.
-
-    """
-    if here is not None:
-        for machine in machines:
-            if here in {machine.name, machine.ssh}:
-                return machine
-        msg = f"--here {here!r} names no machine of the list"
-        raise MachineListError(msg)
-    short = short_hostname(this_hostname() if hostname is None else hostname)
-    return next((machine for machine in machines if short in machine.hostnames), None)
 
 
 # -- probes -------------------------------------------------------------------------------
@@ -455,7 +241,7 @@ def _powershell_literal(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def probe_command(machine: Machine, *, local: bool) -> tuple[list[str], str | None]:
+def probe_command(machine: fleet.Machine, *, local: bool) -> tuple[list[str], str | None]:
     """Return the argv and stdin that measure ``machine``: one process, one ssh call if remote."""
     if machine.os == "windows":
         script = WINDOWS_PROBE.replace("{repo}", _powershell_literal(machine.repo))
@@ -469,12 +255,7 @@ def probe_command(machine: Machine, *, local: bool) -> tuple[list[str], str | No
         ]
         if local:
             return command, None
-        return [
-            "ssh",
-            *SSH_OPTIONS,
-            machine.ssh,
-            " ".join(command),
-        ], None
+        return fleet.ssh_argv(machine, " ".join(command)), None
     script = LINUX_PROBE if machine.os == "linux" else MACOS_PROBE
     if local:
         return [
@@ -483,13 +264,7 @@ def probe_command(machine: Machine, *, local: bool) -> tuple[list[str], str | No
             "--",
             machine.repo,
         ], script
-    remote = f"sh -s -- {shlex.quote(machine.repo)}"
-    return [
-        "ssh",
-        *SSH_OPTIONS,
-        machine.ssh,
-        remote,
-    ], script
+    return fleet.ssh_argv(machine, f"sh -s -- {shlex.quote(machine.repo)}"), script
 
 
 def _sections(output: str) -> dict[str, list[str]]:
@@ -655,7 +430,7 @@ def parse_windows(output: str) -> Measurement:
     except ValueError as error:
         msg = f"unreadable Windows probe JSON ({error})"
         raise ProbeOutputError(msg) from error
-    if not is_json_object(raw):
+    if not fleet.is_json_object(raw):
         msg = "Windows probe JSON is not an object"
         raise ProbeOutputError(msg)
     document = raw
@@ -691,7 +466,12 @@ def _last_line(text: str) -> str:
     return lines[-1] if lines else "no output"
 
 
-def measure(machine: Machine, *, local: bool, timeout: float = PROBE_TIMEOUT) -> Measurement | str:
+def measure(
+    machine: fleet.Machine,
+    *,
+    local: bool,
+    timeout: float = PROBE_TIMEOUT,
+) -> Measurement | str:
     """Run ``machine``'s probe and return its measurement, or the reason it has none."""
     argv, stdin = probe_command(machine, local=local)
     try:
@@ -707,7 +487,7 @@ def measure(machine: Machine, *, local: bool, timeout: float = PROBE_TIMEOUT) ->
         return f"probe timed out after {timeout:g}s"
     except OSError as error:
         return f"cannot run {argv[0]}: {error}"
-    if completed.returncode == SSH_FAILED and not local:
+    if completed.returncode == fleet.SSH_FAILED and not local:
         return f"unreachable over ssh {machine.ssh}: {_last_line(completed.stderr)}"
     if completed.returncode != 0:
         return f"probe failed (exit {completed.returncode}): {_last_line(completed.stderr)}"
@@ -766,7 +546,7 @@ def score(measurement: Measurement, weight: float) -> float:
 
 
 def judge(
-    machine: Machine,
+    machine: fleet.Machine,
     result: Measurement | str,
     mode: str,
     *,
@@ -794,9 +574,9 @@ def rank(verdicts: Sequence[Verdict]) -> list[Verdict]:
 
 
 def survey(
-    machines: Sequence[Machine],
+    machines: Sequence[fleet.Machine],
     mode: str,
-    local: Machine | None,
+    local: fleet.Machine | None,
     timeout: float = PROBE_TIMEOUT,
 ) -> list[Verdict]:
     """Probe every machine in parallel and return the ranked verdicts."""
@@ -944,14 +724,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--here",
         help="the machine (name or ssh host) this runs on; default: by this host's name",
     )
-    _ = parser.add_argument("--machines", type=Path, default=MACHINES_FILE, help="machine list")
+    _ = parser.add_argument(
+        "--machines",
+        type=Path,
+        default=fleet.MACHINES_FILE,
+        help="machine list",
+    )
     _ = parser.add_argument("--timeout", type=float, default=PROBE_TIMEOUT, help="probe seconds")
     args = parser.parse_args(argv, namespace=_Args())
     mode = "heavy" if args.heavy else "light"
     try:
-        machines = load_machines(args.machines)
-        local = local_machine(machines, args.here)
-    except MachineListError as error:
+        machines = fleet.load_machines(args.machines)
+        local = fleet.local_machine(machines, args.here)
+    except fleet.MachineListError as error:
         print(f"load_balancing: {error}", file=sys.stderr)
         return 2
     verdicts = survey(machines, mode, local, args.timeout)
