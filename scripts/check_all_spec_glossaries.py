@@ -32,11 +32,11 @@ import sys
 from pathlib import Path
 
 try:
+    import _git
     import check_spec_glossary
 except ModuleNotFoundError:  # imported as a ``scripts`` submodule (repo root on path)
-    from scripts import check_spec_glossary
+    from scripts import _git, check_spec_glossary
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
 #: The live spec's directory and the archive, each relative to the checkout root.
 LIVE_DIR = "docs"
 ARCHIVE_DIR = "docs/SPECS"
@@ -57,7 +57,7 @@ def _parse_args(argv: list[str] | None) -> _Args:
     _ = parser.add_argument(
         "--root",
         type=Path,
-        default=REPO_ROOT,
+        default=_git.CHECKOUT_ROOT,
         help="Checkout whose specs are checked (default: this repository).",
     )
     return parser.parse_args(argv, namespace=_Args())

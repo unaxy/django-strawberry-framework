@@ -107,7 +107,6 @@ except ModuleNotFoundError:  # imported as ``scripts.review_plan`` (repo root on
     from scripts import _git as _git_runner
     from scripts import _plan_common
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_DIR = "django_strawberry_framework"
 REVIEW_DIR = Path("docs/review")
 AXES = ("performance", "mechanics", "comments")
@@ -1576,7 +1575,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--root",
         type=Path,
-        default=REPO_ROOT,
+        default=_git_runner.CHECKOUT_ROOT,
         help="repository root (default: the checkout holding this script)",
     )
     commands = parser.add_subparsers(dest="command", required=True)

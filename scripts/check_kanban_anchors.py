@@ -35,15 +35,15 @@ from __future__ import annotations
 
 import re
 import sys
-from pathlib import Path
 
 try:
+    import _git
     from _kanban_lib import configure_django
 except ModuleNotFoundError:  # imported as ``scripts.check_kanban_anchors`` (repo root on path)
+    from scripts import _git
     from scripts._kanban_lib import configure_django
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-KANBAN_MD_PATH = REPO_ROOT / "KANBAN.md"
+KANBAN_MD_PATH = _git.CHECKOUT_ROOT / "KANBAN.md"
 RENDER_ANCHOR_RE = re.compile(r'<a id="([^"]+)"></a>')
 
 

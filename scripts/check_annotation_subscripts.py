@@ -68,14 +68,15 @@ import tomli
 from typing_extensions import TypeIs, override
 
 try:
+    import _git
     import check_citations
 except ModuleNotFoundError:  # imported as a ``scripts`` submodule (repo root on path)
-    from scripts import check_citations
+    from scripts import _git, check_citations
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = _git.CHECKOUT_ROOT
 #: The package the sweep reads, repo-relative.
 PACKAGE = "django_strawberry_framework"
 

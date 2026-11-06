@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from django.db.backends.base.base import BaseDatabaseWrapper
     from typing_extensions import TypeIs
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = _git.CHECKOUT_ROOT
 FAKESHOP_ROOT = REPO_ROOT / "examples" / "fakeshop"
 
 # Wait this long for a competing writer to release a SQLite lock before erroring.

@@ -13,12 +13,13 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 try:
+    import _git
     from _kanban_lib import run_git as _run_git
 except ModuleNotFoundError:  # imported as ``scripts.build_kanban_tracked_path_constants``
+    from scripts import _git
     from scripts._kanban_lib import run_git as _run_git
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT = REPO_ROOT / "examples" / "fakeshop" / "apps" / "kanban" / "constants.py"
+DEFAULT_OUTPUT = _git.CHECKOUT_ROOT / "examples" / "fakeshop" / "apps" / "kanban" / "constants.py"
 # The roots kanban cards may link paths under: the package itself plus the four
 # deliberate test locations (see docs/TREE.md "Test layout").
 TRACKED_ROOTS = (
