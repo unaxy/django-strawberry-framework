@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts import _git, load_balancing, prove_failability, work, workspace
+from scripts import _git, fleet, prove_failability, work, workspace
 from tests._idioms import json_at, json_list, json_loads, json_object
 
 PACKAGE = work.PACKAGE
@@ -3628,7 +3628,7 @@ def test_a_machine_is_named_by_the_override_else_its_short_hostname(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv(work.MACHINE_ENV, raising=False)
-    monkeypatch.setattr(load_balancing, "this_hostname", lambda: "Riordens-MacBook-Air.local")
+    monkeypatch.setattr(fleet, "this_hostname", lambda: "Riordens-MacBook-Air.local")
     assert work.machine_id() == "riordens-macbook-air"
     monkeypatch.setenv(work.MACHINE_ENV, "Rio-Ubu")
     assert work.machine_id() == "rio-ubu"

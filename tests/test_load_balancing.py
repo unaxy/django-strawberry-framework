@@ -2,11 +2,12 @@
 
 Each OS's probe output is parsed from text captured on a fleet machine (Windows
 from the shape ``ConvertTo-Json -Compress`` prints), then scored and held to
-its floors; the machine list in ``docs/fleet/machines.json`` is loaded and its
-schema refusals pinned; the CLI's ``--pick``, ``--json`` and table outputs run
-end to end with only ``subprocess.run`` faked, which is the ssh and local
-probe boundary. A live ``/graphql/`` request has no wire shape for picking a
-machine, so there is no live sibling in ``examples/fakeshop/test_query/``.
+its floors; every disk floor of the tracked machine list leaves room for a
+workspace copy (the list's schema is ``tests/test_fleet.py``'s); the CLI's
+``--pick``, ``--json`` and table outputs run end to end with only
+``subprocess.run`` faked, which is the ssh and local probe boundary. A live
+``/graphql/`` request has no wire shape for picking a machine, so there is no
+live sibling in ``examples/fakeshop/test_query/``.
 """
 
 from __future__ import annotations
@@ -14,14 +15,12 @@ from __future__ import annotations
 import base64
 import dataclasses
 import json
-import socket
 import subprocess
-import sys
 from typing import TYPE_CHECKING
 
 import pytest
 
-from scripts import load_balancing, workspace
+from scripts import fleet, load_balancing, workspace
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -120,8 +119,8 @@ def _machine(
     light: float = 1.0,
     heavy: float = 1.0,
     floors: dict[str, dict[str, float]] | None = None,
-) -> load_balancing.Machine:
-    return load_balancing.Machine(
+) -> fleet.Machine:
+    return fleet.Machine(
         name=name,
         ssh=f"{name}-ssh",
         os=os_name,
@@ -389,133 +388,27 @@ def test_rank_orders_qualifying_by_score_then_disqualified_then_unreachable() ->
 # -- machine list -------------------------------------------------------------------------
 
 
-def test_the_tracked_machine_list_loads_with_the_current_fleet() -> None:
-    """The fleet file names both machines with both modes' weights."""
-    machines = {machine.name: machine for machine in load_balancing.load_machines()}
-    assert set(machines) >= {"rio-mac", "rio-desktop"}
-    assert machines["rio-desktop"].os == "linux"
-    assert machines["rio-mac"].os == "macos"
-    assert machines["rio-desktop"].floors["heavy"]["heavy_slots"] == 3
-    assert machines["rio-mac"].weights["heavy"] < machines["rio-desktop"].weights["heavy"]
-
-
 def test_every_disk_floor_leaves_room_for_a_workspace_copy() -> None:
     """A thread may bind a ``workspace.py`` copy, which refuses under its free-disk guard."""
     guard = workspace.MIN_FREE_BYTES / GIB
-    for machine in load_balancing.load_machines():
-        for mode in load_balancing.MODES:
+    for machine in fleet.load_machines():
+        for mode in fleet.MODES:
             assert machine.floors[mode].get("min_disk_free_gib", 0) >= guard, (machine.name, mode)
-
-
-@pytest.mark.parametrize(
-    ("machines", "message"),
-    [
-        ([], "non-empty list"),
-        ([_entry("a", "linux"), _entry("a", "linux")], "duplicate machine name(s) a"),
-        ([_entry("a", "plan9")], "is not one of"),
-        ([_entry("a", "linux", weight={"light": 1})], "no 'heavy' weight"),
-        ([_entry("a", "linux", weight={"light": "1", "heavy": 1})], "must be a number"),
-        ([_entry("a", "linux", weight={"light": True, "heavy": 1})], "must be a number"),
-        (
-            [_entry("a", "linux", weight={"light": 1, "heavy": 1, "medium": 1})],
-            "unknown mode(s) medium",
-        ),
-        (
-            [_entry("a", "macos", floors={"light": {"heavy_slots": 3}})],
-            "heavy_slots cannot be measured on macos",
-        ),
-        (
-            [_entry("a", "windows", floors={"heavy": {"max_psi_memory_full_avg10": 5}})],
-            "cannot be measured on windows",
-        ),
-        ([_entry("a", "linux", ssh="")], "ssh must be a non-empty string"),
-        ([_entry("a", "linux", ssh="-oProxyCommand=x")], "which ssh reads as an option"),
-        (
-            [_entry("a", "linux", weight={"light": float("nan"), "heavy": 1})],
-            "weight.light must be a finite number of at least 0, got nan",
-        ),
-        (
-            [_entry("a", "linux", weight={"light": -1, "heavy": 1})],
-            "weight.light must be a finite number of at least 0",
-        ),
-        (
-            [_entry("a", "linux", floors={"light": {"min_mem_available_gib": float("nan")}})],
-            "min_mem_available_gib must be a finite number of at least 0, got nan",
-        ),
-        (
-            [_entry("a", "linux", floors={"light": {"min_disk_free_gib": float("inf")}})],
-            "min_disk_free_gib must be a finite number of at least 0, got inf",
-        ),
-        (
-            [_entry("a", "linux", floors={"heavy": {"heavy_slots": 10**400}})],
-            "heavy_slots must be finite",
-        ),
-        ([_entry("a", "linux", hostnames="box")], "hostnames must be a list"),
-        ([_entry("a", "linux", hostnames=[""])], "hostnames must be a list"),
-        (
-            [
-                _entry("a", "linux", hostnames=["Box.local"]),
-                _entry("b", "macos", hostnames=["box"]),
-            ],
-            "hostname(s) box belong to more than one machine",
-        ),
-        ([_entry("a", "linux", floors=[])], "floors must be an object"),
-    ],
-)
-def test_a_machine_list_breaking_the_schema_is_refused(
-    tmp_path: Path,
-    machines: list[dict[str, object]],
-    message: str,
-) -> None:
-    """Each schema rule refuses with a message naming the entry and the rule."""
-    with pytest.raises(load_balancing.MachineListError) as raised:
-        _ = load_balancing.load_machines(_write_list(tmp_path, machines))
-    assert message in str(raised.value)
-
-
-def test_a_missing_or_non_json_machine_list_is_refused(tmp_path: Path) -> None:
-    """Unreadable files are list errors, not tracebacks."""
-    with pytest.raises(load_balancing.MachineListError):
-        _ = load_balancing.load_machines(tmp_path / "absent.json")
-    bad = tmp_path / "bad.json"
-    _ = bad.write_text("{", encoding="utf-8")
-    with pytest.raises(load_balancing.MachineListError):
-        _ = load_balancing.load_machines(bad)
-
-
-def test_the_local_machine_is_the_one_whose_hostname_matches_or_the_one_named() -> None:
-    """A hostname match ignores case and the domain; ``--here`` takes a name or an ssh host."""
-    mac = dataclasses.replace(_machine("m", "macos"), hostnames=("laptop",))
-    linux = dataclasses.replace(_machine("l"), hostnames=("desk",))
-    assert load_balancing.local_machine([mac, linux], None, "Laptop.local") is mac
-    assert load_balancing.local_machine([mac, linux], None, "desk") is linux
-    assert load_balancing.local_machine([mac, linux], "l-ssh", "laptop") is linux
-    with pytest.raises(load_balancing.MachineListError, match="names no machine"):
-        _ = load_balancing.local_machine([mac], "nowhere", "laptop")
-
-
-def test_an_unidentified_host_is_no_machine_even_when_one_shares_its_os() -> None:
-    """The only Linux row is not this Linux box unless its hostname says so."""
-    machines = load_balancing.load_machines()
-    assert any(machine.os == "linux" for machine in machines)
-    assert load_balancing.local_machine(machines, None, "unknown-linux-laptop") is None
-    assert load_balancing.local_machine(machines, None, "rio-ubu.lan") is not None
 
 
 # -- probe commands and the subprocess boundary -------------------------------------------
 
 
-def test_a_remote_probe_is_one_batch_mode_ssh_call_with_the_script_on_stdin() -> None:
-    """No password prompt can hang it, the connect times out, ``repo`` is shell-quoted."""
+def test_a_remote_probe_is_one_fleet_ssh_call_with_the_script_on_stdin() -> None:
+    """The fleet's ssh options (batch mode, connect timeout, keepalive); ``repo`` is shell-quoted."""
     argv, stdin = load_balancing.probe_command(_machine("l"), local=False)
-    assert argv[:5] == [
+    assert argv == [
         "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=5",
+        *fleet.SSH_OPTIONS,
+        "l-ssh",
+        "sh -s -- '~/projects/repo'",
     ]
-    assert argv[5:] == ["l-ssh", "sh -s -- '~/projects/repo'"]
+    assert "ServerAliveInterval=15" in argv
     assert stdin == load_balancing.LINUX_PROBE
 
 
@@ -536,15 +429,8 @@ def test_a_windows_probe_is_an_encoded_powershell_command_holding_the_quoted_rep
     machine = dataclasses.replace(_machine("w", "windows"), repo="C:\\it's\\repo")
     argv, stdin = load_balancing.probe_command(machine, local=False)
     assert stdin is None
-    assert argv[:6] == [
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=5",
-        "w-ssh",
-    ]
-    words = argv[6].split()
+    assert argv[:-1] == ["ssh", *fleet.SSH_OPTIONS, "w-ssh"]
+    words = argv[-1].split()
     assert words[:4] == [
         "powershell",
         "-NoProfile",
@@ -566,7 +452,7 @@ class _FakeRun:
         self.calls: list[list[str]] = []
 
     def host(self, argv: list[str]) -> str:
-        return argv[5] if argv[0] == "ssh" else "local"
+        return argv[1 + len(fleet.SSH_OPTIONS)] if argv[0] == "ssh" else "local"
 
     def __call__(self, argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(argv))
@@ -580,7 +466,7 @@ class _FakeRun:
 def _patch(monkeypatch: pytest.MonkeyPatch, fake: _FakeRun) -> None:
     """Route every subprocess to ``fake``, on a host no machine list names (no scutil call)."""
     monkeypatch.setattr(subprocess, "run", fake)
-    monkeypatch.setattr(load_balancing, "this_hostname", lambda: "stranger")
+    monkeypatch.setattr(fleet, "this_hostname", lambda: "stranger")
 
 
 @pytest.mark.parametrize(
@@ -715,19 +601,19 @@ def test_json_reports_every_machine_with_status_reasons_and_measurement(
     )
     document = _loads(capsys.readouterr().out)
     assert code == 0
-    assert load_balancing.is_json_object(document)
+    assert fleet.is_json_object(document)
     assert document["mode"] == "light"
     assert document["pick"] == "desk"
     machines = document["machines"]
-    assert load_balancing.is_json_array(machines)
-    rows = [row for row in machines if load_balancing.is_json_object(row)]
+    assert fleet.is_json_array(machines)
+    rows = [row for row in machines if fleet.is_json_object(row)]
     assert [(row["name"], row["status"], row["local"]) for row in rows] == [
         ("desk", "ok", True),
         ("win", "ok", False),
         ("mac", "ok", False),
     ]
     measurement = rows[0]["measurement"]
-    assert load_balancing.is_json_object(measurement)
+    assert fleet.is_json_object(measurement)
     assert measurement["heavy_jobs"] == 1
     assert measurement["cpu_free"] == pytest.approx(0.75)
 
@@ -782,7 +668,7 @@ def test_an_unidentified_host_measures_every_machine_over_ssh(
     )
     fake = _FakeRun({"desk": (0, LINUX_OUTPUT, ""), "mac": (0, MACOS_OUTPUT, "")})
     _patch(monkeypatch, fake)
-    monkeypatch.setattr(load_balancing, "this_hostname", lambda: "stranger")
+    monkeypatch.setattr(fleet, "this_hostname", lambda: "stranger")
     code = load_balancing.main(["--pick", "--machines", str(path)])
     assert (code, capsys.readouterr().out) == (0, "desk\n")
     assert sorted(fake.host(call) for call in fake.calls) == ["desk", "mac"]
@@ -832,56 +718,3 @@ def test_an_unreadable_machine_list_exits_two(
     code = load_balancing.main(["--machines", str(tmp_path / "absent.json")])
     assert code == 2
     assert "absent.json" in capsys.readouterr().err
-
-
-def test_a_mac_is_named_by_its_local_host_name_not_the_network_one(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """On macOS the name comes from scutil, so a DHCP lease (``mac.lan`` at home) cannot rename it."""
-    calls: list[list[str]] = []
-
-    def scutil(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, "Riordens-MacBook-Air\n", "")
-
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(subprocess, "run", scutil)
-    monkeypatch.setattr(socket, "gethostname", lambda: "mac.lan")
-    assert load_balancing.this_hostname() == "Riordens-MacBook-Air"
-    assert calls == [["scutil", "--get", "LocalHostName"]]
-
-
-@pytest.mark.parametrize(
-    "outcome",
-    [
-        subprocess.CompletedProcess(["scutil"], 1, "", "no LocalHostName"),
-        subprocess.CompletedProcess(["scutil"], 0, "  \n", ""),
-        FileNotFoundError("scutil"),
-        subprocess.TimeoutExpired(["scutil"], 5),
-    ],
-)
-def test_a_mac_whose_scutil_gives_no_name_falls_back_to_the_network_name(
-    monkeypatch: pytest.MonkeyPatch,
-    outcome: subprocess.CompletedProcess[str] | Exception,
-) -> None:
-    def scutil(_argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
-
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(subprocess, "run", scutil)
-    monkeypatch.setattr(socket, "gethostname", lambda: "mac.lan")
-    assert load_balancing.this_hostname() == "mac.lan"
-
-
-def test_off_macos_the_name_is_the_socket_hostname_and_scutil_never_runs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def refuse(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError
-
-    monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(subprocess, "run", refuse)
-    monkeypatch.setattr(socket, "gethostname", lambda: "rio-ubu")
-    assert load_balancing.this_hostname() == "rio-ubu"
