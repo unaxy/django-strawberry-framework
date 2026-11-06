@@ -125,6 +125,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
 try:
+    import _git
     from check_trailing_commas import (
         git_visible_scope,
         git_visible_walk,
@@ -132,6 +133,7 @@ try:
         is_ruff_excluded_name,
     )
 except ModuleNotFoundError:  # imported as ``scripts.check_citations`` (repo root on path)
+    from scripts import _git
     from scripts.check_trailing_commas import (
         git_visible_scope,
         git_visible_walk,
@@ -139,7 +141,7 @@ except ModuleNotFoundError:  # imported as ``scripts.check_citations`` (repo roo
         is_ruff_excluded_name,
     )
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = _git.CHECKOUT_ROOT
 
 # The first-party trees. A citation's file half is resolved against these (plus the
 # citing file's own directory), so `utils/querysets.py::visible_related_object`

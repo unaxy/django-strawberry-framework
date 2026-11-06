@@ -60,7 +60,6 @@ import subprocess
 import sys
 import tokenize
 from collections import Counter
-from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 import tomli
@@ -73,10 +72,11 @@ except ModuleNotFoundError:  # imported as a ``scripts`` submodule (repo root on
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
+    from pathlib import Path
 
     from typing_extensions import TypeIs
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = _git.CHECKOUT_ROOT
 #: The generated site ledger, repo-relative.
 LEDGER = "scripts/type_suppressions.toml"
 #: The commit trailer that carries the maintainer's consent to a ledger total rising.

@@ -196,7 +196,7 @@ if TYPE_CHECKING:
 
     from typing_extensions import TypeIs
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = _git.CHECKOUT_ROOT
 
 
 def _is_toml_table(value: object) -> TypeIs[dict[str, object]]:

@@ -81,6 +81,11 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import tomli
 
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts.check_public_types`` (repo root on path)
+    from scripts import _git
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
@@ -89,7 +94,6 @@ if TYPE_CHECKING:
 # ``json.loads`` returns ``Any``; this alias hands callers an ``object`` to narrow.
 _loads: Callable[[str], object] = json.loads
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "django_strawberry_framework"
 DISTRIBUTION = "django-strawberry-framework"
 #: The one passing score: every exported symbol's type is known.
@@ -378,10 +382,10 @@ def build_environment(environment: Path) -> None:
             "--python",
             sys.executable,
             "--project",
-            str(REPO_ROOT),
+            str(_git.CHECKOUT_ROOT),
             "--quiet",
         ],
-        cwd=REPO_ROOT,
+        cwd=_git.CHECKOUT_ROOT,
         env=child_environment(os.environ, UV_PROJECT_ENVIRONMENT=str(environment)),
     )
     if completed.returncode != 0:
@@ -410,7 +414,7 @@ def checked_python_version() -> str:
     """Return ``[tool.basedpyright] pythonVersion``, the Python the package checkers read."""
     # ``tomli.loads`` returns ``dict[str, Any]``; this alias hands the walk an ``object``.
     toml_loads: Callable[[str], dict[str, object]] = tomli.loads
-    pyproject = REPO_ROOT / "pyproject.toml"
+    pyproject = _git.CHECKOUT_ROOT / "pyproject.toml"
     try:
         return _basedpyright_python_version(toml_loads(pyproject.read_text(encoding="utf-8")))
     except (OSError, KeyError, tomli.TOMLDecodeError) as error:
@@ -466,7 +470,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _ = parse_args(sys.argv[1:] if argv is None else argv)
     with tempfile.TemporaryDirectory(prefix="dsf-verifytypes-") as scratch:
         root = Path(scratch).resolve()
-        if root == REPO_ROOT or REPO_ROOT in root.parents:
+        if root == _git.CHECKOUT_ROOT or _git.CHECKOUT_ROOT in root.parents:
             raise MeasurementError(
                 f"The temporary directory {root} lies inside the repository; point TMPDIR "
                 "outside it so the verifier reads the installed package.",

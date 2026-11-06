@@ -25,12 +25,16 @@ import functools
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts.census_test_models`` (repo root on path)
+    from scripts import _git
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-TESTS_ROOT = REPO_ROOT / "tests"
-IMPORT_ROOTS = (REPO_ROOT, REPO_ROOT / "examples" / "fakeshop")
+TESTS_ROOT = _git.CHECKOUT_ROOT / "tests"
+IMPORT_ROOTS = (_git.CHECKOUT_ROOT, _git.CHECKOUT_ROOT / "examples" / "fakeshop")
 DJANGO_MODEL_MODULES = frozenset({"django.db.models", "django.db.models.base"})
 MODEL_BASE_MODULES = ("models", "djmodels", "dj_models")
 FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)

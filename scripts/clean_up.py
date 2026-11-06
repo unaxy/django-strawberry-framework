@@ -22,13 +22,18 @@ from __future__ import annotations
 
 import argparse
 import shutil
-from pathlib import Path
 from typing import TYPE_CHECKING
+
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts.clean_up`` (repo root on path)
+    from scripts import _git
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
+    from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = _git.CHECKOUT_ROOT
 CLEAR_DIRECTORIES = ("docs/shadow", "docs/review/temp-tests", "docs/builder/temp-tests")
 WORKER_MEMORY_ROOTS = ("docs",)
 WORKER_MEMORY_DIRECTORY_NAME = "worker-memory"

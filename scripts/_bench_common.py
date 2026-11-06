@@ -60,7 +60,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.optimizer.extension import DjangoOptimizerExtension
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = _git.CHECKOUT_ROOT
 FAKESHOP = REPO_ROOT / "examples" / "fakeshop"
 TRACKED_DB = FAKESHOP / "db.sqlite3"
 BENCH_COMMON = Path(__file__).resolve()

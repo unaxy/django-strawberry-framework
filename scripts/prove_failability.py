@@ -301,9 +301,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 try:
+    import _git
     import _stop_signals
 except ModuleNotFoundError:  # imported as ``scripts.prove_failability`` (repo root on path)
-    from scripts import _stop_signals
+    from scripts import _git, _stop_signals
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
@@ -311,7 +312,7 @@ if TYPE_CHECKING:
 
     from typing_extensions import TypeIs
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = _git.CHECKOUT_ROOT
 # ``json.loads`` returns ``Any``; this alias hands callers an ``object`` to narrow.
 _loads: Callable[[str], object] = json.loads
 # The XDG base directory variable for state that outlives a restart; an unset, empty or

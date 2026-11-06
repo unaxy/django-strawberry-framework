@@ -164,7 +164,12 @@ from typing import TypeAlias, TypeGuard
 
 import tomli
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+try:
+    import _git
+except ModuleNotFoundError:  # imported as ``scripts.check_truthful_reads`` (repo root on path)
+    from scripts import _git
+
+REPO_ROOT = _git.CHECKOUT_ROOT
 TABLE = "tool.truthful_reads"
 
 IDENTITY_DUNDERS = frozenset(
