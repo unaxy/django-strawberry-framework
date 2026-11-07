@@ -33,7 +33,10 @@ The shape is the ``036`` discipline adapted to forms (spec-038 Decision 7):
   built-in field reading a single value over an ``ArrayField``: ``_input_shape_disagrees``), use
   ``converter.convert_form_field`` (the model-less table), except a single-value
   ``ChoiceField`` over an ``ArrayField`` whose ``base_field`` lists choices, which is
-  typed by that element column (``_input_typing_column``).
+  typed by that element column (``_input_typing_column``). So does a built-in single-value
+  field over a column holding JSON as given and listing no choices
+  (``_reads_one_value_of_held_json``: a ``CharField`` over a ``JSONField`` takes ``String``),
+  which reads the client's text.
   The two key spaces (``forms.Field`` / ``models.Field``) stay strictly separate: the column is
   resolved first, then handed to the ``models.Field``-keyed converters.
 - Shape identity is ``(form_class, operation_kind, frozenset(effective field
@@ -74,6 +77,7 @@ from django_strawberry_framework.types.converters import (
     build_enum_from_choices,
     choice_column_pairs,
     choice_enum_name,
+    holds_values_as_given,
 )
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._array_field import array_element_field
@@ -991,17 +995,47 @@ def _input_shape_disagrees(field: forms.Field, column: ConcreteField) -> bool:
     )
 
 
+def _reads_one_value_of_held_json(field: forms.Field, column: ConcreteField) -> bool:
+    """Return whether ``field`` reads one value of its own kind over a column holding JSON as given.
+
+    A built-in form field that reads a single value (``converter.form_field_reads_one_value``:
+    a ``CharField``, a ``ChoiceField``, an ``IntegerField``, a ``BooleanField``, ...) over a
+    column listing no choices that stores each value as the kind it is handed
+    (``types/converters.py::holds_values_as_given``: a ``JSONField``). The field cleans the
+    text or number an HTML form posts, and the column stores what it cleans as given, so a
+    ``CharField`` handed a decoded JSON object stores its Python text (``"{'a': 1}"``) as a
+    JSON string and a ``BooleanField`` its truthiness: the input is typed by the form field,
+    so the form reads what the client sends as an HTML form posts it. A field reading a list
+    or any JSON value (``converter.form_field_reads_list``: a ``forms.JSONField``, a
+    ``MultipleChoiceField``) reads the column's value, and a bare ``forms.Field`` or a
+    consumer field no registered class covers passes it through or states nothing, so each
+    keeps the column's ``JSON``; a column converting what it is handed keeps its own type. A
+    ``JSONField`` listing choices is a choice column: a field over it keeps the column's read
+    enum (narrowed as any choice column's is, ``_form_choice_narrowing``), whose members
+    decode to the stored values, so only a ``JSONField`` listing no choices qualifies.
+    """
+    return (
+        form_field_reads_one_value(field) and holds_values_as_given(column) and not column.choices
+    )
+
+
 def _input_typing_column(field: forms.Field, column: ConcreteField | None) -> ConcreteField | None:
     """Return the column ``field``'s input is typed by, or ``None`` to type it by the form field.
 
     The backing ``column`` itself, unless the field's input shape disagrees with it
-    (``_input_shape_disagrees``): then ``None`` (``converter.convert_form_field`` types the
-    field), except a single-value ``ChoiceField`` over an ``ArrayField`` whose ``base_field``
-    lists choices, whose one value is an element: the ``base_field``, so the input is the
-    element's read enum, the one the column's list carries, narrowed by the form's choices
-    as any choice column is (``_form_choice_narrowing``).
+    (``_input_shape_disagrees``) or it reads one value of its own kind over a column holding
+    JSON as given (``_reads_one_value_of_held_json``): then ``None``
+    (``converter.convert_form_field`` types the field), except a single-value ``ChoiceField``
+    over an ``ArrayField`` whose ``base_field`` lists choices, whose one value is an element:
+    the ``base_field``, so the input is the element's read enum, the one the column's list
+    carries, narrowed by the form's choices as any choice column is
+    (``_form_choice_narrowing``).
     """
-    if column is None or not _input_shape_disagrees(field, column):
+    if column is None:
+        return None
+    if _reads_one_value_of_held_json(field, column):
+        return None
+    if not _input_shape_disagrees(field, column):
         return column
     element = array_element_field(column)
     if (
@@ -1026,6 +1060,19 @@ def shape_disagreeing_column(
     """
     column = _model_column_for(form_class, name)
     if column is None or not _input_shape_disagrees(field, column):
+        return None
+    return column
+
+
+def held_json_column(form_class: FormClass, name: str, field: forms.Field) -> ConcreteField | None:
+    """Return the JSON column form field ``name`` reads one value of its own kind over, or ``None``.
+
+    The backing column (``_model_column_for``) when ``_reads_one_value_of_held_json`` holds
+    for it, else ``None``. An update omitting such a field binds the form's own presentation
+    of its initial (``forms/resolvers.py::_bind_omitted_json_presentations``).
+    """
+    column = _model_column_for(form_class, name)
+    if column is None or not _reads_one_value_of_held_json(field, column):
         return None
     return column
 

@@ -78,7 +78,10 @@ and the form-specific invariants this module owns:
   (never re-supplied, never cleared). An omitted field whose input shape disagrees with
   its column (a ``MultipleChoiceField`` over a single-value column without choices, a
   built-in single-value field over an ``ArrayField``) binds the bound form's own initial for the
-  field (``_bind_omitted_shape_disagreeing_initials``), never the stored value. A required
+  field (``_bind_omitted_shape_disagreeing_initials``), never the stored value. An omitted built-in
+  single-value field over a ``JSONField`` listing no choices, typed by the form field, binds the
+  field's ``prepare_value`` of its initial, what the form presents for it
+  (``_bind_omitted_json_presentations``). A required
   non-model extra field stays
   required in the partial input, so it is always present in
   ``provided_data``. This is a partial-input transport, not partial validation:
@@ -276,7 +279,12 @@ from django_strawberry_framework.utils.write_values import (
 )
 from django_strawberry_framework.write_mixins import backing_model_of
 
-from .inputs import choice_key_field, relation_target_model, shape_disagreeing_column
+from .inputs import (
+    choice_key_field,
+    held_json_column,
+    relation_target_model,
+    shape_disagreeing_column,
+)
 from .sets import _is_form_class
 
 if TYPE_CHECKING:
@@ -694,6 +702,11 @@ def _reconstruct_partial_data(
       ``__init__`` setting ``self.initial``) validates an omitted field unchanged, and one
       that does not fails it under the full-form validation above or, through such a field,
       writes the value made of the stored list.
+    - **A built-in single-value field over a column holding JSON as given**
+      (``forms/inputs.py::held_json_column``: a ``CharField`` over a ``JSONField`` listing no
+      choices, typed by the form field) is left out here too: the stored value is a JSON value and
+      the field reads text, so ``_bind_omitted_json_presentations`` binds the field's presentation
+      of the form's initial instead, the text an HTML form posts back for the unchanged field.
 
     Reconstruction reads the form's FULL declared field set (``get_form_fields``),
     NOT the (possibly narrowed) generated input: a ``Meta.fields`` / ``Meta.exclude``
@@ -731,6 +744,9 @@ def _reconstruct_partial_data(
             continue
         if shape_disagreeing_column(form_class, name, form_field) is not None:
             # Bound from the form's initial (``_bind_omitted_shape_disagreeing_initials``).
+            continue
+        if held_json_column(form_class, name, form_field) is not None:
+            # Bound from the form's presentation (``_bind_omitted_json_presentations``).
             continue
         if _is_model_multiple_choice_field(form_field) and name in m2m_field_names:
             try:
@@ -954,6 +970,53 @@ def _bind_omitted_shape_disagreeing_initials(
     if not initials:
         return {}
     return _bind_form_values(form, initials)
+
+
+def _bind_omitted_json_presentations(
+    mutation_cls: _FormMutationClass,
+    form: forms.BaseForm,
+    form_data: Mapping[str, object],
+) -> tuple[dict[str, object], dict[str, list[ValidationError]]]:
+    """Bind an update's omitted fields reading one value over a JSON column from their presentation.
+
+    ``_reconstruct_partial_data`` leaves such a field (``held_json_column``: a ``CharField`` over a
+    ``JSONField`` listing no choices, typed by the form field) out of ``form_data`` when the input
+    omits it. Each is bound to what the form presents for it, the value an HTML form posts back for
+    an unchanged field: the field's ``prepare_value`` of the form's initial for it
+    (``form.get_initial_for_field``: the ``initial`` a ``ModelForm`` builds from the row and the
+    ``initial=`` kwarg, after any ``__init__`` adjustment), as Django's ``BoundField.value``
+    presents an unbound field. A ``CharField`` presents a stored object as is, and cleans it to its
+    Python text; a field presenting the stored value as JSON text (a ``prepare_value`` returning
+    ``json.dumps``, as ``forms.JSONField``'s does, or an ``__init__`` setting ``self.initial``)
+    reads the text back. A name the bound form no longer declares, and one a ``get_form`` hook
+    bound a value for (``_binds_nothing``), are left out: the hook's value is the consumer's. A
+    ``disabled`` field ignores the bound value and cleans its initial. The field's
+    ``prepare_value`` is handed the stored value, so it must accept it, as Django's own rendering
+    of an edit form requires.
+
+    Returns ``(presented, errors)``: ``presented`` maps each bound name to the field's
+    ``prepare_value`` of the value ``form.instance`` holds in the column, the presentation the
+    row's own value gets, which ``_keep_omitted_columns`` compares the bound value with, so an
+    initial consumer code sets is the consumer's; ``errors`` the values that cannot be bound,
+    as ``_bind_form_values`` answers them, any of which refuses the update before
+    ``presented`` is read.
+    """
+    form_class = require(mutation_cls._mutation_meta.form_class, _is_form_class)
+    instance = require_instance(read_attr(form, "instance"), models.Model)
+    bindings: dict[str, object] = {}
+    presented: dict[str, object] = {}
+    for name, basis_field in mutation_cls.get_form_fields().items():
+        if name in form_data:
+            continue
+        column = held_json_column(form_class, name, basis_field)
+        form_field = form.fields.get(name)
+        if column is None or form_field is None or not _binds_nothing(form, name):
+            continue
+        bindings[name] = form_field.prepare_value(form.get_initial_for_field(form_field, name))
+        presented[name] = form_field.prepare_value(column.value_from_object(instance))
+    if not bindings:
+        return {}, {}
+    return presented, _bind_form_values(form, bindings)
 
 
 #: What ``_bound_form_value`` answers for a field the bound form holds no value for.
@@ -1376,6 +1439,10 @@ def _bound_form_or_field_errors(
     unbindable = _bind_under_form_keys(form)
     if instance is not None:
         unbindable |= _bind_omitted_shape_disagreeing_initials(mutation_cls, form, form_data)
+        presented, unpresentable = _bind_omitted_json_presentations(mutation_cls, form, form_data)
+        unbindable |= unpresentable
+        omitted = omitted.union(presented)
+        reconstructed.update(presented)
     _assert_bound_choice_agreement(mutation_cls, form, form_data)
     if unbindable:
         return None, _form_errors_to_field_errors(unbindable, specs)
@@ -1459,7 +1526,9 @@ def _keep_omitted_columns(
     The form and the model validated the cleaned value, so either one's refusal of it
     still fails the update. ``reconstructed`` holds the value the reconstruction bound
     for each omitted field, read before ``get_form`` ran, so a hook or form ``__init__``
-    setting the field in the bound mapping in place reads as the consumer's value. A
+    setting the field in the bound mapping in place reads as the consumer's value; for a
+    field bound from its presentation (``_bind_omitted_json_presentations``) it holds the
+    field's presentation of the stored value. A
     ``disabled`` field, whose column ``stored`` holds whether the input sent it or not, reads
     no bound value: Django cleans its initial, which ``ModelForm`` builds from
     ``form.instance``, so its ``stored`` value is the one compared, and an initial consumer

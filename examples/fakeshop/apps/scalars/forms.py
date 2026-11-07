@@ -30,16 +30,25 @@ to ``""``, so an explicit ``null``, or a create omitting the field, is read as t
 field's own cleaning and stores ``NULL``. An update omitting a field keeps its column's
 stored value, ``NULL`` included, where the form field's own cleaning would rewrite it (the
 ``label`` ``CharField``'s strip, the ``payload`` ``CharField``'s text of a JSON object or
-list).
+list). Its ``payload`` input is the ``CharField``'s ``String``, not the column's ``JSON``.
+
+``NullableScalarSpecimenJsonTextForm`` writes ``payload`` through ``JsonTextField``, a
+``CharField`` reading JSON text: its ``clean`` parses the text sent and its
+``prepare_value`` presents a value as its JSON text, as ``forms.JSONField``'s does, so an update
+omitting ``payload`` reads the stored JSON value back from the form's presentation of it.
 """
 
 from __future__ import annotations
 
 import datetime
+import json
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from django import forms
+from django.core.exceptions import ValidationError
 from django.http import QueryDict
+from typing_extensions import override
 
 from apps.scalars import models
 
@@ -154,9 +163,11 @@ class NullableScalarSpecimenFlagForm(forms.ModelForm[models.NullableScalarSpecim
     ``CharField(required=False)``, which cleans an explicit ``null`` to ``""``, a JSON string
     the column would store, and ``score`` a ``FloatField(null=True)`` written through one
     too, whose ``""`` the column cannot store (its input stays ``Float``, the column's). The
-    mutation stores ``NULL`` for an explicit ``null`` or a create omitting the field, while
-    a value sent is written as sent and an update omitting one keeps its stored value as
-    stored.
+    ``payload`` input is the ``CharField``'s ``String``, not the column's ``JSON``: the column
+    stores the text the field cleans as a JSON string, so an object sent would be stored as
+    its Python text. The mutation stores ``NULL`` for an explicit ``null`` or a create omitting
+    the field, while a value sent is written as sent and an update omitting one keeps its
+    stored value as stored.
     """
 
     flag = forms.BooleanField(required=False)
@@ -171,3 +182,46 @@ class NullableScalarSpecimenFlagForm(forms.ModelForm[models.NullableScalarSpecim
             "payload",
             "score",
         )
+
+
+#: ``json.loads`` and ``CharField.clean`` typed as the ``object`` each returns.
+_loads: Callable[[str], object] = json.loads
+_clean_text: Callable[[forms.CharField, object], object] = forms.CharField.clean
+
+
+class JsonTextField(forms.CharField):
+    """A ``CharField`` reading JSON text: the value is the JSON value the text spells.
+
+    ``clean`` parses the text the ``CharField`` cleans (empty text is ``None``) and refuses
+    text that is no JSON as the field's ``invalid`` error; ``prepare_value`` presents a value
+    as its JSON text, the text an HTML form posts back for an unchanged field.
+    """
+
+    @override
+    def clean(self, value: object) -> object:
+        text = _clean_text(self, value)
+        if not isinstance(text, str) or not text:
+            return None
+        try:
+            return _loads(text)
+        except json.JSONDecodeError as error:
+            raise ValidationError("Enter valid JSON text.", code="invalid") from error
+
+    @override
+    def prepare_value(self, value: object) -> object:
+        return json.dumps(value)
+
+
+class NullableScalarSpecimenJsonTextForm(forms.ModelForm[models.NullableScalarSpecimen]):
+    """A ``NullableScalarSpecimen`` ``ModelForm`` writing the JSON column ``payload`` as JSON text.
+
+    ``payload`` is the ``JsonTextField``'s ``String``: the text sent is parsed and its JSON
+    value stored, and an update omitting ``payload`` binds the field's presentation of the
+    stored value, its JSON text, which the field parses back to the stored value.
+    """
+
+    payload = JsonTextField(required=False)
+
+    class Meta:
+        model = models.NullableScalarSpecimen
+        fields = ("label", "payload")

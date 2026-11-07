@@ -7860,6 +7860,201 @@ def test_update_omitting_an_empty_json_value_keeps_it(stored: object) -> None:
     assert row == {"title": "New", "payload": stored}
 
 
+class _NullJsonRow(models.Model):
+    """An unmanaged row: a ``null=True`` JSON column a consumer text field writes."""
+
+    title: _Text = models.TextField()
+    payload: _JSON = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_kept_columns"
+
+
+class _PickedJsonRow(models.Model):
+    """An unmanaged row: a ``JSONField`` listing choices, written through its own form field."""
+
+    title: _Text = models.TextField()
+    pick: _JSON = models.JSONField(
+        choices=[("north", "North"), ("south", "South")],
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_kept_columns"
+
+
+class _PickedJsonForm(forms.ModelForm[_PickedJsonRow]):
+    """The ``TypedChoiceField`` Django builds for ``pick``, typed by the column's choice enum."""
+
+    class Meta:
+        model = _PickedJsonRow
+        fields = ("title", "pick")
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [pytest.param("south", id="value"), pytest.param(None, id="null")],
+)
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_a_json_choice_column_keeps_it(stored: object) -> None:
+    """An update omitting a ``JSONField`` listing choices reconstructs it from the row.
+
+    The column is a choice column, so its field keeps the column's enum and the omitted
+    value is reconstructed from the stored value, as any choice column's is.
+    """
+    row = _update_omitting(_PickedJsonRow, _PickedJsonForm, {"pick": stored})
+    assert row == {"title": "New", "pick": stored}
+
+
+class _JsonTextField(forms.CharField):
+    """A text field reading JSON text, presenting a value as its JSON text as ``forms.JSONField`` does."""
+
+    @override
+    def clean(self, value: object) -> object:
+        text = object_result(super().clean, value)
+        return object_result(json.loads, text) if isinstance(text, str) and text else None
+
+    @override
+    def prepare_value(self, value: object) -> object:
+        return json.dumps(value)
+
+
+class _JsonTextForm(forms.ModelForm[_NullJsonRow]):
+    """``payload`` through ``_JsonTextField``, which presents the stored value as JSON text."""
+
+    payload = _JsonTextField(required=False)
+
+    class Meta:
+        model = _NullJsonRow
+        fields = ("title", "payload")
+
+
+class _InitialTextForm(forms.ModelForm[_NullJsonRow]):
+    """A plain ``CharField`` parsed in ``clean_payload``, presented as JSON text in ``__init__``."""
+
+    payload = forms.CharField(required=False)
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        files: _FilesT | None = None,
+        instance: _NullJsonRow | None = None,
+    ) -> None:
+        super().__init__(data=data, files=files, instance=instance)
+        self.initial["payload"] = json.dumps(self.instance.payload)
+
+    def clean_payload(self) -> object:
+        text = self.cleaned_data.get("payload")
+        return object_result(json.loads, text) if isinstance(text, str) and text else None
+
+    class Meta:
+        model = _NullJsonRow
+        fields = ("title", "payload")
+
+
+class _PresentedTextField(forms.CharField):
+    """A text field presenting a value as its JSON text and cleaning the text as text."""
+
+    @override
+    def prepare_value(self, value: object) -> object:
+        return json.dumps(value)
+
+
+class _PresentedTextForm(forms.ModelForm[_NullJsonRow]):
+    """``payload`` through ``_PresentedTextField``, which cleans the JSON text it presents as text."""
+
+    payload = _PresentedTextField(required=False)
+
+    class Meta:
+        model = _NullJsonRow
+        fields = ("title", "payload")
+
+
+class _DroppedTextForm(_JsonTextForm):
+    """Drops ``payload`` in ``__init__``, so the bound form declares no such field."""
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        files: _FilesT | None = None,
+        instance: _NullJsonRow | None = None,
+    ) -> None:
+        super().__init__(data=data, files=files, instance=instance)
+        del self.fields["payload"]
+
+
+_STORED_JSON = [
+    pytest.param({"k": "v"}, id="object"),
+    pytest.param(["x", 1], id="list"),
+    pytest.param("s", id="string"),
+    pytest.param(5, id="number"),
+    pytest.param(None, id="null"),
+]
+
+
+@pytest.mark.parametrize("stored", _STORED_JSON)
+@pytest.mark.parametrize(
+    "form_class",
+    [
+        pytest.param(_InitialTextForm, id="init-initial"),
+        pytest.param(_PresentedTextForm, id="presented-text"),
+        pytest.param(_DroppedTextForm, id="dropped"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_a_json_text_field_binds_its_presentation(
+    form_class: type[forms.BaseForm],
+    stored: object,
+) -> None:
+    """An omitted text field over a JSON column binds what the form presents for it.
+
+    The field is typed ``String`` and reads JSON text, so the update binds the field's
+    ``prepare_value`` of its initial: an ``__init__`` setting ``self.initial`` to the stored
+    value's JSON text, which ``clean_payload`` parses, reads the stored value back, every JSON
+    kind and ``NULL`` included. A field presenting the stored value as JSON text and cleaning
+    that text as text binds its presentation of the stored value, so the restore keeps the
+    stored value, never its JSON text as a JSON string. A field the form's ``__init__`` drops
+    binds nothing and keeps the column.
+    """
+    row = _update_omitting(_NullJsonRow, form_class, {"payload": stored})
+    assert row == {"title": "New", "payload": stored}
+
+
+@pytest.mark.parametrize(
+    ("hook", "bind", "written"),
+    [
+        pytest.param("copy", {"payload": '{"n": 2}'}, {"n": 2}, id="hook-bound"),
+        pytest.param("copy", {"payload": "null"}, None, id="hook-bound-null"),
+        pytest.param("in-place", {"payload": "[3]"}, [3], id="hook-in-place"),
+        pytest.param("initial", {"payload": {"n": 3}}, {"n": 3}, id="hook-initial"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_a_json_text_field_writes_the_consumers_value(
+    hook: str,
+    bind: dict[str, object],
+    written: object,
+) -> None:
+    """A value a hook binds, or an initial it sets, for the omitted JSON text field is written.
+
+    A ``get_form_kwargs`` binding the field's text, in a copy of the mapping it is handed or
+    in that mapping in place, keeps it (the presentation is bound only where the form holds
+    nothing for the field); an ``initial=`` naming another value than
+    the stored one presents that value, which the form cleans and the update writes.
+    """
+    row = _update_omitting(
+        _NullJsonRow,
+        _JsonTextForm,
+        {"payload": {"k": "v"}},
+        bind=bind,
+        hook=hook,
+    )
+    assert row == {"title": "New", "payload": written}
+
+
 @pytest.mark.django_db(transaction=True)
 def test_update_omitting_a_column_a_rebound_instance_holds_writes_its_value() -> None:
     """A hook's rebound instance's own value for the omitted ``kind`` is the one written.

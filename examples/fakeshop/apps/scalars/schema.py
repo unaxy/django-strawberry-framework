@@ -49,7 +49,9 @@ pair writes the ``null=True`` ``flag`` column through
 and ``score`` float columns through its ``CharField``, so an explicit ``null``, or a create
 omitting the field, stores ``NULL``, while an update omitting ``label``, ``flag``,
 ``payload`` or ``score`` keeps the stored value, ``NULL`` included, where the form field's
-own cleaning would rewrite it.
+own cleaning would rewrite it. The ``ViaJsonTextForm`` pair writes ``payload`` through
+``forms.NullableScalarSpecimenJsonTextForm``'s ``JsonTextField``, typed ``String``, which parses
+the JSON text sent and presents the stored value as its JSON text to an update omitting it.
 
 ``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
 ``FilteredRelation("parent")`` alias named ``par``, filtered by
@@ -770,6 +772,24 @@ class UpdateNullableScalarSpecimenViaForm(DjangoModelFormMutation):
         permission_classes = []
 
 
+class CreateNullableScalarSpecimenViaJsonTextForm(DjangoModelFormMutation):
+    """Create a ``NullableScalarSpecimen`` through ``forms.NullableScalarSpecimenJsonTextForm``."""
+
+    class Meta:
+        form_class = forms.NullableScalarSpecimenJsonTextForm
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateNullableScalarSpecimenViaJsonTextForm(DjangoModelFormMutation):
+    """Update a ``NullableScalarSpecimen`` through ``forms.NullableScalarSpecimenJsonTextForm``."""
+
+    class Meta:
+        form_class = forms.NullableScalarSpecimenJsonTextForm
+        operation = "update"
+        permission_classes = []
+
+
 class CreateScalarSpecimenViaSerializer(SerializerMutation):
     """Create a ``ScalarSpecimen`` through ``ScalarSpecimenTemporalSerializer``."""
 
@@ -798,7 +818,8 @@ class Mutation:
     ``occurredAt`` through a ``SplitDateTimeField``; the ``ViaPosted`` pairs bind posted
     text over the temporal and the split form; the ``NullableScalarSpecimen``
     ``ViaForm`` pair writes the ``null=True`` ``flag`` through a checkbox and ``payload``
-    and ``score`` through a ``CharField``.
+    and ``score`` through a ``CharField``, and the ``ViaJsonTextForm`` pair writes ``payload``
+    as JSON text.
     """
 
     create_media_specimen = DjangoMutationField(CreateMediaSpecimen)
@@ -848,6 +869,12 @@ class Mutation:
     )
     update_nullable_scalar_specimen_via_form = DjangoMutationField(
         UpdateNullableScalarSpecimenViaForm,
+    )
+    create_nullable_scalar_specimen_via_json_text_form = DjangoMutationField(
+        CreateNullableScalarSpecimenViaJsonTextForm,
+    )
+    update_nullable_scalar_specimen_via_json_text_form = DjangoMutationField(
+        UpdateNullableScalarSpecimenViaJsonTextForm,
     )
     create_scalar_specimen_via_serializer = DjangoMutationField(CreateScalarSpecimenViaSerializer)
     update_scalar_specimen_via_serializer = DjangoMutationField(UpdateScalarSpecimenViaSerializer)
