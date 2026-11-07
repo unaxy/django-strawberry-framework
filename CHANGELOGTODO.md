@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 187 to do.
+Progress: 0 done, 188 to do.
 
 ## From dry-0_0_15_3
 
@@ -812,6 +812,12 @@ Progress: 0 done, 187 to do.
   own `field_name` / `lookup_expr` and the published input key are unchanged; a class-level `filter` override on a
   column crossing now runs over the crossed hop's visible rows with the walked `field_name` / `lookup_expr`, as it
   does under the joined spelling
+- [ ] 798. CHANGELOG entry for item 797: a filter naming a nested `RelatedFilter` branch beside a flat field walking the
+  same declared branch, one branch held by several `and` / `or` / `not` arms, or a branch nested two levels deep beside
+  its flat spelling (`shelf: { branch: {...} }` with `shelfBranchName`) now runs the branch target type's
+  `get_queryset` once per request instead of once per spelling, arm or level, on `apply_sync` and `apply_async`; rows
+  and errors are unchanged. A `FilterSet` subclass that overrides `apply_sync` / `apply_async` and is reached as a
+  nested branch receives one more private keyword, `_hop_visibility`
 
 ## From dry-upstream-0_0_15
 

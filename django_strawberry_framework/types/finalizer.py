@@ -1562,7 +1562,7 @@ def _format_unregistered_related_target_error(
 
     Sibling of ``_format_orphan_sets_error`` above; finalize-time formatters stay
     grouped here so consumer error matching stays grep-stable. Mirrors the
-    runtime message raised by ``FilterSet._iter_visibility_steps`` for the
+    runtime message raised by ``FilterSet._branch_visibility_seed`` for the
     same misconfiguration so the two surfaces read as one contract.
     """
     child_model: object = truth.static_attr(truth.static_attr(child_filterset, "_meta"), "model")
@@ -1689,7 +1689,7 @@ def _audit_unregistered_related_filter_targets(wired: list[type[FilterSet]]) -> 
     make the branch unfulfillable even though its input field is materialized
     into the schema, so the misconfiguration surfaces here -- at finalize,
     naming the filterset -- instead of on the first request that activates the
-    branch (where ``FilterSet._iter_visibility_steps`` raises the runtime
+    branch (where ``FilterSet._branch_visibility_seed`` raises the runtime
     sibling of this error). The walk is transitive with a visited set; cyclic
     cross-references (``BookFilter`` <-> ``ShelfFilter``) are legal.
     """

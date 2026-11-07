@@ -8735,18 +8735,17 @@ def test_check_permissions_falls_back_to_active_input_when_no_requested_fields(
 
 
 @pytest.mark.django_db
-def test_iter_visibility_steps_yields_pre_await_tuple_for_active_branches() -> None:
+def test_iter_visibility_steps_yields_the_declaration_of_each_active_branch() -> None:
     """``_iter_visibility_steps`` yields the shared pre-await state both derive methods consume.
 
     Pins the shared path: both
     ``_derive_related_visibility_querysets_sync`` and
     ``_derive_related_visibility_querysets_async`` route through the
-    single ``_iter_visibility_steps`` classmethod, so the helper's
-    five-tuple shape (``field_name, target_type, child_filterset,
-    child_input, child_base``) is the load-bearing contract. Branches
-    missing ``target_type`` or ``child_filterset`` raise (see the
-    sibling fail-loud test) so the derive methods carry only the two
-    awaits / calls per step.
+    single ``_iter_visibility_steps`` classmethod, whose three-tuple
+    (``field_name, related_filter, child_input``) names the declaration
+    keying the branch's rows in the request-wide hop map
+    (``_declared_hop_rows``), the derivation a flat leaf walking the
+    branch reads too.
     """
 
     class ShelfType(DjangoType):
@@ -8769,11 +8768,17 @@ def test_iter_visibility_steps_yields_pre_await_tuple_for_active_branches() -> N
         BranchFilter._iter_visibility_steps({"shelves": {"code": "A"}}),
     )
     assert len(steps) == 1
-    field_name, target_type, child_filterset, child_input, child_base = steps[0]
+    field_name, related_filter, child_input = steps[0]
     assert field_name == "shelves"
+    assert related_filter is BranchFilter.related_filters["shelves"]
+    assert child_input == {"code": "A"}
+    target_type, child_filterset, child_base = BranchFilter._branch_visibility_seed(
+        field_name,
+        related_filter,
+        None,
+    )
     assert target_type is ShelfType
     assert child_filterset is ShelfFilter
-    assert child_input == {"code": "A"}
     assert child_base.model is library_models.Shelf
 
 
@@ -9160,8 +9165,8 @@ def test_collect_related_declarations_honors_base_tombstone() -> None:
 
 
 @pytest.mark.django_db
-def test_iter_visibility_steps_threads_parent_db_alias() -> None:
-    """The child visibility base is pinned to the parent request's DB alias.
+def test_declared_hop_rows_threads_parent_db_alias() -> None:
+    """A declared hop's visibility base is pinned to the parent request's DB alias.
 
     The cascade-permission path builds its base with
     ``._default_manager.using(queryset.db).all()``; the related-visibility path
@@ -9188,14 +9193,12 @@ def test_iter_visibility_steps_threads_parent_db_alias() -> None:
             model = library_models.Branch
             fields = {"name": ["exact"]}
 
-    input_value = {"shelves": {"code": {"exact": "AAA"}}}
-    aliased = list(BranchFilter._iter_visibility_steps(input_value, "shard_b"))
-    assert aliased
-    assert aliased[0][4].db == "shard_b"
+    shelves = BranchFilter.related_filters["shelves"]
+    aliased = BranchFilter._declared_hop_rows("shelves", shelves, None, {}, "shard_b")
+    assert aliased.db == "shard_b"
     # No alias threaded -> the router default stays in place (single-DB case).
-    default = list(BranchFilter._iter_visibility_steps(input_value))
-    assert default
-    assert default[0][4].db == "default"
+    default = BranchFilter._declared_hop_rows("shelves", shelves, None, {}, None)
+    assert default.db == "default"
 
 
 @pytest.mark.django_db
@@ -9235,6 +9238,7 @@ def test_related_visibility_hook_receives_parent_db_alias() -> None:
     BranchFilter._derive_related_visibility_querysets_sync(
         {"shelves": {"code": {"exact": "AAA"}}},
         _make_info(),
+        hop_visibility={},
         parent_db="shard_b",
     )
     assert seen == ["shard_b"]
@@ -16370,6 +16374,7 @@ def test_visibility_unresolved_model_less_child_names_unresolved() -> None:
         BranchFilter._derive_related_visibility_querysets_sync(
             {"orphans": {"code": "x"}},
             info=None,
+            hop_visibility={},
         )
     assert "<unresolved>" in str(excinfo.value)
 
@@ -16622,9 +16627,10 @@ def test_an_arm_branch_error_answers_before_a_permission_denial_on_both_colors(
 def test_each_arm_branch_derives_once_on_both_colors(mode: str) -> None:
     """The ``.qs`` read reuses each arm's pre-derived branch rather than deriving it again.
 
-    ``BranchType.get_queryset`` runs once per active ``branch``, the root's and
-    each ``and`` / ``or`` / ``not`` arm's, on ``apply_sync`` and on ``apply_async``
-    with a sync or an async-only hook.
+    ``BranchType.get_queryset`` runs once per request for the one ``branch``
+    declaration, however many of the root and the ``and`` / ``or`` / ``not`` arms
+    hold it, on ``apply_sync`` and on ``apply_async`` with a sync or an async-only
+    hook: every arm reads the request-wide hop map (``_declared_hop_rows``).
     """
     hook_runs: list[str] = []
     filter_set = _arm_error_order_filter(mode, gated=False, hook_runs=hook_runs)
@@ -16640,7 +16646,7 @@ def test_each_arm_branch_derives_once_on_both_colors(mode: str) -> None:
     else:
         rows = asyncio.run(filter_set.apply_async(filter_input, base, _make_info()))
     assert list(rows) == []
-    assert hook_runs == ["branch"] * 4
+    assert hook_runs == ["branch"]
 
 
 @pytest.mark.django_db(transaction=True)
