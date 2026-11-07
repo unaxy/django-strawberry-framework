@@ -2056,6 +2056,19 @@ def _relation_key_value(value: object, attname: str) -> object:
 
 
 @dataclass(frozen=True)
+class _ToManyKey:
+    """How a to-many relation key leaf is re-read on the target rows' own key column.
+
+    ``attname`` names the target key column (``_relation_key_value``); ``declared`` is the
+    per-request leaf as the set declares it, whose predicate Django builds over the
+    relation (``_LeafChain.terminal_value``).
+    """
+
+    attname: str
+    declared: Filter
+
+
+@dataclass(frozen=True)
 class _LeafChain:
     """How an active flat leaf walking relation hops reads the related rows.
 
@@ -2063,21 +2076,41 @@ class _LeafChain:
     parent's own rows when ``hops`` is empty), already bound to the set whose
     rows those are. ``key_hop`` is the last hop of a forward relation key leaf,
     which ``terminal`` compares on the rows that hold the key: a row it matches
-    must also reach a visible row of ``key_hop``. ``key_attname``
-    names the target key column a to-many relation key leaf was re-read against
-    (``_relation_key_value``).
+    must also reach a visible row of ``key_hop``. ``to_many_key`` is how a to-many
+    relation key leaf was re-read against the target key column (``_ToManyKey``).
     """
 
     hops: tuple[RelationHop, ...]
     terminal: Filter
     key_hop: RelationHop | None = None
-    key_attname: str | None = None
+    to_many_key: _ToManyKey | None = None
 
-    def terminal_value(self, value: object) -> object:
-        """Return the ``terminal`` value: ``value``, or the target key for a to-many key leaf."""
-        if self.key_attname is None:
+    def terminal_value(self, value: object, using: str) -> object:
+        """Return the ``terminal`` value: ``value``, or the target key for a to-many key leaf.
+
+        A to-many key leaf whose ``filter`` is shipped code (``_runs_shipped_filter``, the
+        rule a set publishes by) first builds its predicate as declared
+        (``_ToManyKey.declared``) on a fresh queryset of the model it is declared on, on
+        ``using``, which runs no query of its own (a queryset ``value`` is evaluated once,
+        and ``_relation_key_value`` reads the rows it holds): Django resolves the relation's
+        lookup and prepares ``value`` for it (``RelatedLookupMixin`` / ``RelatedIn``),
+        raising what it raises for the declared predicate (a lookup the relation does not
+        register, ``FieldError``; a lone model instance handed to ``in``, ``TypeError``), so
+        the target key column answers only a predicate Django builds. A class-level
+        ``filter`` override is consumer code, which is never run twice for one request.
+        """
+        if self.to_many_key is None:
             return value
-        return _relation_key_value(value, self.key_attname)
+        declared = self.to_many_key.declared
+        if not _runs_shipped_filter(declared):
+            return _relation_key_value(value, self.to_many_key.attname)
+        # On the request's alias: a shipped filter may read it while building (a GlobalID
+        # filter coerces its decoded key per the alias's backend, ``alias=qs.db``).
+        _ = declared.filter(
+            base_queryset(require(read_attr(declared, "model"), is_model_class), using=using),
+            value,
+        )
+        return _relation_key_value(value, self.to_many_key.attname)
 
 
 @dataclass(frozen=True)
@@ -6389,7 +6422,9 @@ class FilterSet(
         stored key on the rows that hold it and requires the key to reach a
         visible row (``_LeafChain.key_hop``); a leaf on a to-many path compares
         the target rows' own key column, the column Django's relation lookup
-        compares (``_relation_key_value`` reads model-choice values there).
+        compares (``_relation_key_value`` reads model-choice values there), once
+        Django builds the leaf's predicate as declared (``_LeafChain.terminal_value``),
+        so the column answers only the lookups and values the relation accepts.
         Every declared hop's target set resolves: a caller derives (or checks)
         the hops first.
         """
@@ -6445,7 +6480,7 @@ class FilterSet(
             key_name, key_attname = targets[0].name, targets[0].attname
         terminal = self._bound_terminal(filter_instance, last, key_name)
         setattr(terminal, _GLOBALID_RELATION_PK_ATTR, False)
-        return _LeafChain(hops, terminal, key_attname=key_attname)
+        return _LeafChain(hops, terminal, to_many_key=_ToManyKey(key_attname, filter_instance))
 
     def _reaches_hop(
         self,
@@ -6524,7 +6559,7 @@ class FilterSet(
         chain = require_instance(self._leaf_chain(filter_instance), _LeafChain)
         rows = self._chain_base(chain, built)
         try:
-            return chain.terminal.filter(rows, chain.terminal_value(value)) is not rows
+            return chain.terminal.filter(rows, chain.terminal_value(value, built.db)) is not rows
         except FieldError:
             # Only a compiled lookup can raise it, so the leaf constrains something.
             return True
@@ -6727,7 +6762,7 @@ class FilterSet(
         if negate:
             terminal = copy.copy(terminal)
             terminal.exclude = False
-        value = chain.terminal_value(value)
+        value = chain.terminal_value(value, using)
         null_extends = (
             terminal.method is None and terminal.lookup_expr == "isnull" and value is True
         )

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 432 done, 107 to do. The CHANGELOG entries filed here moved to
+Progress: 433 done, 108 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1746,6 +1746,22 @@ Progress: 432 done, 107 to do. The CHANGELOG entries filed here moved to
   sent) over the new fakeshop `updateScalarSpecimenViaLockedStampForm`; package rows in
   `tests/forms/test_resolvers.py`; spec-038, README, GLOSSARY `DjangoModelFormMutation`
 
+- [x] 780. fixed: a declared filter on a to-many relation key (reverse FK, many-to-many either way,
+  `GenericRelation`) answers only what Django answers for its declaration, walked hop or not. A lookup the relation's
+  last join does not register (`icontains`, `startswith`, `iexact`, `regex`, a whole `range`) is refused when the set
+  publishes: `filters/base.py::_unresolvable_lookup` asks every relation on `split_lookup`'s join field (776's
+  to-many key-column loop gone; the range-as-`gte` rewrite applies to every relation), and the refusal names the
+  related column to spell past the relation (`children__id`, `filters/base.py::_related_column_hint`). A raw
+  `FilterSet(data=...)` raises Django's own `FieldError` walked or not: `filters/sets.py::_LeafChain.terminal_value`
+  first builds the declared predicate, without SQL, for shipped `filter` code (`_ToManyKey`; a class-level consumer
+  override runs once, as unwalked). The same build makes a model-choice `in` on a text key raise Django's `TypeError`
+  instead of matching rows by the key's characters. 610 walked/unwalked grid cells disagreeing went to 0; no cell
+  answering unwalked stopped answering. Tests in `tests/filters/test_finalizer.py`
+  (`test_a_declared_leaf_django_resolves_on_no_queryset_is_refused`,
+  `test_a_raw_to_many_key_lookup_the_relation_refuses_raises_djangos_error`, the any-class, text-key `in`, range,
+  lazy and `test_a_class_level_override_on_a_to_many_key_runs_once_per_request` rows); spec-027, README, GLOSSARY
+  `FilterSet`. Filed 783, 784
+
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -2010,10 +2026,18 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`filters/sets.py::_held_integer_value` -> `_queryset_integer_column` -> `utils/relations.py::_walk_lookup_expr`
   reads `cached_col` on the annotation's unbound `output_field`); the same name past a declared `RelatedFilter` hop
   answers. Found researching 776
-- [ ] 780. (robustness) `ModelMultipleChoiceFilter(field_name="children", lookup_expr="icontains")` answers the target
-  key's `icontains` when some type's `get_queryset` scopes the target model (the walked to-many hop compares the
-  target key) and a masked `FieldError` when none does (Django's `ManyToOneRel` reading): one declaration, two
-  predicates, chosen by whether a hop is walked. Found researching 776
+- [ ] 783. (robustness) A declared `MultipleChoiceFilter` / `ModelMultipleChoiceFilter` (`exact`) with a lazy
+  `field_name` (`gettext_lazy("children__label")`) gives one declaration two answers: unwalked, django-filter's
+  `MultipleChoiceFilter.get_filter_predicate` keys the predicate by the lazy object and the request raises
+  `TypeError: keywords must be strings`; walked, `filters/sets.py::FilterSet._bound_terminal` rebinds `field_name` to
+  a str path and the request answers rows. 780 aligns a to-many relation key only; a target path and a two-hop walk
+  still split. Found researching 780
+- [ ] 784. A consumer class-level `filter` override (a django-filter `Filter` subclass) on a to-many relation key a hop
+  walks receives the target's key column (`field_name="id"`) and the reshaped key values instead of the relation and
+  model instances (`filters/sets.py::FilterSet._bound_terminal` rebinds a filter whose behaviour is consumer code;
+  `_flat_leaf_walk` refuses only an instance-level `filter`), so an override reading `value.pk` raises a masked
+  `AttributeError` walked and answers unwalked (spec-027 Decision 8: a walked leaf answers as unwalked over the visible
+  rows). Found verifying 780
 
 ## To do: holes found re-checking the fixes
 

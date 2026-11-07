@@ -4631,7 +4631,7 @@ def test_consumer_override_relation_nonstandard_lookup_not_rejected() -> None:
     class OverrideFilter(FilterSet):
         class Meta:
             model = library_models.Book
-            fields = {"genres": ["icontains"]}
+            fields = {"genres": ["gt"]}
             filter_overrides = {
                 dj_models.ManyToManyField: {"filter_class": CustomM2M, "extra": _override_extra},
             }
@@ -4639,10 +4639,10 @@ def test_consumer_override_relation_nonstandard_lookup_not_rejected() -> None:
     genres_field = library_models.Book._meta.get_field("genres")
     # ``filter_for_lookup`` short-circuits on the consumer-owned origin and returns
     # the consumer's class unchanged -- no ConfigurationError.
-    selected_class, _params = OverrideFilter.filter_for_lookup(genres_field, "icontains")
+    selected_class, _params = OverrideFilter.filter_for_lookup(genres_field, "gt")
     assert selected_class is CustomM2M
     # The full generation path also builds without raising and keeps the consumer class.
-    leaf = OverrideFilter.get_filters()["genres__icontains"]
+    leaf = OverrideFilter.get_filters()["genres__gt"]
     assert isinstance(leaf, CustomM2M)
 
 

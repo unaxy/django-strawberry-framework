@@ -139,7 +139,6 @@ from django_strawberry_framework.utils.relations import (
     lookup_operand,
     lookup_registry,
     lookup_transform_parts,
-    path_traverses_to_many,
     relation_bool,
     stored_value_column,
     stored_value_link,
@@ -481,9 +480,9 @@ class _LookupOperand(NamedTuple):
     over a transform's output takes the operand its own class compares. ``lookup`` is that
     class, ``None`` where no walk resolved one (a ``method=`` filter, whose method applies
     no lookup of the filter's, a path the walk refuses, which a set publishes only past a
-    name the related model lacks or for a to-many key a walked hop compares on the target's
-    key, ``refuse_unresolvable_lookup``): ``filters/inputs.py`` asks it
-    whether the value is prepared through the column (Django's ``FieldGetDbPrepValueMixin``).
+    name the related model lacks or under a consumer ``filter`` override,
+    ``refuse_unresolvable_lookup``): ``filters/inputs.py`` asks it whether the value is
+    prepared through the column (Django's ``FieldGetDbPrepValueMixin``).
     ``node_types`` are the classes the predicate holds past the column, each transform's then
     the lookup's (``utils/relations.py::_LookupWalk.node_types``), a reverse relation key's
     too (``_reverse_relation_node_types``, its ``lookup`` left ``None``), empty where no walk
@@ -737,8 +736,9 @@ def _reverse_relation_node_types(
     class a project registers on the forward field's class), which the walk from the
     relation asks (``utils/relations.py::_lookup_node_types``). The operand's field and
     lookup stay the relation's own reading. Empty where the walk refuses the expression (a
-    lookup only the target's key registers, which a walked hop compares,
-    ``refuse_unresolvable_lookup``).
+    lookup the relation does not register: a set refuses it when it publishes a leaf running
+    shipped ``filter`` code, ``refuse_unresolvable_lookup``, so only a consumer ``filter``
+    override, which reads its value as it likes, publishes one).
     """
     try:
         return _lookup_node_types(relation, lookup_expr)
@@ -3043,14 +3043,16 @@ def refuse_unresolvable_lookup(
     (``_unresolvable_lookup``). Where the path ends on a column, the leftover is the
     column's transforms and lookups on every queryset: one the column's walk refuses
     (``signed_big__gt``, a ``lookup_expr`` no field registers) is refused. Where it ends
-    on a to-one relation (``utils/relations.py::path_traverses_to_many`` answers no for its
-    last name), every request applies the leftover through the relation's own lookups
-    (``filters/sets.py::FilterSet._leaf_chain``), so one those refuse is refused
-    (``parent`` with ``icontains``); a filter applying the relation's ``range`` as its
-    bounds (``_BOUNDED_RANGE_FILTERS``) is asked for a bound's ``gte``. Where it ends on a to-many
-    relation, a walked hop compares the target's key instead, so the leftover is refused
-    only where the relation, every key column its join compares and the target's primary
-    key all refuse it. ``filters/sets.py::FilterSet._publish_filters`` asks this of every
+    on a relation, the leftover is asked of the field Django's query asks it of, the last
+    join's field (``Query.names_to_path``'s final field: the relation itself, a reverse
+    relation's ``ForeignObjectRel``, a many-to-many's through key onto its target), whose
+    lookups every request applies whether or not a hop is walked
+    (``filters/sets.py::FilterSet._leaf_chain``: a to-one key folds into them, a to-many
+    key's predicate is built as declared before the target's key answers it), so one those
+    refuse is refused (``parent`` or ``children`` with ``icontains``; the target's key is
+    spelled ``children__id``); a filter applying the relation's ``range`` as its bounds
+    (``_BOUNDED_RANGE_FILTERS``) is asked for a bound's ``gte``.
+    ``filters/sets.py::FilterSet._publish_filters`` asks this of every
     leaf a set publishes whose ``filter`` is shipped code
     (``filters/sets.py::_runs_shipped_filter``), as ``refuse_identityless_relation`` is
     asked: a set a type serves refuses it when the schema builds, an unserved set at its
@@ -3087,16 +3089,38 @@ def refuse_unresolvable_lookup(
     if refused is None:
         return
     field, refusal = refused
+    related_key = _related_column_hint(field, path)
     raise ConfigurationError(
         f"FilterSet {truth.qualname(filterset_cls)}: {truth.kind(filter_instance)} "
         f"{filter_name!r} has field_name {field_name!r} and lookup_expr {lookup_expr!r}, "
         "but Django resolves no transform or "
         f"lookup {truth.render(refusal.part)} on {_field_label(field)} ({truth.kind(field)}), "
         "so every request naming the filter would be refused. Spell the transforms and lookup "
-        "the field registers (a column's lookups belong in lookup_expr, not field_name), "
-        "register a project lookup at startup (Field.register_lookup in AppConfig.ready), "
-        "or read the value in `method=`.",
+        "the field registers (a column's lookups belong in lookup_expr, not field_name"
+        f"{related_key}), register a project lookup at startup (Field.register_lookup in "
+        "AppConfig.ready), or read the value in `method=`.",
     ) from refusal
+
+
+def _related_column_hint(field: ModelField, path: str) -> str:
+    """Return the refusal's pointer to the related column a relation ``field`` compares; ``""``.
+
+    A relation applies only its own lookups (``RelatedExact``, ``RelatedIn``, ...) to the
+    column its last join compares (``path_infos[-1].target_fields``); that column's own
+    lookups are reached by naming it past the relation (``children__id``), which Django
+    answers alike whether or not a hop is walked. ``""`` for a column, and for a relation
+    compared on more than one column or on a column that is itself a relation.
+    """
+    if not isinstance(
+        field,
+        (models.ForeignObject, models.ManyToManyField, models.ForeignObjectRel),
+    ):
+        return ""
+    targets = field.path_infos[-1].target_fields
+    if len(targets) != 1 or targets[0].is_relation:
+        return ""
+    column = LOOKUP_SEP.join((path, targets[0].name))
+    return f" (a relation's related column is named past it: field_name {column!r})"
 
 
 def _unresolvable_lookup(
@@ -3129,25 +3153,17 @@ def _unresolvable_lookup(
         return None if refusal is None else (field, refusal)
     if len(head) < len(field_name.split(LOOKUP_SEP)):
         return None
+    # A range filter applies a relation's ``range`` as its bounds.
+    *transforms, final = rest.split(LOOKUP_SEP)
+    if bounds and final == "range":
+        rest = LOOKUP_SEP.join((*transforms, "gte"))
+    # The walk from the relation reads its own lookups (the ``Col`` Django's query builds:
+    # a reverse relation, a many-to-many's through key onto its target).
+    refusal = _refusal(field, rest)
+    if refusal is None:
+        return None
     steps = _names_to_path(query, head[:-1], model._meta)[0] if head[:-1] else []
     owner = steps[-1].to_opts.model if steps else model
-    # ``filters/sets.py::FilterSet._leaf_chain`` folds a to-one key into the relation's own
-    # lookups on every request; a range filter applies a ``range`` there as its bounds.
-    to_one = not path_traverses_to_many(owner, head[-1])
-    *transforms, final = rest.split(LOOKUP_SEP)
-    if to_one and bounds and final == "range":
-        rest = LOOKUP_SEP.join((*transforms, "gte"))
-    # The walk from the relation reads its own lookups (the ``Col`` Django's query builds).
-    refusal = _refusal(field, rest)
-    if refusal is None or to_one:
-        return None if refusal is None else (field, refusal)
-    # The key columns the relation's join compares (``Query.names_to_path``'s targets), and
-    # the related model's primary key, which a walked to-many hop compares instead.
-    related = require(read_attr(field, "related_model"), is_model_class)
-    keys = (*lookup_target_fields(query, LOOKUP_SEP.join(head)), related._meta.pk)
-    for key in keys:
-        if _refusal(stored_value_column(require(key, is_concrete_field)), rest) is None:
-            return None
     # Named as the path spells it: a many-to-many, not its through table's key.
     return owner._meta.get_field(head[-1]), refusal
 

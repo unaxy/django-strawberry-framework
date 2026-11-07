@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 183 to do.
+Progress: 0 done, 184 to do.
 
 ## From dry-0_0_15_3
 
@@ -769,8 +769,7 @@ Progress: 0 done, 183 to do.
   a type serves, at first use otherwise), naming the set, the filter, its path and lookup, the part Django refuses and
   the field, where it built before and every request with a value answered "An unexpected error occurred.":
   `NumberFilter(field_name="price__gt")` (a lookup spelled in `field_name`), a `lookup_expr` no field registers
-  (`unaccent` without `django.contrib.postgres`), `icontains` on a foreign key, a lookup neither a to-many relation
-  nor its target's key registers. Move the lookup to `lookup_expr`, register a project lookup at startup
+  (`unaccent` without `django.contrib.postgres`), `icontains` on a foreign key or any other relation. Move the lookup to `lookup_expr`, register a project lookup at startup
   (`Field.register_lookup` in `AppConfig.ready`), or read the value in `method=`. `method=` filters, filter
   overrides, queryset annotation and `FilteredRelation` alias paths and names past a relation are unchanged
 - [ ] 782. CHANGELOG entry for item 719: a `DjangoModelFormMutation` update through a form with a `disabled` field
@@ -780,6 +779,13 @@ Progress: 0 done, 183 to do.
   (`get_form_kwargs` `initial=`, a form `__init__`, a `get_initial_for_field` override) is still written as the form
   cleans it
 
+- [ ] 785. CHANGELOG entry for item 780: a declared filter on a to-many relation (reverse foreign key, many-to-many,
+  `GenericRelation`) with a lookup the relation does not register (`icontains`, `startswith`, `iexact`, `regex`, a
+  whole `range`) now raises `ConfigurationError` when its set publishes, where it answered rows matched on the related
+  row's key whenever the target type had its own `get_queryset` or a `RelatedFilter` claimed the relation (and a masked
+  error otherwise). Spell the related column past the relation instead (`children__id` with `icontains`); the error
+  names it. A raw `FilterSet(data=...)` raises Django's own `FieldError` either way, and a model-choice `in` on a
+  text-keyed to-many relation raises Django's `TypeError` instead of matching rows by the key's characters
 ## From dry-upstream-0_0_15
 
 - [ ] 101. CHANGELOG entry for item 22: the debug-toolbar middleware and its GraphiQL bridge template are adapted from
