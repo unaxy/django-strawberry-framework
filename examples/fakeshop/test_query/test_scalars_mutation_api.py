@@ -72,6 +72,11 @@ value or ``NULL``, and a create omitting it, store ``NULL`` with empty ``errors`
 async, where the column's ``null`` error would be false; an update omitting it keeps the
 stored value. A create omitting ``flag`` or ``payload`` stores ``NULL`` too, while one
 omitting the text column ``label`` keeps ``""``.
+
+``updateScalarSpecimenViaLockedStampForm`` writes through a form disabling ``occurred_at``,
+``occurred_time`` and ``external_id``: an update keeps each one's stored value, the
+microseconds the ``DateTimeInput`` / ``TimeInput`` presentation of a stored instant zeroes
+included, whether it omits the field or sends a value Django ignores, sync and async.
 """
 
 from __future__ import annotations
@@ -1584,3 +1589,111 @@ async def test_async_update_omitting_a_column_keeps_its_stored_value(
         )
 
     await sync_to_async(_assert_columns_kept)(root, response_json(result.response), stored)
+
+
+_LOCKED_AT = datetime.datetime(2020, 1, 2, 3, 4, 5, 123456, tzinfo=datetime.timezone.utc)
+_LOCKED_TIME = datetime.time(3, 4, 5, 654321)
+_LOCKED_DOCUMENT = """
+    mutation Locked($id: ID!, $data: ScalarSpecimenLockedStampFormPartialInput!) {
+      updateScalarSpecimenViaLockedStampForm(id: $id, data: $data) {
+        result { label occurredAt occurredTime }
+        errors { field messages }
+      }
+    }
+"""
+
+
+def _locked_variables(sent: Mapping[str, object]) -> tuple[dict[str, object], uuid.UUID]:
+    """Seed a row whose stamp carries microseconds; the update renames it and sends ``sent``."""
+    external_id = uuid.uuid4()
+    specimen = models.ScalarSpecimen.objects.create(
+        label="stored",
+        occurred_on=datetime.date(2020, 1, 2),
+        occurred_at=_LOCKED_AT,
+        occurred_time=_LOCKED_TIME,
+        external_id=external_id,
+    )
+    return {"id": str(specimen.pk), "data": {"label": "renamed", **sent}}, external_id
+
+
+def _assert_locked_kept(payload: JSONObject, external_id: uuid.UUID) -> None:
+    """The update wrote ``label`` and kept each disabled column as stored."""
+    assert payload == {
+        "data": {
+            "updateScalarSpecimenViaLockedStampForm": {
+                "result": {
+                    "label": "renamed",
+                    "occurredAt": "2020-01-02T03:04:05.123456+00:00",
+                    "occurredTime": "03:04:05.654321",
+                },
+                "errors": [],
+            },
+        },
+    }
+    rows = list(
+        models.ScalarSpecimen.objects.values_list(
+            "label",
+            "occurred_at",
+            "occurred_time",
+            "external_id",
+        ),
+    )
+    assert rows == [
+        (
+            "renamed",
+            _LOCKED_AT,
+            _LOCKED_TIME,
+            external_id,
+        ),
+    ], rows
+
+
+_LOCKED_SENT = [
+    pytest.param({}, id="omitted"),
+    pytest.param(
+        {
+            "occurredAt": "2030-05-06T07:08:09.654321+00:00",
+            "occurredTime": "10:11:12.654321",
+            "externalId": str(uuid.UUID(int=1)),
+        },
+        id="sent",
+    ),
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("sent", _LOCKED_SENT)
+def test_update_through_disabled_fields_keeps_their_stored_values(
+    sent: Mapping[str, object],
+) -> None:
+    """An update keeps each disabled field's stored value, microseconds included.
+
+    Django cleans a disabled field's initial, the stored value, and ignores a value the
+    input sends for it; ``DateTimeInput`` and ``TimeInput`` present that initial with its
+    microseconds zeroed, so the form field's own cleaning of ``occurred_at`` and
+    ``occurred_time`` drops them. The instance gets each stored value back before the save,
+    whether the input omits the field or sends one.
+    """
+    variables, external_id = _locked_variables(sent)
+
+    payload = response_json(post_graphql(_LOCKED_DOCUMENT, variables=variables))
+
+    _assert_locked_kept(payload, external_id)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("sent", _LOCKED_SENT)
+async def test_async_update_through_disabled_fields_keeps_their_stored_values(
+    sent: Mapping[str, object],
+) -> None:
+    """The async pipeline keeps a disabled field's stored value the same way, omitted or sent."""
+    variables, external_id = await sync_to_async(_locked_variables)(sent)
+    with override_settings(ROOT_URLCONF=__name__):
+        result = await AsyncTestClient().query(
+            _LOCKED_DOCUMENT,
+            variables=variables,
+            assert_no_errors=False,
+            url="/graphql-async/",
+        )
+
+    await sync_to_async(_assert_locked_kept)(response_json(result.response), external_id)

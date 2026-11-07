@@ -17,6 +17,9 @@ writes ``occurred_at`` through Django's ``SplitDateTimeField`` (the admin's form
 ``ScalarSpecimenDayInstantForm``'s ``clean_occurred_on`` answers the aware midnight UTC of
 the date sent, which the ``DateField`` column stores as its date in the default time zone,
 so a day whose midnight falls outside years 1..9999 there is refused over a live request.
+``ScalarSpecimenLockedStampForm`` disables ``occurred_at``, ``occurred_time`` and
+``external_id``, so an update writes ``label`` / ``occurred_on`` and keeps the stored instant,
+microseconds included.
 ``as_posted_text`` re-encodes form data as the text a browser posts, the mapping the
 ``ViaPosted`` mutations' ``get_form_kwargs`` binds over both forms.
 
@@ -107,6 +110,21 @@ class ScalarSpecimenDayInstantForm(ScalarSpecimenTemporalForm):
             # Django runs ``clean_occurred_on`` only once the field cleaned to a date.
             raise TypeError(f"expected the cleaned date, got {type(day).__name__}")
         return datetime.datetime.combine(day, datetime.time.min, tzinfo=datetime.timezone.utc)
+
+
+class ScalarSpecimenLockedStampForm(ScalarSpecimenTemporalForm):
+    """``ScalarSpecimenTemporalForm`` with ``occurred_at``, ``occurred_time`` and ``external_id`` disabled.
+
+    Django cleans a disabled field's initial, the stored value, and ignores any value bound
+    for it. The ``DateTimeInput`` / ``TimeInput`` of ``occurred_at`` / ``occurred_time``
+    present that initial with its microseconds zeroed, so the form field's own cleaning of
+    a stored instant drops them; an update keeps each stored value as stored, whether the
+    input omits the field or sends a value Django ignores.
+    """
+
+    occurred_at = forms.DateTimeField(disabled=True)
+    occurred_time = forms.TimeField(disabled=True)
+    external_id = forms.UUIDField(disabled=True)
 
 
 class PrefixedScalarSpecimenSplitStampForm(ScalarSpecimenSplitStampForm):

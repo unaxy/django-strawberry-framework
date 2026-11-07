@@ -44,11 +44,13 @@ import contextlib
 import datetime
 import decimal
 import functools
+import io
 import itertools
 import json
 import uuid
 from collections.abc import Callable, Generator, Iterator
 from enum import Enum
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 from urllib.parse import urlencode
@@ -64,6 +66,8 @@ from apps.scalars import models as scalars_models
 from asgiref.sync import async_to_sync
 from django import forms
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
+from django.core.files.base import File
+from django.core.files.storage import FileSystemStorage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import DataError, IntegrityError, connection, models, transaction
 from django.db.models.signals import pre_save
@@ -71,6 +75,7 @@ from django.http import QueryDict
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.utils.datastructures import MultiValueDict
+from PIL import Image
 from strawberry import relay
 from strawberry.types import ExecutionResult
 from strawberry.types.base import get_object_definition
@@ -624,10 +629,22 @@ def test_partial_reconstruction_excludes_every_file_field_flavor(file_field_name
     assert reconstructed["label"] == specimen.label
 
 
-def _update_media_file_schema() -> tuple[strawberry.Schema, type[DjangoType]]:
-    """Build an ``updateMedia`` ModelForm mutation over every ``MediaSpecimen`` file column."""
+def _update_media_file_schema(
+    *,
+    disabled: str | None = None,
+) -> tuple[strawberry.Schema, type[DjangoType]]:
+    """Build an ``updateMedia`` ModelForm mutation over every ``MediaSpecimen`` file column.
+
+    ``disabled`` names the one file field (``optional_attachment`` or ``spare_image``) the
+    form declares ``disabled``.
+    """
 
     class MediaForm(forms.ModelForm[scalars_models.MediaSpecimen]):
+        if disabled == "optional_attachment":
+            optional_attachment = forms.FileField(disabled=True, required=False)
+        if disabled == "spare_image":
+            spare_image = forms.ImageField(disabled=True, required=False)
+
         class Meta:
             model = scalars_models.MediaSpecimen
             fields = (
@@ -699,6 +716,113 @@ def test_update_explicit_null_on_an_optional_file_clears_it() -> None:
     assert specimen.optional_attachment.name == ""
     assert specimen.attachment.name == "scalar_media/files/stored.txt"
     assert specimen.spare_image.name == "scalar_media/images/spare.png"
+
+
+class _CountingStorage(FileSystemStorage):
+    """A consumer ``FileSystemStorage`` counting its ``size()`` reads and file opens.
+
+    It keeps each file it opens: Django's ``ImageField.to_python`` reads a stored image
+    through the instance's ``FieldFile`` and leaves it open, so the test closes them.
+    """
+
+    sizes: ClassVar[int] = 0
+    opened: ClassVar[list[File[bytes]]] = []
+
+    @override
+    def size(self, name: str) -> int:
+        type(self).sizes += 1
+        return super().size(name)
+
+    @override
+    def open(self, name: str, mode: str = "rb") -> File[bytes]:
+        opened = super().open(name, mode)
+        type(self).opened.append(opened)
+        return opened
+
+
+def _one_pixel_png() -> bytes:
+    """Return a valid one-pixel PNG, so Pillow's open and ``verify()`` accept it."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (1, 1)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    (
+        "disabled",
+        "input_key",
+        "stored_name",
+        "content",
+        "opens",
+    ),
+    [
+        pytest.param(
+            "optional_attachment",
+            "optionalAttachment",
+            "scalar_media/files/optional.txt",
+            b"stored",
+            0,
+            id="file",
+        ),
+        pytest.param(
+            "spare_image",
+            "spareImage",
+            "scalar_media/images/spare.png",
+            None,
+            1,
+            id="image",
+        ),
+    ],
+)
+@pytest.mark.django_db
+def test_update_keeps_a_disabled_file_fields_stored_file(
+    tmp_path: Path,
+    disabled: str,
+    input_key: str,
+    stored_name: str,
+    content: bytes | None,
+    opens: int,
+) -> None:
+    """A ``disabled`` file field keeps its stored file, cleaned by Django once per update.
+
+    Django cleans the disabled field's initial, the stored ``FieldFile`` itself, and ignores
+    the explicit ``null`` the input sends for it. Its ``FileField.to_python`` reads the
+    file's ``size()`` (an ``ImageField`` also opens it for Pillow), so the file exists under
+    the storage's location; no restore check cleans it a second time, so the update reads
+    the storage once.
+    """
+    stored = tmp_path / stored_name
+    stored.parent.mkdir(parents=True)
+    _ = stored.write_bytes(_one_pixel_png() if content is None else content)
+    backend = f"{_CountingStorage.__module__}.{_CountingStorage.__qualname__}"
+    storages = {
+        "default": {"BACKEND": backend, "OPTIONS": {"location": str(tmp_path)}},
+        "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+    }
+    schema, media_type = _update_media_file_schema(disabled=disabled)
+    specimen = _stored_media_specimen()
+    _CountingStorage.sizes = 0
+    _CountingStorage.opened = []
+    with override_settings(STORAGES=storages):
+        try:
+            res = schema.execute_sync(
+                _UPDATE_MEDIA,
+                variable_values={
+                    "id": global_id_for(media_type, saved_pk(specimen)),
+                    "d": {"label": "Renamed", input_key: None},
+                },
+            )
+        finally:
+            for opened in _CountingStorage.opened:
+                opened.close()
+        counted = (_CountingStorage.sizes, len(_CountingStorage.opened))
+    assert res.errors is None, res.errors
+    assert _json_at(res.data, "updateMedia", "errors") == []
+    assert counted == (1, opens)
+    specimen.refresh_from_db()
+    assert specimen.label == "Renamed"
+    assert str(read_attr(specimen, disabled)) == stored_name
+    assert specimen.attachment.name == "scalar_media/files/stored.txt"
 
 
 # ---------------------------------------------------------------------------
@@ -7252,6 +7376,36 @@ class _DisabledNoteForm(_KeptNoteForm):
     note = forms.CharField(disabled=True, required=False)
 
 
+_PRECISE_STAMP = datetime.datetime(2020, 1, 2, 3, 4, 5, 123456, tzinfo=datetime.timezone.utc)
+_OTHER_STAMP = datetime.datetime(2021, 2, 3, 4, 5, 6, 654321, tzinfo=datetime.timezone.utc)
+
+
+class _DisabledStampForm(forms.ModelForm[_KeptRow]):
+    at = forms.DateTimeField(disabled=True, required=False)
+
+    class Meta:
+        model = _KeptRow
+        fields = ("title", "at")
+
+
+class _DisabledSplitStampForm(forms.ModelForm[_KeptRow]):
+    at = forms.SplitDateTimeField(disabled=True, required=False)
+
+    class Meta:
+        model = _KeptRow
+        fields = ("title", "at")
+
+
+class _PresentedStampForm(_DisabledStampForm):
+    """Presents ``at`` as another instant through its own ``get_initial_for_field``."""
+
+    @override
+    def get_initial_for_field(self, field: forms.Field, field_name: str) -> object:
+        if field_name == "at":
+            return _OTHER_STAMP
+        return object_result(super().get_initial_for_field, field, field_name)
+
+
 class _SlugRow(models.Model):
     """An unmanaged row whose model ``clean()`` derives ``slug`` from ``title``."""
 
@@ -7374,8 +7528,8 @@ class _KeptUpdate(DjangoModelFormMutation):
     """The base (no ``Meta``) of each update below: its hook binds ``bind`` as ``hook`` says.
 
     ``"copy"`` binds a copy of the package's data holding ``bind``, ``"in-place"`` sets
-    ``bind`` in the mapping the hook is handed, and ``"rebind"`` hands the form a fresh copy
-    of the located row.
+    ``bind`` in the mapping the hook is handed, ``"initial"`` passes ``bind`` as the form's
+    ``initial``, and ``"rebind"`` hands the form a fresh copy of the located row.
     """
 
     bind: ClassVar[dict[str, object]] = {}
@@ -7397,6 +7551,8 @@ class _KeptUpdate(DjangoModelFormMutation):
         kwargs = super().get_form_kwargs(info, data=data, files=files, instance=instance)
         if self.hook == "copy":
             kwargs["data"] = {**data, **self.bind}
+        if self.hook == "initial":
+            kwargs["initial"] = self.bind
         if self.hook == "rebind" and instance is not None:
             fresh = type(instance)._base_manager.get(pk=pk_of(instance))
             vars(fresh).update(self.rebound)
@@ -7533,6 +7689,128 @@ def test_update_omitting_a_note_writes_only_the_consumers_value(
         hook=hook,
     )
     assert row == {"title": "New", "note": note, "at": None}
+
+
+@pytest.mark.parametrize(
+    (
+        "form_class",
+        "bind",
+        "hook",
+        "at",
+    ),
+    [
+        pytest.param(_DisabledStampForm, {}, "copy", _PRECISE_STAMP, id="disabled"),
+        pytest.param(_DisabledSplitStampForm, {}, "copy", _PRECISE_STAMP, id="disabled-split"),
+        pytest.param(
+            _DisabledStampForm,
+            {"at": _PRECISE_STAMP},
+            "initial",
+            _PRECISE_STAMP,
+            id="initial-the-stored-value",
+        ),
+        pytest.param(
+            _DisabledStampForm,
+            {"at": _OTHER_STAMP},
+            "initial",
+            _OTHER_STAMP.replace(microsecond=0),
+            id="initial-another-value",
+        ),
+        pytest.param(
+            _DisabledStampForm,
+            {"at": lambda: _OTHER_STAMP},
+            "initial",
+            _OTHER_STAMP.replace(microsecond=0),
+            id="initial-a-callable",
+        ),
+        pytest.param(_PresentedStampForm, {}, "copy", _OTHER_STAMP, id="get-initial-for-field"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_a_disabled_stamp_writes_only_the_consumers_initial(
+    form_class: type[forms.BaseForm],
+    bind: dict[str, object],
+    hook: str,
+    at: datetime.datetime,
+) -> None:
+    """A ``disabled`` datetime keeps its stored microseconds unless consumer code set another.
+
+    Django cleans a disabled field's initial, which a ``DateTimeInput`` or
+    ``SplitDateTimeWidget`` presents with its microseconds zeroed, so the form field's own
+    cleaning of the stored instant drops them and the stored value is kept, as it is under
+    an ``initial`` equal to it. An ``initial`` the consumer sets (a ``get_form_kwargs``
+    value or callable) is written as the form cleans it, and so is the value
+    a ``get_initial_for_field`` override presents.
+    """
+    row = _update_omitting(
+        _KeptRow,
+        form_class,
+        {"at": _PRECISE_STAMP},
+        bind=bind,
+        hook=hook,
+    )
+    assert row == {"title": "New", "note": "", "at": at}
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [pytest.param(_PADDED, id="padded-text"), pytest.param(None, id="null")],
+)
+@pytest.mark.django_db
+def test_update_sending_a_disabled_text_field_keeps_its_stored_value(stored: str | None) -> None:
+    """A value the input sends for a ``disabled`` field is ignored and the column kept as stored.
+
+    Django cleans the disabled ``CharField``'s initial, the stored value, to its stripped text
+    or, for a stored ``NULL``, its ``""``; the instance gets the stored value back before the
+    save, while ``flag`` is written as sent.
+    """
+
+    class LockedLabelForm(forms.ModelForm[scalars_models.NullableScalarSpecimen]):
+        label = forms.CharField(disabled=True, required=False)
+
+        class Meta:
+            model = scalars_models.NullableScalarSpecimen
+            fields = ("label", "flag")
+
+    class LockedT(DjangoType):
+        class Meta:
+            model = scalars_models.NullableScalarSpecimen
+            fields = ("id", "label", "flag")
+
+    assert registry.get(scalars_models.NullableScalarSpecimen) is LockedT
+
+    class UpdateLocked(DjangoModelFormMutation):
+        class Meta:
+            form_class = LockedLabelForm
+            operation = "update"
+            permission_classes = []
+
+    @strawberry.type
+    class Mutation:
+        update_locked = DjangoMutationField(UpdateLocked)
+
+    finalize_django_types()
+    schema = _schema(Mutation)
+    assert UpdateLocked._input_class is not None
+    row = scalars_models.NullableScalarSpecimen.objects.create(label=stored, flag=False)
+    res = schema.execute_sync(
+        f"mutation($id: ID!, $d: {UpdateLocked._input_class.__name__}!){{ "
+        "updateLocked(id: $id, data: $d){ errors{ field codes } } }",
+        variable_values={"id": str(pk_of(row)), "d": {"label": "sent", "flag": True}},
+    )
+    assert res.errors is None, res.errors
+    assert res.data == {"updateLocked": {"errors": []}}
+    assert list(
+        scalars_models.NullableScalarSpecimen.objects.values_list("label", "flag"),
+    ) == [(stored, True)]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_update_omitting_a_disabled_naive_stamp_keeps_its_microseconds() -> None:
+    """Under ``USE_TZ = False`` a ``disabled`` naive datetime keeps its stored microseconds."""
+    stamp = _PRECISE_STAMP.replace(tzinfo=None)
+    with override_settings(USE_TZ=False):
+        row = _update_omitting(_KeptRow, _DisabledStampForm, {"at": stamp})
+    assert row == {"title": "New", "note": "", "at": stamp}
 
 
 @pytest.mark.django_db(transaction=True)
