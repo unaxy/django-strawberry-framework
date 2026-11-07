@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 434 done, 109 to do. The CHANGELOG entries filed here moved to
+Progress: 435 done, 110 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1776,6 +1776,25 @@ Progress: 434 done, 109 to do. The CHANGELOG entries filed here moved to
   mutations; package rows in `tests/forms/test_inputs.py` and `test_resolvers.py`; spec-038, spec-027 citations, README,
   GLOSSARY `DjangoModelFormMutation`. Filed 786 and 787
 
+- [x] 784. fixed: a class-level `filter` override on a relation key a flat leaf walks (to-many at any hop count, a
+  forward key two or more relations away) runs once as declared, with its own `field_name`, the value its form
+  cleaned (model instances, not pks) and the declaring set's rows, as unwalked, and keeps only the parents that reach,
+  through each hop's visible rows, a visible last-hop row its value names (every one for `conjoined`; a raw key or
+  GlobalID named through the leaf class's nearest shipped `filter` on the column Django's relation lookup compares, a
+  non-pk `to_field` included). So a `value.pk` reader no longer raises walked, a hardcoded-path override answers its
+  unwalked rows, `icontains` raises Django's `FieldError` walked as unwalked, and a hidden named row matches nothing.
+  A value naming no row of the target (an empty, `null` or absent model-choice value, instances of a model the
+  relation does not accept per Django's `check_rel_lookup_compatibility`, a raw or GlobalID value the shipped
+  comparison skips or refuses) and an `isnull` override run over the visible related rows exactly as before
+  (`FilterSet._request_chain`, `_LeafChain.fallback`). The value names the rows the override keeps (`exclude=True`
+  negates, applied at the parent); a path the override's own Python reaches beyond its value is its own scoping, as
+  for `method=`. Changed `filters/sets.py::FilterSet._leaf_chain`, `::FilterSet._apply_relation_leaf`,
+  `::FilterSet._absent_leaf_applies`; new `::FilterSet._request_chain`, `::FilterSet._reaches_key`,
+  `::FilterSet._folded_key_chain`, `::_KeyMatch`, `::_model_choice_members`, `::_shipped_filter_class`,
+  `::_defines_shipped_filter`, `::_SHIPPED_COMPARISON_REFUSALS`. Grid: 0 regressions, 0 hidden-row leaks, query
+  counts unchanged. Pinned by `examples/fakeshop/test_query/test_relation_key_overrides_api.py` (sync, async, form,
+  nested and flat child); spec-027, README, GLOSSARY `FilterSet`. Filed 789, 790
+
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -2042,12 +2061,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `TypeError: keywords must be strings`; walked, `filters/sets.py::FilterSet._bound_terminal` rebinds `field_name` to
   a str path and the request answers rows. 780 aligns a to-many relation key only; a target path and a two-hop walk
   still split. Found researching 780
-- [ ] 784. A consumer class-level `filter` override (a django-filter `Filter` subclass) on a to-many relation key a hop
-  walks receives the target's key column (`field_name="id"`) and the reshaped key values instead of the relation and
-  model instances (`filters/sets.py::FilterSet._bound_terminal` rebinds a filter whose behaviour is consumer code;
-  `_flat_leaf_walk` refuses only an instance-level `filter`), so an override reading `value.pk` raises a masked
-  `AttributeError` walked and answers unwalked (spec-027 Decision 8: a walked leaf answers as unwalked over the visible
-  rows). Found verifying 780
 - [ ] 786. (robustness) A `ModelForm`'s default `forms.JSONField` over a `JSONField` re-parses a decoded JSON
   string as JSON text: the JSON string `"hi"` sent is refused "Enter a valid JSON.", the JSON string `'{"a": 1}'` is
   stored as the object, and an update omitting the field over a stored JSON string is refused the same way, though the
@@ -2057,6 +2070,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
   no encoder hands the column a value its JSON encoder cannot encode, failing at save; the filter side refuses the
   same kind at build (`filters/inputs.py::_refuse_kind_json_cannot_encode`), the form side does not. Found researching
   720
+- [ ] 789. (robustness) A shipped `ModelMultipleChoiceFilter(conjoined=True)` on a to-many relation key a flat leaf
+  walks (a `RelatedFilter` on the relation, or a target type with its own `get_queryset`) answers no row where
+  unwalked answers (`ScalarSpecimen.children` naming two children: walked `[]`, unwalked `['p1']`): each AND is re-read
+  on the target key column over a single target row (`filters/sets.py::FilterSet._leaf_chain`,
+  `_LeafChain.terminal_value`). One declaration, two answers (GOAL "Trust boundary"). Found researching 784
+- [ ] 790. (robustness) A flat leaf left out of the request whose relation-key path a hop walks calls a consumer
+  `filter` override twice (the `filters/sets.py::FilterSet._absent_leaf_applies` probe, then the apply), where
+  unwalked calls it once; consumer code runs once per request elsewhere (780). Found verifying 784
 
 ## To do: holes found re-checking the fixes
 

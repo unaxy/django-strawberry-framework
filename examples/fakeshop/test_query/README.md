@@ -646,6 +646,7 @@ Module docstring = authoritative description; this = index. Read the docstring b
 | [`test_postgres_array_filter_bindability_api.py`][test-postgres-array-filter-bindability-api] | Real PostgreSQL array tables exercise element, length, index, slice, compound-parameter and nested-array leaf bindability through native HTTP holders. |
 | [`test_scalar_predicate_binding_api.py`][test-scalar-predicate-binding-api] | Consumer scalar arguments exercise the database values of transformed, annotated and projected predicates, including duration, decimal and timezone boundaries; a typed `Decimal` past the range of an integer annotation, a column past a `FilteredRelation` alias, the alias compared as the relation or a `year` of either is held without being converted. |
 | [`test_relation_filter_defaults_api.py`][test-relation-filter-defaults-api] | Unbound relation filters preserve consumer defaults, forms, constructor edits and prefixed inputs through apply methods and direct construction. |
+| [`test_relation_key_overrides_api.py`][test-relation-key-overrides-api] | A class-level `filter` override on a walked relation key runs once as declared (its `field_name`, cleaned value and own set's rows) and matches only parents reaching a visible row its value names, on `apply_sync`, `apply_async` and the set's own form. |
 | [`test_relation_leaf_sql_api.py`][test-relation-leaf-sql-api] | Independent relation leaves preserve null extension, correlated EXISTS predicates and exclusion under a nullable child key. |
 | [`test_relation_filter_form_paths_api.py`][test-relation-filter-form-paths-api] | Consumer relation form paths preserve reentry visibility and authored empty choice inputs. |
 | [`test_filter_lookup_catalog_api.py`][test-filter-lookup-catalog-api] | Consumer overrides retain usable all-catalog text-pattern filters on datetime, JSON and stored file paths. |
@@ -790,6 +791,7 @@ Outside this dir: [`../tests/`][fakeshop-tests] = project-level rows (urls, sett
 [test-relation-filter-defaults-api]: test_relation_filter_defaults_api.py
 [test-relation-filter-form-paths-api]: test_relation_filter_form_paths_api.py
 [test-relation-identity-columns-api]: test_relation_identity_columns_api.py
+[test-relation-key-overrides-api]: test_relation_key_overrides_api.py
 [test-relation-leaf-sql-api]: test_relation_leaf_sql_api.py
 [test-relation-link-api]: test_relation_link_api.py
 [test-relation-reentry-api]: test_relation_reentry_api.py
