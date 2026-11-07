@@ -48,7 +48,7 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 from django.db.models import QuerySet
 from django.db.models.functions import ExtractYear
-from django.db.models.lookups import Exact, GreaterThanOrEqual
+from django.db.models.lookups import Exact, GreaterThan, GreaterThanOrEqual
 from django.http import HttpRequest
 from django.test.utils import isolate_apps, register_lookup
 from django.utils.functional import SimpleLazyObject, lazy
@@ -459,8 +459,10 @@ def test_lookup_leaf_names_names_a_chain_segment_by_segment(
 def test_two_lookups_of_one_head_named_by_one_attr_are_refused() -> None:
     """A lookup a ``get_filters()`` override adds under a chain's attr would shadow the chain.
 
-    ``year_gt`` and ``year__gt`` both name the attr ``year_gt`` of the ``occurred_at`` head,
-    so one would be unreachable from the generated input.
+    ``year_gt`` (a lookup the project registers) and ``year__gt`` both name the attr
+    ``year_gt`` of the ``occurred_at`` head, so one would be unreachable from the generated
+    input. The lookup is registered (Django's ``register_lookup``, which unregisters it on
+    exit) so the attr-collision guard, not the unresolvable-lookup refusal, is what fires.
     """
 
     class CollidingFilter(FilterSet):
@@ -478,7 +480,10 @@ def test_two_lookups_of_one_head_named_by_one_attr_are_refused() -> None:
             model = scalar_models.ScalarSpecimen
             fields = {"occurred_at": ["year__gt"]}
 
-    with pytest.raises(ConfigurationError, match="both generate the lookup attribute 'year_gt'"):
+    with (
+        register_lookup(models.DateTimeField, GreaterThan, lookup_name="year_gt"),
+        pytest.raises(ConfigurationError, match="both generate the lookup attribute 'year_gt'"),
+    ):
         filter_lookup_table(CollidingFilter)
 
 
@@ -5011,13 +5016,6 @@ def _generated_specimen_set() -> type[FilterSet]:
             lambda: _payload_set(_EvenFilter(field_name="number"), model=library_models.Issue),
             id="integer-bounded-by-validate",
         ),
-        pytest.param(
-            lambda: _payload_set(
-                NumberFilter(field_name="number", lookup_expr="unaccent"),
-                model=library_models.Issue,
-            ),
-            id="lookup-no-field-registers",
-        ),
         pytest.param(_generated_specimen_set, id="generated-leaves"),
     ],
 )
@@ -5032,9 +5030,29 @@ def test_a_declared_filter_some_value_of_its_column_answers_builds(
     or a ``validate`` bounding the values of a kind never refuses it. A ``method=`` filter,
     a consumer ``filter`` override and a consumer parser own what a value means; a
     transform and a null test type their leaf on other arms; generated leaves are
-    django-filter's choice; a lookup no field registers is not judged at build.
+    django-filter's choice.
     """
     assert _build_input_fields(make_set())
+
+
+def test_a_declared_lookup_no_field_registers_is_refused_before_its_form_is_asked() -> None:
+    """A ``lookup_expr`` no field registers is refused when the set publishes, naming the lookup.
+
+    Django resolves ``unaccent`` only where ``django.contrib.postgres`` registers it, so the
+    leaf could answer no request; the set's publication refuses it
+    (``filters/base.py::refuse_unresolvable_lookup``) before the input build asks its form.
+    """
+    payload_set = _payload_set(
+        NumberFilter(field_name="number", lookup_expr="unaccent"),
+        model=library_models.Issue,
+    )
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(payload_set)
+    assert str(excinfo.value).startswith(
+        "FilterSet PayloadValueSet: NumberFilter 'value' has field_name 'number' and "
+        "lookup_expr 'unaccent', but Django resolves no transform or lookup 'unaccent' on "
+        "Issue.number (IntegerField)",
+    )
 
 
 def test_a_projected_child_leaf_some_value_of_its_column_answers_builds() -> None:

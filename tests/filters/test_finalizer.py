@@ -22,6 +22,10 @@ Covers:
 - A declared filter a deep copy refuses fails the build naming its set and
   attribute (a served set's by the subpass-1.5 probe, an unserved
   ``RelatedFilter`` child's by the expansion copy).
+- A declared leaf whose ``field_name`` and ``lookup_expr`` Django resolves on no
+  queryset is refused when its set publishes, under every serving shape, while the
+  shapes Django resolves on some queryset (a name past a relation, a to-many key its
+  target's key reads, a range applied as a relation's bounds) build.
 
 Bound and unbound filtersets answering requests live in ``test_query/``.
 ``test_filter_declarations_api.py`` owns copyable callable and widget controls
@@ -50,6 +54,8 @@ from apps.library.models import (
     Genre,
     LendingDesk,
     Loan,
+    Patron,
+    PatronProfile,
     ProxyBranch,
     Shelf,
     TaggedItem,
@@ -61,6 +67,7 @@ from django.core.cache import caches
 from django.db.models import (
     BigIntegerField,
     DateTimeField,
+    F,
     ForeignKey,
     IntegerField,
     Lookup,
@@ -75,13 +82,18 @@ from django.db.models.lookups import GreaterThan, IStartsWith
 from django.http import HttpRequest
 from django.test import override_settings
 from django.test.utils import register_lookup
+from django.utils.functional import SimpleLazyObject
+from django.utils.translation import gettext_lazy
 from django_filters import (
     BooleanFilter,
     CharFilter,
     Filter,
+    ModelChoiceFilter,
     ModelMultipleChoiceFilter,
     NumberFilter,
 )
+from django_filters.filters import BaseRangeFilter
+from django_filters.filters import RangeFilter as DjangoFilterRangeFilter
 from strawberry import relay
 from typing_extensions import override
 
@@ -99,18 +111,23 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.exceptions import ConfigurationError, LookupValidationError
 from django_strawberry_framework.filters import (
     FilterInput,
     FilterSet,
     GlobalIDFilter,
     ListFilter,
+    RangeFilter,
     RelatedFilter,
     _connection_served_filtersets,
     _helper_referenced_filtersets,
     filter_input_type,
 )
-from django_strawberry_framework.filters.base import _lookup_operand, _model_lookup_operand
+from django_strawberry_framework.filters.base import (
+    IntegerRangeFilter,
+    _lookup_operand,
+    _model_lookup_operand,
+)
 from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import (
     INPUTS_MODULE_PATH,
@@ -2540,7 +2557,7 @@ def _specimen_set(
     declared: dict[str, Filter] | None = None,
     *,
     name: str = "SpecimenFilter",
-    model: type[Model] = ScalarSpecimen,
+    model: type[Model] | None = ScalarSpecimen,
     meta: dict[str, object] | None = None,
 ) -> type[FilterSet]:
     """A set over ``model`` generating ``fields`` and declaring ``declared``."""
@@ -2935,12 +2952,24 @@ _UNWALKED_SERVED_LEAVES = [
         id="declared-over-an-annotation",
     ),
     pytest.param(
+        lambda: NumberFilter(field_name="signed_big__gt", method=_doubled_is),
+        id="method-over-a-path-django-refuses",
+    ),
+    pytest.param(
+        lambda: _OwnFilterNumberFilter(field_name="signed_big__gt"),
+        id="filter-override-over-a-path-django-refuses",
+    ),
+    pytest.param(
+        lambda: NumberFilter(field_name="parent__bogus"),
+        id="name-past-a-relation-its-model-lacks",
+    ),
+    pytest.param(
         lambda: ModelMultipleChoiceFilter(
             field_name="children",
-            lookup_expr="unknown",
+            lookup_expr="icontains",
             queryset=ScalarSpecimen.objects.all(),
         ),
-        id="reverse-key-lookup-no-relation-resolves",
+        id="reverse-key-lookup-its-target-key-resolves",
     ),
 ]
 
@@ -2949,10 +2978,12 @@ _UNWALKED_SERVED_LEAVES = [
 def test_a_served_leaf_the_build_does_not_walk_builds(declare: Callable[[], Filter]) -> None:
     """A served leaf whose query is consumer code, or whose path the model cannot walk, builds.
 
-    A ``method=`` filter and a ``filter`` override build their own query, a queryset
-    annotation has no walk from the model, and a reverse relation key's lookup no relation
-    resolves has none either: no class reaches the seal from the build's walk, which leaves
-    each to the request.
+    A ``method=`` filter and a ``filter`` override build their own query, over a path Django
+    refuses too, and a queryset annotation has no walk from the model: no class reaches the
+    seal from the build's walk, which leaves each to the request. A name past a relation the
+    related model lacks is read on the rows a walked hop's type shapes, and a to-many key's
+    lookup the target's key resolves is the comparison a walked hop makes, so neither is
+    refused as unresolvable (``filters/base.py::refuse_unresolvable_lookup``).
     """
     with _doubled():
         _ = _serve_at_root(_specimen_set([], {"twice_of": declare()}))
@@ -3364,3 +3395,540 @@ def test_a_related_child_behind_hidden_flat_copies_is_refused_through_its_branch
         "ChildFilter.twice: NumberFilter on 'signed_big' (reached through PartnerFilter.partner)"
     )
     assert str(exc_info.value) == _unsealable_refusal(subject, "doubled", _Doubled)
+
+
+# ---------------------------------------------------------------------------
+# A declared predicate Django resolves on no queryset.
+# ---------------------------------------------------------------------------
+
+
+class _NumberRangeFilter(BaseRangeFilter, NumberFilter):
+    """django-filter's CSV ``range`` filter over numbers, which hands Django its ``range`` whole."""
+
+
+@dataclass(frozen=True)
+class _UnresolvableCase:
+    """A declared leaf whose predicate Django resolves on no queryset, and what its refusal names."""
+
+    declare: Callable[[], Filter]
+    model: type[Model]
+    kind: str
+    field_name: str
+    lookup_expr: str
+    part: str
+    field: str
+
+
+def _scalar_specimens() -> QuerySet[ScalarSpecimen]:
+    return ScalarSpecimen.objects.all()
+
+
+_UNRESOLVABLE_LEAVES: dict[str, _UnresolvableCase] = {
+    "column-lookup-spelled-in-field-name": _UnresolvableCase(
+        lambda: NumberFilter(field_name="signed_big__gt"),
+        ScalarSpecimen,
+        "NumberFilter",
+        "signed_big__gt",
+        "exact",
+        "gt",
+        "ScalarSpecimen.signed_big (BigIntegerField)",
+    ),
+    "no-transform-past-a-transform": _UnresolvableCase(
+        lambda: NumberFilter(field_name="occurred_at__year__gt"),
+        ScalarSpecimen,
+        "NumberFilter",
+        "occurred_at__year__gt",
+        "exact",
+        "gt",
+        "ScalarSpecimen.occurred_at (DateTimeField)",
+    ),
+    "lookup-no-field-registers": _UnresolvableCase(
+        lambda: CharFilter(field_name="label", lookup_expr="unaccent"),
+        ScalarSpecimen,
+        "CharFilter",
+        "label",
+        "unaccent",
+        "unaccent",
+        "ScalarSpecimen.label (TextField)",
+    ),
+    "column-past-a-forward-hop": _UnresolvableCase(
+        lambda: CharFilter(field_name="parent__label__icontains"),
+        ScalarSpecimen,
+        "CharFilter",
+        "parent__label__icontains",
+        "exact",
+        "icontains",
+        "ScalarSpecimen.label (TextField)",
+    ),
+    "column-past-a-reverse-hop": _UnresolvableCase(
+        lambda: NumberFilter(field_name="children__signed_big__gt"),
+        ScalarSpecimen,
+        "NumberFilter",
+        "children__signed_big__gt",
+        "exact",
+        "gt",
+        "ScalarSpecimen.signed_big (BigIntegerField)",
+    ),
+    "column-past-a-many-to-many-hop": _UnresolvableCase(
+        lambda: CharFilter(field_name="genres__name__typo"),
+        Book,
+        "CharFilter",
+        "genres__name__typo",
+        "exact",
+        "typo",
+        "Genre.name (TextField)",
+    ),
+    "forward-key-lookup-its-target-key-resolves": _UnresolvableCase(
+        lambda: ModelChoiceFilter(
+            field_name="parent",
+            lookup_expr="icontains",
+            queryset=_scalar_specimens(),
+        ),
+        ScalarSpecimen,
+        "ModelChoiceFilter",
+        "parent",
+        "icontains",
+        "icontains",
+        "ScalarSpecimen.parent (ForeignKey)",
+    ),
+    "forward-key-lookup-nothing-resolves": _UnresolvableCase(
+        lambda: ModelChoiceFilter(
+            field_name="parent",
+            lookup_expr="unknown",
+            queryset=_scalar_specimens(),
+        ),
+        ScalarSpecimen,
+        "ModelChoiceFilter",
+        "parent",
+        "unknown",
+        "unknown",
+        "ScalarSpecimen.parent (ForeignKey)",
+    ),
+    "forward-key-range-handed-whole": _UnresolvableCase(
+        lambda: _NumberRangeFilter(field_name="branch", lookup_expr="range"),
+        Shelf,
+        "_NumberRangeFilter",
+        "branch",
+        "range",
+        "range",
+        "Shelf.branch (ForeignKey)",
+    ),
+    "forward-key-range-its-walk-refuses": _UnresolvableCase(
+        lambda: RangeFilter(field_name="branch", lookup_expr="range"),
+        Shelf,
+        "RangeFilter",
+        "branch",
+        "range",
+        "range",
+        "Shelf.branch (ForeignKey)",
+    ),
+    "reverse-one-to-one-key-lookup": _UnresolvableCase(
+        lambda: CharFilter(field_name="profile", lookup_expr="icontains"),
+        Patron,
+        "CharFilter",
+        "profile",
+        "icontains",
+        "icontains",
+        "Patron.profile (OneToOneRel)",
+    ),
+    "reverse-key-lookup-no-relation-resolves": _UnresolvableCase(
+        lambda: ModelMultipleChoiceFilter(
+            field_name="children",
+            lookup_expr="unknown",
+            queryset=_scalar_specimens(),
+        ),
+        ScalarSpecimen,
+        "ModelMultipleChoiceFilter",
+        "children",
+        "unknown",
+        "unknown",
+        "ScalarSpecimen.children (ManyToOneRel)",
+    ),
+    "many-to-many-key-lookup-no-relation-resolves": _UnresolvableCase(
+        lambda: ModelMultipleChoiceFilter(
+            field_name="genres",
+            lookup_expr="unknown",
+            queryset=Genre.objects.all(),
+        ),
+        Book,
+        "ModelMultipleChoiceFilter",
+        "genres",
+        "unknown",
+        "unknown",
+        "Book.genres (ManyToManyField)",
+    ),
+}
+
+
+def _unresolvable_refusal(case: _UnresolvableCase) -> str:
+    """The refusal of the leaf ``probe`` ``case`` declares on ``SpecimenFilter``."""
+    return (
+        f"FilterSet SpecimenFilter: {case.kind} 'probe' has field_name {case.field_name!r} and "
+        f"lookup_expr {case.lookup_expr!r}, but Django resolves no transform or lookup "
+        f"{case.part!r} on {case.field}, so every request naming the filter would be refused. "
+        "Spell the transforms and lookup the field registers (a column's lookups belong in "
+        "lookup_expr, not field_name), register a project lookup at startup "
+        "(Field.register_lookup in AppConfig.ready), or read the value in `method=`."
+    )
+
+
+def _build_at_root(filterset_cls: type[FilterSet]) -> None:
+    _ = _serve_at_root(filterset_cls)
+    finalize_django_types()
+
+
+def _build_nested_only(filterset_cls: type[FilterSet]) -> None:
+    """Serve ``filterset_cls`` (over ``ScalarSpecimen``) only as the ``childrenConnection``."""
+    _ = _relay_node(ScalarSpecimen, ("id", "children"), filterset_cls)
+    finalize_django_types()
+
+
+def _build_through_related_filter(filterset_cls: type[FilterSet]) -> None:
+    _serve_through_related_filter(filterset_cls)
+    finalize_django_types()
+
+
+def _build_unserved_filter_input(filterset_cls: type[FilterSet]) -> None:
+    """Bind ``filterset_cls`` to a type no connection serves, applied through ``FilterInput``."""
+    model = filterset_cls._meta.model
+    assert model is not None
+    output = _relay_node(model, ("id",), filterset_cls, relay_node=False)
+
+    def rows(
+        info: strawberry.Info,
+        filter: object,  # noqa: A002
+    ) -> list[Model]:
+        return list(filterset_cls.apply_sync(filter, model._default_manager.all(), info))
+
+    # The input class is the set's own, which only a runtime annotation can name.
+    rows.__annotations__["filter"] = FilterInput[filterset_cls]
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {"__annotations__": {"rows": list[output]}, "rows": strawberry.field(resolver=rows)},
+        ),
+    )
+    finalize_django_types()
+    _ = DjangoSchema(query=query, config=strawberry_config())
+
+
+def _apply_unbound(filterset_cls: type[FilterSet]) -> None:
+    """Apply ``filterset_cls``, bound to no type, from a resolver of the project's own."""
+    model = filterset_cls._meta.model
+    assert model is not None
+    finalize_django_types()
+    _ = filterset_cls.apply_sync({}, model._default_manager.all(), None)
+
+
+_UNRESOLVABLE_SERVINGS: dict[str, Callable[[type[FilterSet]], None]] = {
+    "root-connection": _build_at_root,
+    "nested-connection": _build_nested_only,
+    "related-filter-reached": _build_through_related_filter,
+    "unserved-filter-input": _build_unserved_filter_input,
+    "apply-sync-first-use": _apply_unbound,
+}
+
+#: The servings that read the set over a ``ScalarSpecimen`` as one served nested or reached.
+_SPECIMEN_ONLY_SERVINGS = frozenset({"nested-connection", "related-filter-reached"})
+
+
+@pytest.mark.parametrize(
+    ("case", "serve"),
+    [
+        pytest.param(
+            _UNRESOLVABLE_LEAVES[case_id],
+            _UNRESOLVABLE_SERVINGS[serving],
+            id=f"{case_id}-{serving}",
+        )
+        for case_id in _UNRESOLVABLE_LEAVES
+        for serving in _UNRESOLVABLE_SERVINGS
+        if _UNRESOLVABLE_LEAVES[case_id].model is ScalarSpecimen
+        or serving not in _SPECIMEN_ONLY_SERVINGS
+    ],
+)
+def test_a_declared_leaf_django_resolves_on_no_queryset_is_refused(
+    case: _UnresolvableCase,
+    serve: Callable[[type[FilterSet]], None],
+) -> None:
+    """A declared leaf whose path and lookup Django refuses on every queryset fails its set.
+
+    Where the path ends on a column, on a to-one relation (read through the relation's own
+    lookups on every request), or on a to-many relation none of whose key columns accepts the
+    lookup either, Django refuses the predicate whatever rows it runs on, so the set refuses
+    the leaf when it publishes: a served set when the schema builds, an unbound one at its
+    first use. The refusal names the set, the filter class and name, its ``field_name`` and
+    ``lookup_expr``, the part Django refuses and the field it is refused on, chained from the
+    walk's ``LookupValidationError``.
+    """
+    filterset_cls = _specimen_set([], {"probe": case.declare()}, model=case.model)
+    with pytest.raises(ConfigurationError) as exc_info:
+        serve(filterset_cls)
+    assert str(exc_info.value) == _unresolvable_refusal(case)
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, LookupValidationError)
+    assert cause.part == case.part
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["signed_big__magnitude", "signed_big"],
+    ids=["transform", "lookup"],
+)
+def test_a_lookup_registered_before_the_set_publishes_builds(path: str) -> None:
+    """A project registration in place when the set publishes resolves the leaf: it builds."""
+    lookup_expr = "exact" if path.endswith("magnitude") else "magnitude"
+    with register_lookup(BigIntegerField, Abs, lookup_name="magnitude"):
+        _build_at_root(
+            _specimen_set([], {"probe": NumberFilter(field_name=path, lookup_expr=lookup_expr)}),
+        )
+    assert hasattr(sys.modules[INPUTS_MODULE_PATH], "SpecimenFilterInputType")
+
+
+def test_a_lookup_registered_after_a_set_publishes_is_not_seen_by_the_next_set() -> None:
+    """Nothing is kept between sets: a registration gone when the next set publishes refuses it.
+
+    The first set publishes while ``magnitude`` is registered and builds; the second
+    declares the same leaf once the registration is gone and is refused at its first use,
+    as one declared before the registration is (Django registers lookups at startup).
+    """
+    with register_lookup(BigIntegerField, Abs, lookup_name="magnitude"):
+        _build_at_root(
+            _specimen_set([], {"probe": NumberFilter(field_name="signed_big__magnitude")}),
+        )
+    later = _specimen_set(
+        [],
+        {"probe": NumberFilter(field_name="signed_big__magnitude")},
+        name="LaterFilter",
+    )
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = later.get_filters()
+    assert str(exc_info.value).startswith(
+        "FilterSet LaterFilter: NumberFilter 'probe' has field_name 'signed_big__magnitude' and "
+        "lookup_expr 'exact', but Django resolves no transform or lookup 'magnitude' on "
+        "ScalarSpecimen.signed_big (BigIntegerField)",
+    )
+
+
+def _twice(queryset: QuerySet[Model]) -> QuerySet[Model]:
+    return queryset.annotate(twice=F("signed_big") * 2)
+
+
+def _shaping_node(
+    model: type[Model],
+    shape: Callable[[QuerySet[Model]], QuerySet[Model]],
+    filterset_cls: type[FilterSet] | None = None,
+) -> type[DjangoType]:
+    """A Relay ``DjangoType`` over ``model`` whose ``get_queryset`` hands back ``shape``'s rows."""
+
+    def get_queryset(
+        cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        info: object,
+        **kwargs: object,
+    ) -> QuerySet[Model]:
+        del cls, info, kwargs
+        return shape(queryset)
+
+    meta: dict[str, object] = {
+        "model": model,
+        "fields": ("id", "label"),
+        "interfaces": (relay.Node,),
+    }
+    if filterset_cls is not None:
+        meta["filterset_class"] = filterset_cls
+    node = type(
+        f"{model.__name__}Node",
+        (DjangoType,),
+        {"Meta": type("Meta", (), meta), "get_queryset": classmethod(get_queryset)},
+    )
+    assert issubclass(node, DjangoType)
+    return node
+
+
+@pytest.mark.django_db
+def test_a_name_past_a_declared_hop_its_target_type_annotates_answers() -> None:
+    """A name the related model lacks is read on the rows the hop's type shapes: it answers.
+
+    ``partner__twice`` past the declared ``partner`` hop names no field of
+    ``ScalarSpecimen``; the hop's type annotates ``twice`` onto the rows it walks, so the
+    leaf is not judged unresolvable and filters on the annotation.
+    """
+    kept = cleaned_specimen("kept", kept=True)
+    dropped = cleaned_specimen("dropped", kept=False)
+    _ = NullableScalarSpecimen.objects.create(label="kept-partner", partner=kept)
+    _ = NullableScalarSpecimen.objects.create(label="dropped-partner", partner=dropped)
+    parent = _specimen_set(
+        {"label": ["exact"]},
+        {
+            "partner": RelatedFilter(_specimen_set({"label": ["exact"]}), field_name="partner"),
+            "partner_twice": NumberFilter(field_name="partner__twice"),
+        },
+        name="PartnerFilter",
+        model=NullableScalarSpecimen,
+    )
+    _ = _shaping_node(ScalarSpecimen, _twice)
+    schema = _served_schema(parent, NullableScalarSpecimen)
+    data = _post(
+        schema,
+        f'{{ rows(filter: {{partnerTwice: {{exact: "{kept.signed_big * 2}"}}}}) '
+        "{ edges { node { label } } } }",
+    )
+    assert _labels(data) == ["kept-partner"]
+
+
+@pytest.mark.django_db
+def test_a_reverse_key_lookup_its_target_key_resolves_answers_on_a_walked_hop() -> None:
+    """A to-many key's lookup compares the target key on a walked hop: it builds and answers.
+
+    ``children`` with ``icontains`` is no lookup of the reverse relation, but the target
+    type's ``get_queryset`` walks the hop, which compares the children's primary key, whose
+    column registers ``icontains``.
+    """
+    parent = cleaned_specimen("parent", kept=True)
+    child = cleaned_specimen("child", kept=False)
+    child.parent = parent
+    child.save()
+    filterset_cls = _specimen_set(
+        [],
+        {
+            "probe": ModelMultipleChoiceFilter(
+                field_name="children",
+                lookup_expr="icontains",
+                queryset=_scalar_specimens(),
+            ),
+        },
+    )
+    node = _shaping_node(ScalarSpecimen, lambda queryset: queryset, filterset_cls)
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"rows": DjangoConnection[node]},
+                "rows": DjangoConnectionField(node),
+            },
+        ),
+    )
+    finalize_django_types()
+    schema = DjangoSchema(query=query, config=strawberry_config())
+    data = _post(
+        schema,
+        f"{{ rows(filter: {{probe: {{iContains: [{saved_pk(child)}]}}}}) "
+        "{ edges { node { label } } } }",
+    )
+    assert _labels(data) == ["parent"]
+
+
+@pytest.mark.parametrize(
+    ("declare", "model"),
+    [
+        pytest.param(
+            lambda: IntegerRangeFilter(field_name="branch", lookup_expr="range"),
+            Shelf,
+            id="integer-range",
+        ),
+        pytest.param(
+            lambda: DjangoFilterRangeFilter(field_name="branch", lookup_expr="range"),
+            Shelf,
+            id="django-filter-range",
+        ),
+        pytest.param(
+            lambda: RangeFilter(field_name="branch__pk", lookup_expr="range"),
+            Shelf,
+            id="range-over-the-key-column",
+        ),
+        pytest.param(
+            lambda: RangeFilter(field_name="pk", lookup_expr="range"),
+            PatronProfile,
+            id="range-over-a-relation-valued-pk",
+        ),
+    ],
+)
+def test_a_range_applied_as_bounds_over_a_forward_key_publishes(
+    declare: Callable[[], Filter],
+    model: type[Model],
+) -> None:
+    """A filter applying a ``range`` the relation's lookups or its key's column take publishes.
+
+    Django registers no ``range`` on a relation; ``IntegerRangeFilter`` applies both bounds,
+    and django-filter's ``RangeFilter`` a lone one, as the relation's ``gte`` / ``lte``;
+    ``branch__pk`` names the key's own column, and the package ``RangeFilter`` over a
+    relation-valued ``pk`` ranges the column the key stores. None is refused.
+    """
+    filterset_cls = _specimen_set([], {"probe": declare()}, model=model)
+    assert "probe" in filterset_cls.get_filters()
+
+
+def test_a_declared_leaf_of_a_set_with_no_model_publishes() -> None:
+    """A set declaring no ``Meta.model`` has no model to resolve a path on: its leaf publishes.
+
+    The unresolvable-lookup refusal does not ask it; the missing ``Meta.model`` is refused on
+    its own terms, when a type binds the set or when a leaf of it is applied unbound.
+    """
+    modelless = _specimen_set([], {"probe": NumberFilter(field_name="signed_big__gt")}, model=None)
+    assert "probe" in modelless.get_filters()
+
+
+def _respelled(filter_instance: Filter, **values: object) -> Filter:
+    """``filter_instance`` with each of ``values`` set on it as a consumer may set a lazy value.
+
+    The stubs type ``field_name`` and ``lookup_expr`` as ``str``; a project hands Django's lazy
+    text (``gettext_lazy``, ``SimpleLazyObject``) where a ``str`` is read.
+    """
+    for name, value in values.items():
+        setattr(filter_instance, name, value)
+    return filter_instance
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param(
+            lambda: _respelled(
+                NumberFilter(field_name="signed_big"),
+                lookup_expr=gettext_lazy("gt"),
+            ),
+            id="lazy-lookup-expr",
+        ),
+        pytest.param(
+            lambda: _respelled(
+                NumberFilter(lookup_expr="gt"),
+                field_name=SimpleLazyObject(lambda: "signed_big"),
+            ),
+            id="lazy-field-name",
+        ),
+    ],
+)
+def test_a_declared_leaf_spelled_lazily_builds_and_answers(declare: Callable[[], Filter]) -> None:
+    """A lazy ``field_name`` or ``lookup_expr`` is read as the text it renders, as django-filter does.
+
+    django-filter formats ``field_name`` and ``lookup_expr`` into the predicate's argument,
+    so the set publishes the leaf and a request filters by it.
+    """
+    _ = cleaned_specimen("small", kept=True)
+    _ = cleaned_specimen("large", kept=False)
+    schema = _served_schema(_specimen_set([], {"probe": declare()}))
+    data = _post(schema, '{ rows(filter: {probe: {gt: "7"}}) { edges { node { label } } } }')
+    assert _labels(data) == ["large"]
+
+
+def test_a_lazily_spelled_lookup_django_resolves_nowhere_is_refused_naming_its_text() -> None:
+    """A lazy ``lookup_expr`` naming no lookup is refused, naming the text it renders."""
+    filterset_cls = _specimen_set(
+        [],
+        {
+            "probe": _respelled(
+                NumberFilter(field_name="signed_big"),
+                lookup_expr=gettext_lazy("unknown"),
+            ),
+        },
+    )
+    with pytest.raises(ConfigurationError) as exc_info:
+        _build_at_root(filterset_cls)
+    assert str(exc_info.value).startswith(
+        "FilterSet SpecimenFilter: NumberFilter 'probe' has field_name 'signed_big' and "
+        "lookup_expr 'unknown', but Django resolves no transform or lookup 'unknown' on "
+        "ScalarSpecimen.signed_big (BigIntegerField)",
+    )
