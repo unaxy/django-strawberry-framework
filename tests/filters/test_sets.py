@@ -8086,29 +8086,6 @@ def test_is_own_pk_under_relay_owner_false_for_relation_field() -> None:
     assert BookFilter._is_own_pk_under_relay_owner(relation_field, "genres") is False
 
 
-def test_is_own_pk_under_relay_owner_false_when_model_missing() -> None:
-    """A non-relation field with a model-less filterset returns ``False``."""
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            interfaces = (strawberry.relay.Node,)
-
-    apply_interfaces(CategoryType, CategoryType.__django_strawberry_definition__)
-
-    class CategoryFilter(FilterSet):
-        class Meta:
-            model = Category
-            fields = {"name": ["exact"]}
-
-    CategoryFilter._owner_definition = CategoryType.__django_strawberry_definition__
-    # The local class is discarded after the test, so nulling its own
-    # ``_meta.model`` does not leak into other tests.
-    CategoryFilter._meta.model = None
-    non_relation = SimpleNamespace(is_relation=False)
-    assert CategoryFilter._is_own_pk_under_relay_owner(non_relation, "name") is False
-
-
 def _relay_bound_book_filter(fields: dict[str, object]) -> type[FilterSet]:
     """A ``Book`` set with ``fields``, bound to a Relay-Node ``BookType``."""
 

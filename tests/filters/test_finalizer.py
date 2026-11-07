@@ -93,6 +93,7 @@ if TYPE_CHECKING:
 from django_strawberry_framework import (
     DjangoConnection,
     DjangoConnectionField,
+    DjangoListField,
     DjangoSchema,
     DjangoType,
     finalize_django_types,
@@ -128,6 +129,7 @@ from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.utils import querysets as querysets_module
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_dict, is_str, read_attr, require
+from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.typing import object_result
 from tests._cleaned_filter_sets import cleaned_specimen
 from tests._idioms import json_at, json_list, saved_pk
@@ -1670,6 +1672,150 @@ def test_phase_2_5_runs_under_relay_node_interface() -> None:
     assert issubclass(BookType, relay.Node)
     inputs_module = sys.modules[INPUTS_MODULE_PATH]
     assert hasattr(inputs_module, "BookFilterInputType")
+
+
+# ---------------------------------------------------------------------------
+# A Meta.filterset_class declaring no Meta.model.
+# ---------------------------------------------------------------------------
+
+
+def _model_less_book_filter(shape: str) -> type[FilterSet]:
+    """Return a ``FilterSet`` declaring no ``Meta.model`` in the named shape."""
+    if shape == "no-meta":
+
+        class NoMetaBookFilter(FilterSet):
+            title = CharFilter(field_name="title")
+
+        return NoMetaBookFilter
+    if shape == "related-only":
+
+        class RelatedShelfFilter(FilterSet):
+            class Meta:
+                model = Shelf
+                fields = {"code": ["exact"]}
+
+        class RelatedOnlyBookFilter(FilterSet):
+            shelf = RelatedFilter(RelatedShelfFilter, field_name="shelf")
+
+        return RelatedOnlyBookFilter
+    meta_bodies: dict[str, dict[str, object]] = {
+        "model-none": {"model": None},
+        "all-fields": {"fields": "__all__"},
+        "exclude": {"exclude": ("title",)},
+        "fields-dict": {"fields": {"title": ["exact"]}},
+    }
+    return type(
+        "MetaBookFilter",
+        (FilterSet,),
+        {"title": CharFilter(field_name="title"), "Meta": type("Meta", (), meta_bodies[shape])},
+    )
+
+
+def _wire_book_type(filterset: type[FilterSet], *, relay_node: bool) -> type[DjangoType]:
+    """Declare a ``Book`` type naming ``filterset`` as its ``Meta.filterset_class``."""
+    meta_body: dict[str, object] = {
+        "model": Book,
+        "fields": ("id", "title"),
+        "filterset_class": filterset,
+    }
+    if relay_node:
+        meta_body["interfaces"] = (relay.Node,)
+    return type("WiredBookType", (DjangoType,), {"Meta": type("Meta", (), meta_body)})
+
+
+def _serving_query(book_type: type[DjangoType], *, serving: str) -> type:
+    """Declare the root ``Query`` serving ``book_type``, as a project does before finalize."""
+    if serving == "list":
+        annotations: dict[str, object] = {"books": list[book_type]}
+        field: object = DjangoListField(book_type)
+    else:
+        annotations = {"books": DjangoConnection[book_type]}
+        field = DjangoConnectionField(book_type)
+    return strawberry.type(type("Query", (), {"__annotations__": annotations, "books": field}))
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "no-meta",
+        "model-none",
+        "all-fields",
+        "exclude",
+        "fields-dict",
+        "related-only",
+    ],
+)
+@pytest.mark.parametrize(
+    ("relay_node", "serving"),
+    [(True, "connection"), (False, "list")],
+    ids=["relay-connection", "plain-list"],
+)
+def test_a_filterset_class_declaring_no_meta_model_is_refused_at_finalize(
+    *,
+    shape: str,
+    relay_node: bool,
+    serving: str,
+) -> None:
+    """A served filterset must declare the ``Meta.model`` its owner's model is or derives from.
+
+    Every filter of a served set is typed, validated and applied against the set's
+    ``Meta.model``, so a set without one would publish an input no request could apply.
+    The binding refuses it whatever else its ``Meta`` declares, naming the set, the owner
+    type, the owner's model and the remedy, and stores no owner. The wiring is refused,
+    not the serving: a ``DjangoListField`` publishes no filter argument, yet its type's
+    ``Meta.filterset_class`` is refused the same way.
+    """
+    filterset = _model_less_book_filter(shape)
+    book_type = _wire_book_type(filterset, relay_node=relay_node)
+    _serving_query(book_type, serving=serving)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+
+    name = filterset.__qualname__
+    assert str(exc_info.value) == (
+        f"FilterSet {name} is declared as the filterset_class of "
+        f"{book_type.__qualname__} (model Book), but declares no Meta.model. A filterset's "
+        "filters are typed, validated and applied against its Meta.model, so a filterset "
+        "a DjangoType serves must declare one: set Meta.model = Book (with Meta.fields = "
+        f"[] to publish only its declared filters) on {name}, or on a subclass declared as "
+        "the filterset_class."
+    )
+    assert set_bound_definition(filterset) is None
+
+
+def test_a_model_less_base_serves_through_a_subclass_declaring_meta_model_and_no_fields() -> None:
+    """``Meta.model`` with ``Meta.fields = []`` publishes only the declared filters.
+
+    The model-less base stays an unwired base; its subclass keys it on the owner's model
+    and binds, and the generated input carries the declared filter and the logical arms,
+    no model-derived leaf.
+    """
+
+    class DeclaredOnlyBase(FilterSet):
+        title = CharFilter(field_name="title", lookup_expr="icontains")
+
+    class DeclaredOnlyBookFilter(DeclaredOnlyBase):
+        class Meta:
+            model = Book
+            fields: ClassVar[list[str]] = []
+
+    book_type = _wire_book_type(DeclaredOnlyBookFilter, relay_node=True)
+    query = _serving_query(book_type, serving="connection")
+    finalize_django_types()
+    schema = strawberry.Schema(query=query, config=strawberry_config())
+
+    assert DeclaredOnlyBookFilter._owner_definition is book_type.__django_strawberry_definition__
+    assert set_bound_definition(DeclaredOnlyBase) is None
+    sdl = schema.as_str()
+    block = sdl.split("input DeclaredOnlyBookFilterInputType {\n", 1)[1].split("\n}", 1)[0]
+    published = sorted(line.split(":", 1)[0].strip() for line in block.splitlines())
+    assert published == [
+        "and",
+        "not",
+        "or",
+        "title",
+    ], block
 
 
 # ---------------------------------------------------------------------------

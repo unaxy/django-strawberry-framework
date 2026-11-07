@@ -1120,8 +1120,11 @@ def _bind_set_owner_common(
 
     First binding stores ``definition`` after rejecting a ``Meta.model``
     unrelated to the owner's (``definition.model`` must BE the set's model or
-    derive from it; otherwise the set's lookups would run against a queryset of
-    the wrong model, and the mismatch surfaces here at finalize rather than as
+    derive from it; a set with no ``Meta.model`` passes here: the order family
+    resolves a related-only set against the queryset's model, spec-028, and the
+    filter family refuses one before binding, ``_bind_filterset_owner``;
+    otherwise the set's lookups would run against a queryset of the wrong
+    model, and the mismatch surfaces here at finalize rather than as
     an opaque query-time ``FieldError``). A NON-CLASS ``Meta.model`` (the
     order side reads the raw ``Meta`` with no metaclass validation, so the
     Django lazy-ref string idiom reaches here) raises the same family
@@ -1172,11 +1175,19 @@ def _bind_filterset_owner(
 ) -> None:
     """Bind ``filterset_cls._owner_definition`` to its first owner.
 
+    A filterset declaring no ``Meta.model`` is refused before any binding
+    (``_format_model_less_filterset_error``): the owner's model must BE the
+    filterset's ``Meta.model`` or derive from it (spec-027 Decision 4), and every
+    build-time reading of a filter (its input type, the form-versus-column and
+    lookup-class refusals, the relation hops its visibility walks) resolves on that
+    model, so a model-less set would publish an input no request could apply.
     Re-binding the same ``(filterset_cls, definition)`` pair is a no-op; a
     second, distinct owner is accepted only when ``_check_filterset_owner_axes``
     passes. Owners that diverge on an owner-dependent axis declare a
     ``FilterSet`` subclass per owner.
     """
+    if filterset_cls._meta.model is None:
+        raise ConfigurationError(_format_model_less_filterset_error(filterset_cls, definition))
     _bind_set_owner_common(
         filterset_cls,
         definition,
@@ -1463,6 +1474,22 @@ def _format_owner_set_model_mismatch_error(
         f"{truth.qualname(set_cls)} on "
         f"{truth.name(owner.model)}, or attach it to a "
         f"{set_model_name} type."
+    )
+
+
+def _format_model_less_filterset_error(
+    filterset_cls: type[FilterSet],
+    owner: DjangoTypeDefinition,
+) -> str:
+    """Return the refusal of a ``Meta.filterset_class`` declaring no ``Meta.model``."""
+    model = truth.name(owner.model)
+    return (
+        f"FilterSet {truth.qualname(filterset_cls)} is declared as the filterset_class "
+        f"of {truth.qualname(owner.origin)} (model {model}), but declares no Meta.model. "
+        "A filterset's filters are typed, validated and applied against its Meta.model, "
+        f"so a filterset a DjangoType serves must declare one: set Meta.model = {model} "
+        f"(with Meta.fields = [] to publish only its declared filters) on "
+        f"{truth.qualname(filterset_cls)}, or on a subclass declared as the filterset_class."
     )
 
 

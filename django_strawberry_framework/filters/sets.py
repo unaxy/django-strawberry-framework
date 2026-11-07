@@ -4754,11 +4754,11 @@ class FilterSet(
             return False
         if getattr(field, "is_relation", False):
             return False
-        # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
-        meta = optional_instance(truth.static_attr(cls, "_meta", None), FilterSetOptions)
-        model: type[models.Model] | None = getattr(meta, "model", None)
-        if model is None:
-            return False
+        # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset,
+        # and a bound set declares a model class: the binder refuses one with no
+        # ``Meta.model`` (``types/finalizer.py::_bind_filterset_owner``) or a non-class one.
+        meta = require_instance(truth.static_attr(cls, "_meta", None), FilterSetOptions)
+        model = require(meta.model, is_model_class)
         pk = getattr(model._meta, "pk", None)
         if pk is None or field is not pk:
             return False
@@ -5055,9 +5055,13 @@ class FilterSet(
     def _leaf_lookups_by_attr(cls) -> Mapping[str, Mapping[str, FormKeyedFilter]]:
         """Return the leaf form-key table keyed by input attr, empty when model-less.
 
-        A ``FilterSet`` without ``Meta.model`` exposes no leaf lookups: the empty map makes
-        ``_normalize_input`` reject any leaf and ``_supplied_leaf_entries`` supply none, so
-        the pre-pass and the form can never disagree. One body serves both readers.
+        A ``FilterSet`` without ``Meta.model`` exposes no leaf lookups: a leaf resolves,
+        is cleaned and walks its relation hops' visibility on the set's model, so a
+        model-less set (a base its subclasses key, never a ``Meta.filterset_class``:
+        ``types/finalizer.py::_bind_filterset_owner``) applied programmatically has
+        none to apply. The empty map makes ``_normalize_input`` refuse any leaf
+        (``_leaf_form_entries``) and ``_supplied_leaf_entries`` supply none, so the
+        pre-pass and the form can never disagree. One body serves both readers.
         """
         return filter_lookup_table(cls).by_input_attr if cls._meta.model is not None else {}
 
@@ -5080,6 +5084,12 @@ class FilterSet(
         writing it as an unknown form key would apply nothing.
         """
         lookups = lookups_by_attr.get(python_attr)
+        if lookups is None and cls._meta.model is None:
+            raise ConfigurationError(
+                f"FilterSet {truth.qualname(cls)}: {python_attr!r} cannot apply: the set "
+                "declares no Meta.model, which every leaf filter resolves against. Declare "
+                "Meta.model on the set, or apply a subclass that declares it.",
+            )
         if lookups is None:
             raise ConfigurationError(
                 f"FilterSet {truth.qualname(cls)}: {python_attr!r} is not a filter input "

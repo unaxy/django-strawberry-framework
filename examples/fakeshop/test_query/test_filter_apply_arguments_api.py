@@ -7,10 +7,13 @@ they are not private-validator wrappers. Native Meta output types remain unbound
 sets. Explicit pass-through policy lets refusal rows read the production diagnostics.
 A JSON number past an integer column's range answers from the end it lies past without
 being converted, and past an integer transform's range it keeps its ``FILTER_INVALID``.
+A set declaring no ``Meta.model`` refuses a leaf by naming the missing model, masked
+under the default error policy, while its ``RelatedFilter`` branches still apply.
 """
 
 import asyncio
 import datetime
+import logging
 from collections.abc import Awaitable, Mapping
 from functools import wraps
 from typing import TYPE_CHECKING, Annotated, NoReturn
@@ -32,11 +35,12 @@ from django.urls import path
 from django_filters import CharFilter, DateTimeFilter, MultipleChoiceFilter, NumberFilter
 from django_filters import RangeFilter as UpstreamRangeFilter
 from graphql import GraphQLError
-from graphql_client import JSONObject, graphql_payload, json_object, response_json
+from graphql_client import JSONObject, graphql_payload, json_at, json_object, response_json
 from strategy_schemas import make_django_type
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoSchema, finalize_django_types, strawberry_config
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import read_attr
@@ -132,6 +136,7 @@ def _schema(
     targets: tuple[type["DjangoType"], ...] = (),
     resource_policy: Mapping[str, object] | None = None,
     direct: bool = False,
+    masked: bool = False,
 ) -> DjangoSchema:
     output = make_django_type("RawCriteriaOutput", model, fields, node=False)
 
@@ -198,7 +203,7 @@ def _schema(
         query=Query,
         types=targets,
         config=strawberry_config(),
-        error_policy={"enabled": False},
+        error_policy=None if masked else {"enabled": False},
         resource_policy=resource_policy,
     )
 
@@ -292,6 +297,85 @@ def test_an_unknown_json_filter_key_is_refused_at_each_input_depth(
         f"FilterSet {filterset.__qualname__}: 'nope' is not a filter input field; "
         "it would apply nothing.",
     )
+
+
+def _model_less_branch_filter() -> type[FilterSet]:
+    class ChildShelfCodeFilter(FilterSet):
+        class Meta:
+            model = models.Shelf
+            fields = {"code": ["exact"]}
+
+    class ModelLessBranchFilter(FilterSet):
+        name = CharFilter(field_name="name")
+        shelves = RelatedFilter(ChildShelfCodeFilter, field_name="shelves")
+
+    return ModelLessBranchFilter
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("masked", [False, True], ids=["pass-through", "masked"])
+def test_a_leaf_of_an_unbound_set_declaring_no_meta_model_is_refused_by_its_missing_model(
+    *,
+    transport: str,
+    masked: bool,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A leaf resolves against the set's ``Meta.model``, so a model-less set applies none.
+
+    The refusal names the missing ``Meta.model`` rather than calling a declared filter
+    unknown. A pass-through error policy puts it on the wire; the default policy without
+    ``DEBUG`` answers the masked message and its correlation id while the log keeps the
+    refusal.
+    """
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+    models.Branch.objects.create(name="must not be returned")
+    filterset = _model_less_branch_filter()
+    schema = _schema(filterset, models.Branch, transport=transport, masked=masked)
+    message = (
+        f"FilterSet {filterset.__qualname__}: 'name' cannot apply: the set declares no "
+        "Meta.model, which every leaf filter resolves against. Declare Meta.model on the "
+        "set, or apply a subclass that declares it."
+    )
+    payload = _post(schema, {"name": "must not be returned"}, transport=transport)
+    if not masked:
+        _refused(payload, message)
+        return
+    correlation_id = json_at(payload, "errors", 0, "extensions", "correlationId")
+    assert isinstance(correlation_id, str), payload
+    _refused(
+        payload,
+        "An unexpected error occurred.",
+        extensions={"correlationId": correlation_id},
+    )
+    [logged] = [
+        record.exc_info
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert isinstance(logged[1], ConfigurationError), logged
+    assert str(logged[1]) == message
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_a_branch_of_an_unbound_set_declaring_no_meta_model_still_narrows_the_rows(
+    transport: str,
+) -> None:
+    """A ``RelatedFilter`` branch resolves on its child set's model, so it applies."""
+    alpha = models.Branch.objects.create(name="alpha")
+    models.Shelf.objects.create(code="a1", branch=alpha)
+    beta = models.Branch.objects.create(name="beta")
+    models.Shelf.objects.create(code="b1", branch=beta)
+    schema = _schema(
+        _model_less_branch_filter(),
+        models.Branch,
+        transport=transport,
+        targets=(make_django_type("ShelfTarget", models.Shelf, ("code",), node=False),),
+    )
+    assert _post(schema, {"shelves": {"code": {"exact": "b1"}}}, transport=transport) == {
+        "data": {"rows": [{"name": "beta"}]},
+    }
 
 
 @pytest.mark.django_db(transaction=True)

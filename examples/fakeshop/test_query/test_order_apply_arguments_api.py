@@ -3,7 +3,8 @@
 Ordinary resolver arguments select a public Ordering value and call OrderSet.apply_sync.
 The model-less and conflicting-Meta sets remain unbound to the native output type, as in
 their programmatic use; no generated input factory or private owner assignment changes
-their metadata before the request.
+their metadata before the request. A model-less related-only set wired as a type's
+``Meta.orderset_class`` serves ``orderBy`` on a ``DjangoListField`` the same way.
 """
 
 from functools import wraps
@@ -20,6 +21,7 @@ from django.urls import path
 from graphql_client import JSONObject, graphql_payload
 
 from django_strawberry_framework import (
+    DjangoListField,
     DjangoSchema,
     DjangoType,
     finalize_django_types,
@@ -145,3 +147,74 @@ def test_an_unbound_order_aggregates_using_the_actual_root_queryset_model(metada
         if 'FROM "library_branch"' in row["sql"] and "MIN(" in row["sql"].upper()
     ]
     assert len(ordered_statements) == 1, captured.captured_queries
+
+
+def _wired_schema() -> DjangoSchema:
+    class WiredShelfOrder(OrderSet):
+        class Meta:
+            model = models.Shelf
+            fields = ["code"]
+
+    class WiredModellessBranchOrder(OrderSet):
+        shelves = RelatedOrder(WiredShelfOrder, field_name="shelves")
+
+    class WiredShelfOutput(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("code",)
+
+    class WiredBranchOutput(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("name",)
+            orderset_class = WiredModellessBranchOrder
+
+    @strawberry.type
+    class Query:
+        branches: list[WiredBranchOutput] = DjangoListField(WiredBranchOutput)
+
+    finalize_django_types()
+    return DjangoSchema(
+        query=Query,
+        types=[WiredShelfOutput],
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("direction", "names"),
+    [("ASC", ["Beta", "Alpha"]), ("DESC", ["Alpha", "Beta"])],
+    ids=["asc", "desc"],
+)
+def test_a_wired_related_only_order_without_meta_model_serves_order_by(
+    direction: str,
+    names: list[str],
+) -> None:
+    """A model-less related-only set wired as ``Meta.orderset_class`` orders its owner's rows.
+
+    Order paths resolve against the queryset's model, so the wired set needs no
+    ``Meta.model``: ``orderBy`` orders each branch by its shelves' MIN (ascending) or MAX
+    (descending) code in the one list query.
+    """
+    alpha = models.Branch.objects.create(name="Alpha", city="X")
+    models.Shelf.objects.create(code="z", branch=alpha)
+    models.Shelf.objects.create(code="c", branch=alpha)
+    beta = models.Branch.objects.create(name="Beta", city="Y")
+    models.Shelf.objects.create(code="a", branch=beta)
+    models.Shelf.objects.create(code="b", branch=beta)
+    _CURRENT["schema"] = _wired_schema()
+    try:
+        with (
+            override_settings(ROOT_URLCONF=__name__),
+            CaptureQueriesContext(connection) as captured,
+        ):
+            payload = graphql_payload(
+                f"{{ branches(orderBy: [{{shelves: {{code: {direction}}}}}]) {{ name }} }}",
+                url="/graphql-order-arguments/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+    assert payload == {"data": {"branches": [{"name": name} for name in names]}}
+    assert len(captured.captured_queries) == 1, captured.captured_queries
