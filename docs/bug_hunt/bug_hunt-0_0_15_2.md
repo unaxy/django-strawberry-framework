@@ -2140,19 +2140,27 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`['gamma']`): consumer `isnull` overrides keep the key-column re-bind, since running them through 796's relation view
   narrows forward one-hop and many-to-many hiding cells (the forward left join and the many-to-many through join both
   need a condition). Found fixing 796
-- [ ] 800. (robustness) A class-level `filter` override on a many-to-many key a flat leaf walks, where Django gives the
-  through key onto the source no reverse name of its own, runs on the key-column fallback when its value names no row:
-  its `field_name` is re-bound to the target key over the visible targets. An auto-created self-referential many-to-many
-  read forward (symmetrical or `symmetrical=False`) is such a key, because both through keys share one hidden reverse
-  name, which Django resolves to only one of them, so no through join there can be conditioned
-  (`filters/sets.py::_names_every_through`). On that key, an instance or queryset default raises the masked `TypeError`
-  and a path past the relation raises `Unsupported lookup`, where unwalked answers rows. The reverse direction and every
-  other many-to-many read the relation view. Found fixing 796
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 800. Decide: a class-level `filter` override on a many-to-many key a flat leaf walks, where Django gives the
+  through key onto the source no reverse name of its own (an auto-created self-referential many-to-many read forward,
+  symmetrical or not; an explicit through whose two keys onto the model share `related_name="+"`), still runs on the
+  key-column fallback when its value names no row (`filters/sets.py::_names_every_through`): an instance or queryset
+  default raises a masked `TypeError`, a path past the relation raises `Unsupported lookup`, and an `isnull=True`
+  default answers `[]` where unwalked answers rows. No public Django construction conditions that through join
+  (`ManyToManyField._get_path_info` conditions the target join only; `Query.add_filtered_relation` refuses paths outside
+  the relation; the shared hidden name resolves to the other key; checked on 5.2.16 to 6.1.3). A target-join-only
+  `FilteredRelation` makes a NULL test depend on a through row onto a hidden target; reading a symmetrical relation's
+  mirrored side answers a one-direction through row (Django's documented through access writes them) differently from
+  HEAD. A private construction that writes the condition into the through join's ON clause answers every
+  single-reference cell exactly, but Django's join reuse then either gives a second reference in one `filter()` call its
+  own join pair (an AND of two conditions on the alias matches rows unwalked does not, where HEAD raised) or, if the
+  conditioned join is made reusable, lets later joins on the returned queryset (`order_by`, `annotate`) read only
+  visible-target through rows and changes row counts HEAD answers correctly. Keep the fallback (and state it), accept
+  one of those trade-offs, or take a deeper private rewrite of Django's join bookkeeping? (Found fixing 796)
 - [ ] 803. Decide: should a to-many `orderBy` read only the related rows a filter on the same relation matched? Today an
   unwalked plain filter (a shipped `ModelMultipleChoiceFilter` or a key override on `shelves`) sorts `shelvesCode` by
   the matched shelves (Django reuses the filter's join for the order's `Min`), while a walked leaf, a key override's
