@@ -268,11 +268,12 @@ from typing import IO, TYPE_CHECKING, NoReturn
 
 try:
     import _git as _git_runner
+    import _locks
     import fleet
     import work
 except ModuleNotFoundError:  # imported as ``scripts.fleet_sync`` (repo root on path)
     from scripts import _git as _git_runner
-    from scripts import fleet, work
+    from scripts import _locks, fleet, work
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
@@ -455,18 +456,34 @@ def _last_line(raw: bytes) -> str:
 # --------------------------------------------------------------------------------------------
 
 
+def _try_lock(descriptor: int, lock: Path) -> bool:
+    """Take the kernel lock on ``descriptor`` (``scripts/_locks.py::try_lock``); ``False`` while held.
+
+    Raises:
+        FleetError: the lock call failed for a reason but another holder.
+
+    """
+    try:
+        return _locks.try_lock(descriptor)
+    except OSError as error:
+        msg = f"cannot lock {lock}: {error}"
+        raise FleetError(msg) from error
+
+
 def _lock_busy(path: Path) -> bool:
-    """Return whether another process holds the kernel lock on ``path`` (a missing file: no)."""
+    """Return whether another process holds the kernel lock on ``path`` (a missing file: no).
+
+    Raises:
+        FleetError: the lock call failed for a reason but another holder.
+
+    """
     if not path.is_file():
         return False
     descriptor = os.open(path, os.O_RDWR)
     try:
-        work._lock_file(descriptor)
-    except OSError:
-        return True
+        return not _try_lock(descriptor, path)
     finally:
         os.close(descriptor)
-    return False
 
 
 @contextlib.contextmanager
@@ -482,11 +499,9 @@ def holding(repo: Path) -> Generator[str, None, None]:
     work.check_layout(repo)
     descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        try:
-            work._lock_file(descriptor)
-        except OSError:
+        if not _try_lock(descriptor, lock):
             msg = f"another fleet_sync run holds {lock}; this one skips"
-            raise FleetError(msg) from None
+            raise FleetError(msg)
         if _lock_busy(work.work_dir(repo) / work.LAND_LOCK):
             msg = "a work.py land is in progress; no sync until it ends"
             raise FleetError(msg)

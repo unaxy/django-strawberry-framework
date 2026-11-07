@@ -863,3 +863,29 @@ def test_no_script_resolves_its_checkout_from_the_current_directory_but_through_
         path.name for path in sources if _reads_the_toplevel(path.read_text(encoding="utf-8"))
     }
     assert readers == TOPLEVEL_READERS
+
+
+def test_git_dirs_is_gits_own_answer_for_a_checkout_and_a_linked_worktree(
+    repo: Path,
+    tmp_path: Path,
+) -> None:
+    """The one common-dir rule ``work.py``, ``workspace.py`` and ``_locks.py`` read."""
+    common = (repo / ".git").resolve()
+    assert _git.git_dirs(repo) == (common, common)
+    linked = tmp_path / "linked"
+    _ = _fixture_git(repo, "worktree", "add", "-q", "--detach", str(linked))
+    assert _git.git_dirs(linked) == (common / "worktrees" / "linked", common)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    _ = (plain / ".git").write_text("gitdir: /nonexistent/repo.git\n", encoding="utf-8")
+    assert _git.git_dirs(plain) is None
+
+
+def test_a_gate_copy_of_no_repository_is_refused_by_workspaces_own_error(tmp_path: Path) -> None:
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    nowhere = tmp_path / "nowhere"
+    nowhere.mkdir()
+    _ = (nowhere / ".git").write_text("gitdir: /nonexistent/repo.git\n", encoding="utf-8")
+    with pytest.raises(workspace.WorkspaceError, match="git reads no repository at"):
+        _ = workspace.build_gate_git(nowhere, gate)

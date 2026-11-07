@@ -554,7 +554,7 @@ def test_a_save_carried_to_a_second_home_stays_its_makers_and_rm_drop_saves_keep
     copy = _new()
     fleet.at_b()
     other = _new()
-    assert _note(other)[work.PINS_NOTE] == ""
+    assert set(work.recorded_pins(_note(other))) == {work.START_PIN}
     fleet.at_a()
     _ = _write(copy / "saved.txt", "a's work\n")
     assert work.main(["save", NAME]) == 0
@@ -568,7 +568,9 @@ def test_a_save_carried_to_a_second_home_stays_its_makers_and_rm_drop_saves_keep
     )
     assert work.pins(fleet.repo_b)[NAME]["save-1"] == saved
     fleet.at_b()
-    assert work.recorded_pins(work.attributed_note(fleet.repo_b, _note(other))) == {}
+    assert set(work.recorded_pins(work.attributed_note(fleet.repo_b, _note(other)))) == {
+        work.START_PIN,
+    }
     _ = capsys.readouterr()
     assert work.main(["rm", NAME, "--drop-saves"]) == 0
     assert f"save-1 {saved[:12]}" in capsys.readouterr().out
@@ -1385,7 +1387,7 @@ def test_a_save_of_unchanged_content_stays_the_copys_own_after_a_handoff(
         _age(held)
     code, document = fleet.run("handoff", NAME, "--to", "b")
     assert code == 0, document
-    assert set(work.recorded_pins(_note(held))) == {"save-1", "save-2"}
+    assert set(work.recorded_pins(_note(held))) == {work.START_PIN, "save-1", "save-2"}
     _age(copy)
     assert work.main(["rm", "--discard", NAME]) == 0
     code, document = fleet.run("sync", "--copy", NAME)

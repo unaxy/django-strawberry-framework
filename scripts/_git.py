@@ -236,6 +236,33 @@ def same_directory(first: Path | str, second: Path | str) -> bool:
         return False
 
 
+def git_dirs(
+    root: Path | str,
+    *,
+    base: Mapping[str, str] | None = None,
+) -> tuple[Path, Path] | None:
+    """Return the git directory and the common git directory git reads at ``root``, resolved.
+
+    git's own answer (``rev-parse --git-dir --git-common-dir``, absolute), so a linked
+    worktree's ``.git`` file and its ``commondir`` are followed and checked as git does:
+    the common directory is the shared repository's, the git directory the worktree's own
+    (equal for a checkout with its own repository). ``None`` when git reads no repository
+    there. ``base`` is the environment made repository-only, as for :func:`run_git`.
+    """
+    completed = run_git(
+        root,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--git-common-dir",
+        base=base,
+    )
+    lines = completed.stdout.splitlines() if completed.returncode == 0 else []
+    if len(lines) != 2:
+        return None
+    return Path(lines[0]).resolve(), Path(lines[1]).resolve()
+
+
 class CheckoutError(RuntimeError):
     """Git found no checkout from the current directory, or a checkout other than the script's."""
 

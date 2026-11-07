@@ -548,6 +548,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_lateral_pg_parity.py     # PostgreSQL tests for internal JSON adapters, connection cleanup and EXPLAIN index usability.
 ├── test_list_field.py            # Package-side DjangoListField tests for construction-time validation, helper mechanics and internals.
 ├── test_load_balancing.py        # Script tests for ``scripts/load_balancing.py``, the fleet machine picker.
+├── test_locks.py                 # Script tests for ``scripts/_locks.py``: the shared lock rule and the pytest lock of a checkout.
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
 ├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
 ├── test_permissions.py           # Package-only cascade-permission pins that no live GraphQL request can express.
@@ -921,6 +922,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_lateral_pg_parity.py     # PostgreSQL tests for internal JSON adapters, connection cleanup and EXPLAIN index usability.
 ├── test_list_field.py            # Package-side DjangoListField tests for construction-time validation, helper mechanics and internals.
 ├── test_load_balancing.py        # Script tests for ``scripts/load_balancing.py``, the fleet machine picker.
+├── test_locks.py                 # Script tests for ``scripts/_locks.py``: the shared lock rule and the pytest lock of a checkout.
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
 ├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
 ├── test_permissions.py           # Package-only cascade-permission pins that no live GraphQL request can express.

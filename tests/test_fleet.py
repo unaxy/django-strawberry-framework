@@ -4,9 +4,10 @@ The tracked ``docs/fleet/machines.json`` loads; every schema rule of the list
 refuses with a message naming the entry and the rule; :func:`fleet.machine`
 refuses a name the list lacks; this machine is the row named by its override
 or its hostname (macOS's ``scutil`` name first) and nothing else, an alias
-included; a stored name reads as the row whose name or alias it is; every ssh
-call is built with
-the one option set, keepalive included. Only ``subprocess.run`` and
+included; a stored name reads as the row whose name or alias it is; a host
+name reaches the row whose name, alias or ssh host it is; every ssh call is
+built with the one option set, keepalive included; the login a host is reached
+as is ``ssh -G``'s. Only ``subprocess.run`` and
 ``socket.gethostname`` are faked, the hostname boundary. A live ``/graphql/``
 request has no wire shape for any of it, so there is no live sibling in
 ``examples/fakeshop/test_query/``.
@@ -537,3 +538,81 @@ def test_ssh_command_is_the_argv_prefix_as_one_shell_string() -> None:
     command = fleet.ssh_command()
     assert shlex.split(command) == ["ssh", *fleet.SSH_OPTIONS]
     assert shlex.split(command) == fleet.ssh_argv("h", "c")[:-2]
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("rio-ubu", "rio-ubu"),
+        ("Rio-Ubu.tail.ts.net", "rio-ubu"),
+        ("riordens-macbook-air.local", "rio-air"),
+        ("air-ssh", "rio-air"),
+        ("AIR-SSH.lan", "rio-air"),
+        ("stranger", None),
+        ("", None),
+        (".lan", None),
+    ],
+)
+def test_a_host_name_reaches_the_row_whose_name_alias_or_ssh_host_it_is(
+    tmp_path: Path,
+    host: str,
+    expected: str | None,
+) -> None:
+    repo = _checkout(
+        tmp_path,
+        [
+            _entry("rio-ubu", "linux"),
+            _entry("rio-air", "macos", ssh="air-ssh", aliases=["Riordens-MacBook-Air"]),
+        ],
+    )
+    found = fleet.reached_as(host, fleet.machines(repo))
+    assert (found.name if found is not None else None) == expected
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (0, "hostname rio-ubu\nuser desk\nport 22\n", "desk"),
+        (0, "hostname rio-ubu\nport 22\n", None),
+        (255, "user desk\n", None),
+    ],
+)
+def test_ssh_user_is_the_user_line_ssh_dash_g_prints(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+    expected: str | None,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert fleet.ssh_user("rio-ubu") == expected
+    assert calls == [["ssh", "-G", "rio-ubu"]]
+
+
+@pytest.mark.parametrize("host", ["", "-oProxyCommand=x"])
+def test_ssh_user_never_hands_ssh_an_option_or_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+) -> None:
+    def no_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        pytest.fail("ssh ran")
+
+    monkeypatch.setattr(subprocess, "run", no_run)
+    assert fleet.ssh_user(host) is None
+
+
+@pytest.mark.parametrize("error", [OSError("no ssh"), subprocess.TimeoutExpired("ssh", 10)])
+def test_ssh_user_is_none_when_ssh_is_missing_or_hangs(
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    def failing(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise error
+
+    monkeypatch.setattr(subprocess, "run", failing)
+    assert fleet.ssh_user("rio-ubu") is None

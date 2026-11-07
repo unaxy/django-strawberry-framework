@@ -10,7 +10,8 @@ flow; a name of kind ``review``, ``hunt`` or ``dry`` is refused here.
 Layout (all under ``.work/``, which ``.gitignore`` lists)
     ``clones/<name>/``
         A ``git clone --no-hardlinks -o parent`` of the shared checkout, its
-        ``HEAD`` detached at the start commit, its push URL ``no-push``. A
+        ``HEAD`` detached at the start commit, its push URL ``no-push``, no
+        ``branch.<name>.*`` tracking config (nothing in it tracks a branch). A
         clone has its own hooks, stash, config and refs: use one for a
         ref-rewriting experiment, a hook run or a move to another machine.
     ``worktrees/<name>/``
@@ -21,7 +22,8 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
         stash list.
     ``evidence/<stem>/``
         What a copy's work produced and must outlive it (proof scratch,
-        pre-edit snapshots, database copies). Keyed by the name's
+        pre-edit snapshots, database copies); a repro test belongs in the
+        copy's own ``tests/`` tree, where its conftest applies. Keyed by the name's
         stem, so a ``-verify`` or ``-rN`` sibling shares its purpose's folder.
         ``rm`` never touches it unless asked (``--evidence``); nothing deletes
         it by age.
@@ -63,6 +65,11 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
         A file one ``land`` (or ``repair``) at a time holds an exclusive kernel
         lock on (``flock``; ``msvcrt.locking`` on Windows): released however
         its holder ends, never taken over.
+    ``pytest.lock``
+        The kernel lock one pytest at a time holds across every copy of this
+        checkout (``scripts/_locks.py``, which ``run`` and
+        ``scripts/prove_failability.py`` both take); it holds its holder's
+        copy, owner, machine and pid for the waiting line.
     ``land-journal.json``
         Every touched path's state before and after a landing, written
         (atomically) before the first path is; a landing that fails or is
@@ -108,9 +115,9 @@ name, form, purpose, owner, host, home, start commit, startshared (whether a
 shared ref reached the start at ``new``; ``adopt`` records false), created,
 incarnation (a random id ``new`` and ``adopt`` write), adopted, landed, pins
 (the ``leaf=commit`` pins it published, :func:`record_pin`; ``new`` and
-``adopt`` write it empty, so a pin another copy left or a sync carried under
-the name is never this copy's; only a note older than the key attributes by
-:func:`legacy_pins`), and the handoff
+``adopt`` write it holding only the ``start`` pin they publish, so a pin another
+copy left or a sync carried under the name is never this copy's; only a note
+older than the key attributes by :func:`legacy_pins`), and the handoff
 lineage ``fleet_sync.py handoff`` writes: generation, formerhomes)
 lives in its own git config: the clone's ``.git/config``, the worktree's
 ``config.worktree`` (``extensions.worktreeConfig``, which ``new`` turns on
@@ -162,19 +169,27 @@ Commands
         only, or from a pin as above), check git reads it as its own checkout,
         write its note, pin ``start``, copy ``.python-version``, run ``uv sync
         --frozen`` and, for a clone, ``pre-commit install``. ``--no-setup``
-        skips the sync and the hook. Refused for a name in use or claimed, a
+        skips the sync and the hook. ``--purpose`` (what the copy is for) and
+        ``--owner`` (the session or agent, free text; default
+        ``$DSF_WORK_OWNER``) are refused holding a newline or another control
+        character. Refused for a name in use or claimed, a
         name with pins left from an earlier copy, below 6 GB free disk, and a
         kind ``workspace.py`` owns. A failure part way removes what it made.
     ``adopt <path> <name> [--purpose TEXT] [--owner TEXT]``
-        Register, in place, a copy another tool made: a harness worktree
+        Register, in place, a copy another tool made (``--purpose`` and
+        ``--owner``, as for ``new``, hold no newline or other control
+        character): a harness worktree
         (Claude Desktop ``.claude/worktrees/*``, Codex, Cursor, T3, OpenCode,
         Muse ``--workspace``) anywhere, or a clone already at
         ``.work/clones/<name>`` whose remote is this checkout (a local path) or
-        a fleet machine's checkout over SSH (``<ssh>:<path>`` or
-        ``ssh://<ssh>/<path>``, ``ssh``, ``repo`` and an optional ``user`` from
-        ``docs/fleet/machines.json``: the account must be that ``user``, or with
-        none listed no user part or this user's own login; the port none or 22;
-        the path that machine's ``repo`` for that account, canonical). Writes the note with ``adopted=true``
+        a fleet machine's checkout over SSH (``<host>:<path>`` or
+        ``ssh://<host>/<path>``, the host reaching a row of
+        ``docs/fleet/machines.json`` as ``scripts/fleet.py`` reads it (the
+        row's name, an alias or its ``ssh`` host, any case or domain form); the
+        account the one ssh logs in to that host as (``ssh -G``): no user part
+        or that login; the port none or 22; the path that row's ``repo`` for
+        that account, canonical). A broken machine list, or a host ``ssh -G``
+        names no account for, refuses. Writes the note with ``adopted=true``
         and pins the copy's ``HEAD``. Never moves, locks or re-branches it:
         the harness keeps its own cleanup, and a branch the harness made is the
         harness's, not an agent-created branch. ``rm`` never deletes an
@@ -182,7 +197,12 @@ Commands
     ``list [--json]``
         Every known copy: name, form, state (``live``, ``landed``,
         ``folder-gone``, ``pins-only``, ``broken``, ``unsafe``), ``HEAD``,
-        pins, path, purpose and owner.
+        pins, path, purpose and owner (``owner=``, shell-quoted). ``pins.git``
+        says which pins exist and the note which are the copy's: ``pins=`` the
+        copy's own, ``foreign-pins=`` others under its name (an earlier copy's,
+        a sync's), ``missing-pins=`` ones its note records that ``pins.git`` no
+        longer holds (``--json``: ``pins``, ``foreign``, ``missing``; ``-``
+        for none). A copy with no note owns every pin under its name.
     ``save <name>``
         Pin the copy's content as the next ``save-N``. Content equal to
         ``HEAD`` with ``HEAD`` still at the start pin saves nothing.
@@ -306,12 +326,24 @@ Commands
         ``COVERAGE_*`` variables, ``PYTHONPATH``, uv's project redirects and
         any other virtualenv's ``bin`` on ``PATH`` (direnv's activation of the
         shared ``.venv`` included); ``PROJECT_ROOT`` is the copy and
-        ``FAKESHOP_PG_DSN``, when set, names the copy's own database. Before
-        the command runs, the copy's interpreter must import
+        ``FAKESHOP_PG_DSN``, when set, names the copy's own database.
+        ``PYTHONPATH`` is cleared by design: a repro test goes in the copy's
+        own ``tests/`` tree (a private clone, so its conftest applies), and
+        ``.work/evidence/<stem>/`` holds only proof that must outlive the
+        copy. Before the command runs, the copy's interpreter must import
         ``django_strawberry_framework`` from inside the copy, else the run is
-        refused. A copy whose git directory holds ``dsf-work-venv-stale``
-        (``fleet_sync.py`` writes it on a replica, whose ``.venv`` never travels)
-        has its ``.venv`` rebuilt with ``uv sync --frozen`` first. Returns the
+        refused; then one line on stderr names where it runs (``work: run
+        <name> in <copy> (.venv <venv>)``). A command any of whose words is
+        ``pytest``, ``py.test`` (a path to one included) or ``-mpytest`` (so
+        ``-m pytest`` and ``uv run --group pg pytest`` too) runs one at a time
+        per checkout: it waits on ``.work/pytest.lock`` with one stderr line
+        naming the holder, and starts with ``DSF_PYTEST_LOCK_HELD`` so a
+        pytest it starts again never waits on it (``scripts/_locks.py``).
+        A pytest started outside ``run`` and ``prove_failability.py`` takes no
+        lock and is not seen. A copy
+        whose git directory holds ``dsf-work-venv-stale`` (``fleet_sync.py``
+        writes it on a replica, whose ``.venv`` never travels) has its
+        ``.venv`` rebuilt with ``uv sync --frozen`` first. Returns the
         command's exit code (``128 + N`` for death by signal ``N``).
     ``check-name <name>``
         Validate a name and print its kind, id, slug and stem.
@@ -361,27 +393,29 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
-import getpass
 import hashlib
 import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import stat
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
 try:
     import _git as _git_runner
+    import _locks
     import fleet
 except ModuleNotFoundError:  # imported as ``scripts.work`` (repo root on path)
     from scripts import _git as _git_runner
-    from scripts import fleet
+    from scripts import _locks, fleet
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
@@ -399,6 +433,8 @@ TRASH = "trash"
 PIN_STORE = "pins.git"
 LAND_LOCK = "land.lock"
 LAND_JOURNAL = "land-journal.json"
+#: The kernel lock one pytest at a time holds (``scripts/_locks.py``).
+PYTEST_LOCK = _locks.PYTEST_LOCK
 JOURNAL_KEPT = "the journal is kept for the next land or repair"
 #: ``scripts/fleet_sync.py``'s folder (its holder token, evidence manifests) and its lock.
 FLEET = "fleet"
@@ -415,7 +451,12 @@ DIR_CONTAINERS = (
     FLEET,
     TOMBSTONES,
 )
-FILE_ENTRIES = (LAND_LOCK, LAND_JOURNAL, FLEET_LOCK)
+FILE_ENTRIES = (
+    LAND_LOCK,
+    LAND_JOURNAL,
+    FLEET_LOCK,
+    PYTEST_LOCK,
+)
 SENTINEL_TEXT = "gitdir: /nonexistent/dsf-work-sentinel\n"
 PIN_PREFIX = "refs/work/"
 INCOMING_PREFIX = "refs/work-incoming/"
@@ -1049,10 +1090,17 @@ def _resolve_commit(root: Path, rev: str) -> str:
 
 
 def _common_dir(repo: Path) -> Path:
-    """Return the shared checkout's common git directory, absolute."""
-    return Path(
-        _git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir").strip(),
-    ).resolve()
+    """Return the shared checkout's common git directory, absolute (``_git.git_dirs``).
+
+    Raises:
+        WorkError: git reads no repository at ``repo``.
+
+    """
+    dirs = _git_runner.git_dirs(repo)
+    if dirs is None:
+        msg = f"git reads no repository at {repo}"
+        raise WorkError(msg)
+    return dirs[1]
 
 
 def _git_path(root: Path, name: str) -> Path:
@@ -2931,8 +2979,13 @@ def _make_copy(
         )
         if start.restore is not None:
             fetch_pinned(repo, path, start.restore)
+        cloned = _git_runner.run_git(path, "symbolic-ref", "--quiet", "--short", "HEAD")
         _ = _git(path, "checkout", "--quiet", "--detach", start.base)
         _ = _git(path, "remote", "set-url", "--push", "parent", NO_PUSH)
+        branch = cloned.stdout.strip() if cloned.returncode == 0 else ""
+        if branch:
+            # The clone's HEAD is detached: nothing there tracks the branch the clone made.
+            _ = _git(path, "config", "--local", "--remove-section", f"branch.{branch}")
     else:
         _ensure_worktree_config(repo)
         _ = _git(repo, "worktree", "add", "--quiet", "--detach", str(path), start.base)
@@ -3035,7 +3088,7 @@ def _build_copy(
         "startshared": "true" if _shared_ref_reaches(repo, start.base) else "false",
         "created": str(int(time.time())),
         "incarnation": secrets.token_hex(8),
-        PINS_NOTE: "",
+        PINS_NOTE: f"{START_PIN}={start.base}",
     }
     if start.restore:
         note["restoredfrom"] = start.restore
@@ -3048,10 +3101,29 @@ def _build_copy(
         _setup(path, form)
 
 
+def refuse_control_text(args: _Args) -> None:
+    """Refuse a ``--purpose`` or ``--owner`` holding a newline or another control character.
+
+    A control character (Unicode ``Cc``) or a line or paragraph separator (``Zl``, ``Zp``).
+
+    Both are written into the note and printed on one ``list`` line, so a control character
+    would split or rewrite that line.
+
+    Raises:
+        WorkError: one of them holds a control character.
+
+    """
+    for option, value in (("--purpose", args.purpose), ("--owner", args.owner)):
+        if any(unicodedata.category(character) in {"Cc", "Zl", "Zp"} for character in value):
+            msg = f"{option} {value!r} holds a newline or another control character"
+            raise WorkError(msg)
+
+
 def cmd_new(args: _Args) -> int:
     """Claim a name and make its copy."""
     repo = REPO_ROOT
     name = parse_name(args.name)
+    refuse_control_text(args)
     form = "worktree" if args.worktree else "clone"
     if free_bytes(repo) < MIN_FREE_BYTES:
         msg = f"less than {MIN_FREE_BYTES // 1024**3} GB free; free disk before making a copy"
@@ -3077,23 +3149,6 @@ def cmd_new(args: _Args) -> int:
     print(path)
     _say(f"evidence: {evidence}")
     return 0
-
-
-def fleet_identities(repo: Path) -> list[tuple[str, str, str | None]]:
-    """Return ``(ssh host, checkout path, user)`` for every machine ``docs/fleet/machines.json`` lists."""
-    try:
-        document = _loads((repo / fleet.MACHINES_PATH).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    machines = document.get("machines") if fleet.is_json_object(document) else None
-    found: list[tuple[str, str, str | None]] = []
-    for machine in machines if fleet.is_json_array(machines) else []:
-        if not fleet.is_json_object(machine):
-            continue
-        host, checkout, user = machine.get("ssh"), machine.get("repo"), machine.get("user")
-        if isinstance(host, str) and isinstance(checkout, str):
-            found.append((host, checkout, user if isinstance(user, str) and user else None))
-    return found
 
 
 def _ssh_parts(url: str) -> tuple[str | None, str, int | None, str] | None:
@@ -3138,12 +3193,31 @@ def _checkout_matches(path: str, checkout: str, login: str) -> bool:
     )
 
 
+def _fleet_rows(repo: Path) -> tuple[fleet.Machine, ...]:
+    """Return the machine list of the checkout at ``repo`` (``fleet.machines``).
+
+    Raises:
+        WorkError: the list is missing, unreadable or broken (``fleet.MachineListError``).
+
+    """
+    try:
+        return fleet.machines(repo)
+    except fleet.MachineListError as error:
+        raise WorkError(str(error)) from error
+
+
 def is_parent_url(repo: Path, url: str) -> bool:
     """Return whether a remote ``url`` names this checkout: a local path, or a fleet one over SSH.
 
-    Over SSH the host must be a fleet machine's ``ssh`` name, the account the one that
-    machine lists as ``user`` (none listed: no user part, or this user's own login), the
-    port none or 22, and the path that machine's ``repo`` for that account.
+    Over SSH the host must reach a row of the machine list (``fleet.reached_as``: its
+    name, an alias or its ``ssh`` host, any case or domain form), the port none or 22, the
+    account the one ssh logs in to that host as (``fleet.ssh_user``: no user part, or
+    that login) and the path that row's ``repo`` for that account.
+
+    Raises:
+        WorkError: the machine list is broken, or ssh cannot say which account it logs in
+            to a host a row names as (``ssh -G`` failed).
+
     """
     ssh = _ssh_parts(url)
     if ssh is None:
@@ -3152,16 +3226,17 @@ def is_parent_url(repo: Path, url: str) -> bool:
     user, host, port, path = ssh
     if port not in {None, 22}:
         return False
-    for fleet_host, checkout, fleet_user in fleet_identities(repo):
-        expected = fleet_user or getpass.getuser()
-        allowed_users = {fleet_user} if fleet_user else {None, expected}
-        if (
-            host == fleet_host
-            and user in allowed_users
-            and _checkout_matches(path, checkout, user or expected)
-        ):
-            return True
-    return False
+    row = fleet.reached_as(host, _fleet_rows(repo))
+    if row is None:
+        return False
+    login = fleet.ssh_user(host)
+    if login is None:
+        msg = (
+            f"cannot tell which account ssh logs in to {host} as (`ssh -G {host}` gave no "
+            f"user), so {url} cannot be checked against {row.name}'s checkout"
+        )
+        raise WorkError(msg)
+    return user in {None, login} and _checkout_matches(path, row.repo, login)
 
 
 def _adoptable(repo: Path, name: Name, path: Path) -> tuple[str, list[str]]:
@@ -3232,7 +3307,7 @@ def _register(
             "created": str(int(time.time())),
             "incarnation": secrets.token_hex(8),
             "adopted": "true",
-            PINS_NOTE: "",
+            PINS_NOTE: f"{START_PIN}={head}",
         },
     )
     if form == "clone":
@@ -3246,6 +3321,7 @@ def cmd_adopt(args: _Args) -> int:
     """Register a copy another tool made, in place."""
     repo = REPO_ROOT
     name = parse_name(args.name)
+    refuse_control_text(args)
     path = _abs(Path(args.path).expanduser())
     form, parents = _adoptable(repo, name, path)
     note = _clone_note(path) if form == "clone" else _worktree_note(path, None)
@@ -3280,6 +3356,22 @@ def _state(copy: Copy) -> str:
     return "landed" if copy.note.get("landed") else "live"
 
 
+def _listed_pins(repo: Path, copy: Copy, held: Mapping[str, str]) -> tuple[str, str, str]:
+    """Return the copy's pins for ``list``: its own, foreign, and recorded but missing.
+
+    ``pins.git`` says which pins exist (``held``, ``{leaf: commit}``); the note says which
+    are the copy's (:func:`pin_belongs` against :func:`attributed_note`). Each part is a
+    comma list, ``-`` when empty. A copy with no note (pins left alone) owns every pin.
+    """
+    if not copy.note:
+        return ",".join(sorted(held)) or "-", "-", "-"
+    note = attributed_note(repo, copy.note)
+    own = sorted(leaf for leaf, commit in held.items() if pin_belongs(note, leaf, commit))
+    foreign = sorted(foreign_pins(note, held))
+    missing = sorted(leaf for leaf in recorded_pins(note) if leaf not in held)
+    return ",".join(own) or "-", ",".join(foreign) or "-", ",".join(missing) or "-"
+
+
 def cmd_list(args: _Args) -> int:
     """Print every known copy."""
     repo = REPO_ROOT
@@ -3287,14 +3379,16 @@ def cmd_list(args: _Args) -> int:
     rows: list[dict[str, str]] = []
     for name, copy in sorted(discover(repo).items()):
         head = _head(copy.path) if copy.path is not None and copy.healthy else "-"
-        leaves = all_pins.get(name, {})
+        own, foreign, missing = _listed_pins(repo, copy, all_pins.get(name, {}))
         rows.append(
             {
                 "name": name,
                 "form": copy.form,
                 "state": _state(copy),
                 "head": head[:12],
-                "pins": ",".join(sorted(leaves)) or "-",
+                "pins": own,
+                "foreign": foreign,
+                "missing": missing,
                 "adopted": "yes" if copy.adopted else "no",
                 "home": home_of(copy.note) if copy.note else "",
                 "replica": "yes" if is_replica(copy.note) else "no",
@@ -3309,8 +3403,12 @@ def cmd_list(args: _Args) -> int:
     for row in rows:
         print(
             f"{row['name']:<24} {row['form']:<8} {row['state']:<11} {row['head']:<12} "
-            f"pins={row['pins']} adopted={row['adopted']} "
+            f"pins={row['pins']} "
+            + (f"foreign-pins={row['foreign']} " if row["foreign"] != "-" else "")
+            + (f"missing-pins={row['missing']} " if row["missing"] != "-" else "")
+            + f"adopted={row['adopted']} "
             + (f"replica-of={row['home']} " if row["replica"] == "yes" else "")
+            + (f"owner={shlex.quote(row['owner'])} " if row["owner"] else "")
             + row["path"]
             + (f"  # {row['purpose']}" if row["purpose"] else ""),
         )
@@ -3960,25 +4058,16 @@ def land_lock(repo: Path) -> Generator[None, None, None]:
     descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
-            _lock_file(descriptor)
-        except OSError:
+            locked = _locks.try_lock(descriptor)
+        except OSError as error:
+            msg = f"cannot lock {lock}: {error}"
+            raise WorkError(msg) from error
+        if not locked:
             msg = f"another land holds {lock}; wait for it"
-            raise WorkError(msg) from None
+            raise WorkError(msg)
         yield
     finally:
         os.close(descriptor)
-
-
-def _lock_file(descriptor: int) -> None:
-    """Take an exclusive, non-blocking lock on ``descriptor``; raise ``OSError`` when held."""
-    if sys.platform == "win32":
-        import msvcrt  # noqa: PLC0415 - Windows only
-
-        msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-    else:
-        import fcntl  # noqa: PLC0415 - POSIX only
-
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def _blob_bytes(repo: Path, path: str, state: tuple[str, str]) -> bytes:
@@ -4689,6 +4778,45 @@ def cmd_repair(_args: _Args) -> int:
     return 1 if problems else 0
 
 
+def is_pytest(argv: Sequence[str]) -> bool:
+    """Return whether ``argv`` may run pytest (``run`` serialises those, ``scripts/_locks.py``).
+
+    Any word whose last path part, less ``.exe``, is ``pytest`` or ``py.test``, or the word
+    ``-mpytest``: the program itself, ``-m pytest``, and whatever a wrapper hands on
+    (``uv run --group pg pytest``, ``uv tool run pytest``). A false positive only waits.
+    """
+    return any(
+        word == "-mpytest"
+        or PurePosixPath(word.replace("\\", "/")).name.removesuffix(".exe")
+        in {"pytest", "py.test"}
+        for word in argv
+    )
+
+
+@contextlib.contextmanager
+def _pytest_lock_held(repo: Path, holder: str) -> Generator[dict[str, str], None, None]:
+    """Hold this checkout's pytest lock for one ``run`` (``scripts/_locks.py::hold_pytest``).
+
+    Yields the variables the command is started with, so a pytest it starts again never
+    waits on this run.
+
+    Raises:
+        WorkError: the lock cannot be opened or taken for a reason but another holder.
+
+    """
+    _ = ensure_sentinel(repo)
+    check_layout(repo)
+    try:
+        with _locks.hold_pytest(
+            repo,
+            f"{holder} {machine_id()} pid {os.getpid()}",
+            say=_say,
+        ) as held:
+            yield held
+    except _locks.PytestLockError as error:
+        raise WorkError(str(error)) from error
+
+
 def cmd_run(args: _Args) -> int:
     """Run a command in a copy's own environment."""
     if not args.tail:
@@ -4707,7 +4835,21 @@ def cmd_run(args: _Args) -> int:
         msg = f"{PACKAGE} imports from {location}, outside the copy {copy_root}"
         raise WorkError(msg)
     executable = shutil.which(args.tail[0], path=env["PATH"]) or args.tail[0]
-    completed = subprocess.run([executable, *args.tail[1:]], cwd=copy_root, env=env, check=False)
+    _say(f"run {copy.name} in {copy_root} (.venv {env['VIRTUAL_ENV']})")
+    no_hold: dict[str, str] = {}
+    serialise = (
+        _pytest_lock_held(REPO_ROOT, f"{copy.name} {copy.note.get('owner') or '-'}")
+        if is_pytest(args.tail)
+        else contextlib.nullcontext(no_hold)
+    )
+    with serialise as held:
+        env.update(held)
+        completed = subprocess.run(
+            [executable, *args.tail[1:]],
+            cwd=copy_root,
+            env=env,
+            check=False,
+        )
     return 128 - completed.returncode if completed.returncode < 0 else completed.returncode
 
 
