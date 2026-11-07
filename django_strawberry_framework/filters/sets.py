@@ -46,6 +46,7 @@ from django.db.models import Exists, Q
 from django.db.models import lookups as model_lookups
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression
+from django.db.models.query_utils import check_rel_lookup_compatibility
 from django.db.models.sql.query import Query
 from django.db.models.sql.where import WhereNode
 from django.forms.utils import ErrorList
@@ -266,6 +267,7 @@ if TYPE_CHECKING:
     from typing import TypeAlias
 
     from django import forms
+    from django.db.models.fields.mixins import FieldCacheMixin
     from django.forms import Field as FormField
     from django.http import HttpRequest
     from typing_extensions import Self, TypeIs
@@ -1372,7 +1374,9 @@ def _own_filter(filter_instance: Filter) -> object | None:
     ``_owner_bound_child``; a parent's walks no hop, ``FilterSet._flat_leaf_walk``)
     and never negates its ``exclude`` (``FilterSet._apply_relation_leaf``).
     Read through the instance ``__dict__``, so a class-level ``filter``
-    override is not one.
+    override is not one: it walks its hops, on a relation key running as
+    declared over the parent's rows (``FilterSet._leaf_chain``), and the package
+    negates its ``exclude`` at the parent.
     """
     return (truth.instance_dict(filter_instance) or {}).get("filter")
 
@@ -2037,22 +2041,39 @@ def _restrict_through_branch(
     return _restrict_to_related(queryset, _bound_field_name(related_filter), admitted, via)
 
 
+def _model_choice_members(value: object) -> list[models.Model] | None:
+    """Return the model instances a model-choice ``value`` holds, ``None`` for any other value.
+
+    django-filter's model-choice filters clean to model instances: one, a list of them,
+    or a queryset (evaluated here, once). A raw key, a GlobalID, or a list holding
+    anything but instances holds none (``None``).
+    """
+    if isinstance(value, models.Model):
+        return [value]
+    if isinstance(value, models.QuerySet) or is_list_or_tuple(value):
+        held: Iterable[object] = value
+        found = list(held)
+        members = [member for member in found if isinstance(member, models.Model)]
+        if len(members) == len(found):
+            return members
+    return None
+
+
 def _relation_key_value(value: object, attname: str) -> object:
     """Read a relation-key leaf's model-choice value as the key column it compares.
 
     django-filter's model-choice filters clean to model instances (one, a list,
-    or a queryset), which a relation lookup normalizes to the key column and a
-    plain column lookup rejects; a leaf re-read against the target rows' own key
-    column (``FilterSet._leaf_chain``) gets each instance's ``attname`` value
-    instead. Every other value (a raw key, a GlobalID) passes unchanged.
+    or a queryset, ``_model_choice_members``), which a relation lookup normalizes to
+    the key column and a plain column lookup rejects; a leaf re-read against the
+    target rows' own key column (``FilterSet._leaf_chain``) gets each instance's
+    ``attname`` value instead. Every other value (a raw key, a GlobalID) passes
+    unchanged.
     """
-    if isinstance(value, models.Model):
-        return read_attr(value, attname)
-    if is_list_or_tuple(value):
-        return [_relation_key_value(member, attname) for member in value]
-    if isinstance(value, models.QuerySet):
-        return [_relation_key_value(member, attname) for member in value]
-    return value
+    members = _model_choice_members(value)
+    if members is None:
+        return value
+    keys = [read_attr(member, attname) for member in members]
+    return keys[0] if isinstance(value, models.Model) else keys
 
 
 @dataclass(frozen=True)
@@ -2069,6 +2090,68 @@ class _ToManyKey:
 
 
 @dataclass(frozen=True)
+class _KeyMatch:
+    """The last-hop rows a relation-key leaf running consumer code ties the parents it keeps to.
+
+    Such a leaf's ``filter`` runs once, as declared, over the rows of the set declaring
+    it (``FilterSet._leaf_chain``) whenever its cleaned value names rows of the
+    relation's target (``named_rows``); a parent it keeps must also reach a visible
+    last-hop row the value names. ``attname`` reads a model-choice value's key on the
+    column the relation compares (the target's primary key, or a single non-key
+    ``to_field``); ``relation`` is the relation reaching the target, against which
+    Django decides which instances its lookup accepts; ``terminal`` is the leaf re-bound
+    to that column over the last hop's target rows, positive, whose class's shipped
+    comparison (``_shipped_filter_class``) reads any other value. The consumer's
+    ``filter`` never runs a second time.
+    """
+
+    hop: RelationHop
+    attname: str
+    relation: FieldCacheMixin
+    terminal: Filter
+
+    def named_rows(
+        self,
+        rows: models.QuerySet[models.Model],
+        value: object,
+    ) -> list[models.QuerySet[models.Model]] | None:
+        """Return the sets of last-hop ``rows`` a kept parent must each reach, ``None`` for none named.
+
+        A model-choice value (an instance, a list of them, a queryset) names its rows:
+        one set of ``rows`` among them (a parent reaching any), or one set per instance
+        when the leaf is ``conjoined`` (a parent reaching every one). An instance names a
+        row only when Django's relation lookup accepts it for the relation's target
+        (``check_rel_lookup_compatibility``: the target's concrete model, a parent or a
+        child of it). Any other value (a raw key, a GlobalID) keeps the rows the shipped
+        comparison of the leaf's class keeps on the key column. A value naming no row
+        (an empty or absent model-choice value, an instance of another model, a value
+        the shipped comparison skips, returning ``rows`` by identity, or refuses,
+        ``_SHIPPED_COMPARISON_REFUSALS``) is ``None``: the leaf then runs over the
+        related rows (``_LeafChain.fallback``).
+        """
+        members = _model_choice_members(value)
+        if members is None:
+            try:
+                kept = _shipped_filter_class(self.terminal).filter(self.terminal, rows, value)
+            except _SHIPPED_COMPARISON_REFUSALS:
+                # The shipped comparison cannot read the value, so it names no row; the
+                # consumer's ``filter`` answers it over the related rows.
+                return None
+            return None if kept is rows else [kept]
+        target = rows.model._meta
+        if not members or not all(
+            check_rel_lookup_compatibility(truth.class_of(member), target, self.relation)
+            for member in members
+        ):
+            return None
+        keys = [read_attr(member, self.attname) for member in members]
+        column = _bound_field_name(self.terminal)
+        if isinstance(self.terminal, MultipleChoiceFilter) and self.terminal.conjoined:
+            return [rows.filter(**{column: key}) for key in keys]
+        return [rows.filter(**{f"{column}__in": keys})]
+
+
+@dataclass(frozen=True)
 class _LeafChain:
     """How an active flat leaf walking relation hops reads the related rows.
 
@@ -2078,12 +2161,20 @@ class _LeafChain:
     which ``terminal`` compares on the rows that hold the key: a row it matches
     must also reach a visible row of ``key_hop``. ``to_many_key`` is how a to-many
     relation key leaf was re-read against the target key column (``_ToManyKey``).
+    A relation-key leaf running consumer code walks no hop: ``terminal`` is the leaf
+    as declared, and a row it matches must reach, through the visible rows of each
+    hop of ``key_via``, a visible row of ``key_hop`` its value names (``key_match``);
+    for a value naming no row (``_KeyMatch.named_rows``) the request reads
+    ``fallback`` instead, the leaf re-bound over the related rows.
     """
 
     hops: tuple[RelationHop, ...]
     terminal: Filter
     key_hop: RelationHop | None = None
     to_many_key: _ToManyKey | None = None
+    key_match: _KeyMatch | None = None
+    key_via: tuple[RelationHop, ...] = ()
+    fallback: _LeafChain | None = None
 
     def terminal_value(self, value: object, using: str) -> object:
         """Return the ``terminal`` value: ``value``, or the target key for a to-many key leaf.
@@ -2097,7 +2188,9 @@ class _LeafChain:
         raising what it raises for the declared predicate (a lookup the relation does not
         register, ``FieldError``; a lone model instance handed to ``in``, ``TypeError``), so
         the target key column answers only a predicate Django builds. A class-level
-        ``filter`` override is consumer code, which is never run twice for one request.
+        ``filter`` override is consumer code, which is never run twice for one request:
+        its value is read on the key column as it is (a leaf reaching here is the
+        ``fallback`` of one whose value names no row).
         """
         if self.to_many_key is None:
             return value
@@ -2469,6 +2562,29 @@ def _runs_shipped_filter(filter_instance: Filter) -> bool:
     return truth.module(method).partition(".")[0] in _SHIPPED_FILTER_PACKAGES
 
 
+def _shipped_filter_class(filter_instance: Filter) -> type[Filter]:
+    """Return the class whose ``filter`` is the nearest shipped one of ``filter_instance``'s class.
+
+    The first ``Filter`` class of the real MRO whose own namespace defines a ``filter``
+    django-filter or this package ships (``_SHIPPED_FILTER_PACKAGES``): the comparison a
+    class-level override of ``filter`` replaces, ``Filter`` itself at the latest.
+    """
+    return next(
+        klass
+        for klass in truth.mro(truth.class_of(filter_instance))
+        if truth.is_subclass(klass, Filter) and _defines_shipped_filter(klass)
+    )
+
+
+def _defines_shipped_filter(klass: type) -> bool:
+    """Whether ``klass``'s own namespace defines a ``filter`` django-filter or this package ships."""
+    function = truth.stored_function(truth.class_dict(klass).get("filter"))
+    return (
+        function is not None
+        and truth.module(function).partition(".")[0] in _SHIPPED_FILTER_PACKAGES
+    )
+
+
 #: What Django's preparation of a value for a lookup raises when the lookup cannot bind it
 #: (``Lookup.get_prep_lookup``, building the predicate): read per request by
 #: ``_unbindable_predicate`` and at schema build by ``filters/inputs.py::_answers_sample``.
@@ -2478,6 +2594,12 @@ _PREPARATION_REFUSALS: tuple[type[Exception], ...] = (
     TypeError,
     ValidationError,
 )
+
+#: What a shipped comparison raises on a relation-key value it cannot read: the GlobalID
+#: filter's refusal of a malformed or mistyped id (``filters/base.py::GlobalIDFilter.filter``)
+#: and Django's preparation of a raw value for the key column (``_PREPARATION_REFUSALS``).
+#: Read by ``_KeyMatch.named_rows``, where such a value names no row.
+_SHIPPED_COMPARISON_REFUSALS: tuple[type[Exception], ...] = (GraphQLError, *_PREPARATION_REFUSALS)
 
 
 def _unbindable_predicate(
@@ -6391,7 +6513,14 @@ class FilterSet(
         this set's own instance is untouched. Only the class's ``filter`` reads
         the copy's rebound ``field_name``: a filter holding a ``filter`` of its
         own (``_own_filter``, whose bound receiver stays the pre-copy object)
-        never walks a hop (``_flat_leaf_walk``), so it never reaches here.
+        never walks a hop (``_flat_leaf_walk``), so it never reaches here. A
+        relation-key leaf whose class overrides ``filter`` runs as declared
+        (``_leaf_chain``) when its value names rows of the relation's target, its
+        copy here read by the shipped comparison of its class (``_KeyMatch``);
+        for a value naming no row its copy runs over the related rows
+        (``_LeafChain.fallback``). A class-level override on a path into a
+        target column runs over the last hop's visible target rows with the
+        path left on that target as its ``field_name``.
         """
         terminal = copy.copy(filter_instance)
         terminal.field_name = field_name
@@ -6425,8 +6554,16 @@ class FilterSet(
         compares (``_relation_key_value`` reads model-choice values there), once
         Django builds the leaf's predicate as declared (``_LeafChain.terminal_value``),
         so the column answers only the lookups and values the relation accepts.
-        Every declared hop's target set resolves: a caller derives (or checks)
-        the hops first.
+        A relation-key leaf running consumer code (``_runs_shipped_filter``: a
+        class-level ``filter`` override) on a to-many path, or on a forward path
+        two or more hops long, runs once as declared (its own ``field_name``, the
+        value its form cleaned, the rows of this set) when its value names rows of
+        the relation's target, and a row it keeps must reach, through each hop's
+        visible rows, a visible last-hop row its value names
+        (``_LeafChain.key_match``), compared on the column Django's relation
+        lookup compares; its chain carries, as ``fallback``, the re-read chain a
+        value naming no row runs (``FilterSet._request_chain``). Every declared hop's target set
+        resolves: a caller derives (or checks) the hops first.
         """
         if isinstance(filter_instance, ProjectedChildFilter):
             projection = filter_instance._projection
@@ -6436,7 +6573,14 @@ class FilterSet(
             inner = child._leaf_chain(child_filter)
             if inner is None:
                 return _LeafChain((hop,), child_filter)
-            return replace(inner, hops=(hop, *inner.hops))
+            fallback = inner.fallback
+            return replace(
+                inner,
+                hops=(hop, *inner.hops),
+                fallback=None
+                if fallback is None
+                else replace(fallback, hops=(hop, *fallback.hops)),
+            )
         walk = type(self)._flat_leaf_walk(filter_instance)
         if walk is None:
             return None
@@ -6455,14 +6599,10 @@ class FilterSet(
             )
         owner_model = _hop_source_model(hops, len(hops) - 1)
         relation = _hop_relation(last)
-        if not path_traverses_to_many(owner_model, relation):
-            folded = hops[:-1]
-            terminal = (
-                self._bound_terminal(filter_instance, folded[-1], relation)
-                if folded
-                else filter_instance
-            )
-            return _LeafChain(folded, terminal, key_hop=last)
+        shipped = _runs_shipped_filter(filter_instance)
+        to_many = path_traverses_to_many(owner_model, relation)
+        if not to_many and (shipped or len(hops) == 1):
+            return self._folded_key_chain(filter_instance, hops, relation)
         # The relation's last link names the target column Django's relation lookup
         # compares: the target's primary key, or a single non-key ``to_field``. A
         # GlobalID / raw-key leaf marked for a non-pk ``to_field`` carries the pk.
@@ -6480,7 +6620,43 @@ class FilterSet(
             key_name, key_attname = targets[0].name, targets[0].attname
         terminal = self._bound_terminal(filter_instance, last, key_name)
         setattr(terminal, _GLOBALID_RELATION_PK_ATTR, False)
-        return _LeafChain(hops, terminal, to_many_key=_ToManyKey(key_attname, filter_instance))
+        chain = (
+            _LeafChain(hops, terminal, to_many_key=_ToManyKey(key_attname, filter_instance))
+            if to_many
+            else self._folded_key_chain(filter_instance, hops, relation)
+        )
+        if shipped:
+            return chain
+        key_terminal = copy.copy(terminal)
+        key_terminal.exclude = False
+        return _LeafChain(
+            (),
+            filter_instance,
+            key_hop=last,
+            key_match=_KeyMatch(last, key_attname, relation_field, key_terminal),
+            key_via=hops[:-1],
+            fallback=chain,
+        )
+
+    def _folded_key_chain(
+        self,
+        filter_instance: Filter,
+        hops: tuple[RelationHop, ...],
+        relation: str,
+    ) -> _LeafChain:
+        """Return the chain of a forward relation-key leaf comparing the stored key it holds.
+
+        The leaf compares ``relation`` on the rows of the hop before the last (on this
+        set's own rows for a one-hop path) and a row it matches must reach a visible row
+        of the last hop (``_LeafChain.key_hop``).
+        """
+        folded = hops[:-1]
+        terminal = (
+            self._bound_terminal(filter_instance, folded[-1], relation)
+            if folded
+            else filter_instance
+        )
+        return _LeafChain(folded, terminal, key_hop=hops[-1])
 
     def _reaches_hop(
         self,
@@ -6501,6 +6677,57 @@ class FilterSet(
         admitted = _admitted_rows(owner, hop.declared_attr, related_filter, rows, self.request)
         via = owner._via_rows(related_filter, self._apply_info, self._hop_visibility(), outer.db)
         return _reaches_related(outer, _bound_field_name(related_filter), admitted, via)
+
+    def _reaches_key(
+        self,
+        outer: models.QuerySet[_M],
+        chain: _LeafChain,
+        key_hop: RelationHop,
+        named: list[models.QuerySet[models.Model]] | None,
+        using: str,
+    ) -> Q:
+        """Return "the ``outer`` row reaches a visible row of ``key_hop``" for ``chain``'s relation-key leaf.
+
+        Without ``named`` (a forward relation leaf comparing the key it holds) any
+        visible row of the key hop counts. With it (a relation-key leaf running consumer
+        code whose value names rows, ``FilterSet._request_chain``) the row must be in each
+        named set in turn, reached through the visible rows of each hop of ``key_via``.
+        """
+        if named is None:
+            return Q(self._reaches_hop(outer, key_hop, self._hop_visible_rows(key_hop, using)))
+        path = (*chain.key_via, key_hop)
+        condition = Q()
+        for rows in named:
+            reached = rows
+            for index in range(len(path) - 1, 0, -1):
+                via = self._hop_visible_rows(path[index - 1], using)
+                reached = via.filter(self._reaches_hop(via, path[index], reached))
+            condition &= Q(self._reaches_hop(outer, path[0], reached))
+        return condition
+
+    def _request_chain(
+        self,
+        chain: _LeafChain,
+        value: object,
+        key_rows: Callable[[RelationHop, str], models.QuerySet[models.Model]],
+        using: str,
+    ) -> tuple[_LeafChain, list[models.QuerySet[models.Model]] | None]:
+        """Return the chain a request with cleaned ``value`` reads, and the key rows it names.
+
+        A relation-key leaf running consumer code (``_LeafChain.key_match``) whose value
+        names rows of the relation's target runs as declared, tied to the named sets of
+        ``key_rows`` of the key hop (its visible rows, or its unscoped rows when only
+        asking whether an absent leaf constrains); one whose value names no row
+        (``_KeyMatch.named_rows``) reads its ``fallback``, re-bound over the related rows.
+        Every other chain is returned as it is, naming nothing.
+        """
+        match = chain.key_match
+        if match is None:
+            return chain, None
+        named = match.named_rows(key_rows(match.hop, using), value)
+        if named is None:
+            return require_instance(chain.fallback, _LeafChain), None
+        return chain, named
 
     def _absent_leaf_applies(self, filter_instance: Filter, value: object) -> bool:
         """Whether a leaf the request left absent constrains anything for the ``value`` it cleaned to.
@@ -6556,7 +6783,12 @@ class FilterSet(
             return terminal.filter(rows, value) is not rows
         # A caller passes only a leaf ``_flat_leaf_walk`` reads or a ``ProjectedChildFilter``,
         # which always carries its projection hop.
-        chain = require_instance(self._leaf_chain(filter_instance), _LeafChain)
+        chain, _named = self._request_chain(
+            require_instance(self._leaf_chain(filter_instance), _LeafChain),
+            value,
+            lambda hop, using: base_queryset(_hop_model(hop), using=using),
+            built.db,
+        )
         rows = self._chain_base(chain, built)
         try:
             return chain.terminal.filter(rows, chain.terminal_value(value, built.db)) is not rows
@@ -6742,6 +6974,15 @@ class FilterSet(
         ``isnull`` reading still null-extends, which adds the parents reaching
         no visible row without applying the filter twice. A ``NOT EXISTS``
         cannot be emptied by a ``NULL`` key the way ``NOT IN`` is.
+
+        A relation-key leaf whose class overrides ``filter`` (``_KeyMatch``), its
+        value naming rows of the relation's target (``_request_chain``), runs
+        that override once over ``queryset`` as declared, with ``exclude`` off
+        when it is set (the parent negation above applies its ``exclude``, so an
+        override honours ``self.exclude`` through the package), and keeps the
+        parents it matched that reach a visible last-hop row its value names
+        (``_reaches_key``); the rows it returns, its own ``distinct`` included,
+        are the parents' multiplicity, as for a leaf walking no hop.
         """
         if not supplied:
             applies = self._recorded_verdict(name, value)
@@ -6756,7 +6997,12 @@ class FilterSet(
         # (``_branch_visibility_seed``).
         for hop in type(self)._visibility_hops(filter_instance):
             _ = self._hop_visible_rows(hop, using)
-        chain = require_instance(self._leaf_chain(filter_instance), _LeafChain)
+        chain, named = self._request_chain(
+            require_instance(self._leaf_chain(filter_instance), _LeafChain),
+            value,
+            self._hop_visible_rows,
+            using,
+        )
         terminal = chain.terminal
         negate = _own_filter(terminal) is None and terminal.exclude
         if negate:
@@ -6773,9 +7019,7 @@ class FilterSet(
                 inner = self._filter_child_rows(terminal, inner_root, value)
                 if inner is inner_root:
                     return queryset
-                inner = inner.filter(
-                    self._reaches_hop(inner, key_hop, self._hop_visible_rows(key_hop, using)),
-                )
+                inner = inner.filter(self._reaches_key(inner, chain, key_hop, named, using))
                 return queryset.filter(~Exists(inner))
             # The parent's own rows: the filter's original invocation, consumer
             # ``distinct`` included, as for a leaf walking no hop.
@@ -6786,21 +7030,13 @@ class FilterSet(
             )
             if matched is queryset:
                 return queryset
-            return matched.filter(
-                self._reaches_hop(matched, key_hop, self._hop_visible_rows(key_hop, using)),
-            )
+            return matched.filter(self._reaches_key(matched, chain, key_hop, named, using))
         visible = [self._hop_visible_rows(hop, using) for hop in chain.hops]
         rows = self._filter_child_rows(terminal, visible[-1], value)
         if rows is visible[-1]:
             return queryset
-        if chain.key_hop is not None:
-            rows = rows.filter(
-                self._reaches_hop(
-                    rows,
-                    chain.key_hop,
-                    self._hop_visible_rows(chain.key_hop, using),
-                ),
-            )
+        if key_hop is not None:
+            rows = rows.filter(self._reaches_key(rows, chain, key_hop, named, using))
         condition = Q()
         for index in range(len(chain.hops) - 1, -1, -1):
             outer = visible[index - 1] if index else queryset

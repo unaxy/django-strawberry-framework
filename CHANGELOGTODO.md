@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 185 to do.
+Progress: 0 done, 186 to do.
 
 ## From dry-0_0_15_3
 
@@ -786,6 +786,15 @@ Progress: 0 done, 185 to do.
   error otherwise). Spell the related column past the relation instead (`children__id` with `icontains`); the error
   names it. A raw `FilterSet(data=...)` raises Django's own `FieldError` either way, and a model-choice `in` on a
   text-keyed to-many relation raises Django's `TypeError` instead of matching rows by the key's characters
+- [ ] 791. CHANGELOG entry for item 784: a `Filter` subclass overriding `filter` on a relation key a flat field walks
+  (a reverse foreign key or many-to-many, a key two relations away, a forward key through another relation) now
+  receives its declared `field_name`, the value its form cleaned (model instances) and the queryset of its own set, as
+  when no hop is walked, and runs once. It received the target key column, primary keys and the related rows, so an
+  override reading `value.pk` failed with a masked error, a hardcoded path answered other rows, and a lookup the
+  relation refuses (`icontains`) answered rows. A parent it keeps must still reach a visible related row its value
+  names, so a row a target type hides still matches nothing; its value names the rows it keeps, and `exclude=True`
+  negates. An empty or absent choice the override reads as a default, a value naming none of the relation's rows, a
+  value the key's comparison refuses and an `isnull` override keep their earlier answer
 - [ ] 788. CHANGELOG entry for item 720: a `ModelForm` field that reads one value (`CharField`, `ChoiceField`,
   `IntegerField`, `BooleanField`, ...) over a `JSONField` listing no choices is typed by the form field (`String`,
   `Int`, `Boolean`) instead of `JSON`, matching graphene-django and the package's own filters over such a column; a

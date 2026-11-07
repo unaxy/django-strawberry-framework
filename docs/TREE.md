@@ -827,6 +827,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_relation_filter_defaults_api.py  # Consumer relation forms apply defaults, await scoped methods and refuse unresolved active hops.
 ├── test_relation_filter_form_paths_api.py  # Consumer form relation keys and projected reentry preserve their target and root universes.
 ├── test_relation_identity_columns_api.py  # Raw relation identities use the target's stored key column through native HTTP filters.
+├── test_relation_key_overrides_api.py  # A class-level ``filter`` override on a walked relation key runs as declared, over visible rows.
 ├── test_relation_leaf_sql_api.py # Walked relation predicates preserve null extension, orphan-safe negation and independent SQL.
 ├── test_relation_link_api.py     # Live HTTP execution over relations whose link is not a plain pk ``ForeignKey``.
 ├── test_relation_reentry_api.py  # Live HTTP relation filters and orders read their bound or registered target type.
