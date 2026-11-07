@@ -23,9 +23,11 @@ Covers:
   attribute (a served set's by the subpass-1.5 probe, an unserved
   ``RelatedFilter`` child's by the expansion copy).
 - A declared leaf whose ``field_name`` and ``lookup_expr`` Django resolves on no
-  queryset is refused when its set publishes, under every serving shape, while the
-  shapes Django resolves on some queryset (a name past a relation, a to-many key its
-  target's key reads, a range applied as a relation's bounds) build.
+  queryset is refused when its set publishes, under every serving shape (a relation
+  key's lookup asked of the relation, to-one or to-many), while the shapes Django
+  resolves on some queryset (a name past a relation, a range applied as a relation's
+  bounds) build; a raw set's to-many key leaf answers Django's own refusal whether or
+  not a hop is walked.
 
 Bound and unbound filtersets answering requests live in ``test_query/``.
 ``test_filter_declarations_api.py`` owns copyable callable and widget controls
@@ -51,12 +53,16 @@ from apps.kanban.models import Actor, Card, CardItem, CardPathLink
 from apps.library.models import (
     Book,
     Branch,
+    Edition,
     Genre,
     LendingDesk,
     Loan,
+    MembershipCard,
     Patron,
     PatronProfile,
+    Printing,
     ProxyBranch,
+    Publisher,
     Shelf,
     TaggedItem,
     Venue,
@@ -64,6 +70,8 @@ from apps.library.models import (
 from apps.scalars.models import NullableScalarSpecimen, ScalarSpecimen
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import caches
+from django.core.exceptions import FieldError
+from django.db import connection
 from django.db.models import (
     BigIntegerField,
     DateTimeField,
@@ -81,7 +89,7 @@ from django.db.models.functions import Abs, ExtractHour
 from django.db.models.lookups import GreaterThan, IStartsWith
 from django.http import HttpRequest
 from django.test import override_settings
-from django.test.utils import register_lookup
+from django.test.utils import CaptureQueriesContext, register_lookup
 from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy
 from django_filters import (
@@ -108,6 +116,7 @@ from django_strawberry_framework import (
     DjangoListField,
     DjangoSchema,
     DjangoType,
+    ErrorPolicy,
     finalize_django_types,
     strawberry_config,
 )
@@ -145,7 +154,13 @@ from django_strawberry_framework.types.finalizer import (
 from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.utils import querysets as querysets_module
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._narrowing import is_dict, is_str, read_attr, require
+from django_strawberry_framework.utils._narrowing import (
+    is_dict,
+    is_queryset,
+    is_str,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.typing import object_result
 from tests._cleaned_filter_sets import cleaned_specimen
@@ -2851,6 +2866,14 @@ class _OwnFilterNumberFilter(NumberFilter):
         return qs
 
 
+class _OwnFilterModelMultipleChoiceFilter(ModelMultipleChoiceFilter):
+    """A consumer ``ModelMultipleChoiceFilter`` whose own ``filter`` decides what its value means."""
+
+    @override
+    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+        return qs
+
+
 def _post(schema: object, query: str) -> object:
     """Execute ``query`` on ``schema`` with a request context; return its data, no errors."""
     assert isinstance(schema, strawberry.Schema)
@@ -2964,12 +2987,12 @@ _UNWALKED_SERVED_LEAVES = [
         id="name-past-a-relation-its-model-lacks",
     ),
     pytest.param(
-        lambda: ModelMultipleChoiceFilter(
+        lambda: _OwnFilterModelMultipleChoiceFilter(
             field_name="children",
             lookup_expr="icontains",
-            queryset=ScalarSpecimen.objects.all(),
+            queryset=_scalar_specimens(),
         ),
-        id="reverse-key-lookup-its-target-key-resolves",
+        id="filter-override-over-a-to-many-key-lookup-the-relation-refuses",
     ),
 ]
 
@@ -2978,12 +3001,12 @@ _UNWALKED_SERVED_LEAVES = [
 def test_a_served_leaf_the_build_does_not_walk_builds(declare: Callable[[], Filter]) -> None:
     """A served leaf whose query is consumer code, or whose path the model cannot walk, builds.
 
-    A ``method=`` filter and a ``filter`` override build their own query, over a path Django
-    refuses too, and a queryset annotation has no walk from the model: no class reaches the
-    seal from the build's walk, which leaves each to the request. A name past a relation the
-    related model lacks is read on the rows a walked hop's type shapes, and a to-many key's
-    lookup the target's key resolves is the comparison a walked hop makes, so neither is
-    refused as unresolvable (``filters/base.py::refuse_unresolvable_lookup``).
+    A ``method=`` filter and a ``filter`` override build their own query, over a path or a
+    relation's lookup Django refuses too, and a queryset annotation has no walk from the
+    model: no class reaches the seal from the build's walk, which leaves each to the request.
+    A name past a relation the related model lacks is read on the rows a walked hop's type
+    shapes, so it is not refused as unresolvable
+    (``filters/base.py::refuse_unresolvable_lookup``).
     """
     with _doubled():
         _ = _serve_at_root(_specimen_set([], {"twice_of": declare()}))
@@ -3417,6 +3440,8 @@ class _UnresolvableCase:
     lookup_expr: str
     part: str
     field: str
+    related: str = ""
+    """The relation's related column spelled past it, which the refusal names; ``""`` for none."""
 
 
 def _scalar_specimens() -> QuerySet[ScalarSpecimen]:
@@ -3490,6 +3515,7 @@ _UNRESOLVABLE_LEAVES: dict[str, _UnresolvableCase] = {
         "icontains",
         "icontains",
         "ScalarSpecimen.parent (ForeignKey)",
+        "parent__id",
     ),
     "forward-key-lookup-nothing-resolves": _UnresolvableCase(
         lambda: ModelChoiceFilter(
@@ -3503,6 +3529,7 @@ _UNRESOLVABLE_LEAVES: dict[str, _UnresolvableCase] = {
         "unknown",
         "unknown",
         "ScalarSpecimen.parent (ForeignKey)",
+        "parent__id",
     ),
     "forward-key-range-handed-whole": _UnresolvableCase(
         lambda: _NumberRangeFilter(field_name="branch", lookup_expr="range"),
@@ -3512,6 +3539,7 @@ _UNRESOLVABLE_LEAVES: dict[str, _UnresolvableCase] = {
         "range",
         "range",
         "Shelf.branch (ForeignKey)",
+        "branch__id",
     ),
     "forward-key-range-its-walk-refuses": _UnresolvableCase(
         lambda: RangeFilter(field_name="branch", lookup_expr="range"),
@@ -3521,6 +3549,7 @@ _UNRESOLVABLE_LEAVES: dict[str, _UnresolvableCase] = {
         "range",
         "range",
         "Shelf.branch (ForeignKey)",
+        "branch__id",
     ),
     "reverse-one-to-one-key-lookup": _UnresolvableCase(
         lambda: CharFilter(field_name="profile", lookup_expr="icontains"),
@@ -3543,6 +3572,35 @@ _UNRESOLVABLE_LEAVES: dict[str, _UnresolvableCase] = {
         "unknown",
         "unknown",
         "ScalarSpecimen.children (ManyToOneRel)",
+        "children__id",
+    ),
+    "reverse-key-lookup-its-target-key-resolves": _UnresolvableCase(
+        lambda: ModelMultipleChoiceFilter(
+            field_name="children",
+            lookup_expr="icontains",
+            queryset=_scalar_specimens(),
+        ),
+        ScalarSpecimen,
+        "ModelMultipleChoiceFilter",
+        "children",
+        "icontains",
+        "icontains",
+        "ScalarSpecimen.children (ManyToOneRel)",
+        "children__id",
+    ),
+    "many-to-many-key-lookup-its-target-key-resolves": _UnresolvableCase(
+        lambda: ModelMultipleChoiceFilter(
+            field_name="genres",
+            lookup_expr="icontains",
+            queryset=Genre.objects.all(),
+        ),
+        Book,
+        "ModelMultipleChoiceFilter",
+        "genres",
+        "icontains",
+        "icontains",
+        "Book.genres (ManyToManyField)",
+        "genres__id",
     ),
     "many-to-many-key-lookup-no-relation-resolves": _UnresolvableCase(
         lambda: ModelMultipleChoiceFilter(
@@ -3556,18 +3614,80 @@ _UNRESOLVABLE_LEAVES: dict[str, _UnresolvableCase] = {
         "unknown",
         "unknown",
         "Book.genres (ManyToManyField)",
+        "genres__id",
+    ),
+    "reverse-many-to-many-key-lookup": _UnresolvableCase(
+        lambda: ModelMultipleChoiceFilter(
+            field_name="books",
+            lookup_expr="icontains",
+            queryset=Book.objects.all(),
+        ),
+        Genre,
+        "ModelMultipleChoiceFilter",
+        "books",
+        "icontains",
+        "icontains",
+        "Genre.books (ManyToManyRel)",
+        "books__id",
+    ),
+    "generic-relation-key-lookup": _UnresolvableCase(
+        lambda: ModelMultipleChoiceFilter(
+            field_name="tags",
+            lookup_expr="startswith",
+            queryset=TaggedItem.objects.all(),
+        ),
+        Branch,
+        "ModelMultipleChoiceFilter",
+        "tags",
+        "startswith",
+        "startswith",
+        "Branch.tags (GenericRelation)",
+        "tags__id",
+    ),
+    "reverse-one-to-one-key-lookup-its-target-key-resolves": _UnresolvableCase(
+        lambda: ModelChoiceFilter(
+            field_name="card",
+            lookup_expr="iexact",
+            queryset=MembershipCard.objects.all(),
+        ),
+        Patron,
+        "ModelChoiceFilter",
+        "card",
+        "iexact",
+        "iexact",
+        "Patron.card (OneToOneRel)",
+        "card__id",
+    ),
+    "reverse-text-key-lookup-its-target-key-resolves": _UnresolvableCase(
+        lambda: ModelMultipleChoiceFilter(
+            field_name="editions",
+            lookup_expr="contains",
+            queryset=Edition.objects.all(),
+        ),
+        Publisher,
+        "ModelMultipleChoiceFilter",
+        "editions",
+        "contains",
+        "contains",
+        "Publisher.editions (ManyToOneRel)",
+        "editions__isbn_13",
     ),
 }
 
 
 def _unresolvable_refusal(case: _UnresolvableCase) -> str:
     """The refusal of the leaf ``probe`` ``case`` declares on ``SpecimenFilter``."""
+    related_key = (
+        f" (a relation's related column is named past it: field_name {case.related!r})"
+        if case.related
+        else ""
+    )
     return (
         f"FilterSet SpecimenFilter: {case.kind} 'probe' has field_name {case.field_name!r} and "
         f"lookup_expr {case.lookup_expr!r}, but Django resolves no transform or lookup "
         f"{case.part!r} on {case.field}, so every request naming the filter would be refused. "
         "Spell the transforms and lookup the field registers (a column's lookups belong in "
-        "lookup_expr, not field_name), register a project lookup at startup "
+        f"lookup_expr, not field_name{related_key}), register a project lookup at startup "
         "(Field.register_lookup in AppConfig.ready), or read the value in `method=`."
     )
 
@@ -3653,13 +3773,14 @@ def test_a_declared_leaf_django_resolves_on_no_queryset_is_refused(
 ) -> None:
     """A declared leaf whose path and lookup Django refuses on every queryset fails its set.
 
-    Where the path ends on a column, on a to-one relation (read through the relation's own
-    lookups on every request), or on a to-many relation none of whose key columns accepts the
-    lookup either, Django refuses the predicate whatever rows it runs on, so the set refuses
-    the leaf when it publishes: a served set when the schema builds, an unbound one at its
-    first use. The refusal names the set, the filter class and name, its ``field_name`` and
-    ``lookup_expr``, the part Django refuses and the field it is refused on, chained from the
-    walk's ``LookupValidationError``.
+    Where the path ends on a column, or on a relation (to-one or to-many: the lookup is asked
+    of the relation's last join, which every request applies it through, walked hop or not),
+    Django refuses the predicate whatever rows it runs on, so the set refuses the leaf when it
+    publishes: a served set when the schema builds, an unbound one at its first use. The
+    refusal names the set, the filter class and name, its ``field_name`` and
+    ``lookup_expr``, the part Django refuses and the field it is refused on (a relation's,
+    with the related column spelled past it), chained from the walk's
+    ``LookupValidationError``.
     """
     filterset_cls = _specimen_set([], {"probe": case.declare()}, model=case.model)
     with pytest.raises(ConfigurationError) as exc_info:
@@ -3718,6 +3839,7 @@ def _shaping_node(
     model: type[Model],
     shape: Callable[[QuerySet[Model]], QuerySet[Model]],
     filterset_cls: type[FilterSet] | None = None,
+    fields: tuple[str, ...] = ("id", "label"),
 ) -> type[DjangoType]:
     """A Relay ``DjangoType`` over ``model`` whose ``get_queryset`` hands back ``shape``'s rows."""
 
@@ -3732,7 +3854,7 @@ def _shaping_node(
 
     meta: dict[str, object] = {
         "model": model,
-        "fields": ("id", "label"),
+        "fields": fields,
         "interfaces": (relay.Node,),
     }
     if filterset_cls is not None:
@@ -3777,29 +3899,314 @@ def test_a_name_past_a_declared_hop_its_target_type_annotates_answers() -> None:
     assert _labels(data) == ["kept-partner"]
 
 
-@pytest.mark.django_db
-def test_a_reverse_key_lookup_its_target_key_resolves_answers_on_a_walked_hop() -> None:
-    """A to-many key's lookup compares the target key on a walked hop: it builds and answers.
+@dataclass(frozen=True)
+class _ToManyRelation:
+    """A to-many relation of ``source``, a row of it reaching one ``target`` row, and its key column."""
 
-    ``children`` with ``icontains`` is no lookup of the reverse relation, but the target
-    type's ``get_queryset`` walks the hop, which compares the children's primary key, whose
-    column registers ``icontains``.
-    """
+    source: Model
+    relation: str
+    target: Model
+    column: str
+
+
+def _reverse_key() -> _ToManyRelation:
     parent = cleaned_specimen("parent", kept=True)
     child = cleaned_specimen("child", kept=False)
     child.parent = parent
     child.save()
-    filterset_cls = _specimen_set(
-        [],
-        {
-            "probe": ModelMultipleChoiceFilter(
+    return _ToManyRelation(parent, "children", child, "id")
+
+
+def _shelved_book() -> Book:
+    shelf = Shelf.objects.create(code="S1", branch=Branch.objects.create(name="east"))
+    return Book.objects.create(title="Dune", shelf=shelf)
+
+
+def _many_to_many_key() -> _ToManyRelation:
+    book = _shelved_book()
+    genre = Genre.objects.create(name="fiction")
+    book.genres.add(genre)
+    return _ToManyRelation(book, "genres", genre, "id")
+
+
+def _reverse_many_to_many_key() -> _ToManyRelation:
+    book = _shelved_book()
+    genre = Genre.objects.create(name="fiction")
+    book.genres.add(genre)
+    return _ToManyRelation(genre, "books", book, "id")
+
+
+def _generic_relation_key() -> _ToManyRelation:
+    branch = Branch.objects.create(name="east")
+    tag = TaggedItem.objects.create(
+        tag="open",
+        content_type=ContentType.objects.get_for_model(Branch),
+        object_id=branch.pk,
+    )
+    return _ToManyRelation(branch, "tags", tag, "id")
+
+
+def _reverse_one_to_one_key() -> _ToManyRelation:
+    patron = Patron.objects.create(name="Ada")
+    return _ToManyRelation(
+        patron,
+        "card",
+        MembershipCard.objects.create(patron=patron, barcode="C-1"),
+        "id",
+    )
+
+
+def _published_edition() -> Edition:
+    publisher = Publisher.objects.create(name="House A", house_code="HA")
+    return Edition.objects.create(isbn_13="x1", publisher=publisher)
+
+
+def _reverse_text_key() -> _ToManyRelation:
+    edition = _published_edition()
+    return _ToManyRelation(edition.publisher, "editions", edition, "isbn_13")
+
+
+def _many_to_many_text_key() -> _ToManyRelation:
+    edition = _published_edition()
+    printing = Printing.objects.create(edition=edition)
+    printing.bound_with.add(edition)
+    return _ToManyRelation(printing, "bound_with", edition, "isbn_13")
+
+
+_TO_MANY_KEYS = [
+    pytest.param(_reverse_key, id="reverse-foreign-key"),
+    pytest.param(_many_to_many_key, id="many-to-many"),
+    pytest.param(_reverse_many_to_many_key, id="reverse-many-to-many"),
+    pytest.param(_generic_relation_key, id="generic-relation"),
+    pytest.param(_reverse_one_to_one_key, id="reverse-one-to-one"),
+    pytest.param(_reverse_text_key, id="reverse-foreign-text-key"),
+]
+
+_TEXT_TO_MANY_KEYS = [
+    pytest.param(_reverse_text_key, id="reverse-foreign-text-key"),
+    pytest.param(_many_to_many_text_key, id="many-to-many-text-key"),
+]
+
+#: How a raw set's to-many key leaf reaches the request: as Django's own predicate, or over a
+#: walked hop (the target type's ``get_queryset``, or a ``RelatedFilter`` the set declares on
+#: the relation).
+_KEY_WALKS = ["unwalked", "target-get-queryset", "related-filter"]
+
+
+def _raw_key_set(key: _ToManyRelation, walk: str, probe: Filter) -> type[FilterSet]:
+    """A set over ``key``'s source model declaring ``probe``, its hop walked as ``walk`` names."""
+    target_model = type(key.target)
+    fields = (target_model._meta.pk.name,)
+    if walk == "target-get-queryset":
+        _ = _shaping_node(target_model, lambda queryset: queryset, None, fields=fields)
+    elif walk == "related-filter":
+        _ = _relay_node(target_model, fields, None)
+    finalize_django_types()
+    declared: dict[str, Filter] = {"probe": probe}
+    if walk == "related-filter":
+        declared["hop"] = RelatedFilter(
+            _specimen_set([], name="TargetFilter", model=target_model),
+            field_name=key.relation,
+        )
+    filterset_cls = _specimen_set([], declared, model=type(key.source))
+    walked = filterset_cls._flat_leaf_walk(filterset_cls.base_filters["probe"]) is not None
+    assert walked is (walk != "unwalked")
+    return filterset_cls
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("walk", _KEY_WALKS)
+@pytest.mark.parametrize("make_key", _TO_MANY_KEYS)
+def test_a_raw_to_many_key_lookup_the_relation_refuses_raises_djangos_error(
+    make_key: Callable[[], _ToManyRelation],
+    walk: str,
+) -> None:
+    """A raw set's to-many key lookup the relation does not register raises Django's refusal.
+
+    A set applied as ``FilterSet(data=...)`` never publishes, so its leaf reaches the request:
+    ``icontains`` is no lookup of a to-many relation (Django's query asks it of the relation's
+    last join: a reverse relation, a many-to-many's through key onto its target), and the
+    request raises Django's own ``FieldError`` whether or not a hop is walked. The related
+    column spelled past the relation (``children__id``) answers Django's rows in both.
+    """
+    key = make_key()
+    value = str(read_attr(key.target, "pk"))
+    model = type(key.source)
+    with pytest.raises(FieldError) as django_refusal:
+        _ = model._default_manager.filter(**{f"{key.relation}__icontains": value})
+    probe = ModelMultipleChoiceFilter(
+        field_name=key.relation,
+        lookup_expr="icontains",
+        queryset=type(key.target)._default_manager.all(),
+    )
+    filterset_cls = _raw_key_set(key, walk, probe)
+    with pytest.raises(FieldError) as raised:
+        _ = list(filterset_cls(data={"probe": [value]}).qs)
+    assert str(raised.value) == str(django_refusal.value)
+    spelled = CharFilter(field_name=f"{key.relation}__{key.column}", lookup_expr="icontains")
+    rows = _specimen_set([], {"probe": spelled}, name="SpelledFilter", model=model)
+    expected = model._default_manager.filter(**{f"{key.relation}__{key.column}__icontains": value})
+    assert list(expected) == [key.source]
+    assert list(rows(data={"probe": value}).qs) == [key.source]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("walk", _KEY_WALKS)
+@pytest.mark.parametrize(
+    ("declare", "lookup_expr"),
+    [
+        pytest.param(
+            lambda: CharFilter(field_name="children", lookup_expr="icontains"),
+            "icontains",
+            id="char-icontains",
+        ),
+        pytest.param(
+            lambda: NumberFilter(field_name="children", lookup_expr="startswith"),
+            "startswith",
+            id="number-startswith",
+        ),
+        pytest.param(
+            lambda: ModelChoiceFilter(
                 field_name="children",
-                lookup_expr="icontains",
+                lookup_expr="iexact",
                 queryset=_scalar_specimens(),
             ),
-        },
+            "iexact",
+            id="model-choice-iexact",
+        ),
+    ],
+)
+def test_a_raw_reverse_key_lookup_any_filter_class_applies_raises_djangos_error(
+    declare: Callable[[], Filter],
+    lookup_expr: str,
+    walk: str,
+) -> None:
+    """Every filter class applying a lookup the reverse relation refuses raises Django's refusal.
+
+    The walked hop builds what the class's own ``filter`` hands Django, whatever value its form
+    cleans to (text, a decimal, a model instance), so the request raises the unwalked
+    request's ``FieldError``.
+    """
+    key = _reverse_key()
+    value = str(saved_pk(key.target))
+    with pytest.raises(FieldError) as django_refusal:
+        _ = ScalarSpecimen.objects.filter(**{f"children__{lookup_expr}": value})
+    filterset_cls = _raw_key_set(key, walk, declare())
+    with pytest.raises(FieldError) as raised:
+        _ = list(filterset_cls(data={"probe": value}).qs)
+    assert str(raised.value) == str(django_refusal.value)
+
+
+class _CountingOverride(ModelMultipleChoiceFilter):
+    """A consumer class-level ``filter`` override recording each call and running one query."""
+
+    calls: ClassVar[list[object]] = []
+
+    @override
+    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+        type(self).calls.append(value)
+        _ = ScalarSpecimen.objects.exists()
+        return qs
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("walk", _KEY_WALKS)
+def test_a_class_level_override_on_a_to_many_key_runs_once_per_request(walk: str) -> None:
+    """A consumer ``filter`` override on a to-many key is called once, walked or not.
+
+    The walked hop builds the declared predicate first only for shipped ``filter`` code
+    (the rule a set publishes by); a consumer override is never run a second time, so the
+    request runs the queries the unwalked request runs.
+    """
+    key = _reverse_key()
+    data = {"probe": [str(saved_pk(key.target))]}
+    unwalked_set = _raw_key_set(
+        key,
+        "unwalked",
+        _CountingOverride(
+            field_name="children",
+            lookup_expr="icontains",
+            queryset=_scalar_specimens(),
+        ),
     )
-    node = _shaping_node(ScalarSpecimen, lambda queryset: queryset, filterset_cls)
+    with CaptureQueriesContext(connection) as unwalked:
+        _ = list(unwalked_set(data=data).qs)
+    registry.clear()
+    _CountingOverride.calls.clear()
+    filterset_cls = _raw_key_set(
+        key,
+        walk,
+        _CountingOverride(
+            field_name="children",
+            lookup_expr="icontains",
+            queryset=_scalar_specimens(),
+        ),
+    )
+    with CaptureQueriesContext(connection) as walked:
+        _ = list(filterset_cls(data=data).qs)
+    assert len(_CountingOverride.calls) == 1
+    assert len(walked.captured_queries) == len(unwalked.captured_queries)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("walk", _KEY_WALKS)
+@pytest.mark.parametrize("make_key", _TEXT_TO_MANY_KEYS)
+def test_a_raw_text_key_in_handed_one_instance_raises_djangos_error(
+    make_key: Callable[[], _ToManyRelation],
+    walk: str,
+) -> None:
+    """A model-choice ``in`` on a to-many text key raises Django's ``TypeError``, walked or not.
+
+    ``ModelMultipleChoiceFilter`` applies its lookup to each chosen row alone, so ``in`` is
+    handed one instance, which Django's ``RelatedIn`` refuses to iterate. A walked hop builds
+    the declared predicate before comparing the target's key, so the key's text is never
+    iterated as a list of its characters.
+    """
+    key = make_key()
+    model = type(key.source)
+    with pytest.raises(TypeError) as django_refusal:
+        _ = model._default_manager.filter(**{f"{key.relation}__in": key.target})
+    probe = ModelMultipleChoiceFilter(
+        field_name=key.relation,
+        lookup_expr="in",
+        queryset=type(key.target)._default_manager.all(),
+    )
+    filterset_cls = _raw_key_set(key, walk, probe)
+    with pytest.raises(TypeError) as raised:
+        _ = list(filterset_cls(data={"probe": [str(read_attr(key.target, "pk"))]}).qs)
+    assert str(raised.value) == str(django_refusal.value)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("walked", [False, True], ids=["unwalked", "walked"])
+def test_a_served_text_key_in_handed_one_instance_answers_walked_as_unwalked(
+    *,
+    walked: bool,
+) -> None:
+    """A served model-choice ``in`` on a to-many text key errors alike whether a hop is walked.
+
+    Django refuses ``in`` handed the one row a ``ModelMultipleChoiceFilter`` applies it to
+    (``RelatedIn``'s ``TypeError``); the walked hop builds that predicate as declared first,
+    so the request answers the unwalked request's error, never the rows the key's characters
+    would match.
+    """
+    edition = _published_edition()
+    with pytest.raises(TypeError) as django_refusal:
+        _ = Publisher.objects.filter(editions__in=edition)
+    if walked:
+        _ = _shaping_node(Edition, lambda queryset: queryset, None, fields=("isbn_13",))
+    else:
+        _ = _relay_node(Edition, ("isbn_13",), None)
+    probe = ModelMultipleChoiceFilter(
+        field_name="editions",
+        lookup_expr="in",
+        queryset=Edition.objects.all(),
+    )
+    node = _relay_node(
+        Publisher,
+        ("id", "name"),
+        _specimen_set([], {"probe": probe}, model=Publisher),
+    )
     query = strawberry.type(
         type(
             "Query",
@@ -3811,13 +4218,18 @@ def test_a_reverse_key_lookup_its_target_key_resolves_answers_on_a_walked_hop() 
         ),
     )
     finalize_django_types()
-    schema = DjangoSchema(query=query, config=strawberry_config())
-    data = _post(
-        schema,
-        f"{{ rows(filter: {{probe: {{iContains: [{saved_pk(child)}]}}}}) "
-        "{ edges { node { label } } } }",
+    # Unmasked, so the response carries the exception the request raised.
+    schema = DjangoSchema(
+        query=query,
+        config=strawberry_config(),
+        error_policy=ErrorPolicy(enabled=False),
     )
-    assert _labels(data) == ["parent"]
+    result = schema.execute_sync(
+        '{ rows(filter: {probe: {in: ["x1"]}}) { edges { node { name } } } }',
+        context_value=HttpRequest(),
+    )
+    assert result.data is None
+    assert [error.message for error in result.errors or []] == [str(django_refusal.value)]
 
 
 @pytest.mark.parametrize(
@@ -3858,6 +4270,88 @@ def test_a_range_applied_as_bounds_over_a_forward_key_publishes(
     """
     filterset_cls = _specimen_set([], {"probe": declare()}, model=model)
     assert "probe" in filterset_cls.get_filters()
+
+
+def _csv_bounds(pk: int) -> dict[str, object]:
+    return {"probe": f"{pk},{pk}"}
+
+
+def _lone_lower_bound(pk: int) -> dict[str, object]:
+    return {"probe_min": str(pk)}
+
+
+def _both_bounds(pk: int) -> dict[str, object]:
+    return {"probe_min": str(pk), "probe_max": str(pk)}
+
+
+def _gte_and_lte(pk: int) -> dict[str, object]:
+    return {"children__gte": pk, "children__lte": pk}
+
+
+def _gte(pk: int) -> dict[str, object]:
+    return {"children__gte": pk}
+
+
+def _range(pk: int) -> dict[str, object]:
+    return {"children__range": (pk, pk)}
+
+
+def _django_outcome(model: type[Model], predicate: dict[str, object]) -> object:
+    """The rows Django's own ``predicate`` on ``model`` answers, or the exception it raises."""
+    try:
+        return sorted(
+            str(read_attr(row, "pk")) for row in model._default_manager.filter(**predicate)
+        )
+    except (TypeError, FieldError) as exc:
+        return (truth.kind(exc), str(exc))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("walk", _KEY_WALKS)
+@pytest.mark.parametrize(
+    ("declare", "data", "predicate"),
+    [
+        pytest.param(
+            lambda: IntegerRangeFilter(field_name="children", lookup_expr="range"),
+            _csv_bounds,
+            _gte_and_lte,
+            id="integer-range-both-bounds",
+        ),
+        pytest.param(
+            lambda: DjangoFilterRangeFilter(field_name="children", lookup_expr="range"),
+            _lone_lower_bound,
+            _gte,
+            id="django-filter-range-lone-bound",
+        ),
+        pytest.param(
+            lambda: DjangoFilterRangeFilter(field_name="children", lookup_expr="range"),
+            _both_bounds,
+            _range,
+            id="django-filter-range-both-bounds",
+        ),
+    ],
+)
+def test_a_range_applied_as_bounds_over_a_to_many_key_publishes_and_answers_as_django(
+    declare: Callable[[], Filter],
+    data: Callable[[int], dict[str, object]],
+    predicate: Callable[[int], dict[str, object]],
+    walk: str,
+) -> None:
+    """A range filter applying a to-many relation's ``gte`` / ``lte`` publishes and answers as Django.
+
+    ``IntegerRangeFilter`` applies both bounds, and django-filter's ``RangeFilter`` a lone one,
+    as the relation's ``gte`` / ``lte``, which Django registers on every relation, so the set
+    publishes the leaf; django-filter's ``RangeFilter`` hands Django ``range`` for both bounds,
+    which no relation registers. Each request answers what Django answers for the predicate
+    the filter applies, whether or not a hop is walked.
+    """
+    key = _reverse_key()
+    pk = saved_pk(key.target)
+    filterset_cls = _raw_key_set(key, walk, declare())
+    assert "probe" in filterset_cls.get_filters()
+    expected = _django_outcome(ScalarSpecimen, predicate(pk))
+    assert expected != []
+    assert _raw_outcome(filterset_cls, data(pk)) == expected
 
 
 def test_a_declared_leaf_of_a_set_with_no_model_publishes() -> None:
@@ -3932,3 +4426,69 @@ def test_a_lazily_spelled_lookup_django_resolves_nowhere_is_refused_naming_its_t
         "lookup_expr 'unknown', but Django resolves no transform or lookup 'unknown' on "
         "ScalarSpecimen.signed_big (BigIntegerField)",
     )
+
+
+@pytest.mark.parametrize(
+    "lazy",
+    [
+        pytest.param({"field_name": SimpleLazyObject(lambda: "children")}, id="lazy-field-name"),
+        pytest.param({"lookup_expr": gettext_lazy("icontains")}, id="lazy-lookup-expr"),
+    ],
+)
+def test_a_lazily_spelled_to_many_key_lookup_is_refused_naming_its_text(
+    lazy: dict[str, object],
+) -> None:
+    """A lazy ``field_name`` or ``lookup_expr`` on a to-many key is refused as its text would be."""
+    case = _UNRESOLVABLE_LEAVES["reverse-key-lookup-its-target-key-resolves"]
+    filterset_cls = _specimen_set([], {"probe": _respelled(case.declare(), **lazy)})
+    with pytest.raises(ConfigurationError) as exc_info:
+        _build_at_root(filterset_cls)
+    assert str(exc_info.value) == _unresolvable_refusal(case)
+
+
+def _raw_outcome(filterset_cls: type[FilterSet], data: dict[str, object]) -> object:
+    """The rows ``filterset_cls`` applied raw to ``data`` answers, or the exception it raises."""
+    try:
+        rows = require(filterset_cls(data=data).qs, is_queryset)
+        return sorted(str(read_attr(row, "pk")) for row in rows)
+    except (TypeError, FieldError) as exc:
+        return (truth.kind(exc), str(exc))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("walk", ["target-get-queryset", "related-filter"])
+@pytest.mark.parametrize(
+    "lazy",
+    [
+        pytest.param({"field_name": gettext_lazy("children")}, id="lazy-field-name"),
+        pytest.param(
+            {"field_name": SimpleLazyObject(lambda: "children")},
+            id="simple-lazy-object-field-name",
+        ),
+        pytest.param({"lookup_expr": gettext_lazy("exact")}, id="lazy-lookup-expr"),
+        pytest.param(
+            {"lookup_expr": SimpleLazyObject(lambda: "icontains")},
+            id="lazy-lookup-expr-the-relation-refuses",
+        ),
+    ],
+)
+def test_a_lazily_spelled_raw_to_many_key_leaf_answers_walked_as_unwalked(
+    lazy: dict[str, object],
+    walk: str,
+) -> None:
+    """A walked hop builds a lazily spelled to-many key leaf as Django builds it unwalked.
+
+    The walked leaf builds its declared predicate first, so whatever Django and
+    django-filter answer the lazy spelling with unwalked (rows, or the error a lazy keyword
+    raises), the walked request answers too.
+    """
+    key = _reverse_key()
+    data: dict[str, object] = {"probe": [str(read_attr(key.target, "pk"))]}
+
+    def declare() -> Filter:
+        probe = ModelMultipleChoiceFilter(field_name="children", queryset=_scalar_specimens())
+        return _respelled(probe, **lazy)
+
+    unwalked = _raw_outcome(_raw_key_set(key, "unwalked", declare()), data)
+    registry.clear()
+    assert _raw_outcome(_raw_key_set(key, walk, declare()), data) == unwalked
