@@ -242,9 +242,9 @@ from .inputs import (
 _LOGIC_PYTHON_ATTRS: frozenset[str] = frozenset(op.python_attr for op in LOGIC_OPERATORS)
 
 #: The ``SyncMisuseError`` recourse a filter's sync visibility read appends when a
-#: target type's ``get_queryset`` is ``async def``: a nested branch's target, or a
-#: hop a flat leaf walks (``FilterSet._derive_related_visibility_querysets_sync``,
-#: ``FilterSet._hop_visible_rows``, ``FilterSet._scoped_rows``).
+#: target type's ``get_queryset`` is ``async def``: a declared hop a nested branch or
+#: a flat leaf walks (``FilterSet._declared_hop_rows``), or a model no declaration
+#: owns (``FilterSet._scoped_rows``).
 _FILTER_ASYNC_RECOURSE = (
     "A related filter reads its target type's get_queryset; await "
     "FilterSet.apply_async from an async resolver (a connection field does under "
@@ -278,11 +278,9 @@ if TYPE_CHECKING:
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.typing import ModelField
 
-    # ``(field_name, target_type, child_filterset, child_input, child_base)`` per active
-    # related branch, as ``FilterSet._iter_visibility_steps`` yields it.
-    _VisibilityStep: TypeAlias = (
-        "tuple[str, type[DjangoType], type[FilterSet], object, models.QuerySet[models.Model]]"
-    )
+    # ``(field_name, related_filter, child_input)`` per active related branch, as
+    # ``FilterSet._iter_visibility_steps`` yields it.
+    _VisibilityStep: TypeAlias = "tuple[str, RelatedFilter, object]"
     #: Any forward ``ManyToManyField``, as django-stubs parametrizes it.
     _ManyToManyFieldAny: TypeAlias = models.ManyToManyField[models.Model, models.Model]
 else:
@@ -2973,6 +2971,16 @@ def _filter_declaration(hop: DeclaredHop) -> tuple[type[FilterSet], RelatedFilte
     )
 
 
+def _branch_child_set(related_filter: RelatedFilter) -> type[FilterSet]:
+    """Return the ``FilterSet`` an active branch's declaration resolves.
+
+    Read after the branch's hop rows (``FilterSet._declared_hop_rows``), whose seed
+    (``FilterSet._branch_visibility_seed``) raised the branch's ``ConfigurationError``
+    for a declaration resolving none; ``TypeError`` otherwise.
+    """
+    return require(related_filter.filterset, _is_filterset_class)
+
+
 def _hop_target_set(hop: DeclaredHop) -> type[FilterSet]:
     """Return the ``FilterSet`` ``hop``'s declaration resolves; ``TypeError`` when it resolves none.
 
@@ -3224,8 +3232,9 @@ class FilterSet(
     # Populated by ``apply_sync`` / ``apply_async`` via
     # ``_collect_nested_visibility_querysets_sync`` / ``_async``, which walk
     # every ``and`` / ``or`` / ``not`` arm BEFORE the permission pass, form
-    # validation and the top-level ``.qs`` read, deriving each branch's target
-    # ``get_queryset`` (awaited on the async color, where the sync derive
+    # validation and the top-level ``.qs`` read, deriving each branch's child
+    # rows over its hop's visible rows (``_declared_hop_rows``, read from the
+    # request-wide hop map; awaited on the async color, where the sync derive
     # would raise ``SyncMisuseError`` mid-``.qs`` for an async-only one).
     # ``_q_for_branch`` then looks the arm up instead of deriving it again.
     # ``None`` for instances built outside the apply pipeline.
@@ -3246,11 +3255,13 @@ class FilterSet(
     # (``filters/base.py::_filter_schema``).
     _projection_owner: FilterSet | None = None
 
-    # Visibility-scoped target rows per declared hop a flat relation leaf walks,
-    # keyed by ``(id(<RelatedFilter declaration>), <database alias>)``
-    # (``_hop_visible_rows``). One map serves the whole request: a hop's
-    # visibility does not depend on which leaf or logical arm walks it, so
-    # ``_q_for_branch`` hands this instance's map to every sibling it builds.
+    # Visibility-scoped target rows per declared hop a nested branch or a flat
+    # relation leaf walks, keyed by ``(id(<RelatedFilter declaration>), <database
+    # alias>)`` (``_declared_hop_rows``). One map serves the whole request: a hop's
+    # visibility does not depend on which branch, leaf or logical arm walks it, so
+    # ``apply_sync`` / ``apply_async`` hand it to each nested branch's child apply
+    # (``_hop_visibility``) and ``_q_for_branch`` hands this instance's map to
+    # every sibling it builds.
     # ``apply_async`` pre-fills it (``_derive_flat_hop_visibility_async``) so an
     # async-only ``get_queryset`` never runs inside the sync ``.qs`` read; the
     # sync path derives each entry on first use. ``None`` only on a set built
@@ -4576,7 +4587,7 @@ class FilterSet(
         child = children.get(filterset_cls)
         if child is None:
             # A ``RelatedFilter`` target always declares ``Meta.model``
-            # (``_iter_visibility_steps`` trusts the same).
+            # (``_branch_visibility_seed`` trusts the same).
             child_model = require(filterset_cls._meta.model, is_model_class)
             # Never ``None`` on an instance (see ``ProjectedChildFilter.filter``).
             parent_qs = require(self.queryset, is_queryset)
@@ -5427,51 +5438,32 @@ class FilterSet(
         return filter_lookup_table(cls).gate_paths.get(python_attr, python_attr)
 
     @classmethod
-    def _iter_visibility_steps(
-        cls,
-        input_value: object,
-        parent_db: str | None = None,
-    ) -> Iterator[_VisibilityStep]:
+    def _iter_visibility_steps(cls, input_value: object) -> Iterator[_VisibilityStep]:
         """Yield the pre-await state each visibility derive method needs.
 
-        Returns ``(field_name, target_type, child_filterset, child_input,
-        child_base)`` for every active related branch. A branch whose
-        ``target_type`` or ``child_filterset`` cannot be resolved raises
-        ``ConfigurationError`` (``_branch_visibility_seed``, the resolution
-        flat leaves walking the branch share) instead of being skipped: the branch is
-        ACTIVE (the consumer supplied input for it), so skipping would
-        drop the constraint entirely and silently return unfiltered
-        parent rows - a filter the consumer believes is applied doing
-        nothing. The same misconfiguration is also caught earlier, at
-        finalize time, by ``_bind_filtersets`` subpass 2.5 for every
-        schema-wired filterset; this runtime guard covers direct
-        ``apply_sync`` / ``apply_async`` callers that never finalize.
-        Composes with ``_iter_active_related_branches`` (per-branch yield
-        shape) so the two iterators chain naturally without materializing
+        Returns ``(field_name, related_filter, child_input)`` for every active
+        related branch: the declaration keys the branch's visible rows in the
+        request-wide hop map (``_declared_hop_rows`` / ``_await_declared_hop_rows``),
+        the one derivation a flat leaf walking the branch reads too, so the target
+        type's ``get_queryset`` runs once per request however many nested branches,
+        logical arms and flat leaves walk the hop. A branch whose target type or
+        child filter set cannot be resolved raises ``ConfigurationError`` there
+        (``_branch_visibility_seed``) instead of being skipped: the branch is ACTIVE
+        (the consumer supplied input for it), so skipping would drop the constraint
+        entirely and silently return unfiltered parent rows. The same
+        misconfiguration is also caught earlier, at finalize time, by
+        ``_bind_filtersets`` subpass 2.5 for every schema-wired filterset; this
+        runtime guard covers direct ``apply_sync`` / ``apply_async`` callers that
+        never finalize. Composes with ``_iter_active_related_branches`` (per-branch
+        yield shape) so the two iterators chain naturally without materializing
         intermediate lists.
-
-        ``child_base`` is pinned to ``parent_db`` (the alias of the parent
-        queryset being filtered) via ``.using(...)`` so the child's
-        ``get_queryset`` visibility hook sees the SAME database as the parent
-        request -- matching the cascade-permission path
-        (``permissions.py`` builds its base with
-        ``._default_manager.using(queryset.db).all()``). Without it a sharded
-        parent (e.g. ``shard_b``) would run the child hook against the default
-        alias, so an alias-sensitive hook applies the wrong shard's policy
-        (report Defect 3). ``None`` leaves the router default in place for the
-        single-database case and for direct callers who do not thread an alias.
         """
         for field_name, declaration, child_input in cls._iter_active_related_branches(
             input_value,
         ):
             # ``related_filters`` holds only the ``RelatedFilter`` declarations the
             # metaclass collected (``sets_mixins.py::collect_related_declarations``).
-            target_type, child_filterset, child_base = cls._branch_visibility_seed(
-                field_name,
-                require_instance(declaration, RelatedFilter),
-                parent_db,
-            )
-            yield field_name, target_type, child_filterset, child_input, child_base
+            yield field_name, require_instance(declaration, RelatedFilter), child_input
 
     @classmethod
     def _branch_visibility_seed(
@@ -5483,9 +5475,10 @@ class FilterSet(
         """Resolve an active branch's target type, child filterset and unscoped base rows.
 
         The one resolution of the ``DjangoType`` whose ``get_queryset`` scopes a
-        declared ``RelatedFilter`` branch (``field_name`` on ``cls``), shared by
-        the nested branch (``_iter_visibility_steps``) and every flat leaf
-        walking the branch (``_hop_visible_rows``). The branch is ACTIVE (the
+        declared ``RelatedFilter`` branch (``field_name`` on ``cls``), read by the
+        first derivation of the branch's hop rows (``_declared_hop_rows`` /
+        ``_await_declared_hop_rows``), which the nested branch and every flat leaf
+        walking the branch share. The branch is ACTIVE (the
         consumer supplied input for it, nested or flat), so a target that cannot
         be resolved raises ``ConfigurationError`` instead of being skipped:
         skipping would drop the visibility scoping and silently return rows the
@@ -5526,25 +5519,33 @@ class FilterSet(
         input_value: object,
         info: object,
         *,
+        hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         parent_db: str | None = None,
         _depth: int = 0,
         _branch_path: str = "",
     ) -> dict[str, models.QuerySet[models.Model]]:
-        """Run each active branch's target ``get_queryset(...)`` then recurse.
+        """Read each active branch's visible target rows, then narrow them by the child input.
 
-        Reuses ``django_strawberry_framework/utils/querysets.py::apply_type_visibility_sync``
-        - the existing helper handles the sync-misuse detection and
-        raises ``SyncMisuseError`` (a ``ConfigurationError`` and
-        ``RuntimeError`` subclass) naming the filter recourse
-        (``_FILTER_ASYNC_RECOURSE``); ``apply``'s catch-and-rethrow
-        translates that into a ``RuntimeError`` consumers can match
-        on via the actionable "use apply_async instead" message.
+        Each branch's rows are its declared hop's (``_declared_hop_rows``): the
+        target type's ``get_queryset(...)`` through
+        ``django_strawberry_framework/utils/querysets.py::apply_type_visibility_sync``,
+        run on the hop's first use in the request and read from
+        ``hop_visibility`` (the request-wide hop map) after, so a branch held by
+        several logical arms or walked by a flat leaf too runs it once. The
+        helper handles the sync-misuse detection and raises
+        ``SyncMisuseError`` (a ``ConfigurationError`` and ``RuntimeError``
+        subclass) naming the filter recourse (``_FILTER_ASYNC_RECOURSE``);
+        ``apply``'s catch-and-rethrow translates that into a ``RuntimeError``
+        consumers can match on via the actionable "use apply_async instead"
+        message.
 
-        After the visibility hook runs, the child filterset's
+        Over those rows, the child filterset's
         ``apply_sync`` is invoked against the visibility-scoped queryset
         so nested input clauses (e.g. ``shelves: { code: { iContains:
         "A" } }``) narrow the child queryset BEFORE the parent's
-        restriction through the branch is built (spec-027 Decision 8).
+        restriction through the branch is built (spec-027 Decision 8). The
+        child apply receives ``hop_visibility`` (``_hop_visibility``), so its own
+        branches and flat leaves read the hops this request already derived.
 
         The child ``apply_sync`` runs with ``run_permissions=False``: this
         step only needs the child's filtered, visibility-scoped queryset,
@@ -5568,26 +5569,22 @@ class FilterSet(
         branch's flat copies answer.
         """
         result: dict[str, models.QuerySet[models.Model]] = {}
-        for (
-            field_name,
-            target_type,
-            child_filterset,
-            child_input,
-            child_base,
-        ) in cls._iter_visibility_steps(input_value, parent_db):
-            scoped = apply_type_visibility_sync(
-                target_type,
-                child_base,
+        for field_name, related_filter, child_input in cls._iter_visibility_steps(input_value):
+            scoped = cls._declared_hop_rows(
+                field_name,
+                related_filter,
                 info,
-                async_recourse=_FILTER_ASYNC_RECOURSE,
+                hop_visibility,
+                parent_db,
             )
-            result[field_name] = child_filterset.apply_sync(
+            result[field_name] = _branch_child_set(related_filter).apply_sync(
                 child_input,
                 scoped,
                 info,
                 run_permissions=False,
                 _depth=_depth + 1,
                 _branch_path=_branch_key(_branch_path, field_name),
+                _hop_visibility=hop_visibility,
             )
         return result
 
@@ -5597,6 +5594,7 @@ class FilterSet(
         input_value: object,
         info: object,
         *,
+        hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         parent_db: str | None = None,
         _depth: int = 0,
         _branch_path: str = "",
@@ -5606,26 +5604,30 @@ class FilterSet(
         Runs the child ``apply_async`` with ``run_permissions=False`` for the
         same reason the sync twin passes ``run_permissions=False`` (see there):
         the top-level ``_run_permission_checks`` pass owns every nested gate,
-        so the derivation must not re-fire them. ``parent_db`` (report Defect 3)
+        so the derivation must not re-fire them. Each branch's rows are awaited
+        into ``hop_visibility`` (``_await_declared_hop_rows``) unless a branch or
+        flat leaf of this request already put them there, and the child apply
+        receives the map, as in the sync twin. ``parent_db`` (report Defect 3)
         and ``_depth`` (report Defect 5) thread exactly as in the sync twin, and
         so does ``_branch_path``.
         """
         result: dict[str, models.QuerySet[models.Model]] = {}
-        for (
-            field_name,
-            target_type,
-            child_filterset,
-            child_input,
-            child_base,
-        ) in cls._iter_visibility_steps(input_value, parent_db):
-            scoped = await apply_type_visibility_async(target_type, child_base, info)
-            result[field_name] = await child_filterset.apply_async(
+        for field_name, related_filter, child_input in cls._iter_visibility_steps(input_value):
+            scoped = await cls._await_declared_hop_rows(
+                field_name,
+                related_filter,
+                info,
+                hop_visibility,
+                parent_db,
+            )
+            result[field_name] = await _branch_child_set(related_filter).apply_async(
                 child_input,
                 scoped,
                 info,
                 run_permissions=False,
                 _depth=_depth + 1,
                 _branch_path=_branch_key(_branch_path, field_name),
+                _hop_visibility=hop_visibility,
             )
         return result
 
@@ -5699,6 +5701,7 @@ class FilterSet(
         input_value: object,
         info: object,
         *,
+        hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         parent_db: str | None = None,
         _depth: int = 0,
         _branch_path: str = "",
@@ -5708,7 +5711,9 @@ class FilterSet(
         The sync twin of ``_collect_nested_visibility_querysets_async``: every arm
         ``_iter_logic_arms`` yields gets its related branches derived
         (``_derive_related_visibility_querysets_sync``) under its own arm path, in
-        tree order, and the map comes back keyed by ``id(child_input)``.
+        tree order, and the map comes back keyed by ``id(child_input)``. Every arm
+        reads and fills ``hop_visibility``, the request-wide hop map, so a
+        declaration several arms hold runs its target ``get_queryset`` once.
         ``apply_sync`` calls it before the permission pass and form validation, as
         ``apply_async`` calls its twin, so an input carrying an arm's branch error
         beside a form error or a permission denial answers the same first error on
@@ -5718,6 +5723,7 @@ class FilterSet(
             id(child_input): cls._derive_related_visibility_querysets_sync(
                 child_input,
                 info,
+                hop_visibility=hop_visibility,
                 parent_db=parent_db,
                 _depth=depth,
                 _branch_path=arm_path,
@@ -5759,7 +5765,9 @@ class FilterSet(
         cap ``_evaluate_logic_tree`` enforces, surfacing its typed
         ``ConfigurationError`` here rather than waiting for the ``.qs`` read.
 
-        ``flat_hop_visibility`` also receives the awaited target
+        ``flat_hop_visibility`` is the request-wide hop map: each arm's nested
+        branches read and fill it (``_await_declared_hop_rows``), so a declaration
+        several arms hold is awaited once, and it also receives the awaited target
         visibility of every hop a flat leaf of each arm the form data names walks
         (``_derive_flat_hop_visibility_async``), so this one walk of the
         logical arms pre-derives both kinds of relational scoping.
@@ -5777,6 +5785,7 @@ class FilterSet(
             result[id(child_input)] = await cls._derive_related_visibility_querysets_async(
                 child_input,
                 info,
+                hop_visibility=flat_hop_visibility,
                 parent_db=parent_db,
                 _depth=depth,
                 _branch_path=arm_path,
@@ -6294,7 +6303,9 @@ class FilterSet(
         ``apply_async`` runs it for the top level and
         ``_collect_nested_visibility_querysets_async`` for every ``and`` / ``or``
         / ``not`` arm, so the sync ``.qs`` read finds each hop already in the
-        request-wide map and never runs an async-only ``get_queryset``. The
+        request-wide map and never runs an async-only ``get_queryset``; a hop a
+        nested branch already awaited (``_await_declared_hop_rows``) is not
+        awaited again. The
         leaves are ``_named_leaf_filters``'s: those whose form data names a key,
         the one rule the sync form reads a flat leaf as supplied by
         (``_named_flat_copies``, ``_leaf_absent``), so the pre-pass sees exactly
@@ -6333,7 +6344,8 @@ class FilterSet(
         """Await the target visibility of each of ``hops`` into the request-wide hop map ``into``.
 
         The rows ``_hop_visible_rows`` reads: a declared hop's target type's
-        ``get_queryset`` over its seed (``_branch_visibility_seed``), keyed by
+        ``get_queryset`` over its seed (``_await_declared_hop_rows``, the
+        derivation a nested branch shares), keyed by
         ``(id(<RelatedFilter declaration>), parent_db)``, after the rows of each
         intermediate model its ``field_name`` crosses (``_branch_via_types``); an
         undeclared hop's scoping type's (``_await_scoped_rows``). A key already in
@@ -6346,15 +6358,13 @@ class FilterSet(
             owner, related_filter = _filter_declaration(hop)
             for scope in owner._branch_via_types(related_filter):
                 await cls._await_scoped_rows(scope, info, into, parent_db)
-            key = (id(related_filter), parent_db)
-            if key in into:
-                continue
-            target_type, _child, child_base = owner._branch_visibility_seed(
+            _ = await owner._await_declared_hop_rows(
                 hop.declared_attr,
                 related_filter,
+                info,
+                into,
                 parent_db,
             )
-            into[key] = await apply_type_visibility_async(target_type, child_base, info)
 
     @classmethod
     def _branch_via_types(
@@ -6454,11 +6464,11 @@ class FilterSet(
     ) -> models.QuerySet[models.Model]:
         """Return ``hop``'s target rows its ``DjangoType.get_queryset`` lets this request see.
 
-        The nested branch's step 3 for one declared hop: the target type is
-        resolved and seeded on ``parent_db`` by ``_branch_visibility_seed``, then
-        scoped by ``apply_type_visibility_sync`` with this instance's resolver
-        ``info``. Read from the request-wide map when present (``apply_async``
-        pre-fills it), derived and stored on first use otherwise. An undeclared
+        A declared hop's rows are the nested branch's step 3 for it
+        (``_declared_hop_rows``, with this instance's resolver ``info``): read
+        from the request-wide map when present (a nested branch walking the hop,
+        or ``apply_async``'s pre-pass, put them there), derived and stored on
+        first use otherwise. An undeclared
         hop reads its scoping type's rows (``_scoped_rows``), or, when no type
         scopes its model, every row of it, as Django's join reads them.
         """
@@ -6468,22 +6478,72 @@ class FilterSet(
             if scope is None:
                 return _hop_model(hop)._base_manager.using(parent_db)
             return self._scoped_rows(scope, self._apply_info, visibility, parent_db)
-        key = (id(hop.related_obj), parent_db)
+        owner, related_filter = _filter_declaration(hop)
+        return owner._declared_hop_rows(
+            hop.declared_attr,
+            related_filter,
+            self._apply_info,
+            visibility,
+            parent_db,
+        )
+
+    @classmethod
+    def _declared_hop_rows(
+        cls,
+        declared_attr: str,
+        related_filter: RelatedFilter,
+        info: object,
+        visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        parent_db: str | None,
+    ) -> models.QuerySet[models.Model]:
+        """Return the rows the target type of this set's branch ``declared_attr`` lets the request see.
+
+        The one derivation of a declared hop's visibility, read by a nested
+        branch (``_derive_related_visibility_querysets_sync``) and by every flat
+        leaf walking the branch (``_hop_visible_rows``): keyed by
+        ``(id(related_filter), parent_db)`` in the request-wide hop map, read from
+        it when present (``apply_async`` pre-fills it,
+        ``_await_declared_hop_rows``), otherwise the target type's ``get_queryset``
+        over the branch's seed (``_branch_visibility_seed``) with ``info``, stored
+        on first use, so the hook runs once per request however many nested
+        branches, flat leaves and logical arms walk the hop.
+        """
+        key = (id(related_filter), parent_db)
         rows = visibility.get(key)
         if rows is None:
-            owner, related_filter = _filter_declaration(hop)
-            target_type, _child, child_base = owner._branch_visibility_seed(
-                hop.declared_attr,
+            target_type, _child, child_base = cls._branch_visibility_seed(
+                declared_attr,
                 related_filter,
                 parent_db,
             )
             rows = apply_type_visibility_sync(
                 target_type,
                 child_base,
-                self._apply_info,
+                info,
                 async_recourse=_FILTER_ASYNC_RECOURSE,
             )
             visibility[key] = rows
+        return rows
+
+    @classmethod
+    async def _await_declared_hop_rows(
+        cls,
+        declared_attr: str,
+        related_filter: RelatedFilter,
+        info: object,
+        into: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        parent_db: str | None,
+    ) -> models.QuerySet[models.Model]:
+        """Async twin of ``_declared_hop_rows``: await the hook into ``into`` unless already there."""
+        key = (id(related_filter), parent_db)
+        rows = into.get(key)
+        if rows is None:
+            target_type, _child, child_base = cls._branch_visibility_seed(
+                declared_attr,
+                related_filter,
+                parent_db,
+            )
+            rows = into[key] = await apply_type_visibility_async(target_type, child_base, info)
         return rows
 
     def _filter_child_rows(
@@ -7419,7 +7479,9 @@ class FilterSet(
         ``_collect_nested_visibility_querysets_sync`` / ``_async`` and threaded
         through ``_nested_qs_by_branch_id`` keyed by ``id(child_input)``; that
         stash is consumed by ``.get(id(...))`` here, so each arm's branches
-        derive once, before the permission pass and form validation, and an
+        derive once (a declared hop's visible rows once per request, read from
+        the hop map every arm and flat leaf shares), before the permission pass
+        and form validation, and an
         async-only target ``get_queryset`` does not raise ``SyncMisuseError``
         mid-``.qs``. Outside the pipeline the stash is ``None`` and the helper
         derives synchronously, which keeps the documented sync-misuse error.
@@ -7481,6 +7543,7 @@ class FilterSet(
             child_qs_by_branch = cls._derive_related_visibility_querysets_sync(
                 child_input,
                 info,
+                hop_visibility=_flat_hop_visibility,
                 parent_db=queryset.db,
                 _depth=_depth,
                 _branch_path=_branch_path,
@@ -7799,6 +7862,8 @@ class FilterSet(
         run_permissions: bool = True,
         _depth: int = 0,
         _branch_path: str = "",
+        _hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
+        | None = None,
     ) -> models.QuerySet[_M]:
         """Sync resolver entry point (Decision 8).
 
@@ -7827,11 +7892,18 @@ class FilterSet(
         visibility hook sees the parent's shard (report Defect 3). ``_branch_path``
         is the declared path the derivation re-enters under (``""`` for a consumer
         call: the root), stashed on the instance so its form errors carry it.
+        ``_hop_visibility`` is the request-wide hop map the derivation hands each
+        nested child apply (``None`` for a consumer call: a fresh map), created
+        before the first derivation, so every nested branch, logical arm and flat
+        leaf of the request reads one derivation per declared hop
+        (``_declared_hop_rows``).
         """
         cls._assert_logic_depth(_depth)
+        hop_visibility = {} if _hop_visibility is None else _hop_visibility
         child_qs_by_branch = cls._derive_related_visibility_querysets_sync(
             input_value,
             info,
+            hop_visibility=hop_visibility,
             parent_db=queryset.db,
             _depth=_depth,
             _branch_path=_branch_path,
@@ -7839,11 +7911,11 @@ class FilterSet(
         nested_qs_by_branch_id = cls._collect_nested_visibility_querysets_sync(
             input_value,
             info,
+            hop_visibility=hop_visibility,
             parent_db=queryset.db,
             _depth=_depth,
             _branch_path=_branch_path,
         )
-        hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] = {}
         data, request, constrained, form_bindings = cls._apply_common_prelude(
             input_value,
             queryset,
@@ -7874,13 +7946,16 @@ class FilterSet(
         run_permissions: bool = True,
         _depth: int = 0,
         _branch_path: str = "",
+        _hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
+        | None = None,
     ) -> models.QuerySet[_M]:
         """Async sibling of `apply_sync` awaiting every blocking step.
 
         Steps:
             1. Await the top-level ``_derive_related_visibility_querysets_async``
                so every active ``RelatedFilter`` branch's target
-               ``get_queryset`` runs on the async path.
+               ``get_queryset`` runs on the async path, into the request-wide
+               hop map every later step reads (``_await_declared_hop_rows``).
             2. Await, via ``_derive_flat_hop_visibility_async``, the target
                visibility of every declared hop a top-level flat relation
                leaf the form data names walks, into the request-wide hop map.
@@ -7925,18 +8000,20 @@ class FilterSet(
         ``_apply_common_finalize`` / ``_derive_related_visibility_querysets_sync``).
 
         ``_depth`` (related-recursion cap, report Defect 5), the parent
-        ``queryset.db`` alias (report Defect 3) and ``_branch_path`` thread through
-        the top-level derivations and the arm pre-walk exactly as in ``apply_sync``.
+        ``queryset.db`` alias (report Defect 3), ``_branch_path`` and
+        ``_hop_visibility`` thread through the top-level derivations and the arm
+        pre-walk exactly as in ``apply_sync``.
         """
         cls._assert_logic_depth(_depth)
+        flat_hop_visibility = {} if _hop_visibility is None else _hop_visibility
         child_qs_by_branch = await cls._derive_related_visibility_querysets_async(
             input_value,
             info,
+            hop_visibility=flat_hop_visibility,
             parent_db=queryset.db,
             _depth=_depth,
             _branch_path=_branch_path,
         )
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] = {}
         await cls._derive_flat_hop_visibility_async(
             input_value,
             info,

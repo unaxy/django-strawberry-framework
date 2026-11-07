@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 437 done, 113 to do. The CHANGELOG entries filed here moved to
+Progress: 438 done, 112 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1813,6 +1813,18 @@ Progress: 437 done, 113 to do. The CHANGELOG entries filed here moved to
   longer sibling `RelatedFilter`'s continuation is refused at build, as its joined spelling is; a GlobalID crossing
   validates the crossed relation's type. Tests: `tests/filters/test_sets.py`, `test_finalizer.py`,
   `tests/test_sets_mixins.py`, live `test_crossing_lookup_filters_api.py`. Filed 792 and 793
+- [x] 797. fixed: a declared hop's target `get_queryset` runs once per request however many nested branches (at every
+  level), logical arms and flat leaves walk it. `filters/sets.py::FilterSet._declared_hop_rows` /
+  `FilterSet._await_declared_hop_rows` are the one derivation, keyed `(id(<RelatedFilter>), alias)` in the request hop
+  map `FilterSet.apply_sync` / `FilterSet.apply_async` create before the first nested derive and hand each nested
+  child's `apply_*` (private `_hop_visibility`); `FilterSet._derive_related_visibility_querysets_sync` / `_async`,
+  `FilterSet._hop_visible_rows` and `FilterSet._await_hop_visibility_async` read it, and `FilterSet._iter_visibility_steps`
+  yields each branch's declaration (`FilterSet._branch_visibility_seed` raises the unresolved-target error). Rows and
+  errors are unchanged; a declared hop and an undeclared relation to one type stay two hops; projection children read
+  no hop (spec-027 corrected). Tests: live
+  `test_relation_filter_defaults_api.py::test_one_declared_hop_runs_its_target_scope_once_however_many_branches_and_leaves_walk_it`
+  (sync, async, async-only hooks; exact statement counts), `tests/filters/test_sets.py::test_each_arm_branch_derives_once_on_both_colors`
+  (one run for four arms)
 
 ## Outside review of the fixes
 
@@ -2098,9 +2110,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   expected a number but got <Shelf: open>`) on every walked reverse, many-to-many and two-hop key, supplied empty or
   left out, where unwalked and django-filter answer the rows: 784's names-no-row fallback re-binds the override to the
   target's `pk`; a pk default and forward keys work. Found researching 790
-- [ ] 797. (robustness, gate first) A request filtering through a nested branch (`branch: {...}`) beside a flat leaf
-  walking the same hop runs the hop target type's `get_queryset` twice (the nested map and the flat hop map are
-  separate), where CHANGELOGTODO 561 says the hook runs once per request. Found researching 790
 
 ## To do: holes found re-checking the fixes
 

@@ -442,6 +442,8 @@ def test_connection_resolver_composition_order() -> None:
             run_permissions: bool = True,
             _depth: int = 0,
             _branch_path: str = "",
+            _hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
+            | None = None,
         ) -> models.QuerySet[_M]:
             calls.append("filter")
             return super().apply_sync(
@@ -451,6 +453,7 @@ def test_connection_resolver_composition_order() -> None:
                 run_permissions=run_permissions,
                 _depth=_depth,
                 _branch_path=_branch_path,
+                _hop_visibility=_hop_visibility,
             )
 
     class _OrderedOrder(OrderSet):

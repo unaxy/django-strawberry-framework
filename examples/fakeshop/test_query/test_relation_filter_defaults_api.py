@@ -3,6 +3,8 @@
 Ordinary JSON arguments reach unbound FilterSet apply methods or a consumer's direct
 queryset property. Native output types preserve the whole root universe independently
 of relation visibility. Explicit pass-through error policy exposes configuration refusals.
+A declared hop's target scope runs once per request however many nested branches,
+logical arms and flat leaves walk it, at every nesting level.
 """
 
 import asyncio
@@ -596,6 +598,128 @@ def test_a_projected_method_reading_the_database_costs_one_lookup_in_either_spel
     assert payload == _expected(["alpha", "beta"]), payload
     assert len(_table_sql(sql, "library_shelf")) == 1, sql
     assert len(_table_sql(sql, "library_branch")) == 2, sql
+
+
+def _counted_target(
+    model: type[Model],
+    runs: list[str],
+    *,
+    asynchronous: bool,
+) -> type[DjangoType]:
+    """A target type whose scope records its run and reads the database once (a ``Genre`` probe)."""
+    label = model.__name__
+
+    def scope(_cls: type[DjangoType], queryset: QuerySet[Model], _info: object) -> QuerySet[Model]:
+        runs.append(label)
+        _ = models.Genre.objects.exists()
+        return queryset.exclude(topic="secret") if model is models.Shelf else queryset
+
+    async def async_scope(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        _info: object,
+    ) -> QuerySet[Model]:
+        runs.append(label)
+        _ = await models.Genre.objects.aexists()
+        return queryset.exclude(topic="secret") if model is models.Shelf else queryset
+
+    return type(
+        f"Counted{label}",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": model, "fields": ("id",)}),
+            "get_queryset": classmethod(async_scope if asynchronous else scope),
+        },
+    )
+
+
+def _book_filter() -> type[FilterSet]:
+    class BranchLeaf(FilterSet):
+        class Meta:
+            model = models.Branch
+            fields = {"name": ["exact"]}
+
+    class ShelfHop(FilterSet):
+        branch = RelatedFilter(BranchLeaf, field_name="branch")
+
+        class Meta:
+            model = models.Shelf
+            fields = {"code": ["exact"]}
+
+    class BookRoot(FilterSet):
+        shelf = RelatedFilter(ShelfHop, field_name="shelf")
+
+        class Meta:
+            model = models.Book
+            fields = {"title": ["exact"]}
+
+    return BookRoot
+
+
+_SHARED_HOP_SHAPES: dict[str, tuple[JSONObject, tuple[str, ...]]] = {
+    "branch-and-flat": (
+        {"shelves": {"code": "match"}, "shelves__code": "match"},
+        ("Shelf",),
+    ),
+    "branch-and-projected": (
+        {"shelves": {"code": "match"}, "shelves__code_is": "match"},
+        ("Shelf",),
+    ),
+    "branch-in-each-arm": (
+        {
+            "shelves": {"code": "match"},
+            "or_": [{"shelves": {"code": "match"}}, {"shelves__code": "match"}],
+            "and_": [{"not_": {"shelves": {"topic": "closed"}}}],
+        },
+        ("Shelf",),
+    ),
+    "two-level-branch-and-flat": (
+        {"shelf": {"branch": {"name": "alpha"}}, "shelf__branch__name": "alpha"},
+        ("Shelf", "Branch"),
+    ),
+    "two-level-walked-and-flat": (
+        {"shelf": {"branch__name": "alpha"}, "shelf__branch__name": "alpha"},
+        ("Shelf", "Branch"),
+    ),
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async", "async-only"])
+@pytest.mark.parametrize("shape", list(_SHARED_HOP_SHAPES))
+def test_one_declared_hop_runs_its_target_scope_once_however_many_branches_and_leaves_walk_it(
+    shape: str,
+    transport: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """Nested branches, logical arms and flat leaves walking one declaration share its target scope.
+
+    Each declared hop's target ``get_queryset`` runs once per request at every
+    nesting level, and its one database read is the request's only ``Genre``
+    statement per hop, on ``apply_sync`` and on ``apply_async`` with a sync or
+    an ``async def`` hook.
+    """
+    _world()
+    where, expected_runs = _SHARED_HOP_SHAPES[shape]
+    runs: list[str] = []
+    asynchronous = transport == "async-only"
+    books = shape.startswith("two-level")
+    targets = (
+        _counted_target(models.Shelf, runs, asynchronous=asynchronous),
+        *((_counted_target(models.Branch, runs, asynchronous=asynchronous),) if books else ()),
+    )
+    wire = "sync" if transport == "sync" else "async"
+    schema = (
+        _holder(_book_filter(), model=models.Book, label="title", targets=targets, transport=wire)
+        if books
+        else _holder(_branch_filter(), targets=targets, transport=wire)
+    )
+    sql = record_compiled_sql()
+    payload = _post(schema, where, label="title" if books else "name", transport=wire)
+    universe = ("alpha", "beta") if books else ("alpha", "beta", "gamma")
+    assert payload == _expected(["alpha"], universe=universe), payload
+    assert runs == list(expected_runs)
+    assert len(_table_sql(sql, "library_genre")) == len(expected_runs), sql
 
 
 @pytest.mark.django_db
