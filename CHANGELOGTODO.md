@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 180 to do.
+Progress: 0 done, 181 to do.
 
 ## From dry-0_0_15_3
 
@@ -758,6 +758,12 @@ Progress: 0 done, 180 to do.
   `Meta.fields` `"__all__"` no longer includes such a lookup class on any set. Remedies: register a Django class
   under the name you want, apply a set no connection serves from your own resolver (`FilterInput[...]` and
   `apply_sync`), or set `Meta.relation_shapes = {"<relation>": "list"}` to drop a nested connection
+- [ ] 778. CHANGELOG entry for item 714: a `FilterSet` without `Meta.model` named as a `DjangoType`'s
+  `Meta.filterset_class` now raises `ConfigurationError` at `finalize_django_types()`, naming the set, the type and
+  its model, where it built a filter input that refused every request. Declare `Meta.model` (with `Meta.fields = []`
+  to publish only the declared filters) on the set or a subclass. A model-less set applied from your own resolver
+  refuses a leaf filter by naming the missing `Meta.model`, and its `RelatedFilter` branches still apply; a model-less
+  related-only `OrderSet` remains a valid `Meta.orderset_class`
 
 ## From dry-upstream-0_0_15
 

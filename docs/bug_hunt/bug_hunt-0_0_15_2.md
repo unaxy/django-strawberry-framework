@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 428 done, 108 to do. The CHANGELOG entries filed here moved to
+Progress: 429 done, 108 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1694,6 +1694,18 @@ Progress: 428 done, 108 to do. The CHANGELOG entries filed here moved to
   working cells unchanged. Package rows in `tests/filters/test_finalizer.py` and `tests/filters/test_all_lookups.py`;
   README, spec-027, spec-045 and its rationale, GLOSSARY `FilterSet` and prove-then-clone. `django.contrib.postgres`
   lookups typed only, unrun. Filed 776
+- [x] 714. (robustness) fixed: a `FilterSet` declaring no `Meta.model` named as a `DjangoType`'s
+  `Meta.filterset_class` is refused with `ConfigurationError` when it binds at `finalize_django_types()`, naming the
+  set, the owner type, its model and the remedy (`Meta.model`, with `Meta.fields = []` for declared filters only):
+  `types/finalizer.py::_bind_filterset_owner`, spec-027 Decision 4's owner-model rule, which the common binder skipped
+  for a `None` model. It built and published an input every request refused (36 of 36 grid requests). Serving it
+  instead (django-filter / graphene-django shape, absent from strawberry-graphql-django) walked no relation visibility
+  and skipped the build refusals a backed set gets. A model-less base set still builds; a model-less unbound set
+  applied with a leaf names the missing `Meta.model` (`filters/sets.py::FilterSet._leaf_form_entries`) and its
+  `RelatedFilter` branches still apply; a model-less related-only `OrderSet` stays a legal `Meta.orderset_class`
+  (spec-028). The now-unreachable `model is None` arm of `FilterSet._is_own_pk_under_relay_owner` is gone. Tests:
+  `tests/filters/test_finalizer.py`, live `test_filter_apply_arguments_api.py` and `test_order_apply_arguments_api.py`;
+  spec-027, spec-028, README, GLOSSARY `FilterSet` and `Meta.filterset_class`. Filed 777
 
 ## Outside review of the fixes
 
@@ -1734,11 +1746,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 714. (robustness) A `FilterSet` with no `Meta.model` set as a Relay `DjangoType`'s `Meta.filterset_class` and
-  served by `DjangoConnectionField` builds and publishes its filter input (a `RangeFilter` over `occurred_at` as
-  `LooseOccurredAtRangeInputType` with `String` axes), but any value sent to it answers a masked `ConfigurationError`
-  "'span' is not a filter input field; it would apply nothing": the build accepts what every request refuses.
-  Found verifying 624
 - [ ] 719. A `DjangoModelFormMutation` update omitting a `disabled` `DateTimeField` over a stored
   datetime with microseconds writes it with the microseconds dropped: `BaseForm.get_initial_for_field` strips them,
   so the field's initial is not the stored value and 524's restore does not apply; spec-038 Decision 8 says omitted
@@ -1972,6 +1979,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   key pinned building by
   `tests/filters/test_finalizer.py::test_a_served_leaf_the_build_does_not_walk_builds[reverse-key-lookup-no-relation-resolves]`).
   Found fixing 709
+- [ ] 777. (robustness) A wired `OrderSet` (with or without `Meta.model`) declaring
+  `RelatedOrder(<set>, field_name=<no such relation>)` builds and publishes its order input, and every `orderBy:` term
+  through that branch is refused per request ("invalid order path"), where the filter side refuses a `RelatedFilter`
+  whose `field_name` reaches no relation at build; spec-028 defers order path validation to apply time. GOAL: the build
+  accepts what every request refuses. Found researching 714
 
 ## To do: holes found re-checking the fixes
 
