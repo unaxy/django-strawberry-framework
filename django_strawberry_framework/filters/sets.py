@@ -208,7 +208,9 @@ from .base import (
     TextPatternFilter,
     _bound_field_name,
     _bound_value_field,
+    _declared_field_name,
     _django_prepares,
+    _filterset_walked_lookup,
     _integer_compared_column,
     _reads_integer_transform,
     copied_declared_filter,
@@ -1420,7 +1422,7 @@ def _candidate_metadata_for(
         return None
     if _expansion_record(filter_instance) is not None:
         return None
-    path_plan = classify_path(model, _bound_field_name(filter_instance))
+    path_plan = classify_path(model, _declared_field_name(filter_instance))
     eligible = (
         path_plan.first_many_index is not None
         and getattr(filter_instance, "method", None) is None
@@ -2038,7 +2040,7 @@ def _restrict_through_branch(
     admitted = _admitted_rows(owner, declared_attr, related_filter, child_rows, request)
     if admitted is None:
         return queryset
-    return _restrict_to_related(queryset, _bound_field_name(related_filter), admitted, via)
+    return _restrict_to_related(queryset, _declared_field_name(related_filter), admitted, via)
 
 
 def _model_choice_members(value: object) -> list[models.Model] | None:
@@ -2238,7 +2240,7 @@ def _hop_model(hop: RelationHop) -> type[models.Model]:
 def _hop_relation(hop: RelationHop) -> str:
     """Return the ORM path a hop crosses from the model it starts on."""
     if isinstance(hop, DeclaredHop):
-        return _bound_field_name(_filter_declaration(hop)[1])
+        return _declared_field_name(_filter_declaration(hop)[1])
     return hop.declared_attr
 
 
@@ -2299,7 +2301,7 @@ def _require_relation_path(owner: type[FilterSet], declared_attr: str, f: Relate
     owner's model and the declaration's ``field_name`` only, never the target
     filter set, so a lazily resolved target is unaffected.
     """
-    field_name = _bound_field_name(f)
+    field_name = _declared_field_name(f)
     # Only model-backed sets expand their ``related_filters`` (see ``get_filters``).
     model = require(owner._meta.model, is_model_class)
     hops = leading_relation_hops(model, field_name)
@@ -2340,7 +2342,7 @@ def _require_correlated_target(
     target = f.filterset
     if target is None:
         return
-    field_name = _bound_field_name(f)
+    field_name = _declared_field_name(f)
     # Only model-backed sets expand their ``related_filters`` (see ``get_filters``).
     model = require(owner._meta.model, is_model_class)
     target_model: type[models.Model] | None = target._meta.model
@@ -2366,12 +2368,16 @@ def _require_correlated_target(
 def _filter_paths(filterset: type[FilterSet]) -> Iterator[str]:
     """Yield the ORM path of every leaf a target filter set exposes, its expanded copies included.
 
+    Each leaf's path is the one Django walks for it
+    (``filters/base.py::_filterset_walked_lookup``), a relation its ``lookup_expr``
+    continues across included: that is the path its walk reads.
+
     A ``RelatedFilter`` (declared, or copied by an expansion) is a branch, not a
     leaf; ``reject_captured_branches`` reads the declared ones apart.
     """
     for filter_instance in filterset._filter_table().values():
         if not isinstance(filter_instance, RelatedFilter):
-            yield _bound_field_name(filter_instance)
+            yield _filterset_walked_lookup(filterset, filter_instance)[0]
 
 
 @dataclass
@@ -2830,7 +2836,7 @@ def _queryset_integer_column(filter_instance: Filter, query: Query) -> ModelFiel
     try:
         _names, start, leftover = split_lookup(
             query,
-            LOOKUP_SEP.join((_bound_field_name(filter_instance), filter_instance.lookup_expr)),
+            LOOKUP_SEP.join((_declared_field_name(filter_instance), filter_instance.lookup_expr)),
         )
         walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover))
         output = read_attr(walk.lhs, "output_field", None)
@@ -3048,7 +3054,7 @@ def _expand_related_filter(
     if not target_filterset:
         return expanded
     target_filters = target_filterset._filters_along(path, scope)
-    relation = _bound_field_name(f)
+    relation = _declared_field_name(f)
     via = f"{truth.qualname(path[-1])}.{filter_name}"
     for child_name, field in target_filters.items():
         new_name = _branch_key(filter_name, child_name)
@@ -6029,21 +6035,21 @@ class FilterSet(
     ) -> tuple[tuple[RelationHop, ...], str] | None:
         """Return the hops a flat leaf's ORM path walks and the path left on the last target.
 
-        The hops are ``utils/permissions.py::walk_declared_relation_path``'s
-        visibility reading (``undeclared=True``) of the filter's ``field_name``:
-        each declared ``RelatedFilter`` hop, the chain the flat-path permission
-        gates fire along, then one undeclared hop per relation segment past them
-        (``alt_shelves``, ``items`` in ``items__name``). The path left is empty
-        for a relation-key leaf (``shelf``, ``shelf__branch``, ``alt_shelves``:
-        nothing after the last relation). ``None`` for a leaf whose walk reads no
-        visibility: a same-model leaf, a path whose relations no declaration
-        claims and whose models no type scopes (``UndeclaredHop.scope``), a
-        filter declared on this set holding a ``filter`` of its own
-        (``_own_filter``: a consumer ``method=`` or a callable stored on the
-        instance; its Python receives this set's queryset and owns its own
-        scoping; GOAL.md "Trust boundary"), a ``RelatedFilter`` (a branch,
-        never a leaf), and a ``ProjectedChildFilter``, whose hop is its
-        projection (``_projection_hop``).
+        The hops are ``utils/permissions.py::walk_declared_relation_path``'s visibility
+        reading (``undeclared=True``) of the path Django walks for the filter
+        (``filters/base.py::_filterset_walked_lookup``: its ``field_name``, and every
+        relation its ``lookup_expr`` continues across, ``shelf`` + ``tier__in`` walking
+        ``shelf__tier``): each declared ``RelatedFilter`` hop, the chain the flat-path
+        permission gates fire along, then one undeclared hop per relation segment past them
+        (``alt_shelves``, ``items`` in ``items__name``). The path left is empty for a
+        relation-key leaf (``shelf``, ``shelf__branch``, ``alt_shelves``: nothing after the
+        last relation). ``None`` for a leaf whose walk reads no visibility: a same-model
+        leaf, a path whose relations no declaration claims and whose models no type scopes
+        (``UndeclaredHop.scope``), a filter declared on this set holding a ``filter`` of its
+        own (``_own_filter``: a consumer ``method=`` or a callable stored on the instance;
+        its Python receives this set's queryset and owns its own scoping; GOAL.md "Trust
+        boundary"), a ``RelatedFilter`` (a branch, never a leaf), and a
+        ``ProjectedChildFilter``, whose hop is its projection (``_projection_hop``).
         """
         if (
             isinstance(filter_instance, (ProjectedChildFilter, RelatedFilter))
@@ -6052,7 +6058,7 @@ class FilterSet(
             return None
         hops, remainder = walk_declared_relation_path(
             cls,
-            _bound_field_name(filter_instance),
+            _filterset_walked_lookup(cls, filter_instance)[0],
             related_attr=cls._permission.traversal.related_attr,
             target_attr=cls._permission.target_attr,
             undeclared=True,
@@ -6178,7 +6184,8 @@ class FilterSet(
           (``_supplied_leaf_gates``), as ``<branch>: {<child filter>: ...}``
           does; a copy borrowed from another set is this set's own leaf;
         - any other leaf walking declared hops (``_flat_leaf_walk``) fires
-          ``utils/permissions.py::relation_path_gates`` over its ``field_name``:
+          ``utils/permissions.py::relation_path_gates`` over the path it walks
+          (``filters/base.py::_filterset_walked_lookup``):
           each walked branch gate and the last target set's gate for the path
           left there (its primary key for a relation-key leaf), whatever
           lookup, ``isnull`` or ``exclude`` the filter applies;
@@ -6200,7 +6207,7 @@ class FilterSet(
             return ()
         return relation_path_gates(
             cls,
-            _bound_field_name(filter_instance),
+            _filterset_walked_lookup(cls, filter_instance)[0],
             related_attr=cls._permission.traversal.related_attr,
             target_attr=cls._permission.target_attr,
         )
@@ -6363,7 +6370,7 @@ class FilterSet(
         this set's table, the same ``_meta.concrete_model``, reading the type
         this set is bound to). Empty for a single relation.
         """
-        relation = _bound_field_name(related_filter)
+        relation = _declared_field_name(related_filter)
         if LOOKUP_SEP not in relation:
             return ()
         return relation_path_visibility_types(
@@ -6510,7 +6517,10 @@ class FilterSet(
         (``_projection_child``), or for an undeclared hop the face its rows offer
         in place of one (``_UndeclaredHopSet``). A shallow copy of the
         per-request filter, so the form field it already built carries over and
-        this set's own instance is untouched. Only the class's ``filter`` reads
+        this set's own instance is untouched. The copy's ``lookup_expr`` is the one
+        applied where the walked path ends (``filters/base.py::_filterset_walked_lookup``:
+        ``in`` for ``shelf`` + ``tier__in``); the filter the set holds keeps the pair it
+        was declared with. Only the class's ``filter`` reads
         the copy's rebound ``field_name``: a filter holding a ``filter`` of its
         own (``_own_filter``, whose bound receiver stays the pre-copy object)
         never walks a hop (``_flat_leaf_walk``), so it never reaches here. A
@@ -6520,10 +6530,12 @@ class FilterSet(
         for a value naming no row its copy runs over the related rows
         (``_LeafChain.fallback``). A class-level override on a path into a
         target column runs over the last hop's visible target rows with the
-        path left on that target as its ``field_name``.
+        path left on that target as its ``field_name`` and the walked lookup as its
+        ``lookup_expr``.
         """
         terminal = copy.copy(filter_instance)
         terminal.field_name = field_name
+        terminal.lookup_expr = _filterset_walked_lookup(type(self), filter_instance)[1]
         target_set = (
             # The walk continues only past a declared hop whose target resolved to a set class.
             self._projection_child(_hop_target_set(hop))
@@ -6592,7 +6604,7 @@ class FilterSet(
                 self._bound_terminal(filter_instance, last, target_path),
             )
         target_pk = _hop_model(last)._meta.pk
-        if filter_instance.lookup_expr == "isnull":
+        if _filterset_walked_lookup(type(self), filter_instance)[1] == "isnull":
             return _LeafChain(
                 hops,
                 self._bound_terminal(filter_instance, last, target_pk.name),
@@ -6676,7 +6688,7 @@ class FilterSet(
         owner, related_filter = _filter_declaration(hop)
         admitted = _admitted_rows(owner, hop.declared_attr, related_filter, rows, self.request)
         via = owner._via_rows(related_filter, self._apply_info, self._hop_visibility(), outer.db)
-        return _reaches_related(outer, _bound_field_name(related_filter), admitted, via)
+        return _reaches_related(outer, _declared_field_name(related_filter), admitted, via)
 
     def _reaches_key(
         self,

@@ -2152,6 +2152,50 @@ def test_phase_2_5_rejects_a_callable_strategy_target_behind_an_untyped_hop(
     assert "callable" in msg
 
 
+def test_phase_2_5_rejects_a_callable_strategy_target_a_crossing_lookup_reaches() -> None:
+    """A GlobalID filter whose ``lookup_expr`` crosses into an encode-only type fails at build.
+
+    ``field_name="shelf", lookup_expr="branch"`` compares ``Branch`` keys, the target the
+    request-time walk validates against (the path Django walks, ``shelf__branch``), so the
+    audit refuses the encode-only ``Branch`` type rather than reading ``shelf`` alone.
+    """
+
+    def encode(_type_cls: type[DjangoType], _model: type[Model], _root: object) -> str:
+        return "BranchType"
+
+    class BranchType(DjangoType):
+        class Meta:
+            model = Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            globalid_strategy = encode
+
+    class CrossingFilter(FilterSet):
+        branch_is = GlobalIDFilter(field_name="shelf", lookup_expr="branch")
+
+        class Meta:
+            model = Book
+            fields = ()
+
+    class OwnerType(DjangoType):
+        class Meta:
+            model = Book
+            fields = ("id",)
+            interfaces = (relay.Node,)
+            filterset_class = CrossingFilter
+            primary = True
+
+    assert registry.get(Branch) is BranchType
+    assert registry.get(Book) is OwnerType
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    msg = str(exc_info.value)
+    assert "CrossingFilter" in msg
+    assert "encode-only" in msg
+    assert "callable" in msg
+
+
 def test_phase_2_5_rejects_globalid_filter_on_custom_strategy_target() -> None:
     """A GlobalID filter whose own-PK target overrides ``resolve_typename`` fails at build.
 

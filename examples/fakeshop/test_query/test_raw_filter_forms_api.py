@@ -6,7 +6,9 @@ input factory or assigning an owner. QueryDict is built by Django from a real qu
 argument, retaining repeated SelectMultiple keys that a generated filter input cannot spell.
 A declared list or lone range bound over a relation itself cleans each raw element as the
 target column the relation compares on (its ``to_field``, else the primary key), as
-``<relation>__<that column>`` cleans it; a ``method=`` filter on a relation cleans none.
+``<relation>__<that column>`` cleans it, and one whose ``lookup_expr`` crosses the relation
+cleans each as the column the crossing reaches; a ``method=`` filter on a relation cleans
+none.
 A number past an integer column's range, which django-filter's ``NumberFilter`` caps only
 from above (``-1e999999999999999999`` cleans to a decimal whose ``int()`` cannot finish),
 answers from the end it lies past without converting it, on both parents and on every
@@ -975,6 +977,18 @@ _RELATION_FILTERS: dict[str, Callable[[str], django_filters.Filter]] = {
     "array": lambda field_name: ArrayFilter(field_name=field_name, lookup_expr="in"),
     "lone-bound": lambda field_name: RangeFilter(field_name=field_name, lookup_expr="gte"),
     "crossing": lambda field_name: ListFilter(field_name=field_name, lookup_expr="code__in"),
+    "crossing-integer": lambda field_name: ListFilter(
+        field_name=field_name,
+        lookup_expr="tier__in",
+    ),
+    "crossing-integer-array": lambda field_name: ArrayFilter(
+        field_name=field_name,
+        lookup_expr="tier__in",
+    ),
+    "crossing-integer-control": lambda field_name: ListFilter(
+        field_name=f"{field_name}__tier",
+        lookup_expr="in",
+    ),
     "list-method": lambda field_name: ListFilter(
         field_name=field_name,
         lookup_expr="in",
@@ -1051,10 +1065,21 @@ def _relation_schema() -> DjangoSchema:
 
 
 def _relation_world() -> dict[str, str]:
-    """Create one matching and one other row per relation; answer each matching target's key."""
+    """Create one matching and one other row per relation; answer each matching target's key.
+
+    Each shelf's ``tier`` differs from its key, so a tier compared as a key answers other rows.
+    """
     branch = library_models.Branch.objects.create(name="Raw relations")
-    shelf = library_models.Shelf.objects.create(branch=branch, code="A-1")
-    other_shelf = library_models.Shelf.objects.create(branch=branch, code="B-1")
+    shelf = library_models.Shelf.objects.create(
+        branch=branch,
+        code="A-1",
+        tier=library_models.Shelf.Tier.UPPER,
+    )
+    other_shelf = library_models.Shelf.objects.create(
+        branch=branch,
+        code="B-1",
+        tier=library_models.Shelf.Tier.LOWER,
+    )
     first = library_models.Book.objects.create(shelf=shelf, title="First")
     second = library_models.Book.objects.create(shelf=other_shelf, title="Second")
     genre = library_models.Genre.objects.create(name="matching")
@@ -1224,6 +1249,40 @@ def test_a_declared_filter_over_a_relation_cleans_only_where_its_lookup_compares
     keys = _relation_world()
     query = query.format(key=keys["foreign-key"])
     result = _post_relation(parent, kind, "foreign-key", query)
+    assert result == _relation_answer(errors, rows), result
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize(
+    "kind",
+    ["crossing-integer", "crossing-integer-array", "crossing-integer-control"],
+)
+@pytest.mark.parametrize(
+    ("wire", "errors", "rows"),
+    [
+        pytest.param("3", [], ["First"], id="member"),
+        pytest.param("1", [], ["Second"], id="member-equal-to-another-shelfs-key"),
+        pytest.param("x", ["f: Enter a number."], [], id="junk"),
+        pytest.param(_OVERFLOW, [], [], id="overflow"),
+        pytest.param(f"3,{_OVERFLOW}", [], ["First"], id="overflow-beside-member"),
+    ],
+)
+def test_a_declared_list_crossing_a_relation_cleans_each_raw_element_as_the_crossed_column(
+    parent: str,
+    kind: str,
+    wire: str,
+    errors: list[str],
+    rows: list[str],
+) -> None:
+    """``?f=`` on ``shelf`` + ``tier__in`` reads each element as ``shelf__tier`` + ``in`` does.
+
+    On the first instance of a fresh package set and under a stock django-filter parent
+    alike, an element the ``tier`` column cannot hold is the form's error and one past
+    its integer range names no row, never Django's ``ValueError`` or ``OverflowError``.
+    """
+    _relation_world()
+    result = _post_relation(parent, kind, "foreign-key", f"f={wire}")
     assert result == _relation_answer(errors, rows), result
 
 

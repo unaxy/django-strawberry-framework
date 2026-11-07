@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 435 done, 110 to do. The CHANGELOG entries filed here moved to
+Progress: 437 done, 110 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1794,6 +1794,25 @@ Progress: 435 done, 110 to do. The CHANGELOG entries filed here moved to
   `::_defines_shipped_filter`, `::_SHIPPED_COMPARISON_REFUSALS`. Grid: 0 regressions, 0 hidden-row leaks, query
   counts unchanged. Pinned by `examples/fakeshop/test_query/test_relation_key_overrides_api.py` (sync, async, form,
   nested and flat child); spec-027, README, GLOSSARY `FilterSet`. Filed 789, 790
+- [x] 721. (robustness) fixed, the crossing half: a declared filter whose `lookup_expr` continues across a relation
+  (`ListFilter("shelf", lookup_expr="tier__in")`, `("venue", "opened_on__year__in")`) is typed and cleaned as the
+  column the path Django walks reaches, on every driver and under a stock django-filter parent, so a junk raw element
+  is the form's error and an out-of-range one names no row, where they were Django's `ValueError` / `OverflowError`
+  (a 500). `filters/base.py::_filterset_walked_lookup` asks Django's own path walk (`utils/querysets.py::split_lookup`,
+  cached per model) at read time; the filter object keeps its declared `field_name` / `lookup_expr` and the published
+  input key keeps the declared token. The `FilteredRelation` alias half is item 792. Tests:
+  `tests/filters/test_base.py`, live `test_crossing_lookup_filters_api.py`, `test_raw_filter_forms_api.py`; spec-027,
+  README, GLOSSARY `FilterSet`
+- [x] 749. fixed with 721: the flat-leaf walk, gates, terminal, captured-branch check, GlobalID target and the
+  finalizer's GlobalID audit read the walked path (`FilterSet._flat_leaf_walk`, `::_leaf_gates`, `::_bound_terminal`,
+  `::_filter_paths`, `types/finalizer.py::_audit_globalid_filter_strategies`), so a crossed hop is scoped by its target
+  type's `get_queryset` and gated as its `field_name="<rel>__<col>"` spelling is (a restricted branch no longer matches
+  for anon), a gate fires on the compared column, and a to-many crossing answers valid input instead of `FieldError`.
+  A class-level `filter` override on a column crossing runs on the walked per-request copy; one ending on a relation
+  key runs once as declared (784's rule); a `method=` filter reads its pair as declared. A crossing leaf entering a
+  longer sibling `RelatedFilter`'s continuation is refused at build, as its joined spelling is; a GlobalID crossing
+  validates the crossed relation's type. Tests: `tests/filters/test_sets.py`, `test_finalizer.py`,
+  `tests/test_sets_mixins.py`, live `test_crossing_lookup_filters_api.py`. Filed 792 and 793
 
 ## Outside review of the fixes
 
@@ -1834,14 +1853,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 721. (robustness) A declared `ListFilter` / `ArrayFilter` whose `lookup_expr` continues across a relation
-  (`ListFilter(field_name="holders", lookup_expr="year__in")`, `lookup_expr="pk__in"` / `"id__in"` over a relation)
-  or whose `field_name` is a `FilteredRelation` alias leaves its elements uncleaned, so `?f=x` under
-  `DjangoFilterBackend` / `FilterSet(data=...)` answers Django's `ValueError`, a 500. Typing question for the fix:
-  clean and type the element as the crossed column (`holders__year`'s `IntegerField`, the target pk for `pk__in`),
-  resolving `_bound_value_field` through the crossing walk (and the queryset for an alias) instead of answering the
-  relation. The crossing half shares 749's root (read `utils/querysets.py::split_lookup`'s joined path, rebinding
-  `field_name` and the lookup tail); the `FilteredRelation` alias half is its own. Found fixing 527
 - [ ] 724. (robustness) A `ListFilter` / `ArrayFilter` `in` over a `DurationField` binds a member past the backend's
   range raw: `?f=999999999 00:00:00` under `DjangoFilterBackend` / `FilterSet(data=...)` raises `OverflowError`
   ("Python int too large to convert to SQLite INTEGER"), a 500, where an integer column's `in` drops a member
@@ -1931,23 +1942,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
   anonymous raw `BookFilter` `shelf=<secret shelf pk>` returns the book on the shelf `ShelfType.get_queryset` hides,
   while `shelf__code=<its code>` returns nothing; a raw `BranchFilter` `shelves__books__shelf=<secret shelf pk>`
   matches through a shelf outside `BranchFilter.shelves`' `queryset=` scope, which `shelves=<pk>` refuses as "Select a
-  valid choice" and `shelves__code` excludes. GraphQL cannot name a head. Same root as 749: `_flat_leaf_walk` must walk
-  the path Django resolves for the predicate, heads included (one fix closes both); needs 750's actor. Found planning
-  216
+  valid choice" and `shelves__code` excludes. GraphQL cannot name a head. Not 749's root (749 landed reading the
+  walked path at read time; a head is never walked): `_flat_leaf_walk` must walk own and copied heads as relation-key
+  leaves; needs 750's actor. Found planning 216
 - [ ] 216. A dense `RelatedFilter` graph publishes a flat surface factorial in its size (path-relative expansion over every
   simple path: six sets each related to every other give about 11k flat keys per set, seven about 94k). The bound
   landed in `47dd4daa`; the maintainer ruled the per-declaration opt-out `RelatedFilter(flat=False)`. Plan:
-  `docs/related-filter-flat-opt-out-plan.md` (v7, reviewed five rounds). Blocked on 745 and on 748 / 749, which land
+  `docs/related-filter-flat-opt-out-plan.md` (v7, reviewed five rounds). Blocked on 745 and on 748, which land
   first. Tracked on BACKLOG.md `related_filter_flat_opt_out`, removed when this lands. Moved from Waiting on you
-- [ ] 749. A filter whose `lookup_expr` crosses a relation (`RelationPkMultipleFilter(field_name="shelf",
-  lookup_expr="branch__in")`, `CharFilter(field_name="shelf", lookup_expr="branch__name")`, the shape
-  `filters/base.py::_filterset_lookup_operand` documents) skips that hop's visibility and gates:
-  `filters/sets.py::FilterSet._flat_leaf_walk` walks only `_bound_field_name`, so `_leaf_chain` /
-  `_apply_relation_leaf` run the unbound filter over unscoped rows and `_leaf_gates` fires no gate for the crossed hop.
-  A restricted branch's pk matches through a visible book over GraphQL and raw forms, while `field_name="shelf__branch"`
-  returns nothing. Django already resolves the joined path (`utils/querysets.py::split_lookup` over
-  `Query.names_to_path`, which input typing uses); the walk and `_bound_terminal` must read it, rebinding both
-  `field_name` and the lookup tail. A to-many crossing raises `LookupValidationError`. Found probing 748
 - [ ] 750. A raw `FilterSet(data=..., request=...)` (`DjangoFilterBackend`) never sets `_apply_info` (only
   `apply_sync` / `apply_async` do, `_build_stashed_instance`), so every hop and choice hook scopes with `info=None`: a
   staff request is filtered as anonymous (`CatalogueBookFilter` `shelf=<secret pk>` returns nothing for staff), and a
@@ -2078,6 +2080,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 790. (robustness) A flat leaf left out of the request whose relation-key path a hop walks calls a consumer
   `filter` override twice (the `filters/sets.py::FilterSet._absent_leaf_applies` probe, then the apply), where
   unwalked calls it once; consumer code runs once per request elsewhere (780). Found verifying 784
+- [ ] 792. A declared filter whose path names a `FilteredRelation` alias (`ListFilter("vshelf", lookup_expr="in")`,
+  `CharFilter("vshelf__code")`, fakeshop's `par__occurred_at`) is resolved without the queryset that holds the alias:
+  list elements are uncleaned (junk is Django's `ValueError`, masked over GraphQL), and the alias hop reads no
+  visibility, so a shelf `ShelfType.get_queryset` hides matches for anon through `vshelf` on GraphQL, `apply_sync` and
+  raw forms (README: a flat path "answers as Django would if every row the target type's `get_queryset` hides ... did
+  not exist"). Needs the queryset seam (`parent.queryset.query`, the applied queryset's `_filtered_relations`, as
+  `filters/sets.py::_queryset_integer_column` reads it). Split from 721
+- [ ] 793. (robustness) A set used only through raw form drivers (`FilterSet(data=...)`, `DjangoFilterBackend`) never
+  publishes, so `refuse_unresolvable_lookup` / `refuse_identityless_relation` never run for it, though the glossary and
+  spec-027 say a refusal fires for "an unserved set at its first use": `tests/filters/test_base.py::_ScalarRangeSet`
+  with a refused `RangeFilter("parent", "range")` builds and serves raw. Found fixing 721
 
 ## To do: holes found re-checking the fixes
 

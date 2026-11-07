@@ -32,6 +32,7 @@ from apps.library.filters import BookFilter
 from apps.library.models import Book
 from django.db.models import Model
 from django.utils.functional import SimpleLazyObject
+from django_filters import CharFilter
 from typing_extensions import override
 
 import django_strawberry_framework.filters.sets as filter_sets
@@ -1174,6 +1175,45 @@ def test_a_longer_related_filter_capturing_a_branchs_flat_leaves_is_refused() ->
     assert "RelatedFilter 'shelf_branch' declares the relation 'shelf__branch'" in message
     assert "continues the relation 'shelf' of 'public_shelf' into 'branch'" in message
     assert "_ShelfFilter of 'public_shelf' reaches" in message
+
+
+def test_a_longer_related_filter_capturing_a_crossing_leaf_is_refused() -> None:
+    """A leaf whose ``lookup_expr`` crosses into the continuation is captured by the longer branch.
+
+    ``branch`` + ``shelves__code`` on the shelf set walks ``branch__shelves__code``, so beside
+    ``shelf`` the declaration ``shelf__branch__shelves`` would take the flat leaf
+    ``shelf__branch_shelf_codes``; the walk reads the path Django walks, never the
+    ``field_name`` alone, and the pair is refused.
+    """
+
+    class _ShelfFilter(FilterSet):
+        branch_shelf_codes = CharFilter(
+            field_name="branch",
+            lookup_expr="shelves__code",
+        )
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"topic": ["exact"]}
+
+    class _OtherShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class _BookFilter(FilterSet):
+        shelf = RelatedFilter(_ShelfFilter, field_name="shelf")
+        sibling_shelves = RelatedFilter(_OtherShelfFilter, field_name="shelf__branch__shelves")
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _BookFilter.get_filters()
+    message = str(excinfo.value)
+    assert "'sibling_shelves' declares the relation 'shelf__branch__shelves'" in message
+    assert "continues the relation 'shelf' of 'shelf' into 'branch__shelves'" in message
 
 
 def test_a_longer_related_order_capturing_a_branchs_terms_is_refused() -> None:

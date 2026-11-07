@@ -678,6 +678,14 @@ def _specimen_list_view(filterset_class: type[BaseFilterSet]) -> Callable[..., o
     return SpecimenListView.as_view()
 
 
+class _DelegatingListFilter(ListFilter):
+    """A ``ListFilter`` whose class-level ``filter`` override delegates to the shipped one."""
+
+    @override
+    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+        return super().filter(qs, value)
+
+
 def _declared_set(
     parent: type[django_filters.FilterSet | FilterSet],
     model: type[Model],
@@ -883,27 +891,16 @@ def test_declared_list_over_a_relation_cleans_each_element_as_its_key_column(
             ListFilter(field_name="content_object", lookup_expr="in"),
             id="generic-foreign-key",
         ),
-        pytest.param(
-            models.Book,
-            ListFilter(field_name="shelf", lookup_expr="code__in"),
-            id="lookup-crossing-the-relation",
-        ),
-        pytest.param(
-            models.Book,
-            ArrayFilter(field_name="shelf", lookup_expr="code__in"),
-            id="array-lookup-crossing-the-relation",
-        ),
     ],
 )
 def test_declared_list_over_a_relation_no_one_column_holds_cleans_no_element(
     model: type[Model],
     filter_instance: ListFilter | ArrayFilter,
 ) -> None:
-    """A relation compared on several columns or none, or crossed by the lookup, cleans nothing.
+    """A relation compared on several columns or on none cleans nothing.
 
     No one column holds a value of a multi-column ``ForeignObject`` or a
-    ``GenericForeignKey``; a ``lookup_expr`` continuing across the relation compares the
-    crossed column, whose value is no value of the relation's key.
+    ``GenericForeignKey``.
     """
     filterset = _declared_set(FilterSet, model, f=filter_instance)(
         data={},
@@ -911,6 +908,54 @@ def test_declared_list_over_a_relation_no_one_column_holds_cleans_no_element(
     )
 
     assert _column_form_field(filterset.filters["f"], element=True) is None
+
+
+@pytest.mark.parametrize(
+    "parent",
+    [FilterSet, django_filters.FilterSet],
+    ids=["package-set", "stock-django-filter-set"],
+)
+@pytest.mark.parametrize("filter_class", [ListFilter, ArrayFilter, _DelegatingListFilter])
+@pytest.mark.parametrize(
+    ("lookup_expr", "column"),
+    [
+        pytest.param("code__in", "code", id="text-column"),
+        pytest.param("tier__in", "tier", id="integer-choice-column"),
+        pytest.param("branch__in", "branch", id="relation-key-across-the-relation"),
+    ],
+)
+def test_declared_list_crossing_a_relation_cleans_as_the_crossed_column(
+    parent: type[django_filters.FilterSet | FilterSet],
+    filter_class: type[ListFilter | ArrayFilter],
+    lookup_expr: str,
+    column: str,
+) -> None:
+    """A ``lookup_expr`` continuing across a relation cleans each element as the column it reaches.
+
+    ``field_name="shelf", lookup_expr="tier__in"`` compares ``Shelf.tier``, so an element
+    is cleaned by the form field ``field_name="shelf__tier", lookup_expr="in"`` cleans it
+    with, under the package's set and a stock django-filter parent alike, a class-level
+    ``filter`` override delegating to the shipped one included, and a value the column
+    cannot hold is the form's error. The filter keeps the pair it was declared with.
+    """
+    filterset = _declared_set(
+        parent,
+        models.Book,
+        f=filter_class(field_name="shelf", lookup_expr=lookup_expr),
+        control=filter_class(field_name=f"shelf__{column}", lookup_expr="in"),
+    )(data={}, queryset=models.Book.objects.none())
+    crossing = filterset.filters["f"]
+
+    cleaned = _column_form_field(crossing, element=True)
+    control = _column_form_field(filterset.filters["control"], element=True)
+
+    assert cleaned is not None
+    assert control is not None
+    assert type(cleaned) is type(control)
+    if column != "code":
+        with pytest.raises(ValidationError):
+            _ = object_result(cleaned.clean, "junk")
+    assert (crossing.field_name, crossing.lookup_expr) == ("shelf", lookup_expr)
 
 
 @pytest.mark.parametrize("filterset_class", _CLEANED_SCALAR_SETS)
@@ -2558,6 +2603,31 @@ def test_globalid_target_relation_branch() -> None:
     assert target.definition is target_def
 
 
+@pytest.mark.parametrize(
+    "filter_",
+    [
+        pytest.param(GlobalIDFilter(field_name="shelf", lookup_expr="branch"), id="single"),
+        pytest.param(
+            GlobalIDMultipleChoiceFilter(field_name="shelf", lookup_expr="branch__in"),
+            id="multiple",
+        ),
+    ],
+)
+def test_globalid_target_of_a_lookup_crossing_a_relation_is_the_relation_it_reaches(
+    filter_: GlobalIDFilter | GlobalIDMultipleChoiceFilter,
+) -> None:
+    """``shelf`` + ``branch`` validates a ``Branch`` GlobalID: the path Django walks ends there."""
+    target_def = _definition(models.Branch, "BranchType")
+    _ = _definition(models.Shelf, "ShelfType")
+    bound = _bound(filter_, _owner())
+
+    target = _globalid_target(bound)
+
+    assert target is not None
+    assert target.definition is target_def
+    assert (bound.field_name, bound.lookup_expr) == (filter_.field_name, filter_.lookup_expr)
+
+
 def test_globalid_target_relation_branch_unresolved_target() -> None:
     """An unresolvable relation head returns `None` (decode without validation)."""
     owner = _owner()
@@ -2720,6 +2790,55 @@ def _unresolved_relation_owner(kind: str) -> DjangoTypeDefinition | None:
     definition, whose ``shelf`` / ``genres`` targets nothing registers.
     """
     return None if kind == "unbound" else _owner()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("owner_kind", ["unbound", "bound"])
+@pytest.mark.parametrize(
+    ("filter_class", "lookup", "wrap"),
+    [
+        pytest.param(GlobalIDFilter, "branch", False, id="crossing-exact"),
+        pytest.param(GlobalIDMultipleChoiceFilter, "branch__in", True, id="crossing-in"),
+    ],
+)
+@pytest.mark.parametrize("node_id", ["abc", "99999999999999999999"], ids=["junk", "past-range"])
+def test_unresolved_crossing_target_coerces_the_node_id_through_the_crossed_key(
+    *,
+    owner_kind: str,
+    filter_class: type[GlobalIDFilter | GlobalIDMultipleChoiceFilter],
+    lookup: str,
+    wrap: bool,
+    node_id: str,
+) -> None:
+    """``shelf`` + ``branch`` coerces its node id through ``Branch``'s key, the walk's target.
+
+    No type registers ``Branch``, so no ``type_name`` is validated, but the lookup applied
+    where the walked path ends is the relation's own ``exact`` / ``in``: an id the key
+    cannot hold answers ``GLOBALID_INVALID``, never Django's ``ValueError`` or the
+    backend's ``OverflowError``, and a coercible one matches the books on that branch.
+    """
+    # A branch first, so the crossed branch's key differs from the shelf's.
+    _ = models.Branch.objects.create(name="Other")
+    branch = models.Branch.objects.create(name="CrossedBranch")
+    shelf = models.Shelf.objects.create(code="CB-1", branch=branch)
+    _ = models.Book.objects.create(title="Kept", shelf=shelf)
+    f = _bound(
+        filter_class(field_name="shelf", lookup_expr=lookup),
+        _unresolved_relation_owner(owner_kind),
+    )
+    assert _globalid_target(f) is None
+    books = models.Book.objects.order_by("pk")
+
+    def apply(raw: str) -> list[str]:
+        encoded = relay.to_base64("Unregistered", raw)
+        return list(
+            f.filter(books, [encoded] if wrap else encoded).values_list("title", flat=True),
+        )
+
+    assert apply(str(saved_pk(branch))) == ["Kept"]
+    with pytest.raises(GraphQLError, match=r"not a valid Branch key value") as exc_info:
+        _ = apply(node_id)
+    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
 
 
 @pytest.mark.django_db

@@ -107,6 +107,7 @@ from django_filters.exceptions import FieldLookupError
 from django_filters.filterset import FILTER_FOR_DBFIELD_DEFAULTS as UPSTREAM
 from django_filters.filterset import BaseFilterSet, UnknownFieldBehavior
 from django_filters.filterset import FilterSetMetaclass as DjangoFilterMetaclass
+from django_filters.utils import label_for_filter
 from django_filters.widgets import SuffixedMultiWidget
 from graphql import GraphQLError
 from typing_extensions import override
@@ -136,6 +137,7 @@ from django_strawberry_framework.filters.base import (
     MembershipInFilter,
     RelationPkFilter,
     RelationPkMultipleFilter,
+    _filterset_walked_lookup,
     _GlobalIDMultipleChoiceField,
     membership_in_filter_class,
 )
@@ -185,7 +187,11 @@ from django_strawberry_framework.utils._narrowing import (
     require,
 )
 from django_strawberry_framework.utils.input_values import UNSET
-from django_strawberry_framework.utils.permissions import DeclaredHop, UndeclaredHop
+from django_strawberry_framework.utils.permissions import (
+    DeclaredHop,
+    UndeclaredHop,
+    relation_path_gates,
+)
 from django_strawberry_framework.utils.relations import ClassifiedPath, classify_path
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.widgets import multi_widget_keys
@@ -14465,6 +14471,241 @@ def test_undeclared_relation_to_a_hooked_type_walks_one_hop_per_relation() -> No
     assert [hop.owner for hop in hops] == [BranchPaths, None]
     assert rest == "title"
     assert BranchPaths._flat_leaf_walk(filters["by_pk"]) is None
+
+
+def _by_tier(
+    queryset: QuerySet[library_models.Book],
+    _name: str,
+    _value: object,
+) -> QuerySet[library_models.Book]:
+    """A ``method=`` handler applying nothing."""
+    return queryset
+
+
+class _CrossingBookFilter(FilterSet):
+    """A Book set whose ``lookup_expr`` continues the path across ``shelf``."""
+
+    tiers = ListFilter(field_name="shelf", lookup_expr="tier__in")
+    tiers_by_method = ListFilter(field_name="shelf", lookup_expr="tier__in", method=_by_tier)
+    shelf = RelatedFilter("_CrossingShelfFilter", field_name="shelf")
+
+    class Meta:
+        model = library_models.Book
+        fields = ()
+
+
+class _CrossingShelfFilter(FilterSet):
+    """The Shelf side of a cycle through ``_CrossingBookFilter``'s crossing leaf."""
+
+    books = RelatedFilter(_CrossingBookFilter, field_name="books")
+
+    class Meta:
+        model = library_models.Shelf
+        fields = ()
+
+
+def test_a_lookup_crossing_a_relation_walks_the_path_django_walks() -> None:
+    """A leaf whose ``lookup_expr`` crosses a relation walks, scopes and gates that hop.
+
+    ``field_name="shelf", lookup_expr="tier__in"`` walks the ``shelf`` hop and runs ``in``
+    on ``tier`` over its visible rows, as ``field_name="shelf__tier"`` does, and fires the
+    hop's gates; a ``method=`` twin reads its pair as declared and walks nothing.
+    """
+    _hide(library_models.Shelf, topic="secret")
+    table = _CrossingBookFilter._filter_table()
+
+    walk = _CrossingBookFilter._flat_leaf_walk(table["tiers"])
+    assert walk is not None
+    hops, rest = walk
+    assert [hop.declared_attr for hop in hops] == ["shelf"]
+    assert rest == "tier"
+    assert _CrossingBookFilter._leaf_gates(table["tiers"]) == relation_path_gates(
+        _CrossingBookFilter,
+        "shelf__tier",
+        related_attr=_CrossingBookFilter._permission.traversal.related_attr,
+        target_attr=_CrossingBookFilter._permission.target_attr,
+    )
+    assert _CrossingBookFilter._flat_leaf_walk(table["tiers_by_method"]) is None
+    assert _filterset_walked_lookup(_CrossingBookFilter, table["tiers_by_method"]) == (
+        "shelf",
+        "tier__in",
+    )
+
+
+def test_a_crossing_leaf_keeps_its_declared_pair_wherever_it_is_read() -> None:
+    """The package never rewrites the filter: every consumer read sees the declared pair.
+
+    The class's declaration, its published table, an instance's copy and the label
+    django-filter derives from them read ``("shelf", "tier__in")``; only the package's
+    own reads walk ``("shelf__tier", "in")``.
+    """
+    instance = _CrossingBookFilter(
+        data={"tiers": "1"},
+        queryset=library_models.Book.objects.none(),
+    )
+    for filter_instance in (
+        _CrossingBookFilter.declared_filters["tiers"],
+        _CrossingBookFilter.base_filters["tiers"],
+        _CrossingBookFilter._filter_table()["tiers"],
+        instance.filters["tiers"],
+    ):
+        assert (filter_instance.field_name, filter_instance.lookup_expr) == ("shelf", "tier__in")
+    assert instance.filters["tiers"].label == label_for_filter(
+        library_models.Book,
+        "shelf",
+        "tier__in",
+    )
+    assert _filterset_walked_lookup(_CrossingBookFilter, instance.filters["tiers"]) == (
+        "shelf__tier",
+        "in",
+    )
+
+
+def test_an_expanded_copy_of_a_crossing_leaf_walks_from_the_set_holding_it() -> None:
+    """A copy expanded around a cycle walks its rebased path on the set holding it.
+
+    ``_CrossingShelfFilter.books`` copies the Book leaf as ``books__shelf`` +
+    ``tier__in``, and ``_CrossingBookFilter.shelf`` copies that copy back as
+    ``shelf__books__shelf`` + ``tier__in``: each reads the path its own model walks,
+    whichever set published first, and keeps the pair its expansion gave it.
+    """
+    shelf_table = _CrossingShelfFilter._filter_table()
+    book_table = _CrossingBookFilter._filter_table()
+    shelf_copy = shelf_table["books__tiers"]
+    cycle_copy = book_table["shelf__books__tiers"]
+
+    assert (shelf_copy.field_name, shelf_copy.lookup_expr) == ("books__shelf", "tier__in")
+    assert _filterset_walked_lookup(_CrossingShelfFilter, shelf_copy) == (
+        "books__shelf__tier",
+        "in",
+    )
+    assert (cycle_copy.field_name, cycle_copy.lookup_expr) == ("shelf__books__shelf", "tier__in")
+    assert _filterset_walked_lookup(_CrossingBookFilter, cycle_copy) == (
+        "shelf__books__shelf__tier",
+        "in",
+    )
+
+
+def test_a_refused_crossing_lookup_names_the_pair_it_was_declared_with() -> None:
+    """A crossing lookup Django resolves on no queryset is refused naming the declared pair."""
+
+    class RefusedCrossing(FilterSet):
+        tiers = ListFilter(field_name="shelf", lookup_expr="tier__bogus")
+
+        class Meta:
+            model = library_models.Book
+            fields = ()
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"'tiers' has field_name 'shelf' and lookup_expr 'tier__bogus'",
+    ):
+        _ = RefusedCrossing._filter_table()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "lookup_expr"),
+    [
+        pytest.param("shelf_alias", "tier__in", id="queryset-alias-first-name"),
+        pytest.param("tier_total", "in", id="annotation-first-name"),
+        pytest.param("shelf", "in", id="no-hop-past-the-field-name"),
+        pytest.param("shelf", "isnull", id="lookup-on-the-relation"),
+    ],
+)
+def test_a_pair_crossing_no_relation_django_walks_is_read_as_declared(
+    field_name: str,
+    lookup_expr: str,
+) -> None:
+    """Only a ``lookup_expr`` Django walks as a path past ``field_name`` moves into it.
+
+    A first name only the queryset holds (a ``FilteredRelation`` alias, an annotation)
+    is refused by Django on a fresh query, so the pair is read as declared; so is one
+    whose lookup applies to the field itself.
+    """
+
+    class Declared(FilterSet):
+        f = ListFilter(field_name=field_name, lookup_expr=lookup_expr)
+
+        class Meta:
+            model = library_models.Book
+            fields = ()
+
+    assert _filterset_walked_lookup(Declared, Declared.declared_filters["f"]) == (
+        field_name,
+        lookup_expr,
+    )
+
+
+def test_a_crossing_pair_on_a_set_with_no_model_is_read_as_declared() -> None:
+    """With no model there is no path to walk: the filter's own pair answers."""
+    crossing = ListFilter(field_name="shelf", lookup_expr="tier__in")
+
+    assert _filterset_walked_lookup(None, crossing) == ("shelf", "tier__in")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "key",
+    ["publisher_is", "publishers_in", "control"],
+)
+def test_a_globalid_crossing_into_a_node_id_column_matches_its_joined_spelling(key: str) -> None:
+    """``edition`` + ``publisher`` compares the publisher's ``relay.NodeID`` column.
+
+    The target type's id is ``house_code``, so the predicate compiles on
+    ``edition__publisher__house_code`` with the lookup applied where the walked path ends
+    (``exact`` / ``in``), never the declared ``publisher`` tail, and matches the printing
+    ``field_name="edition__publisher"`` matches. The target type keeps the default hook.
+    """
+
+    class PublisherNode(DjangoType):
+        house_code: strawberry.relay.NodeID[str]
+
+        class Meta:
+            model = library_models.Publisher
+            fields = ("id", "name", "house_code")
+            interfaces = (strawberry.relay.Node,)
+
+    class CrossingPrintingFilter(FilterSet):
+        publisher_is = GlobalIDFilter(field_name="edition", lookup_expr="publisher")
+        publishers_in = GlobalIDMultipleChoiceFilter(
+            field_name="edition",
+            lookup_expr="publisher__in",
+        )
+        control = GlobalIDFilter(field_name="edition__publisher")
+
+        class Meta:
+            model = library_models.Printing
+            fields = ()
+
+    class PrintingNode(DjangoType):
+        class Meta:
+            model = library_models.Printing
+            fields = ("id", "run_size")
+            interfaces = (strawberry.relay.Node,)
+            filterset_class = CrossingPrintingFilter
+
+    finalize_django_types()
+    assert registry.get(library_models.Publisher) is PublisherNode
+    assert registry.get(library_models.Printing) is PrintingNode
+    houses = [
+        library_models.Publisher.objects.create(name=name, house_code=code)
+        for name, code in (("H", "H1"), ("J", "H2"))
+    ]
+    for index, house in enumerate(houses):
+        edition = library_models.Edition.objects.create(
+            isbn_13=f"978000000000{index}",
+            publisher=house,
+        )
+        _ = library_models.Printing.objects.create(edition=edition, run_size=5 + index)
+    # The model-label strategy names the publisher; its node id is the ``house_code``.
+    node_id = strawberry.relay.to_base64("library.publisher", houses[1].house_code)
+    value: object = [node_id] if key == "publishers_in" else node_id
+    printings = library_models.Printing.objects.order_by("pk")
+    filterset = CrossingPrintingFilter(data=QueryDict(mutable=True), queryset=printings)
+
+    matched: QuerySet[library_models.Printing] = filterset.filters[key].filter(printings, value)
+
+    assert [printing.run_size for printing in matched] == [6]
 
 
 class _HopShelfFilter(FilterSet):

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 186 to do.
+Progress: 0 done, 187 to do.
 
 ## From dry-0_0_15_3
 
@@ -803,6 +803,15 @@ Progress: 0 done, 186 to do.
   for such inputs). `forms.JSONField`, `MultipleChoiceField`, a bare `forms.Field` and a choice column keep their
   types. An update omitting such a field binds what the form presents for it (its `prepare_value` of the stored value),
   which that `prepare_value` must accept
+- [ ] 794. CHANGELOG entry for items 721 and 749: a declared filter whose `lookup_expr` continues across a relation
+  (`ListFilter(field_name="shelf", lookup_expr="tier__in")`) now answers as `field_name="shelf__tier",
+  lookup_expr="in"`: values are typed and cleaned as the crossed column (a raw form answers the form's error, not a
+  500), every crossed hop's `get_queryset` scopes the match and its `check_<field>_permission` gates fire (a hidden
+  related row no longer matches), a to-many crossing answers valid input, and a GlobalID crossing validates the
+  crossed relation's type. Such shapes over a relation key that were refused at schema build now build. The filter's
+  own `field_name` / `lookup_expr` and the published input key are unchanged; a class-level `filter` override on a
+  column crossing now runs over the crossed hop's visible rows with the walked `field_name` / `lookup_expr`, as it
+  does under the joined spelling
 
 ## From dry-upstream-0_0_15
 

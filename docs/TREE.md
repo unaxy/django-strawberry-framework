@@ -758,6 +758,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_connection_names_api.py  # Live connection selection names and row-fetch elision under schema name conversion.
 ├── test_connection_pagination_api.py  # Live /graphql pagination error containment and ``totalCount`` gating for connections.
 ├── test_converter_outputs_api.py # Native HTTP converter verdicts requiring consumer scalar or column declarations.
+├── test_crossing_lookup_filters_api.py  # A declared filter whose ``lookup_expr`` crosses a relation answers as its joined spelling.
 ├── test_debug_extension_api.py   # Live GraphQL HTTP tests for the ``DjangoDebugExtension`` request-visible contract.
 ├── test_debug_toolbar_api.py     # Live HTTP tests for ``DebugToolbarMiddleware`` across GraphQL, panel, and pass-through routes.
 ├── test_declared_key_forms_api.py  # Native key filters publish their stored-column scalar and validate raw key bounds over HTTP.

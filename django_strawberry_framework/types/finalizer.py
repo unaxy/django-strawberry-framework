@@ -1891,6 +1891,7 @@ def _audit_globalid_filter_strategies(wired: list[type[FilterSet]]) -> None:
         ENCODE_ONLY_GLOBALID_STRATEGIES,
         GlobalIDFilter,
         GlobalIDMultipleChoiceFilter,
+        _filterset_walked_lookup,
         resolve_globalid_target_definition,
     )
 
@@ -1900,7 +1901,10 @@ def _audit_globalid_filter_strategies(wired: list[type[FilterSet]]) -> None:
         for field_name, filter_instance in filterset_cls._filter_table().items():
             if not isinstance(filter_instance, GlobalIDFilter | GlobalIDMultipleChoiceFilter):
                 continue
-            target = resolve_globalid_target_definition(owner, filter_instance.field_name)
+            target = resolve_globalid_target_definition(
+                owner,
+                _filterset_walked_lookup(filterset_cls, filter_instance)[0],
+            )
             if target is None:
                 continue
             strategy = target.effective_globalid_strategy
