@@ -11,14 +11,13 @@ Machines
     Tailscale's peers with ``Online`` true, plus this machine (``tailscale status
     --json``; the binary on ``PATH``, else ``/usr/local/bin/tailscale``,
     ``/usr/bin/tailscale`` or the macOS app's). A peer matches a
-    ``docs/fleet/machines.json`` row when its hostname or MagicDNS name, up to the
-    first dot and casefolded, is one of the row's ``hostnames`` (the match
-    ``scripts/fleet.py`` makes); it is then reached as the row's ``ssh`` alias,
-    else as its MagicDNS name. Every remote call is one ssh with the fleet's
-    options (``fleet.ssh_argv``: batch mode, a connect timeout, a keepalive)
-    running the peer's own ``scripts/fleet_sync.py agent`` (its ``.venv``
-    Python, else ``python3``), so
-    both ends apply the same rules; ``--remote-scripts DIR`` runs the scripts in
+    ``docs/fleet/machines.json`` row when its hostname or MagicDNS name resolves to
+    the row (``fleet.canonical``: its name or one of its aliases); it is then
+    reached as the row's ``ssh`` alias, else as its MagicDNS name. Every remote
+    call is one ssh with the fleet's options (``fleet.ssh_argv``: batch mode, a
+    connect timeout, a keepalive) running the peer's own ``scripts/fleet_sync.py
+    agent`` (its ``.venv`` Python, else ``python3``), so both ends apply the same
+    rules; ``--remote-scripts DIR`` runs the scripts in
     ``DIR`` on the peer instead, for a peer whose main predates this script. A
     peer qualifies when that call answers, its checkout is at
     ``~/projects/django-strawberry-framework`` (a repository elsewhere is reported,
@@ -28,8 +27,9 @@ Machines
     supported yet" and never half synced: work.py's process census and locks,
     ``sh`` and ``rsync`` are POSIX here. A qualifying peer no row lists is synced
     and reported with a suggested ``machines.json`` row; the list is never written.
-    A machine names itself as ``scripts/work.py`` notes do (``work.machine_id``:
-    ``$DSF_MACHINE_ID``, else its short hostname).
+    Machines are named, and stored names read, by ``scripts/fleet.py``'s rule (its
+    "Identity"): a listed machine is its row's name everywhere, and ``sync`` and
+    ``handoff`` refuse on a host no row names.
 
 One writer per copy
     Every copy has a home machine (``home`` in its work.py note; an older note's
@@ -226,7 +226,8 @@ Commands
         Move a copy's home (above).
     ``--json`` on each prints one document for agents. Exit codes: ``0`` synced
     or clean, ``1`` a conflict or skipped work, ``2`` bad setup (no Tailscale, an
-    unreadable machine list, a checkout outside ``~/projects``, Windows here).
+    unreadable machine list, a checkout outside ``~/projects``, Windows here, and
+    for ``sync`` and ``handoff`` a host no row names).
 
 Running it periodically
     Nothing installs a schedule; the maintainer decides. A cron line
@@ -1641,6 +1642,9 @@ def run_agent(args: _Args) -> int:
     """Run one agent operation against ``--repo``; JSON (or a bundle) on stdout."""
     repo = Path(args.repo).resolve()
     work.REPO_ROOT = repo
+    # A peer names machines by its own list, which may predate this one's: read them here.
+    args.home, args.source = work.canonical(args.home), work.canonical(args.source)
+    args.former = ",".join(work.canonical(home) for home in args.former.split(",") if home)
     output: dict[str, object] | bytes
     try:
         work.refuse_locating_env()
@@ -1938,7 +1942,12 @@ class Machine:
 
     @property
     def id(self) -> str:
-        """Return the machine's name as its notes say it (its probe), else its tailnet label."""
+        """Return the machine's name: its row's, else its probe's, else its tailnet label.
+
+        A listed machine is its row's name (:attr:`label` too), whatever it reports.
+        """
+        if self.row:
+            return self.row
         return self.probe.id if self.probe is not None else (self.labels or ("?",))[0]
 
     @property
@@ -1955,7 +1964,7 @@ class Machine:
             "repo": f"~/{CHECKOUT}",
             "weight": {"light": 1.0, "heavy": 1.0},
             "floors": {"light": {"min_mem_available_gib": 2, "min_disk_free_gib": 6}},
-            "hostnames": [self.id],
+            "aliases": [],
         }
 
 
@@ -2011,7 +2020,8 @@ def discover_machines(
         if not local and peer.get("Online") is not True:
             continue
         labels = _labels(peer)
-        row = next((row for row in rows if set(row.hostnames) & set(labels)), None)
+        named = {fleet.canonical(label, rows) for label in labels}
+        row = next((row for row in rows if row.name in named), None)
         os_name = TAILSCALE_OS.get(_string(peer, "OS").casefold(), _string(peer, "OS"))
         machine = Machine(
             label=row.name if row is not None else (labels or ("?",))[0],
@@ -2032,13 +2042,50 @@ def discover_machines(
             machine.reason = "no ssh name (no machines.json row and no MagicDNS name)"
         else:
             machine.endpoint = Endpoint(
-                machine=labels[0] if labels else "",
+                machine=machine.id if row is not None or labels else "",
                 label=machine.label,
                 ssh=machine.ssh,
                 scripts="" if local else scripts,
             )
         machines.append(machine)
     return machines
+
+
+def _named_by(machine: Machine, typed: str, rows: Sequence[fleet.Machine] | None = None) -> bool:
+    """Return whether a ``--machine`` or ``--to`` value ``typed`` names ``machine``.
+
+    As typed: its label, ssh name, row, id or a tailnet label. Or read as a stored name
+    (``fleet.canonical`` of ``rows``, default this checkout's list): a row's alias, or a
+    row's name or the id in any case or with a domain. An empty or blank ``typed`` names
+    no machine, and no empty value of the machine's is matched.
+    """
+    if not typed.strip():
+        return False
+    known = {
+        machine.label,
+        machine.ssh,
+        machine.row,
+        machine.id,
+        *machine.labels,
+    } - {""}
+    if typed in known:
+        return True
+    resolved = fleet.canonical(typed, rows, repo=REPO_ROOT)
+    return bool(resolved) and resolved in {machine.row, machine.id}
+
+
+def _this_member(rows: Sequence[fleet.Machine]) -> fleet.Machine:
+    """Return this machine's row (``fleet.this_machine``).
+
+    Raises:
+        SetupError: no row is this machine; the message names it and the rows.
+
+    """
+    try:
+        return fleet.this_machine(rows)
+    except fleet.MachineListError as error:
+        msg = f"not a fleet machine: {error}"
+        raise SetupError(msg) from None
 
 
 def qualify(machine: Machine, local: Probe | None) -> None:
@@ -2067,7 +2114,7 @@ def qualify(machine: Machine, local: Probe | None) -> None:
         machine.endpoint = None
         return
     machine.probe = probe
-    machine.endpoint = dataclasses.replace(endpoint, machine=probe.id)
+    machine.endpoint = dataclasses.replace(endpoint, machine=machine.id)
     reasons = _disqualifications(probe, local)
     if reasons:
         machine.reason = "; ".join(reasons)
@@ -2095,12 +2142,22 @@ def _disqualifications(probe: Probe, local: Probe | None) -> list[str]:
     return reasons
 
 
-def find_machines(scripts: str, only: Sequence[str]) -> tuple[Machine, list[Machine]]:
+def find_machines(
+    scripts: str,
+    only: Sequence[str],
+    *,
+    member: bool = False,
+) -> tuple[Machine, list[Machine]]:
     """Return this machine and every other machine Tailscale lists, probed in parallel.
+
+    ``member`` (``sync``, ``handoff``: what writes records naming this machine) requires
+    this machine to be a row of the list (``fleet.this_machine``) and Tailscale's ``Self``
+    to resolve to that row; ``status`` only reads, so an unlisted host still reports.
 
     Raises:
         SetupError: Windows here, no Tailscale, an unreadable machine list, this checkout
-            outside ``~/projects``, or this machine unqualified.
+            outside ``~/projects``, this machine unqualified, or (``member``) no row is this
+            machine or Tailscale names it as another.
 
     """
     if sys.platform == "win32":
@@ -2111,10 +2168,18 @@ def find_machines(scripts: str, only: Sequence[str]) -> tuple[Machine, list[Mach
     except fleet.MachineListError as error:
         msg = f"machine list: {error}"
         raise SetupError(msg) from None
+    me = _this_member(rows) if member else None
     machines = discover_machines(tailscale_status(), rows, scripts)
     here = next((machine for machine in machines if machine.local), None)
     if here is None:
         msg = "tailscale lists no Self"
+        raise SetupError(msg)
+    if me is not None and here.row != me.name:
+        msg = (
+            f"Tailscale names this machine {here.label!r}, which resolves to "
+            f"{here.row or 'no row'}, but this machine is {me.name!r}: give it its row's name "
+            f"in Tailscale"
+        )
         raise SetupError(msg)
     qualify(here, None)
     if (
@@ -2127,17 +2192,8 @@ def find_machines(scripts: str, only: Sequence[str]) -> tuple[Machine, list[Mach
         raise SetupError(msg)
     others = [machine for machine in machines if not machine.local]
     if only:
-        wanted = set(only)
         others = [
-            machine
-            for machine in others
-            if wanted
-            & {
-                machine.label,
-                machine.ssh,
-                machine.row,
-                *machine.labels,
-            }
+            machine for machine in others if any(_named_by(machine, typed, rows) for typed in only)
         ]
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(others), 1)) as pool:
         for future in [pool.submit(qualify, machine, here.probe) for machine in others]:
@@ -2187,7 +2243,7 @@ class CopyInfo:
             name=name,
             form=_string(record, "form"),
             path=_string(record, "path"),
-            home=_string(record, "home"),
+            home=work.canonical(_string(record, "home")),
             replica=replica,
             syncing=record.get("syncing") is True,
             syncedtree=_string(record, "syncedtree"),
@@ -2601,7 +2657,7 @@ def _plan_removal(
     where: Endpoint,
     grave: work.Tombstone,
 ) -> Step:
-    removed = f"its home {grave.home} removed it"
+    removed = f"its home {work.canonical(grave.home)} removed it"
     if replica.changed:
         return Step(
             "conflict",
@@ -3478,7 +3534,7 @@ def copy_overview(inventories: Mapping[str, Inventory]) -> list[dict[str, object
 
 def cmd_sync(args: _Args) -> int:
     """Sync with every qualifying peer."""
-    here, others = find_machines(args.remote_scripts, args.machine)
+    here, others = find_machines(args.remote_scripts, args.machine, member=True)
     rows = [
         Row("machine", machine.label, "skip", machine.reason)
         for machine in others
@@ -3487,7 +3543,7 @@ def cmd_sync(args: _Args) -> int:
     peers = [machine for machine in others if machine.qualified]
     for machine in peers:
         if machine.probe is not None:
-            _REPOS[machine.probe.id] = machine.probe.repo
+            _REPOS[machine.id] = machine.probe.repo
     lock = contextlib.nullcontext("") if args.dry_run else holding(REPO_ROOT)
     try:
         with lock as local_token:
@@ -3505,26 +3561,15 @@ def cmd_sync(args: _Args) -> int:
 
 def cmd_handoff(args: _Args) -> int:
     """Move a copy's home to ``--to`` (default this machine)."""
-    here, others = find_machines(args.remote_scripts, [])
+    here, others = find_machines(args.remote_scripts, [], member=True)
     peers = [machine for machine in others if machine.qualified]
     for machine in peers:
         if machine.probe is not None:
-            _REPOS[machine.probe.id] = machine.probe.repo
+            _REPOS[machine.id] = machine.probe.repo
     everyone = [here, *peers]
     target = here
     if args.to:
-        named = [
-            m
-            for m in everyone
-            if args.to
-            in {
-                m.label,
-                m.ssh,
-                m.row,
-                m.id,
-                *m.labels,
-            }
-        ]
+        named = [m for m in everyone if _named_by(m, args.to)]
         if not named:
             msg = f"--to {args.to!r} names no qualifying machine"
             raise SetupError(msg)
