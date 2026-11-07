@@ -467,6 +467,7 @@ def _patch(monkeypatch: pytest.MonkeyPatch, fake: _FakeRun) -> None:
     """Route every subprocess to ``fake``, on a host no machine list names (no scutil call)."""
     monkeypatch.setattr(subprocess, "run", fake)
     monkeypatch.setattr(fleet, "this_hostname", lambda: "stranger")
+    monkeypatch.delenv(fleet.MACHINE_ENV, raising=False)
 
 
 @pytest.mark.parametrize(
@@ -661,10 +662,10 @@ def test_an_unidentified_host_measures_every_machine_over_ssh(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """With no ``--here`` and no hostname match, no probe runs locally."""
+    """No ``--here`` and no row named this host (an alias is none): no probe runs locally."""
     path = _write_list(
         tmp_path,
-        [_entry("desk", "linux", hostnames=["desk"]), _entry("mac", "macos")],
+        [_entry("desk", "linux", aliases=["stranger"]), _entry("mac", "macos")],
     )
     fake = _FakeRun({"desk": (0, LINUX_OUTPUT, ""), "mac": (0, MACOS_OUTPUT, "")})
     _patch(monkeypatch, fake)
@@ -672,6 +673,21 @@ def test_an_unidentified_host_measures_every_machine_over_ssh(
     code = load_balancing.main(["--pick", "--machines", str(path)])
     assert (code, capsys.readouterr().out) == (0, "desk\n")
     assert sorted(fake.host(call) for call in fake.calls) == ["desk", "mac"]
+
+
+def test_the_machine_override_names_the_local_machine_as_it_names_this_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``$DSF_MACHINE_ID`` is the identity rule's raw name here too: that row runs locally."""
+    path = _write_list(tmp_path, [_entry("desk", "linux"), _entry("mac", "macos")])
+    fake = _FakeRun({"local": (0, LINUX_OUTPUT, ""), "mac": (0, MACOS_OUTPUT, "")})
+    _patch(monkeypatch, fake)
+    monkeypatch.setenv(fleet.MACHINE_ENV, "Desk")
+    code = load_balancing.main(["--pick", "--machines", str(path)])
+    assert (code, capsys.readouterr().out) == (0, "desk\n")
+    assert sorted(fake.host(call) for call in fake.calls) == ["local", "mac"]
 
 
 def test_an_impossible_measurement_excludes_the_machine_with_its_reason(

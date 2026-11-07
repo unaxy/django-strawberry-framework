@@ -1769,7 +1769,7 @@ def test_rm_on_the_home_leaves_a_tombstone_of_this_copy_and_off_the_home_none(
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(work.MACHINE_ENV, "a")
+    monkeypatch.setenv(fleet.MACHINE_ENV, "a")
     first = _new("spike-grave")
     _age(first)
     identity = work.copy_identity(work._config_values(first, "--local"))
@@ -1795,7 +1795,7 @@ def test_rm_on_the_home_leaves_a_tombstone_of_this_copy_and_off_the_home_none(
     second = _new("spike-grave")
     _age(second)
     assert work.copy_identity(work._config_values(second, "--local")) != identity
-    monkeypatch.setenv(work.MACHINE_ENV, "z")
+    monkeypatch.setenv(fleet.MACHINE_ENV, "z")
     assert work.main(["rm", "spike-grave"]) == 0
     assert work.tombstones(repo) == graves
 
@@ -3624,23 +3624,145 @@ def test_an_empty_folder_at_a_names_place_still_holds_the_name(repo: Path) -> No
 # --------------------------------------------------------------------------------------------
 
 
-def test_a_machine_is_named_by_the_override_else_its_short_hostname(
+ALIASED_FLEET = json.dumps(
+    {
+        "machines": [
+            {
+                "name": name,
+                "ssh": name,
+                "os": os_name,
+                "repo": "~/projects/django-strawberry-framework",
+                "weight": {"light": 1, "heavy": 1},
+                "floors": {},
+                "aliases": aliases,
+            }
+            for name, os_name, aliases in (
+                ("rio-ubu", "linux", []),
+                ("rio-air", "macos", ["Riordens-MacBook-Air"]),
+            )
+        ],
+    },
+)
+
+
+def _on_rio_air(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """List ``rio-air`` (alias ``Riordens-MacBook-Air``) in ``repo`` and make this host it."""
+    _ = _write(repo / "docs" / "fleet" / "machines.json", ALIASED_FLEET)
+    monkeypatch.delenv(fleet.MACHINE_ENV, raising=False)
+    monkeypatch.setattr(fleet, "this_hostname", lambda: "rio-air")
+
+
+def test_a_machine_is_named_by_its_row_else_its_short_hostname(
+    repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(work.MACHINE_ENV, raising=False)
+    """The override first, then the hostname; a former name records its row's, never itself."""
+    _on_rio_air(repo, monkeypatch)
+    assert work.machine_id() == "rio-air"
     monkeypatch.setattr(fleet, "this_hostname", lambda: "Riordens-MacBook-Air.local")
-    assert work.machine_id() == "riordens-macbook-air"
-    monkeypatch.setenv(work.MACHINE_ENV, "Rio-Ubu")
+    assert work.machine_id() == "rio-air"
+    monkeypatch.setenv(fleet.MACHINE_ENV, "Rio-Ubu")
     assert work.machine_id() == "rio-ubu"
+    monkeypatch.setenv(fleet.MACHINE_ENV, "Stranger.lan")
+    assert work.machine_id() == "stranger"
+
+
+def test_a_note_naming_a_former_hostname_reads_as_that_machine(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Old records are never rewritten: ``home``, ``host`` and ``formerhomes`` read through the list."""
+    _on_rio_air(repo, monkeypatch)
+    assert work.home_of({"home": "riordens-macbook-air"}) == "rio-air"
+    assert work.home_of({"host": "Riordens-MacBook-Air.local"}) == "rio-air"
     assert work.home_of({"host": "Rio-Ubu.lan"}) == "rio-ubu"
-    assert work.home_of({"host": "rio-ubu", "home": "rio-mac"}) == "rio-mac"
+    assert work.home_of({"host": "rio-ubu", "home": "Rio-Mac"}) == "rio-mac"
+    assert work.former_homes({"formerhomes": "riordens-macbook-air,rio-ubu"}) == (
+        "rio-air",
+        "rio-ubu",
+    )
+    assert work.later_home(
+        {"home": "rio-ubu", "generation": "1", "formerhomes": "riordens-macbook-air"},
+        {"home": "rio-air"},
+    )
+
+
+def test_a_copy_whose_note_names_a_former_hostname_is_this_machines_home_copy(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its ``rm`` buries it under the row's name; ``list`` names the row."""
+    _on_rio_air(repo, monkeypatch)
+    old = _new("spike-old-home")
+    work.write_note(old, "clone", {"home": "riordens-macbook-air"})
+    hostless = _new("spike-old-host")
+    _ = work._git(hostless, "config", "--local", "--unset", f"{work.NOTE_SECTION}.home")
+    work.write_note(hostless, "clone", {"host": "Riordens-MacBook-Air.local"})
+    for path in (old, hostless):
+        assert work.home_of(work._config_values(path, "--local")) == "rio-air"
+    _age(old)
+    assert work.main(["rm", "spike-old-home"]) == 0
+    [grave] = work.tombstones(repo)
+    assert (grave.name, grave.home, grave.removed_by) == ("spike-old-home", "rio-air", "rio-air")
+
+
+def test_a_tombstone_naming_a_former_hostname_is_that_machines_and_stays_as_written(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create-only and carried between machines: read through the list, never rewritten."""
+    _on_rio_air(repo, monkeypatch)
+    old = work.Tombstone(
+        "spike-old-grave",
+        "riordens-macbook-air",
+        "abc123",
+        1.0,
+        "riordens-macbook-air",
+    )
+    replica = {"replica": "true", "home": "rio-air", "incarnation": "abc123"}
+    assert old.buries("spike-old-grave", replica)
+    other = dataclasses.replace(old, home="rio-ubu", removed_by="rio-ubu")
+    assert not other.buries("spike-old-grave", replica)
+    assert work.write_tombstone(repo, old)
+    assert work.tombstones(repo) == [old]
+
+
+def test_a_claim_owned_under_a_former_hostname_is_this_machines(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new claim's owner is the row's name; an old one under the alias is known dead here."""
+    _on_rio_air(repo, monkeypatch)
+    claim = work.claim_name(repo, "fix-claimed-here")
+    owner = (claim / "owner").read_text(encoding="utf-8").split()
+    assert owner == ["rio-air", str(os.getpid())]
+    old = repo / ".work" / "names" / "fix-claimed-before"
+    _ = _write(old / "owner", "Riordens-MacBook-Air.local 999999\n")
+    assert work._claim_is_stale(old)
+    _ = _write(old / "owner", "rio-ubu 999999\n")
+    assert not work._claim_is_stale(old)
+
+
+def test_a_machine_with_no_name_takes_no_claim_and_owns_none(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty name (``$DSF_MACHINE_ID=.``) refuses the claim; a ``.`` owner is never its own."""
+    _on_rio_air(repo, monkeypatch)
+    monkeypatch.setenv(fleet.MACHINE_ENV, ".")
+    with pytest.raises(work.WorkError, match="this machine has no name"):
+        _ = work.claim_name(repo, "fix-nameless")
+    assert not (repo / ".work" / "names" / "fix-nameless").exists()
+    dotted = repo / ".work" / "names" / "fix-dotted"
+    _ = _write(dotted / "owner", ". 999999\n")
+    assert not work._claim_is_stale(dotted)
 
 
 def test_new_and_adopt_record_this_machine_as_the_copys_home(
     repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(work.MACHINE_ENV, "rio-desktop")
+    monkeypatch.setenv(fleet.MACHINE_ENV, "rio-desktop")
     _ = _new("build-homed")
     assert work.locate(repo, "build-homed").note["home"] == "rio-desktop"
     clone = repo / ".work" / "clones" / "spike-adopted-home"

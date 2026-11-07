@@ -22,9 +22,7 @@
           "heavy_slots": 3
         }
       },
-      "hostnames": [
-        "rio-ubu"
-      ]
+      "aliases": []
     },
     {
       "name": "rio-air",
@@ -47,8 +45,7 @@
           "max_vm_pressure_level": 1
         }
       },
-      "hostnames": [
-        "rio-air",
+      "aliases": [
         "Riordens-MacBook-Air"
       ]
     },
@@ -73,8 +70,7 @@
           "max_vm_pressure_level": 1
         }
       },
-      "hostnames": [
-        "rio-mini",
+      "aliases": [
         "Rios-Mac-mini"
       ]
     }

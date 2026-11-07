@@ -28,7 +28,7 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
     ``names/<name>/``
         The claim on a name, one namespace for clones, worktrees and adopted
         copies, taken before anything else: a folder holding its owner
-        (``<host> <pid>``) renamed into place in one step, so no claim is seen
+        (``<machine> <pid>``) renamed into place in one step, so no claim is seen
         without its owner and of two commands racing for one name (whatever
         form each asks for) only one wins. ``rm`` releases it; ``repair``
         releases a claim whose owner is known dead and reports any other claim
@@ -124,9 +124,9 @@ folders claim, make every record involved unsafe: listed, never touched by
 maintainer to fix by hand.
 
 Every copy has one home machine, the only one that edits it: ``home`` in its note
-(:func:`machine_id`: ``$DSF_MACHINE_ID``, else the short hostname, as
-``scripts/fleet.py`` matches ``hostnames``; a note older than ``home``
-reads its ``host``). ``scripts/fleet_sync.py`` keeps a replica of it on every
+(:func:`machine_id`; a note older than ``home`` reads its ``host``); machines are
+named, and stored names read, by ``scripts/fleet.py``'s rule (its "Identity").
+``scripts/fleet_sync.py`` keeps a replica of it on every
 other fleet machine, marked ``replica=true`` with ``home``, ``syncedtree`` (its
 content when last synced), ``syncedhead``, ``syncedfrom`` and ``syncedat``.
 ``save``, ``land`` and ``rm`` refuse a replica and name its home; ``rm
@@ -437,9 +437,6 @@ PARENT_REFS = "refs/remotes/parent/"
 #: The refs git keeps per worktree, in its metadata: they die with the worktree.
 PER_WORKTREE_REFS = ("refs/bisect/", "refs/worktree/", "refs/rewritten/")
 NO_PUSH = "no-push"
-#: Names this machine in a copy's note instead of its hostname (a hostname that is not its
-#: tailnet name; two fake machines on one host in the tests).
-MACHINE_ENV = "DSF_MACHINE_ID"
 #: A file in a copy's git directory: its ``.venv`` came from another machine or none exists,
 #: so ``run`` rebuilds it (``uv sync --frozen``) first.
 VENV_STALE = "dsf-work-venv-stale"
@@ -614,19 +611,21 @@ def _valid(name: str) -> bool:
 
 
 def machine_id() -> str:
-    """Return this machine's name in a copy's note: ``$DSF_MACHINE_ID``, else the short hostname.
+    """Return this machine's name for a record (``fleet.this_machine_name``, this checkout's list)."""
+    return fleet.this_machine_name(repo=REPO_ROOT)
 
-    The short hostname is ``scripts/fleet.py``'s (up to its first dot, casefolded),
-    the one a machine's ``hostnames`` are matched by, so every fleet script names a
-    machine the same way.
-    """
-    override = os.environ.get(MACHINE_ENV, "")
-    return fleet.short_hostname(override or fleet.this_hostname())
+
+def canonical(name: str) -> str:
+    """Return the machine a stored ``name`` means (``fleet.canonical`` of this checkout's list)."""
+    return fleet.canonical(name, repo=REPO_ROOT)
 
 
 def home_of(note: Mapping[str, str]) -> str:
-    """Return the machine a copy's note names as its home (a note older than ``home``: its host)."""
-    return note.get("home") or fleet.short_hostname(note.get("host", ""))
+    """Return the machine a copy's note names as its home (a note older than ``home``: its host).
+
+    Read through :func:`canonical`, so a home stored under a machine's alias is that machine.
+    """
+    return canonical(note.get("home") or note.get("host", ""))
 
 
 def is_replica(note: Mapping[str, str]) -> bool:
@@ -672,8 +671,8 @@ def handoff_generation(note: Mapping[str, str]) -> int:
 
 
 def former_homes(note: Mapping[str, str]) -> tuple[str, ...]:
-    """Return the machines a handoff moved the copy's home away from, oldest first."""
-    return tuple(home for home in note.get("formerhomes", "").split(",") if home)
+    """Return the machines a handoff moved the copy's home away from (:func:`canonical`), oldest first."""
+    return tuple(canonical(home) for home in note.get("formerhomes", "").split(",") if home)
 
 
 def later_home(newer: Mapping[str, str], older: Mapping[str, str]) -> bool:
@@ -698,6 +697,8 @@ class Tombstone:
     missed; ``saves_dropped`` says ``rm --drop-saves`` dropped its saves, and
     ``dropped_pins`` (``(leaf, commit)`` pairs) are the pins the removal dropped, which no
     sync carries back and which a machine holding no copy under the name drops too.
+    ``home`` and ``removed_by`` are the names the file stores (its digest covers ``home``):
+    compare them through :func:`canonical`, never as stored.
     """
 
     name: str
@@ -734,7 +735,7 @@ class Tombstone:
         identity = copy_identity(note)
         if not identity or name != self.name or identity != self.identity:
             return False
-        if home_of(note) == self.home:
+        if home_of(note) == canonical(self.home):
             return self.generation >= handoff_generation(note)
         return later_home(
             {
@@ -1160,17 +1161,27 @@ def claim_name(repo: Path, name: str) -> Path:
     The owner file is written before the rename publishes the claim, so no claim is ever
     seen without its owner, and of two commands racing for one name only one rename wins.
 
+    The owner is ``<machine> <pid>``; a machine with no name (``$DSF_MACHINE_ID`` such as
+    ``.``) is refused, since an owner without one could never be known dead.
+
     Raises:
-        WorkError: another command holds the claim.
+        WorkError: this machine has no name, or another command holds the claim.
 
     """
     _ = parse_name(name)
+    owner = machine_id()
+    if not owner:
+        msg = (
+            f"this machine has no name (${fleet.MACHINE_ENV}, else its hostname, is empty "
+            f"before its first dot): set ${fleet.MACHINE_ENV} to its row's name"
+        )
+        raise WorkError(msg)
     claims = _container(repo, NAMES, create=True)
     claim = claims / name
     staged = claims / f".{name}.{_token()}"
     staged.mkdir()
     _ = (staged / "owner").write_text(
-        f"{fleet.this_hostname()} {os.getpid()}\n",
+        f"{owner} {os.getpid()}\n",
         encoding="utf-8",
     )
     try:
@@ -1201,8 +1212,9 @@ def release_name(repo: Path, name: str) -> None:
 def _claim_is_stale(claim: Path) -> bool:
     """Return whether the command that took ``claim`` is known dead.
 
-    Dead means: its owner is this host and its pid is gone, or it never wrote an owner and
-    is older than :data:`CLAIM_GRACE_SECONDS`. A claim from another host is never known dead.
+    Dead means: its owner is this machine (:func:`canonical`) and its pid is gone, or it never
+    wrote an owner and is older than :data:`CLAIM_GRACE_SECONDS`. A claim from another machine
+    is never known dead.
     """
     try:
         host, pid = (claim / "owner").read_text(encoding="utf-8").split()
@@ -1212,7 +1224,8 @@ def _claim_is_stale(claim: Path) -> bool:
         return False
     except (OSError, ValueError):
         return False
-    return host == fleet.this_hostname() and pid.isdigit() and not _pid_alive(int(pid))
+    here = machine_id()
+    return bool(here) and canonical(host) == here and pid.isdigit() and not _pid_alive(int(pid))
 
 
 def _pid_alive(pid: int) -> bool:

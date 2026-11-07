@@ -6,7 +6,7 @@ floor. The machines are ``docs/fleet/machines.json``'s, read through
 ``scripts/fleet.py`` (its docstring states the list's schema): each entry names
 the machine, the ssh host it is reached as, its OS, the checkout path the thread
 would work in (``repo``), a preference weight per mode, the hard floors per mode
-and the ``hostnames`` the machine reports for itself. A machine joins the fleet
+and its ``aliases`` (other names its stored records may carry). A machine joins the fleet
 by a row there and its block in ``docs/fleet/MACHINES.md``.
 
 Modes
@@ -19,7 +19,8 @@ Measurement
     locally (no ssh), every other one in one ssh call with the fleet's options
     (``fleet.ssh_argv``: batch mode, a 5-second connect timeout, a keepalive), all
     machines in parallel. The local machine is the one ``--here`` names, else the
-    machine whose ``hostnames`` holds this host's name (``fleet.local_machine``);
+    machine whose ``name`` is this machine's (``$DSF_MACHINE_ID``, else the
+    hostname: ``fleet.local_machine``);
     with neither, the script cannot tell which machine it is on and reaches every
     machine over ssh, its own included.
 

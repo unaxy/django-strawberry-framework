@@ -2,8 +2,10 @@
 
 The tracked ``docs/fleet/machines.json`` loads; every schema rule of the list
 refuses with a message naming the entry and the rule; :func:`fleet.machine`
-refuses a name the list lacks; this machine is identified by its hostname
-(macOS's ``scutil`` name first) and nothing else; every ssh call is built with
+refuses a name the list lacks; this machine is the row named by its override
+or its hostname (macOS's ``scutil`` name first) and nothing else, an alias
+included; a stored name reads as the row whose name or alias it is; every ssh
+call is built with
 the one option set, keepalive included. Only ``subprocess.run`` and
 ``socket.gethostname`` are faked, the hostname boundary. A live ``/graphql/``
 request has no wire shape for any of it, so there is no live sibling in
@@ -122,14 +124,25 @@ def test_the_tracked_machine_list_loads_with_the_current_fleet() -> None:
             [_entry("a", "linux", floors={"heavy": {"heavy_slots": 10**400}})],
             "heavy_slots must be finite",
         ),
-        ([_entry("a", "linux", hostnames="box")], "hostnames must be a list"),
-        ([_entry("a", "linux", hostnames=[""])], "hostnames must be a list"),
+        ([_entry("a", "linux", aliases="box")], "aliases must be a list"),
+        ([_entry("a", "linux", aliases=[""])], "aliases must be a list"),
         (
-            [
-                _entry("a", "linux", hostnames=["Box.local"]),
-                _entry("b", "macos", hostnames=["box"]),
-            ],
-            "hostname(s) box belong to more than one machine",
+            [_entry("a", "linux", aliases=["Box.local"]), _entry("b", "macos", aliases=["box"])],
+            "name(s) box listed more than once",
+        ),
+        (
+            [_entry("a", "linux"), _entry("b", "macos", aliases=["A"])],
+            "name(s) a listed more than once",
+        ),
+        ([_entry("a", "linux", aliases=["a.lan"])], "name(s) a listed more than once"),
+        ([_entry(".", "linux")], "name '.' is empty before its first dot"),
+        ([_entry(".local", "linux")], "name '.local' is empty before its first dot"),
+        ([_entry("a", "linux", aliases=[".x"])], "aliases: '.x' empty before the first dot"),
+        ([_entry(" ", "linux")], "name ' ' is empty before its first dot"),
+        ([_entry("a", "linux", aliases=[" "])], "aliases: ' ' empty before the first dot"),
+        (
+            [_entry("a", "linux", hostnames=["a"])],
+            "unknown key hostnames; former names go in aliases",
         ),
         ([_entry("a", "linux", floors=[])], "floors must be an object"),
     ],
@@ -191,13 +204,18 @@ def test_machine_refuses_a_broken_list(tmp_path: Path) -> None:
 # -- identity -----------------------------------------------------------------------------
 
 
-def test_the_local_machine_is_the_one_whose_hostname_matches_or_the_one_named() -> None:
-    """A hostname match ignores case and the domain; ``--here`` takes a name or an ssh host."""
-    mac = dataclasses.replace(_machine("m", "macos"), hostnames=("laptop",))
-    linux = dataclasses.replace(_machine("l"), hostnames=("desk",))
+def test_the_local_machine_is_the_one_whose_name_matches_or_the_one_named() -> None:
+    """A hostname matches a row's name, ignoring case and the domain, never an alias.
+
+    ``--here`` takes a name, an ssh host or an alias.
+    """
+    mac = dataclasses.replace(_machine("laptop", "macos"), aliases=("old-laptop",))
+    linux = _machine("desk")
     assert fleet.local_machine([mac, linux], None, "Laptop.local") is mac
     assert fleet.local_machine([mac, linux], None, "desk") is linux
-    assert fleet.local_machine([mac, linux], "l-ssh", "laptop") is linux
+    assert fleet.local_machine([mac, linux], None, "Old-Laptop.local") is None
+    assert fleet.local_machine([mac, linux], "desk-ssh", "laptop") is linux
+    assert fleet.local_machine([mac, linux], "Old-Laptop", None) is mac
     with pytest.raises(fleet.MachineListError, match="names no machine"):
         _ = fleet.local_machine([mac], "nowhere", "laptop")
 
@@ -208,6 +226,221 @@ def test_an_unidentified_host_is_no_machine_even_when_one_shares_its_os() -> Non
     assert any(machine.os == "linux" for machine in machines)
     assert fleet.local_machine(machines, None, "unknown-linux-laptop") is None
     assert fleet.local_machine(machines, None, "rio-ubu.lan") is not None
+
+
+def _named(monkeypatch: pytest.MonkeyPatch, hostname: str, override: str | None = None) -> None:
+    """Make this machine's hostname ``hostname`` and its override ``override`` (none: unset)."""
+    monkeypatch.setattr(fleet, "this_hostname", lambda: hostname)
+    if override is None:
+        monkeypatch.delenv(fleet.MACHINE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(fleet.MACHINE_ENV, override)
+
+
+ALIASED = [
+    _entry("rio-ubu", "linux"),
+    _entry("rio-air", "macos", aliases=["Riordens-MacBook-Air"]),
+]
+
+
+@pytest.mark.parametrize(
+    ("hostname", "override", "expected"),
+    [
+        ("Rio-Air.local", None, "rio-air"),
+        ("Riordens-MacBook-Air", None, None),
+        ("stranger", "RIO-UBU", "rio-ubu"),
+        ("rio-air", "fake-b", None),
+    ],
+)
+def test_the_local_machine_by_default_is_named_as_this_machine_is(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hostname: str,
+    override: str | None,
+    expected: str | None,
+) -> None:
+    """One raw name for both: the override, else the hostname; a row's name only, else none.
+
+    An explicit ``hostname`` still wins over both.
+    """
+    repo = _checkout(tmp_path, ALIASED)
+    listed = fleet.machines(repo)
+    _named(monkeypatch, hostname, override)
+    found = fleet.local_machine(listed, None)
+    assert (found.name if found is not None else None) == expected
+    if expected is not None:
+        assert fleet.this_machine(listed) is found
+    explicit = fleet.local_machine(listed, None, "rio-ubu")
+    assert explicit is not None
+    assert explicit.name == "rio-ubu"
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ("rio-air", "rio-air"),
+        ("riordens-macbook-air", "rio-air"),
+        ("Riordens-MacBook-Air.local", "rio-air"),
+        ("Rio-Ubu.lan", "rio-ubu"),
+        ("Stranger.lan", "stranger"),
+        ("", ""),
+        (".", ""),
+        (".local", ""),
+        (" ", ""),
+        (" Rio-Air.lan ", "rio-air"),
+    ],
+)
+def test_a_stored_name_reads_as_the_row_whose_name_or_alias_it_is(
+    tmp_path: Path,
+    stored: str,
+    expected: str,
+) -> None:
+    """Up to its first dot, casefolded; a name no row holds stays itself."""
+    repo = _checkout(tmp_path, ALIASED)
+    assert fleet.canonical(stored, repo=repo) == expected
+    assert fleet.canonical(stored, fleet.machines(repo)) == expected
+
+
+@pytest.mark.parametrize("listed", [None, [_entry("a", "plan9")]])
+def test_a_stored_name_reads_as_itself_short_when_the_list_is_unreadable(
+    tmp_path: Path,
+    listed: list[dict[str, object]] | None,
+) -> None:
+    """``canonical`` never raises: a missing or broken list resolves nothing."""
+    repo = tmp_path if listed is None else _checkout(tmp_path, listed)
+    assert fleet.canonical("Riordens-MacBook-Air.local", repo=repo) == "riordens-macbook-air"
+
+
+def test_this_machine_is_the_row_named_by_its_hostname_or_its_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _checkout(tmp_path, ALIASED)
+    _named(monkeypatch, "Rio-Air.local")
+    assert fleet.this_machine(repo=repo).name == "rio-air"
+    assert fleet.this_machine_name(repo=repo) == "rio-air"
+    _named(monkeypatch, "Rio-Air.local", "RIO-UBU")
+    assert fleet.this_machine(fleet.machines(repo)).name == "rio-ubu"
+    assert fleet.this_machine_name(repo=repo) == "rio-ubu"
+
+
+@pytest.mark.parametrize(
+    (
+        "hostname",
+        "override",
+        "raw",
+        "source",
+    ),
+    [
+        (
+            "stranger.lan",
+            None,
+            "stranger",
+            "its hostname",
+        ),
+        (
+            "Riordens-MacBook-Air.local",
+            None,
+            "riordens-macbook-air",
+            "its hostname",
+        ),
+        (
+            "rio-air",
+            "fake-b",
+            "fake-b",
+            "$DSF_MACHINE_ID",
+        ),
+    ],
+)
+def test_this_machine_refuses_a_host_no_row_is_named_by_an_alias_included(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hostname: str,
+    override: str | None,
+    raw: str,
+    source: str,
+) -> None:
+    """An alias resolves old records, never the live machine: the message names both sides."""
+    repo = _checkout(tmp_path, ALIASED)
+    _named(monkeypatch, hostname, override)
+    with pytest.raises(fleet.MachineListError) as raised:
+        _ = fleet.this_machine(repo=repo)
+    message = str(raised.value)
+    assert f"this machine is {raw!r} ({source})" in message
+    assert "listed: rio-ubu, rio-air" in message
+
+
+@pytest.mark.parametrize(
+    ("hostname", "override", "source"),
+    [("rio-air", ".", "$DSF_MACHINE_ID"), (".local", None, "its hostname")],
+)
+def test_an_empty_raw_name_is_no_machine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hostname: str,
+    override: str | None,
+    source: str,
+) -> None:
+    """Empty before its first dot: ``this_machine`` refuses naming the source, no row matches."""
+    repo = _checkout(tmp_path, ALIASED)
+    listed = fleet.machines(repo)
+    _named(monkeypatch, hostname, override)
+    with pytest.raises(fleet.MachineListError) as raised:
+        _ = fleet.this_machine(repo=repo)
+    assert f"this machine has no name: {source} is empty" in str(raised.value)
+    assert fleet.this_machine_name(repo=repo) == ""
+    assert fleet.local_machine(listed, None) is None
+
+
+def test_an_empty_name_never_resolves_even_through_a_list_the_parser_did_not_check() -> None:
+    nameless = dataclasses.replace(_machine("."), aliases=("",))
+    assert fleet.canonical("", [nameless]) == ""
+    assert fleet.canonical(".x", [nameless]) == ""
+
+
+def test_this_machine_refuses_an_unreadable_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _named(monkeypatch, "rio-air")
+    with pytest.raises(fleet.MachineListError):
+        _ = fleet.this_machine(repo=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("hostname", "override", "expected"),
+    [
+        ("Riordens-MacBook-Air.local", None, "rio-air"),
+        ("Stranger.lan", None, "stranger"),
+        ("rio-air", "Fake-B", "fake-b"),
+    ],
+)
+def test_this_machine_name_falls_back_to_the_stored_name_rule_on_an_unlisted_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hostname: str,
+    override: str | None,
+    expected: str,
+) -> None:
+    """No row named: the raw name read through ``canonical`` (an alias: its row), never an error."""
+    repo = _checkout(tmp_path, ALIASED)
+    _named(monkeypatch, hostname, override)
+    assert fleet.this_machine_name(repo=repo) == expected
+
+
+def test_this_machine_name_never_raises_on_an_unreadable_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _named(monkeypatch, "Rio-Air.local")
+    assert fleet.this_machine_name(repo=tmp_path) == "rio-air"
+
+
+def test_the_tracked_list_resolves_each_machines_former_name() -> None:
+    """Each Mac's alias, the name older records store, reads as its row."""
+    assert fleet.canonical("Riordens-MacBook-Air") == "rio-air"
+    assert fleet.canonical("Rios-Mac-mini.local") == "rio-mini"
+    assert fleet.canonical("rio-ubu") == "rio-ubu"
 
 
 def test_a_mac_is_named_by_its_local_host_name_not_the_network_one(

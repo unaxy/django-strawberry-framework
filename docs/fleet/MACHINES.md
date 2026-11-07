@@ -110,15 +110,18 @@ uv run python scripts/load_balancing.py --json     # one document for agents
 
 - The machine list is [machines.json][machines-json]: per machine its ssh host, OS
   (`linux`, `macos`, `windows`), checkout path, a preference weight per mode (`light`, `heavy`)
-  and hard floors per mode, plus the `hostnames` it reports for itself. A machine joining the
-  fleet gets a row there as well as its §1 block. Weights and floors are finite numbers of at
-  least 0; a list breaking that exits 2.
+  and hard floors per mode, plus its `aliases`: other names the machine's stored records may
+  carry, read only to resolve those records. The row's `name` is the machine's one name (its
+  hostname, Tailscale name and ssh alias match it). A machine joining the fleet gets a row there
+  as well as its §1 block. Weights and floors are finite numbers of at least 0; a list breaking
+  that exits 2.
 - Each machine is measured once per run, in parallel: the machine the script runs on directly,
   every other one in a single `ssh -o BatchMode=yes -o ConnectTimeout=5` call. The script runs
-  on the machine `--here` names or whose `hostnames` holds this host's name; on an unlisted host
-  every machine, its own included, is reached over ssh. Linux reads load,
-  `MemAvailable`, PSI memory and the running `heavy` jobs; macOS reads `sysctl`; Windows reads
-  `Get-CimInstance` through PowerShell; every OS reports free disk under the checkout.
+  on the machine `--here` names or whose `name` is this machine's (`$DSF_MACHINE_ID`, else the
+  hostname); on an unlisted host every machine, its own included, is reached over ssh. Linux
+  reads load, `MemAvailable`, PSI memory and the running `heavy` jobs; macOS reads `sysctl`;
+  Windows reads `Get-CimInstance` through PowerShell; every OS reports free disk under the
+  checkout.
 - Score = weight x (free CPU share + free memory share) / 2. Any floor breach disqualifies:
   RAM available, free disk, PSI memory thrashing, all heavy slots taken, macOS memory pressure.
   An unreachable machine, or one whose probe reports an impossible value (NaN, negative, more

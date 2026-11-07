@@ -4,9 +4,10 @@
 reader: every script that needs a machine (``scripts/load_balancing.py`` picking
 one, ``scripts/work.py`` naming a copy's home, ``scripts/fleet_sync.py`` syncing
 copies) takes it from here. This module is also the one place two facts are
-computed: which machine this one is (:func:`this_hostname`,
-:func:`short_hostname`, :func:`local_machine`) and the ssh command line every
-remote call runs (:data:`SSH_OPTIONS`, :func:`ssh_argv`, :func:`ssh_command`).
+computed: which machine this one is and what name a stored record means
+(:func:`this_machine`, :func:`this_machine_name`, :func:`canonical`,
+:func:`local_machine`, below "Identity") and the ssh command line every remote
+call runs (:data:`SSH_OPTIONS`, :func:`ssh_argv`, :func:`ssh_command`).
 The checkout the list is read from defaults to ``scripts/_git.py``'s
 ``CHECKOUT_ROOT``, the one home of the repository root.
 
@@ -17,21 +18,36 @@ The list
     (``linux``, ``macos`` or ``windows``), the checkout path a thread works in
     (``repo``, ``~`` allowed), a preference weight per mode (``weight``: ``light``
     and ``heavy``), the hard floors per mode (``floors``; only the keys the
-    entry's OS can measure) and the ``hostnames`` the machine reports for itself
-    (optional; no hostname belongs to two machines). Every weight and floor is a
+    entry's OS can measure) and its ``aliases`` (optional: other names the
+    machine's stored records may carry, read only to resolve them; below). Names
+    and aliases are compared up to their first dot, casefolded
+    (:func:`short_hostname`); each is non-blank there, no name or alias belongs to
+    two machines or appears twice (an alias never equals a row's name), and a row
+    holds no ``hostnames`` key (other names go in ``aliases``). Every weight and floor is a
     finite number of at least 0. What a weight or a floor means is
     ``scripts/load_balancing.py``'s rule; this module only checks their shape. A
     list breaking any of this is a :class:`MachineListError`, never a partial
     result.
 
 Identity
-    A machine's own name is :func:`this_hostname` (macOS: ``scutil --get
-    LocalHostName``, since the socket hostname there follows the network;
-    elsewhere, or when scutil gives none, :func:`socket.gethostname`); a
-    hostname is compared and recorded up to its first dot, casefolded
-    (:func:`short_hostname`). The machine this one is in the list is the entry
-    whose ``hostnames`` holds that short name; nothing else (a matching OS
-    included) identifies it.
+    A machine has one name, its row's ``name``: every fleet script records it
+    (a copy's ``home``, a handoff's ``formerhomes``, a tombstone's home and
+    remover, a name claim's owner) and compares by it. This machine's raw name
+    is :data:`MACHINE_ENV` (``$DSF_MACHINE_ID``) when set, else
+    :func:`this_hostname` (macOS: ``scutil --get LocalHostName``, since the
+    socket hostname there follows the network; elsewhere, or when scutil gives
+    none, :func:`socket.gethostname`), taken up to its first dot, casefolded
+    (:func:`short_hostname`). :func:`this_machine` is the row whose ``name`` is
+    that raw name, and nothing else identifies it (an alias or a matching OS
+    included): a machine that must act as a fleet member refuses on a host the
+    list does not name. A stored name is read through :func:`canonical`: the
+    row whose name or one of whose ``aliases`` it is, else the stored name
+    itself (short, casefolded). :func:`this_machine_name`, for what only records
+    or reports, is :func:`this_machine`'s name, else the raw name read through
+    :func:`canonical`. Records are never rewritten (a tombstone is create-only
+    and travels between machines): a record carrying a name other than the row's
+    reads as that machine's through the row's aliases. An empty raw name (an
+    override such as ``.``) names no machine.
 
 ssh
     Every remote call is ``ssh`` with :data:`SSH_OPTIONS`: batch mode (no
@@ -51,6 +67,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import os
 import shlex
 import socket
 import subprocess
@@ -94,6 +111,9 @@ SSH_OPTIONS = (
 )
 #: ssh's own exit status for a connection or authentication failure.
 SSH_FAILED = 255
+#: Names this machine instead of its hostname (module docstring, "Identity"): a hostname
+#: that is not its row's name, two fake machines on one host in the tests.
+MACHINE_ENV = "DSF_MACHINE_ID"
 
 # ``json.loads`` returns ``Any``; this alias hands callers an ``object`` to narrow.
 _loads: Callable[[str], object] = json.loads
@@ -113,7 +133,7 @@ class Machine:
     repo: str
     weights: Mapping[str, float]
     floors: Mapping[str, Mapping[str, float]]
-    hostnames: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
 
 
 # -- decoded JSON -------------------------------------------------------------------------
@@ -163,6 +183,14 @@ def _object(value: object, where: str) -> dict[str, object]:
     return value
 
 
+def _names(entry: Machine) -> tuple[str, ...]:
+    """Return every name ``entry`` is known by, short and casefolded: its name, then its aliases.
+
+    An empty short form (which the parser refuses) is never one of them.
+    """
+    return tuple(known for known in (short_hostname(entry.name), *entry.aliases) if known)
+
+
 def _machine(raw: object, index: int) -> Machine:
     """Return entry ``index`` of the list as a :class:`Machine`.
 
@@ -173,6 +201,12 @@ def _machine(raw: object, index: int) -> Machine:
     where = f"machines[{index}]"
     entry = _object(raw, where)
     name = _text(entry, "name", where)
+    if not short_hostname(name):
+        msg = f"{where}.name {name!r} is empty before its first dot"
+        raise MachineListError(msg)
+    if "hostnames" in entry:
+        msg = f"{where}: unknown key hostnames; former names go in aliases"
+        raise MachineListError(msg)
     os_name = _text(entry, "os", where)
     if os_name not in OSES:
         msg = f"{where}.os {os_name!r} is not one of {', '.join(OSES)}"
@@ -203,11 +237,15 @@ def _machine(raw: object, index: int) -> Machine:
     if ssh.startswith("-"):
         msg = f"{where}.ssh {ssh!r} starts with '-', which ssh reads as an option"
         raise MachineListError(msg)
-    hostnames_raw = entry.get("hostnames", [])
-    if not is_json_array(hostnames_raw) or not all(
-        isinstance(item, str) and item for item in hostnames_raw
+    aliases_raw = entry.get("aliases", [])
+    if not is_json_array(aliases_raw) or not all(
+        isinstance(item, str) and item for item in aliases_raw
     ):
-        msg = f"{where}.hostnames must be a list of non-empty strings"
+        msg = f"{where}.aliases must be a list of non-empty strings"
+        raise MachineListError(msg)
+    empty = [str(item) for item in aliases_raw if not short_hostname(str(item))]
+    if empty:
+        msg = f"{where}.aliases: {', '.join(map(repr, empty))} empty before the first dot"
         raise MachineListError(msg)
     return Machine(
         name=name,
@@ -216,7 +254,7 @@ def _machine(raw: object, index: int) -> Machine:
         repo=_text(entry, "repo", where),
         weights=weights,
         floors=floors,
-        hostnames=tuple(short_hostname(str(item)) for item in hostnames_raw),
+        aliases=tuple(short_hostname(str(item)) for item in aliases_raw),
     )
 
 
@@ -225,7 +263,7 @@ def load_machines(path: Path = MACHINES_FILE) -> tuple[Machine, ...]:
 
     Raises:
         MachineListError: the file is missing, not JSON, or breaks the schema the
-            module docstring states (names must be unique).
+            module docstring states (names and aliases must be unique).
 
     """
     try:
@@ -243,10 +281,10 @@ def load_machines(path: Path = MACHINES_FILE) -> tuple[Machine, ...]:
     if duplicates:
         msg = f"{path}: duplicate machine name(s) {', '.join(duplicates)}"
         raise MachineListError(msg)
-    claimed = [hostname for entry in parsed for hostname in entry.hostnames]
-    shared = sorted({hostname for hostname in claimed if claimed.count(hostname) > 1})
+    claimed = [known for entry in parsed for known in _names(entry)]
+    shared = sorted({known for known in claimed if claimed.count(known) > 1})
     if shared:
-        msg = f"{path}: hostname(s) {', '.join(shared)} belong to more than one machine"
+        msg = f"{path}: name(s) {', '.join(shared)} listed more than once (a name or an alias)"
         raise MachineListError(msg)
     return parsed
 
@@ -310,8 +348,102 @@ def this_hostname() -> str:
 
 
 def short_hostname(hostname: str) -> str:
-    """Return ``hostname`` up to its first dot, casefolded: how a machine is matched and named."""
-    return hostname.split(".", 1)[0].casefold()
+    """Return ``hostname`` stripped, up to its first dot, casefolded: how names are compared.
+
+    A blank name (``" "``) is ``""``, like ``"."``: the empty name no machine has.
+    """
+    return hostname.strip().split(".", 1)[0].casefold()
+
+
+def _raw_identity() -> tuple[str, str]:
+    """Return this machine's raw name, short, and where it came from (module docstring, "Identity").
+
+    :data:`MACHINE_ENV` when set (source ``$DSF_MACHINE_ID``), else :func:`this_hostname`
+    (source ``its hostname``): the one place every identity check takes the name from.
+    """
+    override = os.environ.get(MACHINE_ENV, "")
+    if override:
+        return short_hostname(override), f"${MACHINE_ENV}"
+    return short_hostname(this_hostname()), "its hostname"
+
+
+def canonical(
+    name: str,
+    listed: Sequence[Machine] | None = None,
+    *,
+    repo: Path = _git_runner.CHECKOUT_ROOT,
+) -> str:
+    """Return the machine name a stored ``name`` means.
+
+    Take ``name`` up to its first dot, casefolded (:func:`short_hostname`). When a row of
+    ``listed`` (default the list of the checkout at ``repo``) has that as its name or one
+    of its ``aliases``, return the row's ``name``; otherwise return the short form itself.
+    An empty short form returns ``""`` and never a row. Never raises: with an unreadable
+    or broken list nothing resolves, so the short form is returned.
+    """
+    short = short_hostname(name)
+    if not short:
+        return ""
+    if listed is None:
+        try:
+            listed = machines(repo)
+        except MachineListError:
+            return short
+    return next((entry.name for entry in listed if short in _names(entry)), short)
+
+
+def this_machine(
+    listed: Sequence[Machine] | None = None,
+    *,
+    repo: Path = _git_runner.CHECKOUT_ROOT,
+) -> Machine:
+    """Return the row of the machine this script runs on (module docstring, "Identity").
+
+    The row (``listed``, default the list of the checkout at ``repo``) whose ``name`` is
+    this machine's raw name: :data:`MACHINE_ENV` when set, else :func:`this_hostname`, both
+    up to the first dot, casefolded. An alias never identifies the live machine: aliases
+    exist so stored records resolve, and a host answering to one, or to a name the list
+    does not hold, refuses until its hostname or the list names its row. Every machine
+    then records and compares by the one row name, never by whatever hostname it reports.
+
+    Raises:
+        MachineListError: the raw name is empty (an override such as ``.``), the list is
+            unreadable or broken (:func:`load_machines`), or no row is named the raw name;
+            the message names it and its source (and the rows).
+
+    """
+    raw, source = _raw_identity()
+    if not raw:
+        msg = (
+            f"this machine has no name: {source} is empty before its first dot; set "
+            f"${MACHINE_ENV} to its row's name"
+        )
+        raise MachineListError(msg)
+    if listed is None:
+        listed = machines(repo)
+    found = next((entry for entry in listed if short_hostname(entry.name) == raw), None)
+    if found is None:
+        msg = (
+            f"this machine is {raw!r} ({source}), which no row of the machine list names "
+            f"(listed: {', '.join(entry.name for entry in listed)}); give the host its row's "
+            f"name, add its row, or set ${MACHINE_ENV} to the row's name"
+        )
+        raise MachineListError(msg)
+    return found
+
+
+def this_machine_name(*, repo: Path = _git_runner.CHECKOUT_ROOT) -> str:
+    """Return this machine's name for a record: :func:`this_machine`'s, else :func:`canonical`'s.
+
+    Lenient where :func:`this_machine` is strict: on a host no row names, the raw name
+    (:data:`MACHINE_ENV`, else :func:`this_hostname`) read through :func:`canonical`, so
+    a host answering to an alias records its row's name, an unlisted one its own short
+    name and an empty raw name ``""``. Never raises.
+    """
+    try:
+        return this_machine(repo=repo).name
+    except MachineListError:
+        return canonical(_raw_identity()[0], repo=repo)
 
 
 def local_machine(
@@ -321,23 +453,26 @@ def local_machine(
 ) -> Machine | None:
     """Return the machine this script runs on, or ``None`` when no entry is this one.
 
-    ``here`` names it outright (a name or an ssh host); otherwise it is the machine
-    whose ``hostnames`` holds ``hostname`` (default :func:`this_hostname`) up to its
-    first dot, compared without case. Nothing else identifies it: a machine of the
-    same OS is not this one.
+    ``here`` names it outright: a row's name or ssh host, or a name :func:`canonical`
+    resolves to a row (an alias included). Otherwise it is the row whose ``name`` is
+    ``hostname`` when given, else this machine's raw name as :func:`this_machine` takes
+    it (:data:`MACHINE_ENV`, else :func:`this_hostname`), up to its first dot, compared
+    without case: an alias never identifies the live machine, and neither does a machine
+    of the same OS. Unlike :func:`this_machine`, no row is ``None``, never an error.
 
     Raises:
         MachineListError: ``here`` names no machine of the list.
 
     """
     if here is not None:
+        wanted = canonical(here, listed)
         for entry in listed:
-            if here in {entry.name, entry.ssh}:
+            if here in {entry.name, entry.ssh} or wanted == entry.name:
                 return entry
         msg = f"--here {here!r} names no machine of the list"
         raise MachineListError(msg)
-    short = short_hostname(this_hostname() if hostname is None else hostname)
-    return next((entry for entry in listed if short in entry.hostnames), None)
+    short = _raw_identity()[0] if hostname is None else short_hostname(hostname)
+    return next((entry for entry in listed if short_hostname(entry.name) == short), None)
 
 
 # -- ssh ----------------------------------------------------------------------------------

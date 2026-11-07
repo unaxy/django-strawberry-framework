@@ -94,15 +94,15 @@ def _commit(root: Path, path: str, content: str) -> str:
     return _git_out(root, "rev-parse", "HEAD").strip()
 
 
-def _row(name: str, ssh: str, hostname: str) -> dict[str, object]:
+def _row(name: str) -> dict[str, object]:
+    """Return the ``machines.json`` row of fake machine ``name``: its ssh alias and id alike."""
     return {
         "name": name,
-        "ssh": ssh,
+        "ssh": name,
         "os": "macos" if sys.platform == "darwin" else "linux",
         "repo": "~/projects/django-strawberry-framework",
         "weight": {"light": 1.0, "heavy": 1.0},
         "floors": {"light": {}, "heavy": {}},
-        "hostnames": [hostname],
     }
 
 
@@ -166,12 +166,12 @@ class Fleet:
     def at_b(self) -> None:
         """Make ``work.py`` calls in this process act as machine ``b``."""
         self.monkeypatch.setattr(work, "REPO_ROOT", self.repo_b)
-        self.monkeypatch.setenv(work.MACHINE_ENV, "b")
+        self.monkeypatch.setenv(fleet_rules.MACHINE_ENV, "b")
 
     def at_a(self) -> None:
         """Make ``work.py`` calls in this process act as machine ``a`` again."""
         self.monkeypatch.setattr(work, "REPO_ROOT", self.repo_a)
-        self.monkeypatch.setenv(work.MACHINE_ENV, "a")
+        self.monkeypatch.setenv(fleet_rules.MACHINE_ENV, "a")
 
     def repo(self, label: str) -> Path:
         return self.tmp / label / "projects" / "django-strawberry-framework"
@@ -188,7 +188,7 @@ class Fleet:
     def at(self, label: str) -> None:
         """Make ``work.py`` calls in this process act as machine ``label``."""
         self.monkeypatch.setattr(work, "REPO_ROOT", self.repo(label))
-        self.monkeypatch.setenv(work.MACHINE_ENV, label)
+        self.monkeypatch.setenv(fleet_rules.MACHINE_ENV, label)
 
     @contextlib.contextmanager
     def running_on(self, label: str) -> Generator[None, None, None]:
@@ -212,7 +212,7 @@ class Fleet:
         with pytest.MonkeyPatch.context() as patch:
             patch.setenv("FAKE_TAILNET", str(tailnet))
             patch.setenv("HOME", str(self.tmp / label))
-            patch.setenv(work.MACHINE_ENV, label)
+            patch.setenv(fleet_rules.MACHINE_ENV, label)
             patch.setattr(fleet_sync, "REPO_ROOT", self.repo(label))
             patch.setattr(work, "REPO_ROOT", self.repo(label))
             yield
@@ -249,7 +249,7 @@ def _make_checkout(root: Path) -> None:
     _ = _write(root / "django_strawberry_framework" / "__init__.py", "VALUE = 1\n")
     _ = _write(root / ".gitignore", ".work/\n.venv/\n__pycache__/\n*.pyc\n.python-version\n")
     _ = _write(root / "gone.txt", "to delete\n")
-    machines = {"machines": [_row("rio-a", "a", "a"), _row("rio-b", "b", "b")]}
+    machines = {"machines": [_row("a"), _row("b")]}
     _ = _write(root / "docs" / "fleet" / "machines.json", json.dumps(machines, indent=2))
     _ = _git_out(root, "init", "-q", "-b", "main")
     _ = _git_out(root, "add", "-A")
@@ -346,38 +346,128 @@ def test_status_names_every_online_machine_and_why_one_is_not_synced(fleet: Flee
     assert code == 0
     machines = _machines(document)
     assert set(machines) == {
-        "rio-a",
-        "rio-b",
+        "a",
+        "b",
         "c",
         "w",
         "y",
         "r",
         "x",
     }
-    assert machines["rio-a"]["qualified"] is True
-    assert machines["rio-b"]["qualified"] is True
-    assert machines["rio-b"]["ssh"] == "b"
+    assert machines["a"]["qualified"] is True
+    assert machines["b"]["qualified"] is True
+    assert machines["b"]["ssh"] == "b"
     assert "Host key verification failed" in str(machines["c"]["reason"])
     assert "not supported yet" in str(machines["w"]["reason"])
     assert "no checkout at ~/projects/django-strawberry-framework" in str(machines["y"]["reason"])
     assert "root commit differs" in str(machines["r"]["reason"])
     assert machines["x"]["qualified"] is True
-    assert json_object(machines["x"], "suggested_row")["hostnames"] == ["x"]
+    suggested = json_object(machines["x"], "suggested_row")
+    assert (suggested["name"], suggested["aliases"]) == ("x", [])
 
 
 def test_a_peer_without_the_script_or_ignoring_no_work_folder_is_not_synced(fleet: Fleet) -> None:
     code, document = fleet.run("status", scripts=False)
     assert code == 0
-    assert "lacks scripts/fleet_sync.py" in str(_machines(document)["rio-b"]["reason"])
+    assert "lacks scripts/fleet_sync.py" in str(_machines(document)["b"]["reason"])
     _ = _write(fleet.repo_b / ".gitignore", ".venv/\n")
     _, document = fleet.run("status")
-    assert "does not ignore .work/" in str(_machines(document)["rio-b"]["reason"])
+    assert "does not ignore .work/" in str(_machines(document)["b"]["reason"])
 
 
 def test_a_checkout_outside_projects_is_bad_setup(fleet: Fleet) -> None:
     fleet.monkeypatch.setenv("HOME", str(fleet.tmp / "elsewhere"))
     code, _ = fleet.run("status")
     assert code == 2
+
+
+def _setup_error(fleet: Fleet, *args: str) -> str:
+    """Run ``fleet_sync.py args`` on machine ``a``, expecting bad setup; return its stderr."""
+    _ = fleet.capsys.readouterr()
+    code = fleet_sync.main(
+        [
+            *args,
+            "--json",
+            "--remote-scripts",
+            SCRIPTS,
+        ],
+    )
+    captured = fleet.capsys.readouterr()
+    assert (code, captured.out) == (2, "")
+    return captured.err
+
+
+def test_sync_and_handoff_refuse_on_a_host_no_row_names_and_status_still_reports(
+    fleet: Fleet,
+) -> None:
+    """Only a listed machine writes records naming itself; reading needs no row."""
+    copy = _new()
+    _age(copy)
+    fleet.monkeypatch.setenv(fleet_rules.MACHINE_ENV, "stranger")
+    for command in (["sync"], ["handoff", NAME]):
+        error = _setup_error(fleet, *command)
+        assert "this machine is 'stranger' ($DSF_MACHINE_ID)" in error
+        assert "listed: a, b" in error
+    assert not (fleet.repo_b / ".work" / "clones" / NAME).exists()
+    assert fleet.run("status")[0] == 0
+
+
+def test_a_typed_machine_name_selects_its_row_through_its_aliases_case_and_domain() -> None:
+    """``--machine``/``--to`` take the label, ssh, row or id as typed, or any stored-name form."""
+    rows = [
+        fleet_rules.Machine(
+            name="rio-air",
+            ssh="air-ssh",
+            os="macos",
+            repo="~/projects/django-strawberry-framework",
+            weights={"light": 1.0, "heavy": 1.0},
+            floors={"light": {}, "heavy": {}},
+            aliases=("riordens-macbook-air",),
+        ),
+    ]
+    listed = fleet_sync.Machine("rio-air", "air-ssh", "macos", local=False, row="rio-air")
+    unlisted = fleet_sync.Machine("x", "x", "linux", local=False, row="", labels=("x",))
+    for typed in (
+        "rio-air",
+        "air-ssh",
+        "Rio-Air.lan",
+        "Riordens-MacBook-Air.local",
+    ):
+        assert fleet_sync._named_by(listed, typed, rows), typed
+    assert fleet_sync._named_by(unlisted, "X.tail0.ts.net", rows)
+    for typed in (
+        "rio-ubu",
+        "x",
+        "",
+        " ",
+        ".",
+    ):
+        assert not fleet_sync._named_by(listed, typed, rows), typed
+    for typed in ("", " "):
+        assert not fleet_sync._named_by(unlisted, typed, rows), typed
+
+
+def test_an_empty_machine_filter_selects_no_peer(fleet: Fleet) -> None:
+    """``--machine ""`` never matches an unlisted peer's empty row."""
+    _ = fleet.machine("c")
+    for typed in ("", " "):
+        here, others = fleet_sync.find_machines(SCRIPTS, [typed])
+        assert here.row == "a"
+        assert others == [], typed
+
+
+def test_handoff_to_a_machine_typed_with_a_domain_and_another_case(fleet: Fleet) -> None:
+    copy = _new()
+    _age(copy)
+    assert fleet.run("sync", "--copy", NAME, "--machine", "B.tail0.ts.net")[0] == 0
+    code, document = fleet.run("handoff", NAME, "--to", "B.lan")
+    assert code == 0, document
+    assert _note(copy)["home"] == "b"
+
+
+def test_sync_refuses_when_tailscale_names_this_machine_as_another_row(fleet: Fleet) -> None:
+    fleet.monkeypatch.setenv(fleet_rules.MACHINE_ENV, "b")
+    assert "Tailscale names this machine 'a'" in _setup_error(fleet, "sync")
 
 
 # --------------------------------------------------------------------------------------------
@@ -396,7 +486,7 @@ def test_sync_makes_a_replica_on_the_peer_that_is_marked_and_points_at_its_own_c
     _age(copy)
     code, document = fleet.run("sync", "--copy", NAME)
     assert code == 0, document
-    assert ("synced", NAME, "synced rio-a -> rio-b") in _results(document)
+    assert ("synced", NAME, "synced a -> b") in _results(document)
     replica = fleet.repo_b / ".work" / "clones" / NAME
     assert (replica / "work.txt").read_text(encoding="utf-8") == "uncommitted work\n"
     assert not (replica / "gone.txt").exists()
@@ -416,7 +506,7 @@ def test_sync_makes_a_replica_on_the_peer_that_is_marked_and_points_at_its_own_c
     assert "replica" not in _note(copy)
     code, document = fleet.run("sync", "--copy", NAME)
     assert code == 0
-    assert ("fresh", NAME, "replica on rio-b is fresh") in _results(document)
+    assert ("fresh", NAME, "replica on b is fresh") in _results(document)
 
 
 def test_an_edit_at_home_reaches_the_replica_and_a_replica_edit_stops_the_copy(
@@ -442,7 +532,7 @@ def test_an_edit_at_home_reaches_the_replica_and_a_replica_edit_stops_the_copy(
     code, document = fleet.run("status", "--copy", NAME)
     assert code == 1
     [entry] = [json_object(item) for item in json_list(document, "copies")]
-    assert json_object(entry, "replicas") == {"rio-b": "changed"}
+    assert json_object(entry, "replicas") == {"b": "changed"}
 
 
 def test_a_copy_both_machines_hold_as_home_is_a_conflict(fleet: Fleet) -> None:
@@ -527,7 +617,7 @@ def test_handoff_moves_the_home_and_the_old_home_takes_the_new_homes_edits(fleet
     copy = _new()
     _age(copy)
     assert fleet.run("sync", "--copy", NAME)[0] == 0
-    code, document = fleet.run("handoff", NAME, "--to", "rio-b")
+    code, document = fleet.run("handoff", NAME, "--to", "b")
     assert code == 0, document
     replica = fleet.repo_b / ".work" / "clones" / NAME
     assert _note(replica)["replica"] == "false"
@@ -538,7 +628,7 @@ def test_handoff_moves_the_home_and_the_old_home_takes_the_new_homes_edits(fleet
     _age(replica)
     code, document = fleet.run("sync", "--copy", NAME)
     assert code == 0, document
-    assert ("synced", NAME, "synced rio-b -> rio-a") in _results(document)
+    assert ("synced", NAME, "synced b -> a") in _results(document)
     assert (copy / "from-b.txt").read_text(encoding="utf-8") == "edited at the new home\n"
     assert _note(copy)["syncedtree"] == work.content_tree(copy)
 
@@ -552,7 +642,7 @@ def test_handoff_to_an_edited_replica_keeps_its_edits_when_the_home_did_not_chan
     replica = fleet.repo_b / ".work" / "clones" / NAME
     _ = _write(replica / "mistake.txt", "edited on the replica\n")
     _age(replica)
-    code, document = fleet.run("handoff", NAME, "--to", "rio-b")
+    code, document = fleet.run("handoff", NAME, "--to", "b")
     assert code == 0, document
     assert (replica / "mistake.txt").exists()
     assert _note(replica)["replica"] == "false"
@@ -568,7 +658,7 @@ def test_a_handoff_chain_reaches_a_replica_whose_machine_missed_a_handoff(fleet:
     replica_c = repo_c / ".work" / "clones" / NAME
     assert _note(replica_c)["home"] == "a"
     fleet.peer("c", None, online=False)
-    assert fleet.run("handoff", NAME, "--to", "rio-b")[0] == 0
+    assert fleet.run("handoff", NAME, "--to", "b")[0] == 0
     home_b = fleet.repo_b / ".work" / "clones" / NAME
     _ = _write(home_b / "from-b.txt", "edited at the new home\n")
     _age(home_b)
@@ -591,7 +681,7 @@ def test_the_new_homes_tombstone_removes_a_replica_whose_machine_missed_the_hand
     _age(_new())
     assert fleet.run("sync", "--copy", NAME)[0] == 0
     fleet.peer("c", None, online=False)
-    assert fleet.run("handoff", NAME, "--to", "rio-b")[0] == 0
+    assert fleet.run("handoff", NAME, "--to", "b")[0] == 0
     fleet.at_b()
     _age(fleet.repo_b / ".work" / "clones" / NAME)
     assert work.main(["rm", NAME]) == 0
@@ -631,7 +721,7 @@ def test_handoff_with_the_home_offline_refuses_unless_forced_and_the_old_home_is
     code, document = fleet.run("sync", "--copy", NAME, "--machine", "c")
     assert code == 1
     assert any(
-        result == "conflict" and "rio-a holds the newer handoff" in detail
+        result == "conflict" and "a holds the newer handoff" in detail
         for result, _s, detail in _results(document)
     )
     assert _note(old_home)["home"] == "c"
@@ -652,7 +742,7 @@ def test_a_copy_removed_at_home_leaves_every_unchanged_replica_and_keeps_an_edit
     ]
     code, document = fleet.run("sync", "--copy", NAME)
     assert code == 0, document
-    assert ("synced", NAME, "tombstone rio-a -> rio-b") in _results(document)
+    assert ("synced", NAME, "tombstone a -> b") in _results(document)
     assert work.tombstones(fleet.repo_b) == work.tombstones(fleet.repo_a)
     assert not (fleet.repo_b / ".work" / "clones" / NAME).exists()
     assert NAME not in work.discover(fleet.repo_b)
@@ -899,7 +989,7 @@ def test_a_home_save_a_cut_short_sync_copied_is_no_replica_edit(fleet: Fleet, th
     assert (replica / "first.txt").read_text(encoding="utf-8") == "saved at home meanwhile\n"
     code, document = fleet.run("status", "--copy", NAME)
     [entry] = [json_object(item) for item in json_list(document, "copies")]
-    assert json_object(entry, "replicas") == {"rio-b": "syncing"}
+    assert json_object(entry, "replicas") == {"b": "syncing"}
     args = (
         ["sync", "--copy", NAME]
         if then == "sync"
@@ -907,7 +997,7 @@ def test_a_home_save_a_cut_short_sync_copied_is_no_replica_edit(fleet: Fleet, th
             "handoff",
             NAME,
             "--to",
-            "rio-b",
+            "b",
         ]
     )
     code, document = fleet.run(*args)
@@ -1106,7 +1196,7 @@ def test_a_new_copy_reusing_a_replicas_name_never_overwrites_that_replica(
     assert (kept / "old.txt").read_text(encoding="utf-8") == "earlier work\n"
     code, document = fleet.run("sync", "--copy", NAME)
     assert code == 0, document
-    assert ("synced", NAME, "synced rio-a -> rio-b") in _results(document)
+    assert ("synced", NAME, "synced a -> b") in _results(document)
     assert not (replica / "old.txt").exists()
     assert work.copy_identity(_note(replica)) == work.copy_identity(_note(new))
 
@@ -1121,7 +1211,7 @@ def test_gc_on_a_former_home_never_removes_the_landed_copy_it_now_holds_as_a_rep
     _ = _git_out(fleet.repo_a, "commit", "-q", "-m", "the maintainer commits the landing")
     _age(copy)
     assert fleet.run("sync", "--copy", NAME)[0] == 0
-    code, document = fleet.run("handoff", NAME, "--to", "rio-b")
+    code, document = fleet.run("handoff", NAME, "--to", "b")
     assert code == 0, document
     _ = fleet.capsys.readouterr()
     assert work.main(["gc"]) == 0
@@ -1288,12 +1378,12 @@ def test_a_save_of_unchanged_content_stays_the_copys_own_after_a_handoff(
     held = fleet.repo_b / ".work" / "clones" / NAME
     if replica == "clean":
         code, document = fleet.run("sync", "--copy", NAME)
-        assert ("synced", NAME, "synced rio-a -> rio-b") in _results(document), document
+        assert ("synced", NAME, "synced a -> b") in _results(document), document
         assert "save-2" in work.recorded_pins(_note(held))
     else:
         _ = _write(held / "mistake.txt", "edited on the replica\n")
         _age(held)
-    code, document = fleet.run("handoff", NAME, "--to", "rio-b")
+    code, document = fleet.run("handoff", NAME, "--to", "b")
     assert code == 0, document
     assert set(work.recorded_pins(_note(held))) == {"save-1", "save-2"}
     _age(copy)
@@ -1316,9 +1406,9 @@ def test_handoff_carries_a_home_save_no_sync_carried_to_the_promoted_machine(
     second = work.pins(fleet.repo_a)[NAME]["save-2"]
     assert "save-2" not in work.pins(fleet.repo_b)[NAME]
     _age(copy)
-    code, document = fleet.run("handoff", NAME, "--to", "rio-b")
+    code, document = fleet.run("handoff", NAME, "--to", "b")
     assert code == 0, document
-    assert ("synced", f"{NAME}/save-2", "pin rio-a -> rio-b") in _results(document)
+    assert ("synced", f"{NAME}/save-2", "pin a -> b") in _results(document)
     held = fleet.repo_b / ".work" / "clones" / NAME
     assert _note(held)["home"] == "b"
     assert work.recorded_pins(_note(held))["save-2"] == second
@@ -1386,7 +1476,7 @@ def test_pins_a_link_created_stay_reported_when_the_bundle_after_it_fails(
     code, document = fleet.run("sync", "--copy", NAME)
     assert code == 1
     rows = _results(document)
-    assert ("synced", f"{NAME}/save-1", "pin rio-a -> rio-b") in rows
+    assert ("synced", f"{NAME}/save-1", "pin a -> b") in rows
     assert ("failed", "pins", "the bundle broke") in rows
     assert work.pins(fleet.repo_b)[NAME]["save-1"] == start
     assert "save-2" not in work.pins(fleet.repo_b)[NAME]
@@ -1499,7 +1589,7 @@ def test_one_run_per_machine_and_none_during_a_land(fleet: Fleet) -> None:
     assert any("another fleet_sync run" in detail for _r, _s, detail in _results(document))
     with work.land_lock(fleet.repo_b):
         code, document = fleet.run("status")
-    assert "land is in progress" in str(_machines(document)["rio-b"]["reason"])
+    assert "land is in progress" in str(_machines(document)["b"]["reason"])
 
 
 def test_an_agent_write_outside_a_held_run_is_refused(fleet: Fleet) -> None:
@@ -1556,12 +1646,12 @@ def _capture_run(patch: pytest.MonkeyPatch, seen: list[tuple[list[str], dict[str
 def test_a_peers_ssh_and_rsync_carry_the_keepalive_and_rsync_an_io_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    peer = fleet_sync.Endpoint("b", "rio-b", "b-ssh", SCRIPTS)
+    peer = fleet_sync.Endpoint("b", "b", "b-ssh", SCRIPTS)
     argv = peer.argv("probe")
     assert argv == fleet_rules.ssh_argv("b-ssh", argv[-1])
     seen: list[tuple[list[str], dict[str, str]]] = []
     _capture_run(monkeypatch, seen)
-    fleet_sync.rsync(fleet_sync.Endpoint("a", "rio-a", ""), "/x", peer, "/y")
+    fleet_sync.rsync(fleet_sync.Endpoint("a", "a", ""), "/x", peer, "/y")
     rsync_argv = seen[0][0]
     assert "--timeout=120" in rsync_argv
     assert rsync_argv[rsync_argv.index("-e") + 1] == fleet_rules.ssh_command()
@@ -1572,7 +1662,7 @@ def test_fetch_main_runs_git_with_the_batch_mode_keepalive_ssh(
 ) -> None:
     monkeypatch.setenv("DSF_FETCH_PROBE", "kept")
     probe = fleet_sync.Probe(
-        id="rio-b",
+        id="b",
         os="linux",
         repo="/home/b/projects/django-strawberry-framework",
         at_checkout=True,
@@ -1584,7 +1674,7 @@ def test_fetch_main_runs_git_with_the_batch_mode_keepalive_ssh(
         fleet_busy=False,
         rsync="rsync",
     )
-    machine = fleet_sync.Machine("rio-b", "b-ssh", "linux", local=False, row="", probe=probe)
+    machine = fleet_sync.Machine("b", "b-ssh", "linux", local=False, row="", probe=probe)
     seen: list[tuple[list[str], dict[str, str]]] = []
     _capture_run(monkeypatch, seen)
     assert not fleet_sync.fetch_main(machine)
@@ -1601,7 +1691,7 @@ def test_a_hold_on_a_silent_peer_times_out_with_a_fleet_error(
     started = time.monotonic()
     with (
         pytest.raises(fleet_sync.FleetError, match=r"the hold printed nothing in 0\.3s"),
-        _SilentPeer("b", "rio-b", "b-ssh").hold("token"),
+        _SilentPeer("b", "b", "b-ssh").hold("token"),
     ):
         pass
     assert time.monotonic() - started < 10
