@@ -37,12 +37,13 @@ from typing import (
 import django_filters
 from django.core.exceptions import (
     EmptyResultSet,
+    FieldDoesNotExist,
     FieldError,
     FullResultSet,
     ValidationError,
 )
 from django.db import connections, models
-from django.db.models import Exists, Q
+from django.db.models import Exists, FilteredRelation, Q, Subquery
 from django.db.models import lookups as model_lookups
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression
@@ -192,6 +193,7 @@ from django_strawberry_framework.utils.widgets import widget_keys
 
 from .base import (
     _GLOBALID_RELATION_PK_ATTR,
+    _RELATION_VIEW_ATTR,
     ArrayFilter,
     EnumChoiceFilter,
     EnumLookupFilter,
@@ -207,12 +209,14 @@ from .base import (
     RelationPkMultipleFilter,
     TextPatternFilter,
     _bound_field_name,
+    _bound_lookup_expr,
     _bound_value_field,
     _declared_field_name,
     _django_prepares,
     _filterset_walked_lookup,
     _integer_compared_column,
     _reads_integer_transform,
+    _RelationView,
     copied_declared_filter,
     copied_form_field,
     membership_in_filter_class,
@@ -289,6 +293,7 @@ else:
 
 _M = TypeVar("_M", bound=models.Model)
 _EntryT = TypeVar("_EntryT")
+_RowT = TypeVar("_RowT")
 
 if TYPE_CHECKING:
 
@@ -2064,10 +2069,10 @@ def _relation_key_value(value: object, attname: str) -> object:
 
     django-filter's model-choice filters clean to model instances (one, a list,
     or a queryset, ``_model_choice_members``), which a relation lookup normalizes to
-    the key column and a plain column lookup rejects; a leaf re-read against the
-    target rows' own key column (``FilterSet._leaf_chain``) gets each instance's
-    ``attname`` value instead. Every other value (a raw key, a GlobalID) passes
-    unchanged.
+    the key column and a plain column lookup rejects; a shipped to-many key leaf re-read
+    against the target rows' own key column (``FilterSet._leaf_chain``) gets each
+    instance's ``attname`` value instead. Every other value (a raw key, a GlobalID)
+    passes unchanged.
     """
     members = _model_choice_members(value)
     if members is None:
@@ -2076,9 +2081,63 @@ def _relation_key_value(value: object, attname: str) -> object:
     return keys[0] if isinstance(value, models.Model) else keys
 
 
+def _free_alias(model: type[models.Model], taken: set[str], stem: str) -> str:
+    """Return ``stem``, or ``stem`` numbered, naming no field of ``model`` and none of ``taken``."""
+    name, index = stem, 1
+    while True:
+        try:
+            _ = model._meta.get_field(name)
+        except FieldDoesNotExist:
+            if name not in taken:
+                return name
+        index += 1
+        name = f"{stem}_{index}"
+
+
+def _through_link(model: type[models.Model], field: object) -> tuple[str, str, str] | None:
+    """Return how a many-to-many ``field`` of ``model`` reaches its target through its through rows.
+
+    ``(link, onto, column)`` from the joins Django builds for the relation (its
+    ``path_infos``: onto the through rows, then onto the target): ``link`` is the name
+    ``model``'s rows reach the through rows by (the reverse query name of the through
+    model's key onto ``model``, the hidden ``<Model>_<field>+`` of an auto-created one
+    included), ``onto`` the through model's key onto the target and ``column`` the target
+    column it holds. ``None`` for any other relation, and for a through model whose key
+    onto ``model`` ``model`` cannot name by a reverse name of its own (an auto-created
+    self-referential one, both of whose keys share one hidden name).
+    """
+    # The two joins of ``ManyToManyField.path_infos`` (or ``ManyToManyRel.path_infos``):
+    # onto the through rows, then onto the target.
+    if not isinstance(field, (models.ManyToManyField, models.ManyToManyRel)):
+        return None
+    joins = field.path_infos
+    into, onto = joins[0], joins[-1]
+    link = into.join_field.name
+    if model._meta.get_field(link) is not into.join_field:
+        return None
+    return link, onto.join_field.name, onto.target_fields[0].attname
+
+
+def _names_every_through(model: type[models.Model], hops: tuple[RelationHop, ...]) -> bool:
+    """Whether each many-to-many ``hops`` cross from ``model`` names its through key (``_through_link``).
+
+    Only then can ``FilterSet._relation_view`` condition each through join on the visible
+    targets. A many-to-many whose through key onto its source Django gives no reverse name
+    of its own names none (an auto-created self-referential one read forward, symmetrical
+    or not, both of whose through keys share one hidden name).
+    """
+    for hop in hops:
+        for segment in _hop_relation(hop).split(LOOKUP_SEP):
+            field = model._meta.get_field(segment)
+            if field.many_to_many and _through_link(model, field) is None:
+                return False
+            model = require(field.related_model, is_model_class)
+    return True
+
+
 @dataclass(frozen=True)
 class _ToManyKey:
-    """How a to-many relation key leaf is re-read on the target rows' own key column.
+    """How a shipped to-many relation key leaf is re-read on the target rows' own key column.
 
     ``attname`` names the target key column (``_relation_key_value``); ``declared`` is the
     per-request leaf as the set declares it, whose predicate Django builds over the
@@ -2102,7 +2161,8 @@ class _KeyMatch:
     Django decides which instances its lookup accepts; ``terminal`` is the leaf re-bound
     to that column over the last hop's target rows, positive, whose class's shipped
     comparison (``_shipped_filter_class``) reads any other value. The consumer's
-    ``filter`` never runs a second time.
+    ``filter`` never runs a second time. A value naming no row runs the leaf on its
+    chain's ``fallback`` instead (``_LeafChain.view`` for a to-many key).
     """
 
     hop: RelationHop
@@ -2126,8 +2186,9 @@ class _KeyMatch:
         comparison of the leaf's class keeps on the key column. A value naming no row
         (an empty or absent model-choice value, an instance of another model, a value
         the shipped comparison skips, returning ``rows`` by identity, or refuses,
-        ``_SHIPPED_COMPARISON_REFUSALS``) is ``None``: the leaf then runs over the
-        related rows (``_LeafChain.fallback``).
+        ``_SHIPPED_COMPARISON_REFUSALS``) is ``None``: the leaf then runs its chain's
+        ``fallback`` (``_LeafChain.view``: as declared over the rows of the set declaring
+        it, its relation joined only to visible related rows).
         """
         members = _model_choice_members(value)
         if members is None:
@@ -2135,7 +2196,7 @@ class _KeyMatch:
                 kept = _shipped_filter_class(self.terminal).filter(self.terminal, rows, value)
             except _SHIPPED_COMPARISON_REFUSALS:
                 # The shipped comparison cannot read the value, so it names no row; the
-                # consumer's ``filter`` answers it over the related rows.
+                # consumer's ``filter`` answers it on the chain's ``fallback``.
                 return None
             return None if kept is rows else [kept]
         target = rows.model._meta
@@ -2165,7 +2226,14 @@ class _LeafChain:
     as declared, and a row it matches must reach, through the visible rows of each
     hop of ``key_via``, a visible row of ``key_hop`` its value names (``key_match``);
     for a value naming no row (``_KeyMatch.named_rows``) the request reads
-    ``fallback`` instead, the leaf re-bound over the related rows.
+    ``fallback`` instead: on a forward key the leaf comparing the stored key it holds
+    (``FilterSet._folded_key_chain``), on a to-many key the leaf as declared, its
+    relation read through ``view``. ``view`` holds the hops whose relations such a leaf
+    reads: it runs over the rows of the set declaring it (over the last of ``hops``'
+    visible rows when ``hops`` is not empty, a projected child's leaf) with its
+    ``field_name`` bound to a ``FilteredRelation`` alias of its relation that joins
+    only the rows each hop lets the request see (``FilterSet._relation_view``), so its
+    own value, default and path answer as unwalked, over visible rows.
     """
 
     hops: tuple[RelationHop, ...]
@@ -2175,6 +2243,7 @@ class _LeafChain:
     key_match: _KeyMatch | None = None
     key_via: tuple[RelationHop, ...] = ()
     fallback: _LeafChain | None = None
+    view: tuple[RelationHop, ...] = ()
 
     def terminal_value(self, value: object, using: str) -> object:
         """Return the ``terminal`` value: ``value``, or the target key for a to-many key leaf.
@@ -2188,9 +2257,10 @@ class _LeafChain:
         raising what it raises for the declared predicate (a lookup the relation does not
         register, ``FieldError``; a lone model instance handed to ``in``, ``TypeError``), so
         the target key column answers only a predicate Django builds. A class-level
-        ``filter`` override is consumer code, which is never run twice for one request:
-        its value is read on the key column as it is (a leaf reaching here is the
-        ``fallback`` of one whose value names no row).
+        ``filter`` override reaches here only as the ``fallback`` of a leaf whose value
+        names no row, on a relation whose many-to-many through key Django names no way
+        (``_names_every_through``); it is consumer code, never run twice for one request,
+        so its value is read on the key column as it is.
         """
         if self.to_many_key is None:
             return value
@@ -6587,8 +6657,11 @@ class FilterSet(
         relation-key leaf whose class overrides ``filter`` runs as declared
         (``_leaf_chain``) when its value names rows of the relation's target, its
         copy here read by the shipped comparison of its class (``_KeyMatch``);
-        for a value naming no row its copy runs over the related rows
-        (``_LeafChain.fallback``). A class-level override on a path into a
+        for a value naming no row it runs on its chain's ``fallback``: a forward
+        key's copy comparing the stored key it holds, a to-many key's leaf as
+        declared through its relation's visible rows (``_LeafChain.view``). A
+        class-level ``isnull`` override's copy here tests the target's primary
+        key over the related rows. A class-level override on a path into a
         target column runs over the last hop's visible target rows with the
         path left on that target as its ``field_name`` and the walked lookup as its
         ``lookup_expr``.
@@ -6633,9 +6706,15 @@ class FilterSet(
         the relation's target, and a row it keeps must reach, through each hop's
         visible rows, a visible last-hop row its value names
         (``_LeafChain.key_match``), compared on the column Django's relation
-        lookup compares; its chain carries, as ``fallback``, the re-read chain a
-        value naming no row runs (``FilterSet._request_chain``). Every declared hop's target set
-        resolves: a caller derives (or checks) the hops first.
+        lookup compares; its chain carries, as ``fallback``, the chain a value naming
+        no row runs (``FilterSet._request_chain``): on a forward path the leaf
+        comparing the stored key it holds (``_folded_key_chain``), on a to-many path
+        the leaf as declared over the rows of this set, its ``field_name`` bound to its
+        relation joined through each hop's visible rows (``_LeafChain.view``,
+        ``_relation_view``), or, where a many-to-many on the path names no through key
+        (``_names_every_through``), the leaf re-bound to the target key over the visible
+        target rows. Every declared hop's target set resolves: a caller derives (or checks)
+        the hops first.
         """
         if isinstance(filter_instance, ProjectedChildFilter):
             projection = filter_instance._projection
@@ -6692,13 +6771,9 @@ class FilterSet(
             key_name, key_attname = targets[0].name, targets[0].attname
         terminal = self._bound_terminal(filter_instance, last, key_name)
         setattr(terminal, _GLOBALID_RELATION_PK_ATTR, False)
-        chain = (
-            _LeafChain(hops, terminal, to_many_key=_ToManyKey(key_attname, filter_instance))
-            if to_many
-            else self._folded_key_chain(filter_instance, hops, relation)
-        )
         if shipped:
-            return chain
+            # Shipped and forward returned above: this leaf is a to-many key.
+            return _LeafChain(hops, terminal, to_many_key=_ToManyKey(key_attname, filter_instance))
         key_terminal = copy.copy(terminal)
         key_terminal.exclude = False
         return _LeafChain(
@@ -6707,8 +6782,132 @@ class FilterSet(
             key_hop=last,
             key_match=_KeyMatch(last, key_attname, relation_field, key_terminal),
             key_via=hops[:-1],
-            fallback=chain,
+            fallback=(
+                _LeafChain((), filter_instance, key_hop=last, view=hops)
+                if _names_every_through(_hop_source_model(hops, 0), hops)
+                # No through key to condition: the leaf re-bound to the target key column
+                # over the visible target rows.
+                else _LeafChain(
+                    hops,
+                    terminal,
+                    to_many_key=_ToManyKey(key_attname, filter_instance),
+                )
+            )
+            if to_many
+            else self._folded_key_chain(filter_instance, hops, relation),
         )
+
+    def _relation_view(
+        self,
+        hops: tuple[RelationHop, ...],
+        terminal: Filter,
+        rows: models.QuerySet[_M, _RowT],
+        using: str | None,
+    ) -> tuple[models.QuerySet[_M, _RowT], Filter]:
+        """Return ``rows`` joining the relation ``hops`` cross to visible rows, ``terminal`` bound to it.
+
+        Each relation each of ``hops`` crosses is a ``FilteredRelation`` (Django's own join
+        restricted to a condition) chained onto the one before, its condition the rows the
+        request may reach there: an intermediate model's visible rows (``_via_rows``) and
+        each hop's admitted visible rows (``_admitted_rows``); with no ``using`` (asking
+        whether an absent leaf constrains, ``_absent_leaf_applies``) every join is Django's
+        own. A many-to-many joins its through rows by a ``FilteredRelation`` of their own
+        (``<relation>_links``, ``_through_link``) conditioned on the visible target rows,
+        then the target through them, so a through row onto a hidden target is no row of
+        the view (a ``NULL`` test reads only visible targets). Each alias is named for its
+        relation (``<relation>_visible``), numbered past a name the query or the model
+        already holds (``_free_alias``). The copy of
+        ``terminal`` names the last alias as its ``field_name`` and the lookup its walked
+        path applies where it ends as its ``lookup_expr`` (``filters/base.py::_bound_lookup_expr``:
+        ``exact`` for ``field_name="shelves", lookup_expr="books"``), and carries the relation
+        it stands for (``filters/base.py::_RelationView``), so the filter compares its own
+        value, default and path (``<field_name>__pk__in``, ``<field_name>__code``) through
+        the relation as Django's related lookups read it, over visible rows only.
+        """
+        aliases: dict[str, FilteredRelation] = {}
+        # Every name the query already resolves: its annotations and aliases, and the
+        # ``FilteredRelation`` aliases Django keeps beside them. ``Query._filtered_relations``
+        # is a dict keyed by alias in every audited Django (5.2.16 through 6.1.3), and
+        # ``Query.add_filtered_relation`` overwrites an entry by name without refusing the
+        # repeat, so a name it holds is never reused; a release without the dict fails here.
+        filtered = require(read_attr(rows.query, "_filtered_relations", None), is_dict)
+        taken: set[str] = {str(name) for name in (*rows.query.annotations, *filtered)}
+        names: list[str] = []
+
+        def alias(stem: str, relation_name: str, condition: Q) -> str:
+            name = _free_alias(rows.model, taken, stem)
+            taken.add(name)
+            names.append(name)
+            aliases[name] = FilteredRelation(relation_name, condition=condition)
+            return name
+
+        model: type[models.Model] = rows.model
+        for hop in hops:
+            segments = _hop_relation(hop).split(LOOKUP_SEP)
+            conditions: list[models.QuerySet[models.Model] | None] = [None] * len(segments)
+            if using is not None:
+                visible = self._hop_visible_rows(hop, using)
+                if isinstance(hop, DeclaredHop):
+                    owner, related_filter = _filter_declaration(hop)
+                    via = owner._via_rows(
+                        related_filter,
+                        self._apply_info,
+                        self._hop_visibility(),
+                        using,
+                    )
+                    conditions[: len(via)] = via
+                    visible = _admitted_rows(
+                        owner,
+                        hop.declared_attr,
+                        related_filter,
+                        visible,
+                        self.request,
+                    )
+                conditions[-1] = visible
+            for segment, condition_rows in zip(segments, conditions, strict=True):
+                field = model._meta.get_field(segment)
+                relation_name = f"{names[-1]}{LOOKUP_SEP}{segment}" if names else segment
+                through = _through_link(model, field)
+                if through is None:
+                    condition = (
+                        Q()
+                        if condition_rows is None
+                        else Q(
+                            **{
+                                f"{relation_name}{LOOKUP_SEP}pk{LOOKUP_SEP}in": Subquery(
+                                    condition_rows.values("pk"),
+                                ),
+                            },
+                        )
+                    )
+                    _ = alias(f"{segment}_visible", relation_name, condition)
+                else:
+                    # A many-to-many joins its through rows first: conditioning them, not
+                    # only the target, keeps a through row onto a hidden target out of the
+                    # view (an ``isnull`` reading no visible target sees no such row).
+                    link, onto, column = through
+                    link_name = f"{names[-1]}{LOOKUP_SEP}{link}" if names else link
+                    condition = (
+                        Q()
+                        if condition_rows is None
+                        else Q(
+                            **{
+                                f"{link_name}{LOOKUP_SEP}{onto}{LOOKUP_SEP}in": Subquery(
+                                    condition_rows.values(column),
+                                ),
+                            },
+                        )
+                    )
+                    links = alias(f"{segment}_links", link_name, condition)
+                    _ = alias(f"{segment}_visible", f"{links}{LOOKUP_SEP}{onto}", Q())
+                model = require(field.related_model, is_model_class)
+        view = copy.copy(terminal)
+        setattr(view, _RELATION_VIEW_ATTR, _RelationView(names[-1], _bound_field_name(terminal)))
+        # The alias stands for the walked path, a ``lookup_expr`` crossing a relation
+        # included, so the copy applies the lookup that path applies where it ends.
+        view.lookup_expr = _bound_lookup_expr(terminal)
+        view.field_name = names[-1]
+        return rows.alias(**aliases), view
 
     def _folded_key_chain(
         self,
@@ -6790,7 +6989,9 @@ class FilterSet(
         names rows of the relation's target runs as declared, tied to the named sets of
         ``key_rows`` of the key hop (its visible rows, or its unscoped rows when only
         asking whether an absent leaf constrains); one whose value names no row
-        (``_KeyMatch.named_rows``) reads its ``fallback``, re-bound over the related rows.
+        (``_KeyMatch.named_rows``) reads its ``fallback``: a forward key's leaf comparing
+        the stored key it holds, a to-many key's leaf as declared through its relation's
+        visible rows (``_LeafChain.view``).
         Every other chain is returned as it is, naming nothing.
         """
         match = chain.key_match
@@ -6812,8 +7013,11 @@ class FilterSet(
         terminal (``_leaf_chain``) runs with the value it would receive over the
         rows of the model it was written for, unscoped: the last hop target's base
         rows, or, when the chain walks no hop (a relation-key leaf on one forward
-        hop), the rows this set was built over (``self.queryset``,
-        ``_chain_base``), never the rows the leaves before it left, so the answer
+        hop, or one running consumer code), the rows this set was built over
+        (``self.queryset``, ``_chain_base``), a to-many key's leaf reading its
+        relation there through Django's own joins (``_LeafChain.view``, every
+        ``_relation_view`` alias unconditioned), never the rows the leaves
+        before it left, so the answer
         is the same whenever it is asked, on ``apply_sync`` and ``apply_async``
         alike (``_probe_absent_relation_leaves``). A pipeline asks it before the
         ``.qs`` read, on the request's root set and on each logical arm's sibling
@@ -6862,8 +7066,11 @@ class FilterSet(
             built.db,
         )
         rows = self._chain_base(chain, built)
+        terminal = chain.terminal
+        if chain.view:
+            rows, terminal = self._relation_view(chain.view, terminal, rows, None)
         try:
-            return chain.terminal.filter(rows, chain.terminal_value(value, built.db)) is not rows
+            return terminal.filter(rows, chain.terminal_value(value, built.db)) is not rows
         except FieldError:
             # Only a compiled lookup can raise it, so the leaf constrains something.
             return True
@@ -7054,7 +7261,15 @@ class FilterSet(
         override honours ``self.exclude`` through the package), and keeps the
         parents it matched that reach a visible last-hop row its value names
         (``_reaches_key``); the rows it returns, its own ``distinct`` included,
-        are the parents' multiplicity, as for a leaf walking no hop.
+        are the parents' multiplicity, as for a leaf walking no hop. One whose
+        value names no row of the target runs its chain's ``fallback``: on a to-many
+        key (``_LeafChain.view``) the override runs once, as declared, over
+        ``queryset`` (over the projection hop's visible rows for a projected child's
+        leaf), its ``field_name`` bound to its relation joined only to the rows each
+        hop lets the request see (``_relation_view``), so a default, a queryset or an
+        instance it reads, and a path it continues past the relation, answer as
+        unwalked over the visible related rows; the rows it keeps need no further
+        reach test, and ``exclude`` negates at the parent as above.
         """
         if not supplied:
             applies = self._recorded_verdict(name, value)
@@ -7088,26 +7303,42 @@ class FilterSet(
         if not chain.hops and key_hop is not None:
             if negate:
                 inner_root = correlated_inner_root(queryset)
+                if chain.view:
+                    inner_root, terminal = self._relation_view(
+                        chain.view,
+                        terminal,
+                        inner_root,
+                        using,
+                    )
                 inner = self._filter_child_rows(terminal, inner_root, value)
                 if inner is inner_root:
                     return queryset
-                inner = inner.filter(self._reaches_key(inner, chain, key_hop, named, using))
+                if not chain.view:
+                    inner = inner.filter(self._reaches_key(inner, chain, key_hop, named, using))
                 return queryset.filter(~Exists(inner))
             # The parent's own rows: the filter's original invocation, consumer
             # ``distinct`` included, as for a leaf walking no hop.
-            matched = terminal.filter(queryset, value)
+            source = queryset
+            if chain.view:
+                source, terminal = self._relation_view(chain.view, terminal, queryset, using)
+            matched = terminal.filter(source, value)
             assert truth.is_instance(matched, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
                 f"Expected '{truth.kind(self)}' filter {terminal.field_name!r} "
                 f"to return a QuerySet, but got a {truth.kind(matched)} instead."
             )
-            if matched is queryset:
+            if matched is source:
                 return queryset
+            if chain.view:
+                return matched
             return matched.filter(self._reaches_key(matched, chain, key_hop, named, using))
         visible = [self._hop_visible_rows(hop, using) for hop in chain.hops]
-        rows = self._filter_child_rows(terminal, visible[-1], value)
-        if rows is visible[-1]:
+        source = visible[-1]
+        if chain.view:
+            source, terminal = self._relation_view(chain.view, terminal, source, using)
+        rows = self._filter_child_rows(terminal, source, value)
+        if rows is source:
             return queryset
-        if key_hop is not None:
+        if key_hop is not None and not chain.view:
             rows = rows.filter(self._reaches_key(rows, chain, key_hop, named, using))
         condition = Q()
         for index in range(len(chain.hops) - 1, -1, -1):
