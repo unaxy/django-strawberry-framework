@@ -1617,6 +1617,122 @@ def test_multiple_choice_field_over_json_column_keeps_the_column_type() -> None:
     assert _field_map(built)["payload"].type == _field_map(json_built)["payload"].type
 
 
+@pytest.mark.parametrize(
+    ("make_field", "scalar"),
+    [
+        pytest.param(
+            lambda: forms.CharField(required=False, widget=forms.Textarea),
+            str,
+            id="textarea",
+        ),
+        pytest.param(lambda: forms.EmailField(required=False), str, id="email"),
+        pytest.param(
+            lambda: forms.ChoiceField(choices=_CITY_PICKS, required=False),
+            str,
+            id="choice",
+        ),
+        pytest.param(lambda: forms.IntegerField(required=False), int, id="integer"),
+        pytest.param(lambda: forms.BooleanField(required=False), bool, id="boolean"),
+    ],
+)
+@pytest.mark.parametrize("operation_kind", [CREATE, PARTIAL])
+def test_single_value_field_over_json_column_is_typed_by_the_form_field(
+    make_field: Callable[[], forms.Field],
+    scalar: object,
+    operation_kind: str,
+) -> None:
+    """A built-in single-value form field over a ``JSONField`` publishes the scalar it reads.
+
+    The column stores what the field cleans as given (a ``CharField``'s ``str()`` of a decoded
+    object is a JSON string), so the input carries what the field reads, as an HTML form
+    posts it, never the column's ``JSON``.
+    """
+    model = scalar_models.NullableScalarSpecimen
+    built, specs = build_form_input_class(
+        _column_form(model, "payload", make_field()),
+        operation_kind=operation_kind,
+    )
+    payload = _field_map(built)["payload"]
+    assert _is_optional(payload)
+    assert _inner_type(payload) is scalar
+    assert [spec.kind for spec in specs] == [SCALAR]
+
+
+@pytest.mark.parametrize(
+    "make_field",
+    [
+        pytest.param(lambda: forms.JSONField(required=False), id="json"),
+        pytest.param(lambda: forms.Field(required=False), id="bare"),
+        pytest.param(
+            lambda: forms.MultipleChoiceField(choices=_CITY_PICKS, required=False),
+            id="multiple-choice",
+        ),
+    ],
+)
+def test_field_reading_any_json_value_over_json_column_keeps_json(
+    make_field: Callable[[], forms.Field],
+) -> None:
+    """A field reading the column's value (any JSON value, a list, or as given) keeps ``JSON``."""
+    model = scalar_models.NullableScalarSpecimen
+    built, _ = build_form_input_class(
+        _column_form(model, "payload", make_field()),
+        operation_kind=CREATE,
+    )
+    assert _inner_type(_field_map(built)["payload"]) is strawberry.scalars.JSON
+
+
+class _PickedJsonRow(models.Model):
+    """An unmanaged row whose ``JSONField`` lists choices."""
+
+    pick: models.JSONField[object, object] = models.JSONField(
+        choices=[("north", "North"), ("south", "South")],
+        null=True,
+        blank=True,
+    )
+
+    class Meta:
+        managed = False
+        app_label = "test_forms_json_choices"
+
+
+@pytest.mark.parametrize(
+    "make_field",
+    [
+        pytest.param(None, id="auto-typed-choice"),
+        pytest.param(
+            lambda: forms.ChoiceField(choices=_CITY_PICKS, required=False),
+            id="declared-choice",
+        ),
+        pytest.param(
+            lambda: forms.TypedChoiceField(choices=_CITY_PICKS, required=False),
+            id="declared-typed-choice",
+        ),
+    ],
+)
+@pytest.mark.parametrize("operation_kind", [CREATE, PARTIAL])
+def test_choice_field_over_json_column_listing_choices_keeps_the_choice_enum(
+    make_field: Callable[[], forms.Field] | None,
+    operation_kind: str,
+) -> None:
+    """A choice field over a ``JSONField`` listing choices publishes the column's choice enum.
+
+    Such a column is a choice column: its read enum's members decode to the values it
+    stores, so the input keeps that enum as every choice column's does, never the form
+    field's ``String``; the field Django builds for it (a ``TypedChoiceField``) and a
+    declared ``ChoiceField`` / ``TypedChoiceField`` alike.
+    """
+    meta = type("Meta", (), {"model": _PickedJsonRow, "fields": ("pick",)})
+    body: dict[str, object] = {"Meta": meta}
+    if make_field is not None:
+        body["pick"] = make_field()
+    form_class = type("PickForm", (forms.ModelForm,), body)
+    built, specs = build_form_input_class(form_class, operation_kind=operation_kind)
+    pick = _field_map(built)["pick"]
+    assert _is_optional(pick)
+    assert isinstance(_inner_type(pick), StrawberryEnumDefinition)
+    assert [spec.kind for spec in specs] == [SCALAR]
+
+
 def _shape_warnings(
     caplog: pytest.LogCaptureFixture,
     form_class: FormClass,

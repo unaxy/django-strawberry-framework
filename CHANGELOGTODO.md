@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 184 to do.
+Progress: 0 done, 185 to do.
 
 ## From dry-0_0_15_3
 
@@ -786,6 +786,15 @@ Progress: 0 done, 184 to do.
   error otherwise). Spell the related column past the relation instead (`children__id` with `icontains`); the error
   names it. A raw `FilterSet(data=...)` raises Django's own `FieldError` either way, and a model-choice `in` on a
   text-keyed to-many relation raises Django's `TypeError` instead of matching rows by the key's characters
+- [ ] 788. CHANGELOG entry for item 720: a `ModelForm` field that reads one value (`CharField`, `ChoiceField`,
+  `IntegerField`, `BooleanField`, ...) over a `JSONField` listing no choices is typed by the form field (`String`,
+  `Int`, `Boolean`) instead of `JSON`, matching graphene-django and the package's own filters over such a column; a
+  decoded object sent to a `CharField` was stored as its Python text (`"{'a': 1}"`), and a form parsing JSON text
+  raised `JSONDecodeError`. Clients send text, and a non-string value is GraphQL's coercion error (a wire-type change
+  for such inputs). `forms.JSONField`, `MultipleChoiceField`, a bare `forms.Field` and a choice column keep their
+  types. An update omitting such a field binds what the form presents for it (its `prepare_value` of the stored value),
+  which that `prepare_value` must accept
+
 ## From dry-upstream-0_0_15
 
 - [ ] 101. CHANGELOG entry for item 22: the debug-toolbar middleware and its GraphiQL bridge template are adapted from

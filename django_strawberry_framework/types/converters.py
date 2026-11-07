@@ -417,12 +417,42 @@ def _registered_scalar_entry(
     """Return the ``SCALAR_MAP`` ``(key, scalar)`` entry ``field``'s nearest MRO class keys.
 
     The one ``SCALAR_MAP`` walk: ``_scalar_map_entry`` (``scalar_for_field``,
-    ``scalar_route``'s map arm) and ``filters/inputs.py::_holds_values_as_given`` read it. A
+    ``scalar_route``'s map arm) and ``holds_values_as_given`` read it. A
     ``GeneratedField`` is walked as the column it computes (``generated_output_field``).
     ``None`` for a field class no entry covers.
     """
     column = generated_output_field(field) or field
     return truth.mro_entry(SCALAR_MAP, truth.class_of(column))
+
+
+def holds_values_as_given(field: "ModelField") -> bool:
+    """Whether ``field`` stores and compares each value as the kind it is handed.
+
+    A column whose own type admits any kind (its ``SCALAR_MAP`` entry, read by MRO through
+    ``_registered_scalar_entry``, is ``strawberry.scalars.JSON``: a ``JSONField`` and a
+    consumer subclass) and whose class keeps Django's own ``Field.to_python`` and
+    ``Field.get_prep_value`` converts nothing (``5`` and ``"5"`` are two JSON values, and the
+    text ``"{'a': 1}"`` is a JSON string, never the object it spells), so the kind a form
+    cleans is the kind the column compares or stores. A filter over such a column is typed by
+    the kind its form cleans (``filters/inputs.py::_form_cleaned_value_field``), and so is a
+    built-in single-value form field over one listing no choices in a form mutation
+    (``forms/inputs.py::held_json_column``). A subclass that overrides either method
+    converts and is typed by the column, as is every column with another scalar (a consumer
+    column converting in ``get_db_prep_value`` keeps its registered scalar), and a column no
+    entry covers keeps the unsupported-field refusal. A relation registered as ``JSON`` is
+    typed by the column too: Django prepares its value through the target field.
+    """
+    if field.is_relation:
+        return False
+    entry = _registered_scalar_entry(field)
+    return (
+        entry is not None and truth.is_among(entry[1], (strawberry.scalars.JSON,))
+    ) and not truth.overrides(
+        truth.class_of(field),
+        models.Field,
+        "to_python",
+        "get_prep_value",
+    )
 
 
 def _scalar_map_entry(field: "ModelField") -> "tuple[type[ConcreteField], TypeForm[object]]":

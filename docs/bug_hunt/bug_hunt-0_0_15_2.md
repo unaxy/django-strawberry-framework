@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 433 done, 108 to do. The CHANGELOG entries filed here moved to
+Progress: 434 done, 109 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1761,6 +1761,20 @@ Progress: 433 done, 108 to do. The CHANGELOG entries filed here moved to
   `test_a_raw_to_many_key_lookup_the_relation_refuses_raises_djangos_error`, the any-class, text-key `in`, range,
   lazy and `test_a_class_level_override_on_a_to_many_key_runs_once_per_request` rows); spec-027, README, GLOSSARY
   `FilterSet`. Filed 783, 784
+- [x] 720. (robustness) fixed: a `ModelForm` field that reads one value (`CharField` family, `ChoiceField`,
+  `IntegerField`, `BooleanField`, ...) over a `JSONField` listing no choices that converts nothing it is handed is typed
+  by the form field (`String`, `Int`, `Boolean`), as graphene-django types form inputs and as the package's filters
+  over such a column already were; it was typed `JSON`, so a decoded object sent to a `CharField` was stored as its
+  Python text (`"{'a': 1}"`), a `BooleanField` stored the truthiness of an object, and a field reading JSON text raised
+  `JSONDecodeError`. A non-string sent to a `String` is now GraphQL's coercion error (a wire-type change before 1.0).
+  An update omitting such a field binds the form's presentation of the stored value (`prepare_value` of its initial),
+  and the keep-stored restore compares against it, so a plain `CharField` keeps a stored object and a JSON-text field
+  partially updates over one; a choice column keeps its choice enum. `forms/inputs.py::_reads_one_value_of_held_json`,
+  `::held_json_column`, `forms/resolvers.py::_bind_omitted_json_presentations`, the column predicate moved to
+  `types/converters.py::holds_values_as_given`. Live rows in `test_scalars_mutation_api.py` over fakeshop
+  `NullableScalarSpecimenFlagForm` (its `payload` now `String`) and the new `NullableScalarSpecimenJsonTextForm`
+  mutations; package rows in `tests/forms/test_inputs.py` and `test_resolvers.py`; spec-038, spec-027 citations, README,
+  GLOSSARY `DjangoModelFormMutation`. Filed 786 and 787
 
 ## Outside review of the fixes
 
@@ -1801,10 +1815,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 720. (robustness) A `DjangoModelFormMutation` whose consumer `forms.CharField` sits over a `JSONField` writes a
-  `payload` the client sends as its Python `str()` (`{"a": 1}` stored as `"{'a': 1}"`): the field cleans the decoded
-  value as text. Split from 711 (its omitted half closed with 524); fact finding owes what the form's published input
-  type is and whether the write is the consumer form's own choice
 - [ ] 721. (robustness) A declared `ListFilter` / `ArrayFilter` whose `lookup_expr` continues across a relation
   (`ListFilter(field_name="holders", lookup_expr="year__in")`, `lookup_expr="pk__in"` / `"id__in"` over a relation)
   or whose `field_name` is a `FilteredRelation` alias leaves its elements uncleaned, so `?f=x` under
@@ -2038,6 +2048,15 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `_flat_leaf_walk` refuses only an instance-level `filter`), so an override reading `value.pk` raises a masked
   `AttributeError` walked and answers unwalked (spec-027 Decision 8: a walked leaf answers as unwalked over the visible
   rows). Found verifying 780
+- [ ] 786. (robustness) A `ModelForm`'s default `forms.JSONField` over a `JSONField` re-parses a decoded JSON
+  string as JSON text: the JSON string `"hi"` sent is refused "Enter a valid JSON.", the JSON string `'{"a": 1}'` is
+  stored as the object, and an update omitting the field over a stored JSON string is refused the same way, though the
+  input is typed `JSON` by the column (docs/README.md "Form mutations"). Likely fix: bind the form field's
+  `prepare_value` of the decoded value. Found researching 720
+- [ ] 787. (robustness, lead, unprobed) A `DateField` / `DecimalField` / `UUIDField` form field over a `JSONField` with
+  no encoder hands the column a value its JSON encoder cannot encode, failing at save; the filter side refuses the
+  same kind at build (`filters/inputs.py::_refuse_kind_json_cannot_encode`), the form side does not. Found researching
+  720
 
 ## To do: holes found re-checking the fixes
 

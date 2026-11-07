@@ -61,7 +61,7 @@ from django_strawberry_framework.scalars import BigInt
 from django_strawberry_framework.sets_mixins import declaration_map
 from django_strawberry_framework.types.converters import (
     _field_label,
-    _registered_scalar_entry,
+    holds_values_as_given,
     refuse_nested_array,
     scalar_for_field,
 )
@@ -518,33 +518,6 @@ def _passes_value_through(form_field: object) -> bool:
     )
 
 
-def _holds_values_as_given(field: ModelField) -> bool:
-    """Whether a lookup on ``field`` compares each value as the kind it is handed.
-
-    A column whose own type admits any kind (its ``SCALAR_MAP`` entry, read by MRO through
-    ``types/converters.py::_registered_scalar_entry``, is ``strawberry.scalars.JSON``: a
-    ``JSONField`` and a consumer subclass) and whose class keeps Django's own
-    ``Field.to_python`` and ``Field.get_prep_value`` converts nothing (``5`` and ``"5"`` are
-    two JSON values), so the kind the filter's form cleans is the kind compared. The
-    model-side mirror of ``_passes_value_through``. A subclass that overrides either method
-    converts and is typed by the column, as is every column with another scalar (a consumer
-    column converting in ``get_db_prep_value`` keeps its registered scalar), and a column no
-    entry covers keeps the unsupported-field refusal. A relation registered as ``JSON`` is
-    typed by the column too: Django prepares its value through the target field.
-    """
-    if field.is_relation:
-        return False
-    entry = _registered_scalar_entry(field)
-    return (
-        entry is not None and truth.is_among(entry[1], (strawberry.scalars.JSON,))
-    ) and not truth.overrides(
-        truth.class_of(field),
-        models.Field,
-        "to_python",
-        "get_prep_value",
-    )
-
-
 #: Each form-field class -> the Python kind one value it cleans is: the scalars
 #: ``FORM_FIELD_SCALARS`` publishes, and the classes whose kind no scalar publishes (a
 #: ``DurationField``'s ``timedelta``), read by MRO (``_cleaned_kind``).
@@ -703,7 +676,7 @@ def _column_cleaned_scalar(
     field of django-filter's own ``gte`` filter for the value's column
     (``filters/base.py::_ColumnCleanedFilter``), which agrees with every column that
     converts what it is handed. Over a column holding values as given
-    (``_holds_values_as_given``) that form, a ``Meta.filter_overrides`` entry's
+    (``types/converters.py::holds_values_as_given``) that form, a ``Meta.filter_overrides`` entry's
     (``filter_overrides={JSONField: {"filter_class": CharFilter}}`` cleans text), types the
     value. ``None`` where the column types it: a column that converts, one django-filter
     builds no filter for (each value passes through as sent), or a form passing values
@@ -712,7 +685,7 @@ def _column_cleaned_scalar(
     if (
         not truth.is_instance(filter_instance, _ColumnCleanedFilter)
         or value_field is None
-        or not _holds_values_as_given(value_field)
+        or not holds_values_as_given(value_field)
     ):
         return None
     form_field = comparison_form_field(filterset_cls, value_field, filter_instance.field_name)
@@ -734,8 +707,8 @@ def _form_cleaned_value_field(
     """Return ``value_field`` when the filter's own form cleans a value of it, else ``None``.
 
     A column whose own scalar is ``JSON`` and that converts nothing it is handed
-    (``_holds_values_as_given``: a ``JSONField``, its key paths included) compares the kind
-    the form cleans, so the form types the leaf
+    (``types/converters.py::holds_values_as_given``: a ``JSONField``, its key paths
+    included) compares the kind the form cleans, so the form types the leaf
     whenever it has form fields, before any other rule: a ``CharFilter`` on ``payload__n``
     takes ``String`` and compares the text ``"5"``, an ``IntegerField`` form takes ``Int``,
     a ``BooleanFilter`` takes ``Boolean``; only a form passing every value through (a bare
@@ -777,7 +750,7 @@ def _form_cleaned_value_field(
     if value_field is None or truth.is_instance(filter_instance, _ColumnCleanedFilter):
         return value_field
     form_fields = _form_value_fields(filter_instance)
-    if form_fields and _holds_values_as_given(value_field):
+    if form_fields and holds_values_as_given(value_field):
         typed = _typed_by_cleaning_form(filter_instance, value_field, form_fields, filterset_cls)
         return None if typed else value_field
     if value_field is _filterset_model_field(filterset_cls, filter_instance):
@@ -994,7 +967,7 @@ def _refuse_form_serving_no_value(
         column is None
         or truth.is_instance(declared, _ColumnCleanedFilter)
         or column is not _filterset_model_field(owner, declared)
-        or _holds_values_as_given(column)
+        or holds_values_as_given(column)
         or operand.null_test
         or not _runs_shipped_filter(declared)
         or not _django_converts(column)
@@ -1829,7 +1802,7 @@ def convert_filter_to_input_annotation(
         _refuse_method_without_form_field(matched, model_field, filterset_cls)
         value_field = (
             _form_cleaned_value_field(matched, model_field, filterset_cls)
-            if model_field is not None and _holds_values_as_given(model_field)
+            if model_field is not None and holds_values_as_given(model_field)
             else model_field
         )
         element = _element_annotation(matched, value_field, owner_definition, filterset_cls)
