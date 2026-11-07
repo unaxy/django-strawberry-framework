@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 437 done, 110 to do. The CHANGELOG entries filed here moved to
+Progress: 437 done, 113 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2077,9 +2077,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   unwalked answers (`ScalarSpecimen.children` naming two children: walked `[]`, unwalked `['p1']`): each AND is re-read
   on the target key column over a single target row (`filters/sets.py::FilterSet._leaf_chain`,
   `_LeafChain.terminal_value`). One declaration, two answers (GOAL "Trust boundary"). Found researching 784
-- [ ] 790. (robustness) A flat leaf left out of the request whose relation-key path a hop walks calls a consumer
-  `filter` override twice (the `filters/sets.py::FilterSet._absent_leaf_applies` probe, then the apply), where
-  unwalked calls it once; consumer code runs once per request elsewhere (780). Found verifying 784
 - [ ] 792. A declared filter whose path names a `FilteredRelation` alias (`ListFilter("vshelf", lookup_expr="in")`,
   `CharFilter("vshelf__code")`, fakeshop's `par__occurred_at`) is resolved without the queryset that holds the alias:
   list elements are uncleaned (junk is Django's `ValueError`, masked over GraphQL), and the alias hop reads no
@@ -2091,12 +2088,43 @@ tracker number are recorded there; open remainders and new defects are filed as 
   publishes, so `refuse_unresolvable_lookup` / `refuse_identityless_relation` never run for it, though the glossary and
   spec-027 say a refusal fires for "an unserved set at its first use": `tests/filters/test_base.py::_ScalarRangeSet`
   with a refused `RangeFilter("parent", "range")` builds and serves raw. Found fixing 721
+- [ ] 795. (robustness) A consumer `filter` override on a flat leaf a hop walks that returns a new queryset when it
+  constrains nothing (`return qs.distinct()` or `qs.all()` on an empty value, as 784's own `_PkReader` ends) reads as
+  constraining, so supplied empty or left out it keeps only the parents that reach a visible related row (Branch
+  `shelves` key under a `RelatedFilter`: two of three branches) where unwalked and django-filter keep every row; the
+  identity-as-no-op rule on the rebound target rows plus the EXISTS fold, not the double run. Found researching 790
+- [ ] 796. (robustness) A `filter` override on a to-many relation key a hop walks that reads an empty or absent value
+  as a default of model instances (`value or Shelf.objects.filter(...)`) raises a masked `TypeError` (`Field 'id'
+  expected a number but got <Shelf: open>`) on every walked reverse, many-to-many and two-hop key, supplied empty or
+  left out, where unwalked and django-filter answer the rows: 784's names-no-row fallback re-binds the override to the
+  target's `pk`; a pk default and forward keys work. Found researching 790
+- [ ] 797. (robustness, gate first) A request filtering through a nested branch (`branch: {...}`) beside a flat leaf
+  walking the same hop runs the hop target type's `get_queryset` twice (the nested map and the flat hop map are
+  separate), where CHANGELOGTODO 561 says the hook runs once per request. Found researching 790
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 790. Decide: a flat leaf the request leaves out, whose path a hop walks (a `RelatedFilter`, a target type's own
+  `get_queryset`), runs a consumer `filter` override that acts on the empty value twice
+  (`filters/sets.py::FilterSet._absent_leaf_applies` runs it over the unscoped rows to learn whether it constrains,
+  then `_apply_relation_leaf` runs it over the visible rows), where unwalked and django-filter run it once (a default
+  read twice, its query doubled; three to four runs in a logical arm, six for a `ModelMultipleChoiceFilter` key whose
+  fresh empty `QuerySet` never equals the recorded verdict). Item 399 scoped "once per value" to supplied values and
+  kept this probe on purpose. Every one-call fix measured narrows a shape that works today:
+  reusing the probe's result (`visible & result`) fails on every `.distinct()` terminal, and `pk__in` reuse lets a
+  hidden row decide a visible answer for an override reading the queryset's latest row; caching where rows provably
+  match covers only a one-forward-hop key. The best candidate derives the hops of an absent leaf whose terminal runs
+  consumer code and runs it once over the visible rows, as a supplied value does (561), keeping the probe for shipped
+  code and for a hop with no resolvable child set or registered type: consumer runs equal unwalked in all 2352 walked
+  grid cells and the arm re-probe closes, but an inert absent consumer leaf now runs the target `get_queryset` (+1 hook
+  per hop; spec-027 "derives nothing unless it does"), `apply_sync` / raw form `.qs` over an async-only `get_queryset`
+  turn rows into the `RuntimeError` naming `apply_async`, and an override reading queryset state decides activity on
+  the visible rows. Accept that trade (561's own precedent for a supplied `""`), or keep two runs and state them where
+  the README, the `FilterSet` glossary row, `filters/sets.py::_KeyMatch` and CHANGELOGTODO 791 say a key override
+  "runs once as declared"?
 - [ ] 655. Decide: on PostgreSQL a `year` / `month` transform `in` member or `range` bound between 2**31 and 2**63 is
   refused as `FILTER_INVALID` (the transform binds an `IntegerField`, int32 there; 385), while Django's own
   `IntegerFieldOverflow` answers `month__gt=2**31` as no / every row and the package's integer-column `in` drops such
