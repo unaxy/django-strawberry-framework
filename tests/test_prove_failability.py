@@ -90,7 +90,7 @@ from django.conf import settings
 
 import django_strawberry_framework
 from django_strawberry_framework.utils._narrowing import read_attr
-from scripts import prove_failability
+from scripts import _locks, prove_failability
 from tests._idioms import is_object_dict, json_at, json_list, json_loads
 
 if TYPE_CHECKING:
@@ -4663,3 +4663,96 @@ def test_pre_image_site_without_a_source_refuses_to_apply() -> None:
         match=r"^the pre-image site for pyproject\.toml names no source$",
     ):
         _ = site.apply("text")
+
+
+# --------------------------------------------------------------------------------------------
+# One pytest at a time: every scope runs under the checkout's pytest lock
+# --------------------------------------------------------------------------------------------
+
+
+def _hold_lock(root: Path) -> int:
+    """Take ``root``'s pytest lock on a descriptor of its own, as another pytest run would."""
+    lock = _locks.pytest_lock_path(root)
+    lock.parent.mkdir(exist_ok=True)
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    assert _locks.try_lock(descriptor)
+    _ = os.write(descriptor, b"other-run pid 7\n")
+    return descriptor
+
+
+_HELD_SCOPE = (
+    "import os, sys; "
+    f"print(os.environ.get({_locks.HELD_ENV!r}, 'none'), file=sys.stderr); "
+    "print('1 passed in 0.1s')"
+)
+
+
+def test_a_scope_waits_for_another_pytest_in_its_checkout(
+    fake_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One waiting line naming the holder; the scope starts holding the lock and says so down."""
+    monkeypatch.setattr(prove_failability, "PYTEST_COMMAND", (sys.executable, "-c", _HELD_SCOPE))
+    held = _hold_lock(fake_repo)
+    waits: list[float] = []
+
+    def release(seconds: float) -> None:
+        waits.append(seconds)
+        os.close(held)
+
+    monkeypatch.setattr(time, "sleep", release)
+    outcome = prove_failability._run_scope(_single_entry(tmp_path))
+    assert waits == [_locks.POLL_SECONDS]
+    assert outcome.return_code == 0
+    err = capsys.readouterr().err
+    assert (
+        "prove_failability: waiting for another pytest in this checkout (other-run pid 7)" in err
+    )
+    lock = _locks.pytest_lock_path(fake_repo)
+    assert lock.read_text(encoding="utf-8").startswith("prove_failability repo pid ")
+
+
+def test_a_scope_under_a_holder_never_waits_on_it(
+    fake_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``work.py run -- pytest`` whose tests run this: the scope inherits the hold."""
+    lock = _locks.pytest_lock_path(fake_repo)
+    environment = {**os.environ, _locks.HELD_ENV: str(lock)}
+    monkeypatch.setattr(
+        prove_failability,
+        "_resolve_scope_launch",
+        lambda: ((sys.executable, "-c", _HELD_SCOPE), environment),
+    )
+    held = _hold_lock(fake_repo)
+
+    def stuck(_seconds: float) -> None:
+        pytest.fail("a scope under its holder waited on the holder's lock")
+
+    monkeypatch.setattr(time, "sleep", stuck)
+    try:
+        outcome = prove_failability._run_scope(_single_entry(tmp_path))
+    finally:
+        os.close(held)
+    assert outcome.return_code == 0
+
+
+def test_a_stop_while_a_scope_waits_ends_the_wait_and_starts_nothing(
+    fake_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = tmp_path / "started"
+    scope = f"from pathlib import Path; Path({str(started)!r}).touch()"
+    monkeypatch.setattr(prove_failability, "PYTEST_COMMAND", (sys.executable, "-c", scope))
+    held = _hold_lock(fake_repo)
+    monkeypatch.setattr(prove_failability._STOP, "signum", signal.SIGTERM)
+    try:
+        with pytest.raises(prove_failability.RunInterruptedError):
+            _ = prove_failability._run_scope(_single_entry(tmp_path))
+    finally:
+        os.close(held)
+    assert not started.exists()

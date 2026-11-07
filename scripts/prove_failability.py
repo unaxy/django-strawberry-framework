@@ -278,7 +278,6 @@ import argparse
 import contextlib
 import dataclasses
 import difflib
-import fcntl
 import filecmp
 import fnmatch
 import hashlib
@@ -302,9 +301,10 @@ from typing import TYPE_CHECKING, NoReturn
 
 try:
     import _git
+    import _locks
     import _stop_signals
 except ModuleNotFoundError:  # imported as ``scripts.prove_failability`` (repo root on path)
-    from scripts import _git, _stop_signals
+    from scripts import _git, _locks, _stop_signals
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
@@ -1447,23 +1447,24 @@ def _lock_repository_root() -> int:
 
     The lock is an ``flock`` on the repository root directory itself, so it
     names the tree whatever scratch root the run uses, and nothing is created
-    or deleted for it. ``LOCK_NB`` turns a held lock into a refusal instead of
-    a wait. Closing the descriptor releases the lock and the kernel closes it
+    or deleted for it. A held lock (``scripts/_locks.py::try_lock``) is a
+    refusal instead of a wait. Closing the descriptor releases the lock and the kernel closes it
     when the process exits however it exits, so a lock is never stale. The
     descriptor is not inheritable (PEP 446): the pytest processes the run
     spawns never hold it.
     """
     descriptor = os.open(REPO_ROOT, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as error:
+        locked = _locks.try_lock(descriptor)
+    except OSError:
         os.close(descriptor)
-        if isinstance(error, BlockingIOError):
-            raise ScratchRootError(
-                f"another run holds the lock on the repository root {REPO_ROOT}: it is proving "
-                "against this tree, so nothing was copied or run",
-            ) from None
         raise
+    if not locked:
+        os.close(descriptor)
+        raise ScratchRootError(
+            f"another run holds the lock on the repository root {REPO_ROOT}: it is proving "
+            "against this tree, so nothing was copied or run",
+        )
     return descriptor
 
 
@@ -2202,6 +2203,11 @@ def _stop_on_signals() -> Generator[None, None, None]:
         _STOP.signum = None
 
 
+def _say_waiting(line: str) -> None:
+    """Print the pytest lock's waiting line (``scripts/_locks.py::hold_pytest``) on stderr."""
+    print(f"prove_failability: {line}", file=sys.stderr)
+
+
 def _run_scope(entry: ProofEntry, capture: RunCapture | None = None) -> RunOutcome:
     """Run one entry's focused pytest scope and return what it reported.
 
@@ -2215,7 +2221,10 @@ def _run_scope(entry: ProofEntry, capture: RunCapture | None = None) -> RunOutco
     :func:`_request_stop`, which forwards it to the whole group; a scope
     started after a stop is sent that signal as soon as it is recorded.
     Either way this raises :class:`RunInterruptedError` instead of returning:
-    a cut-short run measured nothing.
+    a cut-short run measured nothing. The scope runs under the checkout's pytest
+    lock (``scripts/_locks.py::hold_pytest``), waiting while another pytest holds
+    it; a run started under a holder (``work.py run -- pytest`` whose tests run
+    this) inherits the hold and never waits on it.
     """
     launch, resolved = (
         (_LAUNCH.command, _LAUNCH.environment)
@@ -2240,17 +2249,25 @@ def _run_scope(entry: ProofEntry, capture: RunCapture | None = None) -> RunOutco
             PROBE_OUTPUT_ENV: str(capture.probe_output),
             PROBE_PACKAGE_ENV: PACKAGE_NAME,
         }
-    environment = {**resolved, **additions}
     started = time.monotonic()
-    with subprocess.Popen(
-        command,
-        cwd=REPO_ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=environment,
-        start_new_session=True,
-    ) as process:
+    with (
+        _locks.hold_pytest(
+            REPO_ROOT,
+            f"prove_failability {REPO_ROOT.name} pid {os.getpid()}",
+            say=_say_waiting,
+            check=_raise_if_stopped,
+            environ=resolved,
+        ) as held,
+        subprocess.Popen(
+            command,
+            cwd=REPO_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**resolved, **additions, **held},
+            start_new_session=True,
+        ) as process,
+    ):
         _STOP.scope = process
         try:
             if _STOP.signum is not None:

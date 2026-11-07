@@ -346,10 +346,11 @@ from typing_extensions import NotRequired, override
 try:
     import _bench_common
     import _git as _git_runner
+    import _locks
     import _stop_signals
     import prove_failability
 except ModuleNotFoundError:  # imported as ``scripts.workspace`` (repo root on path)
-    from scripts import _bench_common, _stop_signals, prove_failability
+    from scripts import _bench_common, _locks, _stop_signals, prove_failability
     from scripts import _git as _git_runner
 
 if TYPE_CHECKING:
@@ -1007,7 +1008,9 @@ def file_lock(
             fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB),
             create=create,
         )
-    except BlockingIOError:
+    except OSError as error:
+        if not _locks.is_contention(error):
+            raise
         msg = f"{path} is held: a command is still running there"
         raise LockBusyError(msg) from None
     try:
@@ -3293,7 +3296,9 @@ def gc(layout: Layout) -> list[str]:
     recreate = _folder_gone_state_kept(layout)
     try:
         descriptor = _lock_flow_dir(layout, fcntl.LOCK_EX | fcntl.LOCK_NB, create=recreate)
-    except BlockingIOError:
+    except OSError as error:
+        if not _locks.is_contention(error):
+            raise
         state = _load_state(layout)
         busy = running_slots(layout, sorted(state["slots"], key=_slot_number))
         where = f" ({', '.join(busy)})" if busy else ""
@@ -3514,9 +3519,11 @@ def build_gate_git(repo_root: Path, gate_dir: Path) -> str:
     elif os.path.lexists(git_dir):
         git_dir.unlink()
     _ = _git(gate_dir, "init", "-q")
-    common = Path(
-        _git(repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip(),
-    )
+    dirs = _git_runner.git_dirs(repo_root, base=clean_env())
+    if dirs is None:
+        msg = f"cannot find the shared object store: git reads no repository at {repo_root}"
+        raise WorkspaceError(msg)
+    common = dirs[1]
     (git_dir / "objects" / "info").mkdir(parents=True, exist_ok=True)
     _ = (git_dir / "objects" / "info" / "alternates").write_text(
         f"{common / 'objects'}\n",

@@ -4,10 +4,11 @@
 reader: every script that needs a machine (``scripts/load_balancing.py`` picking
 one, ``scripts/work.py`` naming a copy's home, ``scripts/fleet_sync.py`` syncing
 copies) takes it from here. This module is also the one place two facts are
-computed: which machine this one is and what name a stored record means
-(:func:`this_machine`, :func:`this_machine_name`, :func:`canonical`,
-:func:`local_machine`, below "Identity") and the ssh command line every remote
-call runs (:data:`SSH_OPTIONS`, :func:`ssh_argv`, :func:`ssh_command`).
+computed: which machine this one is, what name a stored record means and which
+row a host name reaches (:func:`this_machine`, :func:`this_machine_name`,
+:func:`canonical`, :func:`local_machine`, :func:`reached_as`, below "Identity")
+and the ssh command line every remote call runs (:data:`SSH_OPTIONS`,
+:func:`ssh_argv`, :func:`ssh_command`, :func:`ssh_user`).
 The checkout the list is read from defaults to ``scripts/_git.py``'s
 ``CHECKOUT_ROOT``, the one home of the repository root.
 
@@ -47,7 +48,9 @@ Identity
     :func:`canonical`. Records are never rewritten (a tombstone is create-only
     and travels between machines): a record carrying a name other than the row's
     reads as that machine's through the row's aliases. An empty raw name (an
-    override such as ``.``) names no machine.
+    override such as ``.``) names no machine. A host name another machine is
+    reached as (a git remote's host) reaches the row whose name, alias or
+    ``ssh`` host it is, up to its first dot, casefolded (:func:`reached_as`).
 
 ssh
     Every remote call is ``ssh`` with :data:`SSH_OPTIONS`: batch mode (no
@@ -56,7 +59,9 @@ ssh
     fetch waits forever on a stalled machine. :func:`ssh_argv` is the argv form
     and :func:`ssh_command` the one string rsync's ``-e`` and git's
     ``GIT_SSH_COMMAND`` take. ssh exits :data:`SSH_FAILED` when the connection
-    or the authentication fails.
+    or the authentication fails. The list records no login: the account a host
+    is reached as is ssh's own answer (:func:`ssh_user`, ``ssh -G``), so each
+    machine's ssh configuration names it.
 
 Standard library plus ``scripts/_git.py``, so it runs on the oldest supported
 Python with no project environment.
@@ -111,6 +116,8 @@ SSH_OPTIONS = (
 )
 #: ssh's own exit status for a connection or authentication failure.
 SSH_FAILED = 255
+#: Seconds ``ssh -G`` may take to print its configuration (:func:`ssh_user`).
+SSH_CONFIG_TIMEOUT = 10
 #: Names this machine instead of its hostname (module docstring, "Identity"): a hostname
 #: that is not its row's name, two fake machines on one host in the tests.
 MACHINE_ENV = "DSF_MACHINE_ID"
@@ -475,6 +482,26 @@ def local_machine(
     return next((entry for entry in listed if short_hostname(entry.name) == short), None)
 
 
+def reached_as(host: str, listed: Sequence[Machine]) -> Machine | None:
+    """Return the row of ``listed`` the host name ``host`` reaches, or ``None``.
+
+    ``host`` up to its first dot, casefolded (:func:`short_hostname`), is the row's name,
+    one of its ``aliases`` or its ``ssh`` host: any case or domain form of a machine's
+    names reaches it. An empty short form reaches no row.
+    """
+    short = short_hostname(host)
+    if not short:
+        return None
+    return next(
+        (
+            entry
+            for entry in listed
+            if short in _names(entry) or short == short_hostname(entry.ssh)
+        ),
+        None,
+    )
+
+
 # -- ssh ----------------------------------------------------------------------------------
 
 
@@ -497,3 +524,31 @@ def ssh_argv(target: Machine | str, command: str) -> list[str]:
 def ssh_command() -> str:
     """Return the ssh command line, options included, as rsync's ``-e`` and ``GIT_SSH_COMMAND`` take it."""
     return shlex.join(["ssh", *SSH_OPTIONS])
+
+
+def ssh_user(host: str) -> str | None:
+    """Return the login ssh uses for ``host`` (``ssh -G``'s ``user`` line), or ``None``.
+
+    ``None`` when ssh cannot say: ``host`` empty or starting with ``-`` (an option to
+    ssh), ssh missing, failing or slower than :data:`SSH_CONFIG_TIMEOUT`, or no ``user``
+    line. ``ssh -G`` prints the configuration and connects nowhere.
+    """
+    if not host or host.startswith("-"):
+        return None
+    try:
+        result = subprocess.run(
+            ["ssh", "-G", host],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=SSH_CONFIG_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        key, _, value = line.strip().partition(" ")
+        if key.casefold() == "user" and value.strip():
+            return value.strip()
+    return None

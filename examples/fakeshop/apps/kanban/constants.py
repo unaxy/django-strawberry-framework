@@ -399,6 +399,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "tests/test_lateral_pg_parity.py",
     "tests/test_list_field.py",
     "tests/test_load_balancing.py",
+    "tests/test_locks.py",
     "tests/test_model_field_annotations.py",
     "tests/test_multipart.py",
     "tests/test_permissions.py",

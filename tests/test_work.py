@@ -11,7 +11,9 @@ none of these rows can move there. There is no live sibling in
 ``examples/fakeshop/test_query/``.
 """
 
+import contextlib
 import dataclasses
+import errno
 import getpass
 import json
 import os
@@ -19,11 +21,12 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Generator, Mapping
 from pathlib import Path
 
 import pytest
 
-from scripts import _git, fleet, prove_failability, work, workspace
+from scripts import _git, _locks, fleet, prove_failability, work, workspace
 from tests._idioms import json_at, json_list, json_loads, json_object
 
 PACKAGE = work.PACKAGE
@@ -524,6 +527,42 @@ def test_list_derives_every_state_from_folders_worktrees_and_pins(
     text = capsys.readouterr().out
     assert "build-live" in text
     assert "# a test" in text
+
+
+def test_list_shows_the_owner_and_the_pins_the_note_and_pins_git_agree_on(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``pins=`` is what the note attributes and ``pins.git`` holds; the rest is named apart."""
+    path = _new("fix-owned", "--owner", "bug hunt session")
+    head = _git_out(path, "rev-parse", "HEAD").strip()
+    note = work._config_values(path, "--local")
+    assert work.recorded_pins(note) == {"start": head}
+    _ = capsys.readouterr()
+    assert work.main(["list"]) == 0
+    line = capsys.readouterr().out
+    assert "pins=start adopted=no owner='bug hunt session' " in line
+    assert "foreign-pins" not in line
+    assert "missing-pins" not in line
+    _plant(repo, "fix-owned", "save-9")
+    _ = _git_out(_store(repo), "update-ref", "-d", "refs/work/fix-owned/start")
+    assert work.main(["list", "--json"]) == 0
+    [row] = json_list(json_loads(capsys.readouterr().out))
+    assert json_object(row)["pins"] == "-"
+    assert json_object(row)["foreign"] == "save-9"
+    assert json_object(row)["missing"] == "start"
+    assert json_object(row)["owner"] == "bug hunt session"
+    assert work.main(["list"]) == 0
+    assert "pins=- foreign-pins=save-9 missing-pins=start " in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("repo")
+def test_a_new_clone_keeps_no_branch_tracking_config() -> None:
+    """Its ``HEAD`` is detached: nothing in it tracks the branch ``git clone`` made."""
+    path = _new("fix-detached")
+    assert _git.run_git(path, "config", "--local", "--get-regexp", r"^branch\.").stdout == ""
+    assert _git.run_git(path, "symbolic-ref", "--quiet", "HEAD").returncode != 0
+    assert _git_out(path, "remote", "get-url", "parent").strip() == str(work.REPO_ROOT)
 
 
 # --------------------------------------------------------------------------------------------
@@ -2108,7 +2147,7 @@ def test_rm_drop_saves_keeps_and_names_a_pin_another_copy_left_under_the_name(
     foreign = _pins(repo)["spike-own"]["save-1"]
     _ = _write(path / "mine.txt", "my work\n")
     assert work.main(["save", "spike-own"]) == 0
-    assert set(work.recorded_pins(work._config_values(path, "--local"))) == {"save-2"}
+    assert set(work.recorded_pins(work._config_values(path, "--local"))) == {"start", "save-2"}
     _age(path)
     _ = capsys.readouterr()
     assert work.main(["rm", "--drop-saves", "spike-own"]) == 0
@@ -2268,10 +2307,14 @@ def test_rm_refuses_a_saved_head_when_its_pin_cannot_be_trusted(
         root: Path | str,
         *args: str,
         stdin: str | None = None,
+        check: bool = False,
+        env: Mapping[str, str] | None = None,
+        base: Mapping[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        """``_git.run_git``'s signature, every keyword passed on."""
         if args[:2] == ("for-each-ref", f"--contains={head}"):
             return subprocess.CompletedProcess(args, 1, "", "listing failed")
-        return real_run_git(root, *args, stdin=stdin)
+        return real_run_git(root, *args, stdin=stdin, check=check, env=env, base=base)
 
     def incomplete(_store: Path, _commit: str) -> bool:
         return False
@@ -2372,7 +2415,8 @@ def test_run_uses_the_copy_its_venv_and_a_scrubbed_environment(
         )
         == 0
     )
-    seen = json_loads(capfd.readouterr().out.strip().splitlines()[-1])
+    captured = capfd.readouterr()
+    seen = json_loads(captured.out.strip().splitlines()[-1])
     env = {str(key): str(value) for key, value in json_object(seen, "env").items()}
     assert Path(str(json_at(seen, "cwd"))).resolve() == path.resolve()
     assert env["VIRTUAL_ENV"] == str(path.resolve() / ".venv")
@@ -2383,6 +2427,267 @@ def test_run_uses_the_copy_its_venv_and_a_scrubbed_environment(
     assert env["KEPT"] == "yes"
     for scrubbed in ("PYTHONPATH", "DIRENV_DIR", "DJANGO_SETTINGS_MODULE"):
         assert scrubbed not in env
+    root = path.resolve()
+    assert f"work: run bench-run in {root} (.venv {root / '.venv'})\n" in captured.err
+    assert "work: run" not in captured.out
+
+
+@pytest.mark.parametrize(
+    ("argv", "pytest_run"),
+    [
+        (["pytest", "-x"], True),
+        (["/x/.venv/bin/pytest"], True),
+        (["C:\\x\\Scripts\\pytest.exe", "-q"], True),
+        (["py.test"], True),
+        (
+            [
+                "python",
+                "-m",
+                "pytest",
+                "tests",
+            ],
+            True,
+        ),
+        (["python3", "-mpytest"], True),
+        (
+            [
+                "uv",
+                "run",
+                "pytest",
+                "-k",
+                "x",
+            ],
+            True,
+        ),
+        (
+            [
+                "uv",
+                "run",
+                "--group",
+                "pg",
+                "pytest",
+            ],
+            True,
+        ),
+        (
+            [
+                "uv",
+                "run",
+                "--frozen",
+                "--group",
+                "pg",
+                "pytest",
+            ],
+            True,
+        ),
+        (
+            [
+                "uv",
+                "run",
+                "--with",
+                "pytest-cov",
+                "pytest",
+            ],
+            True,
+        ),
+        (
+            [
+                "uv",
+                "run",
+                "--python",
+                "3.13",
+                "pytest",
+            ],
+            True,
+        ),
+        (
+            [
+                "uv",
+                "tool",
+                "run",
+                "pytest",
+            ],
+            True,
+        ),
+        (["uvx", "pytest"], True),
+        (
+            [
+                "python",
+                "-m",
+                "pip",
+                "pytest",
+            ],
+            True,
+        ),
+        (["python", "-c", "print('pytest')"], False),
+        (
+            [
+                "uv",
+                "run",
+                "--with",
+                "pytest-cov",
+                "python",
+                "-c",
+                "x",
+            ],
+            False,
+        ),
+        (
+            [
+                "python",
+                "scripts/prove_failability.py",
+                "--only",
+                "x",
+            ],
+            False,
+        ),
+        (["grep", "pytest_plugins"], False),
+        ([], False),
+    ],
+)
+def test_is_pytest_reads_every_word_for_pytest(argv: list[str], *, pytest_run: bool) -> None:
+    """Any word that is pytest, however a wrapper hands it on; a false positive only waits."""
+    assert work.is_pytest(argv) is pytest_run
+
+
+def _pytest_venv(copy: Path) -> None:
+    """Give the copy a ``.venv`` whose ``pytest`` only says it ran."""
+    _fake_venv(copy)
+    script = _write(copy / ".venv" / "bin" / "pytest", "#!/bin/sh\necho pytest-ran\n")
+    script.chmod(0o755)
+
+
+_PYTEST_LOCK_HOLDER = (
+    "import os, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import _locks\n"
+    "descriptor = os.open(sys.argv[2], os.O_RDWR | os.O_CREAT)\n"
+    "assert _locks.try_lock(descriptor)\n"
+    "os.write(descriptor, (sys.argv[3] + '\\n').encode())\n"
+    "print('held', flush=True)\n"
+    "sys.stdin.read()\n"
+)
+
+
+@contextlib.contextmanager
+def _pytest_lock_holder(repo: Path, holder: str) -> Generator[subprocess.Popen[bytes], None, None]:
+    """Hold ``repo``'s pytest lock from another process, as another pytest run would.
+
+    Closing the holder's stdin (or leaving the block) ends it, which lets the lock go.
+    """
+    _ = work.ensure_sentinel(repo)
+    lock = repo / ".work" / work.PYTEST_LOCK
+    with subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _PYTEST_LOCK_HOLDER,
+            str(Path(_locks.__file__).parent),
+            str(lock),
+            holder,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    ) as process:
+        assert process.stdout is not None
+        assert os.read(process.stdout.fileno(), 64).strip() == b"held"
+        assert _locks.pytest_lock_path(repo) == lock.resolve()
+        probe = os.open(lock, os.O_RDWR)
+        try:
+            assert not _locks.try_lock(probe)
+        finally:
+            os.close(probe)
+        try:
+            yield process
+        finally:
+            process.kill()
+
+
+def _let_go(process: subprocess.Popen[bytes]) -> None:
+    """End the holder process and wait for it, so its lock is gone."""
+    assert process.stdin is not None
+    process.stdin.close()
+    _ = process.wait()  # no timeout: a timed wait polls with ``time.sleep``, which tests patch
+
+
+def test_run_waits_for_another_pytest_in_this_checkout(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """One line names the holder; the run starts once the holder lets go, and records itself."""
+    path = _new("bench-pytest", "--owner", "agent-7")
+    _pytest_venv(path)
+    waits: list[float] = []
+    with _pytest_lock_holder(repo, "fix-other agent-3 rio-mac pid 42") as other:
+
+        def release(seconds: float) -> None:
+            waits.append(seconds)
+            _let_go(other)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(time, "sleep", release)
+            code = work.main(
+                [
+                    "run",
+                    "bench-pytest",
+                    "--",
+                    "pytest",
+                    "-q",
+                ],
+            )
+    assert code == 0
+    captured = capfd.readouterr()
+    assert waits == [_locks.POLL_SECONDS]
+    assert captured.err.count("work: waiting for another pytest") == 1
+    assert (
+        "work: waiting for another pytest in this checkout (fix-other agent-3 rio-mac pid 42)"
+        in captured.err
+    )
+    assert "pytest-ran" in captured.out
+    holder = (work.work_dir(repo) / work.PYTEST_LOCK).read_text(encoding="utf-8")
+    assert holder == f"bench-pytest agent-7 {work.machine_id()} pid {os.getpid()}\n"
+
+
+def test_run_never_serialises_a_command_that_is_not_pytest(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _new("bench-free")
+    _fake_venv(path)
+
+    def no_wait(_seconds: float) -> None:
+        pytest.fail("a command that is not pytest waited on the pytest lock")
+
+    with _pytest_lock_holder(repo, "fix-other"), monkeypatch.context() as patch:
+        patch.setattr(time, "sleep", no_wait)
+        code = work.main(
+            [
+                "run",
+                "bench-free",
+                "--",
+                "python",
+                "-c",
+                "pass",
+            ],
+        )
+    assert code == 0
+
+
+def test_a_checkout_under_an_unrelated_work_folder_takes_its_own_pytest_lock(
+    tmp_path: Path,
+) -> None:
+    """A scratch repository in a copy's evidence (or a test's temp under ``.work``) is no copy."""
+    shared = tmp_path / "shared"
+    scratch = shared / ".work" / "evidence" / "fix-x" / "repo"
+    scratch.mkdir(parents=True)
+    assert _locks.pytest_lock_path(scratch) == scratch.resolve() / ".work" / work.PYTEST_LOCK
+
+
+def test_a_clone_and_a_worktree_work_py_makes_take_the_shared_pytest_lock(repo: Path) -> None:
+    expected = repo.resolve() / ".work" / work.PYTEST_LOCK
+    assert _locks.pytest_lock_path(_new("fix-lockclone")) == expected
+    assert _locks.pytest_lock_path(_new("fix-lockwt", "--worktree")) == expected
 
 
 @pytest.mark.usefixtures("repo")
@@ -3138,18 +3443,62 @@ def test_a_clone_and_a_worktree_racing_for_one_name_cannot_both_win(
 # --------------------------------------------------------------------------------------------
 
 
+FLEET = json.dumps(
+    {
+        "machines": [
+            {
+                "name": name,
+                "ssh": name,
+                "os": os_name,
+                "repo": "~/projects/django-strawberry-framework",
+                "weight": {"light": 1, "heavy": 1},
+                "floors": {},
+                "aliases": aliases,
+            }
+            for name, os_name, aliases in (
+                ("rio-mac", "macos", []),
+                ("rio-desktop", "linux", ["old-desktop"]),
+            )
+        ],
+    },
+)
+#: The login the fake ``ssh -G`` answers for the desktop: another account than this one's.
+DESK = f"desk-{ME}"
+
+
+def _fake_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str | None = None) -> None:
+    """Put an ``ssh`` on ``PATH`` whose ``-G`` answers ``DESK`` for the desktop, else ``ME``."""
+    _fake_tool(
+        tmp_path,
+        "ssh",
+        body
+        or (
+            'test "$1" = -G || exit 255\n'
+            'echo "hostname $2"\n'
+            f'case "$2" in *[Dd]esktop*) echo "user {DESK}" ;; *) echo "user {ME}" ;; esac\n'
+            'echo "port 22"'
+        ),
+    )
+    monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path / "bin"), os.environ["PATH"]]))
+
+
 @pytest.mark.parametrize(
     ("url", "parent"),
     [
         (f"rio-mac:/Users/{ME}/projects/django-strawberry-framework", True),
         ("rio-mac:~/projects/django-strawberry-framework", True),
         (f"{ME}@rio-mac:/home/{ME}/projects/django-strawberry-framework", True),
-        (f"ssh://{ME}@rio-desktop:22/home/{ME}/projects/django-strawberry-framework", True),
+        (f"ssh://{DESK}@rio-desktop:22/home/{DESK}/projects/django-strawberry-framework", True),
+        (f"rio-desktop:/home/{DESK}/projects/django-strawberry-framework", True),
+        (f"Rio-Desktop.tail.ts.net:/home/{DESK}/projects/django-strawberry-framework", True),
+        (f"old-desktop:/home/{DESK}/projects/django-strawberry-framework", True),
         ("ssh://rio-desktop/~/projects/django-strawberry-framework", True),
         ("rio-mac:~/projects/django-strawberry-framework/", True),
+        (f"rio-desktop:/home/{ME}/projects/django-strawberry-framework", False),
+        (f"{ME}@rio-desktop:~/projects/django-strawberry-framework", False),
         ("otheruser@rio-mac:~/projects/django-strawberry-framework", False),
         (f"rio-mac:/Users/not-{ME}/projects/django-strawberry-framework", False),
-        (f"ssh://{ME}@rio-desktop:2222/home/{ME}/projects/django-strawberry-framework", False),
+        (f"ssh://{DESK}@rio-desktop:2222/home/{DESK}/projects/django-strawberry-framework", False),
         (f"rio-mac:/Users/{ME}/projects/../projects/django-strawberry-framework", False),
         (f"rio-mac:/Users/{ME}/projects/Django-strawberry-framework", False),
         ("rio-elsewhere:/Users/someone/projects/django-strawberry-framework", False),
@@ -3160,34 +3509,69 @@ def test_a_clone_and_a_worktree_racing_for_one_name_cannot_both_win(
 )
 def test_a_fleet_checkout_over_ssh_is_this_checkouts_parent(
     repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     url: str,
     *,
     parent: bool,
 ) -> None:
+    """The host reaches a row by any of its names; the account is the one ``ssh -G`` names."""
     _ = _write(repo / "docs" / "fleet" / "machines.json", FLEET)
+    _fake_ssh(tmp_path, monkeypatch)
     assert work.is_parent_url(repo, url) is parent
 
 
-FLEET = json.dumps(
-    {
-        "machines": [
-            {
-                "name": "rio-mac",
-                "ssh": "rio-mac",
-                "repo": "~/projects/django-strawberry-framework",
-            },
-            {
-                "name": "rio-desktop",
-                "ssh": "rio-desktop",
-                "repo": "~/projects/django-strawberry-framework",
-            },
-        ],
-    },
+def test_a_local_parent_needs_no_machine_list(repo: Path) -> None:
+    assert not (repo / "docs" / "fleet" / "machines.json").exists()
+    assert work.is_parent_url(repo, str(repo))
+    assert work.is_parent_url(repo, f"file://{repo}")
+
+
+@pytest.mark.parametrize(
+    ("machines", "ssh", "message"),
+    [
+        ('{"machines": []}', None, "'machines' must be a non-empty list"),
+        (None, None, "machines.json"),
+        (FLEET, "exit 255", "cannot tell which account ssh logs in to rio-desktop as"),
+        (FLEET, 'echo "hostname $2"', "cannot tell which account ssh logs in to rio-desktop as"),
+    ],
+    ids=[
+        "broken-list",
+        "no-list",
+        "ssh-fails",
+        "no-user-line",
+    ],
 )
+def test_adopt_refuses_an_ssh_parent_it_cannot_check_and_says_why(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    machines: str | None,
+    ssh: str | None,
+    message: str,
+) -> None:
+    """A broken list is fleet's refusal, never every SSH parent silently refused."""
+    if machines is not None:
+        _ = _write(repo / "docs" / "fleet" / "machines.json", machines)
+    _fake_ssh(tmp_path, monkeypatch, ssh)
+    path = repo / ".work" / "clones" / "fix-remote"
+    path.parent.mkdir(parents=True)
+    _ = _git_out(repo, "clone", "-q", "--no-hardlinks", "-o", "parent", str(repo), str(path))
+    url = f"rio-desktop:/home/{DESK}/projects/django-strawberry-framework"
+    _ = _git_out(path, "remote", "set-url", "parent", url)
+    assert work.main(["adopt", str(path), "fix-remote"]) == 1
+    assert message in capsys.readouterr().err
+    assert not work.locate(repo, "fix-remote").adopted
 
 
-def test_adopt_registers_a_clone_whose_parent_is_a_fleet_checkout_over_ssh(repo: Path) -> None:
+def test_adopt_registers_a_clone_whose_parent_is_a_fleet_checkout_over_ssh(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _ = _write(repo / "docs" / "fleet" / "machines.json", FLEET)
+    _fake_ssh(tmp_path, monkeypatch)
     path = repo / ".work" / "clones" / "fix-remote"
     path.parent.mkdir(parents=True)
     _ = _git_out(repo, "clone", "-q", "--no-hardlinks", "-o", "parent", str(repo), str(path))
@@ -3196,7 +3580,7 @@ def test_adopt_registers_a_clone_whose_parent_is_a_fleet_checkout_over_ssh(repo:
         "remote",
         "set-url",
         "parent",
-        f"rio-mac:/Users/{ME}/projects/django-strawberry-framework",
+        f"rio-desktop:/home/{DESK}/projects/django-strawberry-framework",
     )
     _ = _git_out(path, "remote", "set-url", "--push", "parent", work.NO_PUSH)
     assert work.main(["adopt", str(path), "fix-remote"]) == 0
@@ -3865,3 +4249,141 @@ def test_run_rebuilds_a_venv_marked_stale_before_the_command(
         == 0
     )
     assert not (tmp_path / "uv-args").exists()
+
+
+def test_a_pytest_a_run_starts_again_never_waits_on_the_runs_own_lock(repo: Path) -> None:
+    """``run`` hands the hold down: a child taking the same lock (a proof run in a pytest run)."""
+    path = _new("bench-nested")
+    _fake_venv(path)
+    child = (
+        "import sys; from pathlib import Path; "
+        f"sys.path.insert(0, {str(Path(_locks.__file__).parent)!r}); "
+        "import _locks\n"
+        "def stuck(line): raise SystemExit('deadlock: ' + line)\n"
+        "with _locks.hold_pytest(Path.cwd(), 'child', say=stuck):\n"
+        "    print('child ran')"
+    )
+    assert (
+        work.main(
+            [
+                "run",
+                "bench-nested",
+                "--",
+                "python",
+                "-c",
+                child,
+                "pytest",
+            ],
+        )
+        == 0
+    )
+    lock = (repo / ".work" / work.PYTEST_LOCK).read_text(encoding="utf-8")
+    assert lock.startswith("bench-nested - ")
+
+
+def test_a_lock_failure_that_is_not_contention_refuses_the_run(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("bench-locked")
+    _pytest_venv(path)
+
+    def broken(_descriptor: int) -> bool:
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    monkeypatch.setattr(_locks, "try_lock", broken)
+    assert (
+        work.main(
+            [
+                "run",
+                "bench-locked",
+                "--",
+                "pytest",
+            ],
+        )
+        == work.REFUSED
+    )
+    assert "cannot take the pytest lock" in capsys.readouterr().err
+    assert work.main(["land", "bench-locked"]) == 1
+    assert "cannot lock" in capsys.readouterr().err
+    _ = repo
+
+
+def test_a_pytest_command_that_cannot_start_is_its_own_error_not_the_locks(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only taking the lock is the lock's error: a missing pytest stays a missing program."""
+    path = _new("bench-nopytest")
+    _fake_venv(path)
+    command = [
+        "run",
+        "bench-nopytest",
+        "--",
+        "pytest-not-installed-here",
+        "pytest",
+    ]
+    assert work.main(command) == work.REFUSED
+    err = capsys.readouterr().err
+    assert "No such file or directory" in err
+    assert "pytest-not-installed-here" in err
+    assert "pytest lock" not in err
+    assert (
+        (repo / ".work" / work.PYTEST_LOCK)
+        .read_text(encoding="utf-8")
+        .startswith(
+            "bench-nopytest - ",
+        )
+    )
+
+
+@pytest.mark.parametrize("option", ["--purpose", "--owner"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "two\nlines",
+        "tab\there",
+        "bell\a",
+        "esc\x1b[2J",
+        "line\u2028separator",
+        "paragraph\u2029separator",
+    ],
+)
+def test_new_and_adopt_refuse_a_purpose_or_owner_holding_a_control_character(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    option: str,
+    value: str,
+) -> None:
+    assert (
+        work.main(
+            [
+                "new",
+                "fix-ctl",
+                "--no-setup",
+                option,
+                value,
+            ],
+        )
+        == 1
+    )
+    assert "control character" in capsys.readouterr().err
+    assert "fix-ctl" not in work.discover(repo)
+    harness = repo / ".work" / "clones" / "fix-ctl"
+    harness.parent.mkdir(parents=True, exist_ok=True)
+    _ = _git_out(repo, "clone", "-q", "--no-hardlinks", "-o", "parent", str(repo), str(harness))
+    assert (
+        work.main(
+            [
+                "adopt",
+                str(harness),
+                "fix-ctl",
+                option,
+                value,
+            ],
+        )
+        == 1
+    )
+    assert "control character" in capsys.readouterr().err
+    assert not work.locate(repo, "fix-ctl").adopted
