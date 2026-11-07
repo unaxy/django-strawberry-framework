@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import strawberry
 from django import forms
-from django.core.exceptions import FieldError, ValidationError
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.lookups import FieldGetDbPrepValueMixin
@@ -915,8 +915,8 @@ def _answers_sample(
     values of the kind pass (``min_value``, a slug's or an email's syntax, a consumer's
     ``validate`` reading the database), never whether the form reads the kind (Django
     reads the kind in ``to_python``), and no sample speaks for every bound, so neither
-    runs and no query does. A lookup no field registers (Django's ``FieldError`` building
-    the predicate) is not this probe's to judge: it answers yes, and the leaf builds.
+    runs and no query does. A predicate Django resolves on no queryset never reaches here:
+    the set refused it when it published (``filters/base.py::refuse_unresolvable_lookup``).
     """
     from .sets import _PREPARATION_REFUSALS  # noqa: PLC0415 - import cycle
 
@@ -935,8 +935,6 @@ def _answers_sample(
         warnings.simplefilter("ignore")
         try:
             filtered = require(probe.filter(models.QuerySet(model=model), cleaned), is_queryset)
-        except FieldError:
-            return True
         except _PREPARATION_REFUSALS:
             return False
     return bool(filtered.query.where)
@@ -1073,6 +1071,8 @@ def _refuse_unsealable_served_leaves(served: Iterable[type[FilterSet]]) -> None:
     filter, a ``filter`` override, a ``filter`` held on the instance:
     ``filters/sets.py::_runs_shipped_filter``) owns its query, and a path the model alone
     cannot resolve (a queryset annotation) has no walk; the seal judges both per request. A
+    predicate Django resolves on no queryset never reaches here: its set refused it when it
+    published (``filters/base.py::refuse_unresolvable_lookup``). A
     set no connection serves, applied from the project's own resolver, is never sealed and
     is not asked.
     """

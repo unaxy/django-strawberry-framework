@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 181 to do.
+Progress: 0 done, 182 to do.
 
 ## From dry-0_0_15_3
 
@@ -748,8 +748,8 @@ Progress: 0 done, 181 to do.
   cleans (`TimeFilter(field_name="occurred_at__time")`), declare a filter class whose form cleans the column's kind
   (`DateTimeFilter`, `NumberFilter`), or read the value in `method=`. Not checked: generated `Meta.fields` leaves,
   `method=` filters, filters overriding `filter`, form fields with their own cleaning, a column converting in its own
-  `to_python` / `get_prep_value` (a relation whose target key does), a lookup preparing in its own `get_prep_lookup`,
-  a `lookup_expr` no field registers; validators and a form field's `validate` never run at build
+  `to_python` / `get_prep_value` (a relation whose target key does), a lookup preparing in its own `get_prep_lookup`;
+  validators and a form field's `validate` never run at build
 - [ ] 775. CHANGELOG entry for item 709: a `FilterSet` a connection serves (a `DjangoConnectionField`'s `filter:`, a
   Relay type's nested `<relation>Connection`, or any set reached through a `RelatedFilter`) whose leaf resolves to a
   lookup or transform class that is not Django's own (a project `Transform` or `Lookup`, a subclass of a Django
@@ -764,6 +764,15 @@ Progress: 0 done, 181 to do.
   to publish only the declared filters) on the set or a subclass. A model-less set applied from your own resolver
   refuses a leaf filter by naming the missing `Meta.model`, and its `RelatedFilter` branches still apply; a model-less
   related-only `OrderSet` remains a valid `Meta.orderset_class`
+- [ ] 781. CHANGELOG entry for items 776 and 774: a declared filter whose `field_name` and `lookup_expr` Django can
+  never resolve now raises `ConfigurationError` when its `FilterSet` publishes its filters (at schema build for a set
+  a type serves, at first use otherwise), naming the set, the filter, its path and lookup, the part Django refuses and
+  the field, where it built before and every request with a value answered "An unexpected error occurred.":
+  `NumberFilter(field_name="price__gt")` (a lookup spelled in `field_name`), a `lookup_expr` no field registers
+  (`unaccent` without `django.contrib.postgres`), `icontains` on a foreign key, a lookup neither a to-many relation
+  nor its target's key registers. Move the lookup to `lookup_expr`, register a project lookup at startup
+  (`Field.register_lookup` in `AppConfig.ready`), or read the value in `method=`. `method=` filters, filter
+  overrides, queryset annotation and `FilteredRelation` alias paths and names past a relation are unchanged
 
 ## From dry-upstream-0_0_15
 

@@ -23,6 +23,7 @@ from django_strawberry_framework import DjangoSchema, finalize_django_types, str
 from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter
 from django_strawberry_framework.filters.base import (
     IntegerInFilter,
+    IntegerRangeFilter,
     RelationPkFilter,
     RelationPkMultipleFilter,
 )
@@ -146,6 +147,26 @@ def test_a_declared_integer_key_primitive_never_binds_its_oversized_member(kind:
     }
     leaf, path, values = selected[kind]
     _answer(_schema(models.Shelf, leaf, path, "code"), values, "code", ["PR-1"], ["PR-0", "PR-1"])
+
+
+@pytest.mark.django_db
+def test_an_integer_range_over_a_forward_key_applies_its_bounds_through_the_relation() -> None:
+    """An ``IntegerRangeFilter`` over a forward key builds and answers.
+
+    Django registers no ``range`` on a relation, but the filter applies the range as ``gte``
+    + ``lte``, which the relation's own lookups take.
+    """
+    low = models.Branch.objects.create(name="Low")
+    high = models.Branch.objects.create(name="High")
+    models.Shelf.objects.create(branch=low, code="LO-1")
+    models.Shelf.objects.create(branch=high, code="HI-1")
+    _answer(
+        _schema(models.Shelf, IntegerRangeFilter(lookup_expr="range"), "branch", "code"),
+        [saved_pk(high), saved_pk(high)],
+        "code",
+        ["HI-1"],
+        ["HI-1", "LO-1"],
+    )
 
 
 @pytest.mark.django_db

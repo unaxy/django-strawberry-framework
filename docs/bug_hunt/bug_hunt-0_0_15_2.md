@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 429 done, 108 to do. The CHANGELOG entries filed here moved to
+Progress: 431 done, 108 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1707,6 +1707,32 @@ Progress: 429 done, 108 to do. The CHANGELOG entries filed here moved to
   `tests/filters/test_finalizer.py`, live `test_filter_apply_arguments_api.py` and `test_order_apply_arguments_api.py`;
   spec-027, spec-028, README, GLOSSARY `FilterSet` and `Meta.filterset_class`. Filed 777
 
+- [x] 776. fixed: a declared filter running a shipped `filter` (not `method=`, not a `filter` override) whose
+  `field_name` and `lookup_expr` Django resolves on no queryset is refused with `ConfigurationError` when its set
+  publishes its filters: at schema build for a set a type serves (root, nested `<relation>Connection`,
+  `RelatedFilter`-reached, bound for `FilterInput`), at first use for an unbound set
+  (`filters/base.py::refuse_unresolvable_lookup`, called from `filters/sets.py::FilterSet._publish_filters` beside
+  `refuse_identityless_relation`). The predicate asks Django's own split and walk over a fresh `Query` of the model
+  (`filters/base.py::_unresolvable_lookup`: `utils/querysets.py::split_lookup`,
+  `utils/relations.py::lookup_transform_parts`, `lookup_target_fields`), uncached: a path ending on a column whose
+  walk refuses the leftover is refused (`signed_big__gt`, `occurred_at__year__gt`, `parent__label__icontains`); a
+  to-one key is asked on the relation's own lookups (`parent` + `icontains`), a range filter applying its bounds as
+  `gte` / `lte` asked `gte` (`filters/base.py::_BOUNDED_RANGE_FILTERS`), the package `RangeFilter` on its resolved
+  column path; a to-many key is refused only when every key column its join compares and the target pk refuse too.
+  Not judged: a first name the model lacks (a queryset annotation, a `FilteredRelation` alias), a name past a
+  relation (a walked hop reads it on rows a type's `get_queryset` annotates), a model-less set (714's refusals). A
+  lazy `field_name` / `lookup_expr` is read as its text. Raw `FilterSet(data=...)` keeps django-filter's
+  `FieldError`. A queryset alias spelled `<own column>__<lookup>` and a lookup registered after the set publishes are
+  refused by design. 24 grid cells plus forward key `icontains` refused in every serving shape, every working cell
+  unchanged. `filters/inputs.py::_answers_sample`'s `FieldError` arm is gone. Tests:
+  `tests/filters/test_finalizer.py::test_a_declared_leaf_django_resolves_on_no_queryset_is_refused` and its
+  registration, lazy, name-past-a-hop, reverse-key and range-bounds rows, `test_a_served_leaf_the_build_does_not_walk_builds`;
+  live `test_declared_key_primitives_api.py::test_an_integer_range_over_a_forward_key_applies_its_bounds_through_the_relation`;
+  spec-027, README, GLOSSARY `FilterSet` and `ConfigurationError`. Filed 779, 780
+- [x] 774. fixed with 776: a declared `lookup_expr` no field registers (`unaccent` without `django.contrib.postgres`)
+  is refused by `filters/base.py::refuse_unresolvable_lookup` when its set publishes, naming the lookup and the field;
+  the build pin moved to `tests/filters/test_inputs.py::test_a_declared_lookup_no_field_registers_is_refused_before_its_form_is_asked`
+
 ## Outside review of the fixes
 
 An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
@@ -1965,25 +1991,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
   moves pinned behaviour. A plain `AllValuesMultipleFilter(lookup_expr="year")` is the same class: it publishes the
   transform's `[Int!]` while its choices are the column's dates (`invalid_choice` for every year; from 733). Found
   fixing 708
-- [ ] 774. (robustness) A declared filter whose `lookup_expr` names a lookup no field registers
-  (`NumberFilter(lookup_expr="unaccent")` without `django.contrib.postgres`) builds and answers every request with the
-  masked `FieldError` (`Unsupported lookup 'unaccent' for IntegerField`); 708's probe treats the `FieldError` as
-  inconclusive and builds it (`filters/inputs.py::_answers_sample`; pinned building by
-  `tests/filters/test_inputs.py::test_a_declared_filter_some_value_of_its_column_answers_builds[lookup-no-field-registers]`).
-  Found fixing 708
-- [ ] 776. (robustness) A declared filter whose `field_name` names a model field followed by a part that is no
-  transform (`NumberFilter(field_name="signed_big__gt")`), or a reverse relation key whose `lookup_expr` no relation
-  resolves (`ModelMultipleChoiceFilter(field_name="children", lookup_expr="unknown")`), builds on a served set and
-  every request answers Django's masked `FieldError` (`Unsupported lookup 'gt__exact'`): a
-  `<column>__<non-transform>` path can never resolve, so the build accepts what every request refuses (the reverse
-  key pinned building by
-  `tests/filters/test_finalizer.py::test_a_served_leaf_the_build_does_not_walk_builds[reverse-key-lookup-no-relation-resolves]`).
-  Found fixing 709
 - [ ] 777. (robustness) A wired `OrderSet` (with or without `Meta.model`) declaring
   `RelatedOrder(<set>, field_name=<no such relation>)` builds and publishes its order input, and every `orderBy:` term
   through that branch is refused per request ("invalid order path"), where the filter side refuses a `RelatedFilter`
   whose `field_name` reaches no relation at build; spec-028 defers order path validation to apply time. GOAL: the build
   accepts what every request refuses. Found researching 714
+- [ ] 779. A `NumberFilter(field_name="parent__twice")` past an undeclared hop whose target type's `get_queryset`
+  annotates `twice` answers a masked `AttributeError: 'IntegerField' object has no attribute 'model'`
+  (`filters/sets.py::_held_integer_value` -> `_queryset_integer_column` -> `utils/relations.py::_walk_lookup_expr`
+  reads `cached_col` on the annotation's unbound `output_field`); the same name past a declared `RelatedFilter` hop
+  answers. Found researching 776
+- [ ] 780. (robustness) `ModelMultipleChoiceFilter(field_name="children", lookup_expr="icontains")` answers the target
+  key's `icontains` when some type's `get_queryset` scopes the target model (the walked to-many hop compares the
+  target key) and a masked `FieldError` when none does (Django's `ManyToOneRel` reading): one declaration, two
+  predicates, chosen by whether a hop is walked. Found researching 776
 
 ## To do: holes found re-checking the fixes
 

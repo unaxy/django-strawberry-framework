@@ -214,6 +214,7 @@ from .base import (
     copied_form_field,
     membership_in_filter_class,
     refuse_identityless_relation,
+    refuse_unresolvable_lookup,
 )
 from .form_binding import FilterFormBindings, NormalizedFormValue, bound_filter_form_class
 from .inputs import (
@@ -3432,10 +3433,12 @@ class FilterSet(
         published table: ``base_filters`` (every instance's copies), the
         snapshot's candidate rows, flat copies and form keys, and every package
         read (``_filter_table``). A projected copy the set does not hold is
-        refused first (``_reject_foreign_projection``), and so is a GlobalID filter
+        refused first (``_reject_foreign_projection``), and so are a GlobalID filter
         on a relation no row identity is compared on
-        (``filters/base.py::refuse_identityless_relation``). A read of the set's table
-        while it publishes answers the table being published.
+        (``filters/base.py::refuse_identityless_relation``) and a leaf running a shipped
+        ``filter`` (``_runs_shipped_filter``) whose ``field_name`` and ``lookup_expr``
+        Django resolves on no queryset (``filters/base.py::refuse_unresolvable_lookup``).
+        A read of the set's table while it publishes answers the table being published.
         """
         table = OrderedDict(cls._reshape(expansion))
         for filter_name, filter_instance in table.items():
@@ -3443,6 +3446,8 @@ class FilterSet(
             # An expanded copy is its declaring set's filter, refused when that set published.
             if _expansion_record(filter_instance) is None:
                 refuse_identityless_relation(cls, filter_name, filter_instance)
+                if _runs_shipped_filter(filter_instance):
+                    refuse_unresolvable_lookup(cls, filter_name, filter_instance)
         model = cls._meta.model
         candidates: dict[str, CandidateFilterMetadata] = {}
         if model is not None:

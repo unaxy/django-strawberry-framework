@@ -67,6 +67,7 @@ from django_filters import (
 from django_filters import constants as _filter_constants
 from django_filters.fields import BaseCSVField, ChoiceField
 from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
+from django_filters.filters import RangeFilter as DjangoFilterRangeFilter
 from django_filters.filterset import BaseFilterSet, FilterSetOptions
 from django_filters.utils import get_field_parts, get_model_field
 from django_filters.widgets import BaseCSVWidget
@@ -123,6 +124,7 @@ from django_strawberry_framework.utils.errors import (
 )
 from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.querysets import (
+    _names_to_path,
     base_queryset,
     coerce_field_value_or_none,
     lookup_target_fields,
@@ -137,6 +139,7 @@ from django_strawberry_framework.utils.relations import (
     lookup_operand,
     lookup_registry,
     lookup_transform_parts,
+    path_traverses_to_many,
     relation_bool,
     stored_value_column,
     stored_value_link,
@@ -477,7 +480,9 @@ class _LookupOperand(NamedTuple):
     the resolved lookup's class, not its name: a consumer lookup registered as ``isnull``
     over a transform's output takes the operand its own class compares. ``lookup`` is that
     class, ``None`` where no walk resolved one (a ``method=`` filter, whose method applies
-    no lookup of the filter's, a path the walk refuses): ``filters/inputs.py`` asks it
+    no lookup of the filter's, a path the walk refuses, which a set publishes only past a
+    name the related model lacks or for a to-many key a walked hop compares on the target's
+    key, ``refuse_unresolvable_lookup``): ``filters/inputs.py`` asks it
     whether the value is prepared through the column (Django's ``FieldGetDbPrepValueMixin``).
     ``node_types`` are the classes the predicate holds past the column, each transform's then
     the lookup's (``utils/relations.py::_LookupWalk.node_types``), a reverse relation key's
@@ -731,7 +736,9 @@ def _reverse_relation_node_types(
     through its forward field (``RelatedExact`` / ``RelatedIn`` / ``RelatedIsNull``, or a
     class a project registers on the forward field's class), which the walk from the
     relation asks (``utils/relations.py::_lookup_node_types``). The operand's field and
-    lookup stay the relation's own reading. Empty where the walk refuses the expression.
+    lookup stay the relation's own reading. Empty where the walk refuses the expression (a
+    lookup only the target's key registers, which a walked hop compares,
+    ``refuse_unresolvable_lookup``).
     """
     try:
         return _lookup_node_types(relation, lookup_expr)
@@ -752,9 +759,10 @@ def _filterset_lookup_lhs_path(
     included. ``None`` for a filterset with no model, a path only the queryset a filter
     runs on resolves (an annotation, a ``FilteredRelation`` alias: Django's
     ``FieldError``), or a ``lookup_expr`` no walk from where the path ends accepts
-    (``LookupValidationError``: ``bogus``, or a ``range`` past a ``pk`` that is a
-    relation, which Django registers no ``range`` lookup on; ``RangeFilter.filter`` walks
-    the column the key stores instead).
+    (``LookupValidationError``: ``bogus``, which a set publishes only on a filter whose
+    ``filter`` is consumer code, ``refuse_unresolvable_lookup``, or a ``range`` past a
+    ``pk`` that is a relation, which Django registers no ``range`` lookup on;
+    ``RangeFilter.filter`` walks the column the key stores instead).
     """
     model = _filterset_model(filterset)
     if model is None:
@@ -3007,6 +3015,150 @@ def refuse_identityless_relation(
         "GenericRelation that reverses it on the related model, or on the content type and "
         "object id columns it reads.",
     )
+
+
+#: The shipped filter classes whose ``filter`` applies a relation's ``range`` as the bounds
+#: ``gte`` / ``lte`` on the path itself: both bounds (``IntegerRangeFilter.filter``), or a lone
+#: one (django-filter's ``RangeFilter.filter`` sets ``self.lookup_expr`` to ``"gte"`` for a
+#: lone ``start``, ``"lte"`` for a lone ``stop`` and ``"range"`` for both). The package's
+#: ``RangeFilter`` is no subclass of django-filter's (its bases are ``TypedFilter`` and
+#: ``Filter``) and reads a lone bound through the walk of its ``lookup_expr``, so it is
+#: asked ``range`` as declared.
+_BOUNDED_RANGE_FILTERS: tuple[type[Filter], ...] = (IntegerRangeFilter, DjangoFilterRangeFilter)
+
+
+def refuse_unresolvable_lookup(
+    filterset_cls: type[BaseFilterSet],
+    filter_name: str,
+    filter_instance: Filter,
+) -> None:
+    """Refuse a filter whose ``field_name`` and ``lookup_expr`` Django resolves on no queryset.
+
+    The filter's predicate is the argument ``field_name__lookup_expr`` (a ``RangeFilter``'s
+    ``field_name`` read as the column path it applies, ``_ResolvedField.path``), split as
+    ``Query.build_filter`` splits it (``utils/querysets.py::split_lookup``, over a fresh
+    ``Query`` of the model) into the names walked as a path and the transforms and lookup
+    left over, each asked of where the path ends (``Field.get_transform`` /
+    ``Field.get_lookup``, ``utils/relations.py::lookup_transform_parts``)
+    (``_unresolvable_lookup``). Where the path ends on a column, the leftover is the
+    column's transforms and lookups on every queryset: one the column's walk refuses
+    (``signed_big__gt``, a ``lookup_expr`` no field registers) is refused. Where it ends
+    on a to-one relation (``utils/relations.py::path_traverses_to_many`` answers no for its
+    last name), every request applies the leftover through the relation's own lookups
+    (``filters/sets.py::FilterSet._leaf_chain``), so one those refuse is refused
+    (``parent`` with ``icontains``); a filter applying the relation's ``range`` as its
+    bounds (``_BOUNDED_RANGE_FILTERS``) is asked for a bound's ``gte``. Where it ends on a to-many
+    relation, a walked hop compares the target's key instead, so the leftover is refused
+    only where the relation, every key column its join compares and the target's primary
+    key all refuse it. ``filters/sets.py::FilterSet._publish_filters`` asks this of every
+    leaf a set publishes whose ``filter`` is shipped code
+    (``filters/sets.py::_runs_shipped_filter``), as ``refuse_identityless_relation`` is
+    asked: a set a type serves refuses it when the schema builds, an unserved set at its
+    first use. Nothing is kept between asks: a lookup a project registers after a set
+    publishes (Django registers lookups at startup, ``AppConfig.ready``) is not seen by it.
+
+    Not judged: a first name the model does not carry (a queryset annotation, a
+    ``FilteredRelation`` alias, which only the queryset a filter runs on holds: Django's
+    ``FieldError`` at the split), and a name past a relation the related model does not
+    carry (a walked hop reads it on rows a type's ``get_queryset`` shapes,
+    ``filters/sets.py::FilterSet._leaf_chain``). A set declaring no ``Meta.model`` has no
+    model to resolve a path on and is not asked: a type refuses it when it binds
+    (``types/finalizer.py::_bind_filterset_owner``), and applied unbound it refuses a leaf
+    naming the missing ``Meta.model`` (``filters/sets.py::FilterSet._leaf_form_entries``).
+    """
+    model = _filterset_model(filterset_cls)
+    if model is None:
+        return
+    # django-filter formats the predicate's argument (``Filter.filter``), so a lazy
+    # ``field_name`` or ``lookup_expr`` is read as the text it renders.
+    field_name = truth.text(_bound_field_name(filter_instance))
+    lookup_expr = truth.text(filter_instance.lookup_expr)
+    path = (
+        _model_resolved_field(model, field_name).path
+        if truth.is_instance(filter_instance, RangeFilter)
+        else field_name
+    )
+    refused = _unresolvable_lookup(
+        model,
+        path,
+        lookup_expr,
+        bounds=truth.is_one_of(filter_instance, _BOUNDED_RANGE_FILTERS),
+    )
+    if refused is None:
+        return
+    field, refusal = refused
+    raise ConfigurationError(
+        f"FilterSet {truth.qualname(filterset_cls)}: {truth.kind(filter_instance)} "
+        f"{filter_name!r} has field_name {field_name!r} and lookup_expr {lookup_expr!r}, "
+        "but Django resolves no transform or "
+        f"lookup {truth.render(refusal.part)} on {_field_label(field)} ({truth.kind(field)}), "
+        "so every request naming the filter would be refused. Spell the transforms and lookup "
+        "the field registers (a column's lookups belong in lookup_expr, not field_name), "
+        "register a project lookup at startup (Field.register_lookup in AppConfig.ready), "
+        "or read the value in `method=`.",
+    ) from refusal
+
+
+def _unresolvable_lookup(
+    model: type[models.Model],
+    field_name: str,
+    lookup_expr: str,
+    *,
+    bounds: bool,
+) -> tuple[ModelField, LookupValidationError] | None:
+    """Return the field ``refuse_unresolvable_lookup``'s walk refuses on, and its refusal; ``None``.
+
+    ``bounds`` is whether the filter applies a final ``range`` as its bounds. Asked once per
+    published leaf (a set publishes its table once), so nothing is kept.
+    """
+    query = Query(model)
+    try:
+        head, start, leftover = split_lookup(query, LOOKUP_SEP.join((field_name, lookup_expr)))
+    except FieldError:
+        return None
+    # A fresh ``Query`` holds no annotation, so the start is a field Django's walk ended on.
+    field: ModelField = (
+        start
+        if truth.is_instance(start, models.ForeignObjectRel)
+        else require(start, is_concrete_field)
+    )
+    # ``Query.build_lookup`` reads an empty leftover (a path ending on a field) as ``exact``.
+    rest = LOOKUP_SEP.join(leftover) or "exact"
+    if not field.is_relation:
+        refusal = _refusal(field, rest)
+        return None if refusal is None else (field, refusal)
+    if len(head) < len(field_name.split(LOOKUP_SEP)):
+        return None
+    steps = _names_to_path(query, head[:-1], model._meta)[0] if head[:-1] else []
+    owner = steps[-1].to_opts.model if steps else model
+    # ``filters/sets.py::FilterSet._leaf_chain`` folds a to-one key into the relation's own
+    # lookups on every request; a range filter applies a ``range`` there as its bounds.
+    to_one = not path_traverses_to_many(owner, head[-1])
+    *transforms, final = rest.split(LOOKUP_SEP)
+    if to_one and bounds and final == "range":
+        rest = LOOKUP_SEP.join((*transforms, "gte"))
+    # The walk from the relation reads its own lookups (the ``Col`` Django's query builds).
+    refusal = _refusal(field, rest)
+    if refusal is None or to_one:
+        return None if refusal is None else (field, refusal)
+    # The key columns the relation's join compares (``Query.names_to_path``'s targets), and
+    # the related model's primary key, which a walked to-many hop compares instead.
+    related = require(read_attr(field, "related_model"), is_model_class)
+    keys = (*lookup_target_fields(query, LOOKUP_SEP.join(head)), related._meta.pk)
+    for key in keys:
+        if _refusal(stored_value_column(require(key, is_concrete_field)), rest) is None:
+            return None
+    # Named as the path spells it: a many-to-many, not its through table's key.
+    return owner._meta.get_field(head[-1]), refusal
+
+
+def _refusal(start: ModelField, lookup_expr: str) -> LookupValidationError | None:
+    """Return the refusal of ``lookup_expr`` by Django's walk from ``start``; ``None`` for none."""
+    try:
+        _ = lookup_transform_parts(start, lookup_expr)
+    except LookupValidationError as refusal:
+        return refusal
+    return None
 
 
 def _filter_set_class() -> type[FilterSet]:
