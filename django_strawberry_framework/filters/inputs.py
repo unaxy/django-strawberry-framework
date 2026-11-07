@@ -116,15 +116,16 @@ from .base import (
     RelationPkMultipleFilter,
     TextPatternFilter,
     TypedFilter,
-    _bound_field_name,
     _ColumnCleanedFilter,
     _compared_columns,
+    _declared_field_name,
     _EnumMemberFilterMixin,
     _filterset_lookup_lhs_path,
     _filterset_lookup_operand,
     _filterset_model,
     _filterset_model_field,
     _filterset_value_field,
+    _filterset_walked_lookup,
     comparison_form_field,
     copied_form_field,
     model_choice_identity_column,
@@ -688,7 +689,11 @@ def _column_cleaned_scalar(
         or not holds_values_as_given(value_field)
     ):
         return None
-    form_field = comparison_form_field(filterset_cls, value_field, filter_instance.field_name)
+    form_field = comparison_form_field(
+        filterset_cls,
+        value_field,
+        _filterset_walked_lookup(filterset_cls, filter_instance)[0],
+    )
     if form_field is None or not _typed_by_cleaning_form(
         filter_instance,
         value_field,
@@ -755,7 +760,11 @@ def _form_cleaned_value_field(
         return None if typed else value_field
     if value_field is _filterset_model_field(filterset_cls, filter_instance):
         return value_field
-    upstream = comparison_form_field(filterset_cls, value_field, filter_instance.field_name)
+    upstream = comparison_form_field(
+        filterset_cls,
+        value_field,
+        _filterset_walked_lookup(filterset_cls, filter_instance)[0],
+    )
     if not form_fields or upstream is None:
         return value_field
     compared = _scalar_from_form_field(upstream)
@@ -2399,7 +2408,7 @@ def leaf_gate_path(filterset_cls: type[FilterSet], name: str, filter_instance: F
     """
     if _is_declared_head(filterset_cls, name, filter_instance):
         return name
-    return _bound_field_name(filter_instance)
+    return _declared_field_name(filter_instance)
 
 
 def _group_filters_by_head(
@@ -2489,7 +2498,7 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
         # declared filter, whose flat spelling must fire the gates its nested twin
         # fires (``utils/permissions.py::_fire_flat_relation_path_gates`` walks the
         # relation hops and fires the child's ``check_<name>_permission``).
-        gate_paths[head] = head if head in declared_heads else _bound_field_name(sample_filter)
+        gate_paths[head] = head if head in declared_heads else _declared_field_name(sample_filter)
     alias_heads: dict[str, str] = {}
     for head in heads:
         input_attr = flatten_lookup_path(head)

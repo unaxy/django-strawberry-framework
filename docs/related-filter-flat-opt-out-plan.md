@@ -1,8 +1,9 @@
 # Item 216 plan v7: a per-declaration opt-out for flat RelatedFilter copies
 
-Status: PLAN v7. HEAD `1462297f` (`main`). Process: `docs/bug_hunt/FIX.md`. **Blocked on tracker item 745,** which
-lands first (ruling 6), **and on 748 / 749,** whose one fix rewrites `FilterSet._flat_leaf_walk`, the walk D2's
-restored-own-key routing rows describe; R1 re-derives those rows against it.
+Status: PLAN v7. HEAD `1462297f` (`main`). Process: `docs/bug_hunt/FIX.md`. **Blocked on tracker items 745,** which
+lands first (ruling 6), **and 748,** whose fix walks raw-form `RelatedFilter` heads through `FilterSet._flat_leaf_walk`,
+the walk D2's restored-own-key routing rows describe; R1 re-derives those rows against it. 749 landed without
+rewriting the walk: it hands the walk the path Django walks for a leaf (`filters/base.py::_filterset_walked_lookup`).
 - v1 was reviewed at `8d47f31f` (REVISE). The v1 review is in the repository's docs folder.
 - v2 was reviewed at `a3c97aa4` (REVISE).
 - v3 was reviewed at `703d538a` (REVISE, Sonnet High).
