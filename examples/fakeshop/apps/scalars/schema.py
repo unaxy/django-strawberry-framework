@@ -31,7 +31,10 @@ datetime or time the database cannot store is refused live on each. The
 ``DayInstantForm`` pair writes ``occurred_on`` through
 ``forms.ScalarSpecimenDayInstantForm``'s ``clean_occurred_on``, which answers an aware
 datetime for the ``DateField``: one whose date in the default time zone leaves years
-1..9999 is the field's ``invalid`` error. The ``SplitForm`` pairs write ``occurred_at``
+1..9999 is the field's ``invalid`` error. ``UpdateScalarSpecimenViaLockedStampForm`` writes
+through ``forms.ScalarSpecimenLockedStampForm``, whose disabled ``occurred_at``,
+``occurred_time`` and ``external_id`` keep their stored values, microseconds included. The
+``SplitForm`` pairs write ``occurred_at``
 through ``forms.ScalarSpecimenSplitStampForm``'s ``SplitDateTimeField``, whose widget reads
 a date key and a time key: unprefixed, under the form's own prefix (``PrefixedSplitForm``),
 and from a copy a ``get_form`` keys under that prefix itself (``RekeyedSplitForm``); a
@@ -532,6 +535,15 @@ class UpdateScalarSpecimenViaForm(DjangoModelFormMutation):
         permission_classes = []
 
 
+class UpdateScalarSpecimenViaLockedStampForm(DjangoModelFormMutation):
+    """Update a ``ScalarSpecimen`` through ``ScalarSpecimenLockedStampForm`` (stamp disabled)."""
+
+    class Meta:
+        form_class = forms.ScalarSpecimenLockedStampForm
+        operation = "update"
+        permission_classes = []
+
+
 class CreateScalarSpecimenViaDayInstantForm(DjangoModelFormMutation):
     """Create a ``ScalarSpecimen`` through ``ScalarSpecimenDayInstantForm``."""
 
@@ -781,7 +793,8 @@ class Mutation:
     """Scalars coverage write surface: the live ``Upload`` path (spec-037) and temporal writes.
 
     The ``ScalarSpecimen`` create / update pairs write the temporal columns through each
-    flavor (model, ``ModelForm``, serializer); the ``SplitForm`` pairs write
+    flavor (model, ``ModelForm``, serializer), and ``LockedStampForm`` updates through a form
+    disabling them; the ``SplitForm`` pairs write
     ``occurredAt`` through a ``SplitDateTimeField``; the ``ViaPosted`` pairs bind posted
     text over the temporal and the split form; the ``NullableScalarSpecimen``
     ``ViaForm`` pair writes the ``null=True`` ``flag`` through a checkbox and ``payload``
@@ -795,6 +808,9 @@ class Mutation:
     update_scalar_specimen = DjangoMutationField(UpdateScalarSpecimen)
     create_scalar_specimen_via_form = DjangoMutationField(CreateScalarSpecimenViaForm)
     update_scalar_specimen_via_form = DjangoMutationField(UpdateScalarSpecimenViaForm)
+    update_scalar_specimen_via_locked_stamp_form = DjangoMutationField(
+        UpdateScalarSpecimenViaLockedStampForm,
+    )
     create_scalar_specimen_via_day_instant_form = DjangoMutationField(
         CreateScalarSpecimenViaDayInstantForm,
     )

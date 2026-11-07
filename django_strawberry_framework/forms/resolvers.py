@@ -155,7 +155,10 @@ and the form-specific invariants this module owns:
   the form field's own cleaning of the reconstructed value rewrote it (a ``CharField``'s
   ``strip`` of a text column, its text of a ``JSONField`` value, its ``""`` for a
   ``NULL``): the form validated the cleaned value, and the instance gets the stored one
-  back before the save (``_keep_omitted_columns``). A value a ``get_form`` hook binds, a
+  back before the save (``_keep_omitted_columns``). So does a ``disabled`` field's column,
+  sent or omitted: Django cleans the field's initial, the stored value, never a value
+  bound for it, and a ``DateTimeInput`` / ``TimeInput`` presents a stored ``datetime`` /
+  ``time`` there with its microseconds zeroed. A value a ``get_form`` hook binds, a
   ``clean_<field>`` or form ``clean()`` sets, or a model ``clean()`` sets for the field
   is the consumer's and is written; one equal to the form field's own cleaning of the
   stored value cannot be told from it and keeps the stored value, so a consumer
@@ -213,6 +216,7 @@ reconstruction.
 
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING, Literal
 
 from django import forms
@@ -1341,8 +1345,8 @@ def _bound_form_or_field_errors(
     ``ModelForm`` flavor the built form's ``instance`` must be a row of the mutation's
     model (or a subclass), or the request is a ``ConfigurationError`` before any bind or
     ``is_valid()``, nothing written (``_require_backing_row``). On an update, a column
-    the input omitted keeps its stored value where the form field's cleaning of it is the
-    form field's own (``_keep_omitted_columns``).
+    the input omitted, or a ``disabled`` field's, keeps its stored value where the form
+    field's cleaning of it is the form field's own (``_keep_omitted_columns``).
 
     Django's model validation converts a ``ModelForm``'s cleaned values inside
     ``is_valid()`` (``_post_clean``: ``construct_instance``, then ``Model.full_clean`` and
@@ -1375,7 +1379,7 @@ def _bound_form_or_field_errors(
     _assert_bound_choice_agreement(mutation_cls, form, form_data)
     if unbindable:
         return None, _form_errors_to_field_errors(unbindable, specs)
-    stored = _omitted_column_values(form, omitted)
+    stored = _omitted_column_values(form, omitted, updating=instance is not None)
     try:
         valid = form.is_valid()
     except OverflowError:
@@ -1394,19 +1398,28 @@ def _bound_form_or_field_errors(
 def _omitted_column_values(
     form: forms.BaseForm,
     omitted: frozenset[str],
+    *,
+    updating: bool,
 ) -> dict[_FieldAny, object]:
-    """Read the value ``form.instance`` holds in each scalar column of an omitted field.
+    """Read the value ``form.instance`` holds in each scalar column no input value reaches.
 
     Read before ``is_valid()``, whose ``construct_instance`` overwrites the instance in
     place: the value the instance held when ``get_form`` built the form, the located row's
     stored value or the one a hook's ``instance`` carries. Only a concrete column
     ``construct_instance`` writes is read: an editable one the form declares a field for,
     inside ``Meta.fields`` and outside ``Meta.exclude``, whose field the input omitted and
-    the reconstruction bound from the row (``_modelform_decode_step``). A relation is not:
-    the form field's own cleaning of a stored key is the row that key names, so its write
-    already keeps the column. A plain form, or a create, omits nothing.
+    the reconstruction bound from the row (``_modelform_decode_step``), or, on an
+    ``updating`` form, whose field is ``disabled``, sent or not: Django cleans a disabled
+    field's initial and never reads the bound value. A relation is not: the form field's own
+    cleaning of a stored key is the row that key names, so its write already keeps the
+    column. Nor is a file field: the reconstruction binds no file, so it is never omitted,
+    and a disabled one cleans its initial, the stored ``FieldFile`` itself, so a restore
+    would write back what the instance already holds, while checking it would run Django's
+    ``FileField.to_python`` again, a second ``storage.size()`` read and, for an
+    ``ImageField``, a second Pillow open and verify. A plain form, or a create, omits
+    nothing.
     """
-    if not omitted:
+    if not updating:
         return {}
     model_form = require_instance(form, _ModelFormAny)
     instance = model_form.instance
@@ -1414,8 +1427,14 @@ def _omitted_column_values(
     return {
         field: field.value_from_object(instance)
         for field in instance._meta.concrete_fields
-        if field.name in omitted
-        and field.name in form.fields
+        if field.name in form.fields
+        and (
+            field.name in omitted
+            or (
+                form.fields[field.name].disabled
+                and not isinstance(form.fields[field.name], forms.FileField)
+            )
+        )
         and field.editable
         and not field.is_relation
         and (options.fields is None or field.name in options.fields)
@@ -1441,13 +1460,19 @@ def _keep_omitted_columns(
     still fails the update. ``reconstructed`` holds the value the reconstruction bound
     for each omitted field, read before ``get_form`` ran, so a hook or form ``__init__``
     setting the field in the bound mapping in place reads as the consumer's value. A
-    consumer ``save()`` runs after and may still write another value.
+    ``disabled`` field, whose column ``stored`` holds whether the input sent it or not, reads
+    no bound value: Django cleans its initial, which ``ModelForm`` builds from
+    ``form.instance``, so its ``stored`` value is the one compared, and an initial consumer
+    code sets is the consumer's value. A consumer ``save()`` runs after and may still write
+    another value.
     """
     if not stored:
         return
     instance = require_instance(read_attr(form, "instance"), models.Model)
     for field, value in stored.items():
-        if _holds_own_cleaning(form, instance, field, reconstructed[field.name]):
+        # A ``disabled`` field cleans the initial the form built from ``form.instance``.
+        source = value if form.fields[field.name].disabled else reconstructed[field.name]
+        if _holds_own_cleaning(form, instance, field, source):
             field.save_form_data(instance, value)
 
 
@@ -1460,11 +1485,12 @@ def _holds_own_cleaning(
     """Whether ``instance`` holds only the form field's own cleaning of ``reconstructed``.
 
     ``reconstructed`` is the value the reconstruction bound for an update's omitted field
-    (``_keep_omitted_columns``), or the bound ``None`` of an explicit ``null`` or the
-    ``_UNBOUND`` of a create's omission on a ``null=True`` column (``_coerced_null_fields``).
-    Three readings agree: the field read the value the reconstruction bound
-    (``_bound_form_value``; a ``disabled`` field reads its initial, the row's value), so no
-    ``get_form`` hook bound its own; the cleaned value is what the field's
+    (``_keep_omitted_columns``; the value ``form.instance`` held for a ``disabled`` field),
+    or the bound ``None`` of an explicit ``null`` or the ``_UNBOUND`` of a create's omission
+    on a ``null=True`` column (``_coerced_null_fields``). Three readings agree: the field
+    read the value the reconstruction bound (``_bound_form_value``; a ``disabled`` field
+    reads the initial set for it, ``_set_initial``), so no ``get_form`` hook bound its own
+    and no consumer code set the initial; the cleaned value is what the field's
     ``_clean_bound_field`` makes of it, the value ``Form._clean_fields`` stores before a
     ``clean_<field>``, so no ``clean_<field>`` or form ``clean()`` set its own; and the
     instance holds that cleaned value, as ``construct_instance`` wrote it or as
@@ -1484,9 +1510,7 @@ def _holds_own_cleaning(
     name = field.name
     bound_field = form[name]
     form_field = bound_field.field
-    read = (
-        read_attr(bound_field, "initial") if form_field.disabled else _bound_form_value(form, name)
-    )
+    read = _set_initial(form, name) if form_field.disabled else _bound_form_value(form, name)
     if read != reconstructed:
         return False
     cleaned: object = form.cleaned_data.get(name)
@@ -1498,6 +1522,27 @@ def _holds_own_cleaning(
     if cleaned in field.empty_values:
         return False
     return held == to_python_value(field, cleaned)
+
+
+def _set_initial(form: forms.BaseForm, name: str) -> object:
+    """Return the initial set for the form's field ``name``, microseconds kept.
+
+    The form's own ``get_initial_for_field`` answers it (``form.initial``, else the field's
+    ``initial``, a callable called, or what a consumer override of the method answers), asked
+    of a copy of the field whose widget keeps microseconds: Django's answer for a ``datetime``
+    / ``time`` under a widget whose ``supports_microseconds`` is false (``DateTimeInput``,
+    ``TimeInput``, ``SplitDateTimeWidget``) replaces the microseconds with zero, the form's
+    presentation of the value rather than the value set (django-trac 22502).
+    """
+    form_field = form.fields[name]
+    widget = require_instance(read_attr(form_field, "widget"), forms.Widget)
+    if widget.supports_microseconds:
+        return read_attr(form[name], "initial")
+    stand_in = copy.copy(form_field)
+    stand_in_widget = copy.copy(widget)
+    stand_in_widget.supports_microseconds = True
+    stand_in.widget = stand_in_widget
+    return call_method(form, "get_initial_for_field", stand_in, name)
 
 
 def _unstorable_cleaned_fields(
@@ -1989,9 +2034,10 @@ def _modelform_write_step(
     ``ConfigurationError``: ``_require_backing_row``), runs ``is_valid()`` once (a failure
     maps ``form.errors`` onto the envelope via the reused
     ``validation_error_to_field_errors``) and, on an update, keeps the stored value of each
-    column the input omitted where the form field's own cleaning rewrote it
-    (``_keep_omitted_columns``), answers an update's explicit ``null`` on a
-    required file field with its ``required`` error (``_required_file_clears``), refuses
+    column the input omitted, and of each ``disabled`` field's column, sent or omitted,
+    where the form field's own cleaning rewrote it (``_keep_omitted_columns``), answers an
+    update's explicit ``null`` on a required file field with its ``required`` error
+    (``_required_file_clears``), refuses
     an explicit ``null`` a ``null=False`` column's own form field cleaned to a storable
     value as that column's field-keyed ``null`` error (``_coerced_null_fields``), stores
     ``NULL`` in a ``null=True`` column whose explicit ``null``, create omission (no

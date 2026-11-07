@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 431 done, 108 to do. The CHANGELOG entries filed here moved to
+Progress: 432 done, 107 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1732,6 +1732,19 @@ Progress: 431 done, 108 to do. The CHANGELOG entries filed here moved to
 - [x] 774. fixed with 776: a declared `lookup_expr` no field registers (`unaccent` without `django.contrib.postgres`)
   is refused by `filters/base.py::refuse_unresolvable_lookup` when its set publishes, naming the lookup and the field;
   the build pin moved to `tests/filters/test_inputs.py::test_a_declared_lookup_no_field_registers_is_refused_before_its_form_is_asked`
+- [x] 719. fixed: a `DjangoModelFormMutation` update keeps a `disabled` field's column at its stored value whether
+  the input omits the field or sends a value Django ignores. The keep-stored check read Django's presented initial
+  (`BaseForm.get_initial_for_field` zeroes microseconds under `DateTimeInput` / `TimeInput` / `SplitDateTimeWidget`,
+  django-trac 22502) against the raw stored value, so an omitted disabled `DateTimeField` / `TimeField` lost its
+  microseconds; and only omitted names were checked, so a sent disabled field wrote the cleaning of its initial
+  (stripped text, `""` for `NULL`). `forms/resolvers.py::_set_initial` asks the form's own `get_initial_for_field`
+  for a field copy whose widget keeps microseconds; `::_omitted_column_values` reads every disabled non-file column
+  on an update and `::_keep_omitted_columns` compares it to the instance's stored value. An initial consumer code sets
+  (`initial=`, `__init__`, a `get_initial_for_field` override) is still written; a disabled file field stays out
+  (its cleaning is the stored file, and checking it would read storage again). Live
+  `test_scalars_mutation_api.py::test_update_through_disabled_fields_keeps_their_stored_values` (sync, async, omitted,
+  sent) over the new fakeshop `updateScalarSpecimenViaLockedStampForm`; package rows in
+  `tests/forms/test_resolvers.py`; spec-038, README, GLOSSARY `DjangoModelFormMutation`
 
 ## Outside review of the fixes
 
@@ -1772,10 +1785,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 719. A `DjangoModelFormMutation` update omitting a `disabled` `DateTimeField` over a stored
-  datetime with microseconds writes it with the microseconds dropped: `BaseForm.get_initial_for_field` strips them,
-  so the field's initial is not the stored value and 524's restore does not apply; spec-038 Decision 8 says omitted
-  scalars are preserved. Found verifying 524
 - [ ] 720. (robustness) A `DjangoModelFormMutation` whose consumer `forms.CharField` sits over a `JSONField` writes a
   `payload` the client sends as its Python `str()` (`{"a": 1}` stored as `"{'a': 1}"`): the field cleans the decoded
   value as text. Split from 711 (its omitted half closed with 524); fact finding owes what the form's published input

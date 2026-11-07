@@ -355,7 +355,9 @@ package-internal; Slice 4 is the live consumer surface.
     of a column with no `default` (nothing bound under any key the field's widget reads),
     → `NULL` stored, a model `clean()`'s value written;
     an update omitting a column keeps its stored value (`NULL` included) where
-    the form field's own cleaning of it would rewrite it, while a value a `get_form` /
+    the form field's own cleaning of it would rewrite it, as does a `disabled` field's
+    column, sent or omitted (the microseconds its `DateTimeInput` / `TimeInput` initial
+    zeroes included), while a value a `get_form` /
     `get_form_kwargs` hook binds, a `clean_<field>` / form `clean()` sets or a model
     `clean()` sets is written, except one equal to the form field's own cleaning of the
     stored value, which keeps the stored value (a consumer `save()` writes such a
@@ -1685,8 +1687,17 @@ write flavor rides.
      field is the consumer's and is written, as is anything a consumer `save()` writes
      after; a value equal to the form field's own cleaning of the stored value cannot
      be told from that cleaning and keeps the stored value, so a consumer `save()` is
-     where such a value is written. A `disabled` field whose initial is the stored value
-     keeps it, and under a `get_form` hook that hands the form another instance (a fresh
+     where such a value is written. A `disabled` field's column keeps its stored value
+     too, whether the input omits the field or sends a value: Django cleans the initial
+     `ModelForm` built from the instance, never a bound value, and a `DateTimeInput`,
+     `TimeInput` or `SplitDateTimeWidget` presents a stored `datetime` / `time` there with
+     its microseconds zeroed (`BaseForm.get_initial_for_field`), so the form field's own
+     cleaning drops them. The initial is read through the form's own
+     `get_initial_for_field`, asked of a copy of the field whose widget keeps microseconds
+     (`django_strawberry_framework/forms/resolvers.py::_set_initial`), so an initial
+     consumer code sets (a `get_form_kwargs` `initial=`, an `__init__`, a
+     `get_initial_for_field` override) is the consumer's and is written as the form
+     cleans it. Under a `get_form` hook that hands the form another instance (a fresh
      copy of the row), the value that instance holds for the omitted column is the one
      kept. It
      matches the `036` model-driven `PartialInput` contract (consistent partial-update
@@ -1810,7 +1821,8 @@ write flavor rides.
    `""` its form field cleaned the `None` to, Django's empty value for it, and any other
    value there stores `NULL`. A
    cleaned value the consumer form supplies instead (a `clean_<field>` / `clean()`
-   default) is written, as is a `disabled` field's initial and, on a `null=True` column, a
+   default) is written, as is a `disabled` field's initial (its stored value kept as
+   stored, step 4) and, on a `null=True` column, a
    model `clean()`'s value the instance holds in place of the form field's own cleaning
    (`django_strawberry_framework/forms/resolvers.py::_holds_own_cleaning`); one equal to the form field's
    own cleaning (a `clean_<field>` or `clean()` answering `False` for a checkbox's
@@ -2227,7 +2239,10 @@ Rationale companion: [Decision 14][rationale-d14].
   stripped `"  padded  "`, a `JSONField` value's text, `""` for a stored `NULL`, a
   lossy `DateField` subclass's midnight): the form validates the cleaned value, so its
   refusal still blocks the update, and the instance gets the stored value back before
-  the save. A value a `get_form` / `get_form_kwargs` hook binds, a `clean_<field>` /
+  the save. A `disabled` field's column keeps its stored value the same way, sent or
+  omitted, the microseconds a `DateTimeInput`, `TimeInput` or `SplitDateTimeWidget`
+  zeroes in the initial it presents included; an initial consumer code sets is written.
+  A value a `get_form` / `get_form_kwargs` hook binds, a `clean_<field>` /
   form `clean()` sets or a model `clean()` sets for the omitted field is the
   consumer's and is written, except one equal to the form field's own cleaning of the
   stored value, which cannot be told from it and keeps the stored value (a consumer
@@ -2474,8 +2489,9 @@ Rationale companion: [Decision 14][rationale-d14].
   create and update alike, as the model and serializer flavors answer the same input.
   Only the form field's own cleaning of the `null` is refused: a value a `clean_<field>`
   / `clean()` supplies, a `get_form` / `get_form_kwargs` override binding a value in
-  place of the `null`, a `disabled` field, and a declared field `Meta.fields` /
-  `Meta.exclude` keeps out of `construct_instance` all write as the form resolves them,
+  place of the `null`, a `disabled` field (its stored value kept, Decision 8 step 4), and
+  a declared field `Meta.fields` / `Meta.exclude` keeps out of `construct_instance` all
+  write as the form resolves them,
   except a value equal to the form field's own cleaning, which cannot be told from it. A
   `null=True` column (next), an M2M, a file and a form-required field are never refused
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
@@ -2903,14 +2919,31 @@ behavior reachable through `/graphql/`, package tests own internals.
     an update omitting `label` and `payload` keeps a stored
     `"  padded  "`, `NULL`, JSON object and JSON list as stored, sync and async
     (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_update_omitting_a_column_keeps_its_stored_value`,
-    `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_async_update_omitting_a_column_keeps_its_stored_value`;
+    `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_async_update_omitting_a_column_keeps_its_stored_value`);
+    an update through `ScalarSpecimenLockedStampForm` keeps the disabled `occurred_at`,
+    `occurred_time` and `external_id` as stored, microseconds included, omitted or sent,
+    sync and async
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_update_through_disabled_fields_keeps_their_stored_values`,
+    `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_async_update_through_disabled_fields_keeps_their_stored_values`;
     at the unit tier a `DateField` subclass over a `DateTimeField` keeps the stored
     datetime under `UTC` and, year 1, `Asia/Tokyo`, a `disabled` field and a hook's
-    fresh copy of the row keep the stored value, a hook's bound value (a copy or set in
-    place), a `clean_<field>`, a form `clean()` and a model `clean()` other than the form
-    field's own cleaning are written, an empty cleaned value a model `clean()` fills is
-    never converted, a stored `{}` / `[]` under the default `forms.JSONField` is kept
-    rather than refused as `null`, and a hook's rebound instance's own value is written:
+    fresh copy of the row keep the stored value, a `disabled` `DateTimeField` or
+    `SplitDateTimeField` keeps its stored microseconds, under an `initial=` equal to the
+    stored value too, while an `initial=` value or callable and a
+    `get_initial_for_field` override are written as the form cleans them
+    (`tests/forms/test_resolvers.py::test_update_omitting_a_disabled_stamp_writes_only_the_consumers_initial`;
+    a naive one under `USE_TZ = False` too,
+    `tests/forms/test_resolvers.py::test_update_omitting_a_disabled_naive_stamp_keeps_its_microseconds`),
+    a value sent for a `disabled` `CharField` keeps a stored `"  padded  "` and `NULL`
+    (`tests/forms/test_resolvers.py::test_update_sending_a_disabled_text_field_keeps_its_stored_value`),
+    a `disabled` `FileField` and `ImageField` keep their stored file under a sent `null`,
+    the storage's `size()` read once per update (no restore check cleans it again)
+    (`tests/forms/test_resolvers.py::test_update_keeps_a_disabled_file_fields_stored_file`),
+    a hook's bound value (a copy or set in place), a `clean_<field>`, a form `clean()`
+    and a model `clean()` other than the form field's own cleaning are written, an empty
+    cleaned value a model `clean()` fills is never converted, a stored `{}` / `[]` under
+    the default `forms.JSONField` is kept rather than refused as `null`, and a hook's
+    rebound instance's own value is written:
     `tests/forms/test_resolvers.py::test_update_omitting_a_datetime_under_a_lossy_date_field_keeps_it`,
     `tests/forms/test_resolvers.py::test_update_omitting_a_note_writes_only_the_consumers_value`,
     `tests/forms/test_resolvers.py::test_update_omitting_a_column_a_model_clean_sets_writes_the_models_value`,
@@ -3225,7 +3258,8 @@ The completion contract.
    `NULL` (a model `clean()`'s value written), a `""`
    consumer code sets on such a column answering the column's own `to_python` refusal
    (code `invalid`) where it raises one, and an update omitting a column keeps its stored value, `NULL`
-   included, where the form field's own cleaning would rewrite it (a consumer hook's,
+   included, where the form field's own cleaning would rewrite it (as does a `disabled`
+   field's column, sent or omitted, microseconds included; a consumer hook's,
    `clean_<field>`'s, form `clean()`'s or model `clean()`'s value written, except one
    equal to that cleaning, which keeps the stored value, and a hook's rebound
    instance's own value written);

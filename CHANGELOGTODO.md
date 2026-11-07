@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 182 to do.
+Progress: 0 done, 183 to do.
 
 ## From dry-0_0_15_3
 
@@ -773,6 +773,12 @@ Progress: 0 done, 182 to do.
   nor its target's key registers. Move the lookup to `lookup_expr`, register a project lookup at startup
   (`Field.register_lookup` in `AppConfig.ready`), or read the value in `method=`. `method=` filters, filter
   overrides, queryset annotation and `FilteredRelation` alias paths and names past a relation are unchanged
+- [ ] 782. CHANGELOG entry for item 719: a `DjangoModelFormMutation` update through a form with a `disabled` field
+  keeps that column's stored value whether the input omits the field or sends a value: a `DateTimeField` /
+  `TimeField` under `DateTimeInput`, `TimeInput` or `SplitDateTimeWidget` no longer loses its microseconds, and a sent
+  value no longer writes the cleaned initial (stripped text, `""` for a stored `NULL`). An initial your code sets
+  (`get_form_kwargs` `initial=`, a form `__init__`, a `get_initial_for_field` override) is still written as the form
+  cleans it
 
 ## From dry-upstream-0_0_15
 
