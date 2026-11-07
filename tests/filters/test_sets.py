@@ -17053,3 +17053,157 @@ def test_generated_column_with_no_default_filter_takes_the_unrecognized_field_be
             class Meta:
                 model = owner
                 fields = {"computed": ["exact"]}
+
+
+@isolate_apps("apps.library")
+def test_a_relation_view_alias_never_takes_a_name_a_model_field_holds() -> None:
+    """A ``<relation>_visible`` alias is numbered past a model field of that name.
+
+    Django refuses an alias equal to a model field, so a model holding ``shelves_visible``
+    reads its relation through ``shelves_visible_2``, numbered past a name the query holds.
+    """
+
+    class _Holder(django_models.Model):
+        shelves_visible: django_models.TextField[str | Combinable, str] = django_models.TextField()
+
+        class Meta:
+            app_label = "library"
+
+    with pytest.raises(ValueError, match="conflicts with a field on the model"):
+        _ = _Holder.objects.alias(shelves_visible=django_models.Value(1))
+    assert sets_module._free_alias(_Holder, set(), "shelves_visible") == "shelves_visible_2"
+    taken = {"shelves_visible_2"}
+    assert sets_module._free_alias(_Holder, taken, "shelves_visible") == "shelves_visible_3"
+
+
+@isolate_apps("apps.library")
+def test_a_self_referential_through_its_rows_cannot_name_is_joined_as_django_joins_it() -> None:
+    """Only a through key its model can name by itself carries the relation view's condition.
+
+    Both keys of an auto-created self-referential through model share one hidden reverse
+    name, which names one of them: the direction starting on that key joins its through
+    rows by it, the other reads none (``None``), as does a relation that is no many-to-many.
+    """
+
+    class RkPeer(django_models.Model):
+        follows: django_models.ManyToManyField[RkPeer, django_models.Model] = (
+            django_models.ManyToManyField(
+                "self",
+                symmetrical=False,
+                related_name="followed_by",
+            )
+        )
+
+        class Meta:
+            app_label = "library"
+
+    meta = RkPeer._meta
+    assert sets_module._through_link(RkPeer, meta.get_field("follows")) is None
+    assert sets_module._through_link(RkPeer, meta.get_field("followed_by")) == (
+        "RkPeer_follows+",
+        "from_rkpeer",
+        "id",
+    )
+    assert sets_module._through_link(RkPeer, meta.get_field("id")) is None
+
+
+class RkSelfPeer(django_models.Model):
+    """Self-referential many-to-manys whose through rows Django creates (table made per test)."""
+
+    name: django_models.TextField[str | Combinable, str] = django_models.TextField()
+    follows: django_models.ManyToManyField[RkSelfPeer, django_models.Model] = (
+        django_models.ManyToManyField(
+            "self",
+            symmetrical=False,
+            related_name="followed_by",
+        )
+    )
+    peers: django_models.ManyToManyField[RkSelfPeer, django_models.Model] = (
+        django_models.ManyToManyField("self")
+    )
+
+    class Meta:
+        app_label = "products"
+        managed = False
+
+
+class _NoPeerWhenEmpty(ModelMultipleChoiceFilter):
+    """Reads an empty selection as "no related row", recording the ``field_name`` it ran with."""
+
+    seen: ClassVar[list[str]] = []
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _NoPeerWhenEmpty.seen.append(str(self.field_name))
+        if not value:
+            return qs.filter(**{f"{self.field_name}__isnull": True}).distinct()
+        return super().filter(qs, value)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("relation", "received", "answer"),
+    [
+        pytest.param("follows", "id", [], id="forward"),
+        pytest.param("peers", "id", [], id="symmetrical"),
+        pytest.param("followed_by", "followed_by_visible", ["a", "b"], id="reverse"),
+    ],
+)
+def test_a_through_key_django_cannot_name_keeps_the_key_column_fallback(
+    relation: str,
+    received: str,
+    answer: list[str],
+) -> None:
+    """A key override's empty value runs re-bound to the target key where no through key is named.
+
+    An auto-created self-referential many-to-many names no through key in its forward
+    direction (symmetrical or not), so the relation view cannot condition its through rows:
+    the override runs on the target key column over the visible targets. The reverse
+    direction names its key and runs as declared through the relation's visible rows.
+    """
+
+    class RkSelfPeerType(DjangoType):
+        class Meta:
+            model = RkSelfPeer
+            fields = ("id", "name")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[RkSelfPeer],
+            info: object,
+        ) -> QuerySet[RkSelfPeer]:
+            return queryset.exclude(name="hidden")
+
+    class Peers(FilterSet):
+        probe = _NoPeerWhenEmpty(field_name=relation, queryset=RkSelfPeer.objects.all())
+
+        class Meta:
+            model = RkSelfPeer
+            fields = ["name"]
+
+    assert registry.get(RkSelfPeer) is RkSelfPeerType
+    with connection.schema_editor() as editor:
+        editor.create_model(RkSelfPeer)
+    try:
+        rows = {
+            name: RkSelfPeer.objects.create(name=name)
+            for name in (
+                "a",
+                "b",
+                "c",
+                "hidden",
+            )
+        }
+        rows["a"].follows.add(rows["hidden"])
+        rows["b"].follows.add(rows["c"])
+        rows["a"].peers.add(rows["hidden"])
+        rows["b"].peers.add(rows["c"])
+        _NoPeerWhenEmpty.seen.clear()
+        kept = Peers.apply_sync({"probe": []}, RkSelfPeer.objects.order_by("name"), _make_info())
+        assert [peer.name for peer in kept] == answer
+        assert _NoPeerWhenEmpty.seen == [received]
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(RkSelfPeer)

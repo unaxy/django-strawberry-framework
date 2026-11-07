@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 438 done, 112 to do. The CHANGELOG entries filed here moved to
+Progress: 439 done, 114 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1825,6 +1825,27 @@ Progress: 438 done, 112 to do. The CHANGELOG entries filed here moved to
   `test_relation_filter_defaults_api.py::test_one_declared_hop_runs_its_target_scope_once_however_many_branches_and_leaves_walk_it`
   (sync, async, async-only hooks; exact statement counts), `tests/filters/test_sets.py::test_each_arm_branch_derives_once_on_both_colors`
   (one run for four arms)
+- [x] 796. fixed: a class-level `filter` override on a to-many relation key a flat leaf walks, whose value names no row
+  of the target (empty, `null` or absent, a value the shipped comparison skips or refuses, instances or a key of another
+  model), runs once as declared over its own set's rows with its `field_name` bound to a chained `FilteredRelation`
+  alias of its relation (`<segment>_visible`, numbered past a name the query or the model holds) whose joins admit only
+  each hop's visible rows, its intermediate models' visible rows and its `RelatedFilter(queryset=...)` rows, a
+  many-to-many joining its through rows by an alias conditioned on the visible targets, and its `lookup_expr` the walked
+  lookup. So instance, queryset and single-instance defaults, `<field_name>__pk__in`, `<field_name>__<column>`, a
+  crossing `lookup_expr` and `<field_name>__isnull=True` answer as unwalked over visible rows (they were a masked
+  `TypeError` / `Unsupported lookup` or hidden-row dependent), another model's key raises Django's own `ValueError` as
+  unwalked (it matched by pk coincidence), and the to-many 795 shape keeps every parent. Forward keys and `isnull`
+  overrides are unchanged. A relation the override's own Python names reads every row (stated contract). A many-to-many
+  whose through key onto its source Django gives no reverse name of its own (an auto-created self-referential one read
+  forward) keeps the re-bound fallback (item 800). A GlobalID copy resolves its target from the declared path and
+  compares an off-pk `NodeID` through the alias. Changed `filters/sets.py::FilterSet._leaf_chain`,
+  `::FilterSet._apply_relation_leaf`, `::FilterSet._absent_leaf_applies`, `::_LeafChain` (`view`); new
+  `::FilterSet._relation_view`, `::_free_alias`, `::_through_link`, `::_names_every_through`;
+  `filters/base.py::_globalid_target`, `::_globalid_predicate_path`, new `::_RelationView`, `::_relation_view_of`.
+  Pinned by `examples/fakeshop/test_query/test_relation_key_overrides_api.py` (names-no-row rows sync, form and async;
+  off-key NodeID; a declared hop over two relations with `queryset=` and an `and_` arm; connection count, order and
+  pages) and `tests/filters/test_sets.py` (`_free_alias` over a model field, `_through_link`, the unnameable-through
+  fallback); spec-027, README, GLOSSARY `FilterSet`. Filed 799, 800, 801
 
 ## Outside review of the fixes
 
@@ -2100,17 +2121,28 @@ tracker number are recorded there; open remainders and new defects are filed as 
   publishes, so `refuse_unresolvable_lookup` / `refuse_identityless_relation` never run for it, though the glossary and
   spec-027 say a refusal fires for "an unserved set at its first use": `tests/filters/test_base.py::_ScalarRangeSet`
   with a refused `RangeFilter("parent", "range")` builds and serves raw. Found fixing 721
-- [ ] 795. (robustness) A consumer `filter` override on a flat leaf a hop walks that returns a new queryset when it
-  constrains nothing (`return qs.distinct()` or `qs.all()` on an empty value, as 784's own `_PkReader` ends) reads as
-  constraining, so supplied empty or left out it keeps only the parents that reach a visible related row (Branch
-  `shelves` key under a `RelatedFilter`: two of three branches) where unwalked and django-filter keep every row; the
-  identity-as-no-op rule on the rebound target rows plus the EXISTS fold, not the double run. Found researching 790
-- [ ] 796. (robustness) A `filter` override on a to-many relation key a hop walks that reads an empty or absent value
-  as a default of model instances (`value or Shelf.objects.filter(...)`) raises a masked `TypeError` (`Field 'id'
-  expected a number but got <Shelf: open>`) on every walked reverse, many-to-many and two-hop key, supplied empty or
-  left out, where unwalked and django-filter answer the rows: 784's names-no-row fallback re-binds the override to the
-  target's `pk`; a pk default and forward keys work. Found researching 790
-
+- [ ] 795. (robustness) A consumer `filter` override on a flat leaf a hop walks, on a forward relation key or a path
+  into a target column, that returns a new queryset when it constrains nothing (`return qs.distinct()` or `qs.all()` on
+  an empty value) reads as constraining, so supplied empty or left out it keeps only the parents that reach a visible
+  related row, where unwalked and django-filter keep every row: the identity-as-no-op rule on the rebound rows plus the
+  EXISTS fold, not the double run. A to-many key's override answers as unwalked (item 796). Found researching 790
+- [ ] 799. (robustness) A class-level `filter` override on a relation key a flat leaf walks whose `isnull` reading
+  treats an empty or `null` value as `True` answers walked `[]` where unwalked answers the parents with no related row
+  (`['gamma']`): consumer `isnull` overrides keep the key-column re-bind, since running them through 796's relation view
+  narrows forward one-hop and many-to-many hiding cells (the forward left join and the many-to-many through join both
+  need a condition). Found fixing 796
+- [ ] 800. (robustness) A class-level `filter` override on a many-to-many key a flat leaf walks, where Django gives the
+  through key onto the source no reverse name of its own, runs on the key-column fallback when its value names no row:
+  its `field_name` is re-bound to the target key over the visible targets. An auto-created self-referential many-to-many
+  read forward (symmetrical or `symmetrical=False`) is such a key, because both through keys share one hidden reverse
+  name, which Django resolves to only one of them, so no through join there can be conditioned
+  (`filters/sets.py::_names_every_through`). On that key, an instance or queryset default raises the masked `TypeError`
+  and a path past the relation raises `Unsupported lookup`, where unwalked answers rows. The reverse direction and every
+  other many-to-many read the relation view. Found fixing 796
+- [ ] 801. (robustness, gate first) A root queryset ordered by a to-many relation a walked key override's names-no-row
+  fallback also reads (an `OrderSet` field `shelves__code` beside a `shelves` override reading an empty value as a
+  default) does not reuse the fallback's `FilteredRelation` join, so rows multiply and reorder against unwalked;
+  d7171ad0's EXISTS fold diverged identically. Found verifying 796
 ## To do: holes found re-checking the fixes
 
 

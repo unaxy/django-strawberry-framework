@@ -388,6 +388,29 @@ def _materialize_list_shaped_values(value: object, *, message: str, code: str) -
 # on that column and never reads the flag (``_globalid_predicate_path``).
 _GLOBALID_RELATION_PK_ATTR = "_dst_globalid_relation_pk"
 
+# A copy of a relation-key filter whose ``field_name`` names a ``FilteredRelation`` alias
+# the package joins its relation through (``filters/sets.py::FilterSet._relation_view``)
+# carries a ``_RelationView``: its GlobalID target resolves from the relation path, and a
+# target whose id is not its primary key compares that id through the alias.
+_RELATION_VIEW_ATTR = "_dst_relation_view"
+
+
+@dataclass(frozen=True)
+class _RelationView:
+    """The ``FilteredRelation`` alias a relation-key filter's copy is bound to, and its relation.
+
+    ``alias`` is the copy's ``field_name``; ``path`` is the relation path the filter was
+    declared with, which the alias joins through over the rows the request may see.
+    """
+
+    alias: str
+    path: str
+
+
+def _relation_view_of(filter_instance: Filter) -> _RelationView | None:
+    """Return the ``_RelationView`` a relation-view copy carries, ``None`` for any other filter."""
+    return optional_instance(getattr(filter_instance, _RELATION_VIEW_ATTR, None), _RelationView)
+
 
 def _marked_pk_field_name(filter_instance: Filter) -> str | None:
     """Derive the pk-qualified relation path for a marked GlobalID filter, else ``None``.
@@ -1996,10 +2019,13 @@ def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
         start_model = model
         if relation_only:
             owner = registry.get_definition(registry.get(model))
+    view = _relation_view_of(filter_instance)
     field_name = (
         None
         if getattr(filter_instance, "field_name", None) is None
         else _bound_field_name(filter_instance)
+        if view is None
+        else view.path
     )
     resolved = _resolve_globalid_target(owner, start_model, field_name)
     if resolved is None:
@@ -2508,7 +2534,10 @@ def _globalid_predicate_path(
     """
     if target is not None and target.slot is not None:
         id_attr = target.slot.id_attr
-        return f"{target.row_path}__{id_attr}" if target.row_path else id_attr
+        view = _relation_view_of(filter_instance)
+        # A relation-view copy's target is its relation's, whose rows it reads through the alias.
+        row_path = target.row_path if view is None else view.alias
+        return f"{row_path}__{id_attr}" if row_path else id_attr
     return _marked_pk_field_name(filter_instance)
 
 

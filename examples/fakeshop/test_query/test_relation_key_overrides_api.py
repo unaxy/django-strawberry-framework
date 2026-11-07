@@ -7,9 +7,16 @@ as when no hop is walked; a supplied value runs it once per request (a leaf the 
 leaves out is first asked whether it constrains, then applied). The parents it keeps must
 also reach, through each hop's visible rows, a visible last-hop row its value names, so a
 row a target type's ``get_queryset`` hides matches nothing. A value naming no row of the
-relation's target (an empty or absent choice, instances of another model, a value the key's
-own comparison skips or refuses) runs as the related rows' own filter, over the rows the
-walk keeps visible. Each request reaches the
+relation's target (an empty or absent choice, instances or a key of another model, a value
+the key's own comparison skips or refuses) runs the override as declared over the rows of
+the set declaring it, its ``field_name`` an alias of its relation that joins only the related
+rows the walk keeps visible (a many-to-many's through rows included) and its ``lookup_expr``
+the walked lookup: a default it reads (a key, model instances, a queryset, one instance, a
+GlobalID, through a crossing ``lookup_expr`` too), a path it continues past the relation
+(``__pk__in``, ``__code``, ``__isnull``), ``exclude``, ``conjoined`` and Django's own refusal
+answer as unwalked, over visible rows, through every relation a declared hop crosses and its
+``RelatedFilter(queryset=...)``, and under a connection's count, order and pages; a relation
+the override's own Python names reads every row, its own scoping. Each request reaches the
 leaf over HTTP through ``FilterSet.apply_sync`` / ``apply_async`` or the set's own form.
 """
 
@@ -46,6 +53,7 @@ from strawberry.scalars import JSON
 from typing_extensions import override
 
 from django_strawberry_framework import (
+    DjangoConnectionField,
     DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
@@ -53,6 +61,7 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, GlobalIDFilter, RelatedFilter
+from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import list_of, read_attr, require_instance
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
@@ -594,8 +603,9 @@ def test_an_async_key_override_runs_once_as_declared_and_matches_only_visible_na
 
 #: ``(spelling, value, walk) -> (rows, the call recorded)`` for a child set's override on
 #: ``Shelf.books``: a value naming books runs as declared; an empty choice the override
-#: reads as the hidden ``secret-book`` names no book and runs over the visible books. The
-#: flat copy walks the declared ``shelves`` hop on every walk.
+#: reads as the hidden ``secret-book`` names no book and runs as declared with its relation
+#: joined to the visible books. The flat copy walks the declared ``shelves`` hop on every
+#: walk.
 _CHILD_ANSWERS: dict[tuple[str, str, str], tuple[list[str], tuple[str, str, str]]] = {
     ("nested", "named", "unwalked"): (["alpha", "beta"], ("books", "list", "Shelf")),
     ("nested", "named", "hiding"): (["alpha"], ("books", "list", "Shelf")),
@@ -604,11 +614,11 @@ _CHILD_ANSWERS: dict[tuple[str, str, str], tuple[list[str], tuple[str, str, str]
     ("projected", "named", "unwalked"): (["alpha", "beta"], ("books", "list", "Shelf")),
     ("projected", "named", "hiding"): (["alpha"], ("books", "list", "Shelf")),
     ("nested", "hidden-default", "unwalked"): (["beta"], ("books", "QuerySet", "Shelf")),
-    ("nested", "hidden-default", "hiding"): ([], ("id", "list", "Book")),
-    ("flat", "hidden-default", "unwalked"): (["beta"], ("id", "list", "Book")),
-    ("flat", "hidden-default", "hiding"): ([], ("id", "list", "Book")),
+    ("nested", "hidden-default", "hiding"): ([], ("books_visible", "QuerySet", "Shelf")),
+    ("flat", "hidden-default", "unwalked"): (["beta"], ("books_visible", "QuerySet", "Branch")),
+    ("flat", "hidden-default", "hiding"): ([], ("books_visible", "QuerySet", "Branch")),
     ("projected", "hidden-default", "unwalked"): (["beta"], ("books", "QuerySet", "Shelf")),
-    ("projected", "hidden-default", "hiding"): ([], ("id", "list", "Book")),
+    ("projected", "hidden-default", "hiding"): ([], ("books_visible", "QuerySet", "Shelf")),
 }
 
 
@@ -780,6 +790,135 @@ def _default_pk(default: tuple[type[Model], str, str]) -> object:
     return read_attr(model._default_manager.get(**{field: name}), "pk")
 
 
+def _default_rows(default: tuple[type[Model], str, str], *more: str) -> QuerySet[Model]:
+    model, field, name = default
+    return model._default_manager.filter(**{f"{field}__in": [name, *more]}).order_by("pk")
+
+
+class _InstanceDefaults(ModelMultipleChoiceFilter):
+    """Reads an empty or absent selection as its ``default`` rows, model instances."""
+
+    def __init__(
+        self,
+        *,
+        field_name: str,
+        queryset: QuerySet[Model],
+        default: tuple[type[Model], str, str],
+        more: tuple[str, ...] = (),
+        exclude: bool = False,
+        conjoined: bool = False,
+        lookup_expr: str = "exact",
+    ) -> None:
+        super().__init__(
+            field_name=field_name,
+            queryset=queryset,
+            exclude=exclude,
+            conjoined=conjoined,
+            lookup_expr=lookup_expr,
+        )
+        self.default = default
+        self.more = more
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _record(self.field_name, value, qs)
+        return super().filter(qs, value or list(_default_rows(self.default, *self.more)))
+
+
+class _PkDefaults(_InstanceDefaults):
+    """Reads an empty or absent selection as its ``default`` rows' keys."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _record(self.field_name, value, qs)
+        pks = [read_attr(row, "pk") for row in _default_rows(self.default, *self.more)]
+        return ModelMultipleChoiceFilter.filter(self, qs, value or pks)
+
+
+class _QuerySetDefault(_InstanceDefaults):
+    """Reads an empty selection as a queryset of its ``default`` rows."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _record(self.field_name, value, qs)
+        return ModelMultipleChoiceFilter.filter(self, qs, value or _default_rows(self.default))
+
+
+class _PkInDefault(_InstanceDefaults):
+    """Compares its rows' keys past the relation, ``<field_name>__pk__in``, a default for none."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _record(self.field_name, value, qs)
+        rows = list_of(value) or list(_default_rows(self.default))
+        pks = [read_attr(row, "pk") for row in rows]
+        return qs.filter(**{f"{self.field_name}__pk__in": pks}).distinct()
+
+
+class _DistinctWhenEmpty(ModelMultipleChoiceFilter):
+    """Constrains nothing for an empty selection, returning a new queryset as it does so."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _record(self.field_name, value, qs)
+        if not value:
+            return qs.distinct()
+        return super().filter(qs, value)
+
+
+class _NoneRelatedWhenEmpty(ModelMultipleChoiceFilter):
+    """Reads an empty selection as "no related row", ``<field_name>__isnull=True``."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _record(self.field_name, value, qs)
+        if not value:
+            return qs.filter(**{f"{self.field_name}__isnull": True}).distinct()
+        return super().filter(qs, value)
+
+
+class _NamesItsRelation(_InstanceDefaults):
+    """Names ``shelves`` in its own Python, not through ``field_name``: its own scoping."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _record(self.field_name, value, qs)
+        rows = list_of(value) or list(_default_rows(self.default))
+        return qs.filter(shelves__in=rows).distinct()
+
+
+class _InstanceDefault(ModelChoiceFilter):
+    """Reads an empty choice as its ``default`` row, one model instance."""
+
+    def __init__(
+        self,
+        *,
+        field_name: str,
+        queryset: QuerySet[Model],
+        default: tuple[type[Model], str, str],
+    ) -> None:
+        super().__init__(field_name=field_name, queryset=queryset)
+        self.default = default
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _record(self.field_name, value, qs)
+        return super().filter(qs, value or _default_rows(self.default).get())
+
+
+class _GlobalIDDefault(GlobalIDFilter):
+    """Reads an empty id as the GlobalID of its ``default`` shelf, as a consumer default may."""
+
+    def __init__(self, *, field_name: str, node_id: Callable[[], str]) -> None:
+        super().__init__(field_name=field_name)
+        self.node_id = node_id
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _record(self.field_name, value, qs)
+        return super().filter(qs, value or str(relay.GlobalID("library.shelf", self.node_id())))
+
+
 #: The value a request leaves out of its input.
 _ABSENT = object()
 
@@ -788,9 +927,10 @@ _ABSENT = object()
 class _Unnamed:
     """An override whose value names no row of the relation's target, and the parent's answer.
 
-    ``walked`` is what the walked leaf answers (its rows, or the error its re-bound copy
-    raises), as on the related rows' own filter; ``received`` / ``walked_received`` are the
-    calls it records unwalked and walked. A request runs one statement per call when the
+    ``walked`` is what the walked leaf answers (its rows, or the error Django raises for its
+    value), as unwalked over the visible related rows; ``received`` / ``walked_received`` are
+    the calls it records unwalked and walked (walked, its ``field_name`` is the alias of its
+    relation, ``<relation>_visible``). A request runs one statement per call when the
     override reads its default row (``reads``), ``cleans`` for its form's choices, and the
     root query unless the leaf raises; ``statements`` pins the unwalked, walked and
     hiding counts of an override answering no row by an empty queryset;
@@ -801,7 +941,7 @@ class _Unnamed:
     key: _Key
     declare: Callable[[], Filter]
     value: Callable[[], object]
-    unwalked: Sequence[str]
+    unwalked: Sequence[str] | str
     walked: Sequence[str] | str
     hiding: Sequence[str] | str
     received: tuple[str, str, str]
@@ -816,6 +956,10 @@ _SHELF = (models.Shelf, "code", "open")
 _HIDDEN_SHELF = (models.Shelf, "code", "secret")
 _DRAMA = (models.Genre, "name", "drama")
 _HIDDEN_GENRE = (models.Genre, "name", "secret")
+_HIDDEN_BOOK = (models.Book, "title", "secret-book")
+_DELTA_SHELF = (models.Shelf, "code", "delta-open")
+#: Django's refusal of a book compared on the shelves relation, walked as unwalked.
+_NOT_A_SHELF = 'Cannot query "open-book": Must be "Shelf" instance.'
 _UNNAMED: dict[str, _Unnamed] = {
     "single-null-visible": _Unnamed(
         _SHELVES,
@@ -829,7 +973,7 @@ _UNNAMED: dict[str, _Unnamed] = {
         ["alpha"],
         ["alpha"],
         ("shelves", "NoneType", "Branch"),
-        ("id", "NoneType", "Shelf"),
+        ("shelves_visible", "NoneType", "Branch"),
     ),
     "single-null-hidden": _Unnamed(
         _SHELVES,
@@ -843,7 +987,7 @@ _UNNAMED: dict[str, _Unnamed] = {
         ["beta"],
         [],
         ("shelves", "NoneType", "Branch"),
-        ("id", "NoneType", "Shelf"),
+        ("shelves_visible", "NoneType", "Branch"),
     ),
     "multi-empty-visible": _Unnamed(
         _SHELVES,
@@ -857,7 +1001,7 @@ _UNNAMED: dict[str, _Unnamed] = {
         ["alpha"],
         ["alpha"],
         ("shelves", "QuerySet", "Branch"),
-        ("id", "list", "Shelf"),
+        ("shelves_visible", "QuerySet", "Branch"),
     ),
     "multi-empty-hidden": _Unnamed(
         _SHELVES,
@@ -871,7 +1015,7 @@ _UNNAMED: dict[str, _Unnamed] = {
         ["beta"],
         [],
         ("shelves", "QuerySet", "Branch"),
-        ("id", "list", "Shelf"),
+        ("shelves_visible", "QuerySet", "Branch"),
     ),
     "multi-absent-visible": _Unnamed(
         _SHELVES,
@@ -885,7 +1029,7 @@ _UNNAMED: dict[str, _Unnamed] = {
         ["alpha"],
         ["alpha"],
         ("shelves", "QuerySet", "Branch"),
-        ("id", "list", "Shelf"),
+        ("shelves_visible", "QuerySet", "Branch"),
     ),
     "multi-absent-hidden": _Unnamed(
         _SHELVES,
@@ -899,7 +1043,7 @@ _UNNAMED: dict[str, _Unnamed] = {
         ["beta"],
         [],
         ("shelves", "QuerySet", "Branch"),
-        ("id", "list", "Shelf"),
+        ("shelves_visible", "QuerySet", "Branch"),
     ),
     "m2m-empty-visible": _Unnamed(
         _GENRES,
@@ -909,7 +1053,7 @@ _UNNAMED: dict[str, _Unnamed] = {
         ["mixed-book", "open-book"],
         ["mixed-book", "open-book"],
         ("genres", "QuerySet", "Book"),
-        ("id", "list", "Genre"),
+        ("genres_visible", "QuerySet", "Book"),
     ),
     "m2m-empty-hidden": _Unnamed(
         _GENRES,
@@ -919,17 +1063,17 @@ _UNNAMED: dict[str, _Unnamed] = {
         ["mixed-book", "secret-book"],
         [],
         ("genres", "QuerySet", "Book"),
-        ("id", "list", "Genre"),
+        ("genres_visible", "QuerySet", "Book"),
     ),
     "instances-of-another-model": _Unnamed(
         _SHELVES,
         lambda: _BookPicker(field_name="shelves", queryset=models.Book.objects.all()),
         lambda: _pks(models.Book, "title", "open-book"),
         ["alpha"],
-        "Unsupported lookup 'books__in' for BigAutoField or join on the field not permitted.",
-        "Unsupported lookup 'books__in' for BigAutoField or join on the field not permitted.",
+        ["alpha"],
+        ["alpha"],
         ("shelves", "list", "Branch"),
-        ("id", "list", "Shelf"),
+        ("shelves_visible", "list", "Branch"),
         reads=0,
         cleans=1,
     ),
@@ -941,7 +1085,7 @@ _UNNAMED: dict[str, _Unnamed] = {
         ["alpha"],
         ["alpha"],
         ("shelves", "str", "Branch"),
-        ("id", "str", "Shelf"),
+        ("shelves_visible", "str", "Branch"),
         reads=0,
     ),
     "hidden-raw-pk-the-global-id-refuses": _Unnamed(
@@ -952,7 +1096,7 @@ _UNNAMED: dict[str, _Unnamed] = {
         ["beta"],
         [],
         ("shelves", "str", "Branch"),
-        ("id", "str", "Shelf"),
+        ("shelves_visible", "str", "Branch"),
         reads=0,
     ),
     "malformed-id-a-tolerant-override-reads": _Unnamed(
@@ -963,9 +1107,9 @@ _UNNAMED: dict[str, _Unnamed] = {
         [],
         [],
         ("shelves", "str", "Branch"),
-        ("id", "str", "Shelf"),
+        ("shelves_visible", "str", "Branch"),
         reads=0,
-        statements=(0, 1, 1),
+        statements=(0, 0, 0),
     ),
     "mistyped-id-a-tolerant-override-reads": _Unnamed(
         _SHELVES,
@@ -975,9 +1119,9 @@ _UNNAMED: dict[str, _Unnamed] = {
         [],
         [],
         ("shelves", "str", "Branch"),
-        ("id", "str", "Shelf"),
+        ("shelves_visible", "str", "Branch"),
         reads=0,
-        statements=(0, 0, 1),
+        statements=(0, 0, 0),
         related_received=("shelves", "str", "Branch"),
     ),
     "text-the-key-column-refuses": _Unnamed(
@@ -985,11 +1129,305 @@ _UNNAMED: dict[str, _Unnamed] = {
         lambda: _CodeText(field_name="shelves"),
         lambda: "open",
         ["alpha"],
-        "Unsupported lookup 'code' for BigAutoField or join on the field not permitted.",
-        "Unsupported lookup 'code' for BigAutoField or join on the field not permitted.",
+        ["alpha"],
+        ["alpha"],
         ("shelves", "str", "Branch"),
-        ("id", "str", "Shelf"),
+        ("shelves_visible", "str", "Branch"),
         reads=0,
+    ),
+    "instances-default-visible": _Unnamed(
+        _SHELVES,
+        lambda: _InstanceDefaults(
+            field_name="shelves",
+            queryset=models.Shelf.objects.all(),
+            default=_SHELF,
+        ),
+        list,
+        ["alpha"],
+        ["alpha"],
+        ["alpha"],
+        ("shelves", "QuerySet", "Branch"),
+        ("shelves_visible", "QuerySet", "Branch"),
+    ),
+    "instances-default-hidden": _Unnamed(
+        _SHELVES,
+        lambda: _InstanceDefaults(
+            field_name="shelves",
+            queryset=models.Shelf.objects.all(),
+            default=_HIDDEN_SHELF,
+        ),
+        list,
+        ["beta"],
+        ["beta"],
+        [],
+        ("shelves", "QuerySet", "Branch"),
+        ("shelves_visible", "QuerySet", "Branch"),
+    ),
+    "lazy-field-name-pk-in-default-hidden": _Unnamed(
+        _SHELVES,
+        lambda: _respelled(
+            _PkInDefault(
+                field_name="shelves",
+                queryset=models.Shelf.objects.all(),
+                default=_HIDDEN_SHELF,
+            ),
+            field_name=SimpleLazyObject(lambda: "shelves"),
+        ),
+        list,
+        ["beta"],
+        ["beta"],
+        [],
+        ("shelves", "QuerySet", "Branch"),
+        ("shelves_visible", "QuerySet", "Branch"),
+    ),
+    "queryset-default-hidden": _Unnamed(
+        _SHELVES,
+        lambda: _QuerySetDefault(
+            field_name="shelves",
+            queryset=models.Shelf.objects.all(),
+            default=_HIDDEN_SHELF,
+        ),
+        list,
+        ["beta"],
+        ["beta"],
+        [],
+        ("shelves", "QuerySet", "Branch"),
+        ("shelves_visible", "QuerySet", "Branch"),
+    ),
+    "instance-default-hidden": _Unnamed(
+        _SHELVES,
+        lambda: _InstanceDefault(
+            field_name="shelves",
+            queryset=models.Shelf.objects.all(),
+            default=_HIDDEN_SHELF,
+        ),
+        lambda: None,
+        ["beta"],
+        ["beta"],
+        [],
+        ("shelves", "NoneType", "Branch"),
+        ("shelves_visible", "NoneType", "Branch"),
+    ),
+    "pk-in-default-hidden": _Unnamed(
+        _SHELVES,
+        lambda: _PkInDefault(
+            field_name="shelves",
+            queryset=models.Shelf.objects.all(),
+            default=_HIDDEN_SHELF,
+        ),
+        list,
+        ["beta"],
+        ["beta"],
+        [],
+        ("shelves", "QuerySet", "Branch"),
+        ("shelves_visible", "QuerySet", "Branch"),
+    ),
+    "hidden-text-the-key-column-refuses": _Unnamed(
+        _SHELVES,
+        lambda: _CodeText(field_name="shelves"),
+        lambda: "secret",
+        ["beta"],
+        ["beta"],
+        [],
+        ("shelves", "str", "Branch"),
+        ("shelves_visible", "str", "Branch"),
+        reads=0,
+    ),
+    "exclude-instances-default-hidden": _Unnamed(
+        _SHELVES,
+        lambda: _InstanceDefaults(
+            field_name="shelves",
+            queryset=models.Shelf.objects.all(),
+            default=_HIDDEN_SHELF,
+            exclude=True,
+        ),
+        list,
+        ["alpha", "delta", "gamma"],
+        ["alpha", "delta", "gamma"],
+        [
+            "alpha",
+            "beta",
+            "delta",
+            "gamma",
+        ],
+        ("shelves", "QuerySet", "Branch"),
+        ("shelves_visible", "QuerySet", "Branch"),
+    ),
+    "conjoined-instances-default-hidden-member": _Unnamed(
+        _SHELVES,
+        lambda: _InstanceDefaults(
+            field_name="shelves",
+            queryset=models.Shelf.objects.all(),
+            default=_DELTA_SHELF,
+            more=("delta-secret",),
+            conjoined=True,
+        ),
+        list,
+        ["delta"],
+        ["delta"],
+        [],
+        ("shelves", "QuerySet", "Branch"),
+        ("shelves_visible", "QuerySet", "Branch"),
+    ),
+    "m2m-instances-default-hidden": _Unnamed(
+        _GENRES,
+        lambda: _InstanceDefaults(
+            field_name="genres",
+            queryset=_genres(),
+            default=_HIDDEN_GENRE,
+        ),
+        list,
+        ["mixed-book", "secret-book"],
+        ["mixed-book", "secret-book"],
+        [],
+        ("genres", "QuerySet", "Book"),
+        ("genres_visible", "QuerySet", "Book"),
+    ),
+    "two-hop-instances-default-hidden": _Unnamed(
+        _SHELVES,
+        lambda: _InstanceDefaults(
+            field_name="shelves__books",
+            queryset=models.Book.objects.all(),
+            default=_HIDDEN_BOOK,
+        ),
+        list,
+        ["beta"],
+        ["beta"],
+        [],
+        ("shelves__books", "QuerySet", "Branch"),
+        ("books_visible", "QuerySet", "Branch"),
+    ),
+    "global-id-default-hidden": _Unnamed(
+        _SHELVES,
+        lambda: _GlobalIDDefault(
+            field_name="shelves",
+            node_id=lambda: str(_default_pk(_HIDDEN_SHELF)),
+        ),
+        lambda: "",
+        ["beta"],
+        ["beta"],
+        [],
+        ("shelves", "str", "Branch"),
+        ("shelves_visible", "str", "Branch"),
+    ),
+    "empty-the-override-skips-by-a-new-queryset": _Unnamed(
+        _SHELVES,
+        lambda: _DistinctWhenEmpty(field_name="shelves", queryset=models.Shelf.objects.all()),
+        list,
+        [
+            "alpha",
+            "beta",
+            "delta",
+            "gamma",
+        ],
+        [
+            "alpha",
+            "beta",
+            "delta",
+            "gamma",
+        ],
+        [
+            "alpha",
+            "beta",
+            "delta",
+            "gamma",
+        ],
+        ("shelves", "QuerySet", "Branch"),
+        ("shelves_visible", "QuerySet", "Branch"),
+        reads=0,
+    ),
+    "crossing-lookup-pk-default-hidden": _Unnamed(
+        _SHELVES,
+        lambda: _PkDefaults(
+            field_name="shelves",
+            lookup_expr="books",
+            queryset=models.Book.objects.all(),
+            default=_HIDDEN_BOOK,
+        ),
+        list,
+        ["beta"],
+        ["beta"],
+        [],
+        ("shelves", "QuerySet", "Branch"),
+        ("books_visible", "QuerySet", "Branch"),
+    ),
+    "crossing-lookup-instances-default-visible": _Unnamed(
+        _SHELVES,
+        lambda: _InstanceDefaults(
+            field_name="shelves",
+            lookup_expr="books",
+            queryset=models.Book.objects.all(),
+            default=(models.Book, "title", "open-book"),
+        ),
+        list,
+        ["alpha"],
+        ["alpha"],
+        ["alpha"],
+        ("shelves", "QuerySet", "Branch"),
+        ("books_visible", "QuerySet", "Branch"),
+    ),
+    "crossing-lookup-instances-default-hidden": _Unnamed(
+        _SHELVES,
+        lambda: _InstanceDefaults(
+            field_name="shelves",
+            lookup_expr="books",
+            queryset=models.Book.objects.all(),
+            default=_HIDDEN_BOOK,
+        ),
+        list,
+        ["beta"],
+        ["beta"],
+        [],
+        ("shelves", "QuerySet", "Branch"),
+        ("books_visible", "QuerySet", "Branch"),
+    ),
+    "m2m-no-related-row-when-empty": _Unnamed(
+        _GENRES,
+        lambda: _NoneRelatedWhenEmpty(field_name="genres", queryset=_genres()),
+        list,
+        ["delta-open-book", "delta-secret-book"],
+        ["delta-open-book", "delta-secret-book"],
+        ["delta-open-book", "delta-secret-book", "secret-book"],
+        ("genres", "QuerySet", "Book"),
+        ("genres_visible", "QuerySet", "Book"),
+        reads=0,
+    ),
+    "reverse-fk-no-related-row-when-empty": _Unnamed(
+        _SHELVES,
+        lambda: _NoneRelatedWhenEmpty(field_name="shelves", queryset=models.Shelf.objects.all()),
+        list,
+        ["gamma"],
+        ["gamma"],
+        ["gamma"],
+        ("shelves", "QuerySet", "Branch"),
+        ("shelves_visible", "QuerySet", "Branch"),
+        reads=0,
+    ),
+    "a-relation-its-own-python-names-reads-every-row": _Unnamed(
+        _SHELVES,
+        lambda: _NamesItsRelation(
+            field_name="shelves",
+            queryset=models.Shelf.objects.all(),
+            default=_HIDDEN_SHELF,
+        ),
+        list,
+        ["beta"],
+        ["beta"],
+        ["beta"],
+        ("shelves", "QuerySet", "Branch"),
+        ("shelves_visible", "QuerySet", "Branch"),
+    ),
+    "a-key-of-another-model": _Unnamed(
+        _SHELVES,
+        lambda: _Recorded(field_name="shelves", queryset=models.Book.objects.all()),
+        lambda: _pks(models.Book, "title", "open-book"),
+        _NOT_A_SHELF,
+        _NOT_A_SHELF,
+        _NOT_A_SHELF,
+        ("shelves", "list", "Branch"),
+        ("shelves_visible", "list", "Branch"),
+        reads=0,
+        cleans=1,
     ),
 }
 
@@ -1015,12 +1453,13 @@ def test_a_key_override_whose_value_names_no_row_runs_over_the_visible_related_r
     *,
     direct: bool,
 ) -> None:
-    """A value naming no row of the target runs as the related rows' own filter.
+    """A value naming no row of the target runs as declared through the visible related rows.
 
-    An empty or absent choice the override reads as a default row, or instances of
-    another model, name no row of the relation's target: walked, the leaf runs re-bound
-    over the visible related rows, so a visible default answers its parents and a hidden
-    one matches nothing.
+    An empty or absent choice the override reads as a default, or instances or a key of
+    another model, name no row of the relation's target: walked, the override runs over its
+    own set's rows with its relation joined only to the visible related rows, so a visible
+    default answers its parents as unwalked, a hidden one matches nothing, and a value
+    Django refuses raises Django's own error.
     """
     _world()
     shape = _UNNAMED[name]
@@ -1063,6 +1502,15 @@ def test_a_key_override_whose_value_names_no_row_runs_over_the_visible_related_r
         "hidden-raw-pk-the-global-id-refuses",
         "malformed-id-a-tolerant-override-reads",
         "mistyped-id-a-tolerant-override-reads",
+        "instances-default-hidden",
+        "queryset-default-hidden",
+        "exclude-instances-default-hidden",
+        "m2m-instances-default-hidden",
+        "two-hop-instances-default-hidden",
+        "crossing-lookup-pk-default-hidden",
+        "crossing-lookup-instances-default-hidden",
+        "m2m-no-related-row-when-empty",
+        "a-key-of-another-model",
     ],
 )
 def test_an_async_key_override_whose_value_names_no_row_runs_over_the_visible_related_rows(
@@ -1086,3 +1534,226 @@ def test_an_async_key_override_whose_value_names_no_row_runs_over_the_visible_re
     absent = value is _ABSENT or value is None
     received = shape.received if walk == "unwalked" else shape.walked_received
     assert [received] * (2 if absent and walk != "unwalked" else 1) == _CALLS
+
+
+def _visible_shelf_node(walk: str) -> None:
+    """A ``Shelf`` Relay type whose GlobalID carries its ``code``, hiding secret shelves."""
+    attrs: dict[str, object] = {
+        "__annotations__": {"code": relay.NodeID[str]},
+        "Meta": type(
+            "Meta",
+            (),
+            {"model": models.Shelf, "fields": ("id", "code"), "interfaces": (relay.Node,)},
+        ),
+    }
+    if walk == "hiding":
+
+        def get_queryset(
+            _cls: type[DjangoType],
+            queryset: QuerySet[Model],
+            _info: object,
+        ) -> QuerySet[Model]:
+            return queryset.exclude(topic="secret")
+
+        attrs["get_queryset"] = classmethod(get_queryset)
+    type("ShelfRows", (DjangoType,), attrs)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("walk", ["unwalked", "related-filter", "hiding"])
+@pytest.mark.parametrize("direct", [False, True], ids=["apply-sync", "form"])
+def test_a_global_id_default_compares_an_off_key_node_id_through_the_visible_relation(
+    walk: str,
+    *,
+    direct: bool,
+) -> None:
+    """A default naming a shelf by the ``code`` its GlobalID carries compares through the relation.
+
+    The shelves' type publishes ``code`` as its Relay ``NodeID``: walked, the override's own
+    GlobalID default compares that column on the shelves its relation joins, visible only.
+    """
+    _world()
+    attrs: dict[str, object] = {
+        "probe": _GlobalIDDefault(field_name="shelves", node_id=lambda: "secret"),
+        "Meta": type("Meta", (), {"model": models.Branch, "fields": ["name"]}),
+    }
+    if walk == "related-filter":
+        child = type(
+            "HopChild",
+            (FilterSet,),
+            {"Meta": type("Meta", (), {"model": models.Shelf, "fields": []})},
+        )
+        attrs["hop"] = RelatedFilter(child, field_name="shelves")
+    _visible_shelf_node(walk)
+    schema = _schema(type("Shelves", (FilterSet,), attrs), models.Branch, "name", direct=direct)
+    _CALLS.clear()
+    with CaptureQueriesContext(connection) as queries:
+        payload = _post(schema, "name", {"where": {"probe": ""}})
+    assert _answer(payload) == ([] if walk == "hiding" else ["beta"]), payload
+    received = "shelves" if walk == "unwalked" else "shelves_visible"
+    assert [(received, "str", "Branch")] == _CALLS
+    assert len(queries.captured_queries) == 1, queries.captured_queries
+
+
+#: ``scope -> rows`` a declared hop over two relations (``Branch`` through its shelves to
+#: their books) answers for a book override reading an empty selection as the secret genre:
+#: the mixed book (an open shelf) and the secret book (a secret shelf) carry it.
+_THROUGH_SHELVES: dict[str, list[str]] = {
+    "open": ["alpha", "beta"],
+    "hidden-shelves": ["alpha"],
+    "hidden-genres": [],
+    "admitted-books": ["beta"],
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("arm", [False, True], ids=["flat", "and-arm"])
+@pytest.mark.parametrize("scope", list(_THROUGH_SHELVES))
+def test_a_key_override_default_through_a_declared_hop_over_two_relations_reads_visible_rows(
+    scope: str,
+    *,
+    arm: bool,
+) -> None:
+    """Every relation the walk crosses joins only the rows the request may see.
+
+    The intermediate shelves its type hides, the genres its type hides and the books the
+    ``RelatedFilter(queryset=...)`` leaves out each drop a parent the default reaches only
+    through them. A second leaf in an ``and_`` arm joins the relation again under a name of
+    its own.
+    """
+    _world()
+
+    class BookChild(FilterSet):
+        probe = _InstanceDefaults(
+            field_name="genres",
+            queryset=_genres(),
+            default=_HIDDEN_GENRE,
+        )
+
+        class Meta:
+            model = models.Book
+            fields = ["title"]
+
+    admitted = (
+        models.Book.objects.exclude(title="mixed-book")
+        if scope == "admitted-books"
+        else models.Book.objects.all()
+    )
+
+    class Branches(FilterSet):
+        books = RelatedFilter(BookChild, field_name="shelves__books", queryset=admitted)
+
+        class Meta:
+            model = models.Branch
+            fields = ["name"]
+
+    _node(
+        models.Shelf,
+        (lambda rows: rows.exclude(topic="secret")) if scope == "hidden-shelves" else None,
+    )
+    _node(models.Book)
+    _node(
+        models.Genre,
+        (lambda rows: rows.exclude(name="secret")) if scope == "hidden-genres" else None,
+    )
+    schema = _schema(Branches, models.Branch, "name")
+    where: JSONObject = {"books__probe": []}
+    if arm:
+        where["and_"] = [{"books__probe": []}]
+    _CALLS.clear()
+    with CaptureQueriesContext(connection) as queries:
+        payload = _post(schema, "name", {"where": where})
+    assert _answer(payload) == _THROUGH_SHELVES[scope], payload
+    aliases = ["genres_visible", "genres_visible_2"] if arm else ["genres_visible"]
+    assert [(alias, "QuerySet", "Branch") for alias in aliases] == _CALLS
+    # Each call reads its default rows; then the root query.
+    assert len(queries.captured_queries) == len(aliases) + 1, queries.captured_queries
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("walk", ["unwalked", "hiding"])
+def test_a_key_override_default_pages_counts_and_orders_its_visible_parents(walk: str) -> None:
+    """A connection over the parents the override's default keeps counts and pages only them.
+
+    The default names the open shelves and two secret ones; walked under a type hiding the
+    secret shelves, the delta branch, reaching only a secret one, drops out of the count, the
+    order and each page.
+    """
+    _world()
+
+    class Shelves(FilterSet):
+        probe = _InstanceDefaults(
+            field_name="shelves",
+            queryset=models.Shelf.objects.all(),
+            default=_SHELF,
+            more=("beta-open", "secret", "delta-secret"),
+        )
+
+        class Meta:
+            model = models.Branch
+            fields = ["name"]
+
+    class Names(OrderSet):
+        class Meta:
+            model = models.Branch
+            fields = ["name"]
+
+    _node(models.Shelf, _SHELVES.hidden if walk == "hiding" else None)
+    root = type(
+        "BranchPages",
+        (DjangoType,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": models.Branch,
+                    "fields": ("id", "name"),
+                    "interfaces": (relay.Node,),
+                    "filterset_class": Shelves,
+                    "orderset_class": Names,
+                    "connection": {"total_count": True},
+                },
+            ),
+        },
+    )
+
+    @strawberry.type
+    class Query:
+        rows = DjangoConnectionField(root)
+
+    finalize_django_types()
+    optimizer = DjangoOptimizerExtension()
+    schema = DjangoSchema(
+        query=Query,
+        config=strawberry_config(),
+        extensions=[lambda: optimizer],
+    )
+    expected = ["delta", "beta", "alpha"] if walk == "unwalked" else ["beta", "alpha"]
+    after = ""
+    for index, name in enumerate(expected):
+        document = (
+            "query { rows(filter: {probe: {exact: []}}, orderBy: [{name: DESC}], "
+            f"first: 1{after}) "
+            "{ totalCount edges { cursor node { name } } pageInfo { hasNextPage } } }"
+        )
+        _CALLS.clear()
+        _CURRENT["schema"] = schema
+        try:
+            with (
+                override_settings(ROOT_URLCONF=__name__),
+                CaptureQueriesContext(connection) as queries,
+            ):
+                payload = graphql_payload(document, url="/graphql-key-overrides/")
+        finally:
+            _CURRENT["schema"] = None
+        page = json_object(json_at(payload, "data", "rows"))
+        assert json_at(page, "totalCount") == len(expected), payload
+        edge = json_object(json_at(page, "edges", 0))
+        assert json_at(edge, "node", "name") == name, payload
+        assert json_at(page, "pageInfo", "hasNextPage") == (index < len(expected) - 1), payload
+        received = "shelves" if walk == "unwalked" else "shelves_visible"
+        assert [(received, "QuerySet", "Branch")] == _CALLS
+        # The default rows, the count and the page.
+        assert len(queries.captured_queries) == 3, queries.captured_queries
+        after = f', after: "{json_at(edge, "cursor")}"'

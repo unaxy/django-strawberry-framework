@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 188 to do.
+Progress: 0 done, 189 to do.
 
 ## From dry-0_0_15_3
 
@@ -793,8 +793,9 @@ Progress: 0 done, 188 to do.
   override reading `value.pk` failed with a masked error, a hardcoded path answered other rows, and a lookup the
   relation refuses (`icontains`) answered rows. A parent it keeps must still reach a visible related row its value
   names, so a row a target type hides still matches nothing; its value names the rows it keeps, and `exclude=True`
-  negates. An empty or absent choice the override reads as a default, a value naming none of the relation's rows, a
-  value the key's comparison refuses and an `isnull` override keep their earlier answer
+  negates. On a forward key, a value naming none of the relation's rows (an empty or absent choice the override reads
+  as a default, a value the key's comparison refuses) keeps its earlier answer, as does an `isnull` override; on a
+  to-many key such a value runs the override through the relation's visible rows (item 796)
 - [ ] 788. CHANGELOG entry for item 720: a `ModelForm` field that reads one value (`CharField`, `ChoiceField`,
   `IntegerField`, `BooleanField`, ...) over a `JSONField` listing no choices is typed by the form field (`String`,
   `Int`, `Boolean`) instead of `JSON`, matching graphene-django and the package's own filters over such a column; a
@@ -818,6 +819,20 @@ Progress: 0 done, 188 to do.
   `get_queryset` once per request instead of once per spelling, arm or level, on `apply_sync` and `apply_async`; rows
   and errors are unchanged. A `FilterSet` subclass that overrides `apply_sync` / `apply_async` and is reached as a
   nested branch receives one more private keyword, `_hop_visibility`
+- [ ] 802. CHANGELOG entry for item 796: a `Filter` subclass overriding `filter` on a to-many relation key a flat field
+  walks (a reverse foreign key or many-to-many, a key two relations away, under a `RelatedFilter` or a target type's
+  `get_queryset`) whose value names none of the relation's rows (an empty or absent choice it reads as a default, a
+  value the key's comparison skips or refuses) now runs as declared over its own set's queryset, its `field_name` an
+  alias of the relation (`<relation>_visible`) joined only to the related rows the request may see (a many-to-many
+  through its through rows onto visible targets only) and its `lookup_expr` the lookup its walked path applies. A
+  default of model instances, a queryset or one instance, a path continued past the relation (`<field_name>__pk__in`,
+  `<field_name>__code`) and a crossing `lookup_expr` (`field_name="shelves", lookup_expr="books"`) answer as unwalked
+  where they failed with a masked `TypeError` or `Unsupported lookup`; `<field_name>__isnull=True` answers "no visible
+  related row"; a primary key of another model raises Django's own `Must be "Shelf" instance.` where it matched rows by
+  coincidence; and an override returning a new queryset for an empty choice keeps every parent, as unwalked. The
+  request's visibility reaches the override only through its `field_name`: a relation its own Python names reads every
+  related row. A many-to-many whose through key Django names no reverse for (an auto-created self-referential one read
+  forward) keeps the earlier key-column fallback
 
 ## From dry-upstream-0_0_15
 
