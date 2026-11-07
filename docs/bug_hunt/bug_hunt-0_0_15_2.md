@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 439 done, 114 to do. The CHANGELOG entries filed here moved to
+Progress: 440 done, 114 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1846,6 +1846,15 @@ Progress: 439 done, 114 to do. The CHANGELOG entries filed here moved to
   off-key NodeID; a declared hop over two relations with `queryset=` and an `and_` arm; connection count, order and
   pages) and `tests/filters/test_sets.py` (`_free_alias` over a model field, `_through_link`, the unnameable-through
   fallback); spec-027, README, GLOSSARY `FilterSet`. Filed 799, 800, 801
+- [x] 801. not a defect (AGENTS defect rule: no contract row). Rows never multiply: an `OrderSet` order over a to-many
+  path is a `Min` / `Max` annotation grouped per parent (`orders/sets.py::OrderSet._resolve_order_expressions`, spec-028
+  Decision 12), so `totalCount`, paging and node counts held in all 144 live cells (Branch `shelves`, Book `genres`;
+  walked, unwalked, hiding). Only the ordering key differs: an unwalked plain filter (a shipped
+  `ModelMultipleChoiceFilter`, a key override) shares its join with the order's `Min` by Django's own join reuse and
+  sorts by the matched related rows, while a walked leaf, 796's relation view and an unwalked generated column leaf (the
+  row-preserving `EXISTS` fold, GLOSSARY `FilterSet`) sort by every visible related row; d7171ad0 answered the same. No
+  doc, spec or upstream promises filter-matched ordering (django-filter, django-graphene-filters and strawberry_django
+  `order_by` plainly and duplicate parents). The contract question is filed as 803
 
 ## Outside review of the fixes
 
@@ -2139,15 +2148,19 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`filters/sets.py::_names_every_through`). On that key, an instance or queryset default raises the masked `TypeError`
   and a path past the relation raises `Unsupported lookup`, where unwalked answers rows. The reverse direction and every
   other many-to-many read the relation view. Found fixing 796
-- [ ] 801. (robustness, gate first) A root queryset ordered by a to-many relation a walked key override's names-no-row
-  fallback also reads (an `OrderSet` field `shelves__code` beside a `shelves` override reading an empty value as a
-  default) does not reuse the fallback's `FilteredRelation` join, so rows multiply and reorder against unwalked;
-  d7171ad0's EXISTS fold diverged identically. Found verifying 796
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 803. Decide: should a to-many `orderBy` read only the related rows a filter on the same relation matched? Today an
+  unwalked plain filter (a shipped `ModelMultipleChoiceFilter` or a key override on `shelves`) sorts `shelvesCode` by
+  the matched shelves (Django reuses the filter's join for the order's `Min`), while a walked leaf, a key override's
+  names-no-row relation view (796) and an unwalked generated column leaf (`shelvesCode: {in: ...}`, the row-preserving
+  `EXISTS` fold) sort by every visible shelf; fakeshop `allLibraryBranches(filter: {altShelves: ...}, orderBy:
+  [{altShelvesTopic: ASC}])` shows it. No doc states either reading and no upstream aggregates (each `order_by`s plainly
+  and duplicates parents). Pick one reading for every filter kind, or state that a to-many order reads every visible
+  related row (and accept the unwalked join-reuse exception)? (item 801)
 - [ ] 790. Decide: a flat leaf the request leaves out, whose path a hop walks (a `RelatedFilter`, a target type's own
   `get_queryset`), runs a consumer `filter` override that acts on the empty value twice
   (`filters/sets.py::FilterSet._absent_leaf_applies` runs it over the unscoped rows to learn whether it constrains,
