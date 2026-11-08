@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 446 done, 114 to do. The CHANGELOG entries filed here moved to
+Progress: 447 done, 113 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1963,6 +1963,23 @@ Progress: 446 done, 114 to do. The CHANGELOG entries filed here moved to
   the digitless rows, the zero-statement row, `::test_unstorable_decimal_reads_back_under_the_alias_detect_types`,
   `::test_unstorable_decimal_raises_where_the_backend_cannot_build_the_converter`); spec-036, spec-038, spec-039,
   README, GLOSSARY `FieldError` envelope. Filed 813
+- [x] 810. (robustness) fixed: the serializer flavor holds each value a DRF uniqueness validator binds, at every level.
+  `rest_framework/resolvers.py::_hold_unstorable_values` walks `_validation_tree` and holds every `Serializer` node once
+  (`::_hold_serializer_values`): the root's written columns to the save rule (`utils/errors.py::unstorable_value`), and
+  each value a field `UniqueValidator`, a `UniqueTogetherValidator` (`fields` and `condition_fields`) or a
+  `UniqueFor*Validator` binds to the new bind rule `utils/errors.py::unbindable_query_value` (what DRF's `qs_exists`
+  cannot absorb: `_refused_temporal(stored=False)` and `_refused_decimal(stored=False)`, the server's `numeric` refusal
+  without 726's SQLite read-back; an integer past the range only where the driver refuses it, SQLite) against the column
+  read from the validator's own queryset model (`::_validator_column`, `::_serializer_validator_binds`). A
+  serializer-level validator's values are held only where DRF reaches its query (`::_validator_queries`, adapted from
+  DRF 3.17-3.18's `UniqueTogetherValidator.__call__` / `enforce_required_fields`; `LICENSE.drf` ships with it): a
+  missing field keeps DRF's `required` error, an update changing no checked value and a checked `None` (unless
+  `nulls_distinct=False`) bind nothing. A nested item's unbindable value is its field's `invalid` error at its dotted
+  path, nothing written; an aware time, a decimal SQLite stores but cannot read back, and every value no validator binds
+  stay the consumer's `create()` / `update()`'s. Pinned by
+  `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_nested_value_a_uniqueness_validator_cannot_bind_is_the_item_field_error`
+  (new fakeshop `createScalarSpecimenTagWithUniqueSpecimens`) and `tests/rest_framework/test_resolvers.py` /
+  `tests/utils/test_errors.py` rows. Docs: spec-039, README, GLOSSARY `FieldError` envelope. CHANGELOGTODO 815
 
 ## Outside review of the fixes
 
@@ -2223,13 +2240,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   an empty value) reads as constraining, so supplied empty or left out it keeps only the parents that reach a visible
   related row, where unwalked and django-filter keep every row: the identity-as-no-op rule on the rebound rows plus the
   EXISTS fold, not the double run. A to-many key's override answers as unwalked (item 796). Found researching 790
-- [ ] 810. (robustness) A nested writable serializer's own `ModelSerializer` uniqueness validator binds a nested value
-  inside `is_valid()`, before the write's storability check (which reads only top-level written fields,
-  `rest_framework/resolvers.py::_written_columns`) and before any consumer `create()` runs: on SQLite a unique duration
-  past 64 bits of microseconds or a hook datetime past year 9999 in UTC raises `OverflowError` through DRF's
-  `qs_exists`, and on PostgreSQL the `DataError` DRF swallows aborts the transaction; either way a masked top-level
-  error. Decide in the fix whether the hold walks nested serializers (`_validation_tree`) or the contract states it.
-  Found researching 725
 - [ ] 813. (robustness) On SQLite a stored `GeneratedField` whose `output_field` is a bounded `DecimalField`
   (`GeneratedField(expression=F("price") * 1000, output_field=DecimalField(20, 4), db_persist=True)`) computes a value
   its read-back converter refuses (`price` `9999999999999.9999`), and Django's `INSERT ... RETURNING` converters raise

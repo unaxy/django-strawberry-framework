@@ -21,6 +21,10 @@ operations, a date a ``DateTimeField`` column holds (no fakeshop write flavor ha
 over), the SQLite read-back trial over columns no fakeshop model declares (a
 ``DecimalField(309, 0)`` an infinity reaches, one with no ``max_digits``) and the write
 alias it never opens, and, on the Postgres tier, the real connection and ``ArrayField``.
+
+``unbindable_query_value``, the bind a DRF uniqueness validator makes, is pinned live
+through a nested serializer item in ``examples/fakeshop/test_query/test_scalars_mutation_api.py``;
+its rows here hold each backend's answer beside the save rule's on the same stand-in aliases.
 """
 
 import ast
@@ -31,7 +35,7 @@ import sqlite3
 import uuid
 import warnings
 from collections.abc import Callable, Generator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from decimal import Decimal
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -92,6 +96,7 @@ from django_strawberry_framework.utils.errors import (
     refuses_utc_offset,
     rekey_error_segment,
     save_time_error_key_map,
+    unbindable_query_value,
     unbindable_temporal,
     unstorable_decimal,
     unstorable_temporal,
@@ -2568,3 +2573,216 @@ def test_unstorable_temporal_answers_postgresql_for_array_elements_on_server_sid
     with _postgresql_alias(server_side_binding=True) as alias:
         assert _postgresql_refuses_array(alias, field, value) is refused
         assert unstorable_temporal(field, value, lambda: alias) is refused
+
+
+@contextmanager
+def _psycopg3_client_alias() -> Generator[str, None, None]:
+    """A never-opened stand-in alias reading as PostgreSQL under psycopg 3's client-side binding."""
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    with postgresql_stand_in(driver, cursor_factory) as alias:
+        yield alias
+
+
+@contextmanager
+def _mysql_alias() -> Generator[str, None, None]:
+    """A stand-in alias reading as MySQL, held to its own operations, storing no aware instant."""
+    with _stand_in_alias(MySQLOperations, supports_timezones=False) as alias:
+        connections[alias].vendor = "mysql"
+        yield alias
+
+
+@contextmanager
+def _storing_alias() -> Generator[str, None, None]:
+    """A stand-in alias whose adapters pass every value through and that stores the instant."""
+    with _stand_in_alias(StoringOperations, supports_timezones=True) as alias:
+        yield alias
+
+
+#: Each backend a bind is asked of, by the alias standing in for it.
+_BIND_BACKENDS: dict[str, Callable[[], AbstractContextManager[str]]] = {
+    "sqlite": lambda: _sqlite_alias(None),
+    "mysql": _mysql_alias,
+    "postgresql-stored-instant": _storing_alias,
+    "postgresql": _psycopg3_client_alias,
+}
+
+
+@pytest.mark.parametrize(
+    (
+        "backend",
+        "settings",
+        "column",
+        "value",
+        "unbindable",
+        "unstorable",
+    ),
+    [
+        pytest.param(
+            "sqlite",
+            {},
+            _DURATION,
+            datetime.timedelta(days=_LONGEST_DAYS_IN_64_BITS + 1),
+            True,
+            True,
+            id="sqlite-duration-past-64-bits",
+        ),
+        pytest.param(
+            "sqlite",
+            {},
+            _DURATION,
+            datetime.timedelta(days=_LONGEST_DAYS_IN_64_BITS),
+            False,
+            False,
+            id="sqlite-duration-in-64-bits",
+        ),
+        pytest.param(
+            "sqlite",
+            {},
+            _STAMP,
+            _PAST_YEAR_9999,
+            True,
+            True,
+            id="sqlite-datetime-past-year-9999",
+        ),
+        pytest.param("sqlite", {}, _STAMP, _IN_RANGE, False, False, id="sqlite-in-range"),
+        pytest.param(
+            "sqlite",
+            {},
+            _PRICE,
+            Decimal("9999999999999999.9999"),
+            False,
+            True,
+            id="sqlite-decimal-carried-past-the-digits",
+        ),
+        pytest.param(
+            "sqlite",
+            {},
+            _WIDEST,
+            Decimal("9" * 309),
+            False,
+            True,
+            id="sqlite-decimal-stored-as-an-infinity",
+        ),
+        pytest.param("sqlite", {}, _TIME, _AWARE_TIME, False, True, id="sqlite-aware-time"),
+        pytest.param(
+            "sqlite",
+            {"USE_TZ": False},
+            _STAMP,
+            _IN_RANGE,
+            False,
+            True,
+            id="sqlite-aware-datetime-without-time-zone-support",
+        ),
+        pytest.param("mysql", {}, _TIME, _AWARE_TIME, False, True, id="mysql-aware-time"),
+        pytest.param(
+            "mysql",
+            {},
+            _DURATION,
+            datetime.timedelta(days=_LONGEST_DAYS_IN_64_BITS + 1),
+            False,
+            True,
+            id="mysql-duration-past-64-bits",
+        ),
+        pytest.param(
+            "mysql",
+            {},
+            _STAMP,
+            _PAST_YEAR_9999,
+            True,
+            True,
+            id="mysql-datetime-past-year-9999",
+        ),
+        pytest.param(
+            "postgresql-stored-instant",
+            {},
+            _STAMP,
+            _BEFORE_YEAR_ONE,
+            False,
+            True,
+            id="postgresql-session-wall-clock-before-year-one",
+        ),
+        pytest.param(
+            "postgresql",
+            {},
+            _TIME,
+            datetime.time(12, tzinfo=_OFFSET_16),
+            True,
+            True,
+            id="postgresql-utc-offset-16-00",
+        ),
+        pytest.param(
+            "postgresql",
+            {},
+            _DURATION,
+            datetime.timedelta(days=_LONGEST_DAYS_IN_64_BITS + 1),
+            False,
+            False,
+            id="postgresql-duration-as-interval",
+        ),
+        pytest.param(
+            "postgresql",
+            {},
+            _UNBOUNDED_DECIMAL,
+            Decimal("0E+1073741823"),
+            True,
+            True,
+            id="postgresql-decimal-past-numeric",
+        ),
+        pytest.param(
+            "postgresql",
+            {},
+            _UNBOUNDED_DECIMAL,
+            Decimal("12.50"),
+            False,
+            False,
+            id="postgresql-decimal-in-numeric",
+        ),
+    ],
+)
+def test_unbindable_query_value_refuses_a_bind_no_failed_query_reading_survives(
+    backend: str,
+    settings: dict[str, object],
+    column: models.Field[object, object],
+    value: object,
+    unbindable: bool,  # noqa: FBT001
+    unstorable: bool,  # noqa: FBT001
+) -> None:
+    """A query binding a value is refused only where reading its failure as no match fails.
+
+    DRF's ``qs_exists`` reads a ``TypeError`` / ``ValueError`` / ``DataError`` from a
+    uniqueness query as no duplicate. An ``OverflowError`` Django's preparation raises (a
+    datetime past year 9999 once projected onto SQLite's or MySQL's UTC), a duration past
+    64 bits of microseconds on SQLite, whose driver raises ``OverflowError`` binding it, and
+    on PostgreSQL a UTC offset or a decimal the server refuses (whose ``DataError`` aborts
+    the transaction) are refused, as the save refuses them. A ``ValueError`` Django's
+    preparation raises before the statement (an aware time on SQLite and MySQL, an aware
+    datetime under ``USE_TZ = False``), a duration past 64 bits on MySQL, whose driver
+    interpolates it as a literal the server compares without error, an instant PostgreSQL
+    stores but cannot load back, and a decimal SQLite binds and stores but a bounded
+    column cannot read back (one carried past ``ScalarSpecimen.price``'s digits, one stored
+    as an infinity) bind as that reading expects, so only the save refuses them.
+    PostgreSQL binds a duration as an ``interval``.
+    """
+    with override_settings(**settings), _BIND_BACKENDS[backend]() as alias:
+        assert unbindable_query_value(column, value, lambda: alias) is unbindable
+        assert unstorable_value(column, value, lambda: alias) is unstorable
+
+
+def test_unbindable_query_value_asks_psycopg_for_no_array_as_a_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A list psycopg 3 refuses to dump is no refused bind: it fails before reaching the server.
+
+    The save asks the driver to dump the list as a whole and refuses it on the driver's
+    ``DataError``; a query binding it meets that error before any statement is sent, which
+    a reading of the failure as no match recovers from, so the driver is never asked.
+    """
+    patch_array_field(monkeypatch)
+    dumps: list[_Dump] = []
+    driver = _psycopg3_driver(_DriverDataError("cannot dump"), dumps)
+    value = [_NAIVE_TIME, _AWARE_TIME]
+    with postgresql_stand_in(driver, DjangoClientCursor) as alias:
+        assert unbindable_query_value(_TIMES, value, lambda: alias) is False
+        assert dumps == []
+        assert unstorable_value(_TIMES, value, lambda: alias) is True
+    assert len(dumps) == 1

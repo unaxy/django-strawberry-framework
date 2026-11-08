@@ -58,6 +58,17 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
   one: a decimal past PostgreSQL ``numeric``'s format its column's own validators
   accept refused as the field's ``invalid`` error, written through an alias that reads
   as PostgreSQL.
+- a duration a DRF uniqueness validator binds past 64 bits of microseconds below the top
+  level (a single, ``many=True`` and two-deep nested item under ``unique=True``,
+  ``unique_together``, a conditional ``UniqueConstraint`` (a field in its ``condition``
+  included) and ``unique_for_date``, a plain nested ``Serializer`` and a root
+  serializer-only field declaring a ``UniqueValidator`` over another model): the item
+  field's ``invalid`` error at its dotted path, nested values no validator binds left to
+  the consumer's ``create()``, and a serializer-level validator's values held only where
+  DRF reaches its query (a ``None`` partner, an omitted partner or ``date_field``, an
+  update changing no checked value bind nothing). Fakeshop declares no ``DurationField``;
+  its nested datetime row is live in
+  ``examples/fakeshop/test_query/test_scalars_mutation_api.py``.
 
 **No create/update happy path, envelope, reverse-map, partial-update, visibility,
 write-auth, authorize-before-decode, Upload, request-context, or re-fetch BEHAVIORAL test
@@ -1200,11 +1211,15 @@ def _synthetic_table(model_class: type[Model]) -> Generator[None, None, None]:
 def _blank_columns_schema(
     serializer_cls: type[DRFSerializer],
     model_class: type[Model],
+    *,
+    nested_fields: Mapping[str, NestedSerializerConfig] | None = None,
 ) -> tuple[DjangoSchema, str, str]:
     """A non-Relay primary + create / update ``SerializerMutation`` over ``serializer_cls``.
 
-    Returns the schema and the create / update input type names.
+    ``nested_fields`` is each mutation's ``Meta.nested_fields`` when given. Returns the schema
+    and the create / update input type names.
     """
+    nesting = {} if nested_fields is None else {"nested_fields": nested_fields}
     type(
         f"{model_class.__name__}T",
         (DjangoType,),
@@ -1227,6 +1242,7 @@ def _blank_columns_schema(
                     "serializer_class": serializer_cls,
                     "operation": "create",
                     "permission_classes": [],
+                    **nesting,
                 },
             ),
         },
@@ -1242,6 +1258,7 @@ def _blank_columns_schema(
                     "serializer_class": serializer_cls,
                     "operation": "update",
                     "permission_classes": [],
+                    **nesting,
                 },
             ),
         },
@@ -1273,15 +1290,19 @@ def _serializer_over(
     fields: tuple[str, ...],
     declared: Mapping[str, object] | None = None,
     methods: Mapping[str, object] | None = None,
+    meta: Mapping[str, object] | None = None,
 ) -> type[DRFSerializer]:
-    """A ``ModelSerializer`` over ``model_class`` writing ``fields``, plus ``declared`` fields."""
+    """A ``ModelSerializer`` over ``model_class`` writing ``fields``, plus ``declared`` fields.
+
+    ``meta`` adds ``Meta`` options beside ``model`` and ``fields``.
+    """
     return type(
         f"{model_class.__name__}Serializer",
         (serializers.ModelSerializer,),
         {
             **(declared or {}),
             **(methods or {}),
-            "Meta": type("Meta", (), {"model": model_class, "fields": fields}),
+            "Meta": type("Meta", (), {"model": model_class, "fields": fields, **(meta or {})}),
         },
     )
 
@@ -7961,6 +7982,653 @@ def test_serializer_hold_passes_a_non_mapping_value_on_to_drf(
     logged = [record.getMessage().partition("\n")[0] for record in caplog.records]
     assert "'list' object is not a mapping" in logged, logged
     assert rows == 0
+
+
+#: A duration whose microsecond count leaves 64 bits, and one that fits, as DRF's text.
+_PAST_64_BITS = "999999999 00:00:00"
+_FITS_64_BITS = "5 00:00:00"
+#: Where a consumer ``create()`` / ``update()`` clamps a duration before writing it.
+_CLAMPED = datetime.timedelta(days=10**6)
+
+
+def _nested_parent_model(name: str) -> type[Model]:
+    """A synthetic parent row whose serializer writes nested child rows."""
+    return type(
+        name,
+        (Model,),
+        {
+            "__module__": __name__,
+            "amount": models.IntegerField(default=1),
+            "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
+        },
+    )
+
+
+def _validated_item(value: object) -> dict[str, object]:
+    """A nested serializer's validated mapping, keyed by its field sources."""
+    assert is_mapping(value), value
+    return {str(key): item for key, item in value.items()}
+
+
+def _nested_items(level: str, validated_data: dict[str, object]) -> list[dict[str, object]]:
+    """Pop the nested child items ``level`` declares out of ``validated_data``."""
+    if level == "single":
+        return [_validated_item(validated_data.pop("child"))]
+    if level == "many":
+        items = validated_data.pop("children")
+        assert is_list(items), items
+        return [_validated_item(item) for item in items]
+    return [_validated_item(_validated_item(validated_data.pop("mid"))["child"])]
+
+
+def _nested_parent_serializer(
+    parent_model: type[Model],
+    child_model: type[Model],
+    child_serializer: serializers.Serializer[object],
+    level: str,
+    *,
+    clamp: bool = False,
+) -> tuple[type[DRFSerializer], dict[str, NestedSerializerConfig]]:
+    """A ``ModelSerializer`` over ``parent_model`` declaring ``child_serializer`` at ``level``.
+
+    ``single`` declares it as ``child``, ``many`` as the list ``children`` and ``deep`` as
+    ``mid.child`` under a plain ``Serializer``. Its own ``create()`` / ``update()`` writes
+    the parent, then each child row (its ``span`` clamped to ``_CLAMPED`` when ``clamp``).
+    Answers the class and the ``Meta.nested_fields`` opting the nesting in.
+    """
+    if level == "single":
+        declared: dict[str, object] = {"child": child_serializer}
+        nested = {"child": NestedSerializerConfig()}
+    elif level == "many":
+        declared = {"children": type(child_serializer)(many=True)}
+        nested = {"children": NestedSerializerConfig()}
+    else:
+        mid = type("NestedMidSerializer", (serializers.Serializer,), {"child": child_serializer})
+        declared = {"mid": mid()}
+        nested = {"mid": NestedSerializerConfig(nested_fields={"child": NestedSerializerConfig()})}
+
+    def _write_children(items: list[dict[str, object]]) -> None:
+        for item in items:
+            if clamp:
+                item["span"] = min(require_instance(item["span"], datetime.timedelta), _CLAMPED)
+            _ = child_model._default_manager.create(**item)
+
+    def create(_serializer: object, validated_data: dict[str, object]) -> Model:
+        items = _nested_items(level, validated_data)
+        parent = parent_model._default_manager.create(**validated_data)
+        _write_children(items)
+        return parent
+
+    def update(_serializer: object, instance: Model, validated_data: dict[str, object]) -> Model:
+        items = _nested_items(level, validated_data)
+        for name, value in validated_data.items():
+            setattr(instance, name, value)
+        instance.save()
+        _write_children(items)
+        return instance
+
+    serializer_cls = _serializer_over(
+        parent_model,
+        ("amount", *declared),
+        declared,
+        {"create": create, "update": update},
+    )
+    return serializer_cls, nested
+
+
+#: The dotted path of the item under test's ``span`` at each nesting level.
+_NESTED_PATHS = {"single": "child.span", "many": "children.1.span", "deep": "mid.child.span"}
+
+
+def _nested_payload(level: str, item: dict[str, object]) -> dict[str, object]:
+    """The nested input sending ``item`` at ``level``, a fitting first item before it in a list."""
+    if level == "single":
+        return {"child": item}
+    if level == "many":
+        return {"children": [{**item, "span": "1 00:00:00"}, item]}
+    return {"mid": {"child": item}}
+
+
+def _nested_spans(level: str, sent: str) -> list[datetime.timedelta]:
+    """The child spans a nested write of ``sent`` at ``level`` stores, in write order."""
+    days = 999_999_999 if sent == _PAST_64_BITS else 5
+    stored = [datetime.timedelta(days=days)]
+    return [datetime.timedelta(days=1), *stored] if level == "many" else stored
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("shape", ["unique", "together", "conditional"])
+@pytest.mark.parametrize("level", list(_NESTED_PATHS))
+@pytest.mark.parametrize("sent", [_PAST_64_BITS, _FITS_64_BITS], ids=["past-64-bits", "fits"])
+def test_serializer_nested_duration_a_uniqueness_validator_cannot_bind_is_the_item_error(
+    operation: str,
+    shape: str,
+    level: str,
+    sent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested item's duration its uniqueness validator cannot bind fails the item's field.
+
+    The child ``ModelSerializer``'s ``UniqueValidator`` (``unique=True``, a conditional
+    ``UniqueConstraint``) or ``UniqueTogetherValidator`` binds ``span`` in a query inside
+    ``is_valid()`` at the item's own level: a single nested item, the second item of a
+    ``many=True`` list, an item under a plain nested ``Serializer``. On SQLite a duration
+    past 64 bits of microseconds raises ``OverflowError`` there, which DRF's ``qs_exists``
+    does not catch; the item's ``span`` answers its ``invalid`` error at its dotted path
+    instead, nothing written, on a create and on the pipeline's partial update. A duration
+    that fits reaches the consumer's own ``create()`` / ``update()``, which writes it;
+    PostgreSQL binds an ``interval``, so every duration reaches it there.
+    """
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    suffix = f"{shape.title()}{level.title()}{operation.title()}{'Past' if sent == _PAST_64_BITS else 'Fits'}"
+    parent_model = _nested_parent_model(f"NestedSpanParent{suffix}")
+    child_model = _unique_span_model(f"NestedSpanChild{suffix}", shape)
+    child_cls = _serializer_over(child_model, ("id", "span", "amount"))
+    serializer_cls, nested = _nested_parent_serializer(
+        parent_model,
+        child_model,
+        child_cls(),
+        level,
+    )
+    path = _NESTED_PATHS[level]
+    with _synthetic_table(parent_model), _synthetic_table(child_model):
+        row_id = (
+            saved_pk(parent_model._default_manager.create(amount=1))
+            if operation == "update"
+            else None
+        )
+        schema, create_input, update_input = _blank_columns_schema(
+            serializer_cls,
+            parent_model,
+            nested_fields=nested,
+        )
+        payload = _run_row_write(
+            schema,
+            create_input if row_id is None else update_input,
+            {"amount": 1, **_nested_payload(level, {"span": sent, "amount": 1})},
+            row_id,
+        )
+        spans = list(child_model._default_manager.order_by("pk").values_list("span", flat=True))
+        parents = parent_model._default_manager.count()
+
+    native = connections["default"].features.has_native_duration_field
+    if sent == _PAST_64_BITS and not native:
+        assert payload == {
+            "result": None,
+            "errors": [{"field": path, "messages": _UNREPRESENTABLE, "codes": ["invalid"]}],
+        }
+        assert (spans, parents) == ([], 0 if row_id is None else 1)
+    else:
+        assert json_at(payload, "errors") == []
+        assert spans == _nested_spans(level, sent)
+
+
+def _condition_span_model(name: str) -> type[Model]:
+    """A synthetic model unique on ``amount`` and ``rank`` among the rows of positive ``span``."""
+    return type(
+        name,
+        (Model,),
+        {
+            "__module__": __name__,
+            "amount": models.IntegerField(default=1),
+            "rank": models.IntegerField(default=1),
+            "span": models.DurationField(),
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "app_label": "products",
+                    "managed": False,
+                    "constraints": (
+                        models.UniqueConstraint(
+                            fields=("amount", "rank"),
+                            condition=models.Q(span__gt=datetime.timedelta(0)),
+                            name=f"{name.lower()}_amount_rank_key",
+                        ),
+                    ),
+                },
+            ),
+        },
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("sent", [_PAST_64_BITS, _FITS_64_BITS], ids=["past-64-bits", "fits"])
+def test_serializer_nested_duration_a_constraint_condition_binds_is_the_item_error(
+    sent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested duration a conditional constraint's condition binds fails the item's field.
+
+    ``span`` is no field of the ``UniqueConstraint`` on ``amount`` and ``rank``; it sits in
+    its ``condition``, so DRF's ``UniqueTogetherValidator`` carries it in
+    ``condition_fields`` and binds its value checking the condition inside ``is_valid()``,
+    where SQLite raises ``OverflowError`` for a duration past 64 bits of microseconds, which
+    DRF does not catch. ``child.span`` answers its ``invalid`` error instead, nothing written;
+    a duration that fits is written by the consumer's ``create()``.
+    """
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    suffix = "Past" if sent == _PAST_64_BITS else "Fits"
+    parent_model = _nested_parent_model(f"ConditionSpanParent{suffix}")
+    child_model = _condition_span_model(f"ConditionSpanChild{suffix}")
+    child_cls = _serializer_over(child_model, ("span", "amount", "rank"))
+    serializer_cls, nested = _nested_parent_serializer(
+        parent_model,
+        child_model,
+        child_cls(),
+        "single",
+    )
+    with _synthetic_table(parent_model), _synthetic_table(child_model):
+        schema, create_input, _ = _blank_columns_schema(
+            serializer_cls,
+            parent_model,
+            nested_fields=nested,
+        )
+        payload = _run_row_write(
+            schema,
+            create_input,
+            {"amount": 1, "child": {"span": sent, "amount": 1, "rank": 1}},
+        )
+        spans = list(child_model._default_manager.values_list("span", flat=True))
+
+    if sent == _PAST_64_BITS and not connections["default"].features.has_native_duration_field:
+        assert payload == {
+            "result": None,
+            "errors": [
+                {"field": "child.span", "messages": _UNREPRESENTABLE, "codes": ["invalid"]},
+            ],
+        }
+        assert spans == []
+    else:
+        assert json_at(payload, "errors") == []
+        assert spans == [datetime.timedelta(days=999_999_999 if sent == _PAST_64_BITS else 5)]
+
+
+def _accept_every_item(_attrs: object) -> None:
+    """A serializer-level validator accepting every item."""
+
+
+def _dated_span_model(name: str, *, unique_for_date: bool) -> type[Model]:
+    """A synthetic model with a ``span`` beside a ``day``, unique for that date when asked."""
+    return type(
+        name,
+        (Model,),
+        {
+            "__module__": __name__,
+            "day": models.DateField(),
+            "span": models.DurationField(unique_for_date="day" if unique_for_date else None),
+            "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
+        },
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("shape", ["unique-for-date", "plain"])
+@pytest.mark.parametrize("sent", [_PAST_64_BITS, _FITS_64_BITS], ids=["past-64-bits", "fits"])
+def test_serializer_nested_duration_only_a_validator_bind_holds(
+    shape: str,
+    sent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested duration is held only where a uniqueness validator binds it in a query.
+
+    ``unique_for_date="day"`` makes DRF's ``UniqueForDateValidator`` bind the item's ``span``
+    beside the integer parts of its ``day``, so on SQLite a duration past 64 bits of
+    microseconds is ``child.span``'s ``invalid`` error, nothing written. A ``span`` no
+    validator binds is the consumer ``create()``'s to write: the one here clamps it, so the
+    same duration is written clamped, with no error.
+    """
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    suffix = f"{shape.title().replace('-', '')}{'Past' if sent == _PAST_64_BITS else 'Fits'}"
+    parent_model = _nested_parent_model(f"HeldSpanParent{suffix}")
+    child_model = _dated_span_model(f"HeldSpanChild{suffix}", unique_for_date=shape != "plain")
+    # A serializer-level validator of the consumer's own binds nothing the hold reads.
+    child_cls = _serializer_over(
+        child_model,
+        ("span", "day"),
+        meta=None if shape != "plain" else {"validators": [_accept_every_item]},
+    )
+    serializer_cls, nested = _nested_parent_serializer(
+        parent_model,
+        child_model,
+        child_cls(),
+        "single",
+        clamp=shape == "plain",
+    )
+    with _synthetic_table(parent_model), _synthetic_table(child_model):
+        schema, create_input, _ = _blank_columns_schema(
+            serializer_cls,
+            parent_model,
+            nested_fields=nested,
+        )
+        payload = _run_row_write(
+            schema,
+            create_input,
+            {"amount": 1, "child": {"span": sent, "day": "2021-06-15"}},
+        )
+        spans = list(child_model._default_manager.values_list("span", flat=True))
+
+    days = 999_999_999 if sent == _PAST_64_BITS else 5
+    if shape == "plain":
+        assert json_at(payload, "errors") == []
+        assert spans == [min(datetime.timedelta(days=days), _CLAMPED)]
+    elif sent == _PAST_64_BITS and not connections["default"].features.has_native_duration_field:
+        assert payload == {
+            "result": None,
+            "errors": [
+                {"field": "child.span", "messages": _UNREPRESENTABLE, "codes": ["invalid"]},
+            ],
+        }
+        assert spans == []
+    else:
+        assert json_at(payload, "errors") == []
+        assert spans == [datetime.timedelta(days=days)]
+
+
+def _unchanged_instance(_serializer: object, instance: Model, _validated_data: object) -> Model:
+    """An ``update()`` writing nothing, which a serializer declaring nesting must override."""
+    return instance
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("placement", ["root", "nested"])
+@pytest.mark.parametrize("sent", [_PAST_64_BITS, _FITS_64_BITS], ids=["past-64-bits", "fits"])
+def test_serializer_declared_unique_validator_over_another_model_holds_its_bind(
+    placement: str,
+    sent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declared ``UniqueValidator`` over another model's rows holds the value it binds.
+
+    The ``span`` field writes no column of the mutation's model: at the root it is a
+    serializer-only field, nested it sits on a plain ``Serializer``. Its declared
+    ``UniqueValidator`` binds the value against the other model's ``span`` column, read from
+    the validator's own queryset, so on SQLite a duration past 64 bits of microseconds is
+    ``span``'s ``invalid`` error at its path, nothing written; a duration that fits reaches
+    ``create()``, which writes the other model's row.
+    """
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    suffix = f"{placement.title()}{'Past' if sent == _PAST_64_BITS else 'Fits'}"
+    parent_model = _nested_parent_model(f"DeclaredSpanParent{suffix}")
+    other_model = _unique_span_model(f"DeclaredSpanOther{suffix}", "unique")
+    span = serializers.DurationField(
+        write_only=True,
+        validators=[UniqueValidator(queryset=other_model._default_manager.all())],
+    )
+
+    def create(_serializer: object, validated_data: dict[str, object]) -> Model:
+        held = validated_data.pop("span") if placement == "root" else validated_data.pop("child")
+        span_value = held if placement == "root" else _validated_item(held)["span"]
+        _ = other_model._default_manager.create(span=span_value, amount=1)
+        return parent_model._default_manager.create(**validated_data)
+
+    if placement == "root":
+        declared: dict[str, object] = {"span": span}
+        nested: dict[str, NestedSerializerConfig] | None = None
+        data: dict[str, object] = {"amount": 1, "span": sent}
+        path = "span"
+    else:
+        plain = type("DeclaredSpanSerializer", (serializers.Serializer,), {"span": span})
+        declared = {"child": plain()}
+        nested = {"child": NestedSerializerConfig()}
+        data = {"amount": 1, "child": {"span": sent}}
+        path = "child.span"
+    serializer_cls = _serializer_over(
+        parent_model,
+        ("amount", *declared),
+        declared,
+        {"create": create, "update": _unchanged_instance},
+    )
+    with _synthetic_table(parent_model), _synthetic_table(other_model):
+        schema, create_input, _ = _blank_columns_schema(
+            serializer_cls,
+            parent_model,
+            nested_fields=nested,
+        )
+        payload = _run_row_write(schema, create_input, data)
+        spans = list(other_model._default_manager.values_list("span", flat=True))
+
+    if sent == _PAST_64_BITS and not connections["default"].features.has_native_duration_field:
+        assert payload == {
+            "result": None,
+            "errors": [{"field": path, "messages": _UNREPRESENTABLE, "codes": ["invalid"]}],
+        }
+        assert spans == []
+    else:
+        assert json_at(payload, "errors") == []
+        assert spans == [datetime.timedelta(days=999_999_999 if sent == _PAST_64_BITS else 5)]
+
+
+#: Whether DRF's ``UniqueTogetherValidator`` takes ``nulls_distinct`` (3.18; 3.17 skips any ``None``).
+_DRF_NULLS_DISTINCT = "nulls_distinct" in inspect.signature(UniqueTogetherValidator).parameters
+
+
+def _nullable_partner_model(name: str) -> type[Model]:
+    """A synthetic model with a ``span`` beside a nullable ``amount``."""
+    return type(
+        name,
+        (Model,),
+        {
+            "__module__": __name__,
+            "amount": models.IntegerField(null=True, default=1),
+            "span": models.DurationField(),
+            "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
+        },
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("case", ["null-partner", "null-partner-bound", "omitted-partner"])
+def test_serializer_together_value_drf_binds_in_no_query_is_not_held(
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``UniqueTogetherValidator``'s value is held only where DRF reaches its query.
+
+    The nested item declares ``UniqueTogetherValidator(fields=("span", "amount"))`` and its
+    consumer ``create()`` clamps ``span``. DRF skips the query when a checked value is
+    ``None``, so a duration past 64 bits beside a ``null`` ``amount`` is written clamped,
+    unheld; with ``nulls_distinct=False`` (DRF 3.18) DRF binds it, so on SQLite it is
+    ``child.span``'s ``invalid`` error. An omitted non-required ``amount`` keeps DRF's own
+    ``required`` error, raised before any query.
+    """
+    if case == "null-partner-bound" and not _DRF_NULLS_DISTINCT:
+        pytest.skip("this DRF release has no nulls_distinct")
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    suffix = case.title().replace("-", "")
+    parent_model = _nested_parent_model(f"PartnerParent{suffix}")
+    child_model = _nullable_partner_model(f"PartnerChild{suffix}")
+    validator = UniqueTogetherValidator(
+        queryset=child_model._default_manager.all(),
+        fields=("span", "amount"),
+    )
+    if case == "null-partner-bound":
+        # The ``nulls_distinct=False`` argument, which drf-stubs do not declare.
+        vars(validator)["nulls_distinct"] = False
+    amount = (
+        serializers.IntegerField(required=False)
+        if case == "omitted-partner"
+        else serializers.IntegerField(allow_null=True)
+    )
+    child_cls = _serializer_over(
+        child_model,
+        ("span", "amount"),
+        {"amount": amount},
+        meta={"validators": [validator]},
+    )
+    serializer_cls, nested = _nested_parent_serializer(
+        parent_model,
+        child_model,
+        child_cls(),
+        "single",
+        clamp=True,
+    )
+    item: dict[str, object] = {"span": _PAST_64_BITS}
+    if case != "omitted-partner":
+        item["amount"] = None
+    with _synthetic_table(parent_model), _synthetic_table(child_model):
+        schema, create_input, _ = _blank_columns_schema(
+            serializer_cls,
+            parent_model,
+            nested_fields=nested,
+        )
+        payload = _run_row_write(schema, create_input, {"amount": 1, "child": item})
+        spans = list(child_model._default_manager.values_list("span", flat=True))
+
+    native = connections["default"].features.has_native_duration_field
+    if case == "omitted-partner":
+        assert payload == {
+            "result": None,
+            "errors": [
+                {
+                    "field": "child.amount",
+                    "messages": ["This field is required."],
+                    "codes": ["required"],
+                },
+            ],
+        }
+        assert spans == []
+    elif case == "null-partner-bound" and not native:
+        assert payload == {
+            "result": None,
+            "errors": [
+                {"field": "child.span", "messages": _UNREPRESENTABLE, "codes": ["invalid"]},
+            ],
+        }
+        assert spans == []
+    else:
+        assert json_at(payload, "errors") == []
+        assert spans == [_CLAMPED]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("operation", "amount", "held"),
+    [
+        pytest.param("update", None, False, id="update-unchanged"),
+        pytest.param("update", 1, False, id="update-same"),
+        pytest.param("update", 2, True, id="update-changed"),
+        pytest.param("create", 1, True, id="create"),
+    ],
+)
+def test_serializer_together_condition_value_is_held_only_where_drf_queries(
+    operation: str,
+    amount: int | None,
+    held: bool,  # noqa: FBT001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root ``condition_fields`` value is held only where DRF's update checks a changed value.
+
+    The root serializer declares a ``UniqueTogetherValidator`` over another model's rows on
+    ``amount``, whose ``condition`` reads the serializer-only ``span``. On an update DRF
+    checks only the values that differ from the instance, so an update omitting ``amount``
+    or sending it as stored runs no query and its consumer ``update()`` writes, the duration unheld; an
+    update changing ``amount``, and a create, bind the condition's ``span``, which on SQLite
+    is ``span``'s ``invalid`` error past 64 bits of microseconds.
+    """
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    suffix = f"{operation.title()}{'Held' if held else 'Kept'}{amount or 0}"
+    parent_model = _nested_parent_model(f"ConditionRootParent{suffix}")
+    other_model = _unique_span_model(f"ConditionRootOther{suffix}", "plain")
+    validator = UniqueTogetherValidator(
+        queryset=other_model._default_manager.all(),
+        fields=("amount",),
+        condition_fields=("span",),
+        condition=models.Q(span__gt=datetime.timedelta(0)),
+    )
+
+    def write(
+        _serializer: object,
+        instance: Model | None,
+        validated_data: dict[str, object],
+    ) -> Model:
+        _ = validated_data.pop("span")
+        if instance is None:
+            return parent_model._default_manager.create(**validated_data)
+        for name, value in validated_data.items():
+            setattr(instance, name, value)
+        instance.save()
+        return instance
+
+    def create(serializer: object, validated_data: dict[str, object]) -> Model:
+        return write(serializer, None, validated_data)
+
+    serializer_cls = _serializer_over(
+        parent_model,
+        ("amount", "span"),
+        {"span": serializers.DurationField(write_only=True)},
+        {"create": create, "update": write},
+        meta={"validators": [validator]},
+    )
+    data: dict[str, object] = {"span": _PAST_64_BITS}
+    if amount is not None:
+        data["amount"] = amount
+    with _synthetic_table(parent_model), _synthetic_table(other_model):
+        row_id = (
+            saved_pk(parent_model._default_manager.create(amount=1))
+            if operation == "update"
+            else None
+        )
+        schema, create_input, update_input = _blank_columns_schema(serializer_cls, parent_model)
+        payload = _run_row_write(
+            schema,
+            create_input if row_id is None else update_input,
+            data,
+            row_id,
+        )
+
+    if held and not connections["default"].features.has_native_duration_field:
+        assert payload == {
+            "result": None,
+            "errors": [{"field": "span", "messages": _UNREPRESENTABLE, "codes": ["invalid"]}],
+        }
+    else:
+        assert json_at(payload, "errors") == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_serializer_unique_for_date_value_is_held_only_with_its_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``UniqueForDateValidator``'s ``field`` is held only where its ``date_field`` is sent too.
+
+    DRF answers a missing ``date_field`` with its own ``required`` error before any query,
+    so a duration past 64 bits of microseconds sent without ``day`` binds nothing and the
+    item keeps DRF's ``child.day`` error.
+    """
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    parent_model = _nested_parent_model("UndatedSpanParent")
+    child_model = _dated_span_model("UndatedSpanChild", unique_for_date=True)
+    child_cls = _serializer_over(
+        child_model,
+        ("span", "day"),
+        {"day": serializers.DateField(required=False)},
+    )
+    serializer_cls, nested = _nested_parent_serializer(
+        parent_model,
+        child_model,
+        child_cls(),
+        "single",
+    )
+    with _synthetic_table(parent_model), _synthetic_table(child_model):
+        schema, create_input, _ = _blank_columns_schema(
+            serializer_cls,
+            parent_model,
+            nested_fields=nested,
+        )
+        payload = _run_row_write(
+            schema,
+            create_input,
+            {"amount": 1, "child": {"span": _PAST_64_BITS}},
+        )
+
+    assert payload == {
+        "result": None,
+        "errors": [
+            {"field": "child.day", "messages": ["This field is required."], "codes": ["required"]},
+        ],
+    }
 
 
 # A naive year-1 datetime made aware in Tokyo, and an aware one projected onto UTC under

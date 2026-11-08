@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 194 to do.
+Progress: 0 done, 195 to do.
 
 ## From dry-0_0_15_3
 
@@ -872,6 +872,16 @@ Progress: 0 done, 194 to do.
   the column's digits, such as `9999999999999999.9999` in `DecimalField(20, 4)`) is now the field's `invalid` error
   "Enter a value the database can represent." with nothing written, on every mutation flavor, instead of a masked
   server error with the write rolled back; a column with no `max_digits` still stores and reads back `Infinity`
+- [ ] 815. CHANGELOG entry for item 810: a serializer mutation now holds every value a DRF uniqueness validator binds in
+  a query at every level, a nested writable serializer's items (single, `many=True`, deeper), a plain nested
+  `Serializer`'s declared `UniqueValidator`, a constraint's `condition` field and a root serializer-only field validated
+  against another model included: a value the database refuses at that bind (on SQLite a duration past 64 bits of
+  microseconds or a `validate_<field>` instant past year 9999 in UTC; on PostgreSQL a UTC offset or a decimal past
+  `numeric` the server refuses) is the field's `invalid` error ("Enter a value the database can represent.") at its
+  nested path, nothing written, instead of a masked top-level error or an aborted transaction. A value the bind survives
+  (an aware time, a decimal SQLite stores but cannot read back), a value DRF's validator binds in no query (a missing
+  field, an update changing no checked value, a checked `None`) and every nested value no uniqueness validator binds
+  stay DRF's and your `create()` / `update()`'s
 
 ## From dry-upstream-0_0_15
 
