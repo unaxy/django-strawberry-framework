@@ -6386,6 +6386,37 @@ def test_range_patch_dict_values_still_merge_their_widget_keys(
     assert PatronFilter._normalize_input(inputs[shape]) == expected
 
 
+def test_an_object_sent_to_an_unserved_relation_leaf_is_refused_naming_its_remedies() -> None:
+    """An object sent through ``apply_sync`` to a leaf over a relation is refused in its set's words.
+
+    No type serves the set, so nothing typed the leaf at build; the request asks whether one
+    value is a ``JSON`` object (``publishes_json_value``), which types the leaf from its
+    relation and refuses it with the remedies a ``FilterSet`` has.
+    """
+
+    class UnservedShelfFilter(FilterSet):
+        holder = CharFilter(field_name="branch")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = UnservedShelfFilter.apply_sync(
+            {"holder": {"exact": {"pk": 1}}},
+            library_models.Shelf.objects.all(),
+            _make_info(),
+        )
+
+    assert str(excinfo.value) == (
+        "UnservedShelfFilter: CharFilter on 'branch' reads Shelf.branch, a ForeignKey no "
+        "SCALAR_MAP entry types, so nothing types its input; filter by the related row's key "
+        "through 'branch' in Meta.fields or a ModelChoiceFilter / ModelMultipleChoiceFilter, "
+        "name the related column past it (field_name 'branch__id'), or filter the related row's "
+        "own fields through a RelatedFilter."
+    )
+
+
 #: The refusal a temporal value the queryset's database cannot bind answers.
 _UNBINDABLE = [{"message": "Enter a value the database can represent.", "code": "invalid"}]
 

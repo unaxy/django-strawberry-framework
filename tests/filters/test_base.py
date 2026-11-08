@@ -1882,31 +1882,50 @@ def test_filterset_model_field_keeps_django_filters_answer_on_a_path_the_walk_re
 
 
 def test_declared_pk_leaf_over_a_composite_primary_key_is_refused_at_build() -> None:
-    """A declared leaf over a composite primary key named ``pk`` is the unsupported-field error."""
+    """A declared leaf over a composite primary key named ``pk`` is refused naming its columns."""
     filterset = _pk_alias_set(_CompositeKeyed, leaf=ListFilter(field_name="pk", lookup_expr="in"))
     bound_leaf = filterset.base_filters["leaf"]
     model_field = _filterset_model_field(filterset, bound_leaf)
 
-    with pytest.raises(ConfigurationError, match="Unsupported Django field type"):
+    with pytest.raises(ConfigurationError) as excinfo:
         _ = convert_filter_to_input_annotation(bound_leaf, model_field, None, filterset)
+
+    assert str(excinfo.value) == (
+        f"{filterset.__name__}: ListFilter on 'pk' reads _CompositeKeyed.pk, a "
+        "CompositePrimaryKey over 'left', 'right', which no one value names; filter each "
+        "column it composes by name."
+    )
 
 
 @pytest.mark.parametrize(
-    ("model", "leaf"),
+    (
+        "model",
+        "leaf",
+        "reads",
+        "past",
+    ),
     [
         pytest.param(
             models.PatronProfile,
             RangeFilter(field_name="patron", lookup_expr="range"),
+            "RangeFilter on 'patron' reads PatronProfile.patron, a OneToOneField",
+            "'patron' in Meta.fields or a ModelChoiceFilter / ModelMultipleChoiceFilter, name "
+            "the related column past it (field_name 'patron__id'),",
             id="one-to-one-key-range",
         ),
         pytest.param(
             models.LendingDesk,
             ListFilter(field_name="venue_ptr", lookup_expr="in"),
+            "ListFilter on 'venue_ptr' reads LendingDesk.venue_ptr, a OneToOneField",
+            "'venue_ptr' in Meta.fields or a ModelChoiceFilter / ModelMultipleChoiceFilter, "
+            "name the related column past it (field_name 'venue_ptr__id'),",
             id="parent-link-list",
         ),
         pytest.param(
             models.KioskFault,
             RangeFilter(field_name="kiosk", lookup_expr="range"),
+            "RangeFilter on 'kiosk' reads KioskFault.kiosk, a ForeignKey",
+            "'kiosk' in Meta.fields or a ModelChoiceFilter / ModelMultipleChoiceFilter,",
             id="key-into-parent-link-range",
         ),
     ],
@@ -1914,18 +1933,27 @@ def test_declared_pk_leaf_over_a_composite_primary_key_is_refused_at_build() -> 
 def test_declared_range_or_list_naming_a_relation_valued_key_by_name_is_refused_at_build(
     model: type[Model],
     leaf: django_filters.Filter,
+    reads: str,
+    past: str,
 ) -> None:
     """A declared range or list naming a relation itself stays the build-time refusal.
 
     Only a path ending on ``pk`` reads the column a key stores; ``patron``, ``venue_ptr``
-    and ``kiosk`` name the relation, which no input scalar types.
+    and ``kiosk`` name the relation, which no input scalar types. The related column past
+    ``kiosk`` is a parent link, itself a relation, so no column is named past it.
     """
     filterset = _pk_alias_set(model, leaf=leaf)
     bound_leaf = filterset.base_filters["leaf"]
     model_field = _filterset_model_field(filterset, bound_leaf)
 
-    with pytest.raises(ConfigurationError, match="Unsupported Django field type"):
+    with pytest.raises(ConfigurationError) as excinfo:
         _ = convert_filter_to_input_annotation(bound_leaf, model_field, None, filterset)
+
+    assert str(excinfo.value) == (
+        f"{filterset.__name__}: {reads} no SCALAR_MAP entry types, so nothing types its input; "
+        f"filter by the related row's key through {past} or filter the related row's own "
+        "fields through a RelatedFilter."
+    )
 
 
 @pytest.mark.parametrize(

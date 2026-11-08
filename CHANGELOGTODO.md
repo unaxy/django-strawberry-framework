@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 195 to do.
+Progress: 0 done, 196 to do.
 
 ## From dry-0_0_15_3
 
@@ -882,6 +882,13 @@ Progress: 0 done, 195 to do.
   (an aware time, a decimal SQLite stores but cannot read back), a value DRF's validator binds in no query (a missing
   field, an update changing no checked value, a checked `None`) and every nested value no uniqueness validator binds
   stay DRF's and your `create()` / `update()`'s
+- [ ] 817. CHANGELOG entry for item 730: a filter declared over a field no `SCALAR_MAP` entry covers (a relation, a
+  `GenericForeignKey`, a composite primary key, or a column such as a `DurationField`, a `BinaryField` or a consumer
+  field class) is refused at schema build with a message naming the filter as declared and a remedy a `FilterSet` has
+  (the relation in `Meta.fields`, a `ModelChoiceFilter` / `ModelMultipleChoiceFilter`, the related column named past it,
+  a `RelatedFilter`, the `GenericRelation` or the content type and object id columns, the composite key's own columns,
+  or a `SCALAR_MAP` entry for the column's class), instead of the DjangoType advice to add a `SCALAR_MAP` entry or
+  exclude the field via `Meta.exclude`. The same declarations are refused as before.
 
 ## From dry-upstream-0_0_15
 

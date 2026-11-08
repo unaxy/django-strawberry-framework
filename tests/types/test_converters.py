@@ -51,6 +51,7 @@ from apps.scalars.models import MediaSpecimen, NullableScalarSpecimen, ScalarSpe
 from django.db import models
 from django.db.models.expressions import Combinable
 from django.db.models.functions import Length
+from django_filters import CharFilter
 from strawberry.types import get_object_definition
 from typing_extensions import Never, override
 
@@ -2463,8 +2464,8 @@ def test_file_columns_stay_scalar_on_the_filter_input_path() -> None:
     # The package's filter-input scalar lookup keeps file/image columns scalar.
     assert scalar_for_field(attachment) is str
     assert scalar_for_field(image) is str
-    assert _scalar_from_model_field(attachment) is str
-    assert _scalar_from_model_field(image) is str
+    assert _scalar_from_model_field(attachment, CharFilter(), None) is str
+    assert _scalar_from_model_field(image, CharFilter(), None) is str
     # The shared SCALAR_MAP rows are untouched by the new output map.
     assert SCALAR_MAP[models.FileField] is str
     assert SCALAR_MAP[models.ImageField] is str
@@ -2697,7 +2698,7 @@ def test_generated_column_refuses_an_output_no_conversion_publishes(
         with pytest.raises(ConfigurationError, match=re.escape(refusal)):
             _ = read(field, "OwnerType")
     with pytest.raises(ConfigurationError, match=re.escape(refusal)):
-        _ = _scalar_from_model_field(field)
+        _ = _scalar_from_model_field(field, CharFilter(), None)
 
 
 def test_generated_array_column_routes_through_the_array_arm(

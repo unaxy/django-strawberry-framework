@@ -159,6 +159,7 @@ from tests._idioms import (
 )
 from tests._info import make_info
 from tests._postgres_fields import FakeArrayField, patch_array_field, real_array_of
+from tests._relation_fixtures import RpCompositeChild, RpCompositeParent
 from tests._soft_dependency import blocked_modules
 
 _M = typing.TypeVar("_M", bound=models.Model)
@@ -1600,6 +1601,16 @@ _LEAF_REFUSAL_CASES = {
         "filter a form field whose widget reads one key. A NumericRangeFilter filters a "
         "PostgreSQL range column, which the schema does not publish.",
     ),
+    "relation": _LeafRefusalCase(
+        lambda: CharFilter(field_name="branch"),
+        "{child}.leaf: CharFilter on 'branch' (reached through {parent}.shelf)",
+        "{child}: CharFilter on 'branch'",
+        " reads Shelf.branch, a ForeignKey no SCALAR_MAP entry types, so nothing types its "
+        "input; filter by the related row's key through 'branch' in Meta.fields or a "
+        "ModelChoiceFilter / ModelMultipleChoiceFilter, name the related column past it "
+        "(field_name 'branch__id'), or filter the related row's own fields through a "
+        "RelatedFilter.",
+    ),
     "method-without-field": _LeafRefusalCase(
         lambda: AllValuesMultipleFilter(method="filter_leaf"),
         "{child}.leaf: AllValuesMultipleFilter(method='filter_leaf') on 'leaf' (reached "
@@ -3012,7 +3023,7 @@ def test_scalar_from_form_field_maps_each_recognized_shape(
 
 
 def test_scalar_from_model_field_none_falls_back_to_str() -> None:
-    assert _scalar_from_model_field(None) is str
+    assert _scalar_from_model_field(None, CharFilter(), None) is str
 
 
 @pytest.mark.parametrize(
@@ -3034,7 +3045,7 @@ def test_scalar_from_model_field_maps_each_recognized_shape(
     expected: type[object],
 ) -> None:
     """Each model field reads its scalar from the shared model-field converter."""
-    assert _scalar_from_model_field(field_class()) is expected
+    assert _scalar_from_model_field(field_class(), CharFilter(), None) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -4618,38 +4629,495 @@ def test_a_registered_non_json_column_keeps_its_scalar_whatever_its_methods(
     assert _value_leaves(_payload_set(declare(), model=CodedSpecimen)) == {"exact": int | None}
 
 
+def _relation_remedy(path: str, column: str | None) -> str:
+    """The remedy a declared filter over a relation joined on one column is refused with."""
+    past = "" if column is None else f", name the related column past it (field_name {column!r})"
+    return (
+        " no SCALAR_MAP entry types, so nothing types its input; filter by the related row's key "
+        f"through {path!r} in Meta.fields or a ModelChoiceFilter / ModelMultipleChoiceFilter"
+        f"{past}, or filter the related row's own fields through a RelatedFilter."
+    )
+
+
+_COLUMN_REMEDY = (
+    " no SCALAR_MAP entry types, so nothing types its input; register Base36Field (or a class "
+    "it subclasses) in SCALAR_MAP."
+)
+
+
+@dataclass(frozen=True)
+class _RelationLeaf:
+    """A declared filter over a relation joined on one column, and the remedies its refusal names.
+
+    ``declare`` builds the filter for a ``field_name``; ``path`` is the relation's path in
+    ``Meta.fields`` and ``column`` the related column named past it (``None`` where the related
+    key is itself a relation); ``target`` is the related model a model-choice filter queries.
+    """
+
+    model: type[models.Model]
+    declare: Callable[[str], Filter]
+    field_name: str
+    label: str
+    path: str
+    column: str | None
+    target: type[models.Model]
+
+
+_RELATION_LEAVES = {
+    "forward-key": _RelationLeaf(
+        library_models.Shelf,
+        lambda name: CharFilter(field_name=name),
+        "branch",
+        "Shelf.branch, a ForeignKey",
+        "branch",
+        "branch__id",
+        library_models.Branch,
+    ),
+    "key-attname-method": _RelationLeaf(
+        library_models.Shelf,
+        lambda name: NumberFilter(field_name=name, method="filter_value"),
+        "branch_id",
+        "Shelf.branch, a ForeignKey",
+        "branch",
+        "branch__id",
+        library_models.Branch,
+    ),
+    "reverse-key": _RelationLeaf(
+        library_models.Branch,
+        lambda name: ListFilter(field_name=name, lookup_expr="in"),
+        "shelves",
+        "Branch.shelves, a ManyToOneRel",
+        "shelves",
+        "shelves__id",
+        library_models.Shelf,
+    ),
+    "many-to-many": _RelationLeaf(
+        library_models.Shelf,
+        lambda name: MultipleChoiceFilter(field_name=name, choices=[("1", "one")]),
+        "alt_branches",
+        "Shelf.alt_branches, a ManyToManyField",
+        "alt_branches",
+        "alt_branches__id",
+        library_models.Branch,
+    ),
+    "reverse-many-to-many": _RelationLeaf(
+        library_models.Branch,
+        lambda name: AllValuesMultipleFilter(field_name=name),
+        "alt_shelves",
+        "Branch.alt_shelves, a ManyToManyRel",
+        "alt_shelves",
+        "alt_shelves__id",
+        library_models.Shelf,
+    ),
+    "reverse-one-to-one": _RelationLeaf(
+        library_models.Patron,
+        lambda name: CharFilter(field_name=name),
+        "card",
+        "Patron.card, a OneToOneRel",
+        "card",
+        "card__id",
+        library_models.MembershipCard,
+    ),
+    "one-to-one-key-range": _RelationLeaf(
+        library_models.PatronProfile,
+        lambda name: RangeFilter(field_name=name, lookup_expr="range", method="filter_value"),
+        "patron",
+        "PatronProfile.patron, a OneToOneField",
+        "patron",
+        "patron__id",
+        library_models.Patron,
+    ),
+    "parent-link-list": _RelationLeaf(
+        library_models.LendingDesk,
+        lambda name: ListFilter(field_name=name, lookup_expr="in"),
+        "venue_ptr",
+        "LendingDesk.venue_ptr, a OneToOneField",
+        "venue_ptr",
+        "venue_ptr__id",
+        library_models.Venue,
+    ),
+    "key-into-parent-link-range": _RelationLeaf(
+        library_models.KioskFault,
+        lambda name: RangeFilter(field_name=name, lookup_expr="range", method="filter_value"),
+        "kiosk",
+        "KioskFault.kiosk, a ForeignKey",
+        "kiosk",
+        None,
+        library_models.LendingDesk,
+    ),
+    "generic-relation": _RelationLeaf(
+        library_models.Branch,
+        lambda name: CharFilter(field_name=name),
+        "tags",
+        "Branch.tags, a GenericRelation",
+        "tags",
+        "tags__id",
+        library_models.TaggedItem,
+    ),
+    "two-hops": _RelationLeaf(
+        library_models.Shelf,
+        lambda name: CharFilter(field_name=name),
+        "branch__shelves",
+        "Branch.shelves, a ManyToOneRel",
+        "branch__shelves",
+        "branch__shelves__id",
+        library_models.Shelf,
+    ),
+    "reverse-one-to-one-onto-a-parent-link": _RelationLeaf(
+        library_models.Venue,
+        lambda name: CharFilter(field_name=name),
+        "lendingdesk",
+        "Venue.lendingdesk, a OneToOneRel",
+        "lendingdesk",
+        None,
+        library_models.LendingDesk,
+    ),
+    "key-to-field": _RelationLeaf(
+        library_models.InterlibraryLoan,
+        lambda name: CharFilter(field_name=name),
+        "lender",
+        "InterlibraryLoan.lender, a ForeignKey",
+        "lender",
+        "lender__isil",
+        library_models.Branch,
+    ),
+    "key-to-field-attname": _RelationLeaf(
+        library_models.InterlibraryLoan,
+        lambda name: CharFilter(field_name=name),
+        "lender_id",
+        "InterlibraryLoan.lender, a ForeignKey",
+        "lender",
+        "lender__isil",
+        library_models.Branch,
+    ),
+}
+
+
+@pytest.mark.parametrize("site", list(_RELATION_LEAVES))
+def test_a_declared_filter_over_a_relation_is_refused_naming_filter_remedies(site: str) -> None:
+    """A declared filter whose ``field_name`` ends on a relation is refused in its set's words.
+
+    A relation's value is a related row's key, which no ``SCALAR_MAP`` entry types, so the
+    refusal names the filter and the remedies a ``FilterSet`` has: the relation listed in
+    ``Meta.fields``, a model-choice filter, the related column named past it (absent where the
+    related key is itself a relation), and a ``RelatedFilter``. A ``method=`` filter is refused
+    alike: it keeps its column.
+    """
+    leaf = _RELATION_LEAVES[site]
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(_payload_set(leaf.declare(leaf.field_name), model=leaf.model))
+
+    kind = type(leaf.declare(leaf.field_name)).__name__
+    assert str(excinfo.value) == (
+        f"PayloadValueSet: {kind} on {leaf.field_name!r} reads {leaf.label}"
+        + _relation_remedy(leaf.path, leaf.column)
+    )
+
+
+def _serve_on_a_column(model: type[models.Model], served: type[FilterSet]) -> None:
+    """Declare a ``DjangoType`` for ``model`` selecting one plain column, serving ``served``.
+
+    ``PatronProfile`` keys its rows by a one-to-one, so it carries no ``id`` to select.
+    """
+    column = next(field.name for field in model._meta.concrete_fields if not field.is_relation)
+    meta = {"model": model, "fields": (column,), "filterset_class": served}
+    _ = type(f"{model.__name__}ColumnType", (DjangoType,), {"Meta": type("Meta", (), meta)})
+
+
+def _meta_fields_set(
+    model: type[models.Model],
+    fields: Mapping[str, list[str]],
+) -> type[FilterSet]:
+    """A package ``FilterSet`` over ``model`` generating ``fields``."""
+    return type(
+        "GeneratedSet",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": model, "fields": dict(fields)})},
+    )
+
+
 @pytest.mark.parametrize(
-    ("model", "declare"),
+    "remedy",
     [
+        "meta-fields",
+        "model-choice",
+        "model-multiple-choice",
+        "related-column",
+    ],
+)
+@pytest.mark.parametrize("site", list(_RELATION_LEAVES))
+def test_every_remedy_a_relation_refusal_names_builds(site: str, remedy: str) -> None:
+    """Each remedy the relation refusal names builds the schema for that relation.
+
+    The relation's path listed in ``Meta.fields`` (a raw-key leaf typed by the related key), a
+    ``ModelChoiceFilter`` / ``ModelMultipleChoiceFilter`` on it, and the refused filter moved to
+    the related column past it.
+    """
+    leaf = _RELATION_LEAVES[site]
+    if remedy == "meta-fields":
+        filterset = _meta_fields_set(leaf.model, {leaf.path: ["exact"]})
+    elif remedy == "model-choice":
+        filterset = _payload_set(
+            django_filters.ModelChoiceFilter(
+                field_name=leaf.path,
+                queryset=leaf.target.objects.all(),
+            ),
+            model=leaf.model,
+        )
+    elif remedy == "model-multiple-choice":
+        filterset = _payload_set(
+            django_filters.ModelMultipleChoiceFilter(
+                field_name=leaf.path,
+                queryset=leaf.target.objects.all(),
+            ),
+            model=leaf.model,
+        )
+    else:
+        if leaf.column is None:
+            pytest.skip("the related key is itself a relation: no column is named past it")
+        filterset = _payload_set(leaf.declare(leaf.column), model=leaf.model)
+    _serve_on_a_column(leaf.model, filterset)
+
+    finalize_django_types()
+
+    assert filter_lookup_table(filterset).by_input_attr
+
+
+@pytest.mark.parametrize(
+    ("model", "declare", "message"),
+    [
+        pytest.param(
+            library_models.TaggedItem,
+            lambda: CharFilter(field_name="content_object"),
+            "PayloadValueSet: CharFilter on 'content_object' reads TaggedItem.content_object, a "
+            "GenericForeignKey: Django filters no queryset through it, so no input can carry its "
+            "value; filter through the GenericRelation that reverses it on the related model, or "
+            "on the content type and object id columns it reads.",
+            id="generic-foreign-key",
+        ),
+        pytest.param(
+            library_models.Book,
+            lambda: CharFilter(field_name="shelf", lookup_expr="branch"),
+            "PayloadValueSet: CharFilter on 'shelf' reads Shelf.branch, a ForeignKey"
+            + _relation_remedy("shelf__branch", "shelf__branch__id"),
+            id="lookup-crossing-onto-a-relation",
+        ),
+        pytest.param(
+            library_models.Book,
+            lambda: CharFilter(field_name="genres"),
+            "PayloadValueSet: CharFilter on 'genres' reads Book.genres, a ManyToManyField"
+            + _relation_remedy("genres", "genres__id"),
+            id="text-on-a-many-to-many",
+        ),
+        pytest.param(
+            RpCompositeChild,
+            lambda: CharFilter(field_name="parent"),
+            "PayloadValueSet: CharFilter on 'parent' reads RpCompositeChild.parent, a "
+            "ForeignObject linked by 2 columns, so no single key value can name a related row; "
+            "filter the related row's own fields through a RelatedFilter.",
+            id="relation-linked-by-two-columns",
+        ),
+        pytest.param(
+            RpCompositeParent,
+            lambda: ListFilter(field_name="pk", lookup_expr="in"),
+            "PayloadValueSet: ListFilter on 'pk' reads RpCompositeParent.pk, a "
+            "CompositePrimaryKey over 'tenant_id', 'code', which no one value names; filter each "
+            "column it composes by name.",
+            id="composite-primary-key",
+        ),
         pytest.param(
             scalar_models.OverrideSpecimen,
             lambda: CharFilter(field_name="token"),
+            "PayloadValueSet: CharFilter on 'token' reads OverrideSpecimen.token, a Base36Field"
+            + _COLUMN_REMEDY,
             id="text-on-an-unregistered-column",
         ),
         pytest.param(
             scalar_models.OverrideSpecimen,
             lambda: NumberFilter(field_name="token"),
+            "PayloadValueSet: NumberFilter on 'token' reads OverrideSpecimen.token, a Base36Field"
+            + _COLUMN_REMEDY,
             id="number-on-an-unregistered-column",
         ),
         pytest.param(
-            library_models.Book,
-            lambda: CharFilter(field_name="genres"),
-            id="text-on-a-many-to-many",
+            scalar_models.OverrideSpecimen,
+            lambda: NumberFilter(field_name="token", method="filter_value"),
+            "PayloadValueSet: NumberFilter on 'token' reads OverrideSpecimen.token, a Base36Field"
+            + _COLUMN_REMEDY,
+            id="method-number-on-an-unregistered-column",
         ),
     ],
 )
-def test_a_filter_over_a_column_with_no_scalar_stays_refused(
+def test_a_filter_over_a_field_with_no_scalar_is_refused_naming_its_remedy(
     model: type[models.Model],
     declare: Callable[[], Filter],
+    message: str,
 ) -> None:
-    """A column no ``SCALAR_MAP`` entry covers keeps the unsupported-field refusal.
+    """A field no ``SCALAR_MAP`` entry covers is refused with the remedy its kind takes.
 
-    ``OverrideSpecimen.token`` (``Base36Field``) keeps Django's ``to_python`` /
-    ``get_prep_value`` but its type is unknown, so no form types it, and a many-to-many is a
-    relation. Deliberate controls: both are refused before the rule too.
+    A ``lookup_expr`` crossing onto a relation names the path Django walks. A
+    ``GenericForeignKey`` (no join, so no key column) points at the ``GenericRelation`` and
+    the two columns it reads; a relation linked by several columns at a ``RelatedFilter``; a
+    ``CompositePrimaryKey`` at its columns; any other column at a ``SCALAR_MAP`` entry, never at
+    ``Meta.exclude``, which drops no declared filter.
     """
-    with pytest.raises(ConfigurationError, match="Unsupported Django field type"):
+    with pytest.raises(ConfigurationError) as excinfo:
         _ = _build_input_fields(_payload_set(declare(), model=model))
+
+    assert str(excinfo.value) == message
+
+
+@pytest.mark.parametrize(
+    ("model", "build"),
+    [
+        pytest.param(
+            library_models.TaggedItem,
+            lambda: _meta_fields_set(
+                library_models.TaggedItem,
+                {"content_type": ["exact"], "object_id": ["exact"]},
+            ),
+            id="generic-foreign-key-columns",
+        ),
+        pytest.param(
+            library_models.Branch,
+            lambda: _meta_fields_set(library_models.Branch, {"tags": ["exact"]}),
+            id="generic-relation-reversing-it",
+        ),
+    ],
+)
+def test_the_generic_foreign_key_remedies_build(
+    model: type[models.Model],
+    build: Callable[[], type[FilterSet]],
+) -> None:
+    """The content type and object id columns, and the ``GenericRelation``, build the schema."""
+    filterset = build()
+    _serve_model(model, filterset)
+
+    finalize_django_types()
+
+    assert filter_lookup_table(filterset).by_input_attr
+
+
+def test_a_composite_primary_keys_columns_build_by_name() -> None:
+    """Each column a ``CompositePrimaryKey`` composes is typed by its own scalar."""
+    annotations = {
+        attr: ann
+        for attr, ann, _kwargs in _build_input_fields(
+            _meta_fields_set(RpCompositeParent, {"tenant_id": ["in"], "code": ["in"]}),
+        )
+    }
+
+    assert _annotations(_class_arg(annotations["tenant_id"])) == {"in_": list[int] | None}
+    assert _annotations(_class_arg(annotations["code"])) == {"in_": list[str] | None}
+
+
+def _keyed_model_choice(target: type[models.Model]) -> Filter:
+    """A ``ModelChoiceFilter`` on ``keyed`` querying ``target``."""
+    return django_filters.ModelChoiceFilter(field_name="keyed", queryset=target.objects.all())
+
+
+@pytest.mark.parametrize(
+    ("declare", "kind"),
+    [
+        pytest.param(None, "RelationPkFilter", id="relation-key-in-meta-fields"),
+        pytest.param(_keyed_model_choice, "ModelChoiceFilter", id="model-choice"),
+    ],
+)
+@pytest.mark.parametrize("registered", [False, True], ids=["unregistered", "registered"])
+@isolate_apps("apps.scalars")
+def test_a_relation_key_onto_an_unregistered_primary_key_is_refused_naming_the_key_column(
+    monkeypatch: pytest.MonkeyPatch,
+    declare: Callable[[type[models.Model]], Filter] | None,
+    kind: str,
+    *,
+    registered: bool,
+) -> None:
+    """A key filter typed from a related primary key no ``SCALAR_MAP`` entry covers names it.
+
+    The raw-key leaf ``Meta.fields`` generates and a model-choice filter are typed from the
+    column the related key stores, here a ``Base36Field`` primary key: the refusal names that
+    column and its ``SCALAR_MAP`` remedy, and an entry for its class builds both.
+    """
+
+    class _TokenKeyed(models.Model):
+        token: scalar_models.Base36Field = scalar_models.Base36Field(primary_key=True)
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class _TokenRef(models.Model):
+        keyed: models.ForeignKey[_TokenKeyed | Combinable, _TokenKeyed] = models.ForeignKey(
+            _TokenKeyed,
+            on_delete=models.CASCADE,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    if registered:
+        monkeypatch.setitem(converters_mod.SCALAR_MAP, scalar_models.Base36Field, str)
+    filterset = (
+        _meta_fields_set(_TokenRef, {"keyed": ["exact"]})
+        if declare is None
+        else _payload_set(declare(_TokenKeyed), model=_TokenRef)
+    )
+    if registered:
+        assert _build_input_fields(filterset)
+        return
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(filterset)
+
+    assert str(excinfo.value) == (
+        f"{filterset.__name__}: {kind} on 'keyed' reads _TokenKeyed.token, a Base36Field"
+        + _COLUMN_REMEDY
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "kind"),
+    [
+        pytest.param("span", "DurationField", id="duration"),
+        pytest.param("blob", "BinaryField", id="binary"),
+    ],
+)
+@isolate_apps("apps.scalars")
+def test_a_filter_over_a_django_column_with_no_scalar_is_refused_naming_its_remedy(
+    column: str,
+    kind: str,
+) -> None:
+    """A Django column class ``SCALAR_MAP`` leaves out takes the column remedy for its class."""
+
+    class _Unmapped(models.Model):
+        span: models.DurationField[object, datetime.timedelta] = models.DurationField()
+        blob: models.BinaryField[object, bytes | memoryview] = models.BinaryField()
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(_payload_set(CharFilter(field_name=column), model=_Unmapped))
+
+    assert str(excinfo.value) == (
+        f"PayloadValueSet: CharFilter on {column!r} reads _Unmapped.{column}, a {kind} no "
+        f"SCALAR_MAP entry types, so nothing types its input; register {kind} (or a class it "
+        "subclasses) in SCALAR_MAP."
+    )
+
+
+def test_a_scalar_map_entry_builds_a_filter_over_an_unregistered_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The column remedy: a ``SCALAR_MAP`` entry for the column's class types the filter."""
+    monkeypatch.setitem(converters_mod.SCALAR_MAP, scalar_models.Base36Field, str)
+
+    assert _value_leaves(
+        _payload_set(CharFilter(field_name="token"), model=scalar_models.OverrideSpecimen),
+    ) == {"exact": str | None}
 
 
 def test_a_relation_registered_as_json_keeps_the_column_scalar(

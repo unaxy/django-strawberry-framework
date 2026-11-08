@@ -3434,24 +3434,31 @@ def _model_walked_lookup(
     return LOOKUP_SEP.join(head), LOOKUP_SEP.join(leftover) or "exact"
 
 
-def _related_column_hint(field: ModelField, path: str) -> str:
-    """Return the refusal's pointer to the related column a relation ``field`` compares; ``""``.
+def _related_column_path(field: ModelField, path: str) -> str | None:
+    """Return ``path`` continued to the related column a relation ``field`` compares; ``None``.
 
     A relation applies only its own lookups (``RelatedExact``, ``RelatedIn``, ...) to the
     column its last join compares (``path_infos[-1].target_fields``); that column's own
     lookups are reached by naming it past the relation (``children__id``), which Django
-    answers alike whether or not a hop is walked. ``""`` for a column, and for a relation
+    answers alike whether or not a hop is walked. ``None`` for a column, and for a relation
     compared on more than one column or on a column that is itself a relation.
     """
     if not isinstance(
         field,
         (models.ForeignObject, models.ManyToManyField, models.ForeignObjectRel),
     ):
-        return ""
+        return None
     targets = field.path_infos[-1].target_fields
     if len(targets) != 1 or targets[0].is_relation:
+        return None
+    return LOOKUP_SEP.join((path, targets[0].name))
+
+
+def _related_column_hint(field: ModelField, path: str) -> str:
+    """Return the refusal's pointer to ``_related_column_path``'s column; ``""`` without one."""
+    column = _related_column_path(field, path)
+    if column is None:
         return ""
-    column = LOOKUP_SEP.join((path, targets[0].name))
     return f" (a relation's related column is named past it: field_name {column!r})"
 
 
