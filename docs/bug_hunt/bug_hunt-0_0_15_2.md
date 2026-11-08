@@ -2020,13 +2020,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 729. spec-027's `apply_async` paragraph says a "present-but-empty nested branch" constrains nothing, but a
-  present branch is active whatever its inner value (`utils/permissions.py::active_related_branches`), so
-  `{shelves: {}}` keeps only the parents with a visible, admitted shelf (`_restrict_through_branch`) and
-  `not: {shelves: {}}` keeps the rest, while a root `filter: {}` constrains nothing. The maintainer ruled that `{}`
-  constrains nothing everywhere and that to-many existence is spelled with explicit `some` / `none` / `every`
-  quantifiers on a per-target wrapper input (Prisma's shape), so this closes with that contract change. Plan:
-  `docs/relation-quantifiers-plan.md` (v1, unreviewed; adversarial review next). Found planning 216
 - [ ] 730. (robustness) A declared `CharFilter` / `NumberFilter` / `ListFilter` / `MultipleChoiceFilter` /
   `AllValuesMultipleFilter`, with or without `method=`, whose `field_name` ends on a relation (forward FK `branch` /
   `branch_id`, reverse FK, M2M, `GenericForeignKey`, `branch__shelves`) is refused at schema build with
@@ -2251,6 +2244,18 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## Waiting on you
 
+- [ ] 729. Decide: the to-one shape for the relation-quantifier contract change. The ruled part: `{}` constrains
+  nothing everywhere and a to-many `RelatedFilter` is typed as a per-target `some` / `none` / `every` wrapper (Prisma's
+  shape), which retires spec-027's contradictory `apply_async` sentence (a present nested branch is active whatever its
+  inner value, `utils/permissions.py::active_related_branches`, so `{shelves: {}}` keeps only the parents with a
+  visible, admitted shelf today). Once `{}` constrains nothing, a bare to-one `branch: {}` loses its only nested
+  "has a branch" spelling, so the to-one input changes too, and the plan
+  (`docs/relation-quantifiers-plan.md` D3) leaves it open: (a) a to-one wrapper `{is, isNot, isNull}`, which reshapes
+  every nested to-one query; (b) the bare nested input stays plus a parent-level `<rel>IsNull: Boolean` sibling, refused
+  at build where it collides with a flat copy or own filter of that name (recommended there); or (c) an explicit
+  `branch: null` meaning "has no branch". The names are a one-way door no rule settles. Also open there: does an empty
+  wrapper `shelves: {}` still fire the parent's `check_<rel>_permission` (D6, recommended yes), and the plan, still v1
+  and unreviewed, recommends that 216 land first. (Found planning 216)
 - [ ] 809. Decide: the to-many relation view cannot join some first keys round their target, so a to-many override whose
   value names no row, on a path starting at such a key, still drops a parent whose first related row is hidden: a
   non-null forward key whose reverse Django names no way (`related_name="+"`), a bare `ForeignObject` or a
