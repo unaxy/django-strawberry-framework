@@ -1224,18 +1224,36 @@ def test_a_choice_filter_over_a_column_whose_only_choice_is_blank_builds() -> No
     assert [member.name for member in enum_cls] == ["BLANK"]
 
 
+def _declared_label_annotation(declared: CharFilter) -> object:
+    """Type ``declared`` declared as ``label`` on a ``ScalarSpecimen`` set, as the build does.
+
+    django-filter's metaclass binds the declaration's ``field_name`` to its attribute name
+    (``label``), and the build types each leaf of the set's lookup table.
+    """
+
+    class LabelFilter(FilterSet):
+        label = declared
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    return convert_filter_to_input_annotation(
+        LabelFilter.base_filters["label"],
+        scalar_models.ScalarSpecimen._meta.get_field("label"),
+        None,
+        LabelFilter,
+    )
+
+
 def test_convert_filter_to_input_annotation_wraps_nullable() -> None:
     """``extra['required']=False`` (the default) wraps the annotation in `T | None`."""
-    f = CharFilter()
-    annotation = convert_filter_to_input_annotation(f, models.CharField(), None, FilterSet)
-    assert annotation == str | None
+    assert _declared_label_annotation(CharFilter()) == str | None
 
 
 def test_convert_filter_to_input_annotation_does_not_wrap_required() -> None:
-    f = CharFilter(required=True)
-    annotation = convert_filter_to_input_annotation(f, models.CharField(), None, FilterSet)
-    # Required filters return the scalar without the `| None` wrap.
-    assert annotation is str
+    """``required=True`` returns the scalar without the `| None` wrap."""
+    assert _declared_label_annotation(CharFilter(required=True)) is str
 
 
 # ---------------------------------------------------------------------------
