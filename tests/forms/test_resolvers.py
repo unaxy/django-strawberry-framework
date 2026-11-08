@@ -33,9 +33,16 @@ omitting a column through consumer code fakeshop's forms do not declare (a lossy
 row, a ``clean_<field>``, a form or model ``clean()``, an ``HStoreField``-shaped column),
 and a decimal past PostgreSQL ``numeric``'s format in a column with no ``max_digits``
 (which fakeshop cannot declare on the Django floor), written through an alias that reads
-as PostgreSQL. An ``OverflowError`` inside ``is_valid()`` is answered here where no shipped
-form raises it: beside a form error collected before it, raised by a form ``clean()`` itself
-(propagated), any other exception (propagated) and a plain form's (propagated).
+as PostgreSQL. A value the write alias cannot store is refused before model validation
+inside ``is_valid()`` converts or binds it: a ``clean_<field>``'s value beside a form error
+collected before it; a bounded decimal past ``numeric``'s format under a two-field and a
+conditional ``UniqueConstraint`` and ``unique_together`` (fakeshop's live row runs on
+SQLite); a model's own ``clean_fields`` / ``validate_unique`` / ``validate_constraints``
+overrides, each run once with the refused column excluded; a ``validate_unique`` a
+``get_form`` hook sets on the instance, run and kept; and a form ``clean()`` skipping
+``super().clean()`` under a model ``clean()`` setting the value. An exception
+``is_valid()`` raises propagates: a form ``clean()``'s own ``OverflowError``, any other
+exception and a plain form's.
 """
 
 from __future__ import annotations
@@ -122,7 +129,8 @@ from tests._postgres_fields import FakeArrayField, FakeSplitArrayWidget, patch_a
 from tests._postgresql_stand_in import numeric_refusing_postgresql
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Collection, Iterable, Mapping
+    from typing import TypeVar
 
     from django.contrib.postgres.fields import ArrayField
     from django.db.models.expressions import Combinable
@@ -139,6 +147,15 @@ if TYPE_CHECKING:
         str | datetime.datetime | datetime.date | Combinable | None,
         datetime.datetime | None,
     ]
+    _Amount: TypeAlias = models.DecimalField[
+        str | float | decimal.Decimal | Combinable,
+        decimal.Decimal,
+    ]
+    _Time: TypeAlias = models.TimeField[
+        str | datetime.time | datetime.datetime | Combinable,
+        datetime.time,
+    ]
+    _M = TypeVar("_M", bound=models.Model)
 
 
 def _json_at(value: object, *path: str | int) -> object:
@@ -7396,6 +7413,16 @@ class _DisabledSplitStampForm(forms.ModelForm[_KeptRow]):
         fields = ("title", "at")
 
 
+class _DisabledDateOfStampForm(forms.ModelForm[_KeptRow]):
+    """``_KeptStampForm`` with the lossy ``at`` disabled: Django cleans its initial."""
+
+    at = _DateOfStamp(disabled=True, required=False)
+
+    class Meta:
+        model = _KeptRow
+        fields = ("title", "at")
+
+
 class _PresentedStampForm(_DisabledStampForm):
     """Presents ``at`` as another instant through its own ``get_initial_for_field``."""
 
@@ -7569,8 +7596,9 @@ def _update_omitting(
     bind: dict[str, object] | None = None,
     hook: str = "copy",
     rebound: dict[str, object] | None = None,
+    sent: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Update a row stored with ``stored``, sending only ``title``; return its stored columns.
+    """Update a row stored with ``stored``, sending ``title`` and ``sent``; return its columns.
 
     The update succeeds with empty ``errors``; the row is read back through its base
     manager, ``title`` included.
@@ -7608,7 +7636,7 @@ def _update_omitting(
         res = schema.execute_sync(
             f"mutation($id: ID!, $d: {update._input_class.__name__}!){{ "
             "updateRow(id: $id, data: $d){ result{ title } errors{ field codes } } }",
-            variable_values={"id": str(pk_of(row)), "d": {"title": title}},
+            variable_values={"id": str(pk_of(row)), "d": {"title": title, **(sent or {})}},
         )
         assert res.errors is None, res.errors
         assert res.data == {"updateRow": {"result": {"title": title}, "errors": []}}
@@ -7642,6 +7670,36 @@ def test_update_omitting_a_datetime_under_a_lossy_date_field_keeps_it(
     with override_settings(TIME_ZONE=time_zone):
         row = _update_omitting(_KeptRow, _KeptStampForm, {"at": stamp})
     assert row == {"title": "New", "note": "", "at": stamp}
+
+
+#: A stored datetime whose local midnight under ``Asia/Tokyo`` falls before year 1.
+_YEAR_ONE_STAMP = datetime.datetime(1, 1, 1, 3, 4, 5, tzinfo=datetime.timezone.utc)
+
+
+@pytest.mark.filterwarnings("ignore:DateTimeField .* received a naive datetime:RuntimeWarning")
+@pytest.mark.parametrize(
+    "sent",
+    [pytest.param({}, id="omitted"), pytest.param({"at": "2020-01-02"}, id="sent")],
+)
+@pytest.mark.django_db(transaction=True)
+def test_update_through_a_disabled_lossy_date_field_keeps_the_stored_datetime(
+    sent: dict[str, object],
+) -> None:
+    """A disabled ``DateField`` subclass over a ``DateTimeField`` keeps the stored datetime.
+
+    Django cleans the disabled field's initial and ignores a value sent for it, so its
+    column is the stored datetime the update keeps, whether the input omits the field or
+    sends one: under ``Asia/Tokyo`` year 1's local midnight, the date's conversion, is never
+    the ``invalid`` error.
+    """
+    with override_settings(TIME_ZONE="Asia/Tokyo"):
+        row = _update_omitting(
+            _KeptRow,
+            _DisabledDateOfStampForm,
+            {"at": _YEAR_ONE_STAMP},
+            sent=sent,
+        )
+    assert row == {"title": "New", "note": "", "at": _YEAR_ONE_STAMP}
 
 
 @pytest.mark.parametrize(
@@ -8276,7 +8334,8 @@ def test_modelform_write_stores_a_decimal_within_postgresql_numeric(
 
 
 # ---------------------------------------------------------------------------
-# An ``OverflowError`` inside ``is_valid()`` (``_bound_form_or_field_errors``)
+# A value refused before model validation inside ``is_valid()`` converts or binds it
+# (``_unstorable_values_kept_from_checks``), and exceptions ``is_valid()`` raises
 # ---------------------------------------------------------------------------
 
 #: The aware datetime a hook answers for ``0001-01-01``: its midnight UTC, whose date under
@@ -8371,14 +8430,14 @@ def _create_specimen(
 
 @pytest.mark.django_db
 @override_settings(TIME_ZONE="America/New_York")
-def test_overflow_inside_is_valid_merges_the_column_refusal_with_the_form_s_errors() -> None:
-    """``is_valid()`` raising ``OverflowError`` answers each column the instance cannot store.
+def test_a_hook_value_the_date_column_cannot_store_is_refused_beside_the_form_s_errors() -> None:
+    """A column the instance cannot store is refused before ``clean_fields()`` converts it.
 
-    ``clean_label`` refuses the label, then ``clean_occurred_on``'s aware midnight UTC of
-    ``0001-01-01`` makes ``DateField.to_python`` raise ``OverflowError`` inside
-    ``_post_clean`` (its date under ``America/New_York`` falls in year 0). The form's errors
-    collected before the overflow and ``occurred_on``'s ``invalid`` error are answered
-    together, keyed to the input fields, with nothing written.
+    ``clean_label`` refuses the label, and ``clean_occurred_on``'s aware midnight UTC of
+    ``0001-01-01``, whose date under ``America/New_York`` falls in year 0, would make
+    ``DateField.to_python`` raise ``OverflowError`` inside ``_post_clean``. The form's own
+    error and ``occurred_on``'s ``invalid`` error are answered together, keyed to the input
+    fields, with nothing written.
     """
     result = _create_specimen(_RefusedLabelInstantDayForm)
 
@@ -8416,11 +8475,10 @@ def test_an_exception_naming_no_unstorable_column_propagates_from_is_valid(
     form_class: type[forms.ModelForm[scalars_models.ScalarSpecimen]],
     raised: type[Exception],
 ) -> None:
-    """Only an ``OverflowError`` converting a value the instance holds is a field's refusal.
+    """An exception ``is_valid()`` raises is the application's and propagates.
 
-    A form ``clean()`` raising its own ``OverflowError`` leaves the instance holding nothing
-    the database refuses: the application's error propagates. Any other exception
-    propagates even when the instance holds such a value.
+    A form ``clean()`` raising its own ``OverflowError`` propagates, and so does any other
+    exception, even when the instance holds a value the database refuses.
     """
     result = _create_specimen(form_class)
 
@@ -8431,7 +8489,7 @@ def test_an_exception_naming_no_unstorable_column_propagates_from_is_valid(
 
 @pytest.mark.django_db
 def test_an_overflow_inside_a_plain_form_s_is_valid_propagates() -> None:
-    """A plain form holds no row, so its ``OverflowError`` is the application's own."""
+    """A plain form holds no row: its ``OverflowError`` is the application's own and propagates."""
 
     class TotalForm(forms.Form):
         total = forms.IntegerField()
@@ -8455,3 +8513,455 @@ def test_an_overflow_inside_a_plain_form_s_is_valid_propagates() -> None:
             instance=None,
             specs=Submit._input_field_specs,
         )
+
+
+class _UniqueAmountColumns(models.Model):
+    """A bounded ``amount`` beside the ``other`` and ``flag`` a uniqueness rule reads."""
+
+    amount: _Amount = models.DecimalField(max_digits=20, decimal_places=4)
+    other: _Int = models.IntegerField(default=0)
+    flag: _Bool = models.BooleanField(default=True)
+
+    class Meta:
+        abstract = True
+
+
+class _PairUniqueAmount(_UniqueAmountColumns):
+    """``amount`` unique together with ``other`` through a two-field ``UniqueConstraint``."""
+
+    class Meta(_UniqueAmountColumns.Meta):
+        app_label = "products"
+        managed = False
+        db_table = "forms_pair_unique_amount"
+        constraints = (
+            models.UniqueConstraint(
+                fields=("amount", "other"),
+                name="forms_pair_unique_amount_key",
+            ),
+        )
+
+
+class _ConditionalUniqueAmount(_UniqueAmountColumns):
+    """``amount`` unique among the ``flag`` rows through a conditional ``UniqueConstraint``."""
+
+    class Meta(_UniqueAmountColumns.Meta):
+        app_label = "products"
+        managed = False
+        db_table = "forms_conditional_unique_amount"
+        constraints = (
+            models.UniqueConstraint(
+                fields=("amount",),
+                condition=models.Q(flag=True),
+                name="forms_conditional_unique_amount_key",
+            ),
+        )
+
+
+class _TogetherUniqueAmount(_UniqueAmountColumns):
+    """``amount`` unique together with ``other`` through ``unique_together``."""
+
+    class Meta(_UniqueAmountColumns.Meta):
+        app_label = "products"
+        managed = False
+        db_table = "forms_together_unique_amount"
+        unique_together = (("amount", "other"),)
+
+
+class _PairUniqueAmountForm(forms.ModelForm[_PairUniqueAmount]):
+    class Meta:
+        model = _PairUniqueAmount
+        fields = ("amount", "other", "flag")
+
+
+class _ConditionalUniqueAmountForm(forms.ModelForm[_ConditionalUniqueAmount]):
+    class Meta:
+        model = _ConditionalUniqueAmount
+        fields = ("amount", "other", "flag")
+
+
+class _TogetherUniqueAmountForm(forms.ModelForm[_TogetherUniqueAmount]):
+    class Meta:
+        model = _TogetherUniqueAmount
+        fields = ("amount", "other", "flag")
+
+
+#: Each uniqueness shape over ``amount``: its model and the ``ModelForm`` writing it.
+_UNIQUE_AMOUNT_SHAPES = [
+    pytest.param(_PairUniqueAmount, _PairUniqueAmountForm, id="two-field-constraint"),
+    pytest.param(
+        _ConditionalUniqueAmount,
+        _ConditionalUniqueAmountForm,
+        id="conditional-constraint",
+    ),
+    pytest.param(_TogetherUniqueAmount, _TogetherUniqueAmountForm, id="unique-together"),
+]
+
+
+def _write_via_form(
+    model_class: type[_M],
+    writing_form: type[forms.ModelForm[_M]],
+    data: dict[str, object],
+    pk: object = None,
+    get_form_hook: Callable[[forms.ModelForm[_M]], None] | None = None,
+) -> object:
+    """Run ``writing_form``'s create (``pk`` ``None``) or update of ``pk``; its payload.
+
+    ``get_form_hook`` is handed each form the mutation's ``get_form`` builds.
+    """
+
+    class RowT(DjangoType):
+        class Meta:
+            model = model_class
+            fields = ("id",)
+            primary = True
+
+    class WriteRow(DjangoModelFormMutation):
+        class Meta:
+            form_class = writing_form
+            operation = "create" if pk is None else "update"
+            permission_classes = [_AllowAll]
+
+        @override
+        def get_form(
+            self,
+            info: strawberry.Info[object, object],
+            *,
+            data: dict[str, object],
+            files: dict[str, object],
+            instance: models.Model | None = None,
+        ) -> forms.ModelForm[_M]:
+            form = require_instance(
+                super().get_form(info, data=data, files=files, instance=instance),
+                writing_form,
+            )
+            if get_form_hook is not None:
+                get_form_hook(form)
+            return form
+
+    @strawberry.type
+    class Mutation:
+        write_row = DjangoMutationField(WriteRow)
+
+    finalize_django_types()
+    del RowT
+    selection = "{ result { id } errors { field messages codes } }"
+    if pk is None:
+        document = (
+            f"mutation($d: {writing_form.__name__}Input!) {{ writeRow(data: $d) {selection} }}"
+        )
+        variables: dict[str, object] = {"d": data}
+    else:
+        document = (
+            f"mutation($id: ID!, $d: {writing_form.__name__}PartialInput!) "
+            f"{{ writeRow(id: $id, data: $d) {selection} }}"
+        )
+        variables = {"id": str(pk), "d": data}
+    result = _schema(Mutation).execute_sync(document, variable_values=variables)
+    assert result.errors is None, result.errors
+    return _json_at(result.data, "writeRow")
+
+
+def _unstorable_payload(field: str) -> dict[str, object]:
+    """The payload refusing ``field`` with its ``invalid`` storability error."""
+    return {
+        "result": None,
+        "errors": [
+            {
+                "field": field,
+                "messages": ["Enter a value the database can represent."],
+                "codes": ["invalid"],
+            },
+        ],
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize(("model_class", "form_class"), _UNIQUE_AMOUNT_SHAPES)
+@pytest.mark.parametrize(
+    ("wire", "stored"),
+    [
+        pytest.param("0E+1073741823", None, id="zero-at-exponent-limit"),
+        pytest.param("12.5", decimal.Decimal("12.5"), id="in-range"),
+    ],
+)
+def test_decimal_past_postgresql_numeric_is_refused_before_its_uniqueness_check(
+    operation: str,
+    model_class: type[models.Model],
+    form_class: type[forms.ModelForm[models.Model]],
+    wire: str,
+    stored: decimal.Decimal | None,
+) -> None:
+    """A decimal ``numeric`` refuses is ``amount``'s error before a uniqueness check binds it.
+
+    ``amount``'s bounded ``DecimalValidator`` counts no digit for a zero's positive exponent,
+    so the form is valid while PostgreSQL refuses the bind: the uniqueness check inside
+    ``is_valid()`` would raise its ``DataError`` (a two-field ``UniqueConstraint``,
+    ``unique_together``) or read it as a violation, the ``"__all__"`` answer (a conditional
+    ``UniqueConstraint``). The form answers ``amount``'s ``invalid`` error instead, with
+    nothing written; a decimal ``numeric`` holds is written.
+    """
+    with numeric_refusing_postgresql(model_class):
+        pk = (
+            saved_pk(model_class._default_manager.create(amount=decimal.Decimal(7), other=1))
+            if operation == "update"
+            else None
+        )
+        payload = _write_via_form(
+            model_class,
+            form_class,
+            {"amount": wire, "other": 1, "flag": True},
+            pk,
+        )
+        amounts = list(model_class._default_manager.values_list("amount", flat=True))
+
+    if stored is None:
+        assert payload == _unstorable_payload("amount")
+        assert amounts == ([] if pk is None else [decimal.Decimal(7)])
+    else:
+        assert _json_at(payload, "errors") == []
+        assert amounts == [stored]
+
+
+class _CountedUniqueTime(models.Model):
+    """An unmanaged row with a unique ``opened`` whose model validation hooks record each call.
+
+    ``calls`` holds, per hook, the ``exclude`` of each call, sorted.
+    """
+
+    calls: ClassVar[dict[str, list[list[str]]]] = {}
+    #: The time a model ``clean()`` sets on ``opened`` after ``clean_fields()`` ran, if any.
+    clean_sets: ClassVar[datetime.time | None] = None
+
+    label: _Text = models.TextField()
+    opened: _Time = models.TimeField(unique=True)
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        db_table = "forms_counted_unique_time"
+
+    def _record(self, hook: str, exclude: Iterable[str] | None) -> None:
+        type(self).calls.setdefault(hook, []).append(sorted(exclude or ()))
+
+    @override
+    def clean(self) -> None:
+        clean_sets = type(self).clean_sets
+        if clean_sets is not None:
+            self.opened = clean_sets
+
+    @override
+    def clean_fields(self, exclude: Collection[str] | None = None) -> None:
+        self._record("clean_fields", exclude)
+        super().clean_fields(exclude=exclude)
+
+    @override
+    def validate_unique(self, exclude: Collection[str] | None = None) -> None:
+        self._record("validate_unique", exclude)
+        super().validate_unique(exclude=exclude)
+
+    @override
+    def validate_constraints(self, exclude: Collection[str] | None = None) -> None:
+        self._record("validate_constraints", exclude)
+        super().validate_constraints(exclude=exclude)
+
+
+class _CountedUniqueTimeForm(forms.ModelForm[_CountedUniqueTime]):
+    class Meta:
+        model = _CountedUniqueTime
+        fields = ("label", "opened")
+
+
+class _NoSuperCleanForm(_CountedUniqueTimeForm):
+    """A form ``clean()`` skipping ``super().clean()``: ``ModelForm`` runs no uniqueness check."""
+
+    @override
+    def clean(self) -> dict[str, object] | None:
+        return self.cleaned_data
+
+
+class _UnfieldedOpenedForm(forms.ModelForm[_CountedUniqueTime]):
+    """A form with no ``opened`` field whose ``clean()`` sets the column to an aware time.
+
+    Its ``validate_unique()`` checks the instance with no ``exclude``, so the check meets a
+    refused column the form declares no field for.
+    """
+
+    class Meta:
+        model = _CountedUniqueTime
+        fields = ("label",)
+
+    @override
+    def clean(self) -> dict[str, object] | None:
+        cleaned = super().clean()
+        aware = datetime.time(9, 30, tzinfo=datetime.timezone.utc)
+        self.cleaned_data["opened"] = aware
+        self.instance.opened = aware
+        return cleaned
+
+    @override
+    def validate_unique(self) -> None:
+        try:
+            self.instance.validate_unique()
+        except ValidationError as error:
+            self.add_error(None, error)
+
+
+#: The model validation hooks ``_post_clean`` reaches on every supported Django.
+_CHECKS = ("clean_fields", "validate_unique", "validate_constraints")
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite cannot store an aware time")
+@pytest.mark.parametrize(
+    ("sent", "refused"),
+    [
+        pytest.param("09:30:00+02:00", True, id="aware-refused"),
+        pytest.param("09:30:00", False, id="naive-stored"),
+    ],
+)
+def test_model_validation_overrides_run_once_with_the_refused_column_excluded(
+    sent: str,
+    *,
+    refused: bool,
+) -> None:
+    """A model's own ``clean_fields``, ``validate_unique`` and ``validate_constraints`` run once.
+
+    Each runs once whether the value is refused or stored, so no consumer override is
+    skipped; a refused ``opened`` is in the ``exclude`` each is handed, so neither
+    ``clean_fields()`` converts it nor ``validate_unique()`` binds it, and its ``invalid``
+    error is the answer.
+    """
+    _CountedUniqueTime.calls = {}
+    with _blank_choice_table(_CountedUniqueTime):
+        payload = _write_via_form(
+            _CountedUniqueTime,
+            _CountedUniqueTimeForm,
+            {"label": "row", "opened": sent},
+        )
+        rows = _CountedUniqueTime.objects.count()
+
+    calls = _CountedUniqueTime.calls
+    assert sorted(calls) == sorted(_CHECKS), calls
+    assert all(len(excludes) == 1 for excludes in calls.values()), calls
+    assert all(("opened" in excludes[0]) is refused for excludes in calls.values()), calls
+    if refused:
+        assert payload == _unstorable_payload("opened")
+        assert rows == 0
+    else:
+        assert _json_at(payload, "errors") == []
+        assert rows == 1
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite cannot store an aware time")
+@pytest.mark.parametrize(
+    ("sent", "refused"),
+    [
+        pytest.param("09:30:00+02:00", True, id="aware-refused"),
+        pytest.param("09:30:00", False, id="naive-stored"),
+    ],
+)
+def test_a_validate_unique_a_get_form_hook_sets_on_the_instance_runs_and_is_kept(
+    sent: str,
+    *,
+    refused: bool,
+) -> None:
+    """A ``validate_unique`` a ``get_form`` hook sets on the instance runs once and stays set.
+
+    The storability check runs before it for the length of ``is_valid()`` and is removed
+    after, leaving the hook's own attribute on the instance.
+    """
+    seen: list[list[str]] = []
+    forms_built: list[forms.ModelForm[_CountedUniqueTime]] = []
+
+    def own_validate_unique(exclude: Collection[str] | None = None) -> None:
+        seen.append(sorted(exclude or ()))
+
+    def set_own_validate_unique(form: forms.ModelForm[_CountedUniqueTime]) -> None:
+        form.instance.validate_unique = own_validate_unique
+        forms_built.append(form)
+
+    _CountedUniqueTime.calls = {}
+    with _blank_choice_table(_CountedUniqueTime):
+        payload = _write_via_form(
+            _CountedUniqueTime,
+            _CountedUniqueTimeForm,
+            {"label": "row", "opened": sent},
+            get_form_hook=set_own_validate_unique,
+        )
+
+    assert [("opened" in exclude) for exclude in seen] == [refused]
+    assert "validate_unique" not in _CountedUniqueTime.calls
+    [form] = forms_built
+    namespace = vars(form.instance)
+    assert namespace["validate_unique"] is own_validate_unique
+    assert not any(name in namespace for name in ("clean_fields", "validate_constraints"))
+    if refused:
+        assert payload == _unstorable_payload("opened")
+    else:
+        assert _json_at(payload, "errors") == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite cannot store an aware time")
+@pytest.mark.parametrize(
+    ("sent", "clean_sets"),
+    [
+        pytest.param("09:30:00+02:00", None, id="sent"),
+        pytest.param(
+            "09:30:00",
+            datetime.time(9, 30, tzinfo=datetime.timezone.utc),
+            id="model-clean-sets-it",
+        ),
+    ],
+)
+def test_a_form_clean_skipping_super_still_refuses_the_unstorable_value(
+    sent: str,
+    clean_sets: datetime.time | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A form ``clean()`` skipping ``super().clean()`` runs no uniqueness check, yet refuses.
+
+    ``ModelForm`` then calls no ``validate_unique()`` (nor, on Django 6,
+    ``validate_constraints()``). An aware time sent is refused before ``clean_fields()``
+    converts it; one a model ``clean()`` sets after ``clean_fields()`` ran is refused by the
+    check after ``is_valid()``. Either is ``opened``'s ``invalid`` error, with nothing
+    written.
+    """
+    _CountedUniqueTime.calls = {}
+    monkeypatch.setattr(_CountedUniqueTime, "clean_sets", clean_sets)
+    with _blank_choice_table(_CountedUniqueTime):
+        payload = _write_via_form(
+            _CountedUniqueTime,
+            _NoSuperCleanForm,
+            {"label": "row", "opened": sent},
+        )
+        rows = _CountedUniqueTime.objects.count()
+
+    assert "validate_unique" not in _CountedUniqueTime.calls
+    assert payload == _unstorable_payload("opened")
+    assert rows == 0
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite cannot store an aware time")
+def test_a_refused_column_without_a_form_field_is_answered_after_is_valid() -> None:
+    """A refused column the form declares no field for is excluded, then answered by its name.
+
+    ``_UnfieldedOpenedForm.clean()`` sets ``opened``, a column with no form field, and its
+    ``validate_unique()`` checks the instance with no ``exclude``: the column joins the
+    ``exclude`` the check runs with, never added as a form error (the form has no field to
+    carry it), and the check after ``is_valid()`` answers ``opened``'s ``invalid`` error
+    under the column's own name, with nothing written.
+    """
+    _CountedUniqueTime.calls = {}
+    with _blank_choice_table(_CountedUniqueTime):
+        payload = _write_via_form(_CountedUniqueTime, _UnfieldedOpenedForm, {"label": "row"})
+        rows = _CountedUniqueTime.objects.count()
+
+    assert [("opened" in exclude) for exclude in _CountedUniqueTime.calls["validate_unique"]] == [
+        True,
+    ]
+    assert payload == _unstorable_payload("opened")
+    assert rows == 0

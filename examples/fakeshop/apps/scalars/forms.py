@@ -36,6 +36,11 @@ list). Its ``payload`` input is the ``CharField``'s ``String``, not the column's
 ``CharField`` reading JSON text: its ``clean`` parses the text sent and its
 ``prepare_value`` presents a value as its JSON text, as ``forms.JSONField``'s does, so an update
 omitting ``payload`` reads the stored JSON value back from the form's presentation of it.
+
+``UniqueScalarSpecimenForm`` writes ``UniqueScalarSpecimen``, whose temporal and decimal
+columns are each under a uniqueness rule the form's ``validate_unique()`` /
+``validate_constraints()`` binds in a query inside ``is_valid()``: a value the database cannot
+store is refused as the field's error before that query runs.
 """
 
 from __future__ import annotations
@@ -225,3 +230,22 @@ class NullableScalarSpecimenJsonTextForm(forms.ModelForm[models.NullableScalarSp
     class Meta:
         model = models.NullableScalarSpecimen
         fields = ("label", "payload")
+
+
+class UniqueScalarSpecimenForm(forms.ModelForm[models.UniqueScalarSpecimen]):
+    """A ``UniqueScalarSpecimen`` ``ModelForm`` over every column, each under a uniqueness rule.
+
+    Django's form fields clean an aware time, an aware datetime under ``USE_TZ = False`` and,
+    on PostgreSQL, a zero whose exponent ``numeric`` refuses; the form's uniqueness checks would
+    bind each in a query. The mutation answers each as the field's ``invalid`` error first.
+    """
+
+    class Meta:
+        model = models.UniqueScalarSpecimen
+        fields = (
+            "label",
+            "opened_time",
+            "opened_at",
+            "amount",
+            "active",
+        )

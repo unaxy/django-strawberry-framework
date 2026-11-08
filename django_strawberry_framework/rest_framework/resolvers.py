@@ -82,7 +82,10 @@ The serializer-specific invariants this module owns:
   validated date, datetime, time or duration the pinned alias cannot store (or, on
   PostgreSQL, read back), or a decimal past PostgreSQL ``numeric``'s format its column's
   own validators accept, is the field's ``invalid`` error through the same flattener
-  before any write (``_unstorable_value_errors``); DRF's own ``overflow`` answer comes first, and a
+  before any write: inside ``is_valid()`` before DRF's uniqueness validators bind it in a
+  query, for the field's converted value and a ``validate_<field>`` hook's
+  (``_hold_unstorable_values``), and after it for a value ``validate()`` sets
+  (``_unstorable_value_errors``). DRF's own ``overflow`` answer comes first, and a
   datetime DRF cannot place in a time zone, which it raises as a raw ``OverflowError``,
   fails its ``DateTimeField`` with that same ``overflow`` error
   (``_translate_datetime_overflow``).
@@ -155,7 +158,7 @@ from typing import TYPE_CHECKING, Final, Literal, TypeGuard, TypeVar, cast, over
 from django.core.exceptions import FieldDoesNotExist
 from django.core.files import File
 from django.db import transaction
-from django.db.models import QuerySet
+from django.db.models import Field, QuerySet
 from django.db.models.signals import post_save, pre_save
 from rest_framework import serializers
 from rest_framework.exceptions import ErrorDetail
@@ -319,6 +322,16 @@ if TYPE_CHECKING:
 
         def __call__(self, value: datetime.datetime | str) -> datetime.datetime: ...
 
+    class _ToInternal(Protocol):
+        """A field's ``to_internal_value``, as the storability hold wraps it."""
+
+        def __call__(self, data: object) -> object: ...
+
+    class _RunValidators(Protocol):
+        """A serializer's ``run_validators``, as the storability hold wraps it."""
+
+        def __call__(self, value: object) -> None: ...
+
     class _RowSource(Protocol):
         """A validator's ``queryset``: a queryset or a manager, either of which ``all()`` re-reads."""
 
@@ -331,9 +344,13 @@ if TYPE_CHECKING:
 
     #: Any ``File``, binary or text.
     _FileAny: TypeAlias = File[bytes] | File[str]
+    #: Any model field, its set and get types unread.
+    _FieldAny: TypeAlias = models.Field[object, object]
 else:
-    # ``File`` has no ``__class_getitem__`` at runtime: the hint stays the class.
+    # Neither ``File`` nor ``Field`` has a ``__class_getitem__`` at runtime (only the
+    # ``django_stubs_ext`` patch adds one): each hint stays the class.
     _FileAny = File
+    _FieldAny = Field
 
 
 #: One serializer's validators, kept in their own type through the queryset pinning.
@@ -1675,6 +1692,107 @@ def _translate_datetime_overflow(serializer: DRFSerializer) -> None:
             node.to_internal_value = _overflow_failing(node, node.to_internal_value)
 
 
+def _written_columns(
+    serializer: DRFSerializer,
+    model: type[models.Model],
+) -> dict[str, tuple[DRFField, _FieldAny]]:
+    """Map each writable bound field whose ``source`` names a concrete column to the column.
+
+    The source is a top-level ``validated_data`` key DRF assigns onto the instance
+    (``utils/relations.py::written_model_field``); a ``read_only`` field and one naming no
+    concrete column of ``model`` write nothing the storability rule reads.
+    """
+    columns: dict[str, tuple[DRFField, _FieldAny]] = {}
+    for name, field in bound_fields(serializer).items():
+        if field.read_only:
+            continue
+        column = written_model_field(model, field.source or name)
+        if column is not None:
+            columns[name] = (field, column)
+    return columns
+
+
+def _hold_unstorable_values(serializer: DRFSerializer, model: type[models.Model]) -> None:
+    """Fail each value the pinned alias cannot store before a validator binds it.
+
+    DRF's queryset-backed validators bind each checked value in a query inside
+    ``is_valid()`` (``UniqueValidator`` on the field, ``UniqueTogetherValidator`` with or
+    without a constraint ``condition`` on the serializer), and a value the database refuses
+    there raises its own error: SQLite's ``OverflowError`` binding a duration past 64 bits
+    of microseconds, or an aware datetime a ``validate_<field>`` hook leaves whose projection
+    onto the connection's time zone leaves years 1..9999, escapes ``is_valid()`` raw, and the
+    ``TypeError`` / ``ValueError`` / ``DataError`` DRF's ``qs_exists`` swallows reads as "no
+    duplicate" (on PostgreSQL leaving the write transaction aborted). Each writable
+    top-level field writing a concrete column (``_written_columns``) gets its current
+    ``to_internal_value`` wrapped on the instance, so a converted value
+    ``utils/errors.py::unstorable_value`` refuses on the pinned alias fails the field with
+    the ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` error before its validators run, and the
+    serializer's ``run_validators`` is wrapped likewise for a value a ``validate_<field>``
+    hook set, failing those fields before any serializer-level validator runs, as DRF runs
+    none after a field error. A value ``validate()`` sets is held after ``is_valid()``
+    (``_unstorable_value_errors``). A nested serializer's values are written by the
+    consumer's own ``create()`` / ``update()`` and are not held here.
+    """
+    columns = _written_columns(serializer, model)
+    for field, column in columns.values():
+        field.to_internal_value = _storability_failing(column, field.to_internal_value)
+    serializer.run_validators = _storability_checked_validators(
+        columns,
+        serializer.run_validators,
+    )
+
+
+def _storability_failing(column: _FieldAny, original: _ToInternal) -> _ToInternal:
+    """Return ``original`` wrapped to fail its field on a value ``column`` cannot store."""
+
+    def _to_internal_value(data: object) -> object:
+        value = original(data)
+        if unstorable_value(column, value, pinned_write_alias):
+            raise DRFValidationError(UNBINDABLE_TEMPORAL_MESSAGE, code=FIELD_ERROR_CODE_INVALID)
+        return value
+
+    return _to_internal_value
+
+
+def _storability_checked_validators(
+    columns: Mapping[str, tuple[DRFField, _FieldAny]],
+    original: _RunValidators,
+) -> _RunValidators:
+    """Return ``original`` run after each field whose value its column cannot store fails."""
+
+    def _run_validators(value: object) -> None:
+        refused = _unstorable_written_values(columns, value)
+        if refused:
+            raise DRFValidationError(refused)
+        original(value)
+
+    return _run_validators
+
+
+def _unstorable_written_values(
+    columns: Mapping[str, tuple[DRFField, _FieldAny]],
+    values: object,
+) -> dict[str, list[ErrorDetail]]:
+    """Map each field of ``columns`` whose value in ``values`` the pinned alias cannot store.
+
+    ``values`` is keyed by each field's ``source``: the serializer's validated values inside
+    ``is_valid()`` (``_storability_checked_validators``) or its ``validated_data`` after it
+    (``_unstorable_value_errors``). A refused field answers the ``invalid``
+    ``UNBINDABLE_TEMPORAL_MESSAGE`` ``ErrorDetail`` under its field name, the shape
+    ``serializer.errors`` carries. A value that is no mapping (what a ``to_internal_value``
+    or ``validate()`` override returns in its place, which DRF passes on and its own
+    ``save()`` refuses) holds no column value to read.
+    """
+    if not is_mapping(values):
+        return {}
+    return {
+        name: [ErrorDetail(UNBINDABLE_TEMPORAL_MESSAGE, code=FIELD_ERROR_CODE_INVALID)]
+        for name, (field, column) in columns.items()
+        if (source := field.source or name) in values
+        and unstorable_value(column, values[source], pinned_write_alias)
+    }
+
+
 def _overflow_failing(
     field: serializers.DateTimeField,
     original: _DateTimeToInternal,
@@ -2772,24 +2890,19 @@ def _unstorable_value_errors(
     PostgreSQL's ``numeric`` refuses at ``save()``. Each writable bound field whose
     ``source`` is a top-level ``validated_data`` key naming a concrete column of ``model``
     (``utils/relations.py::written_model_field``) is held to
-    ``utils/errors.py::unstorable_value`` on the pinned alias; a refused one answers
+    ``utils/errors.py::unstorable_value`` on the pinned alias
+    (``_unstorable_written_values``); a refused one answers
     the ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` ``ErrorDetail`` under its field name,
     the shape ``serializer.errors`` carries, so the flattener keys it to the input the
-    client sent. A nested serializer's values are written by the consumer's own
-    ``create()`` / ``update()`` and are not read here.
+    client sent. Inside ``is_valid()`` each such value is held before DRF's uniqueness
+    validators bind it (``_hold_unstorable_values``), so this answers a value ``validate()``
+    sets. A nested serializer's values are written by the consumer's own ``create()`` /
+    ``update()`` and are not read here.
     """
-    validated_data = validated_data_of(serializer)
-    errors: dict[str, list[ErrorDetail]] = {}
-    for name, field in bound_fields(serializer).items():
-        source = field.source or name
-        if field.read_only or not is_mapping(validated_data) or source not in validated_data:
-            continue
-        column = written_model_field(model, source)
-        if unstorable_value(column, validated_data[source], pinned_write_alias):
-            errors[name] = [
-                ErrorDetail(UNBINDABLE_TEMPORAL_MESSAGE, code=FIELD_ERROR_CODE_INVALID),
-            ]
-    return errors
+    return _unstorable_written_values(
+        _written_columns(serializer, model),
+        validated_data_of(serializer),
+    )
 
 
 def _attempted_row_integrity_errors(
@@ -2922,6 +3035,9 @@ def _guarded_serializer_write(
     # A datetime DRF cannot place in a time zone fails with its own ``overflow`` error
     # instead of escaping ``is_valid()`` as a raw ``OverflowError``.
     _translate_datetime_overflow(serializer)
+    # A value the pinned alias cannot store fails its field before DRF's uniqueness
+    # validators bind it in a query.
+    _hold_unstorable_values(serializer, backing_model_of(mutation_cls._mutation_meta))
     # The relation-intent ledger: record the EXACT objects
     # each relation field's ``run_validation()`` resolves - top-level AND nested -
     # BEFORE field-level or object-level validators get a chance to replace them.

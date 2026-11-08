@@ -727,7 +727,7 @@ examples/fakeshop/apps/    # Per-Django-app, non-live tests that stay beside the
 │       └── test_services.py      # Products service tests for Faker discovery, catalog lifecycle, and user lifecycle.
 └── scalars/
     └── tests/    # Non-live app tests for scalar substrate models.
-        └── test_models.py        # Scalars model tests for string rendering, relation traversal, and tag-label uniqueness.
+        └── test_models.py        # Scalars model tests for string rendering, relation traversal, and uniqueness rules.
 ```
 
 

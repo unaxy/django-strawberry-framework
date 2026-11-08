@@ -397,8 +397,9 @@ package-internal; Slice 4 is the live consumer surface.
     date, datetime, time or duration, a `clean_<field>`'s, form `clean()`'s or model
     `clean()`'s included; on PostgreSQL a decimal past `numeric`'s format its
     column's own validators accept) answers that field's `invalid` error before the
-    save, with nothing written, and so does one whose conversion inside `is_valid()`
-    raises `OverflowError`, beside the form's errors collected before it ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
+    save, with nothing written; inside `is_valid()` such a column is that error before
+    model validation converts it or a uniqueness or constraint check binds it in a
+    query, beside the form's other errors ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
   - [ ] Package coverage: [`tests/forms/test_resolvers.py`][test-forms] — create /
     update happy paths, the `form.errors` → envelope (incl. a `NON_FIELD_ERRORS`
     `clean()` error → `"__all__"`), the **decode split** (`categoryId` → `{"category":
@@ -1893,13 +1894,27 @@ write flavor rides.
    the same rule, Django's own save-time preparation on that alias); a refused column is the
    form field's `invalid` error `"Enter a value the database can represent."` and nothing
    is written. The value read is the one the save writes, whatever set it (a form field's
-   cleaning, a `clean_<field>`, a form `clean()`, a model `clean()`). Where Django's model
-   validation inside `is_valid()` raises `OverflowError` converting such a value
-   (`DateField.to_python` making a hook's aware datetime naive in the default time zone, a
-   unique column's value bound by `validate_unique`), each column the same rule refuses is
-   that error, merged with the form's errors collected before the overflow, and
-   `is_valid()` is never run again; an overflow on a plain form, or one naming no such
-   column, is the application's and propagates
+   cleaning, a `clean_<field>`, a form `clean()`, a model `clean()`). Inside `is_valid()`
+   the same rule holds each column before Django's model validation converts it or binds it
+   in a query, where the database's own refusal is no `ValidationError`: `clean_fields()`
+   (`DateField.to_python` raising `OverflowError` making a hook's aware datetime naive in
+   the default time zone), `validate_unique()` and `validate_constraints()` (SQLite's
+   adapter `ValueError` for an aware time, or an aware datetime under `USE_TZ = False`;
+   PostgreSQL's `DataError` for a decimal past `numeric`, which a conditional
+   `UniqueConstraint` reads as a violation). For the length of `is_valid()` each of the three
+   is shadowed on `form.instance` (a model's own override, or one a `get_form` hook set on
+   the instance, still runs, once): a column outside the `exclude` it is handed whose value
+   the rule refuses is added as the form field's `invalid` error (`form.add_error`), and
+   every column refused so far joins the `exclude` the original runs with, so Django never
+   converts or binds it; the instance's own attributes are put back after `is_valid()`
+   ([`forms/resolvers.py`][forms-resolvers]`::_unstorable_values_kept_from_checks`). An
+   omitted or disabled column an update keeps, and a column the form declares no field for
+   (a form `clean()` setting it, checked by a `validate_unique()` called with no `exclude`),
+   joins the `exclude` without an error: the kept column's stored value is held again after
+   `is_valid()`, and the other is answered there. A value no check held (a form `clean()`
+   skipping `super().clean()` under a model `clean()` setting it) is refused after
+   `is_valid()`. An exception `is_valid()` raises (a hook's own
+   `OverflowError`, any other, a plain form's) is the application's and propagates
    ([`forms/resolvers.py`][forms-resolvers]`::_bound_form_or_field_errors`). **The
    `ModelForm` save also maps the one other failure a valid `ModelForm` reaches on its own**
    ([`forms/resolvers.py`][forms-resolvers]`::_modelform_save_or_field_errors`): over
@@ -2633,11 +2648,14 @@ Rationale companion: [Decision 14][rationale-d14].
   huge exponent in a bounded one); the save would raise an error no save mapper owns.
   The form flavor answers the field's `invalid` error `"Enter a value the database can
   represent."` before the save instead, with nothing written ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
-  SQLite refuses no decimal: it stores the nearest double. A `clean_<field>`, form
-  `clean()` or model `clean()` answering an aware datetime for a `DateField` whose date in
-  the default time zone leaves years 1..9999 makes Django raise `OverflowError` inside
-  `is_valid()`; the column is the same `invalid` error, beside the form's other errors.
-  A form `clean()` raising its own `OverflowError`, or a plain form's, propagates.
+  SQLite refuses no decimal: it stores the nearest double. Inside `is_valid()` Django's
+  model validation would convert such a value (a `clean_<field>`, form `clean()` or model
+  `clean()` answering an aware datetime for a `DateField` whose date in the default time
+  zone leaves years 1..9999 makes `DateField.to_python` raise `OverflowError`) or bind it in
+  a uniqueness or constraint query (`unique=True`, `unique_together`, a `UniqueConstraint`,
+  a conditional one reading PostgreSQL's `DataError` as a violation); the column is the
+  same `invalid` error first, beside the form's other errors. A form `clean()` raising its
+  own `OverflowError`, or a plain form's, propagates.
 - **No `DjangoType` `Meta` key added.** [`DEFERRED_META_KEYS`][types-base] /
   `ALLOWED_META_KEYS` carry no form key
   ([Decision 13](#decision-13--finalization-seam-reuse-the-mutation-phase-25-bind-no-deferred_meta_keys-change)).
@@ -3121,11 +3139,27 @@ behavior reachable through `/graphql/`, package tests own internals.
     walk on its own in `tests/utils/test_widgets.py` (with a `decompress` that answers
     no list, the text of a datetime, any other exception it raises, a `decompress`
     `ValidationError` kept, its `OverflowError` over an aware datetime the value's `invalid`
-    refusal and over any other value the `ConfigurationError`); an
-    `OverflowError` inside `is_valid()` beside a form error, a form `clean()`'s own, any
-    other exception and a plain form's
-    (`::test_overflow_inside_is_valid_merges_the_column_refusal_with_the_form_s_errors`,
-    `::test_an_exception_naming_no_unstorable_column_propagates_from_is_valid`,
+    refusal and over any other value the `ConfigurationError`); a value refused before
+    model validation inside `is_valid()` converts or binds it: a `clean_<field>`'s beside
+    a form error, a bounded decimal past `numeric` under a two-field and a conditional
+    `UniqueConstraint` and `unique_together` through the PostgreSQL stand-in, a model's own
+    `clean_fields` / `validate_unique` / `validate_constraints` each run once with the
+    refused column excluded, a `validate_unique` a `get_form` hook sets on the instance run
+    and kept, a form `clean()` skipping `super().clean()`, a disabled field's kept column
+    sent or omitted and a refused column the form declares no field for answered after
+    `is_valid()`
+    (`::test_a_hook_value_the_date_column_cannot_store_is_refused_beside_the_form_s_errors`,
+    `::test_update_through_a_disabled_lossy_date_field_keeps_the_stored_datetime`,
+    `::test_a_refused_column_without_a_form_field_is_answered_after_is_valid`,
+    `::test_decimal_past_postgresql_numeric_is_refused_before_its_uniqueness_check`,
+    `::test_model_validation_overrides_run_once_with_the_refused_column_excluded`,
+    `::test_a_validate_unique_a_get_form_hook_sets_on_the_instance_runs_and_is_kept`,
+    `::test_a_form_clean_skipping_super_still_refuses_the_unstorable_value`), live over the
+    unique columns of `UniqueScalarSpecimen`
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_value_a_uniqueness_check_would_bind_is_the_field_error`,
+    `::test_form_decimal_postgresql_cannot_bind_under_a_conditional_constraint`); and
+    a form `clean()`'s own `OverflowError`, any other exception and a plain form's
+    propagating (`tests/forms/test_resolvers.py::test_an_exception_naming_no_unstorable_column_propagates_from_is_valid`,
     `::test_an_overflow_inside_a_plain_form_s_is_valid_propagates`);
     **the `get_form_kwargs` / `get_form` hook** — an override injecting `user` and one
     scoping a `ModelChoiceField.queryset` (input shape unchanged); **partial-update
@@ -3360,8 +3394,9 @@ The completion contract.
    / [Decision 9](#decision-9--optimizer-composition-the-modelform-payload-re-fetch-rides-the-spec-036-g2-path)).
    A valid `ModelForm` holding a value the database cannot store, on PostgreSQL a decimal
    past `numeric`'s format its column's own validators accept included, answers the
-   field's `invalid` error before the save, with nothing written, as does one whose
-   conversion inside `is_valid()` raises `OverflowError`, beside the form's other errors
+   field's `invalid` error before the save, with nothing written, and inside `is_valid()`
+   before model validation converts it or a uniqueness or constraint check binds it in a
+   query, beside the form's other errors
    ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
 
 **Slice 4 — products live form surface**

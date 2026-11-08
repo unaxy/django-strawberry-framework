@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 443 done, 115 to do. The CHANGELOG entries filed here moved to
+Progress: 444 done, 115 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1896,6 +1896,30 @@ Progress: 443 done, 115 to do. The CHANGELOG entries filed here moved to
   `KioskFault.kiosk__repairticket` on the inner join) and
   `tests/filters/test_sets.py::test_which_forward_keys_the_relation_view_joins_round_their_target`. Docs: spec-027,
   README, GLOSSARY `FilterSet`. Found researching 799; filed 809
+- [x] 725. (robustness) fixed: the form and serializer flavors hold each column before their own validation binds it.
+  A form mutation's `is_valid()` runs with per-instance shadows of `form.instance.clean_fields` / `validate_unique` /
+  `validate_constraints` (`forms/resolvers.py::_unstorable_values_kept_from_checks`, `::_storability_checked`): each
+  runs the write rule on the instance values, adds the field's `invalid` "Enter a value the database can represent."
+  with `add_error`, joins the refused name to one set shared by the three (Django 5.2 runs constraints inside
+  `full_clean` with its own `exclude`) and to `exclude`, then delegates to the bound original, so a consumer override
+  runs once; an omitted or disabled column an update keeps, and a column with no form field, join `exclude` without an
+  error. So a `unique=True` / `UniqueConstraint` (single, two-field, conditional, functional) / `unique_together`
+  column answers the field error where SQLite's adapter `ValueError` (an aware time under either `USE_TZ`, an aware
+  datetime under `USE_TZ = False`) or PostgreSQL's `DataError` (a decimal past `numeric`) escaped as a masked error and
+  a conditional constraint answered a wrong `__all__` violation; 681's `except OverflowError` seam in
+  `::_bound_form_or_field_errors` is deleted (its causes are refused first; a hook's own exception propagates). A
+  serializer mutation wraps each written top-level field's `to_internal_value` and `run_validators`
+  (`rest_framework/resolvers.py::_hold_unstorable_values`, `::_unstorable_written_values`), so a value the rule refuses
+  fails its field before DRF's `UniqueValidator` / `UniqueTogetherValidator` bind it: a unique duration past 64 bits
+  of microseconds and a `validate_<field>` datetime past year 9999 in UTC answered SQLite's `OverflowError`
+  (`qs_exists` catches no `OverflowError`), and on PostgreSQL a `DataError` it swallows aborts the transaction
+  (unverified). The model flavor was already ordered. New fakeshop `scalars.UniqueScalarSpecimen` (migration 0004, not
+  applied to the tracked board DB, as library 0019 / 0020 and products 0004) with form and serializer mutations.
+  Pinned by `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_value_a_uniqueness_check_would_bind_is_the_field_error`
+  and its pg rows (unrun locally), `tests/forms/test_resolvers.py` (stand-in decimal rows, consumer override counts, a
+  `get_form` instance override kept, `clean()` without `super()`, disabled and unfielded columns) and
+  `tests/rest_framework/test_resolvers.py` (duration via `SCALAR_MAP`, `validate()` after `is_valid()`, a non-mapping
+  `to_internal_value`); spec-038, spec-039, README, GLOSSARY `FieldError` envelope. Filed 810
 
 ## Outside review of the fixes
 
@@ -1936,11 +1960,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 725. (robustness) A `ModelForm`'s `validate_unique()` / `validate_constraints()` and DRF's `UniqueValidator`
-  bind the value inside `is_valid()`, before the write's storability preflight, so a unique decimal column sent a
-  value past PostgreSQL `numeric`'s format still answers a masked `DataError`, and so does a unique temporal column
-  the database refuses when `USE_TZ = False` (SQLite's adapter `ValueError`, which 681's `OverflowError` seam does not
-  catch); the `OverflowError` cells on SQLite closed with 681. Shared with 381's temporal preflight. Found fixing 530
 - [ ] 726. (robustness) On SQLite a bounded `DecimalField` (`max_digits` set) holding a value SQLite stores as an
   infinity (`1E+309` in `DecimalField(max_digits=400, decimal_places=0)`) is written, then the post-write re-fetch
   raises `decimal.InvalidOperation` from the converter's `quantize`: a masked top-level error and a rolled-back write.
@@ -2175,6 +2194,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `AttributeError` (`'str' object has no attribute 'days'`) for every value, valid ones included, over GraphQL (a
   masked unexpected error) and every raw driver (at `is_valid()` / `errors`); an integer annotation's `abc` / `1.5`
   member is Django's `ValueError` and `2**63` an `OverflowError` on every path. Found researching 724
+- [ ] 810. (robustness) A nested writable serializer's own `ModelSerializer` uniqueness validator binds a nested value
+  inside `is_valid()`, before the write's storability check (which reads only top-level written fields,
+  `rest_framework/resolvers.py::_written_columns`) and before any consumer `create()` runs: on SQLite a unique duration
+  past 64 bits of microseconds or a hook datetime past year 9999 in UTC raises `OverflowError` through DRF's
+  `qs_exists`, and on PostgreSQL the `DataError` DRF swallows aborts the transaction; either way a masked top-level
+  error. Decide in the fix whether the hold walks nested serializers (`_validation_tree`) or the contract states it.
+  Found researching 725
 
 ## To do: holes found re-checking the fixes
 
