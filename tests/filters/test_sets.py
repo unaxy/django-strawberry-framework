@@ -7606,6 +7606,18 @@ def test_a_queryset_path_comparing_no_integer_field_holds_nothing(
     assert _queryset_integer_column(filter_instance, query) is None
 
 
+def test_a_queryset_alias_of_a_multi_column_link_holds_nothing() -> None:
+    """A ``FilteredRelation`` alias of a link carried by two columns has no one target field.
+
+    ``ShelfLabel.shelf`` is a ``ForeignObject`` over ``(branch, shelf_code)``: Django's
+    ``target_field`` refuses it with ``FieldError``, read as no integer field, so the value
+    reaches Django's own comparison as cleaned.
+    """
+    query = library_models.ShelfLabel.objects.alias(sh=dj_models.FilteredRelation("shelf")).query
+    filter_instance = django_filters.NumberFilter(field_name="sh", lookup_expr="exact")
+    assert _queryset_integer_column(filter_instance, query) is None
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("members", "labels"),

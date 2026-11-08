@@ -9,12 +9,15 @@ A JSON number past an integer column's range answers from the end it lies past w
 being converted, and past an integer transform's range it keeps its ``FILTER_INVALID``.
 A set declaring no ``Meta.model`` refuses a leaf by naming the missing model, masked
 under the default error policy, while its ``RelatedFilter`` branches still apply.
+A list or range criterion over a duration or integer annotation of the queryset handed to
+the set, or of a branch's target type's ``get_queryset``, is cleaned and compared as the
+annotation's output field under ``apply_sync`` and ``apply_async`` alike.
 """
 
 import asyncio
 import datetime
 import logging
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from functools import wraps
 from typing import TYPE_CHECKING, Annotated, NoReturn
 
@@ -137,14 +140,19 @@ def _schema(
     resource_policy: Mapping[str, object] | None = None,
     direct: bool = False,
     masked: bool = False,
+    annotated: Callable[[QuerySet[Model]], QuerySet[Model]] | None = None,
 ) -> DjangoSchema:
     output = make_django_type("RawCriteriaOutput", model, fields, node=False)
+
+    def handed() -> QuerySet[Model]:
+        queryset = model._default_manager.order_by("pk")
+        return queryset if annotated is None else annotated(queryset)
 
     def resolve_rows(
         info: strawberry.Info[object, object],
         where: strawberry.scalars.JSON,
     ) -> QuerySet[Model]:
-        queryset = model._default_manager.order_by("pk")
+        queryset = handed()
         if direct:
             return filterset(data=json_object(where), queryset=queryset).qs
         return filterset.apply_sync(where, queryset, info)
@@ -153,7 +161,7 @@ def _schema(
         info: strawberry.Info[object, object],
         where: strawberry.scalars.JSON,
     ) -> list[Model]:
-        queryset = await filterset.apply_async(where, model._default_manager.order_by("pk"), info)
+        queryset = await filterset.apply_async(where, handed(), info)
         return await sync_to_async(list)(queryset)
 
     def resolve_optional_rows(
@@ -728,6 +736,182 @@ def test_a_json_year_past_the_transforms_range_keeps_its_refusal(transport: str)
                 ],
             },
         },
+    )
+
+
+class _AnnotationCriteriaSet(FilterSet):
+    lag_among = ListFilter(field_name="lag", lookup_expr="in")
+    lag_span = RangeFilter(field_name="lag", lookup_expr="range")
+    kids_among = ListFilter(field_name="kids", lookup_expr="in")
+    kids_span = RangeFilter(field_name="kids", lookup_expr="range")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = []
+
+
+def _with_annotations(rows: QuerySet[Model]) -> QuerySet[Model]:
+    """The duration since the parent's stamp and the count of children, as a resolver adds them."""
+    return rows.annotate(
+        lag=django_models.ExpressionWrapper(
+            django_models.F("occurred_at") - django_models.F("parent__occurred_at"),
+            output_field=django_models.DurationField(),
+        ),
+        kids=django_models.Count("children"),
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("where", "answer"),
+    [
+        pytest.param({"lag_among": {"in_": ["1 00:00:00"]}}, ["child"], id="duration-member"),
+        pytest.param(
+            {"lag_span": {"start": "12:00:00", "end": "2 00:00:00"}},
+            ["child"],
+            id="duration-range",
+        ),
+        pytest.param({"kids_among": {"in_": ["1", "1.5", str(2**63)]}}, ["kept"], id="integer"),
+        pytest.param(
+            {"kids_span": {"start": str(-(2**63) - 1), "end": "0"}},
+            ["child"],
+            id="integer-range-below-the-column",
+        ),
+        pytest.param(
+            {"lag_among": {"in_": ["abc"]}},
+            {"lag_among": [{"message": "Enter a valid duration.", "code": "invalid"}]},
+            id="duration-junk",
+        ),
+        pytest.param(
+            {"lag_span": {"end": "1000000000 00:00:00"}},
+            {
+                "lag_span": [
+                    {
+                        "message": "The number of days must be between -999999999 and 999999999.",
+                        "code": "overflow",
+                    },
+                ],
+            },
+            id="duration-past-timedelta",
+        ),
+        pytest.param(
+            {"kids_span": {"start": "abc"}},
+            {"kids_span": [{"message": "Enter a number.", "code": "invalid"}]},
+            id="integer-junk",
+        ),
+    ],
+)
+def test_a_criterion_over_a_queryset_annotation_is_cleaned_as_the_annotation_compares(
+    transport: str,
+    where: JSONObject,
+    answer: list[str] | JSONObject,
+) -> None:
+    """``apply_sync`` and ``apply_async`` clean a value over an annotation as its output field.
+
+    ``lag`` is a ``DurationField`` expression and ``kids`` a ``Count`` the resolver adds to
+    the queryset it hands the set: a duration member compares as one, an integer member
+    naming no row drops, a range bound past the column widens, and junk or a duration past
+    ``timedelta`` is ``FILTER_INVALID`` keyed to the filter, on either executor.
+    """
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    schema = _schema(
+        _AnnotationCriteriaSet,
+        scalar_models.ScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        annotated=_with_annotations,
+    )
+    payload = _post(schema, where, transport=transport, selection="label")
+    if isinstance(answer, list):
+        assert payload == {"data": {"rows": [{"label": label} for label in answer]}}, payload
+        return
+    _refused(
+        payload,
+        "Invalid filter input",
+        extensions={"code": "FILTER_INVALID", "errors": answer},
+    )
+
+
+class _PartnerAnnotationCriteriaSet(FilterSet):
+    partner = RelatedFilter(_AnnotationCriteriaSet, field_name="partner")
+
+    class Meta:
+        model = scalar_models.NullableScalarSpecimen
+        fields = []
+
+
+def _annotating_target(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+    """A target type's ``get_queryset`` adding the annotations its branch's filters name."""
+    del cls, info
+    return _with_annotations(rows)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("where", "answer"),
+    [
+        pytest.param(
+            {"partner": {"lag_among": {"in_": ["1 00:00:00"]}}},
+            ["of-child"],
+            id="duration-member",
+        ),
+        pytest.param(
+            {"partner": {"kids_span": {"start": "1", "end": str(2**63)}}},
+            ["of-kept"],
+            id="integer-range-past-the-column",
+        ),
+        pytest.param(
+            {"partner": {"lag_among": {"in_": ["abc"]}}},
+            {"partner__lag_among": [{"message": "Enter a valid duration.", "code": "invalid"}]},
+            id="duration-junk",
+        ),
+    ],
+)
+def test_a_branch_criterion_over_its_target_types_annotation_is_cleaned_as_it_compares(
+    transport: str,
+    where: JSONObject,
+    answer: list[str] | JSONObject,
+) -> None:
+    """A ``RelatedFilter`` branch reads the annotations its target type's ``get_queryset`` adds.
+
+    The branch's set is handed the target type's rows, which carry ``lag`` and ``kids``, so a
+    member or bound over either is cleaned and compared as the annotation's output field.
+    """
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-kept", partner=kept)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    target = make_django_type(
+        "AnnotatedPartnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(_annotating_target)},
+    )
+    schema = _schema(
+        _PartnerAnnotationCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(schema, where, transport=transport, selection="label")
+    if isinstance(answer, list):
+        assert payload == {"data": {"rows": [{"label": label} for label in answer]}}, payload
+        return
+    _refused(
+        payload,
+        "Invalid filter input",
+        extensions={"code": "FILTER_INVALID", "errors": answer},
     )
 
 

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 192 to do.
+Progress: 0 done, 193 to do.
 
 ## From dry-0_0_15_3
 
@@ -854,6 +854,19 @@ Progress: 0 done, 192 to do.
   `USE_TZ = False`, through a `ModelForm`; a duration past 64 bits of microseconds or a `validate_<field>` datetime
   past year 9999 through a `ModelSerializer`; on PostgreSQL a decimal past `numeric`. A serializer's own
   `run_validators` / `validate` no longer runs once a field is refused, as DRF runs none after a field error
+- [ ] 812. CHANGELOG entry for item 804: a declared `ListFilter`, `ArrayFilter` or `RangeFilter` over a path only the
+  queryset handed to the set resolves (an annotation a resolver or a target type's `get_queryset` adds, a
+  `FilteredRelation` alias, a reverse relation's included, or a column past one) now cleans each member and bound as
+  that queryset compares it, under the package's `FilterSet` and a plain django-filter one alike. A duration
+  annotation's valid values filter instead of raising `'str' object has no attribute 'days'`; junk is the form's own
+  error (`Enter a valid duration.`, `Enter a number.`, `Enter a valid date.`; `FILTER_INVALID` over GraphQL) instead of
+  a masked `ValueError` or `OverflowError` or the generic bind message; an integer member naming no row drops and an
+  integer `range` bound past the column widens or empties the match as the column's does; a `GlobalIDFilter` or key
+  primitive naming such a path coerces through the related key. Values now answer as the same column does: a decimal
+  member past `1e50` is `FILTER_INVALID` (it was rows `[]`), a text member is stripped, a fractional `year__in` member
+  truncates, and a GlobalID node id past the range of a key annotation (`annotate(parent_ref=F("parent"))`) is
+  `GLOBALID_INVALID`. The published input stays `String`; a `method=` filter receives values as sent; a set handed no
+  queryset still leaves the path to Django
 
 ## From dry-upstream-0_0_15
 

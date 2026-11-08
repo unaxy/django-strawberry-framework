@@ -6,7 +6,11 @@ The ordinary JSON argument carries form-compatible values; each filter's own for
 field, Django expression and executing database retain their upstream behavior.
 A typed ``Decimal`` a declared ``NumberFilter`` publishes over an integer annotation or a
 column past a ``FilteredRelation`` alias answers from the end of the column's range it
-lies past without being converted.
+lies past without being converted, an annotation a consumer ``filter_queryset`` adds before
+the leaves included. A declared ``ListFilter`` / ``RangeFilter`` over such a path, the alias
+itself, an alias of the reverse ``children`` relation or a ``year`` of a date annotation
+cleans and compares each value as the queryset does, and a ``GlobalIDFilter`` over the
+alias, the reverse alias or a key annotation coerces its node id through the related key.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from graphql_client import (
     json_list,
     json_object,
 )
+from strawberry.relay import to_base64
 from strawberry.scalars import JSON
 from strawberry.types import Info
 from strawberry.types.base import StrawberryList
@@ -58,6 +63,7 @@ from django_strawberry_framework import (
 from django_strawberry_framework.filters import (
     FilterInput,
     FilterSet,
+    GlobalIDFilter,
     ListFilter,
     RangeFilter,
     RelatedFilter,
@@ -566,6 +572,15 @@ class _QuerysetIntegerPathFilter(FilterSet):
         field_name="par__occurred_on",
         lookup_expr="year__gt",
     )
+    annotated_span = RangeFilter(field_name="n", lookup_expr="range")
+    dated_years_among = ListFilter(field_name="d", lookup_expr="year__in")
+    parents_among = ListFilter(field_name="par", lookup_expr="in")
+    parent_node = GlobalIDFilter(field_name="par")
+    costs_among = ListFilter(field_name="cost", lookup_expr="in")
+    offspring_among = ListFilter(field_name="offspring", lookup_expr="in")
+    offspring_node = GlobalIDFilter(field_name="offspring")
+    parent_ref_node = GlobalIDFilter(field_name="parent_ref")
+    names_among = ListFilter(field_name="named", lookup_expr="in")
 
     class Meta:
         model = scalar_models.ScalarSpecimen
@@ -591,8 +606,11 @@ def _typed_queryset_path_holder() -> DjangoSchema:
                     n=F("signed_big"),
                     d=F("occurred_on"),
                     kids=Count("children"),
+                    cost=F("price"),
+                    named=F("label"),
+                    parent_ref=F("parent"),
                 )
-                .alias(par=FilteredRelation("parent"))
+                .alias(par=FilteredRelation("parent"), offspring=FilteredRelation("children"))
                 .order_by("pk")
             )
             return _QuerysetIntegerPathFilter.apply_sync(filter, queryset, info)
@@ -839,14 +857,13 @@ def test_a_project_lookup_over_an_integer_annotation_receives_the_number_as_sent
 
 
 @pytest.mark.django_db
-def test_a_declared_list_over_an_integer_annotation_compares_its_members_as_sent(
+def test_a_declared_list_over_an_integer_annotation_compares_its_members_as_its_output(
     record_compiled_sql: RecordCompiledSql,
 ) -> None:
     """A ``ListFilter`` over ``n``, a path no model column names, publishes text members.
 
-    No integer column of the model's is the list's, so nothing of the filter's own is
-    held, and each member compares as Django prepares it for the annotation's output: a
-    row that passes at the parent commit too, pinning the list filter's unheld path.
+    Each member is cleaned and compared as the annotation's output field, read over the
+    queryset the set was handed, as a member of an integer column is.
     """
     sqls = record_compiled_sql()
     payload = _post_typed_queryset_path(
@@ -854,6 +871,318 @@ def test_a_declared_list_over_an_integer_annotation_compares_its_members_as_sent
         {},
     )
     assert payload == _expected(("kept",)), payload
+    assert len(_root_sql(sqls, scalar_models.ScalarSpecimen)) == 1, sqls
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("criteria", "labels"),
+    [
+        pytest.param(
+            'annotatedAmong: { in: ["-1e999999999999999999", "7"] }',
+            ("kept",),
+            id="integer-member-held",
+        ),
+        pytest.param(
+            f'annotatedAmong: {{ in: ["{_PAST_INT64}", "1.5"] }}',
+            (),
+            id="integer-members-naming-no-row-drop",
+        ),
+        pytest.param(
+            f'annotatedSpan: {{ range: {{ start: "{_BEFORE_INT64}", end: "8" }} }}',
+            ("kept",),
+            id="integer-range-below-the-column",
+        ),
+        pytest.param(
+            f'annotatedSpan: {{ range: {{ start: "8", end: "{_PAST_INT64}" }} }}',
+            ("child",),
+            id="integer-range-past-the-column",
+        ),
+        pytest.param(
+            'datedYearsAmong: { yearIn: ["2026"] }',
+            ("kept", "child"),
+            id="transform-member",
+        ),
+        pytest.param(
+            'datedYearsAmong: { yearIn: ["2026.5"] }',
+            ("kept", "child"),
+            id="transform-fraction-as-the-column",
+        ),
+        pytest.param(
+            f'parentsAmong: {{ in: ["{_PAST_INT64}"] }}',
+            (),
+            id="alias-member-naming-no-row-drops",
+        ),
+        pytest.param('namesAmong: { in: ["  kept  "] }', ("kept",), id="text-member-stripped"),
+        pytest.param('costsAmong: { in: ["10.50"] }', ("kept",), id="decimal-member"),
+    ],
+)
+def test_a_declared_list_or_range_over_a_queryset_path_compares_as_that_queryset_does(
+    criteria: str,
+    labels: tuple[str, ...],
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """Members and bounds over a path only the queryset resolves read its output field.
+
+    ``n`` annotates ``signed_big``, ``d`` annotates ``occurred_on`` and ``par`` aliases
+    ``parent``: a list over ``n`` holds a decimal past the 64-bit range and drops members
+    naming no integer row, a range over ``n`` applies as ``gte`` + ``lte`` so a bound past
+    the range widens, a ``year__in`` over ``d`` compares the transform's integers as the
+    column's would (a fraction truncated, as Django truncates it), a list over the alias
+    compares its target key, dropping a member past it, and a text member over ``named``
+    (``label``) is stripped as the column's is. Each runs one statement.
+    """
+    sqls = record_compiled_sql()
+    payload = _post_typed_queryset_path(
+        "{ rows(filter: { %s }) { label } }" % criteria,
+        {},
+    )
+    assert payload == _expected(labels), payload
+    assert len(_root_sql(sqls, scalar_models.ScalarSpecimen)) == (1 if labels else 0), sqls
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("criteria", "key"),
+    [
+        pytest.param('annotatedAmong: { in: ["abc"] }', "annotated_among", id="integer-member"),
+        pytest.param(
+            'annotatedSpan: { range: { start: "abc", end: "8" } }',
+            "annotated_span",
+            id="integer-bound",
+        ),
+        pytest.param('datedYearsAmong: { yearIn: ["abc"] }', "dated_years_among", id="transform"),
+        pytest.param('parentsAmong: { in: ["abc"] }', "parents_among", id="alias-key"),
+        pytest.param(
+            'costsAmong: { in: ["1e60"] }',
+            "costs_among",
+            id="decimal-past-the-number-cap",
+        ),
+    ],
+)
+def test_a_value_a_queryset_path_cannot_hold_is_its_form_error(
+    criteria: str,
+    key: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A value the path's output cannot hold is its form error, before any statement.
+
+    The value is cleaned as the queryset compares it, the annotation's output field, the
+    ``year`` transform's ``IntegerField``, the alias's target key, never handed to Django:
+    text no number spells is ``Enter a number.``, and a decimal past django-filter's
+    ``1e50`` cap the cap's refusal, as over the ``price`` column itself.
+    """
+    sqls = record_compiled_sql()
+    payload = _post_typed_queryset_path(
+        "{ rows(filter: { %s }) { label } }" % criteria,
+        {},
+    )
+    refusal = (
+        {"message": "Ensure this value is less than or equal to 1e+50.", "code": "max_value"}
+        if key == "costs_among"
+        else {"message": "Enter a number.", "code": "invalid"}
+    )
+    assert payload["data"] is None, payload
+    assert json_at(payload, "errors", 0, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {key: [refusal]},
+    }
+    assert _root_sql(sqls, scalar_models.ScalarSpecimen) == [], sqls
+
+
+@pytest.mark.django_db
+def test_a_declared_list_over_a_filtered_relation_alias_compares_its_target_key() -> None:
+    """``parentsAmong`` names the alias itself: each member is a key of its target, ``parent``."""
+    kept_pk = _kept_pk_after_seed()
+    payload = _post_typed_queryset_path(
+        '{ rows(filter: { parentsAmong: { in: ["%s", "%s.0"] } }) { label } }'
+        % (kept_pk, kept_pk),
+        {},
+        _typed_queryset_path_holder(),
+    )
+    assert payload == _expected(("child",)), payload
+
+
+def _kept_pk_after_seed() -> str:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=False)
+    child.parent = kept
+    child.save(update_fields=["parent"])
+    return str(saved_pk(kept))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("node_id", "labels"),
+    [
+        pytest.param("kept", ("child",), id="key"),
+        pytest.param("abc", None, id="junk"),
+        pytest.param(_PAST_INT64, None, id="past-the-key"),
+    ],
+)
+def test_a_global_id_over_a_filtered_relation_alias_is_coerced_through_its_target_key(
+    node_id: str,
+    labels: tuple[str, ...] | None,
+) -> None:
+    """``parentNode`` names the alias with no type to resolve: its node id is the target key's.
+
+    The id is coerced through ``parent``'s primary key, the column the alias compares, so
+    one that key cannot hold is ``GLOBALID_INVALID``, never Django's ``ValueError``.
+    """
+    kept_pk = _kept_pk_after_seed()
+    global_id = to_base64("Anything", kept_pk if node_id == "kept" else node_id)
+    schema = _typed_queryset_path_holder()
+    payload = _post_typed_queryset_path(
+        '{ rows(filter: { parentNode: { exact: "%s" } }) { label } }' % global_id,
+        {},
+        schema,
+    )
+    if labels is not None:
+        assert payload == _expected(labels), payload
+        return
+    assert payload["data"] is None, payload
+    assert json_at(payload, "errors", 0, "extensions") == {"code": "GLOBALID_INVALID"}
+
+
+def _child_pk_after_seed() -> str:
+    _ = _kept_pk_after_seed()
+    return str(saved_pk(scalar_models.ScalarSpecimen.objects.get(label="child")))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("members", "labels"),
+    [
+        pytest.param(["child"], ("kept",), id="key"),
+        pytest.param(["child", "1.5", _PAST_INT64], ("kept",), id="members-naming-no-row-drop"),
+        pytest.param([_PAST_INT64], (), id="every-member-drops"),
+        pytest.param(["abc"], None, id="junk"),
+    ],
+)
+def test_a_declared_list_over_a_reverse_relation_alias_compares_the_related_key(
+    members: list[str],
+    labels: tuple[str, ...] | None,
+) -> None:
+    """``offspringAmong`` names a ``FilteredRelation`` alias of ``children``: the child's key.
+
+    The alias is a reverse relation, answered as the model answers ``children``: each member
+    is cleaned and compared as the child's primary key, so a member naming no integer row
+    drops and text no number spells is ``Enter a number.``, never Django's ``ValueError``.
+    """
+    child_pk = _child_pk_after_seed()
+    sent = ", ".join(f'"{child_pk if member == "child" else member}"' for member in members)
+    payload = _post_typed_queryset_path(
+        "{ rows(filter: { offspringAmong: { in: [%s] } }) { label } }" % sent,
+        {},
+        _typed_queryset_path_holder(),
+    )
+    if labels is not None:
+        assert payload == _expected(labels), payload
+        return
+    assert payload["data"] is None, payload
+    assert json_at(payload, "errors", 0, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {"offspring_among": [{"message": "Enter a number.", "code": "invalid"}]},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("leaf", "node_id", "labels"),
+    [
+        pytest.param("offspringNode", "child", ("kept",), id="reverse-alias-key"),
+        pytest.param("offspringNode", "abc", None, id="reverse-alias-junk"),
+        pytest.param("offspringNode", _PAST_INT64, None, id="reverse-alias-past-the-key"),
+        pytest.param("parentRefNode", "kept", ("child",), id="key-annotation"),
+        pytest.param("parentRefNode", _PAST_INT64, None, id="key-annotation-past-the-key"),
+    ],
+)
+def test_a_global_id_over_a_queryset_relation_path_is_coerced_through_the_related_key(
+    leaf: str,
+    node_id: str,
+    labels: tuple[str, ...] | None,
+) -> None:
+    """A ``GlobalIDFilter`` with no type to resolve compares its node id on the related key.
+
+    ``offspring`` aliases the reverse ``children`` relation and ``parent_ref`` annotates the
+    ``parent`` key: the node id is coerced through the child's or the parent's primary key,
+    so one that key cannot hold is ``GLOBALID_INVALID``, as over the model's own relation.
+    """
+    child_pk = _child_pk_after_seed()
+    kept_pk = str(saved_pk(scalar_models.ScalarSpecimen.objects.get(label="kept")))
+    named = {"child": child_pk, "kept": kept_pk}.get(node_id, node_id)
+    payload = _post_typed_queryset_path(
+        '{ rows(filter: { %s: { exact: "%s" } }) { label } }' % (leaf, to_base64("Any", named)),
+        {},
+        _typed_queryset_path_holder(),
+    )
+    if labels is not None:
+        assert payload == _expected(labels), payload
+        return
+    assert payload["data"] is None, payload
+    assert json_at(payload, "errors", 0, "extensions") == {"code": "GLOBALID_INVALID"}
+
+
+class _LateAnnotationFilter(FilterSet):
+    """A consumer ``filter_queryset`` annotating ``late`` before the leaves run."""
+
+    late_at_least = django_filters.NumberFilter(field_name="late", lookup_expr="gte")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+    @override
+    def filter_queryset(self, queryset: QuerySet[_M]) -> QuerySet[_M]:
+        return super().filter_queryset(queryset.annotate(late=F("signed_big")))
+
+
+@pytest.mark.django_db
+def test_a_typed_decimal_past_an_annotation_only_the_applied_queryset_holds_is_held(
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """An annotation a ``filter_queryset`` adds before the leaves is read on that queryset.
+
+    The set was handed a queryset without ``late``, so the filter's form reads no field
+    for it; the leaf runs on the annotated queryset, whose ``late`` is ``signed_big``'s
+    integer output, so ``-1e999999999999999999`` compares as one below the 64-bit range,
+    never converted.
+    """
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("child", kept=False)
+
+    class LateOutput(DjangoType):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = ("label",)
+            filterset_class = _LateAnnotationFilter
+
+    @strawberry.type
+    class Query:
+        def _rows(
+            self,
+            info: Info[object, object],
+            filter: FilterInput[_LateAnnotationFilter],  # noqa: A002
+        ) -> QuerySet[scalar_models.ScalarSpecimen]:
+            return _LateAnnotationFilter.apply_sync(
+                filter,
+                scalar_models.ScalarSpecimen.objects.order_by("pk"),
+                info,
+            )
+
+        rows: QuerySet[scalar_models.ScalarSpecimen] = strawberry.field(
+            resolver=_rows,
+            graphql_type=StrawberryList(LateOutput),
+        )
+
+    finalize_django_types()
+    sqls = record_compiled_sql()
+    payload = _post_typed_queryset_path(
+        "query($number: Decimal!) { rows(filter: { lateAtLeast: { gte: $number } }) { label } }",
+        {"number": "-1e999999999999999999"},
+        DjangoSchema(query=Query, config=strawberry_config(), error_policy={"enabled": False}),
+    )
+    assert payload == _expected(("kept", "child")), payload
     assert len(_root_sql(sqls, scalar_models.ScalarSpecimen)) == 1, sqls
 
 

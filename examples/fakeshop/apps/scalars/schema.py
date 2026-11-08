@@ -62,13 +62,24 @@ whose ``validate_opened_at`` reads the wall clock sent as shop time;
 before a uniqueness check binds it in a query.
 
 ``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
-``FilteredRelation("parent")`` alias named ``par``, filtered by
+``FilteredRelation("parent")`` alias named ``par`` and two annotations, ``parent_lag`` (the
+duration from the parent's ``occurred_at``) and ``child_count``, filtered by
 ``filters.ScalarSpecimenParentStampFilter``, whose ``parentDayOf`` and ``parentDaysSpan``
-paths cross that alias.
+paths cross that alias and whose ``parentLag*`` / ``childCount*`` paths name the
+annotations.
 """
 
 import strawberry
-from django.db.models import FilteredRelation, Manager, Model, QuerySet
+from django.db.models import (
+    Count,
+    DurationField,
+    ExpressionWrapper,
+    F,
+    FilteredRelation,
+    Manager,
+    Model,
+    QuerySet,
+)
 from django.forms import ModelForm
 from strawberry.types import Info
 from typing_extensions import override
@@ -378,10 +389,18 @@ class Query:
     ) -> QuerySet[models.ScalarSpecimen]:
         """Root field listing scalar specimens over a queryset aliasing ``parent`` as ``par``.
 
-        The ``FilteredRelation`` alias exists only on this queryset, so the filter's
-        ``par__occurred_at`` path resolves only against the queryset it runs on.
+        The ``FilteredRelation`` alias and the ``parent_lag`` / ``child_count`` annotations
+        exist only on this queryset, so the filter's ``par__occurred_at``, ``parent_lag`` and
+        ``child_count`` paths resolve only against the queryset it runs on.
         """
         queryset = models.ScalarSpecimen.objects.alias(par=FilteredRelation("parent"))
+        queryset = queryset.annotate(
+            parent_lag=ExpressionWrapper(
+                F("occurred_at") - F("par__occurred_at"),
+                output_field=DurationField(),
+            ),
+            child_count=Count("children"),
+        )
         queryset = queryset.order_by("id")
         if filter is not None:
             queryset = filters.ScalarSpecimenParentStampFilter.apply_sync(filter, queryset, info)

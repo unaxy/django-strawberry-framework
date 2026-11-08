@@ -14,6 +14,9 @@ from above (``-1e999999999999999999`` cleans to a decimal whose ``int()`` cannot
 answers from the end it lies past without converting it, on both parents and on every
 generated and declared integer lookup; a fraction short of one past an end keeps the
 truncated value's verdict.
+Raw members and bounds over a duration or integer annotation of the queryset handed to the set
+clean as that annotation's output field under both parents, a ``method=`` twin receiving them
+as sent, and a set handed no queryset leaves the path to Django's ``FieldError``.
 Under the package's set the raw form runs the bind ask the typed input runs, as its own
 errors: a year comparison past 9999, a duration past the backend's range on every lookup
 and text the package refuses are refused with the typed input's messages, and the bare ``.qs``
@@ -33,9 +36,20 @@ import strawberry
 from apps.library import models as library_models
 from apps.scalars import models
 from django import forms
+from django.core.exceptions import FieldError
 from django.db import connection
 from django.db.backends.base.base import BaseDatabaseWrapper
-from django.db.models import DurationField, Field, IntegerField, Lookup, Model, QuerySet
+from django.db.models import (
+    Count,
+    DurationField,
+    ExpressionWrapper,
+    F,
+    Field,
+    IntegerField,
+    Lookup,
+    Model,
+    QuerySet,
+)
 from django.db.models.sql.compiler import SQLCompiler
 from django.forms.utils import ErrorDict
 from django.http import HttpRequest, HttpResponseBase, QueryDict
@@ -1329,6 +1343,176 @@ _SURROGATE = [
 _NULL_CHARACTER = [
     {"message": "Null characters are not allowed.", "code": "null_characters_not_allowed"},
 ]
+
+
+def _kids_as_sent(
+    _filterset: BaseFilterSet,
+    queryset: QuerySet[Model],
+    name: str,
+    value: list[object],
+) -> QuerySet[Model]:
+    """A consumer method keeping ``parent`` only when every member arrives as the text sent."""
+    del name
+    return queryset.filter(label="parent" if all(isinstance(v, str) for v in value) else "child")
+
+
+def _annotated_set(parent: str) -> type[BaseFilterSet]:
+    """A set whose list and range filters name two annotations of the queryset it is handed."""
+    base = {"package": FilterSet, "django-filter": django_filters.FilterSet}[parent]
+    declared = type(
+        "RawAnnotationSet",
+        (base,),
+        {
+            "lag_among": ListFilter(field_name="lag", lookup_expr="in"),
+            "lag_span": RangeFilter(field_name="lag", lookup_expr="range"),
+            "kids_among": ListFilter(field_name="kids", lookup_expr="in"),
+            "kids_span": RangeFilter(field_name="kids", lookup_expr="range"),
+            "kids_sent": ListFilter(field_name="kids", lookup_expr="in", method="kids_as_sent"),
+            "kids_as_sent": _kids_as_sent,
+            "Meta": type("Meta", (), {"model": models.ScalarSpecimen, "fields": ()}),
+        },
+    )
+    assert issubclass(declared, BaseFilterSet)
+    return declared
+
+
+def _annotation_schema() -> DjangoSchema:
+    @strawberry.type
+    class Query:
+        def _annotation_rows(
+            self,
+            parent: str,
+            query: str,
+            *,
+            handed: bool,
+        ) -> _RelationAnswer:
+            if not handed:
+                # No queryset handed: the set reads the model's default rows, which hold no
+                # annotation, so Django refuses the path when the form or ``.qs`` reads it.
+                unhanded = _annotated_set(parent)(data=QueryDict(query))
+                try:
+                    _ = unhanded.is_valid() and list(unhanded.qs)
+                except FieldError as error:
+                    return _RelationAnswer(errors=[str(error).partition(".")[0]], rows=[])
+                return _RelationAnswer(errors=[], rows=[])
+            queryset = models.ScalarSpecimen.objects.annotate(
+                lag=ExpressionWrapper(
+                    F("occurred_at") - F("parent__occurred_at"),
+                    output_field=DurationField(),
+                ),
+                kids=Count("children"),
+            ).order_by("label")
+            filterset = _annotated_set(parent)(data=QueryDict(query), queryset=queryset)
+            if not filterset.is_valid():
+                errors = [
+                    f"{name}: {message}"
+                    for name, messages in filterset.errors.items()
+                    for message in messages
+                ]
+                return _RelationAnswer(errors=errors, rows=[])
+            matched: QuerySet[Model] = filterset.qs
+            return _RelationAnswer(errors=[], rows=[str(row) for row in matched])
+
+        annotation_rows: _RelationAnswer = strawberry.field(resolver=_annotation_rows)
+
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize(
+    ("query", "errors", "rows"),
+    [
+        pytest.param("lag_among=1 00:00:00", [], ["child"], id="duration-member"),
+        pytest.param(
+            "lag_among=abc",
+            ["lag_among: Enter a valid duration."],
+            [],
+            id="duration-junk",
+        ),
+        pytest.param(
+            "lag_span_0=0&lag_span_1=1 00:00:00",
+            [],
+            ["child"],
+            id="duration-range",
+        ),
+        pytest.param(
+            "lag_span_0=abc",
+            ["lag_span: Enter a valid duration."],
+            [],
+            id="duration-bound-junk",
+        ),
+        pytest.param("kids_among=1", [], ["parent"], id="integer-member"),
+        pytest.param("kids_among=abc", ["kids_among: Enter a number."], [], id="integer-junk"),
+        pytest.param(f"kids_among=0,1.5,{2**63}", [], ["child"], id="integer-members-drop"),
+        pytest.param(
+            f"kids_span_0=1&kids_span_1={2**63}",
+            [],
+            ["parent"],
+            id="integer-range-past-the-column",
+        ),
+        pytest.param(
+            "kids_span_1=abc",
+            ["kids_span: Enter a number."],
+            [],
+            id="integer-bound-junk",
+        ),
+        pytest.param("kids_sent=1,abc", [], ["parent"], id="method-receives-the-text-sent"),
+    ],
+)
+def test_a_raw_value_over_a_queryset_annotation_is_cleaned_as_the_queryset_compares_it(
+    parent: str,
+    query: str,
+    errors: list[str],
+    rows: list[str],
+) -> None:
+    """Raw members and bounds over annotations clean as the handed queryset's output fields.
+
+    ``lag`` is a ``DurationField`` expression and ``kids`` a ``Count``, neither a field of
+    the model: each value is cleaned by the form field django-filter's ``gte`` filter
+    builds for that output, under the package's set and a plain django-filter one alike,
+    so junk is the form's error, an integer member naming no row drops and a range bound
+    past the column widens, never Django's ``ValueError`` or ``AttributeError``. A
+    ``method=`` filter over an annotation receives each member as sent: its method, not a
+    lookup of the filter's, reads the value.
+    """
+    parent_row = cleaned_specimen("parent", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = parent_row
+    child.occurred_at = parent_row.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    assert _post(
+        _annotation_schema(),
+        "query($parent: String!, $query: String!) { "
+        "annotationRows(parent: $parent, query: $query, handed: true) { errors rows } }",
+        {"parent": parent, "query": query},
+    ) == {"data": {"annotationRows": {"errors": errors, "rows": rows}}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize("query", ["kids_among=1", "kids_among=abc", "kids_span_0=1"])
+def test_a_raw_set_handed_no_queryset_leaves_an_annotation_path_to_django(
+    parent: str,
+    query: str,
+) -> None:
+    """With no queryset handed, no queryset holds the annotation: Django refuses the path.
+
+    The set's rows are its model's default ones, so nothing cleans the value as an
+    annotation, and the path is Django's ``FieldError`` wherever the form or ``.qs`` reads
+    it, the answer a filter naming an unknown path gives.
+    """
+    cleaned_specimen("parent", kept=True)
+    assert _post(
+        _annotation_schema(),
+        "query($parent: String!, $query: String!) { "
+        "annotationRows(parent: $parent, query: $query, handed: false) { errors rows } }",
+        {"parent": parent, "query": query},
+    ) == {
+        "data": {
+            "annotationRows": {"errors": ["Cannot resolve keyword 'kids' into field"], "rows": []},
+        },
+    }
 
 
 class _PackageYearSet(FilterSet):

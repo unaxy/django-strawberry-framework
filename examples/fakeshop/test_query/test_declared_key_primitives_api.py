@@ -3,17 +3,19 @@
 Ordinary JSON arguments call bound public filter primitives directly, preserving the
 original low-level contract rather than introducing generated input or form refusal.
 The custom UUID and BigInteger one-to-one keys use the original shared test models.
+A key primitive naming a ``FilteredRelation`` alias of the queryset its set is handed
+coerces each key through the alias's target key.
 """
 
 import copy
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 import strawberry
 from apps.library import models
 from django.db import connection
-from django.db.models import Model, QuerySet
+from django.db.models import FilteredRelation, Model, QuerySet
 from django_filters.filters import Filter
 from strategy_schemas import make_django_type
 from strawberry.scalars import JSON
@@ -41,6 +43,7 @@ def _schema(
     *,
     bound: bool = True,
     node: bool = False,
+    aliased: Callable[[QuerySet[Model]], QuerySet[Model]] | None = None,
 ) -> DjangoSchema:
     declared = copy.deepcopy(leaf)
     declared.field_name = field_name
@@ -67,7 +70,8 @@ def _schema(
     )
 
     def rows() -> QuerySet[Model]:
-        return source._default_manager.order_by(value_attr)
+        ordered = source._default_manager.order_by(value_attr)
+        return ordered if aliased is None else aliased(ordered)
 
     def apply_values(values: object) -> QuerySet[Model]:
         queryset = rows()
@@ -335,3 +339,37 @@ def test_an_unbound_relation_key_primitive_keeps_its_public_queryset_contract(
         matches,
         ["Kept", "Other"],
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("kind", ["single", "multiple"])
+def test_a_relation_key_primitive_over_a_filtered_relation_alias_coerces_through_its_target_key(
+    kind: str,
+) -> None:
+    """A key primitive naming a ``FilteredRelation`` alias reads the queryset holding it.
+
+    ``vshelf`` aliases ``shelf`` on the rows the set is handed, so each key is coerced
+    through the shelf's primary key, the column the alias compares: a key that column
+    cannot hold, or one past its range, identifies no row, never Django's ``ValueError``.
+    """
+    branch = models.Branch.objects.create(name="Aliased primitives")
+    shelf = models.Shelf.objects.create(branch=branch, code="A-1")
+    other = models.Shelf.objects.create(branch=branch, code="B-2")
+    models.Book.objects.create(title="Kept", shelf=shelf)
+    models.Book.objects.create(title="Other", shelf=other)
+    leaf = (
+        RelationPkFilter(lookup_expr="exact")
+        if kind == "single"
+        else RelationPkMultipleFilter(lookup_expr="in")
+    )
+    schema = _schema(
+        models.Book,
+        leaf,
+        "vshelf",
+        "title",
+        aliased=lambda rows: rows.alias(vshelf=FilteredRelation("shelf")),
+    )
+    kept: object = saved_pk(shelf) if kind == "single" else [saved_pk(shelf), "x", 2**70]
+    junk: object = "x" if kind == "single" else ["x", 2**70]
+    _answer(schema, kept, "title", ["Kept"], ["Kept", "Other"])
+    _answer(schema, junk, "title", [], ["Kept", "Other"])
