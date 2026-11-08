@@ -142,6 +142,7 @@ def _holder() -> tuple[DjangoSchema, type[DjangoType]]:
         stamped_before = DateTimeFilter(field_name="stamped_at", lookup_expr="lt")
         stamped_year_after = NumberFilter(field_name="stamped_at__year", lookup_expr="gt")
         clocked = TimeFilter(field_name="clocked_at")
+        short_label = CharFilter(field_name="label", max_length=3)
 
         class Meta:
             model = models.ScalarSpecimen
@@ -736,3 +737,37 @@ def test_a_declared_filter_past_a_transform_publishes_what_its_own_form_cleans()
         f"Variable '$where' has invalid value at .{head}.{lookup}: "
         'Value cannot represent a Date: "2021". Expected a string.'
     ), payload
+
+
+@pytest.mark.django_db
+def test_a_form_error_and_a_bind_refusal_are_reported_together(
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """The bind ask runs on every bound clean, so the payload holds both fields' errors.
+
+    ``short_label`` fails its own form field and ``year_from`` cleans to a year no database
+    binds; each is keyed to its form field in the one ``FILTER_INVALID`` payload.
+    """
+    _seed()
+    schema, _ = _holder()
+    sqls = record_compiled_sql('"scalars_scalarspecimen"')
+    where = _where(schema, ("short_label", "exact"), "longer") | _where(
+        schema,
+        ("year_from", "gte"),
+        10000,
+    )
+    payload = _post(schema, where)
+    assert payload["data"] is None, payload
+    assert json_at(payload, "errors", 0, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {
+            "short_label": [
+                {
+                    "message": "Ensure this value has at most 3 characters (it has 6).",
+                    "code": "max_length",
+                },
+            ],
+            "year_from": _UNBINDABLE,
+        },
+    }
+    assert sqls == [], sqls

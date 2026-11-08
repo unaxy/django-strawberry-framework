@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 189 to do.
+Progress: 0 done, 190 to do.
 
 ## From dry-0_0_15_3
 
@@ -833,6 +833,13 @@ Progress: 0 done, 189 to do.
   request's visibility reaches the override only through its `field_name`: a relation its own Python names reads every
   related row. A many-to-many whose through key Django names no reverse for (an auto-created self-referential one read
   forward) keeps the earlier key-column fallback
+- [ ] 806. CHANGELOG entry for items 724 and 743: raw form data under the package's `FilterSet` (`FilterSet(data=...)`
+  `is_valid()` / `errors`, `DjangoFilterBackend`, `FilterView`) now refuses what the GraphQL input refuses, as form
+  errors with the same messages, instead of raising the database driver's error: on SQLite and MySQL a duration past 64
+  bits of microseconds on every lookup (an `in` member is refused, not dropped), a year comparison past 9999, and a lone
+  surrogate or NUL. `DjangoFilterBackend` answers 400 and a strict `FilterView` no rows; a bare `.qs` read of an invalid
+  form applies the leaves that cleaned (none once text is refused), as django-filter documents. A GraphQL
+  `FILTER_INVALID` payload now carries a form error and a bind refusal together, where it carried only the form error
 
 ## From dry-upstream-0_0_15
 

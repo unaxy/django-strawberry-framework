@@ -1196,15 +1196,17 @@ class ArrayFilter(_ElementCleanedFilter):
 
     Each element is cleaned by the form field of the ``gte`` filter for the value it
     compares, the column's or a transform output's, an ``ArrayField`` column's innermost
-    ``base_field``'s, a relation's key column's (``_ElementField``), so an element that
-    value cannot hold is a form error rather than a value handed to the ORM, a text element
-    is stripped and a naive datetime element made aware. An ``in`` over an integer column,
-    or a relation compared on one, drops each element that names no row as ``ListFilter``'s
-    does (``_integer_in_column``). An element of an integer column, a transform's integer
-    output or an integer ``ArrayField``'s elements cleaned to a decimal past that column's
-    range on the queryset's database is applied as the integer one past the same end
+    ``base_field``'s, a relation's key column's (``_ElementField``), so an element that value
+    cannot hold is a form error rather than a value handed to the ORM, a text element is
+    stripped and a naive datetime element made aware. An ``in`` over an integer column, or a
+    relation compared on one, drops each element that names no row as ``ListFilter``'s does
+    (``_integer_in_column``). An element of an integer column, a transform's integer output
+    or an integer ``ArrayField``'s elements cleaned to a decimal past that column's range on
+    the queryset's database is applied as the integer one past the same end
     (``_held_column_value``), whose verdict is the decimal's and whose conversion is
-    immediate. Raw form data (``DjangoFilterBackend``,
+    immediate. An element over a duration column the queryset's database cannot bind (on
+    SQLite and MySQL, one whose microsecond count lies past 64 bits) is refused by the bind
+    ask as ``ListFilter``'s is, raw drivers included. Raw form data (``DjangoFilterBackend``,
     a ``QueryDict``) reads ``?name=a,b`` as ``["a", "b"]`` and an empty ``?name=`` as no
     constraint (``_MembershipCSVWidget``); only a list or tuple is an explicit ``[]``.
     """
@@ -1662,8 +1664,13 @@ class ListFilter(_ElementCleanedFilter):
     the range of an integer transform's output the filter compares, is held to the integer
     one past the same end before it is read (``_held_column_value``), so it is dropped or
     compared without its ``int()`` running. A list whose every element drops matches
-    nothing (every row when excluding). The column's own validators are not applied, so an
-    element they would refuse still matches a row that holds it. Raw form data
+    nothing (every row when excluding). An element over a duration column the queryset's
+    database cannot bind (on SQLite and MySQL, one whose microsecond count lies past 64
+    bits) is refused instead, as the generated ``in`` refuses it: under the package's
+    ``FilterSet`` the bind ask is part of the form's clean
+    (``filters/form_binding.py::BindAskingFilterForm``), so raw drivers see the refusal as
+    a form error too. The column's own validators are not applied, so an element they
+    would refuse still matches a row that holds it. Raw form data
     (``DjangoFilterBackend``, a ``QueryDict``) reads as the generated ``in`` reads it
     (``_MembershipCSVWidget``): ``?name=a,b`` is ``["a", "b"]`` and an empty ``?name=``
     applies no constraint.

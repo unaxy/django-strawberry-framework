@@ -14,13 +14,18 @@ from above (``-1e999999999999999999`` cleans to a decimal whose ``int()`` cannot
 answers from the end it lies past without converting it, on both parents and on every
 generated and declared integer lookup; a fraction short of one past an end keeps the
 truncated value's verdict.
+Under the package's set the raw form runs the bind ask the typed input runs, as its own
+errors: a year comparison past 9999, a duration past the backend's range on every lookup
+and text the package refuses are refused with the typed input's messages, and the bare ``.qs``
+applies the leaves that cleaned.
 """
 
 import contextlib
+import datetime
 from collections.abc import Callable, Generator
 from decimal import Decimal
 from functools import wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import django_filters
 import pytest
@@ -28,9 +33,11 @@ import strawberry
 from apps.library import models as library_models
 from apps.scalars import models
 from django import forms
+from django.db import connection
 from django.db.backends.base.base import BaseDatabaseWrapper
-from django.db.models import Field, IntegerField, Lookup, Model, QuerySet
+from django.db.models import DurationField, Field, IntegerField, Lookup, Model, QuerySet
 from django.db.models.sql.compiler import SQLCompiler
+from django.forms.utils import ErrorDict
 from django.http import HttpRequest, HttpResponseBase, QueryDict
 from django.test import override_settings
 from django.test.utils import register_lookup
@@ -54,6 +61,7 @@ from django_strawberry_framework.filters import (
     RelatedFilter,
 )
 from django_strawberry_framework.filters.base import _lookup_operand, _model_lookup_operand
+from django_strawberry_framework.utils._narrowing import require_instance
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._cleaned_filter_sets import (
     KEPT_EXTERNAL_ID,
@@ -535,7 +543,7 @@ def test_a_plain_parents_two_bound_year_range_past_the_range_answers_as_one_past
 
     ``-1e999999999999999999`` answers exactly as ``-9223372036854775809``, one past the
     year output's 64-bit range: the raw driver's own error for a year no database binds
-    (raw form data runs no bind ask), never the ``MemoryError`` its ``int()`` raises.
+    (a plain parent's form runs no bind ask), never the ``MemoryError`` its ``int()`` raises.
     """
     cleaned_specimen("kept", kept=True)
     query = "occurred_year_span_0={0}&occurred_year_span_1={0}"
@@ -1309,3 +1317,385 @@ def test_a_method_filter_over_a_relation_receives_each_raw_element_as_sent(
     _relation_world()
     result = _post_relation(parent, kind, "foreign-key", f"f={wire}")
     assert result == _relation_answer([], rows), result
+
+
+_UNBINDABLE = [{"message": "Enter a value the database can represent.", "code": "invalid"}]
+_SURROGATE = [
+    {
+        "message": "Text contains invalid Unicode (unpaired surrogate code points).",
+        "code": "invalid",
+    },
+]
+_NULL_CHARACTER = [
+    {"message": "Null characters are not allowed.", "code": "null_characters_not_allowed"},
+]
+
+
+class _PackageYearSet(FilterSet):
+    occurred_years_among = ListFilter(field_name="occurred_on__year", lookup_expr="in")
+    occurred_year_span = RangeFilter(field_name="occurred_on", lookup_expr="year__range")
+    occurred_year_after = django_filters.NumberFilter(
+        field_name="occurred_on__year",
+        lookup_expr="gt",
+    )
+
+    class Meta:
+        model = models.ScalarSpecimen
+        fields = {"occurred_on": ["year__gt"], "label": ["exact"]}
+
+
+def _raw_answer_schema() -> DjangoSchema:
+    """A raw ``QueryDict`` set answering both raw verdicts: the form's errors and the bare ``.qs``."""
+    sets: dict[str, type[BaseFilterSet]] = {
+        "package": PackageCleanedScalarSet,
+        "package-year": _PackageYearSet,
+    }
+
+    class RawAnswerSpecimen(DjangoType):
+        class Meta:
+            model = models.ScalarSpecimen
+            fields = ("label",)
+
+    def _bound(parent: str, query: str) -> BaseFilterSet:
+        return sets[parent](
+            data=QueryDict(query),
+            queryset=models.ScalarSpecimen.objects.order_by("label"),
+        )
+
+    @strawberry.type
+    class Query:
+        def _raw_errors(self, parent: str, query: str) -> dict[str, object]:
+            return require_instance(_bound(parent, query).errors, ErrorDict).get_json_data()
+
+        raw_errors: dict[str, object] = strawberry.field(resolver=_raw_errors, graphql_type=JSON)
+
+        def _raw_rows(self, parent: str, query: str) -> QuerySet[models.ScalarSpecimen]:
+            return _bound(parent, query).qs
+
+        raw_rows: QuerySet[models.ScalarSpecimen] = strawberry.field(
+            resolver=_raw_rows,
+            graphql_type=list[RawAnswerSpecimen],
+        )
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config(), error_policy={"enabled": False})
+
+
+def _raw_answer(parent: str, query_string: str) -> JSONObject:
+    return _post(
+        _raw_answer_schema(),
+        "query($parent: String!, $query: String!) { "
+        "rawErrors(parent: $parent, query: $query) "
+        "rawRows(parent: $parent, query: $query) { label } }",
+        {"parent": parent, "query": query_string},
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "parent",
+        "query_string",
+        "errors",
+        "labels",
+    ),
+    [
+        pytest.param(
+            "package-year",
+            "occurred_on__year__gt=99999",
+            {"occurred_on__year__gt": _UNBINDABLE},
+            ["kept", "other"],
+            id="generated-year-past-9999",
+        ),
+        pytest.param(
+            "package-year",
+            "occurred_year_after=99999",
+            {"occurred_year_after": _UNBINDABLE},
+            ["kept", "other"],
+            id="declared-year-past-9999",
+        ),
+        pytest.param(
+            "package-year",
+            "occurred_years_among=2026,99999",
+            {},
+            ["kept", "other"],
+            id="declared-year-list-member-past-9999-compares-as-an-integer",
+        ),
+        pytest.param(
+            "package-year",
+            "occurred_year_span_0=2000&occurred_year_span_1=99999",
+            {},
+            ["kept", "other"],
+            id="declared-year-range-bound-past-9999-compares-as-an-integer",
+        ),
+        pytest.param(
+            "package-year",
+            "occurred_on__year__gt=99999&label=kept",
+            {"occurred_on__year__gt": _UNBINDABLE},
+            ["kept"],
+            id="the-bare-qs-applies-the-leaves-that-cleaned",
+        ),
+        pytest.param(
+            "package-year",
+            "occurred_on__year__gt=2000&label=kept",
+            {},
+            ["kept"],
+            id="year-in-range",
+        ),
+        pytest.param(
+            "package",
+            "label=\ud800",
+            {"label": _SURROGATE},
+            ["kept", "other"],
+            id="lone-surrogate",
+        ),
+        pytest.param(
+            "package-year",
+            "occurred_on__year__gt=2%00",
+            {"occurred_on__year__gt": _NULL_CHARACTER},
+            ["kept", "other"],
+            id="nul-on-a-number",
+        ),
+        pytest.param(
+            "package",
+            "label=\ud800&signed_big_span_0=NaN",
+            {"label": _SURROGATE},
+            ["kept", "other"],
+            id="refused-text-skips-cleaning",
+        ),
+    ],
+)
+def test_a_raw_form_refuses_what_its_typed_input_refuses(
+    parent: str,
+    query_string: str,
+    errors: JSONObject,
+    labels: list[str],
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """Raw form data runs the bind ask the typed input runs, as the form's own errors.
+
+    ``errors`` answers the GraphQL input's ``FILTER_INVALID`` payload for the same value:
+    a year no database binds, and text the package refuses (a refused text skips cleaning, so
+    only its refusals are reported). django-filter's bare ``.qs`` applies the leaves that
+    cleaned, as it does for any invalid form: none once text is refused.
+    """
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("other", kept=False)
+    recorded = record_compiled_sql("scalars_scalarspecimen")
+    result = _raw_answer(parent, query_string)
+    assert result == {
+        "data": {"rawErrors": errors, "rawRows": [{"label": label} for label in labels]},
+    }, result
+    assert len(recorded) == 1, recorded
+
+
+class _RawElapsedProbe(Model):
+    """A duration column on a consumer model; the temporary real table exists only for its rows."""
+
+    elapsed: DurationField[object, datetime.timedelta] = DurationField()
+
+    class Meta:
+        managed = False
+        app_label = "library"
+
+    @override
+    def __str__(self) -> str:
+        return str(self.elapsed)
+
+
+class _DurationsInFilter(django_filters.BaseInFilter, django_filters.DurationFilter):
+    """A consumer CSV filter whose form cleans each member as a duration, as django-filter documents."""
+
+
+class _RawElapsedSet(FilterSet):
+    elapsed_among = ListFilter(field_name="elapsed", lookup_expr="in")
+    elapsed_excluded = ListFilter(field_name="elapsed", lookup_expr="in", exclude=True)
+    elapsed_array_among = ArrayFilter(field_name="elapsed", lookup_expr="in")
+    elapsed_span = RangeFilter(field_name="elapsed", lookup_expr="range")
+    elapsed_after = django_filters.DurationFilter(field_name="elapsed", lookup_expr="gt")
+    elapsed_csv_among = _DurationsInFilter(field_name="elapsed", lookup_expr="in")
+
+    class Meta:
+        model = _RawElapsedProbe
+        fields = {
+            "elapsed": [
+                "exact",
+                "gt",
+                "gte",
+                "lt",
+                "lte",
+                "in",
+                "range",
+            ],
+        }
+
+
+@pytest.fixture
+def raw_elapsed_table(transactional_db: None) -> Generator[None]:
+    """Create the duration consumer's table without changing a shipped model."""
+    _ = transactional_db
+    with connection.schema_editor() as editor:
+        editor.create_model(_RawElapsedProbe)
+    try:
+        yield
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(_RawElapsedProbe)
+
+
+def _raw_elapsed_schema() -> DjangoSchema:
+    class RawElapsedRow(DjangoType):
+        class Meta:
+            model = _RawElapsedProbe
+            fields = ("id",)
+
+    def _bound(query: str) -> _RawElapsedSet:
+        return _RawElapsedSet(
+            data=QueryDict(query),
+            queryset=_RawElapsedProbe.objects.order_by("pk"),
+        )
+
+    @strawberry.type
+    class Query:
+        def _raw_errors(self, query: str) -> dict[str, object]:
+            return require_instance(_bound(query).errors, ErrorDict).get_json_data()
+
+        raw_errors: dict[str, object] = strawberry.field(resolver=_raw_errors, graphql_type=JSON)
+
+        def _raw_rows(self, query: str) -> QuerySet[_RawElapsedProbe]:
+            return _bound(query).qs
+
+        raw_rows: QuerySet[_RawElapsedProbe] = strawberry.field(
+            resolver=_raw_rows,
+            graphql_type=list[RawElapsedRow],
+        )
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config(), error_policy={"enabled": False})
+
+
+_PAST_MICROSECONDS = "999999999 00:00:00"
+_BELOW_MICROSECONDS = "-999999999 00:00:00"
+_ONE_DAY = "1 00:00:00"
+
+
+class _RawDurationCase(NamedTuple):
+    """One raw duration request: the key the bind ask refuses, the rows each backend answers.
+
+    ``refused`` is ``None`` for a request no backend refuses. ``bare_rows`` is what the bare
+    ``.qs`` lists where the value is refused (the leaves that cleaned), ``native_rows`` what
+    the request selects on a backend binding a native interval, which takes every timedelta.
+    """
+
+    query: str
+    refused: str | None
+    bare_rows: tuple[str, ...]
+    native_rows: tuple[str, ...]
+
+
+_BOTH = ("one-day", "two-days")
+_RAW_DURATION_CASES = {
+    "exact": _RawDurationCase(f"elapsed={_PAST_MICROSECONDS}", "elapsed", _BOTH, ()),
+    "gt": _RawDurationCase(f"elapsed__gt={_BELOW_MICROSECONDS}", "elapsed__gt", _BOTH, _BOTH),
+    "gte": _RawDurationCase(f"elapsed__gte={_BELOW_MICROSECONDS}", "elapsed__gte", _BOTH, _BOTH),
+    "lt": _RawDurationCase(f"elapsed__lt={_PAST_MICROSECONDS}", "elapsed__lt", _BOTH, _BOTH),
+    "lte": _RawDurationCase(f"elapsed__lte={_PAST_MICROSECONDS}", "elapsed__lte", _BOTH, _BOTH),
+    "generated-in-mixed": _RawDurationCase(
+        f"elapsed__in={_ONE_DAY},{_PAST_MICROSECONDS}",
+        "elapsed__in",
+        _BOTH,
+        ("one-day",),
+    ),
+    "generated-in-every-member": _RawDurationCase(
+        f"elapsed__in={_PAST_MICROSECONDS}",
+        "elapsed__in",
+        _BOTH,
+        (),
+    ),
+    "generated-range": _RawDurationCase(
+        f"elapsed__range={_ONE_DAY},{_PAST_MICROSECONDS}",
+        "elapsed__range",
+        _BOTH,
+        _BOTH,
+    ),
+    "declared-list-mixed": _RawDurationCase(
+        f"elapsed_among={_ONE_DAY},{_PAST_MICROSECONDS}",
+        "elapsed_among",
+        _BOTH,
+        ("one-day",),
+    ),
+    "declared-list-exclude": _RawDurationCase(
+        f"elapsed_excluded={_ONE_DAY},{_PAST_MICROSECONDS}",
+        "elapsed_excluded",
+        _BOTH,
+        ("two-days",),
+    ),
+    "declared-array": _RawDurationCase(
+        f"elapsed_array_among={_ONE_DAY},{_PAST_MICROSECONDS}",
+        "elapsed_array_among",
+        _BOTH,
+        ("one-day",),
+    ),
+    "declared-range-bound": _RawDurationCase(
+        f"elapsed_span_0={_BELOW_MICROSECONDS}&elapsed_span_1={_ONE_DAY}",
+        "elapsed_span",
+        _BOTH,
+        ("one-day",),
+    ),
+    "declared-comparison": _RawDurationCase(
+        f"elapsed_after={_BELOW_MICROSECONDS}",
+        "elapsed_after",
+        _BOTH,
+        _BOTH,
+    ),
+    "django-filter-csv": _RawDurationCase(
+        f"elapsed_csv_among={_ONE_DAY},{_PAST_MICROSECONDS}",
+        "elapsed_csv_among",
+        _BOTH,
+        ("one-day",),
+    ),
+    "the-bare-qs-applies-the-leaves-that-cleaned": _RawDurationCase(
+        f"elapsed_among={_PAST_MICROSECONDS}&elapsed={_ONE_DAY}",
+        "elapsed_among",
+        ("one-day",),
+        (),
+    ),
+    "in-range": _RawDurationCase(f"elapsed_among={_ONE_DAY}", None, (), ("one-day",)),
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("raw_elapsed_table")
+@pytest.mark.parametrize("case", _RAW_DURATION_CASES)
+def test_a_raw_duration_past_the_backends_range_is_refused_by_the_form(
+    case: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A duration whose microsecond count lies past 64 bits is the raw form's refusal.
+
+    On SQLite and MySQL, which bind a duration as its microsecond count, every lookup and
+    every member or bound of every generated, declared and django-filter duration filter is
+    refused with the message the typed input answers, include and exclude alike; the bare
+    ``.qs`` applies the leaves that cleaned. A native interval takes the value.
+    """
+    rows = {
+        label: _RawElapsedProbe.objects.create(elapsed=datetime.timedelta(days=days))
+        for label, days in (("one-day", 1), ("two-days", 2))
+    }
+    selected = _RAW_DURATION_CASES[case]
+    refused = selected.refused is not None and not connection.features.has_native_duration_field
+    errors = {selected.refused: _UNBINDABLE} if refused and selected.refused else {}
+    labels = selected.bare_rows if refused else selected.native_rows
+    recorded = record_compiled_sql(_RawElapsedProbe._meta.db_table)
+    result = _post(
+        _raw_elapsed_schema(),
+        "query($query: String!) { rawErrors(query: $query) rawRows(query: $query) { id } }",
+        {"query": selected.query},
+    )
+    assert result == {
+        "data": {
+            "rawErrors": errors,
+            "rawRows": [{"id": saved_pk(rows[label])} for label in labels],
+        },
+    }, result
+    assert len(recorded) == 1, recorded
