@@ -195,6 +195,7 @@ from django_strawberry_framework.utils.permissions import (
 from django_strawberry_framework.utils.relations import ClassifiedPath, classify_path
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.widgets import multi_widget_keys
+from tests._filter_key_models import _DecimalKeyedHolder
 from tests._idioms import (
     STR_ENUM,
     STR_SUBCLASS_KINDS,
@@ -17105,6 +17106,77 @@ def test_a_self_referential_through_its_rows_cannot_name_is_joined_as_django_joi
         "id",
     )
     assert sets_module._through_link(RkPeer, meta.get_field("id")) is None
+
+
+def _unconstrained_shelf_key() -> object:
+    """A non-null key onto ``Shelf`` the database does not enforce (``db_constraint=False``)."""
+    key: django_models.ForeignKey[library_models.Shelf, library_models.Shelf] = (
+        django_models.ForeignKey(
+            library_models.Shelf,
+            on_delete=django_models.CASCADE,
+            db_constraint=False,
+        )
+    )
+    return key
+
+
+@pytest.mark.parametrize(
+    ("field", "back"),
+    [
+        pytest.param(
+            lambda: library_models.Book._meta.get_field("shelf"),
+            "books",
+            id="enforced-key",
+        ),
+        pytest.param(
+            lambda: library_models.Edition._meta.get_field("publisher_2"),
+            None,
+            id="nullable-key",
+        ),
+        pytest.param(
+            lambda: library_models.ShelfLabel._meta.get_field("shelf"),
+            None,
+            id="foreign-object",
+        ),
+        pytest.param(
+            lambda: _DecimalKeyedHolder._meta.get_field("owner"),
+            None,
+            id="no-reverse-name",
+        ),
+        pytest.param(
+            _unconstrained_shelf_key,
+            None,
+            id="no-constraint",
+        ),
+        pytest.param(
+            lambda: library_models.BranchSignage._meta.get_field("branch"),
+            "signage",
+            id="proxy-target",
+        ),
+        pytest.param(
+            lambda: library_models.KioskFault._meta.get_field("kiosk"),
+            None,
+            id="inheritance-child",
+        ),
+        pytest.param(
+            lambda: library_models.Book._meta.get_field("genres"),
+            None,
+            id="many-to-many",
+        ),
+    ],
+)
+def test_which_forward_keys_the_relation_view_joins_round_their_target(
+    field: Callable[[], object],
+    back: str | None,
+) -> None:
+    """Only an enforced non-null ``ForeignKey`` with a reverse name is joined round its target.
+
+    A nullable key needs no round trip; a key onto a proxy (``VisibleBranch``) is joined
+    as one onto its concrete model is. A bare ``ForeignObject``, a ``db_constraint=False``
+    key, a key whose reverse is ``related_name="+"``, one onto a multi-table-inheritance
+    child (``SelfServeDesk``) and a many-to-many get none.
+    """
+    assert sets_module._round_trip(field()) == back
 
 
 class RkSelfPeer(django_models.Model):

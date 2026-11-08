@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 190 to do.
+Progress: 0 done, 191 to do.
 
 ## From dry-0_0_15_3
 
@@ -840,6 +840,13 @@ Progress: 0 done, 190 to do.
   surrogate or NUL. `DjangoFilterBackend` answers 400 and a strict `FilterView` no rows; a bare `.qs` read of an invalid
   form applies the leaves that cleaned (none once text is refused), as django-filter documents. A GraphQL
   `FILTER_INVALID` payload now carries a form error and a bind refusal together, where it carried only the form error
+- [ ] 808. CHANGELOG entry for item 807: a `Filter` subclass overriding `filter` on a to-many relation key a flat field
+  walks, on a path starting at a non-null forward key onto a model or a proxy of one (`shelf__alt_branches` on books,
+  `branch__shelves` on signage declared against a proxy), whose value names no row of the target, now keeps a parent
+  whose first related row is hidden and reads it as having none, as unwalked over the visible rows. It dropped that
+  parent: an empty choice read as `<field_name>__isnull=True` missed a book on a hidden shelf. The relation is joined
+  round its target when the database enforces the key. A `ForeignObject`, a `db_constraint=False` key, a
+  `related_name="+"` key and a key onto a multi-table-inheritance child keep their earlier answers
 
 ## From dry-upstream-0_0_15
 
