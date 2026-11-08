@@ -76,6 +76,7 @@ import dataclasses
 import datetime
 import decimal
 import inspect
+import logging
 import re
 import sys
 import threading
@@ -7785,6 +7786,181 @@ def test_serializer_duration_past_the_backend_integer_is_refused(
     else:
         assert json_at(payload, "errors") == []
         assert stored_spans == [datetime.timedelta(days=days)]
+
+
+def _unique_span_model(name: str, shape: str) -> type[Model]:
+    """A synthetic model whose ``span`` is unique under ``shape``, beside an ``amount``.
+
+    ``unique`` is ``unique=True``, ``together`` is ``unique_together`` with ``amount``, and
+    ``conditional`` a ``UniqueConstraint`` over the rows whose ``amount`` is positive.
+    """
+    meta: dict[str, object] = {"app_label": "products", "managed": False}
+    if shape == "together":
+        meta["unique_together"] = (("span", "amount"),)
+    if shape == "conditional":
+        meta["constraints"] = (
+            models.UniqueConstraint(
+                fields=("span",),
+                condition=models.Q(amount__gt=0),
+                name=f"{name.lower()}_span_key",
+            ),
+        )
+    return type(
+        name,
+        (Model,),
+        {
+            "__module__": __name__,
+            "amount": models.IntegerField(default=1),
+            "span": models.DurationField(unique=shape == "unique"),
+            "Meta": type("Meta", (), meta),
+        },
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("shape", ["unique", "together", "conditional"])
+@pytest.mark.parametrize(
+    ("sent", "days"),
+    [
+        pytest.param("999999999 00:00:00", None, id="past-64-bits"),
+        pytest.param("5 00:00:00", 5, id="fits-64-bits"),
+    ],
+)
+def test_serializer_duration_past_the_backend_integer_is_refused_before_its_uniqueness_query(
+    operation: str,
+    shape: str,
+    sent: str,
+    days: int | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duration SQLite cannot bind fails its field before a uniqueness validator binds it.
+
+    DRF's ``UniqueValidator`` (``unique=True``, a conditional ``UniqueConstraint``) and
+    ``UniqueTogetherValidator`` bind ``span`` in a query inside ``is_valid()``, where SQLite
+    raises ``OverflowError`` binding a microsecond count past 64 bits, which DRF's
+    ``qs_exists`` does not catch. The serializer answers ``span``'s ``invalid`` error before
+    any of them runs, nothing written; a duration that fits is written. PostgreSQL binds an
+    ``interval``, so every duration stores there. The column's scalar is the consumer's
+    ``SCALAR_MAP`` entry, here DRF's own duration text.
+    """
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    model_class = _unique_span_model(
+        f"UniqueSpanRow{shape.title()}{operation.title()}{days or 'Past'}",
+        shape,
+    )
+    serializer_cls = _serializer_over(model_class, ("span", "amount"))
+    stored = datetime.timedelta(days=2)
+    with _synthetic_table(model_class):
+        row_id = (
+            saved_pk(model_class._default_manager.create(span=stored, amount=1))
+            if operation == "update"
+            else None
+        )
+        schema, create_input, update_input = _blank_columns_schema(serializer_cls, model_class)
+        payload = _run_row_write(
+            schema,
+            create_input if row_id is None else update_input,
+            {"span": sent, "amount": 1},
+            row_id,
+        )
+        stored_spans = list(model_class._default_manager.values_list("span", flat=True))
+
+    kept = [] if row_id is None else [stored]
+    if days is None and not connections["default"].features.has_native_duration_field:
+        assert payload == {
+            "result": None,
+            "errors": [{"field": "span", "messages": _UNREPRESENTABLE, "codes": ["invalid"]}],
+        }
+        assert stored_spans == kept
+    else:
+        assert json_at(payload, "errors") == []
+        assert stored_spans == [datetime.timedelta(days=days or 999_999_999)]
+
+
+def _unique_stamp_model() -> type[Model]:
+    """A synthetic model with a unique ``stamp`` time beside an ``amount``."""
+    return type(
+        "UniqueStampRow",
+        (Model,),
+        {
+            "__module__": __name__,
+            "amount": models.IntegerField(default=1),
+            "stamp": models.TimeField(unique=True),
+            "Meta": type("Meta", (), {"app_label": "products", "managed": False}),
+        },
+    )
+
+
+def _aware_stamp(_serializer: object, attrs: dict[str, object]) -> dict[str, object]:
+    """A ``validate()`` hook setting ``stamp`` to an aware time."""
+    return {**attrs, "stamp": datetime.time(9, 30, tzinfo=datetime.timezone.utc)}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_serializer_validate_setting_an_aware_unique_time_is_refused_after_is_valid() -> None:
+    """A value ``validate()`` sets, after every uniqueness validator ran, is still refused.
+
+    DRF runs ``validate()`` after its validators, so the ``UniqueValidator`` on ``stamp``
+    bound the naive time sent; the aware time the hook sets is ``stamp``'s ``invalid`` error
+    on SQLite, which cannot store it, nothing written. PostgreSQL stores it.
+    """
+    model_class = _unique_stamp_model()
+    serializer_cls = _serializer_over(model_class, ("stamp",), methods={"validate": _aware_stamp})
+    with _synthetic_table(model_class):
+        schema, create_input, _ = _blank_columns_schema(serializer_cls, model_class)
+        payload = _run_row_write(schema, create_input, {"stamp": "09:30:00"})
+        stored = list(model_class._default_manager.values_list("stamp", flat=True))
+
+    if connections["default"].vendor == "postgresql":
+        assert json_at(payload, "errors") == []
+        return
+    assert payload == {
+        "result": None,
+        "errors": [{"field": "stamp", "messages": _UNREPRESENTABLE, "codes": ["invalid"]}],
+    }
+    assert stored == []
+
+
+def _keys_only(_serializer: object, data: object) -> object:
+    """A ``to_internal_value`` override answering the list of the keys sent, no mapping."""
+    return list(data) if is_mapping(data) else data
+
+
+@pytest.mark.django_db(transaction=True)
+def test_serializer_hold_passes_a_non_mapping_value_on_to_drf(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-mapping value a ``to_internal_value`` override returns is passed on untouched.
+
+    ``_keys_only`` answers the list of the keys sent in place of the validated mapping. The
+    storability hold reads no column value from it, so DRF's own validators and
+    ``save()`` meet it as the override returned it: the request fails with DRF's own
+    refusal of a non-mapping ``validated_data``, masked, never an error the hold raises
+    indexing the list by a field name, and nothing is written.
+    """
+    model_class = _unique_stamp_model()
+    serializer_cls = _serializer_over(
+        model_class,
+        ("stamp",),
+        methods={"to_internal_value": _keys_only},
+    )
+    with _synthetic_table(model_class), caplog.at_level(logging.ERROR):
+        schema, create_input, _ = _blank_columns_schema(serializer_cls, model_class)
+        request = HttpRequest()
+        request.user = User(username="u")
+        result = schema.execute_sync(
+            f"mutation($d: {create_input}!){{ createRow(data:$d){{ result{{ id }} }} }}",
+            variable_values={"d": {"stamp": "09:30:00"}},
+            context_value=SimpleNamespace(request=request),
+        )
+        rows = model_class._default_manager.count()
+
+    assert result.errors is not None
+    assert [error.message for error in result.errors] == ["An unexpected error occurred."]
+    logged = [record.getMessage().partition("\n")[0] for record in caplog.records]
+    assert "'list' object is not a mapping" in logged, logged
+    assert rows == 0
 
 
 # A naive year-1 datetime made aware in Tokyo, and an aware one projected onto UTC under

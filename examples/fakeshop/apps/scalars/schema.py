@@ -53,6 +53,14 @@ own cleaning would rewrite it. The ``ViaJsonTextForm`` pair writes ``payload`` t
 ``forms.NullableScalarSpecimenJsonTextForm``'s ``JsonTextField``, typed ``String``, which parses
 the JSON text sent and presents the stored value as its JSON text to an update omitting it.
 
+The ``UniqueScalarSpecimen`` ``ViaForm`` and ``ViaSerializer`` pairs write columns each under
+a uniqueness rule (``unique=True``, ``unique_together``, a conditional ``UniqueConstraint``)
+through ``forms.UniqueScalarSpecimenForm`` and ``serializers.UniqueScalarSpecimenSerializer``,
+whose ``validate_opened_at`` reads the wall clock sent as shop time;
+``createUniqueScalarSpecimenViaUnboundedAmountSerializer`` writes ``amount`` through a
+``DecimalField`` holding no digits. A value the database cannot store is the field's error
+before a uniqueness check binds it in a query.
+
 ``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
 ``FilteredRelation("parent")`` alias named ``par``, filtered by
 ``filters.ScalarSpecimenParentStampFilter``, whose ``parentDayOf`` and ``parentDaysSpan``
@@ -270,6 +278,21 @@ class MediaSpecimenType(DjangoType):
         # Explicit now that a second type wraps the same model: a relation to
         # ``MediaSpecimen`` resolves here, not to the path-bearing sibling.
         primary = True
+
+
+class UniqueScalarSpecimenType(DjangoType):
+    """``DjangoType`` over ``UniqueScalarSpecimen``: its form and serializer writes' payload."""
+
+    class Meta:
+        model = models.UniqueScalarSpecimen
+        fields = (
+            "id",
+            "label",
+            "opened_time",
+            "opened_at",
+            "amount",
+            "active",
+        )
 
 
 class MediaSpecimenWithPathType(DjangoType):
@@ -808,6 +831,51 @@ class UpdateScalarSpecimenViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+class CreateUniqueScalarSpecimenViaForm(DjangoModelFormMutation):
+    """Create a ``UniqueScalarSpecimen`` through ``UniqueScalarSpecimenForm``."""
+
+    class Meta:
+        form_class = forms.UniqueScalarSpecimenForm
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateUniqueScalarSpecimenViaForm(DjangoModelFormMutation):
+    """Update a ``UniqueScalarSpecimen`` through ``UniqueScalarSpecimenForm``."""
+
+    class Meta:
+        form_class = forms.UniqueScalarSpecimenForm
+        operation = "update"
+        permission_classes = []
+
+
+class CreateUniqueScalarSpecimenViaSerializer(SerializerMutation):
+    """Create a ``UniqueScalarSpecimen`` through ``UniqueScalarSpecimenSerializer``."""
+
+    class Meta:
+        serializer_class = serializers.UniqueScalarSpecimenSerializer
+        operation = "create"
+        permission_classes = []
+
+
+class UpdateUniqueScalarSpecimenViaSerializer(SerializerMutation):
+    """Update a ``UniqueScalarSpecimen`` through ``UniqueScalarSpecimenSerializer``."""
+
+    class Meta:
+        serializer_class = serializers.UniqueScalarSpecimenSerializer
+        operation = "update"
+        permission_classes = []
+
+
+class CreateUniqueScalarSpecimenViaUnboundedAmountSerializer(SerializerMutation):
+    """Create a ``UniqueScalarSpecimen`` through the digitless-``amount`` serializer."""
+
+    class Meta:
+        serializer_class = serializers.UniqueScalarSpecimenUnboundedAmountSerializer
+        operation = "create"
+        permission_classes = []
+
+
 @strawberry.type
 class Mutation:
     """Scalars coverage write surface: the live ``Upload`` path (spec-037) and temporal writes.
@@ -819,7 +887,8 @@ class Mutation:
     text over the temporal and the split form; the ``NullableScalarSpecimen``
     ``ViaForm`` pair writes the ``null=True`` ``flag`` through a checkbox and ``payload``
     and ``score`` through a ``CharField``, and the ``ViaJsonTextForm`` pair writes ``payload``
-    as JSON text.
+    as JSON text; the ``UniqueScalarSpecimen`` pairs write columns under uniqueness rules
+    through a ``ModelForm`` and a serializer.
     """
 
     create_media_specimen = DjangoMutationField(CreateMediaSpecimen)
@@ -878,6 +947,21 @@ class Mutation:
     )
     create_scalar_specimen_via_serializer = DjangoMutationField(CreateScalarSpecimenViaSerializer)
     update_scalar_specimen_via_serializer = DjangoMutationField(UpdateScalarSpecimenViaSerializer)
+    create_unique_scalar_specimen_via_form = DjangoMutationField(
+        CreateUniqueScalarSpecimenViaForm,
+    )
+    update_unique_scalar_specimen_via_form = DjangoMutationField(
+        UpdateUniqueScalarSpecimenViaForm,
+    )
+    create_unique_scalar_specimen_via_serializer = DjangoMutationField(
+        CreateUniqueScalarSpecimenViaSerializer,
+    )
+    update_unique_scalar_specimen_via_serializer = DjangoMutationField(
+        UpdateUniqueScalarSpecimenViaSerializer,
+    )
+    create_unique_scalar_specimen_via_unbounded_amount_serializer = DjangoMutationField(
+        CreateUniqueScalarSpecimenViaUnboundedAmountSerializer,
+    )
 
 
 __all__ = ("Mutation", "Query")

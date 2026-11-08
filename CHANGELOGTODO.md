@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 191 to do.
+Progress: 0 done, 192 to do.
 
 ## From dry-0_0_15_3
 
@@ -847,6 +847,13 @@ Progress: 0 done, 191 to do.
   parent: an empty choice read as `<field_name>__isnull=True` missed a book on a hidden shelf. The relation is joined
   round its target when the database enforces the key. A `ForeignObject`, a `db_constraint=False` key, a
   `related_name="+"` key and a key onto a multi-table-inheritance child keep their earlier answers
+- [ ] 811. CHANGELOG entry for item 725: a form or serializer mutation writing a value the database cannot store into a
+  column under a uniqueness rule (`unique=True`, `unique_together`, a `UniqueConstraint`, conditional and functional
+  ones included) now answers the field's `invalid` error ("Enter a value the database can represent.") instead of a
+  masked top-level error or a wrong `__all__` constraint violation: on SQLite an aware time, or an aware datetime under
+  `USE_TZ = False`, through a `ModelForm`; a duration past 64 bits of microseconds or a `validate_<field>` datetime
+  past year 9999 through a `ModelSerializer`; on PostgreSQL a decimal past `numeric`. A serializer's own
+  `run_validators` / `validate` no longer runs once a field is refused, as DRF runs none after a field error
 
 ## From dry-upstream-0_0_15
 

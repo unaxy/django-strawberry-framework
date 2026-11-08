@@ -56,6 +56,15 @@ column uses the deliberately-unsupported ``Base36Field`` so the consumer-
 annotation escape hatch (a type the converter table cannot auto-map) is shown
 live. ``manage.py inspect_django_type OverriddenScalarSpecimenType`` then prints
 each field's true producing row in its converter column.
+
+``UniqueScalarSpecimen`` holds temporal and decimal columns under every uniqueness shape
+Django validates: ``opened_time`` is ``unique=True``, ``opened_at`` is unique together with
+``label``, and ``amount`` is unique among ``active`` rows through a conditional
+``UniqueConstraint``. A ``ModelForm``'s ``validate_unique()`` / ``validate_constraints()``
+and DRF's uniqueness validators bind each such value in a query inside ``is_valid()``, so a
+value the database cannot store (an aware time on SQLite, an aware datetime under
+``USE_TZ = False``, a decimal past PostgreSQL ``numeric``'s format) is refused live as the
+field's error before any of them runs.
 """
 
 from __future__ import annotations
@@ -381,6 +390,45 @@ class OverrideSpecimen(models.Model):
     # Declared as ``note: auto`` - selected and inferred (``TextField`` -> ``String!``)
     # rather than overridden, so the auto ``SCALAR_MAP`` converter still produces it.
     note: _Text = models.TextField(blank=True, default="")
+
+    @override
+    def __str__(self) -> str:
+        return self.label
+
+
+class UniqueScalarSpecimen(models.Model):
+    """Temporal and decimal columns under each uniqueness shape a write validates.
+
+    ``opened_time`` is ``unique=True``, ``opened_at`` is unique together with ``label``, and
+    ``amount`` is unique among the ``active`` rows (a conditional ``UniqueConstraint``), so a
+    ``ModelForm``'s ``validate_unique()`` / ``validate_constraints()`` and DRF's
+    ``UniqueValidator`` / ``UniqueTogetherValidator`` bind each value in a query inside
+    ``is_valid()``.
+    """
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
+    label: _Text = models.TextField(unique=True)
+    opened_time: _Time = models.TimeField(unique=True)
+    opened_at: _DateTime = models.DateTimeField()
+    amount: _Decimal = models.DecimalField(max_digits=20, decimal_places=4)
+    active: _Bool = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = (
+            (
+                "opened_at",
+                "label",
+            ),
+        )
+        constraints = (
+            models.UniqueConstraint(
+                fields=("amount",),
+                condition=models.Q(active=True),
+                name="scalars_unique_active_amount",
+            ),
+        )
 
     @override
     def __str__(self) -> str:

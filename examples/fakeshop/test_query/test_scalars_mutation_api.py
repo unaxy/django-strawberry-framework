@@ -47,10 +47,10 @@ update and an update omitting ``occurredAt`` over such a stored value, sync and 
 The ``DayInstantForm`` pair writes ``occurred_on`` through a ``clean_occurred_on`` answering
 the aware midnight UTC of the date sent, which the ``DateField`` column stores as its date
 in the default time zone. Under ``America/New_York`` the midnight of ``0001-01-01`` falls in
-year 0 there, where Django's own conversion inside ``is_valid()`` raises ``OverflowError``:
-the mutation answers the ``occurredOn`` ``invalid`` ``FieldError`` with nothing written,
-sync and async, while ``UTC`` stores the date and an in-range day is stored as its date in
-the default time zone.
+year 0 there, where Django's own conversion inside ``is_valid()`` would raise
+``OverflowError``: the mutation answers the ``occurredOn`` ``invalid`` ``FieldError`` before
+that conversion, with nothing written, sync and async, while ``UTC`` stores the date and an
+in-range day is stored as its date in the default time zone.
 
 ``createNullableScalarSpecimenViaForm`` / ``updateNullableScalarSpecimenViaForm`` write the
 ``null=True`` ``NullableScalarSpecimen.flag`` through a checkbox
@@ -88,6 +88,18 @@ its JSON text, and keeps a stored object, list, string, number or ``NULL``, sync
 ``occurred_time`` and ``external_id``: an update keeps each one's stored value, the
 microseconds the ``DateTimeInput`` / ``TimeInput`` presentation of a stored instant zeroes
 included, whether it omits the field or sends a value Django ignores, sync and async.
+
+The ``UniqueScalarSpecimen`` ``ViaForm`` and ``ViaSerializer`` pairs write columns each under
+a uniqueness rule (``openedTime`` ``unique=True``, ``openedAt`` unique together with
+``label``, ``amount`` a conditional ``UniqueConstraint``), which the ``ModelForm``'s
+``validate_unique()`` / ``validate_constraints()`` and DRF's uniqueness validators bind in a
+query inside ``is_valid()``. A value the database cannot store is the field's ``invalid``
+``FieldError`` before that query, on create and update, with nothing written: on SQLite the
+form's aware ``openedTime`` and, under ``USE_TZ = False``, aware ``openedAt``, the
+serializer's ``validate_opened_at`` instant past year 9999 in UTC, and the serializer's aware
+``openedTime``; on PostgreSQL the form's ``amount`` and the digitless ``amount`` of
+``createUniqueScalarSpecimenViaUnboundedAmountSerializer`` sent a zero past ``numeric``'s
+exponent limit. A value each flavor stores is written.
 """
 
 from __future__ import annotations
@@ -850,11 +862,12 @@ def test_clean_hook_datetime_the_date_column_cannot_store_is_the_field_error(
 
     ``ScalarSpecimenDayInstantForm.clean_occurred_on`` answers the aware midnight UTC of the
     date sent, which the ``DateField`` column stores as its date in the default time zone:
-    Django's own conversion of it inside ``is_valid()`` raises ``OverflowError`` where that
-    date falls in year 0 (``0001-01-01`` under ``America/New_York``), so the mutation is the
-    ``occurredOn`` ``invalid`` ``FieldError`` ("Enter a value the database can represent.")
-    with nothing created and an updated row kept. Under ``UTC`` the date is stored, and
-    an in-range day is stored as its date in the default time zone (``2021-06-14``).
+    Django's own conversion of it inside ``is_valid()`` would raise ``OverflowError`` where
+    that date falls in year 0 (``0001-01-01`` under ``America/New_York``), so the mutation is
+    the ``occurredOn`` ``invalid`` ``FieldError`` ("Enter a value the database can
+    represent.") before that conversion, with nothing created and an updated row kept. Under
+    ``UTC`` the date is stored, and an in-range day is stored as its date in the default time
+    zone (``2021-06-14``).
     """
     with override_settings(TIME_ZONE=zone):
         root, payload, specimen = _day_instant_write(operation, day)
@@ -1926,3 +1939,262 @@ async def test_async_update_through_disabled_fields_keeps_their_stored_values(
         )
 
     await sync_to_async(_assert_locked_kept)(response_json(result.response), external_id)
+
+
+#: The ``UniqueScalarSpecimen`` surface: each flavor's create and update root fields and input
+#: types.
+_UNIQUE_FLAVORS = {
+    "form": (
+        "createUniqueScalarSpecimenViaForm",
+        "UniqueScalarSpecimenFormInput",
+        "updateUniqueScalarSpecimenViaForm",
+        "UniqueScalarSpecimenFormPartialInput",
+    ),
+    "serializer": (
+        "createUniqueScalarSpecimenViaSerializer",
+        "UniqueScalarSpecimenSerializerInput",
+        "updateUniqueScalarSpecimenViaSerializer",
+        "UniqueScalarSpecimenSerializerPartialInput",
+    ),
+}
+
+#: The values a ``UniqueScalarSpecimen`` create supplies beside the cell's.
+_UNIQUE_CREATE_DATA: dict[str, object] = {
+    "label": "written",
+    "openedTime": "11:00:00",
+    "openedAt": "2021-06-15T09:30:00+00:00",
+    "amount": "7.5",
+    "active": True,
+}
+
+#: The stored ``UniqueScalarSpecimen`` an update starts from.
+_UNIQUE_STORED = {
+    "label": "stored",
+    "opened_time": datetime.time(3, 4, 5),
+    "opened_at": _STORED_AT,
+    "amount": Decimal("12.5000"),
+}
+
+
+def _unique_seed() -> models.UniqueScalarSpecimen:
+    return models.UniqueScalarSpecimen.objects.create(**_UNIQUE_STORED)
+
+
+def _unique_write(
+    root_fields: tuple[str, str, str, str],
+    specimen: models.UniqueScalarSpecimen | None,
+    field: str,
+    value: str,
+) -> tuple[str, JSONObject]:
+    """Send ``field: value`` through a create, or an update of ``specimen``; root and payload."""
+    create_field, create_input, update_field, update_input = root_fields
+    selection = (
+        "{ result { label openedTime openedAt amount } errors { field messages codes path } }"
+    )
+    if specimen is None:
+        document = (
+            f"mutation Write($data: {create_input}!) {{ {create_field}(data: $data) {selection} }}"
+        )
+        variables: dict[str, object] = {"data": {**_UNIQUE_CREATE_DATA, field: value}}
+        return create_field, response_json(post_graphql(document, variables=variables))
+    document = (
+        f"mutation Write($id: ID!, $data: {update_input}!) "
+        f"{{ {update_field}(id: $id, data: $data) {selection} }}"
+    )
+    variables = {"id": str(specimen.pk), "data": {field: value}}
+    return update_field, response_json(post_graphql(document, variables=variables))
+
+
+def _unique_rows() -> list[tuple[object, ...]]:
+    return list(
+        models.UniqueScalarSpecimen.objects.order_by("label").values_list(
+            "label",
+            "opened_time",
+            "opened_at",
+            "amount",
+        ),
+    )
+
+
+def _assert_nothing_written(specimen: models.UniqueScalarSpecimen | None) -> None:
+    """A refusal creates no row and keeps an updated row's stored values."""
+    expected = (
+        []
+        if specimen is None
+        else [
+            (
+                _UNIQUE_STORED["label"],
+                _UNIQUE_STORED["opened_time"],
+                _UNIQUE_STORED["opened_at"],
+                _UNIQUE_STORED["amount"],
+            ),
+        ]
+    )
+    assert _unique_rows() == expected
+
+
+class _UniqueCell:
+    """One value a uniqueness check would bind: its flavor, field, value, settings and outcome."""
+
+    def __init__(
+        self,
+        flavor: str,
+        field: str,
+        value: str,
+        outcomes: tuple[str, str],
+        *,
+        stored: str | None = None,
+        settings: Mapping[str, object] | None = None,
+    ) -> None:
+        self.flavor = flavor
+        self.field = field
+        self.value = value
+        self.outcomes = outcomes
+        self.stored = value if stored is None else stored
+        self.settings = dict(settings or {})
+
+    def outcome(self) -> str:
+        """The outcome on the database the suite runs on."""
+        sqlite, postgresql = self.outcomes
+        return postgresql if connection.vendor == "postgresql" else sqlite
+
+
+_UNIQUE_CELLS = {
+    "form-aware-unique-time": _UniqueCell(
+        "form",
+        "openedTime",
+        "09:30:00+02:00",
+        (_REFUSED, _STORED),
+    ),
+    "form-naive-unique-time": _UniqueCell("form", "openedTime", "09:30:00", (_STORED, _STORED)),
+    "form-aware-unique-together-datetime-without-time-zone-support": _UniqueCell(
+        "form",
+        "openedAt",
+        "2021-06-15T09:30:00+00:00",
+        (_REFUSED, _STORED),
+        settings={"USE_TZ": False},
+    ),
+    "form-naive-unique-together-datetime-without-time-zone-support": _UniqueCell(
+        "form",
+        "openedAt",
+        "2021-06-15T09:30:00",
+        (_STORED, _STORED),
+        settings={"USE_TZ": False},
+    ),
+    "serializer-aware-unique-time": _UniqueCell(
+        "serializer",
+        "openedTime",
+        "09:30:00+02:00",
+        (_REFUSED, _STORED),
+    ),
+    "serializer-hook-unique-together-datetime-past-year-9999": _UniqueCell(
+        "serializer",
+        "openedAt",
+        "9999-12-31T23:30:00",
+        (_REFUSED, _REFUSED),
+    ),
+    "serializer-hook-unique-together-datetime-in-range": _UniqueCell(
+        "serializer",
+        "openedAt",
+        "2021-06-15T09:30:00",
+        (_STORED, _STORED),
+        stored="2021-06-15T10:30:00+00:00",
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("name", list(_UNIQUE_CELLS))
+def test_value_a_uniqueness_check_would_bind_is_the_field_error(operation: str, name: str) -> None:
+    """A value the database cannot store is refused before a uniqueness check binds it.
+
+    ``openedTime`` is ``unique=True`` and ``openedAt`` unique together with ``label``, so the
+    ``ModelForm``'s ``validate_unique()`` and DRF's ``UniqueTogetherValidator`` would bind each
+    value in a query inside ``is_valid()``, where the database's own refusal escapes as a masked
+    top-level error: SQLite's adapter ``ValueError`` for an aware time, and for an aware
+    datetime under ``USE_TZ = False``, on the form; the ``OverflowError`` of an instant past
+    year 9999 in UTC, which the serializer's ``validate_opened_at`` makes of
+    ``9999-12-31T23:30:00`` read as shop time, on the serializer. Each, and the serializer's
+    aware time, is the field's ``invalid`` ``FieldError`` instead, nothing created and an
+    updated row kept. PostgreSQL stores the aware time and, under ``USE_TZ = False``, the
+    aware datetime. A naive time, a
+    naive datetime under ``USE_TZ = False`` and an in-range hook instant are stored.
+    """
+    cell = _UNIQUE_CELLS[name]
+    specimen = None if operation == "create" else _unique_seed()
+    with override_settings(**cell.settings):
+        root, payload = _unique_write(
+            _UNIQUE_FLAVORS[cell.flavor],
+            specimen,
+            cell.field,
+            cell.value,
+        )
+        if cell.outcome() == _REFUSED:
+            assert payload == _field_refusal(root, cell.field, _UNSTORABLE)
+        else:
+            assert json_at(payload, "data", root, "errors") == [], payload
+            assert json_at(payload, "data", root, "result", cell.field) == cell.stored
+
+    if cell.outcome() == _REFUSED:
+        _assert_nothing_written(specimen)
+    else:
+        assert models.UniqueScalarSpecimen.objects.count() == 1
+
+
+#: A zero whose written exponent PostgreSQL's ``numeric`` refuses at the bind, which ``amount``'s
+#: bounded ``DecimalValidator`` passes, as does a ``DecimalField`` holding no digits.
+_ZERO_AT_NUMERIC_EXPONENT_LIMIT = "0E+1073741823"
+
+
+@pytest.mark.pg
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+def test_form_decimal_postgresql_cannot_bind_under_a_conditional_constraint(
+    operation: str,
+) -> None:
+    """A decimal ``numeric`` refuses is ``amount``'s error before its constraint check binds it.
+
+    ``amount`` is unique among active rows (a conditional ``UniqueConstraint``), whose check
+    inside ``is_valid()`` would bind the value and read the server's ``DataError`` as a
+    violation, the wrong ``"__all__"`` answer. The form answers ``amount``'s ``invalid``
+    ``FieldError`` instead, nothing created and an updated row kept.
+    """
+    specimen = None if operation == "create" else _unique_seed()
+    root, payload = _unique_write(
+        _UNIQUE_FLAVORS["form"],
+        specimen,
+        "amount",
+        _ZERO_AT_NUMERIC_EXPONENT_LIMIT,
+    )
+
+    assert payload == _field_refusal(root, "amount", _UNSTORABLE)
+    _assert_nothing_written(specimen)
+
+
+@pytest.mark.pg
+@pytest.mark.django_db
+def test_serializer_decimal_postgresql_cannot_bind_through_a_field_holding_no_digits() -> None:
+    """A decimal a digitless ``DecimalField`` passes but ``numeric`` refuses is ``amount``'s error.
+
+    ``UniqueScalarSpecimenUnboundedAmountSerializer`` declares ``amount`` with no
+    ``max_digits``, so DRF passes the zero whose exponent PostgreSQL refuses; its uniqueness
+    check would bind it, and DRF reads the server's ``DataError`` as no duplicate, leaving the
+    transaction aborted. The serializer answers ``amount``'s ``invalid`` ``FieldError`` first,
+    nothing created.
+    """
+    root = "createUniqueScalarSpecimenViaUnboundedAmountSerializer"
+    _, payload = _unique_write(
+        (
+            root,
+            "UniqueScalarSpecimenUnboundedAmountSerializerInput",
+            "",
+            "",
+        ),
+        None,
+        "amount",
+        _ZERO_AT_NUMERIC_EXPONENT_LIMIT,
+    )
+
+    assert payload == _field_refusal(root, "amount", _UNSTORABLE)
+    _assert_nothing_written(None)
