@@ -15,9 +15,11 @@ separate public form surface.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import datetime
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from decimal import Decimal
 from functools import partial
 from types import SimpleNamespace
@@ -36,13 +38,15 @@ from django.db import connection as db_connection
 from django.db import models as db_models
 from django.db.models import Model, QuerySet
 from django.db.models.expressions import Combinable
-from django.forms import CharField, DecimalField, Field, Form, SelectMultiple
-from django.http import HttpRequest, QueryDict
+from django.forms import CharField, DecimalField, Field, Form, SelectMultiple, TextInput
+from django.http import HttpRequest, JsonResponse, QueryDict
+from django.test import RequestFactory
 from django.test.utils import CaptureQueriesContext, isolate_apps
 from django.utils.translation import gettext_lazy
 from django_filters import BaseInFilter, CharFilter
 from django_filters.filterset import BaseFilterSet
 from django_filters.rest_framework import DjangoFilterBackend
+from django_filters.views import BaseFilterView
 from graphql import GraphQLError
 from rest_framework import generics
 from rest_framework.test import APIRequestFactory
@@ -102,6 +106,7 @@ from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.utils._narrowing import (
     call_method,
+    list_of,
     read_attr,
     require,
     require_instance,
@@ -3816,3 +3821,398 @@ def test_an_unbound_relation_key_primitive_preserves_the_omission_queryset_ident
     many = RelationPkMultipleFilter(field_name="shelf", lookup_expr="in")
     assert single.filter(queryset, None) is queryset
     assert many.filter(queryset, None) is queryset
+
+
+_UNBINDABLE_MESSAGE = "Enter a value the database can represent."
+_UNBINDABLE_PAYLOAD = [{"message": _UNBINDABLE_MESSAGE, "code": "invalid"}]
+_SURROGATE_PAYLOAD = [
+    {
+        "message": "Text contains invalid Unicode (unpaired surrogate code points).",
+        "code": "invalid",
+    },
+]
+#: A duration ``DurationField``'s form accepts whose microsecond count lies past 64 bits.
+_PAST_MICROSECONDS = "999999999 00:00:00"
+
+
+class _RawElapsedSpecimen(db_models.Model):
+    """A duration column a raw driver filters; refused before any row SQL, so no table exists."""
+
+    elapsed: db_models.DurationField[object, datetime.timedelta] = db_models.DurationField()
+
+    class Meta:
+        managed = False
+        app_label = "test_raw_bind_ask"
+
+
+class _RawElapsedSet(FilterSet):
+    elapsed_among = ListFilter(field_name="elapsed", lookup_expr="in")
+
+    class Meta:
+        model = _RawElapsedSpecimen
+        fields = {"elapsed": ["in", "gt"]}
+
+
+class _RawYearSet(FilterSet):
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = {"occurred_on": ["year__gt"], "label": ["exact"], "signed_big": ["exact"]}
+
+
+#: Each raw request the bind ask refuses, with its set, its model and the refused form key.
+_RAW_REFUSALS = [
+    pytest.param(
+        _RawYearSet,
+        scalar_models.ScalarSpecimen,
+        "occurred_on__year__gt=99999",
+        "occurred_on__year__gt",
+        id="year-past-9999",
+    ),
+    pytest.param(
+        _RawElapsedSet,
+        _RawElapsedSpecimen,
+        f"elapsed__in={_PAST_MICROSECONDS}",
+        "elapsed__in",
+        id="generated-duration-in",
+    ),
+    pytest.param(
+        _RawElapsedSet,
+        _RawElapsedSpecimen,
+        f"elapsed_among=1 00:00:00,{_PAST_MICROSECONDS}",
+        "elapsed_among",
+        id="declared-duration-list",
+    ),
+    pytest.param(
+        _RawElapsedSet,
+        _RawElapsedSpecimen,
+        f"elapsed__gt=-{_PAST_MICROSECONDS}",
+        "elapsed__gt",
+        id="duration-comparison",
+    ),
+]
+
+
+def _skip_a_native_interval(model: type[Model]) -> None:
+    """Skip a duration row where the database binds a native interval, which takes the value."""
+    if model is _RawElapsedSpecimen and db_connection.features.has_native_duration_field:
+        pytest.skip("a native interval binds every timedelta")
+
+
+def _raw_list_view(
+    filterset_class: type[BaseFilterSet],
+    model_class: type[Model],
+) -> Callable[..., object]:
+    """A DRF list view filtering ``model_class`` through ``DjangoFilterBackend``, listing ids."""
+
+    class RawSerializer(ModelSerializerBase[Model]):
+        class Meta:
+            model = model_class
+            fields = ("id",)
+
+    class RawListView(generics.ListAPIView[Model]):
+        queryset = model_class._default_manager.all()
+        serializer_class = RawSerializer
+        filter_backends = (DjangoFilterBackend,)
+        authentication_classes = ()
+        permission_classes = ()
+        pagination_class = None
+        filterset_class: ClassVar[type[BaseFilterSet]] = _RawYearSet
+
+    RawListView.filterset_class = filterset_class
+    return RawListView.as_view()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "filterset_class",
+        "model",
+        "query",
+        "form_key",
+    ),
+    _RAW_REFUSALS,
+)
+def test_django_filter_backend_answers_a_value_the_database_cannot_bind_with_400(
+    filterset_class: type[BaseFilterSet],
+    model: type[Model],
+    query: str,
+    form_key: str,
+) -> None:
+    """The bind ask runs in the form's clean, so the backend's ``raise_exception`` sees it.
+
+    No row SQL runs: the refused request answers DRF's 400 before the queryset is read.
+    """
+    _skip_a_native_interval(model)
+    request = APIRequestFactory().get(f"/rows/?{query}")
+    with CaptureQueriesContext(db_connection) as captured:
+        response = _raw_list_view(filterset_class, model)(request)
+    assert (read_attr(response, "status_code"), read_attr(response, "data")) == (
+        400,
+        {form_key: [_UNBINDABLE_MESSAGE]},
+    )
+    assert captured.captured_queries == []
+
+
+class _StrictPksView(BaseFilterView):
+    """django-filter's ``BaseFilterView`` (``strict`` by default), answering the object list's pks."""
+
+    def render_to_response(self, context: dict[str, object]) -> JsonResponse:
+        rows = [saved_pk(require_instance(row, Model)) for row in list_of(context["object_list"])]
+        return JsonResponse(rows, safe=False)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "filterset_class",
+        "model",
+        "query",
+        "form_key",
+    ),
+    _RAW_REFUSALS,
+)
+def test_a_strict_filter_view_answers_a_value_the_database_cannot_bind_with_no_rows(
+    filterset_class: type[BaseFilterSet],
+    model: type[Model],
+    query: str,
+    form_key: str,
+) -> None:
+    """``FilterView``'s ``strict`` reads the refused form as invalid and lists no row."""
+    _skip_a_native_interval(model)
+    request = RequestFactory().get(f"/rows/?{query}")
+    view = _StrictPksView.as_view(filterset_class=filterset_class, model=model)
+    with CaptureQueriesContext(db_connection) as captured:
+        response = view(request)
+    assert read_attr(response, "content") == b"[]"
+    assert captured.captured_queries == []
+    filterset = filterset_class(data=QueryDict(query), queryset=model._default_manager.all())
+    assert filterset.errors == {form_key: [_UNBINDABLE_MESSAGE]}
+
+
+class _OwnFormYearSet(_RawYearSet):
+    """A consumer ``form`` override building the form class's plain form, which holds no asks."""
+
+    @property
+    @override
+    def form(self) -> Form:
+        if not hasattr(self, "_own_form"):
+            self._own_form: Form = self.get_form_class()(self.data, prefix=self.form_prefix)
+        return self._own_form
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "errors"),
+    [
+        pytest.param(
+            {"label": "\ud800", "occurred_on__year__gt": "x"},
+            {"label": _SURROGATE_PAYLOAD},
+            id="text-first",
+        ),
+        pytest.param(
+            {"occurred_on__year__gt": "x"},
+            {"occurred_on__year__gt": [{"message": "Enter a number.", "code": "invalid"}]},
+            id="form-error",
+        ),
+        pytest.param(
+            {"occurred_on__year__gt": "99999"},
+            {"occurred_on__year__gt": _UNBINDABLE_PAYLOAD},
+            id="unbindable",
+        ),
+        pytest.param(
+            {"signed_big": "x", "occurred_on__year__gt": "99999"},
+            {
+                "signed_big": [{"message": "Enter a number.", "code": "invalid"}],
+                "occurred_on__year__gt": _UNBINDABLE_PAYLOAD,
+            },
+            id="form-error-and-unbindable",
+        ),
+        pytest.param({"occurred_on__year__gt": "2000"}, None, id="valid"),
+    ],
+)
+def test_a_consumer_form_override_is_asked_by_the_validator_itself(
+    data: dict[str, str],
+    errors: dict[str, object] | None,
+) -> None:
+    """A form a consumer ``form`` override builds holds no asks, so the validator runs them.
+
+    The override's own raw form is the consumer's: its ``errors`` hold only what its fields
+    raise, while the typed path refuses the same input as the bind-asking form does.
+    """
+    filterset = _OwnFormYearSet(data=data, queryset=scalar_models.ScalarSpecimen.objects.all())
+    if errors is None:
+        _OwnFormYearSet._validate_form_or_raise(filterset)
+        return
+    with pytest.raises(GraphQLError) as excinfo:
+        _OwnFormYearSet._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {"code": "FILTER_INVALID", "errors": errors}
+
+
+@pytest.mark.django_db
+def test_a_consumer_form_override_keeps_its_own_raw_form() -> None:
+    """The override's raw form runs no ask: a year past 9999 is not among its errors."""
+    filterset = _OwnFormYearSet(
+        data={"occurred_on__year__gt": "99999"},
+        queryset=scalar_models.ScalarSpecimen.objects.all(),
+    )
+    assert filterset.is_valid()
+
+
+def test_an_unbound_filter_form_cleans_nothing() -> None:
+    """An unbound set's form stops as Django's does: no errors, no ``cleaned_data``."""
+    form = _RawYearSet(queryset=scalar_models.ScalarSpecimen.objects.all()).form
+    assert form.errors == {}
+    assert not form.is_valid()
+    assert not hasattr(form, "cleaned_data")
+
+
+class _EmptyPermittedForm(Form):
+    """A consumer ``Meta.form`` permitting an unchanged form to be empty."""
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        *,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data, prefix=prefix, empty_permitted=True, use_required_attribute=False)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("data", "errors"),
+    [
+        pytest.param({"tagged": "\ud800"}, {}, id="unchanged-initial-is-not-asked"),
+        pytest.param({"tagged": "x\ud800"}, {"tagged": _SURROGATE_PAYLOAD}, id="changed-is-asked"),
+    ],
+)
+def test_an_empty_permitted_unchanged_filter_form_skips_the_asks(
+    data: dict[str, str],
+    errors: dict[str, object],
+) -> None:
+    """An empty-permitted form whose data equals its initial skips validation, the asks included."""
+
+    class EmptyPermittedSet(FilterSet):
+        tagged = CharFilter(field_name="label", initial="\ud800")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = ()
+            form = _EmptyPermittedForm
+
+    filterset = EmptyPermittedSet(data=data, queryset=scalar_models.ScalarSpecimen.objects.all())
+    assert filterset.form.errors.get_json_data() == errors
+
+
+#: The consumer form hooks each counting form ran, in order; cleared by each counting row.
+_FORM_HOOK_CALLS: list[str] = []
+
+
+class _CountingForm(Form):
+    """A consumer ``Meta.form`` recording each ``full_clean`` and ``clean`` it runs."""
+
+    @override
+    def full_clean(self) -> None:
+        _FORM_HOOK_CALLS.append("full_clean")
+        super().full_clean()
+
+    @override
+    def clean(self) -> dict[str, object] | None:
+        _FORM_HOOK_CALLS.append("clean")
+        return super().clean()
+
+
+class _EmptyPermittedCountingForm(_CountingForm):
+    """The counting form, empty-permitted."""
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        *,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data, prefix=prefix, empty_permitted=True, use_required_attribute=False)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("form_class", "data", "calls"),
+    [
+        pytest.param(_CountingForm, None, ["full_clean"], id="unbound"),
+        pytest.param(
+            _EmptyPermittedCountingForm,
+            {"tagged": "same"},
+            ["full_clean"],
+            id="empty-permitted-unchanged",
+        ),
+        pytest.param(_CountingForm, {"tagged": "sent"}, ["full_clean", "clean"], id="bound"),
+        pytest.param(_CountingForm, {"tagged": "\ud800"}, [], id="refused-text-skips-cleaning"),
+    ],
+)
+def test_a_consumer_form_clean_runs_wherever_django_runs_it(
+    form_class: type[Form],
+    data: dict[str, str] | None,
+    calls: list[str],
+) -> None:
+    """A consumer ``Meta.form``'s ``full_clean`` and ``clean`` run as Django runs them.
+
+    An unbound form and an unchanged empty-permitted one reach the consumer's
+    ``full_clean`` (Django stops before ``clean``), a bound form both; only a refused
+    text skips cleaning, the consumer's hooks included.
+    """
+
+    class CountingSet(FilterSet):
+        tagged = CharFilter(field_name="label", initial="same")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = ()
+            form = form_class
+
+    _FORM_HOOK_CALLS.clear()
+    _ = CountingSet(data=data, queryset=scalar_models.ScalarSpecimen.objects.all()).form.errors
+    assert calls == _FORM_HOOK_CALLS
+
+
+#: The data each counting widget read, one entry per read; cleared by the row reading it.
+_WIDGET_READS: list[str] = []
+
+
+class _CountingTextInput(TextInput):
+    """A widget recording each read of its data."""
+
+    @override
+    def value_from_datadict(
+        self,
+        data: Mapping[str, object],
+        files: object,
+        name: str,
+    ) -> object:
+        _WIDGET_READS.append(name)
+        return object_result(super().value_from_datadict, data, files, name)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("value", ["sent", "\ud800"], ids=["clean", "refused-text"])
+def test_the_typed_path_reads_the_set_forms_widget_once_per_ask(value: str) -> None:
+    """``_validate_form_or_raise`` reads the set's own form through its clean alone.
+
+    The text ask reads the widget once and cleaning once more; validating that form asks
+    nothing again, so a refused text is read once and a clean value twice.
+    """
+
+    class CountingWidgetSet(FilterSet):
+        tagged = CharFilter(field_name="label", widget=_CountingTextInput)
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = ()
+
+    filterset = CountingWidgetSet(
+        data={"tagged": value},
+        queryset=scalar_models.ScalarSpecimen.objects.all(),
+    )
+    _WIDGET_READS.clear()
+    with contextlib.suppress(GraphQLError):
+        CountingWidgetSet._validate_form_or_raise(filterset)
+    assert (["tagged", "tagged"] if value == "sent" else ["tagged"]) == _WIDGET_READS

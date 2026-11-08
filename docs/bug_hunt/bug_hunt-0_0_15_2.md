@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 440 done, 114 to do. The CHANGELOG entries filed here moved to
+Progress: 442 done, 114 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1855,6 +1855,34 @@ Progress: 440 done, 114 to do. The CHANGELOG entries filed here moved to
   row-preserving `EXISTS` fold, GLOSSARY `FilterSet`) sort by every visible related row; d7171ad0 answered the same. No
   doc, spec or upstream promises filter-matched ordering (django-filter, django-graphene-filters and strawberry_django
   `order_by` plainly and duplicate parents). The contract question is filed as 803
+- [x] 724. (robustness) fixed with 743: the filter form runs the bind ask as its own clean, so a raw `ListFilter` /
+  `ArrayFilter` `in` over a `DurationField` (and every other lookup on it) refuses a duration past 64 bits of
+  microseconds on SQLite and MySQL with the typed input's "Enter a value the database can represent." (`invalid`),
+  never a 500; the over-range member is refused, not dropped, as the generated `in` refuses it, and the integer
+  column's drop rule is unchanged. PostgreSQL and Oracle bind a native interval and answer as before. The `in` gate
+  (`filters/base.py::_integer_in_column`) is unchanged: widening it cleared only the declared `in` cells and split the
+  declared filter from the generated one. Pinned by
+  `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_duration_past_the_backends_range_is_refused_by_the_form`
+  (every generated lookup, `ListFilter` include / exclude, `ArrayFilter`, `RangeFilter`, `DurationFilter`,
+  `BaseInFilter` + `DurationFilter`, mixed lists, in-range control) and the `tests/filters/test_base.py` DRF 400 /
+  `FilterView` strict rows
+- [x] 743. (robustness) fixed: the filter form runs the bind ask and the unstorable-text refusal in its own clean
+  (`filters/form_binding.py::BindAskingFilterForm`, built by `filters/sets.py::FilterSet.form` through
+  `::bind_asking_form_class` with the asks in `::FilterFormAsks`), so `FilterSet(data=...)` `is_valid()` / `errors`,
+  `DjangoFilterBackend` (400) and `FilterView` (`strict`: no rows) refuse what the typed input refuses: a year
+  comparison past 9999, a duration past the backend's range, a lone surrogate or NUL, with the typed messages; a bare
+  `.qs` read of an invalid form applies the leaves that cleaned (none once text is refused), as django-filter's own
+  contract. A text refusal skips cleaning through the reset adapted from Django's `BaseForm.full_clean` (identical
+  5.2.16 through 6.1.2); an unbound or unchanged empty-permitted form runs Django's own `full_clean`, so a consumer
+  `Meta.form` `full_clean` / `clean` runs wherever Django runs it. A form error and a bind refusal are reported
+  together (typed `FILTER_INVALID` payload too). A consumer override of the set's `form` property keeps its own raw
+  form; `FilterSet._validate_form_or_raise` asks it itself. Changed `filters/sets.py::FilterSet.form`,
+  `::FilterSet._validate_form_or_raise`, `::_unbindable_value_errors` (takes the form, returns `ValidationError`s), new
+  `::_unstorable_text_errors`, `::_json_errors`. Pinned by
+  `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_form_refuses_what_its_typed_input_refuses`,
+  `test_declared_temporal_bindability_api.py::test_a_form_error_and_a_bind_refusal_are_reported_together` and
+  `tests/filters/test_base.py` (DRF 400, `FilterView` strict, consumer form override, consumer `full_clean` counts,
+  widget reads, unbound, empty-permitted); spec-027, README, GLOSSARY `FilterSet`. Filed 804, 805
 
 ## Outside review of the fixes
 
@@ -1895,10 +1923,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 724. (robustness) A `ListFilter` / `ArrayFilter` `in` over a `DurationField` binds a member past the backend's
-  range raw: `?f=999999999 00:00:00` under `DjangoFilterBackend` / `FilterSet(data=...)` raises `OverflowError`
-  ("Python int too large to convert to SQLite INTEGER"), a 500, where an integer column's `in` drops a member
-  naming no row (`filters/base.py::_identifying_members`). Found fixing 527
 - [ ] 725. (robustness) A `ModelForm`'s `validate_unique()` / `validate_constraints()` and DRF's `UniqueValidator`
   bind the value inside `is_valid()`, before the write's storability preflight, so a unique decimal column sent a
   value past PostgreSQL `numeric`'s format still answers a masked `DataError`, and so does a unique temporal column
@@ -1956,11 +1980,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `_strawberry_patches.py::_patched_parse_json` translate the `UnicodeDecodeError` / `RecursionError` siblings but not
   this one; the KANBAN row saying an oversized numeric literal is already refused and only its envelope is wrong does
   not hold for this path, and the fix corrects that row in the same change. Found researching 673
-- [ ] 743. (robustness) A raw-form driver (`FilterSet(data=...).qs`, `DjangoFilterBackend`, `FilterView`) never runs
-  the bind ask (`filters/sets.py::_validate_form_or_raise` / `_unbindable_value_errors`), so a value the ask refuses
-  as `FILTER_INVALID` over GraphQL escapes there as Django's or the driver's exception: a raw
-  `occurred_on__year__gt=99999` raises `ValueError` (year 1..9999) and a past-range year raises `OverflowError`. Found
-  researching 673
 - [ ] 745. The finalizer's GlobalID encode-only audit
   (`types/finalizer.py::_audit_globalid_filter_strategies`) resolves each filter's original `field_name` against
   its wired owner, but a request first rebinds the leaf through its declared hops or an undeclared hop's face
@@ -2140,6 +2159,14 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`['gamma']`): consumer `isnull` overrides keep the key-column re-bind, since running them through 796's relation view
   narrows forward one-hop and many-to-many hiding cells (the forward left join and the many-to-many through join both
   need a condition). Found fixing 796
+- [ ] 804. (robustness) A declared `ListFilter` / `ArrayFilter` / `RangeFilter` whose `field_name` names a queryset
+  annotation (a type's `get_queryset` `annotate(elapsed_copy=F("elapsed"))`) applies each member or bound uncleaned:
+  `filters/base.py::_column_form_field` resolves the path through the model's `_meta` (`_bound_value_field`) where the
+  bind ask resolves it over the queryset (`utils/querysets.py::lookup_target_fields`), so `element_field` /
+  `bound_field` is `None` and the raw text reaches Django. On SQLite and MySQL a duration annotation raises
+  `AttributeError` (`'str' object has no attribute 'days'`) for every value, valid ones included, over GraphQL (a
+  masked unexpected error) and every raw driver (at `is_valid()` / `errors`); an integer annotation's `abc` / `1.5`
+  member is Django's `ValueError` and `2**63` an `OverflowError` on every path. Found researching 724
 ## To do: holes found re-checking the fixes
 
 
@@ -2169,6 +2196,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   [{altShelvesTopic: ASC}])` shows it. No doc states either reading and no upstream aggregates (each `order_by`s plainly
   and duplicates parents). Pick one reading for every filter kind, or state that a to-many order reads every visible
   related row (and accept the unwalked join-reuse exception)? (item 801)
+- [ ] 805. Decide whether the package's own `ListFilter` / `ArrayFilter` / `RangeFilter` declared on a plain
+  `django_filters.FilterSet` parent hold a duration member or bound to the backend's integer range. The bind ask lives
+  on the package `FilterSet`'s form, so on a plain parent a `ListFilter` `in` over a `DurationField` sent
+  `999999999 00:00:00` through `DjangoFilterBackend` raises `OverflowError` on SQLite and MySQL, as django-filter's own
+  `BaseInFilter` + `DurationFilter` does there. Options: drop the member in the class (as an integer column's `in`
+  drops, `filters/base.py::_identifying_members`), which diverges from the package parent's refusal; or document that a
+  foreign parent answers as django-filter. (item 724)
 - [ ] 790. Decide: a flat leaf the request leaves out, whose path a hop walks (a `RelatedFilter`, a target type's own
   `get_queryset`), runs a consumer `filter` override that acts on the empty value twice
   (`filters/sets.py::FilterSet._absent_leaf_applies` runs it over the unscoped rows to learn whether it constrains,
@@ -2242,9 +2276,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   range. Today it answers as plain django-filter: a two-bound range or a member past int64 on a `BigIntegerField` is a
   masked `OverflowError` on SQLite and under PostgreSQL server-side binding, and the right rows under psycopg 3
   client-side binding, while the package's `RangeFilter` / `ListFilter` widen, match nothing or drop the member (372).
-  Options: refuse it with `FILTER_INVALID` at the `FilterSet._unbindable_temporal_errors` seam, which already reads
-  every declared filter's cleaned value (backend-independent, so it narrows what PostgreSQL client-side answers
-  today); or document django-filter's behaviour and name the package's `RangeFilter` / `ListFilter` as the remedy.
+  Options: refuse it with `FILTER_INVALID` at the `filters/sets.py::_unbindable_value_errors` seam, which already
+  reads every declared filter's cleaned value and, as part of the filter form's clean, reaches the raw drivers too
+  (backend-independent, so it narrows what PostgreSQL client-side answers today); or document django-filter's
+  behaviour and name the package's `RangeFilter` / `ListFilter` as the remedy.
   Rewriting the declared filter's own `filter()` call would bypass a consumer subclass and its `exclude` / `distinct`.
   Found fixing 507
 - [ ] 576. Decide how a PostgreSQL form field with no model column behind it (a plain `Form` field or a `ModelForm`

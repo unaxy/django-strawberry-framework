@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from decimal import Decimal
-from functools import cache
+from functools import cache, partial
 from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
@@ -223,7 +223,14 @@ from .base import (
     refuse_identityless_relation,
     refuse_unresolvable_lookup,
 )
-from .form_binding import FilterFormBindings, NormalizedFormValue, bound_filter_form_class
+from .form_binding import (
+    BindAskingFilterForm,
+    FilterFormAsks,
+    FilterFormBindings,
+    NormalizedFormValue,
+    bind_asking_form_class,
+    bound_filter_form_class,
+)
 from .inputs import (
     LOGIC_OPERATORS,
     LOGIC_OPERATORS_BY_PYTHON_ATTR,
@@ -2924,7 +2931,10 @@ def _holds_decimal(value: object) -> bool:
     return is_list_or_tuple(value) and any(_holds_decimal(item) for item in value)
 
 
-def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]:
+def _unbindable_value_errors(
+    filterset_instance: FilterSet,
+    form: forms.BaseForm,
+) -> dict[str, ValidationError]:
     """Return the refusal of each cleaned filter value the queryset's database cannot bind.
 
     Each cleaned value a filter applies to a temporal or decimal column (a ``DateField``,
@@ -2960,14 +2970,16 @@ def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]
     member past the column's range (``filters/base.py::_identifying_members``), and its
     comparisons are Django's own range-aware ones. Every value asked is first held to its
     integer column's range (``_held_integer_value``), so a decimal past it is asked as the
-    integer one past that end, never converted.
+    integer one past that end, never converted. The bound filter form runs it over its
+    ``cleaned_data`` once it cleans (``filters/form_binding.py::BindAskingFilterForm``), so
+    the refusal is a form error every driver reads, the raw ones included.
     """
     # django-filter's ``BaseFilterSet.__init__`` stores the model's default queryset when
     # handed none; its stub types the attribute ``QuerySet[Any] | None``.
     queryset = require(filterset_instance.queryset, is_queryset)
     copies = filterset_instance._copied_filters
-    errors: dict[str, object] = {}
-    for name, value in _cleaned_items(filterset_instance.form):
+    errors: dict[str, ValidationError] = {}
+    for name, value in _cleaned_items(form):
         filter_instance = copies.get(name)
         if value is None or filter_instance is None or _own_filter(filter_instance) is not None:
             continue
@@ -2997,10 +3009,55 @@ def _unbindable_value_errors(filterset_instance: FilterSet) -> dict[str, object]
             continue
         source = _terminal_queryset(filter_instance, terminal, queryset)
         if _unbindable_predicate(terminal, source, _held_integer_value(terminal, value, source)):
-            errors[name] = [
-                {"message": UNBINDABLE_TEMPORAL_MESSAGE, "code": FIELD_ERROR_CODE_INVALID},
-            ]
+            errors[name] = ValidationError(
+                UNBINDABLE_TEMPORAL_MESSAGE,
+                code=FIELD_ERROR_CODE_INVALID,
+            )
     return errors
+
+
+def _unstorable_text_errors(
+    filterset_instance: FilterSet,
+    form: forms.BaseForm,
+) -> dict[str, ValidationError]:
+    """Return the refusal of each form field whose data holds text the package refuses.
+
+    Each form field is read as its widget hands it to ``clean`` (``BoundField.data``,
+    every sub-value of a multi-widget field included) and held to the shared
+    ``utils/errors.py::unstorable_text`` rule: a lone surrogate, which no driver can bind,
+    or an embedded NUL, which PostgreSQL refuses, is refused with that rule's message and
+    code. A widget refusing the value it is handed as it is read (a ``ValidationError``
+    from its ``decompress``: an aware datetime a range bound's ``SplitDateTimeWidget``
+    cannot split into the current time zone's wall clock,
+    ``utils/widgets.py::_decompressed``) is that field's refusal, as
+    ``Form._clean_fields`` keys the same read. A ``disabled`` field is skipped, since it
+    cleans to its initial value and never binds what was sent, and so is a GlobalID
+    filter's value unless a ``filter`` of its own (a ``method=`` included) replaces its
+    decode (``_decodes_before_binding``): the decode refuses text it cannot read as the
+    ``GLOBALID_INVALID`` the node-refetch path answers for the same id. The bound filter
+    form runs it before any field cleans (``filters/form_binding.py::BindAskingFilterForm``).
+    """
+    copies = filterset_instance._copied_filters
+    errors: dict[str, ValidationError] = {}
+    for bound in form:
+        if bound.field.disabled or _decodes_before_binding(copies.get(bound.name)):
+            continue
+        try:
+            data = read_attr(bound, "data")
+        except ValidationError as error:
+            errors[bound.name] = error
+            continue
+        refusal = unstorable_text(bound.name, data)
+        if refusal is not None:
+            errors[bound.name] = ValidationError(refusal.message, code=refusal.code)
+    return errors
+
+
+def _json_errors(refusals: Mapping[str, ValidationError]) -> dict[str, object]:
+    """Return ``refusals`` as ``ErrorDict.get_json_data`` spells a form's errors."""
+    return {
+        name: ErrorList(refusal.error_list).get_json_data() for name, refusal in refusals.items()
+    }
 
 
 def _own_related_filters(filterset: type[object]) -> Mapping[str, RelatedFilter]:
@@ -3508,7 +3565,13 @@ class FilterSet(
     @property
     @override
     def form(self) -> forms.Form:
-        """Build the actual consumer form before binding normalized values to its widgets."""
+        """Build the actual consumer form before binding normalized values to its widgets.
+
+        The form class is put behind ``filters/form_binding.py::BindAskingFilterForm``
+        holding this set's asks (``_unstorable_text_errors``, ``_unbindable_value_errors``),
+        so cleaning the form refuses what no driver or database can bind, whichever driver
+        cleans it.
+        """
         # Adapted from django-filter BaseFilterSet.form (BSD-3-Clause;
         # LICENSE.django-filter). Consumer get_form_class and Meta.form run unchanged.
         if not hasattr(self, "_form"):
@@ -3516,6 +3579,13 @@ class FilterSet(
             bindings = self._form_bindings
             if bindings is not None and bindings.values:
                 form_class = bound_filter_form_class(form_class, bindings)
+            form_class = bind_asking_form_class(
+                form_class,
+                FilterFormAsks(
+                    unstorable_text=partial(_unstorable_text_errors, self),
+                    unbindable_values=partial(_unbindable_value_errors, self),
+                ),
+            )
             if self.is_bound:
                 self._form = form_class(self.data, prefix=self.form_prefix)
             else:
@@ -5975,27 +6045,22 @@ class FilterSet(
         the override sees both the policy-owning class (``cls``) and the
         actual filterset whose form to validate.
 
-        A value holding text the package refuses (a lone surrogate, which no driver
-        can bind, or an embedded NUL, which PostgreSQL refuses: the shared
-        ``utils/errors.py::unstorable_text`` rule the write decode applies) is refused
-        first, keyed to its form field with that rule's message and code, before any
-        field cleans: a model-choice field's ``clean`` binds the raw value into a query
-        (``ModelMultipleChoiceField`` outside its own ``except``), and every lookup binds
-        it once the queryset runs, where the driver's error would escape as an
-        unexpected one. Each form field is read as its widget hands it to ``clean``
-        (``BoundField.data``, every sub-value of a multi-widget field included), so a
-        generated, declared, ``method=``, list, range or consumer ``field_class`` filter
-        is held to the one rule, and a nested branch or logical arm through its own
-        filterset's call here. A widget refusing the value it is handed as it is read
-        (a ``ValidationError`` from its ``decompress``: an aware datetime a nested range
-        bound's ``SplitDateTimeWidget`` cannot split into the current time zone's wall
-        clock, ``utils/widgets.py::_decompressed``) is that field's refusal, keyed and
-        shaped as ``Form._clean_fields`` keys the same read. A ``disabled`` field is
-        skipped, since it cleans to its initial value and never binds what was sent. A
-        GlobalID filter's value is exempt unless a ``filter`` of its own (a ``method=``
-        included) replaces its decode (``_decodes_before_binding``): the decode refuses
-        text it cannot read as the ``GLOBALID_INVALID`` the node-refetch path answers for
-        the same id.
+        The asks run inside the form's own clean (``FilterSet.form`` builds a
+        ``filters/form_binding.py::BindAskingFilterForm``), so this call reads them as
+        form errors, and so does every raw driver (``is_valid()`` / ``errors``,
+        ``DjangoFilterBackend``, ``FilterView``). A value holding text the package
+        refuses (a lone surrogate, which no driver can bind, or an embedded NUL, which
+        PostgreSQL refuses: the shared ``utils/errors.py::unstorable_text`` rule the write
+        decode applies) is refused first, keyed to its form field with that rule's message
+        and code, before any field cleans (``_unstorable_text_errors``), and cleaning is
+        skipped, so only those refusals are reported: a model-choice field's ``clean``
+        binds the raw value into a query (``ModelMultipleChoiceField`` outside its own
+        ``except``), and every lookup binds it once the queryset runs, where the driver's
+        error would escape as an unexpected one. A generated, declared, ``method=``, list,
+        range or consumer ``field_class`` filter is held to the one rule, and a nested
+        branch or logical arm through its own filterset's call here. A form a consumer
+        ``form`` override builds holds no asks, so they are run here instead, in the same
+        order and with the same answers.
 
         Every key is the form field's name under the instance's ``_branch_path``
         (``_branch_key``): the root's keys are its own, a nested branch's are
@@ -6004,59 +6069,49 @@ class FilterSet(
         ``not__<field>``; ``LogicOperatorDescriptor.arm_key``), nesting either way
         (``shelf__or_0__branch__name``, ``or_0__shelf__branch__name``).
 
-        A form that cleans is then held to the database its queryset runs on
-        (``_unbindable_value_errors``): a value a filter applies to a temporal, duration or
-        decimal column, or through an integer transform, that the scalar parse and the form
-        accept but that database cannot bind is
-        refused keyed to its form field, ``invalid`` with a fixed message, never the
-        driver's text. Django is asked: the filter's own predicate is built and compiled
-        on that database, so what is refused is what the query would raise, for every
-        member of a list and bound of a range and whatever kind the value cleans to (on
-        SQLite, MySQL and Oracle an aware time, an aware datetime whose projection onto
-        the connection's time zone leaves years 1..9999, a date on a datetime column
-        whose midnight does, any aware datetime when ``USE_TZ`` is false; on every
-        backend a ``year`` / ``iso_year`` bound outside years 1..9999, a datetime on a
+        Each value the form cleans is then held to the database its queryset runs on
+        (``_unbindable_value_errors``), whatever error another field's cleaning raised, so
+        the payload holds both: a value a filter applies to a temporal, duration or decimal
+        column, or through an integer transform, that the scalar parse and the form accept
+        but that database cannot bind is refused keyed to its form field, ``invalid`` with a
+        fixed message, never the driver's text. Django is asked: the filter's own predicate
+        is built and compiled on that database, so what is refused is what the query would
+        raise, for every member of a list and bound of a range and whatever kind the value
+        cleans to (on SQLite, MySQL and Oracle an aware time, an aware datetime whose
+        projection onto the connection's time zone leaves years 1..9999, a date on a
+        datetime column whose midnight does, any aware datetime when ``USE_TZ`` is false; on
+        every backend a ``year`` / ``iso_year`` bound outside years 1..9999, a datetime on a
         date column or through a ``date`` transform whose date in the default time zone
         (``TIME_ZONE``) leaves them, and an integer a lookup binds outside the range the
         database stores for its left-hand side: an integer transform's member or bound
         (``year``, ``iso_year``, an ``ArrayField``'s ``len``, a transform a project
         registers with an ``IntegerField`` output, whatever its column) past 64 bits on
-        SQLite or 32 on PostgreSQL, and on SQLite and
-        MySQL, which bind a duration as its microsecond count, a duration whose
-        microsecond count lies past 64 bits either way). On PostgreSQL the compiled
-        parameters are also held to the UTC offsets the server refuses: 16:00 or more
-        either way, or one carrying a fraction of a second, when parameters are bound as text
-        (psycopg 2, or psycopg 3 unless the connection binds on the server:
-        ``OPTIONS["server_side_binding"]``, or an ``OPTIONS["cursor_factory"]`` that is
-        not a ``ClientCursor``); bound on the server, a time whose offset is 16:00 or
-        more. On PostgreSQL a decimal is held to ``numeric``'s format in either mode: a
+        SQLite or 32 on PostgreSQL, and on SQLite and MySQL, which bind a duration as its
+        microsecond count, a duration whose microsecond count lies past 64 bits either way).
+        On PostgreSQL the compiled parameters are also held to the UTC offsets the server
+        refuses: 16:00 or more either way, or one carrying a fraction of a second, when
+        parameters are bound as text (psycopg 2, or psycopg 3 unless the connection binds on
+        the server: ``OPTIONS["server_side_binding"]``, or an ``OPTIONS["cursor_factory"]``
+        that is not a ``ClientCursor``); bound on the server, a time whose offset is 16:00
+        or more. On PostgreSQL a decimal is held to ``numeric``'s format in either mode: a
         spelling needing more than 131072 digits before the point or 16383 after
-        (``-1e1000000``, ``1e-16384``) is refused, bounded column or not. A decimal past
-        the range of the integer column a shipped filter compares is asked as the integer
-        one past the same end (``_held_integer_value``), never converted, so a ``year``
-        bound of ``-1e1000000`` is refused at once.
+        (``-1e1000000``, ``1e-16384``) is refused, bounded column or not. A decimal past the
+        range of the integer column a shipped filter compares is asked as the integer one
+        past the same end (``_held_integer_value``), never converted, so a ``year`` bound of
+        ``-1e1000000`` is refused at once.
         """
         form = filterset_instance.form
-        copies = filterset_instance._copied_filters
-        errors: dict[str, object] = {}
-        for bound in form:
-            if bound.field.disabled or _decodes_before_binding(copies.get(bound.name)):
-                continue
-            try:
-                data = read_attr(bound, "data")
-            except ValidationError as error:
-                # The widget refused the value it was handed (its ``decompress``):
-                # ``Form._clean_fields`` keys the same read's refusal to the field.
-                errors[bound.name] = ErrorList(error.error_list).get_json_data()
-                continue
-            refusal = unstorable_text(bound.name, data)
-            if refusal is not None:
-                errors[bound.name] = [{"message": refusal.message, "code": refusal.code}]
-        if not errors:
-            if not form.is_valid():
-                errors = form.errors.get_json_data()
-            else:
-                errors = _unbindable_value_errors(filterset_instance)
+        if isinstance(form, BindAskingFilterForm):
+            if form.is_valid():
+                return
+            errors: dict[str, object] = form.errors.get_json_data()
+        else:
+            # A consumer ``form`` override built a form the asks are not part of.
+            errors = _json_errors(_unstorable_text_errors(filterset_instance, form))
+            if not errors:
+                errors = form.errors.get_json_data() | _json_errors(
+                    _unbindable_value_errors(filterset_instance, form),
+                )
                 if not errors:
                     return
         branch = filterset_instance._branch_path
