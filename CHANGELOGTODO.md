@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 193 to do.
+Progress: 0 done, 194 to do.
 
 ## From dry-0_0_15_3
 
@@ -867,6 +867,11 @@ Progress: 0 done, 193 to do.
   truncates, and a GlobalID node id past the range of a key annotation (`annotate(parent_ref=F("parent"))`) is
   `GLOBALID_INVALID`. The published input stays `String`; a `method=` filter receives values as sent; a set handed no
   queryset still leaves the path to Django
+- [ ] 814. CHANGELOG entry for item 726: on SQLite a write whose decimal the database would store as a value the bounded
+  `DecimalField` cannot read back (an infinity, such as `1E+309` in `DecimalField(400, 0)`, or a double rounded past
+  the column's digits, such as `9999999999999999.9999` in `DecimalField(20, 4)`) is now the field's `invalid` error
+  "Enter a value the database can represent." with nothing written, on every mutation flavor, instead of a masked
+  server error with the write rolled back; a column with no `max_digits` still stores and reads back `Infinity`
 
 ## From dry-upstream-0_0_15
 

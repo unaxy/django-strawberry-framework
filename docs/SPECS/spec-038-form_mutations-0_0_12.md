@@ -395,11 +395,13 @@ package-internal; Slice 4 is the live consumer surface.
     consults `mutation_cls.input_type_name(meta)` + `input_module_path`.
   - [ ] A valid `ModelForm` whose instance holds a value the database cannot store (a
     date, datetime, time or duration, a `clean_<field>`'s, form `clean()`'s or model
-    `clean()`'s included; on PostgreSQL a decimal past `numeric`'s format its
-    column's own validators accept) answers that field's `invalid` error before the
-    save, with nothing written; inside `is_valid()` such a column is that error before
-    model validation converts it or a uniqueness or constraint check binds it in a
-    query, beside the form's other errors ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
+    `clean()`'s included; a decimal its column's own validators accept that
+    PostgreSQL's `numeric` cannot hold or that SQLite stores as a value a bounded
+    column cannot read back) answers that field's `invalid` error before the save,
+    with nothing written; inside `is_valid()` such a column is that error before model
+    validation converts it or a uniqueness or constraint check binds it in a query,
+    beside the form's other errors
+    ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
   - [ ] Package coverage: [`tests/forms/test_resolvers.py`][test-forms] — create /
     update happy paths, the `form.errors` → envelope (incl. a `NON_FIELD_ERRORS`
     `clean()` error → `"__all__"`), the **decode split** (`categoryId` → `{"category":
@@ -1885,8 +1887,11 @@ write flavor rides.
    rule the model flavor's decode applies. A `forms.DecimalField` and the model's
    `DecimalValidator` hold no digits for a column with no `max_digits` (and count none for
    a zero's positive exponent), so on PostgreSQL a decimal past `numeric`'s format the
-   column's own validators accept is refused (`django_strawberry_framework/utils/errors.py::unstorable_decimal`);
-   SQLite refuses none. A temporal or duration column is held to
+   column's own validators accept is refused
+   (`django_strawberry_framework/utils/errors.py::unstorable_decimal`), and on SQLite,
+   which stores a decimal as an integer or its nearest double, one a bounded column cannot
+   read back (stored as an infinity, or rounded past its digits) is refused too. A temporal
+   or duration column is held to
    `django_strawberry_framework/utils/errors.py::unstorable_temporal` (on psycopg 3 an
    `ArrayField` list is also asked of the driver as a whole, which dumps every element with
    one dumper and so can refuse a naive time beside an aware one; a `DurationField` past 64
@@ -2641,21 +2646,24 @@ Rationale companion: [Decision 14][rationale-d14].
   [`DjangoModelPermission`][glossary-djangomodelpermission] that does not override
   `has_permission` is **rejected** at class creation, since that hook resolves its
   codename from a model a model-less mutation never supplies ([Decision 11](#decision-11--write-authorization-reuse-the-036-seam-djangomodelpermission-for-the-modelform-explicit-classes-for-the-plain-form)).
-- **A value the database cannot store.** A valid `ModelForm` can hold a datetime or
-  time the adapter or the server refuses, a duration past 64 bits of microseconds on
-  SQLite or MySQL, and on PostgreSQL a decimal past `numeric`'s format that `is_valid()`
-  passes (any finite spelling in a `DecimalField` with no `max_digits`, a zero with a
-  huge exponent in a bounded one); the save would raise an error no save mapper owns.
-  The form flavor answers the field's `invalid` error `"Enter a value the database can
-  represent."` before the save instead, with nothing written ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
-  SQLite refuses no decimal: it stores the nearest double. Inside `is_valid()` Django's
-  model validation would convert such a value (a `clean_<field>`, form `clean()` or model
+- **A value the database cannot store.** A valid `ModelForm` can hold a datetime or time
+  the adapter or the server refuses, a duration past 64 bits of microseconds on SQLite or
+  MySQL, and on PostgreSQL a decimal past `numeric`'s format that `is_valid()` passes (any
+  finite spelling in a `DecimalField` with no `max_digits`, a zero with a huge exponent in
+  a bounded one); the save would raise an error no save mapper owns. The form flavor
+  answers the field's `invalid` error `"Enter a value the database can represent."` before
+  the save instead, with nothing written
+  ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).
+  On SQLite, which stores a decimal as an integer or its nearest double, a decimal stored
+  as an infinity or rounded past a bounded column's digits would raise `InvalidOperation`
+  at the optimizer re-fetch, and is the same error. Inside `is_valid()` Django's model
+  validation would convert such a value (a `clean_<field>`, form `clean()` or model
   `clean()` answering an aware datetime for a `DateField` whose date in the default time
-  zone leaves years 1..9999 makes `DateField.to_python` raise `OverflowError`) or bind it in
-  a uniqueness or constraint query (`unique=True`, `unique_together`, a `UniqueConstraint`,
-  a conditional one reading PostgreSQL's `DataError` as a violation); the column is the
-  same `invalid` error first, beside the form's other errors. A form `clean()` raising its
-  own `OverflowError`, or a plain form's, propagates.
+  zone leaves years 1..9999 makes `DateField.to_python` raise `OverflowError`) or bind it
+  in a uniqueness or constraint query (`unique=True`, `unique_together`, a
+  `UniqueConstraint`, a conditional one reading PostgreSQL's `DataError` as a violation);
+  the column is the same `invalid` error first, beside the form's other errors. A form
+  `clean()` raising its own `OverflowError`, or a plain form's, propagates.
 - **No `DjangoType` `Meta` key added.** [`DEFERRED_META_KEYS`][types-base] /
   `ALLOWED_META_KEYS` carry no form key
   ([Decision 13](#decision-13--finalization-seam-reuse-the-mutation-phase-25-bind-no-deferred_meta_keys-change)).
@@ -3155,7 +3163,8 @@ behavior reachable through `/graphql/`, package tests own internals.
     `::test_model_validation_overrides_run_once_with_the_refused_column_excluded`,
     `::test_a_validate_unique_a_get_form_hook_sets_on_the_instance_runs_and_is_kept`,
     `::test_a_form_clean_skipping_super_still_refuses_the_unstorable_value`), live over the
-    unique columns of `UniqueScalarSpecimen`
+    unique columns of `UniqueScalarSpecimen`, an `amount` SQLite would store past its
+    digits included
     (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_value_a_uniqueness_check_would_bind_is_the_field_error`,
     `::test_form_decimal_postgresql_cannot_bind_under_a_conditional_constraint`); and
     a form `clean()`'s own `OverflowError`, any other exception and a plain form's
@@ -3392,9 +3401,10 @@ The completion contract.
    ([Decision 5](#decision-5--public-surface-djangoformmutation--djangomodelformmutation-exported-from-the-root)
    / [Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)
    / [Decision 9](#decision-9--optimizer-composition-the-modelform-payload-re-fetch-rides-the-spec-036-g2-path)).
-   A valid `ModelForm` holding a value the database cannot store, on PostgreSQL a decimal
-   past `numeric`'s format its column's own validators accept included, answers the
-   field's `invalid` error before the save, with nothing written, and inside `is_valid()`
+   A valid `ModelForm` holding a value the database cannot store, a decimal its column's
+   own validators accept that PostgreSQL's `numeric` cannot hold or that SQLite stores as a
+   value a bounded column cannot read back included, answers the field's `invalid` error
+   before the save, with nothing written, and inside `is_valid()`
    before model validation converts it or a uniqueness or constraint check binds it in a
    query, beside the form's other errors
    ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--formerrors--save--optimizer-re-fetch--payload)).

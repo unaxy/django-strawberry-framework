@@ -1975,7 +1975,8 @@ def _unstorable_value_errors(
     stores but cannot load back at the re-fetch; ``forms.DecimalField`` and the model's
     ``DecimalValidator`` hold no digits for a column with no ``max_digits`` (and count none
     for a zero's positive exponent), so it can carry a decimal PostgreSQL's ``numeric``
-    refuses at ``save()``. Every concrete column
+    refuses at ``save()``, and any bounded column one SQLite stores but the re-fetch cannot
+    read back (an infinity, or a double rounded past its digits). Every concrete column
     the cleaned data names is read from ``form.instance``, the value the save writes (what
     ``construct_instance`` set, else the column's stored or default value), and held to
     ``utils/errors.py::unstorable_value`` on the write pipeline's pinned alias (a date
