@@ -113,9 +113,11 @@ from tests._postgresql_stand_in import (
 if TYPE_CHECKING:
     from typing import TypeAlias
 
+    from django.db.models.expressions import Combinable
+
     from django_strawberry_framework.utils.errors import ErrorKeyMap
 
-    _DecimalColumn: TypeAlias = models.DecimalField[Decimal | str, Decimal]
+    _DecimalColumn: TypeAlias = models.DecimalField[str | float | Decimal | Combinable, Decimal]
 
 
 class _RaisingMessage:
