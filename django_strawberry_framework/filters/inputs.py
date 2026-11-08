@@ -61,6 +61,7 @@ from django_strawberry_framework.scalars import BigInt
 from django_strawberry_framework.sets_mixins import declaration_map
 from django_strawberry_framework.types.converters import (
     _field_label,
+    _registered_scalar_entry,
     holds_values_as_given,
     refuse_nested_array,
     scalar_for_field,
@@ -126,6 +127,7 @@ from .base import (
     _filterset_model_field,
     _filterset_value_field,
     _filterset_walked_lookup,
+    _related_column_path,
     comparison_form_field,
     copied_form_field,
     model_choice_identity_column,
@@ -382,23 +384,85 @@ def _scalar_from_form_field(form_field: object) -> object:
     return str if scalar is None else scalar
 
 
-def _scalar_from_model_field(model_field: ModelField | None) -> object:
-    """Map a Django model field to its scalar via the shared ``SCALAR_MAP`` lookup.
+def _scalar_from_model_field(
+    model_field: ModelField | None,
+    filter_instance: Filter,
+    filterset_cls: type[FilterSet] | None,
+) -> object:
+    """Map the model field a leaf is typed from to its scalar via the shared ``SCALAR_MAP``.
 
-    Delegates to ``types/converters.py::scalar_for_field`` -- a LOCAL import, to
-    avoid the top-level cycle through ``converters`` (same pattern as
-    ``_choice_enum_from_filter``) -- so a filter input and the selected
-    ``DjangoType`` field resolve a column to the SAME GraphQL scalar, including
-    consumer-registered ``SCALAR_MAP`` entries and the ``BigInt`` scalar for
-    64-bit columns. An unsupported field raises the same ``ConfigurationError``
-    as field selection rather than silently degrading to ``str``. ``None`` (a
-    method filter with no backing model field) keeps the ``str`` fallback.
+    Delegates to ``types/converters.py::scalar_for_field``, so a filter input and the
+    selected ``DjangoType`` field resolve a column to the SAME GraphQL scalar, including
+    consumer-registered entries and the ``BigInt`` scalar for 64-bit columns. A field no
+    entry covers (``types/converters.py::_registered_scalar_entry``, the walk
+    ``scalar_for_field`` reads, answers ``None``) is refused naming the leaf as declared
+    (``_unscalared_field_refusal``) rather than with the ``DjangoType`` advice, never
+    degraded to ``str``. ``None`` (a method filter with no backing model field) keeps the
+    ``str`` fallback.
     """
     if model_field is None:
         return str
-
+    if _registered_scalar_entry(model_field) is None:
+        raise _unscalared_field_refusal(filter_instance, model_field, filterset_cls)
     # A ``SCALAR_MAP`` value is a registered runtime annotation (a class or ``NewType``).
     return scalar_for_field(model_field)
+
+
+def _unscalared_field_refusal(
+    filter_instance: Filter,
+    model_field: ModelField,
+    filterset_cls: type[FilterSet] | None,
+) -> ConfigurationError:
+    """Build the refusal for a leaf typed from a model field no ``SCALAR_MAP`` entry covers.
+
+    The remedy follows what the field is. A relation's value is a related row's key: one
+    Django joins on a single column is filtered by that key through the relation listed in
+    ``Meta.fields`` (``RelationPkFilter``) or a model-choice filter, by the related column
+    named past it (``filters/base.py::_related_column_path``, on the path Django walks,
+    ``_filterset_walked_lookup``), or by the related row's own fields through a
+    ``RelatedFilter``; one linked by several columns only by the last; a
+    ``GenericForeignKey``, which Django builds no join for (``_compared_columns`` answers
+    none), through the ``GenericRelation`` reversing it or the two columns it reads. A
+    ``CompositePrimaryKey`` holds no one value, so its columns are named one by one. Any
+    other column takes a ``SCALAR_MAP`` entry for its class.
+    """
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    subject = (
+        f"{_declaration_subject(declaration, filterset_cls)} reads {_field_label(model_field)}, "
+        f"a {truth.kind(model_field)}"
+    )
+    if isinstance(model_field, models.CompositePrimaryKey):
+        columns = ", ".join(repr(column.name) for column in model_field.fields)
+        return ConfigurationError(
+            f"{subject} over {columns}, which no one value names; filter each column it "
+            "composes by name.",
+        )
+    unscalared = f"{subject} no SCALAR_MAP entry types, so nothing types its input"
+    if not model_field.is_relation:
+        return ConfigurationError(
+            f"{unscalared}; register {truth.kind(model_field)} (or a class it subclasses) in "
+            "SCALAR_MAP.",
+        )
+    compared = _compared_columns(filter_instance, model_field)
+    if not compared:
+        return ConfigurationError(
+            f"{subject}: Django filters no queryset through it, so no input can carry its "
+            "value; filter through the GenericRelation that reverses it on the related "
+            "model, or on the content type and object id columns it reads.",
+        )
+    if len(compared) > 1:
+        return ConfigurationError(
+            f"{subject} {_linked_by_columns(len(compared))}",
+        )
+    walked = truth.text(_filterset_walked_lookup(declaration.filterset, declaration.declared)[0])
+    path = LOOKUP_SEP.join((*walked.split(LOOKUP_SEP)[:-1], model_field.name))
+    column = _related_column_path(model_field, path)
+    past = "" if column is None else f", name the related column past it (field_name {column!r})"
+    return ConfigurationError(
+        f"{unscalared}; filter by the related row's key through {path!r} in Meta.fields or a "
+        f"ModelChoiceFilter / ModelMultipleChoiceFilter{past}, or filter the related row's own "
+        "fields through a RelatedFilter.",
+    )
 
 
 def _declaration_of(
@@ -417,6 +481,14 @@ def _declaration_of(
     from .sets import _leaf_declaration  # noqa: PLC0415 - import cycle
 
     return _leaf_declaration(filter_instance, filterset_cls)
+
+
+def _linked_by_columns(count: int) -> str:
+    """Return the refusal's reason and remedy for a relation linked by ``count`` columns."""
+    return (
+        f"linked by {count} columns, so no single key value can name a related row; filter the "
+        "related row's own fields through a RelatedFilter."
+    )
 
 
 def _relation_identity_annotation(
@@ -446,9 +518,8 @@ def _relation_identity_annotation(
     if len(columns) > 1:
         declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
-            f"{_declaration_subject(declaration, filterset_cls)} names a relation linked "
-            f"by {len(columns)} columns, so no single key value can name a related row; "
-            "filter the related row's own fields through a RelatedFilter.",
+            f"{_declaration_subject(declaration, filterset_cls)} names a relation "
+            f"{_linked_by_columns(len(columns))}",
         )
     if not columns:
         declaration = _declaration_of(filter_instance, filterset_cls)
@@ -457,7 +528,7 @@ def _relation_identity_annotation(
             "relation to a model on its FilterSet; name a relation key in Meta.fields, or "
             "filter the related row's own fields through a RelatedFilter.",
         )
-    return _scalar_from_model_field(columns[0])
+    return _scalar_from_model_field(columns[0], filter_instance, filterset_cls)
 
 
 def _model_choice_takes_list(filter_instance: Filter) -> bool:
@@ -1182,7 +1253,7 @@ def _model_choice_identity_annotation(
             "FilterSet model, so there is no column to type its input from. Pass a model "
             "queryset, or point field_name at a relation.",
         )
-    return _scalar_from_model_field(column)
+    return _scalar_from_model_field(column, filter_instance, filterset_cls)
 
 
 def _choice_enum_from_filter(
@@ -1481,12 +1552,12 @@ def _element_scalar(
     if model_field is not None and getattr(model_field, "choices", None):
         return None
     if model_field is not None:
-        return _scalar_from_model_field(model_field)
+        return _scalar_from_model_field(model_field, filter_instance, filterset_cls)
     form_field = _declared_form_field(filter_instance)
     return (
         _scalar_from_form_field(form_field)
         if form_field is not None
-        else _scalar_from_model_field(model_field)
+        else _scalar_from_model_field(model_field, filter_instance, filterset_cls)
     )
 
 
@@ -1738,7 +1809,10 @@ def convert_filter_to_input_annotation(
     none of its column's choices (``_choice_enum_from_filter``), and a declared or
     ``Meta.filter_overrides`` leaf on its column whose own form and lookup answer no value
     of it (``_refuse_form_serving_no_value``, on the catch-all, bare ``TypedFilter``, CSV
-    and range arms).
+    and range arms), and a leaf typed from a field no ``SCALAR_MAP`` entry covers (a
+    relation, a ``GenericForeignKey``, a ``CompositePrimaryKey``, an unregistered column:
+    ``_unscalared_field_refusal``, through ``_scalar_from_model_field`` on every arm that
+    reads a column's scalar).
 
     Dispatch rides ``utils/converters.py::convert_with_mro`` with the same
     kind table ``normalize_input_value`` uses.
@@ -1829,7 +1903,7 @@ def convert_filter_to_input_annotation(
         if compared is not None:
             inner = compared
         elif value_field is not None or model_field is None:
-            inner = _scalar_from_model_field(value_field)
+            inner = _scalar_from_model_field(value_field, matched, filterset_cls)
             _refuse_form_serving_no_value(matched, inner, filterset_cls, _range_bounds)
         else:
             inner = _range_axis_scalar(matched, filterset_cls)

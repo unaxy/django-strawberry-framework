@@ -417,9 +417,11 @@ def _registered_scalar_entry(
     """Return the ``SCALAR_MAP`` ``(key, scalar)`` entry ``field``'s nearest MRO class keys.
 
     The one ``SCALAR_MAP`` walk: ``_scalar_map_entry`` (``scalar_for_field``,
-    ``scalar_route``'s map arm) and ``holds_values_as_given`` read it. A
-    ``GeneratedField`` is walked as the column it computes (``generated_output_field``).
-    ``None`` for a field class no entry covers.
+    ``scalar_route``'s map arm) and ``holds_values_as_given`` read it, and the filter-input
+    converter asks it before ``scalar_for_field``
+    (``filters/inputs.py::_scalar_from_model_field``, which refuses a field with no entry in
+    a filter's own words). A ``GeneratedField`` is walked as the column it computes
+    (``generated_output_field``). ``None`` for a field class no entry covers.
     """
     column = generated_output_field(field) or field
     return truth.mro_entry(SCALAR_MAP, truth.class_of(column))

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 447 done, 113 to do. The CHANGELOG entries filed here moved to
+Progress: 448 done, 113 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1980,6 +1980,24 @@ Progress: 447 done, 113 to do. The CHANGELOG entries filed here moved to
   `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_nested_value_a_uniqueness_validator_cannot_bind_is_the_item_field_error`
   (new fakeshop `createScalarSpecimenTagWithUniqueSpecimens`) and `tests/rest_framework/test_resolvers.py` /
   `tests/utils/test_errors.py` rows. Docs: spec-039, README, GLOSSARY `FieldError` envelope. CHANGELOGTODO 815
+- [x] 730. (robustness) fixed: a filter declared over a field no `SCALAR_MAP` entry covers is refused at schema build
+  in the FilterSet's own words instead of the DjangoType advice to add a `SCALAR_MAP` entry or exclude the field via
+  `Meta.exclude`. `filters/inputs.py::_scalar_from_model_field` asks `types/converters.py::_registered_scalar_entry` first
+  and raises `::_unscalared_field_refusal`, which opens with the declaration (its set, class, `field_name` and route) and
+  names the remedy its field takes: a relation joined on one column, the relation in `Meta.fields`, a
+  `ModelChoiceFilter` / `ModelMultipleChoiceFilter`, the related column named past it (`filters/base.py::_related_column_path`,
+  where that column is not itself a relation) or a `RelatedFilter`; one linked by several columns, a `RelatedFilter`
+  (`::_linked_by_columns`, shared with the raw-pk refusal); a `GenericForeignKey`, the `GenericRelation` reversing it or
+  its content type and object id columns; a `CompositePrimaryKey`, its columns by name; any other column (a related key
+  column reached through a raw-pk or model-choice filter included), a `SCALAR_MAP` entry for its class. `method=` is
+  never offered (it does not escape the refusal). The exception type, the raise points and every build or refuse
+  verdict are unchanged (358 grid cells moved message only); the converter text stays for its DjangoType, mutation and
+  serializer callers. Pinned by `tests/filters/test_inputs.py::test_a_declared_filter_over_a_relation_is_refused_naming_filter_remedies`,
+  `::test_every_remedy_a_relation_refusal_names_builds`, `::test_a_filter_over_a_field_with_no_scalar_is_refused_naming_its_remedy`,
+  `::test_a_filter_over_a_django_column_with_no_scalar_is_refused_naming_its_remedy`, the `relation` leaf-refusal case,
+  `tests/filters/test_base.py`'s relation-key and composite-key rows and
+  `tests/filters/test_sets.py::test_an_object_sent_to_an_unserved_relation_leaf_is_refused_naming_its_remedies`. Docs:
+  spec-027 Decision 4, README, GLOSSARY `FilterSet` and `ConfigurationError`. Filed 816. CHANGELOGTODO 817
 
 ## Outside review of the fixes
 
@@ -2020,14 +2038,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 730. (robustness) A declared `CharFilter` / `NumberFilter` / `ListFilter` / `MultipleChoiceFilter` /
-  `AllValuesMultipleFilter`, with or without `method=`, whose `field_name` ends on a relation (forward FK `branch` /
-  `branch_id`, reverse FK, M2M, `GenericForeignKey`, `branch__shelves`) is refused at schema build with
-  `types/converters.py::scalar_for_field`'s DjangoType advice ("Unsupported Django field type 'ForeignKey' ... Add an
-  entry to SCALAR_MAP or exclude this field via Meta.exclude"), which names no FilterSet remedy, though django-filter
-  serves a forward key and the package types relation keys for its raw-pk filters
-  (`filters/base.py::_compared_columns`). The fix owed is the advice; serving a relation key through these classes
-  reverses 375 and is Waiting 722's decision. Found researching 537
 - [ ] 734. A plain `AllValuesMultipleFilter(field_name="code")` on a `RelatedFilter` child set (Shelf under Book),
   served flat on the parent (`shelfPick`), answers an uncoded "Cannot resolve keyword 'code' into field", while the
   nested branch and the same declaration with `method=` both work; docs/README.md's filter section serves flat copies
@@ -2238,6 +2248,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   its read-back converter refuses (`price` `9999999999999.9999`), and Django's `INSERT ... RETURNING` converters raise
   `decimal.InvalidOperation` inside `save()`: a masked top-level error on every write flavor. The write rule never asks
   it (the column is computed, not written); PostgreSQL stores it. Found verifying 726
+- [ ] 816. (robustness) A filter declared over a `GeneratedField` whose `output_field` no filter converts (a consumer
+  column class with no `SCALAR_MAP` entry, or a `FileField`) is refused at build with the DjangoType advice
+  (`types/converters.py::generated_output_field`: "Add an entry to SCALAR_MAP or exclude this field via Meta.exclude." /
+  "Exclude the field via Meta.exclude."), raised inside `_registered_scalar_entry` before the FilterSet's own refusal
+  (`filters/inputs.py::_unscalared_field_refusal`) can name the filter and a remedy a `FilterSet` has. Pinned on the
+  filter path by `tests/types/test_converters.py::test_generated_column_refuses_an_output_no_conversion_publishes`.
+  Found fixing 730
 
 ## To do: holes found re-checking the fixes
 
