@@ -165,7 +165,9 @@ def unstorable_value_error(
     ``full_clean`` runs; its ``DecimalValidator`` passes any finite spelling in a column
     with no ``max_digits`` and a zero with a huge exponent in any) would raise the server's
     ``DataError`` at the first query binding it (a unique column's ``validate_unique()``,
-    else ``save()``); none is an
+    else ``save()``), and a decimal SQLite stores as a value a bounded column cannot read
+    back (an infinity, or a double rounded past the column's digits) would raise
+    ``InvalidOperation`` at the re-fetch; none is an
     error the save mappers own, so it would escape as a masked top-level error. It is the
     ``invalid`` ``FieldError`` keyed to ``field_name`` instead, carrying the message a
     filter answers for the same value (``UNBINDABLE_TEMPORAL_MESSAGE``), before any

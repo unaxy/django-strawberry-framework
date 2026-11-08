@@ -18,13 +18,16 @@ request reaches: a stand-in alias that reads as PostgreSQL (the rules for a stor
 instant and for ``numeric``'s format), an ``ArrayField`` column (a PostgreSQL-only
 column, stood in for by ``tests/_postgres_fields.py::FakeArrayField``), MySQL's own
 operations, a date a ``DateTimeField`` column holds (no fakeshop write flavor hands one
-over), and, on the Postgres tier, the real connection and ``ArrayField``.
+over), the SQLite read-back trial over columns no fakeshop model declares (a
+``DecimalField(309, 0)`` an infinity reaches, one with no ``max_digits``) and the write
+alias it never opens, and, on the Postgres tier, the real connection and ``ArrayField``.
 """
 
 import ast
 import datetime
 import functools
 import importlib
+import sqlite3
 import uuid
 import warnings
 from collections.abc import Callable, Generator
@@ -34,10 +37,12 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
 
+import django
 import pytest
 from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.scalars import models as scalar_models
+from django.apps.registry import Apps
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator
 from django.db import DEFAULT_DB_ALIAS, DataError, connections, models, transaction
@@ -57,6 +62,7 @@ from django_strawberry_framework.utils._narrowing import (
     call_method,
     is_list_or_tuple,
     is_tuple,
+    read_attr,
     require,
 )
 from django_strawberry_framework.utils.errors import (
@@ -105,7 +111,11 @@ from tests._postgresql_stand_in import (
 )
 
 if TYPE_CHECKING:
+    from typing import TypeAlias
+
     from django_strawberry_framework.utils.errors import ErrorKeyMap
+
+    _DecimalColumn: TypeAlias = models.DecimalField[Decimal | str, Decimal]
 
 
 class _RaisingMessage:
@@ -942,7 +952,7 @@ def _sqlite_alias(database_time_zone: str | None) -> Generator[str, None, None]:
     """Register a never-opened SQLite alias whose ``DATABASES`` ``TIME_ZONE`` is given."""
     alias = "sqlite_time_zone_stand_in"
     connections[alias] = SQLiteDatabaseWrapper(
-        {"NAME": "stand-in", "TIME_ZONE": database_time_zone},
+        {"NAME": "stand-in", "TIME_ZONE": database_time_zone, "OPTIONS": {}},
         alias,
     )
     try:
@@ -1828,20 +1838,213 @@ def test_unstorable_decimal_leaves_a_bounded_column_to_its_validator(
         assert unstorable_decimal(_BOUNDED_DECIMAL, Decimal(raw), lambda: alias) is refused
 
 
+_read_back_apps = Apps([])
+
+
+class _WidestDouble(models.Model):
+    """A table whose ``DecimalField(309, 0)`` holds every integer below a double's largest."""
+
+    value: "_DecimalColumn" = models.DecimalField(max_digits=309, decimal_places=0)
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _read_back_apps
+
+
+class _DigitlessDecimal(models.Model):
+    """A table whose ``DecimalField`` holds no digits, which SQLite reads back from Django 6.1.1."""
+
+    value: "_DecimalColumn" = models.DecimalField(max_digits=None, decimal_places=None)
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _read_back_apps
+
+
+class _SixteenDigits(models.Model):
+    """A table whose ``DecimalField(16, 2)`` holds 14 digits before the point."""
+
+    value: "_DecimalColumn" = models.DecimalField(max_digits=16, decimal_places=2)
+
+    class Meta:
+        app_label = "products"
+        managed = False
+        apps = _read_back_apps
+
+
+#: ``ScalarSpecimen.price``, a ``DecimalField(20, 4)``.
+_PRICE = scalar_models.ScalarSpecimen._meta.get_field("price")
+_WIDEST = _WidestDouble._meta.get_field("value")
+_SIXTEEN = _SixteenDigits._meta.get_field("value")
+
+#: A decimal SQLite stores as the double nearest it: read through Python's ``float`` the
+#: backend's converter rounds it to ``100000000000000``, a digit past ``DecimalField(16, 2)``.
+_ROUNDED_PAST_SIXTEEN = "99999999999999.99"
+
+#: The largest double, written out: SQLite stores the decimal as it.
+_LARGEST_DOUBLE = "1.7976931348623157E+308"
+
+
+@pytest.mark.parametrize(
+    ("column", "raw", "refused"),
+    [
+        pytest.param(_PRICE, "9999999999999999.9999", True, id="carried-past-the-digits"),
+        pytest.param(_PRICE, "-9999999999999999.9999", True, id="negative-carried"),
+        pytest.param(_PRICE, "99999999999999.9999", False, id="rounded-within-the-digits"),
+        pytest.param(_PRICE, "12.5", False, id="plain"),
+        pytest.param(_PRICE, "0E+1073741823", False, id="zero-past-numeric"),
+        # SQLite stores an integral double past 2**51 as an integer, which Django 6.1 reads
+        # exactly and Django 5.2 / 6.0 round to 15 digits.
+        pytest.param(
+            _PRICE,
+            "9999999999999995.0000",
+            django.VERSION < (6, 1),
+            id="integral-double-past-2-to-the-51",
+        ),
+        pytest.param(_SIXTEEN, _ROUNDED_PAST_SIXTEEN, True, id="rounded-past-sixteen-digits"),
+        pytest.param(_WIDEST, _LARGEST_DOUBLE, False, id="largest-double"),
+        # SQLite rounds this spelling to the largest double; Python's ``float`` reaches an
+        # infinity.
+        pytest.param(_WIDEST, "1.7976931348623158079373E+308", False, id="rounded-to-largest"),
+        pytest.param(_WIDEST, "1.797693134862315808E+308", True, id="infinity"),
+        pytest.param(_WIDEST, "-1.797693134862315808E+308", True, id="negative-infinity"),
+        pytest.param(_WIDEST, "9" * 309, True, id="309-digit-infinity"),
+    ],
+)
+def test_unstorable_decimal_refuses_what_sqlite_cannot_read_back(
+    column: models.Field[object, object],
+    raw: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """SQLite stores a decimal as an integer or a double; one its re-fetch cannot read is refused.
+
+    The re-fetch reads a bounded column through Django's converter, which quantizes the
+    stored value to the column's digits and raises for an infinity or a digit the double
+    carried into. The value is stored in a private in-memory database: the write alias is
+    never opened.
+    """
+    with _sqlite_alias(None) as alias:
+        assert unstorable_decimal(column, Decimal(raw), lambda: alias) is refused
+        assert unstorable_value(column, Decimal(raw), lambda: alias) is refused
+        assert read_attr(connections[alias], "connection") is None
+
+
+def test_unstorable_decimal_read_back_trial_runs_no_query_on_a_django_connection() -> None:
+    """The read-back trial runs no statement through Django and never opens the write alias.
+
+    The 309 nines SQLite stores as an infinity are stored and read back in the private
+    in-memory database alone: no execute wrapper on the write alias or the default
+    connection sees a statement, and the write alias stays unopened.
+    """
+    statements: list[str] = []
+
+    def _record(
+        execute: Callable[..., object],
+        sql: str,
+        params: object,
+        many: bool,  # noqa: FBT001
+        context: object,
+    ) -> object:
+        statements.append(sql)
+        return execute(sql, params, many, context)
+
+    with (
+        _sqlite_alias(None) as alias,
+        connections[alias].execute_wrapper(_record),
+        connections[DEFAULT_DB_ALIAS].execute_wrapper(_record),
+    ):
+        assert unstorable_decimal(_WIDEST, Decimal("9" * 309), lambda: alias) is True
+        assert read_attr(connections[alias], "connection") is None
+    assert statements == []
+
+
+@pytest.fixture
+def _decimal_read_as_text() -> Generator[None, None, None]:
+    """Register a ``sqlite3`` converter reading the ``decimal`` declared type as its text."""
+    kept = sqlite3.converters.get("DECIMAL")
+    sqlite3.register_converter("decimal", _decoded)
+    try:
+        yield
+    finally:
+        if kept is None:
+            del sqlite3.converters["DECIMAL"]
+        else:
+            sqlite3.register_converter("decimal", kept)
+
+
+def _decoded(raw: bytes) -> str:
+    return raw.decode()
+
+
+@pytest.mark.usefixtures("_decimal_read_as_text")
+def test_unstorable_decimal_reads_back_under_the_alias_detect_types() -> None:
+    """A converter registered for the column's declared type applies to the read-back trial.
+
+    The write alias opens its connection with ``PARSE_DECLTYPES``, so the re-fetch reads
+    the stored double as the text the converter returns. Django 6.1 quantizes that text
+    into ``DecimalField(16, 2)``, where read as a ``float`` it would round to a 15th digit
+    before the point: not refused. Django 5.2 / 6.0 read the value only as a ``float`` and
+    raise ``TypeError`` for the text, at the re-fetch and in the trial alike.
+    """
+    with _sqlite_alias(None) as alias:
+        if django.VERSION >= (6, 1):
+            assert (
+                unstorable_decimal(_SIXTEEN, Decimal(_ROUNDED_PAST_SIXTEEN), lambda: alias)
+                is False
+            )
+            return
+        with pytest.raises(TypeError):
+            _ = unstorable_decimal(_SIXTEEN, Decimal(_ROUNDED_PAST_SIXTEEN), lambda: alias)
+
+
+@pytest.mark.skipif(
+    django.VERSION >= (6, 1, 1),
+    reason="Django 6.1.1 and later build a converter for a DecimalField without decimal_places",
+)
+def test_unstorable_decimal_raises_where_the_backend_cannot_build_the_converter() -> None:
+    """Below Django 6.1.1 the backend's converter for a digitless column raises ``TypeError``.
+
+    The trial builds the converter as the re-fetch would and lets that error propagate,
+    never answering it as a refused value.
+    """
+    with _sqlite_alias(None) as alias, pytest.raises(TypeError):
+        _ = unstorable_decimal(
+            _DigitlessDecimal._meta.get_field("value"),
+            Decimal(1),
+            lambda: alias,
+        )
+
+
+@pytest.mark.skipif(
+    django.VERSION < (6, 1, 1),
+    reason="Django below 6.1.1 cannot read back a DecimalField without decimal_places",
+)
 @pytest.mark.parametrize(
     "raw",
     [
+        "1E+309",
+        "-1E+309",
         "1e1000000",
-        "1E+131072",
-        "0E-16384",
+        "9999999999999999.9999",
         "0E+1073741823",
+        "0E-16384",
+        "1E+131072",
     ],
 )
-def test_unstorable_decimal_reads_only_postgresql(raw: str) -> None:
-    """SQLite binds every spelling: it stores a decimal as its nearest double, refusing none."""
+def test_unstorable_decimal_stores_an_infinity_in_a_column_holding_no_digits(raw: str) -> None:
+    """A column with no ``max_digits`` refuses no spelling on SQLite.
+
+    It reads an infinity back as ``Infinity`` and a zero past PostgreSQL ``numeric``'s
+    exponent limit as zero: not refused.
+    """
     with _sqlite_alias(None) as alias:
-        assert not unstorable_decimal(_UNBOUNDED_DECIMAL, Decimal(raw), lambda: alias)
-        assert not unstorable_decimal(_BOUNDED_DECIMAL, Decimal(raw), lambda: alias)
+        assert not unstorable_decimal(
+            _DigitlessDecimal._meta.get_field("value"),
+            Decimal(raw),
+            lambda: alias,
+        )
 
 
 @pytest.mark.parametrize(

@@ -29,7 +29,12 @@ accepts, there) is written.
 (``0E+9999999999``), which its ``DecimalValidator`` passes since it counts no digit for a
 zero's positive exponent, is the field's ``invalid`` ``FieldError`` with nothing written on
 PostgreSQL, where the server would refuse the bind, and is stored as zero on SQLite, which
-stores a decimal as its nearest double.
+stores a decimal as an integer or its nearest double. ``9999999999999999.9999``, which
+SQLite stores as ``10000000000000000``, a digit past ``DecimalField(20, 4)`` that the
+re-fetch cannot read back, is the same error with nothing written on SQLite and is stored
+on PostgreSQL; ``9999999999999995.0000``, stored as the integer ``9999999999999996``, is
+written and read back as it on Django 6.1, which reads an integer exactly, and refused on
+Django 5.2 / 6.0, which round it to 15 digits.
 
 The ``SplitForm`` pairs write ``occurred_at`` through a ``SplitDateTimeField``, whose
 widget reads a date key and a time key: the datetime sent is stored on create and update
@@ -97,7 +102,9 @@ query inside ``is_valid()``. A value the database cannot store is the field's ``
 ``FieldError`` before that query, on create and update, with nothing written: on SQLite the
 form's aware ``openedTime`` and, under ``USE_TZ = False``, aware ``openedAt``, the
 serializer's ``validate_opened_at`` instant past year 9999 in UTC, and the serializer's aware
-``openedTime``; on PostgreSQL the form's ``amount`` and the digitless ``amount`` of
+``openedTime``, and the form's and the serializer's ``amount`` sent
+``9999999999999999.9999``, which SQLite stores past the column's digits; on PostgreSQL the
+form's ``amount`` and the digitless ``amount`` of
 ``createUniqueScalarSpecimenViaUnboundedAmountSerializer`` sent a zero past ``numeric``'s
 exponent limit. A value each flavor stores is written.
 """
@@ -114,6 +121,7 @@ from functools import wraps
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
+import django
 import pytest
 from apps.scalars import models
 from asgiref.sync import sync_to_async
@@ -505,8 +513,11 @@ _ZERO_PAST_NUMERIC = "0E+9999999999"
 _STORED_PRICE = Decimal("12.5000")
 
 
-def _write_price(operation: str) -> tuple[str, JSONObject, models.ScalarSpecimen | None]:
-    """Send ``_ZERO_PAST_NUMERIC`` as ``price`` through the model flavor's ``operation``."""
+def _write_price(
+    operation: str,
+    price: str = _ZERO_PAST_NUMERIC,
+) -> tuple[str, JSONObject, models.ScalarSpecimen | None]:
+    """Send ``price`` through the model flavor's ``operation``."""
     specimen = None
     if operation == "update":
         specimen = _seed()
@@ -514,9 +525,9 @@ def _write_price(operation: str) -> tuple[str, JSONObject, models.ScalarSpecimen
         specimen.save(update_fields=["price"])
     root, document = _document("model", operation)
     variables = (
-        {"data": {**_CREATE_DATA, "price": _ZERO_PAST_NUMERIC}}
+        {"data": {**_CREATE_DATA, "price": price}}
         if specimen is None
-        else {"id": str(specimen.pk), "data": {"price": _ZERO_PAST_NUMERIC}}
+        else {"id": str(specimen.pk), "data": {"price": price}}
     )
     return root, response_json(post_graphql(document, variables=variables)), specimen
 
@@ -552,8 +563,8 @@ def test_decimal_postgresql_cannot_bind_stores_as_its_nearest_double_on_sqlite(
 ) -> None:
     """On SQLite the same decimal is written as the nearest double, here zero.
 
-    SQLite refuses no spelling: Django binds the decimal as its text, which the
-    ``NUMERIC`` column stores as its nearest double, so the zero is written as ``0``.
+    Django binds the decimal as its text, which the ``NUMERIC`` column stores as an integer
+    or its nearest double, so the zero is written as ``0`` and read back as ``0.0000``.
     """
     root, payload, specimen = _write_price(operation)
 
@@ -562,6 +573,60 @@ def test_decimal_postgresql_cannot_bind_stores_as_its_nearest_double_on_sqlite(
     assert list(models.ScalarSpecimen.objects.values_list("label", "price")) == [
         (label, Decimal("0.0000")),
     ]
+
+
+#: A ``price`` SQLite stores as ``10000000000000000``: the nearest double carries into a 17th
+#: digit before the point, past the 16 ``DecimalField(20, 4)`` holds.
+_PRICE_CARRIED_PAST_THE_COLUMN = "9999999999999999.9999"
+
+#: A ``price`` whose nearest double is the integer ``9999999999999996``, which SQLite stores as
+#: an integer: Django 6.1 reads it back exactly, Django 5.2 / 6.0 round it to 15 digits and
+#: carry into a 17th.
+_PRICE_STORED_AS_AN_INTEGER = "9999999999999995.0000"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize(
+    ("price", "sqlite_reads_back", "read_back"),
+    [
+        pytest.param(_PRICE_CARRIED_PAST_THE_COLUMN, False, None, id="carried-past-the-column"),
+        pytest.param(
+            _PRICE_STORED_AS_AN_INTEGER,
+            django.VERSION >= (6, 1),
+            Decimal("9999999999999996.0000"),
+            id="stored-as-an-integer",
+        ),
+    ],
+)
+def test_decimal_sqlite_cannot_read_back_is_the_field_error(
+    operation: str,
+    price: str,
+    *,
+    sqlite_reads_back: bool,
+    read_back: Decimal | None,
+) -> None:
+    """A decimal SQLite stores as a value the re-fetch cannot read back is the field's error.
+
+    ``price``'s ``DecimalValidator`` passes each value, which SQLite stores as an integer or
+    the nearest double. The re-fetch would read it back through Django's converter, which
+    quantizes it to the column's digits and raises ``InvalidOperation`` for a digit the
+    double carried into, a masked top-level error with the write rolled back. The write
+    decode answers ``price``'s ``invalid`` error instead, nothing created and an updated
+    row's ``price`` kept. A value the converter reads back is written, as is every value on
+    PostgreSQL, whose ``numeric`` keeps the decimal's own digits.
+    """
+    root, payload, specimen = _write_price(operation, price)
+
+    rows = list(models.ScalarSpecimen.objects.values_list("label", "price"))
+    if connection.vendor == "sqlite" and not sqlite_reads_back:
+        assert payload == _field_refusal(root, "price", _UNSTORABLE)
+        assert rows == ([] if specimen is None else [("stored", _STORED_PRICE)])
+        return
+    label = "written" if specimen is None else "stored"
+    assert payload == {"data": {root: {"result": {"label": label}, "errors": []}}}
+    stored = Decimal(price) if connection.vendor == "postgresql" else read_back
+    assert rows == [(label, stored)]
 
 
 @wraps(AsyncDjangoGraphQLView.as_view())
@@ -2093,6 +2158,18 @@ _UNIQUE_CELLS = {
         "9999-12-31T23:30:00",
         (_REFUSED, _REFUSED),
     ),
+    "form-decimal-carried-past-the-column": _UniqueCell(
+        "form",
+        "amount",
+        _PRICE_CARRIED_PAST_THE_COLUMN,
+        (_REFUSED, _STORED),
+    ),
+    "serializer-decimal-carried-past-the-column": _UniqueCell(
+        "serializer",
+        "amount",
+        _PRICE_CARRIED_PAST_THE_COLUMN,
+        (_REFUSED, _STORED),
+    ),
     "serializer-hook-unique-together-datetime-in-range": _UniqueCell(
         "serializer",
         "openedAt",
@@ -2117,8 +2194,11 @@ def test_value_a_uniqueness_check_would_bind_is_the_field_error(operation: str, 
     year 9999 in UTC, which the serializer's ``validate_opened_at`` makes of
     ``9999-12-31T23:30:00`` read as shop time, on the serializer. Each, and the serializer's
     aware time, is the field's ``invalid`` ``FieldError`` instead, nothing created and an
-    updated row kept. PostgreSQL stores the aware time and, under ``USE_TZ = False``, the
-    aware datetime. A naive time, a
+    updated row kept. ``amount`` is unique among active rows, and SQLite stores
+    ``9999999999999999.9999`` as ``10000000000000000``, which the re-fetch could not read back
+    into ``DecimalField(20, 4)``: the form and the serializer refuse it before that
+    constraint's check binds it. PostgreSQL stores the aware time, the decimal and, under
+    ``USE_TZ = False``, the aware datetime. A naive time, a
     naive datetime under ``USE_TZ = False`` and an in-range hook instant are stored.
     """
     cell = _UNIQUE_CELLS[name]

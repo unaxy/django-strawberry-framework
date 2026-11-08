@@ -55,7 +55,9 @@ write flavors):
   an ``ArrayField`` list the driver cannot dump as a whole;
 - ``unstorable_decimal`` - the write-side answer for a ``DecimalField`` (or an
   ``ArrayField`` of one): a decimal its own validators accept but
-  ``refuses_numeric_format`` refuses on the database a write runs on;
+  ``refuses_numeric_format`` refuses on the database a write runs on, or that SQLite
+  stores as a value the column's own read-back converter refuses (an infinity, or a
+  double rounded past a bounded column's digits), which the re-fetch would raise on;
 - ``unstorable_value`` - the one write-side storability rule, ``unstorable_temporal`` or
   ``unstorable_decimal``, applied by every write flavor before the save
   (``utils/write_values.py::unstorable_value_error`` on the model flavor);
@@ -87,7 +89,7 @@ from __future__ import annotations
 
 import datetime
 import zoneinfo
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, NamedTuple
 
 import strawberry
@@ -892,10 +894,11 @@ def refuses_numeric_format(connection: BaseDatabaseWrapper, values: Iterable[obj
     ``0E-16384`` is refused). A list or tuple among ``values``
     is one list parameter, whose elements are read at any nesting depth. Every other
     value, and every value on any other backend, is not read. SQLite is not asked since it
-    refuses no spelling: Django binds the decimal as its text, which the ``NUMERIC`` column
-    compares as a double, so a value past a double's range or precision compares as the
-    nearest double (zero, an infinity, or the double a longer spelling rounds to) rather
-    than failing the bind.
+    refuses no spelling at the bind: Django binds the decimal as its text, which the
+    ``NUMERIC`` column compares as a double, so a value past a double's range or precision
+    compares as the nearest double (zero, an infinity, or the double a longer spelling
+    rounds to) rather than failing the bind. What a write stores there and cannot read
+    back is ``unstorable_decimal``'s to answer.
     """
     if connection.vendor != "postgresql":
         return False
@@ -1064,7 +1067,7 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
 
 
 def unstorable_decimal(column: object, value: object, using: Callable[[], str]) -> bool:
-    """Return whether the database ``using()`` names cannot bind decimal ``value`` into ``column``.
+    """Return whether the database ``using()`` names cannot store decimal ``value`` in ``column``.
 
     The write-side answer for a ``DecimalField`` column, or an ``ArrayField`` of one at
     any nesting depth: ``value`` is what a write flavor is about to store in ``column``,
@@ -1073,8 +1076,9 @@ def unstorable_decimal(column: object, value: object, using: Callable[[], str]) 
     column's own validators accept that value as ``Model.clean_fields`` asks them
     (``run_validators``: its ``DecimalValidator``, the column's ``validators=`` and a
     subclass's ``default_validators``), held to ``refuses_numeric_format`` on that
-    connection; one they refuse is theirs to answer (``full_clean``, a ``ModelForm``'s
-    model validation). Django's own preparation answers nothing more:
+    connection and, on SQLite, to whether the column reads the value it stores back
+    (``_refused_read_back``); one they refuse is theirs to answer (``full_clean``, a
+    ``ModelForm``'s model validation). Django's own preparation answers nothing more:
     ``DecimalValidator(None, None)`` (a column with no ``max_digits``) refuses only a value
     that is not finite, a bounded one counts no digit for a zero's positive exponent, and
     every backend's ``adapt_decimalfield_value`` passes the decimal through, so a spelling
@@ -1090,7 +1094,80 @@ def unstorable_decimal(column: object, value: object, using: Callable[[], str]) 
         for element in _leaf_elements(value, depth)
         if isinstance(element, Decimal) and (stored := _validated(column, element)) is not None
     ]
-    return bool(decimals) and refuses_numeric_format(connections[using()], decimals)
+    if not decimals:
+        return False
+    connection = connections[using()]
+    return refuses_numeric_format(connection, decimals) or _refused_read_back(
+        connection,
+        column,
+        decimals,
+    )
+
+
+def _refused_read_back(
+    connection: BaseDatabaseWrapper,
+    column: ConcreteField,
+    decimals: Iterable[object],
+) -> bool:
+    """Whether SQLite stores a decimal in ``decimals`` as a value ``column`` cannot read back.
+
+    SQLite keeps a ``NUMERIC``-affinity column's value as an integer or a double, never as
+    the decimal's own digits: Django binds the decimal as its text
+    (``Field.get_db_prep_save``), which the column converts, so a value past a double's
+    range is stored as an infinity and one past its precision as the nearest double, which
+    may carry into a digit the column does not hold (``9999999999999999.9999`` stored as
+    ``10000000000000000`` in a ``max_digits=20, decimal_places=4`` column). The write
+    pipeline's re-fetch reads the saved row back through the backend's converter for the
+    column (``connection.ops.get_db_converters``), which on a bounded column quantizes the
+    value to the column's digits and raises ``InvalidOperation`` for an infinity or a
+    carried digit. Both halves are asked of upstream, never modelled: each decimal is
+    stored as the save would bind it in a column of the field's own type
+    (``Field.db_type``) in a private in-memory database opened through the backend's
+    driver, the same SQLite library the write alias runs (``CAST(... AS NUMERIC)`` is not
+    the same conversion: it keeps a double past 2**51 that the column stores as an
+    integer), and the stored value is read back as the re-fetch reads it: under the
+    alias's own ``detect_types`` (``get_connection_params``), so a converter a project
+    registers for the column's declared type applies, then through the backend's own
+    converter chain. No statement reaches the write alias. A column with no
+    ``max_digits`` reads an infinity back as ``Infinity`` and refuses nothing. Every other
+    backend stores the decimal's digits and is not asked.
+    """
+    if connection.vendor != "sqlite":
+        return False
+    # ``cached_col`` is the ``Col`` the re-fetch compiles for the column.
+    expression = column.cached_col
+    converters: list[Callable[..., object]] = connection.ops.get_db_converters(expression)
+    prepared = [object_result(column.get_db_prep_save, number, connection) for number in decimals]
+    # The alias's own ``detect_types`` applies any converter registered for the column's
+    # declared type, as the re-fetch's cursor does.
+    params = require(object_result(connection.get_connection_params), is_dict)
+    connect = require(read_attr(read_attr(connection, "Database"), "connect"), callable)
+    scratch = object_result(connect, ":memory:", detect_types=params["detect_types"])
+    try:
+        _ = call_method(
+            scratch,
+            "execute",
+            f"CREATE TABLE stored (value {column.db_type(connection)})",
+        )
+        _ = call_method(
+            scratch,
+            "executemany",
+            "INSERT INTO stored VALUES (?)",
+            [(value,) for value in prepared],
+        )
+        rows = list_of(
+            call_method(call_method(scratch, "execute", "SELECT value FROM stored"), "fetchall"),
+        )
+    finally:
+        _ = call_method(scratch, "close")
+    for row in rows:
+        stored: object = list_of(row)[0]
+        try:
+            for converter in converters:
+                stored = converter(stored, expression, connection)
+        except InvalidOperation:
+            return True
+    return False
 
 
 def _leaf_elements(value: object, depth: int) -> list[object]:

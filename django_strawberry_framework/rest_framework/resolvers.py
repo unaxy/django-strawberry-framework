@@ -2887,7 +2887,9 @@ def _unstorable_value_errors(
     binds it as that integer (SQLite, MySQL). A ``DecimalField(max_digits=None,
     decimal_places=None)`` (the field a column with no ``max_digits`` needs, since DRF's
     ``ModelSerializer`` cannot build one) holds no digits, so it can let through a decimal
-    PostgreSQL's ``numeric`` refuses at ``save()``. Each writable bound field whose
+    PostgreSQL's ``numeric`` refuses at ``save()``, and any field one a bounded column's
+    validators accept but SQLite stores as a value the re-fetch cannot read back (an
+    infinity, or a double rounded past the column's digits). Each writable bound field whose
     ``source`` is a top-level ``validated_data`` key naming a concrete column of ``model``
     (``utils/relations.py::written_model_field``) is held to
     ``utils/errors.py::unstorable_value`` on the pinned alias

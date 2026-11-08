@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 445 done, 114 to do. The CHANGELOG entries filed here moved to
+Progress: 446 done, 114 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1940,6 +1940,29 @@ Progress: 445 done, 114 to do. The CHANGELOG entries filed here moved to
   target type's `get_queryset` through a `RelatedFilter`), and
   `tests/filters/test_sets.py::test_a_queryset_alias_of_a_multi_column_link_holds_nothing`. Docs: spec-027, README,
   GLOSSARY `FilterSet`. Closes 792's element half
+- [x] 726. (robustness) fixed: on SQLite a decimal its column's validators accept but SQLite stores as a value the
+  backend's read-back converter refuses is the field's `invalid` "Enter a value the database can represent." on every
+  flavor, create and update, nothing written, where the post-write re-fetch (`mutations/resolvers.py::refetch_optimized`)
+  raised a masked `decimal.InvalidOperation` from `get_decimalfield_converter` (15-digit rounding, then `quantize`
+  under `Context(prec=max_digits)`) and rolled the write back. Two shapes, one root: an infinity (`1E+309` in
+  `DecimalField(400, 0)`, any `max_digits >= 309 + decimal_places`) and a double carried past a bounded column's digits
+  at capacity (`9999999999999999.9999` in `(20, 4)`, live on fakeshop `ScalarSpecimen.price` and
+  `UniqueScalarSpecimen.amount`; any `max_digits >= 16`; on Django 5.2 / 6.0 also an integer past 15 digits, read
+  through a float). `utils/errors.py::_refused_read_back`, a branch of `::unstorable_decimal` after `_validated`,
+  stores the values in a private in-memory database opened through the backend's own driver under the alias's
+  `detect_types` (`get_connection_params`), with the column's `db_type` and `get_db_prep_save`, and reads them back
+  through `connection.ops.get_db_converters(column.cached_col)`, catching only `InvalidOperation`: no Django query, the
+  write alias never opened. `CAST(... AS NUMERIC)` on the alias was rejected (it answers REAL where the column stores
+  INTEGER past 2**51) and so was a `float()` model (SQLite's text-to-double is not correctly rounded near the largest
+  double). An unbounded column's `Infinity` read-back stays accepted; a converter the backend cannot build (a digitless
+  column below Django 6.1.1) propagates its `TypeError`. A row already holding such a value fails every read selecting
+  the column, but only trusted code outside the package writes one (`update()`, raw SQL, `loaddata`) and Django's own
+  ORM cannot load it either: not a defect. 727 untouched. Pinned by
+  `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_decimal_sqlite_cannot_read_back_is_the_field_error`
+  and its unique-amount cells, `tests/utils/test_errors.py` (`::test_unstorable_decimal_refuses_what_sqlite_cannot_read_back`,
+  the digitless rows, the zero-statement row, `::test_unstorable_decimal_reads_back_under_the_alias_detect_types`,
+  `::test_unstorable_decimal_raises_where_the_backend_cannot_build_the_converter`); spec-036, spec-038, spec-039,
+  README, GLOSSARY `FieldError` envelope. Filed 813
 
 ## Outside review of the fixes
 
@@ -1980,11 +2003,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 726. (robustness) On SQLite a bounded `DecimalField` (`max_digits` set) holding a value SQLite stores as an
-  infinity (`1E+309` in `DecimalField(max_digits=400, decimal_places=0)`) is written, then the post-write re-fetch
-  raises `decimal.InvalidOperation` from the converter's `quantize`: a masked top-level error and a rolled-back write.
-  README "Writing data" says SQLite refuses none and documents only that a column with no `max_digits` reads the
-  infinity back as `Infinity`. A lax serializer field over the column is Waiting 727. Found fixing 530
 - [ ] 729. spec-027's `apply_async` paragraph says a "present-but-empty nested branch" constrains nothing, but a
   present branch is active whatever its inner value (`utils/permissions.py::active_related_branches`), so
   `{shelves: {}}` keeps only the parents with a visible, admitted shelf (`_restrict_through_branch`) and
@@ -2212,6 +2230,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `qs_exists`, and on PostgreSQL the `DataError` DRF swallows aborts the transaction; either way a masked top-level
   error. Decide in the fix whether the hold walks nested serializers (`_validation_tree`) or the contract states it.
   Found researching 725
+- [ ] 813. (robustness) On SQLite a stored `GeneratedField` whose `output_field` is a bounded `DecimalField`
+  (`GeneratedField(expression=F("price") * 1000, output_field=DecimalField(20, 4), db_persist=True)`) computes a value
+  its read-back converter refuses (`price` `9999999999999.9999`), and Django's `INSERT ... RETURNING` converters raise
+  `decimal.InvalidOperation` inside `save()`: a masked top-level error on every write flavor. The write rule never asks
+  it (the column is computed, not written); PostgreSQL stores it. Found verifying 726
 
 ## To do: holes found re-checking the fixes
 
