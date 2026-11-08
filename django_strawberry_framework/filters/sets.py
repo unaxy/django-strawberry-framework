@@ -43,7 +43,7 @@ from django.core.exceptions import (
     ValidationError,
 )
 from django.db import connections, models
-from django.db.models import Exists, FilteredRelation, Q, Subquery
+from django.db.models import Exists, F, FilteredRelation, Q, Subquery
 from django.db.models import lookups as model_lookups
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression
@@ -81,6 +81,7 @@ from typing_extensions import override
 from django_strawberry_framework.conf import max_flat_filters_setting
 from django_strawberry_framework.exceptions import ConfigurationError, LookupValidationError
 from django_strawberry_framework.optimizer.predicates import (
+    _enforces_reference,
     attach_exists,
     correlated_inner_root,
     correlates_related_rows,
@@ -2140,6 +2141,55 @@ def _names_every_through(model: type[models.Model], hops: tuple[RelationHop, ...
                 return False
             model = require(field.related_model, is_model_class)
     return True
+
+
+def _inner_forward(field: object) -> bool:
+    """Whether ``field`` is a forward relation Django joins ``INNER`` as the first join of a path.
+
+    A forward ``ForeignObject`` (a ``ForeignKey`` or ``OneToOneField`` included) that is
+    not nullable: ``Query.setup_joins`` marks its join nullable from ``field.null`` alone
+    and ``Query.promote_joins`` promotes only a nullable join or one following an outer
+    join, so a ``FilteredRelation`` of it drops a row whose related row its condition
+    leaves out instead of reading it as ``NULL``.
+    """
+    return (
+        isinstance(field, models.ForeignObject)
+        and (field.many_to_one or field.one_to_one)
+        and not field.null
+    )
+
+
+def _round_trip(field: object) -> str | None:
+    """Return the query name ``field``'s target rows reach its rows back by, for an inner forward key.
+
+    For a key ``_inner_forward`` reads, ``FilterSet._relation_view`` joins the target and
+    back to the row itself (the reverse relation, a join Django makes nullable, so every
+    join after it is outer), then the key again from there: a row whose related row the
+    view's condition leaves out reads it as ``NULL`` instead of dropping. The first join of
+    that round trip is the key's own, inner, so it keeps every row only for a key the
+    database enforces (``optimizer/predicates.py::_enforces_reference``): a bare
+    ``ForeignObject`` or a ``db_constraint=False`` key may name no row, and that row would
+    drop. ``None`` for any other relation, for a key whose reverse relation Django names
+    no way (``related_name="+"``), and for a key onto a multi-table-inheritance child or
+    a proxy of one: Django joins the child's parent tables ahead of the outer join that
+    references them, which the database refuses. A proxy of any other model is joined
+    round as its concrete model is.
+    """
+    if (
+        not isinstance(field, models.ForeignKey)
+        or not _enforces_reference(field)
+        or not _inner_forward(field)
+    ):
+        return None
+    name = field.related_query_name()
+    target = require(field.related_model, is_model_class)
+    if require(target._meta.concrete_model, is_model_class)._meta.parents:
+        return None
+    try:
+        _ = target._meta.get_field(name)
+    except FieldDoesNotExist:
+        return None
+    return name
 
 
 @dataclass(frozen=True)
@@ -6869,7 +6919,14 @@ class FilterSet(
         own. A many-to-many joins its through rows by a ``FilteredRelation`` of their own
         (``<relation>_links``, ``_through_link``) conditioned on the visible target rows,
         then the target through them, so a through row onto a hidden target is no row of
-        the view (a ``NULL`` test reads only visible targets). Each alias is named for its
+        the view (a ``NULL`` test reads only visible targets). A first relation Django
+        joins inner (a non-null forward key, ``_inner_forward``) that the database
+        enforces is reached round its target (``<relation>_round``: the key, then its
+        reverse relation back to the row itself, ``_round_trip``), an outer join, so the
+        view keeps a row whose related row the condition leaves out, reading it as
+        ``NULL``; a key whose reverse Django names no way (``related_name="+"``), a key
+        onto a multi-table-inheritance child, a bare ``ForeignObject`` and a
+        ``db_constraint=False`` key keep Django's inner join. Each alias is named for its
         relation (``<relation>_visible``), numbered past a name the query or the model
         already holds (``_free_alias``). The copy of
         ``terminal`` names the last alias as its ``field_name`` and the lookup its walked
@@ -6921,7 +6978,19 @@ class FilterSet(
                 conditions[-1] = visible
             for segment, condition_rows in zip(segments, conditions, strict=True):
                 field = model._meta.get_field(segment)
-                relation_name = f"{names[-1]}{LOOKUP_SEP}{segment}" if names else segment
+                back = None if names else _round_trip(field)
+                if back is not None:
+                    # Django joins this key inner: the view reaches the row again round
+                    # its target (``_round_trip``), an outer join, and the key from there.
+                    turn = f"{segment}{LOOKUP_SEP}{back}"
+                    names_back = alias(
+                        f"{segment}_round",
+                        turn,
+                        Q(**{f"{turn}{LOOKUP_SEP}pk": F("pk")}),
+                    )
+                    relation_name = f"{names_back}{LOOKUP_SEP}{segment}"
+                else:
+                    relation_name = f"{names[-1]}{LOOKUP_SEP}{segment}" if names else segment
                 through = _through_link(model, field)
                 if through is None:
                     condition = (

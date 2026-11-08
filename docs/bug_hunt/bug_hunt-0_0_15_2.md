@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 442 done, 114 to do. The CHANGELOG entries filed here moved to
+Progress: 443 done, 115 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1883,6 +1883,19 @@ Progress: 442 done, 114 to do. The CHANGELOG entries filed here moved to
   `test_declared_temporal_bindability_api.py::test_a_form_error_and_a_bind_refusal_are_reported_together` and
   `tests/filters/test_base.py` (DRF 400, `FilterView` strict, consumer form override, consumer `full_clean` counts,
   widget reads, unbound, empty-permitted); spec-027, README, GLOSSARY `FilterSet`. Filed 804, 805
+- [x] 807. fixed: 796's to-many relation view dropped a parent whose first related row is hidden when the walked path
+  starts at a non-null forward key: Django joins that key inner, so the view's condition left the parent out
+  (`Book.shelf__alt_branches` under a type hiding a shelf: an empty choice an override reads as
+  `alt_branches__isnull=True` lost the book on the hidden shelf). The view now joins such a key round its target when
+  the database enforces it, onto a model or a proxy of one (`<fk>_round`: the key, its reverse relation back to the row,
+  then the key again, an outer join), so the parent is kept and reads its hidden row as none. A `related_name="+"` key,
+  a bare `ForeignObject`, a `db_constraint=False` key and a key onto a multi-table-inheritance child keep the inner join
+  (decision 809). Changed `filters/sets.py::FilterSet._relation_view`; new `::_inner_forward`, `::_round_trip`. Pinned
+  by `examples/fakeshop/test_query/test_relation_key_overrides_api.py` (`shelf__alt_branches` and the `VisibleBranch`
+  proxy `branch__shelves` names-no-row rows, sync, form and async; `ShelfLabel.shelf__books` and
+  `KioskFault.kiosk__repairticket` on the inner join) and
+  `tests/filters/test_sets.py::test_which_forward_keys_the_relation_view_joins_round_their_target`. Docs: spec-027,
+  README, GLOSSARY `FilterSet`. Found researching 799; filed 809
 
 ## Outside review of the fixes
 
@@ -2154,11 +2167,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   an empty value) reads as constraining, so supplied empty or left out it keeps only the parents that reach a visible
   related row, where unwalked and django-filter keep every row: the identity-as-no-op rule on the rebound rows plus the
   EXISTS fold, not the double run. A to-many key's override answers as unwalked (item 796). Found researching 790
-- [ ] 799. (robustness) A class-level `filter` override on a relation key a flat leaf walks whose `isnull` reading
-  treats an empty or `null` value as `True` answers walked `[]` where unwalked answers the parents with no related row
-  (`['gamma']`): consumer `isnull` overrides keep the key-column re-bind, since running them through 796's relation view
-  narrows forward one-hop and many-to-many hiding cells (the forward left join and the many-to-many through join both
-  need a condition). Found fixing 796
 - [ ] 804. (robustness) A declared `ListFilter` / `ArrayFilter` / `RangeFilter` whose `field_name` names a queryset
   annotation (a type's `get_queryset` `annotate(elapsed_copy=F("elapsed"))`) applies each member or bound uncleaned:
   `filters/base.py::_column_form_field` resolves the path through the model's `_meta` (`_bound_value_field`) where the
@@ -2167,11 +2175,32 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `AttributeError` (`'str' object has no attribute 'days'`) for every value, valid ones included, over GraphQL (a
   masked unexpected error) and every raw driver (at `is_valid()` / `errors`); an integer annotation's `abc` / `1.5`
   member is Django's `ValueError` and `2**63` an `OverflowError` on every path. Found researching 724
+
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 809. Decide: the to-many relation view cannot join some first keys round their target, so a to-many override whose
+  value names no row, on a path starting at such a key, still drops a parent whose first related row is hidden: a
+  non-null forward key whose reverse Django names no way (`related_name="+"`), a bare `ForeignObject` or a
+  `db_constraint=False` key (its key may name no row, and the round trip's first join is inner), and a non-null key onto
+  a multi-table-inheritance child or a proxy of one (Django joins the child's parent tables ahead of the round trip's
+  outer join, which the database refuses). Pinned: `ShelfLabel.shelf__books` and `KioskFault.kiosk__repairticket` live;
+  the `_round_trip` unit cases. Keep it as a stated limit, an `EXISTS`-based absence predicate for these keys (breaks
+  path continuations past the alias), or a private `Join.nullable` promotion (not a public seam)? (Found fixing 807)
+- [ ] 799. Decide: should a class-level `filter` override on a walked relation key run through the relation view (items
+  796, 807) in two more cases, an `isnull` override whatever its value and a forward key's override whose value names no
+  row? Today both keep the earlier re-bind: a `null` or left-out value an `isnull` override reads as `True` answers `[]`
+  where unwalked answers the parents with no related row, and a forward override reading an empty choice as `None`, a
+  default, `<field_name>_id` or `qs.distinct()` drops parents with a `NULL` or hidden key. Routing the `isnull` override
+  alone fixes 752 cells of the research grid; adding the forward fallback fixes 2534, plus 2800 in a wider isnull probe.
+  The cost: the view's alias is a `FilteredRelation`, so an override's `only()` / `prefetch_related(self.field_name)`
+  raises Django's `ValueError` (470 cells correct today from the `isnull` routing alone; the fallback adds 36 grid and
+  90 probe cells), and `<field_name>_id` past a to-many hop raises `FieldError` (the override must read
+  `<field_name>__pk`). Route both and state those as the override's contract, route neither (today), or route only the
+  forward fallback? The round-trip limits of 809 apply. (The maintainer chose "nothing breaks" for this pass; the routed
+  design was built and verified)
 - [ ] 800. Decide: a class-level `filter` override on a many-to-many key a flat leaf walks, where Django gives the
   through key onto the source no reverse name of its own (an auto-created self-referential many-to-many read forward,
   symmetrical or not; an explicit through whose two keys onto the model share `related_name="+"`), still runs on the

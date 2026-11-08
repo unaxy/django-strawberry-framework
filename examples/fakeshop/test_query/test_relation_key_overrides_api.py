@@ -1,23 +1,26 @@
 """A class-level ``filter`` override on a walked relation key runs as declared, over visible rows.
 
-A consumer ``Filter`` subclass overriding ``filter`` on a relation key (a to-many key at
-any hop count, a to-one key two or more hops away) receives the ``field_name`` it was
-declared with, the value its form cleaned and the rows of the set declaring it, exactly
-as when no hop is walked; a supplied value runs it once per request (a leaf the request
-leaves out is first asked whether it constrains, then applied). The parents it keeps must
-also reach, through each hop's visible rows, a visible last-hop row its value names, so a
-row a target type's ``get_queryset`` hides matches nothing. A value naming no row of the
-relation's target (an empty or absent choice, instances or a key of another model, a value
-the key's own comparison skips or refuses) runs the override as declared over the rows of
-the set declaring it, its ``field_name`` an alias of its relation that joins only the related
-rows the walk keeps visible (a many-to-many's through rows included) and its ``lookup_expr``
-the walked lookup: a default it reads (a key, model instances, a queryset, one instance, a
-GlobalID, through a crossing ``lookup_expr`` too), a path it continues past the relation
-(``__pk__in``, ``__code``, ``__isnull``), ``exclude``, ``conjoined`` and Django's own refusal
-answer as unwalked, over visible rows, through every relation a declared hop crosses and its
-``RelatedFilter(queryset=...)``, and under a connection's count, order and pages; a relation
-the override's own Python names reads every row, its own scoping. Each request reaches the
-leaf over HTTP through ``FilterSet.apply_sync`` / ``apply_async`` or the set's own form.
+A consumer ``Filter`` subclass overriding ``filter`` on a relation key (a to-many key at any
+hop count, a to-one key two or more hops away) receives the ``field_name`` it was declared
+with, the value its form cleaned and the rows of the set declaring it, exactly as when no
+hop is walked; a supplied value runs it once per request (a leaf the request leaves out is
+first asked whether it constrains, then applied). The parents it keeps must also reach,
+through each hop's visible rows, a visible last-hop row its value names, so a row a target
+type's ``get_queryset`` hides matches nothing. A value naming no row of the relation's
+target (an empty or absent choice, instances or a key of another model, a value the key's
+own comparison skips or refuses) runs the override as declared over the rows of the set
+declaring it, its ``field_name`` an alias of its relation that joins only the related rows
+the walk keeps visible (a many-to-many's through rows included; a first non-null forward key
+the database enforces joined round its target, so a parent whose related row is hidden is
+kept, any other first key joined as Django joins it) and its ``lookup_expr`` the walked
+lookup: a default it reads (a key, model instances, a queryset, one instance, a GlobalID,
+through a crossing ``lookup_expr`` too), a path it continues past the relation
+(``__pk__in``, ``__code``, ``__isnull``), ``exclude``, ``conjoined`` and Django's own
+refusal answer as unwalked, over visible rows, through every relation a declared hop crosses
+and its ``RelatedFilter(queryset=...)``, and under a connection's count, order and pages; a
+relation the override's own Python names reads every row, its own scoping. Each request
+reaches the leaf over HTTP through ``FilterSet.apply_sync`` / ``apply_async`` or the set's
+own form.
 """
 
 import asyncio
@@ -179,6 +182,22 @@ _SHELF_BRANCH = _Key(
     models.Shelf,
     lambda rows: rows.exclude(topic="secret"),
     models.Shelf,
+)
+_SHELF_ALT_BRANCHES = _Key(
+    models.Book,
+    "title",
+    "shelf",
+    models.Shelf,
+    lambda rows: rows.exclude(topic="secret"),
+    models.Shelf,
+)
+_SIGNAGE_SHELVES = _Key(
+    models.BranchSignage,
+    "code",
+    "branch",
+    models.VisibleBranch,
+    lambda rows: rows.exclude(name="beta"),
+    models.VisibleBranch,
 )
 _FAVORITE_GENRE = _Key(
     models.Patron,
@@ -396,6 +415,13 @@ def _world() -> None:
     models.Shelf.objects.create(branch=beta, code="beta-open", topic="open")
     delta_open = models.Shelf.objects.create(branch=delta, code="delta-open", topic="open")
     delta_secret = models.Shelf.objects.create(branch=delta, code="delta-secret", topic="secret")
+    open_shelf.alt_branches.add(alpha)
+    secret_shelf.alt_branches.add(beta)
+    # Signage reaches its branch through the ``VisibleBranch`` proxy, whose manager keeps
+    # only branches with a city.
+    models.Branch.objects.update(city="here")
+    for branch in (alpha, beta, models.Branch.objects.get(name="gamma")):
+        models.BranchSignage.objects.create(code=f"s-{branch.name}", branch_id=branch.pk)
     drama = models.Genre.objects.create(name="drama")
     secret = models.Genre.objects.create(name="secret")
     models.Book.objects.create(title="open-book", shelf=open_shelf).genres.add(drama)
@@ -958,6 +984,7 @@ _DRAMA = (models.Genre, "name", "drama")
 _HIDDEN_GENRE = (models.Genre, "name", "secret")
 _HIDDEN_BOOK = (models.Book, "title", "secret-book")
 _DELTA_SHELF = (models.Shelf, "code", "delta-open")
+_ALT_BETA = (models.Branch, "name", "beta")
 #: Django's refusal of a book compared on the shelves relation, walked as unwalked.
 _NOT_A_SHELF = 'Cannot query "open-book": Must be "Shelf" instance.'
 _UNNAMED: dict[str, _Unnamed] = {
@@ -1392,6 +1419,76 @@ _UNNAMED: dict[str, _Unnamed] = {
         ("genres_visible", "QuerySet", "Book"),
         reads=0,
     ),
+    "forward-then-m2m-no-related-row-when-empty": _Unnamed(
+        _SHELF_ALT_BRANCHES,
+        lambda: _NoneRelatedWhenEmpty(
+            field_name="shelf__alt_branches",
+            queryset=models.Branch.objects.all(),
+        ),
+        list,
+        ["delta-open-book", "delta-secret-book"],
+        ["delta-open-book", "delta-secret-book"],
+        ["delta-open-book", "delta-secret-book", "secret-book"],
+        ("shelf__alt_branches", "QuerySet", "Book"),
+        ("alt_branches_visible", "QuerySet", "Book"),
+        reads=0,
+    ),
+    "proxy-then-to-many-no-related-row-when-empty": _Unnamed(
+        _SIGNAGE_SHELVES,
+        lambda: _NoneRelatedWhenEmpty(
+            field_name="branch__shelves",
+            queryset=models.Shelf.objects.all(),
+        ),
+        list,
+        ["s-gamma"],
+        ["s-gamma"],
+        ["s-beta", "s-gamma"],
+        ("branch__shelves", "QuerySet", "BranchSignage"),
+        ("shelves_visible", "QuerySet", "BranchSignage"),
+        reads=0,
+    ),
+    "forward-then-m2m-no-related-row-when-absent": _Unnamed(
+        _SHELF_ALT_BRANCHES,
+        lambda: _NoneRelatedWhenEmpty(
+            field_name="shelf__alt_branches",
+            queryset=models.Branch.objects.all(),
+        ),
+        lambda: _ABSENT,
+        ["delta-open-book", "delta-secret-book"],
+        ["delta-open-book", "delta-secret-book"],
+        ["delta-open-book", "delta-secret-book", "secret-book"],
+        ("shelf__alt_branches", "QuerySet", "Book"),
+        ("alt_branches_visible", "QuerySet", "Book"),
+        reads=0,
+    ),
+    "forward-then-m2m-instances-default-hidden": _Unnamed(
+        _SHELF_ALT_BRANCHES,
+        lambda: _InstanceDefaults(
+            field_name="shelf__alt_branches",
+            queryset=models.Branch.objects.all(),
+            default=_ALT_BETA,
+        ),
+        list,
+        ["secret-book"],
+        ["secret-book"],
+        [],
+        ("shelf__alt_branches", "QuerySet", "Book"),
+        ("alt_branches_visible", "QuerySet", "Book"),
+    ),
+    "forward-then-m2m-pk-in-default-hidden": _Unnamed(
+        _SHELF_ALT_BRANCHES,
+        lambda: _PkInDefault(
+            field_name="shelf__alt_branches",
+            queryset=models.Branch.objects.all(),
+            default=_ALT_BETA,
+        ),
+        list,
+        ["secret-book"],
+        ["secret-book"],
+        [],
+        ("shelf__alt_branches", "QuerySet", "Book"),
+        ("alt_branches_visible", "QuerySet", "Book"),
+    ),
     "reverse-fk-no-related-row-when-empty": _Unnamed(
         _SHELVES,
         lambda: _NoneRelatedWhenEmpty(field_name="shelves", queryset=models.Shelf.objects.all()),
@@ -1510,6 +1607,9 @@ def test_a_key_override_whose_value_names_no_row_runs_over_the_visible_related_r
         "crossing-lookup-pk-default-hidden",
         "crossing-lookup-instances-default-hidden",
         "m2m-no-related-row-when-empty",
+        "forward-then-m2m-no-related-row-when-empty",
+        "forward-then-m2m-no-related-row-when-absent",
+        "proxy-then-to-many-no-related-row-when-empty",
         "a-key-of-another-model",
     ],
 )
@@ -1757,3 +1857,85 @@ def test_a_key_override_default_pages_counts_and_orders_its_visible_parents(walk
         # The default rows, the count and the page.
         assert len(queries.captured_queries) == 3, queries.captured_queries
         after = f', after: "{json_at(edge, "cursor")}"'
+
+
+#: ``first hop -> (model, label, field_name, target, rows walked under a type hiding the
+#: secret shelf or desk)`` for a to-many view whose first relation the round trip cannot reach.
+_INNER_FIRST: dict[str, tuple[type[Model], str, str, type[Model], Sequence[str]]] = {
+    "foreign-object": (
+        models.ShelfLabel,
+        "text",
+        "shelf__books",
+        models.Book,
+        ["l-beta-open"],
+    ),
+    "inheritance-child": (
+        models.KioskFault,
+        "note",
+        "kiosk__repairticket",
+        models.RepairTicket,
+        ["f-bare"],
+    ),
+}
+
+
+def _inner_first_world() -> None:
+    """``_world``, four shelf labels (one naming no shelf) and three faulted kiosk desks."""
+    _world()
+    branches = {branch.name: branch for branch in models.Branch.objects.all()}
+    for text, branch, code in (
+        ("l-open", "alpha", "open"),
+        ("l-secret", "beta", "secret"),
+        ("l-beta-open", "beta", "beta-open"),
+        ("l-dangling", "gamma", "none"),
+    ):
+        models.ShelfLabel.objects.create(text=text, branch=branches[branch], shelf_code=code)
+    for name in ("open", "secret", "bare"):
+        desk = models.SelfServeDesk.objects.create(name=name, kiosk_code=name)
+        models.KioskFault.objects.create(kiosk=desk, note=f"f-{name}")
+        if name == "open":
+            models.RepairTicket.objects.create(venue=desk, code="t-open")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("direct", [False, True], ids=["apply-sync", "form"])
+@pytest.mark.parametrize("first", list(_INNER_FIRST))
+def test_a_to_many_view_through_a_key_no_round_trip_reaches_keeps_its_inner_join(
+    first: str,
+    *,
+    direct: bool,
+) -> None:
+    """A first key the view cannot join round its target keeps Django's inner join.
+
+    A bare ``ForeignObject`` (``ShelfLabel.shelf``, whose key may name no shelf) and a key
+    onto a multi-table-inheritance child (``KioskFault.kiosk``, whose parent tables Django
+    would join ahead of the round trip's outer join) are joined as Django joins them: an
+    override reading an empty choice as no related row keeps only the parents reaching a
+    visible first row with none past it.
+    """
+    _inner_first_world()
+    model, label, field_name, target, rows = _INNER_FIRST[first]
+    _node(models.Venue)
+    _node(models.LendingDesk)
+    _node(models.SelfServeDesk, lambda desks: desks.exclude(name="secret"))
+    _node(models.Shelf, _SHELVES.hidden)
+    _node(models.Book)
+    _node(models.RepairTicket)
+
+    inner = type(
+        "Inner",
+        (FilterSet,),
+        {
+            "probe": _NoneRelatedWhenEmpty(
+                field_name=field_name,
+                queryset=target._default_manager.all(),
+            ),
+            "Meta": type("Meta", (), {"model": model, "fields": [label]}),
+        },
+    )
+    schema = _schema(inner, model, label, direct=direct)
+    _CALLS.clear()
+    payload = _post(schema, label, {"where": {"probe": []}})
+    assert _answer(payload) == list(rows), payload
+    segment = field_name.rsplit("__", 1)[-1]
+    assert [(f"{segment}_visible", "QuerySet", model.__name__)] == _CALLS
