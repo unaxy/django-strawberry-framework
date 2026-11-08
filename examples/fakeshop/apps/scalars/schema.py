@@ -60,6 +60,11 @@ whose ``validate_opened_at`` reads the wall clock sent as shop time;
 ``createUniqueScalarSpecimenViaUnboundedAmountSerializer`` writes ``amount`` through a
 ``DecimalField`` holding no digits. A value the database cannot store is the field's error
 before a uniqueness check binds it in a query.
+``createScalarSpecimenTagWithUniqueSpecimens`` writes a tag and a bundle of specimens, a
+nested ``specimens`` list of those serializer items, through
+``serializers.TagWithUniqueSpecimensSerializer``, whose own ``create()`` writes each item; a
+value an item's uniqueness validator cannot bind in its query is that item field's error at
+its nested path.
 
 ``all_scalar_specimens_by_parent_stamp`` lists specimens over a queryset holding a
 ``FilteredRelation("parent")`` alias named ``par`` and two annotations, ``parent_lag`` (the
@@ -94,6 +99,7 @@ from django_strawberry_framework import (
     DjangoMutation,
     DjangoMutationField,
     DjangoType,
+    NestedSerializerConfig,
     SerializerMutation,
     auto,
 )
@@ -886,6 +892,20 @@ class UpdateUniqueScalarSpecimenViaSerializer(SerializerMutation):
         permission_classes = []
 
 
+class CreateScalarSpecimenTagWithUniqueSpecimens(SerializerMutation):
+    """Create a ``ScalarSpecimenTag`` and a bundle of ``UniqueScalarSpecimen`` rows.
+
+    ``serializers.TagWithUniqueSpecimensSerializer`` declares the nested writable
+    ``specimens`` list and writes it in its own ``create()``.
+    """
+
+    class Meta:
+        serializer_class = serializers.TagWithUniqueSpecimensSerializer
+        operation = "create"
+        nested_fields = {"specimens": NestedSerializerConfig()}
+        permission_classes = []
+
+
 class CreateUniqueScalarSpecimenViaUnboundedAmountSerializer(SerializerMutation):
     """Create a ``UniqueScalarSpecimen`` through the digitless-``amount`` serializer."""
 
@@ -977,6 +997,9 @@ class Mutation:
     )
     update_unique_scalar_specimen_via_serializer = DjangoMutationField(
         UpdateUniqueScalarSpecimenViaSerializer,
+    )
+    create_scalar_specimen_tag_with_unique_specimens = DjangoMutationField(
+        CreateScalarSpecimenTagWithUniqueSpecimens,
     )
     create_unique_scalar_specimen_via_unbounded_amount_serializer = DjangoMutationField(
         CreateUniqueScalarSpecimenViaUnboundedAmountSerializer,

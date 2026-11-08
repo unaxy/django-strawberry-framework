@@ -668,7 +668,9 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     or that SQLite stores as a value a bounded column cannot read back) is the field's
     `invalid` error before any write, with nothing written, and inside `is_valid()`
     before DRF's uniqueness validators bind it in a query, a `validate_<field>` hook's
-    value included
+    value included; at every level, a nested serializer's included, a value a DRF
+    uniqueness validator binds in a query the database refuses is the field's `invalid`
+    error at its nested path before the bind
     ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)).
   - [ ] **Package-internal, genuinely-unreachable internals only**
     ([`tests/rest_framework/test_resolvers.py`][test-rest-framework]): the residue a live
@@ -2065,13 +2067,50 @@ The pipeline steps:
      and duration column) is the field's `invalid`
      `ErrorDetail` `"Enter a value the database can represent."`, flattened like any
      `serializer.errors` entry, with nothing written. A nested serializer's values are
-     written by the consumer's `create()` / `update()` and are not read. What DRF itself
+     written by the consumer's `create()` / `update()`, so none is held to the save's rule;
+     each one a DRF uniqueness validator binds in a query is held to the bind's rule below.
+     What DRF itself
      cannot convert never reaches the check: a naive datetime that leaves years 1..9999
      once made aware under a non-UTC `TIME_ZONE`, and an aware datetime whose UTC
      projection leaves them under `USE_TZ = False`, raise a raw `OverflowError` inside
      `is_valid()`, which each `DateTimeField` instance in the validation tree answers as
      DRF's own `overflow` error
      (`django_strawberry_framework/rest_framework/resolvers.py::_translate_datetime_overflow`).
+   - **A bind check at every level.** DRF's uniqueness validators bind each checked value in
+     a query at every serializer of the validation tree, the root and each nested
+     serializer, a `ListSerializer`'s child included: a field's `UniqueValidator` (filtering
+     on its last `source` segment), a serializer's `UniqueTogetherValidator` (its `fields`
+     and constraint `condition_fields`) and `UniqueForDateValidator` and kin (their
+     `field`). Each such value is held, on the pinned alias, to
+     `django_strawberry_framework/utils/errors.py::unbindable_query_value` against the
+     column the validator binds it on, read from the validator's own queryset model, so a
+     nested item's value, a plain nested `Serializer`'s declared `UniqueValidator`'s and a
+     root serializer-only field's over another model are held as the root's written columns
+     are: the field's `to_internal_value` before its own validators, and the serializer's
+     `run_validators` for a `validate_<field>` hook's value before any serializer-level
+     validator runs
+     (`django_strawberry_framework/rest_framework/resolvers.py::_hold_unstorable_values`). A
+     serializer-level validator's values are held only where DRF reaches its query on them
+     (`django_strawberry_framework/rest_framework/resolvers.py::_validator_queries`, adapted
+     from DRF's `UniqueTogetherValidator.__call__` and `enforce_required_fields`): not where
+     a field it names is missing on a create (DRF's own `required` error answers), not on an
+     update whose checked values all equal the instance's, and not where a checked value is
+     `None` unless its `nulls_distinct` is `False`. The bind's rule refuses only what DRF's
+     `qs_exists`, which reads a `TypeError` / `ValueError` / `DataError` as no duplicate,
+     cannot survive: an `OverflowError` raised preparing or binding it (on SQLite a duration
+     past 64 bits of microseconds, an instant past year 9999 in UTC; MySQL's driver
+     interpolates an integer past its range as a literal its server compares without error,
+     so a duration binds there), and on PostgreSQL a UTC offset or a decimal past `numeric`
+     the server refuses, whose `DataError` leaves the transaction aborted. An aware time on
+     SQLite, MySQL and Oracle, whose bind Django refuses with a `ValueError` before the
+     statement, an instant PostgreSQL stores but cannot load back, and a decimal SQLite
+     binds and stores but a bounded column cannot read back pass to the consumer's
+     `create()` / `update()`, which may store them differently; a root written column is
+     held to the save's rule first, which refuses every value the bind's does. A value
+     `validate()` sets and a hook's value behind a field's own `UniqueValidator` (which ran
+     first) are past the bind and are not held there. A refused value is the field's
+     `invalid` `"Enter a value the database can represent."` at its dotted path
+     (`children.1.span`), nothing written.
    - **Validator queryset pinning.** `_pin_validator_querysets` walks the serializer's
      validators recursively — per instance, on a copy — and pins each one's queryset to
      the operation's write alias, so a `UniqueTogetherValidator` (or any author validator)
@@ -3039,8 +3078,14 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   A unique column's value (`unique=True`, `unique_together`, a `UniqueConstraint`), a
   `validate_<field>` hook's included, is refused before DRF's uniqueness validator binds it
   in a query, where SQLite's `OverflowError` would escape `is_valid()` raw and a swallowed
-  PostgreSQL `DataError` would leave the transaction aborted. A nested serializer's values
-  are the consumer's `create()` / `update()`'s to write and are not read. On SQLite, which
+  PostgreSQL `DataError` would leave the transaction aborted. That bind is held at every
+  level, so a nested item's value, a plain nested `Serializer`'s declared `UniqueValidator`'s
+  and a root serializer-only field's over another model are refused the same way, at the
+  field's nested path, to the bind's own rule (an aware time, which the bind reads as no
+  duplicate, passes, as does a decimal SQLite binds but cannot read back), and only where
+  DRF's validator reaches its query (a missing field on a create keeps DRF's `required`
+  error; an unchanged update and a checked `None` bind nothing). Every other nested value is
+  the consumer's `create()` / `update()`'s to write and is not read. On SQLite, which
   stores a decimal as an integer or its nearest double, a decimal stored as an infinity or
   rounded past a bounded column's digits would raise `InvalidOperation` at the optimizer
   re-fetch, and is the same error.
@@ -3167,6 +3212,30 @@ same transport, different app.
     (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_value_a_uniqueness_check_would_bind_is_the_field_error`),
     and on PostgreSQL a digitless `amount` past `numeric`
     (`::test_serializer_decimal_postgresql_cannot_bind_through_a_field_holding_no_digits`).
+  - `tests/rest_framework/test_resolvers.py::test_serializer_nested_duration_a_uniqueness_validator_cannot_bind_is_the_item_error`
+    — a duration past 64 bits of microseconds in a single, `many=True` and two-deep nested
+    item under `unique=True`, `unique_together` and a conditional `UniqueConstraint` is
+    the item field's `invalid` error at its dotted path before the bind, on create and
+    partial update, and one that fits reaches the consumer's `create()` / `update()`;
+    `::test_serializer_nested_duration_a_constraint_condition_binds_is_the_item_error`
+    refuses it in a conditional constraint's `condition` (a `condition_fields` entry);
+    `::test_serializer_nested_duration_only_a_validator_bind_holds` refuses it under
+    `unique_for_date` and leaves a nested duration no validator binds to the consumer's
+    `create()`; `::test_serializer_declared_unique_validator_over_another_model_holds_its_bind`
+    holds a declared `UniqueValidator` over another model on a root serializer-only field
+    and a plain nested `Serializer`;
+    `::test_serializer_together_value_drf_binds_in_no_query_is_not_held` writes a nested
+    duration beside a `null` partner unheld, holds it under `nulls_distinct=False` and keeps
+    DRF's `required` error for an omitted partner;
+    `::test_serializer_together_condition_value_is_held_only_where_drf_queries` leaves a
+    root `condition_fields` value unheld on an update that changes no checked value and
+    holds it on a changed update and a create;
+    `::test_serializer_unique_for_date_value_is_held_only_with_its_date` keeps DRF's
+    `required` error for a missing `date_field`; `tests/utils/test_errors.py::test_unbindable_query_value_refuses_a_bind_no_failed_query_reading_survives`
+    and `::test_unbindable_query_value_asks_psycopg_for_no_array_as_a_whole` pin the
+    bind's rule per backend beside the save's. Live, a nested `UniqueScalarSpecimen`
+    item's `validate_opened_at` instant past year 9999 in UTC
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_nested_value_a_uniqueness_validator_cannot_bind_is_the_item_field_error`).
   - `test_converter.py` — each supported serializer-field class → annotation +
     required-ness; `PrimaryKeyRelatedField` / `ManyRelatedField` id mapping
     (Relay-`GlobalID` vs raw pk); `FileField` → [`Upload`][glossary-upload-scalar]; the
@@ -3526,7 +3595,8 @@ The completion contract.
    accept that PostgreSQL's `numeric` cannot hold or that SQLite stores as a value a
    bounded column cannot read back included, is the field's `invalid` error before any
    write, with nothing written, and before DRF's uniqueness validators bind it
-   inside `is_valid()`
+   inside `is_valid()`; at every level, a nested serializer's included, a value a
+   uniqueness validator cannot bind is the field's `invalid` error at its nested path
    ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)).
 
 5. Products exposes the `SerializerMutation`s (create + update over `Item`) backed by

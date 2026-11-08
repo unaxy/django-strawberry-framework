@@ -10,14 +10,19 @@ serializer half of the temporal write surface over ``ScalarSpecimen``.
 ``validate_opened_at`` reads the instant sent as shop time.
 ``UniqueScalarSpecimenUnboundedAmountSerializer`` declares ``amount`` as a ``DecimalField``
 holding no digits, which passes a decimal PostgreSQL's ``numeric`` refuses.
+``TagWithUniqueSpecimensSerializer`` writes a ``ScalarSpecimenTag`` and a bundle of
+specimens, a nested writable ``specimens`` list of ``UniqueScalarSpecimenSerializer`` items,
+which its own ``create()`` writes; the specimens hold no key to the tag.
 """
 
 import datetime
+from typing import TypedDict
 
 from drf_serializers import ModelSerializerBase
 from rest_framework import serializers
+from typing_extensions import NotRequired, override
 
-from .models import ScalarSpecimen, UniqueScalarSpecimen
+from .models import ScalarSpecimen, ScalarSpecimenTag, UniqueScalarSpecimen
 
 #: The shop's fixed wall-clock offset, one hour behind UTC.
 SHOP_TIME = datetime.timezone(datetime.timedelta(hours=-1), "shop time")
@@ -84,3 +89,46 @@ class UniqueScalarSpecimenUnboundedAmountSerializer(UniqueScalarSpecimenSerializ
     """
 
     amount = serializers.DecimalField(max_digits=None, decimal_places=None)
+
+
+class _UniqueSpecimenData(TypedDict):
+    """One validated ``UniqueScalarSpecimenSerializer`` item."""
+
+    label: str
+    opened_time: datetime.time
+    opened_at: datetime.datetime
+    amount: object
+    active: NotRequired[bool]
+
+
+class _TagWithUniqueSpecimensData(TypedDict):
+    """``TagWithUniqueSpecimensSerializer``'s validated data, nested specimens included."""
+
+    label: str
+    specimens: list[_UniqueSpecimenData]
+
+
+class TagWithUniqueSpecimensSerializer(ModelSerializerBase[ScalarSpecimenTag]):
+    """A ``ScalarSpecimenTag`` serializer writing a bundle of specimens beside the tag.
+
+    Each item is a ``UniqueScalarSpecimenSerializer``, whose own ``UniqueValidator`` /
+    ``UniqueTogetherValidator`` bind its values in a query inside ``is_valid()``. The mutation
+    opts the list in with ``Meta.nested_fields``, and ``create()`` writes the tag and then
+    each specimen itself, storing an aware ``opened_time`` as its wall clock with the offset
+    dropped (SQLite stores no aware time).
+    """
+
+    specimens = UniqueScalarSpecimenSerializer(many=True)
+
+    class Meta:
+        model = ScalarSpecimenTag
+        fields = ("label", "specimens")
+
+    @override
+    def create(self, validated_data: _TagWithUniqueSpecimensData) -> ScalarSpecimenTag:
+        tag = ScalarSpecimenTag.objects.create(label=validated_data["label"])
+        for specimen in validated_data["specimens"]:
+            _ = UniqueScalarSpecimen.objects.create(
+                **{**specimen, "opened_time": specimen["opened_time"].replace(tzinfo=None)},
+            )
+        return tag

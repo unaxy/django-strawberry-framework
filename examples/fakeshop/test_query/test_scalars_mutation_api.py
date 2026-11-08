@@ -107,6 +107,16 @@ serializer's ``validate_opened_at`` instant past year 9999 in UTC, and the seria
 form's ``amount`` and the digitless ``amount`` of
 ``createUniqueScalarSpecimenViaUnboundedAmountSerializer`` sent a zero past ``numeric``'s
 exponent limit. A value each flavor stores is written.
+
+``createScalarSpecimenTagWithUniqueSpecimens`` writes a tag and a bundle of specimens, a nested
+``specimens`` list of ``UniqueScalarSpecimenSerializer`` items, whose uniqueness validators
+bind each item's ``openedTime`` and ``openedAt`` in a query inside ``is_valid()``. On SQLite
+the second item's ``validate_opened_at`` instant past year 9999 in UTC is
+``specimens.1.openedAt``'s ``invalid`` ``FieldError`` before that query, no tag and no specimen
+written; PostgreSQL binds it and the serializer's own ``create()`` writes it. An aware
+``openedTime``, whose bind DRF reads as no duplicate, reaches ``create()``, which stores its
+wall clock; an in-range instant and a naive time are written; each with its exact statement
+count.
 """
 
 from __future__ import annotations
@@ -2278,3 +2288,140 @@ def test_serializer_decimal_postgresql_cannot_bind_through_a_field_holding_no_di
 
     assert payload == _field_refusal(root, "amount", _UNSTORABLE)
     _assert_nothing_written(None)
+
+
+#: The first ``createScalarSpecimenTagWithUniqueSpecimens`` item, a value each column stores.
+_FIRST_NESTED_SPECIMEN = (
+    '{ label: "first", openedTime: "08:00:00", openedAt: "2021-01-01T00:00:00",'
+    ' amount: "1.0000", active: true }'
+)
+
+
+#: The ``openedTime`` the second nested specimen sends beside the value under test.
+_SECOND_OPENED_TIME = datetime.time(8, 30)
+
+
+class _NestedCell:
+    """One value sent on the second nested specimen: its field, value and outcome per backend."""
+
+    def __init__(
+        self,
+        field: str,
+        value: str,
+        outcomes: tuple[str, str],
+        queries: tuple[int, int],
+        *,
+        stored_time: datetime.time = _SECOND_OPENED_TIME,
+    ) -> None:
+        self.field = field
+        self.value = value
+        self.outcomes = outcomes
+        self.queries = queries
+        self.stored_time = stored_time
+
+    def outcome(self) -> str:
+        """The outcome on the database the suite runs on."""
+        sqlite, postgresql = self.outcomes
+        return postgresql if connection.vendor == "postgresql" else sqlite
+
+    def query_count(self) -> int:
+        """The statements the write runs on the database the suite runs on, savepoints included."""
+        sqlite, postgresql = self.queries
+        return postgresql if connection.vendor == "postgresql" else sqlite
+
+
+_NESTED_CELLS = {
+    "hook-unique-together-datetime-past-year-9999": _NestedCell(
+        "openedAt",
+        "9999-12-31T23:30:00",
+        (_REFUSED, _STORED),
+        (13, 19),
+    ),
+    "hook-unique-together-datetime-in-range": _NestedCell(
+        "openedAt",
+        "2021-06-15T09:30:00",
+        (_STORED, _STORED),
+        (19, 19),
+    ),
+    "aware-unique-time": _NestedCell(
+        "openedTime",
+        "09:30:00+02:00",
+        (_STORED, _STORED),
+        (18, 19),
+        stored_time=datetime.time(9, 30),
+    ),
+    "naive-unique-time": _NestedCell(
+        "openedTime",
+        "09:30:00",
+        (_STORED, _STORED),
+        (19, 19),
+        stored_time=datetime.time(9, 30),
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", list(_NESTED_CELLS))
+def test_nested_value_a_uniqueness_validator_cannot_bind_is_the_item_field_error(
+    name: str,
+) -> None:
+    """A nested item's value its uniqueness validator cannot bind is the item field's error.
+
+    ``createScalarSpecimenTagWithUniqueSpecimens`` validates each ``specimens`` item through
+    ``UniqueScalarSpecimenSerializer``, whose ``UniqueValidator`` / ``UniqueTogetherValidator``
+    bind ``openedTime`` and ``openedAt`` in a query inside ``is_valid()``. On SQLite the
+    ``validate_opened_at`` instant past year 9999 in UTC raises ``OverflowError`` there, which
+    DRF's ``qs_exists`` does not catch; it is ``specimens.1.openedAt``'s ``invalid``
+    ``FieldError`` instead, no tag and no specimen written. PostgreSQL binds that instant, so
+    the serializer's own ``create()`` writes it. An aware time binds as the reading of a failed
+    query as no duplicate expects (Django's ``ValueError``), so it reaches ``create()``,
+    which stores its wall clock with the offset dropped; an in-range instant and a naive
+    time are written too. SQLite runs no uniqueness query for the aware time, whose bind
+    Django refuses before the statement.
+    """
+    cell = _NESTED_CELLS[name]
+    document = (
+        "mutation Write($second: UniqueScalarSpecimenSerializerInput!) {"
+        " createScalarSpecimenTagWithUniqueSpecimens("
+        f'data: {{ label: "tag", specimens: [{_FIRST_NESTED_SPECIMEN}, $second] }}'
+        ") { result { label } errors { field messages codes path } } }"
+    )
+    second = {
+        "label": "second",
+        "openedTime": "08:30:00",
+        "openedAt": "2021-01-01T00:00:00",
+        "amount": "2.0000",
+        "active": True,
+        cell.field: cell.value,
+    }
+    with CaptureQueriesContext(connection) as queries:
+        payload = response_json(post_graphql(document, variables={"second": second}))
+
+    root = "createScalarSpecimenTagWithUniqueSpecimens"
+    specimens = list(
+        models.UniqueScalarSpecimen.objects.order_by("label").values_list("label", "opened_time"),
+    )
+    tags = list(models.ScalarSpecimenTag.objects.values_list("label", flat=True))
+    if cell.outcome() == _REFUSED:
+        path = ["specimens", "1", cell.field]
+        assert payload == {
+            "data": {
+                root: {
+                    "result": None,
+                    "errors": [
+                        {
+                            "field": ".".join(path),
+                            "messages": [_UNSTORABLE],
+                            "codes": ["invalid"],
+                            "path": path,
+                        },
+                    ],
+                },
+            },
+        }
+        assert (specimens, tags) == ([], [])
+    else:
+        assert payload == {"data": {root: {"result": {"label": "tag"}, "errors": []}}}
+        assert specimens == [("first", datetime.time(8)), ("second", cell.stored_time)]
+        assert tags == ["tag"]
+    assert len(queries.captured_queries) == cell.query_count(), queries.captured_queries
