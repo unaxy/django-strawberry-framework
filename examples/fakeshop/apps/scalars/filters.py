@@ -95,8 +95,14 @@ a field: ``parent_day_of`` is a declared ``DateTimeFilter`` whose ``field_name``
 ``allScalarSpecimensByParentStamp`` resolver adds to its queryset, into the parent's
 ``occurred_at`` column's ``date`` transform. ``parent_days_span`` is a declared
 ``RangeFilter`` over the same path whose ``lookup_expr`` is that bare ``date`` transform
-(``parentDaysSpan: { date: { start, end } }``), a lone bound compared through it. They are
-the acceptance surface for a path only the queryset the filter runs on resolves.
+(``parentDaysSpan: { date: { start, end } }``), a lone bound compared through it.
+``parent_lag_among`` / ``parent_lag_span`` (``ListFilter`` ``in`` / ``RangeFilter`` ``range``)
+are declared over ``parent_lag``, the duration annotation the same resolver computes (the
+specimen's ``occurred_at`` less its parent's), and ``child_count_among`` /
+``child_count_span`` over ``child_count``, its integer annotation counting ``children``.
+They are the acceptance surface for a path only the queryset the filter runs on resolves:
+published ``String`` (no queryset exists when the schema is built), each member and bound
+is cleaned as that queryset compares it.
 """
 
 from __future__ import annotations
@@ -268,13 +274,17 @@ class NullableScalarSpecimenFilter(FilterSet):
 
 
 class ScalarSpecimenParentStampFilter(FilterSet):
-    """Filters scalar specimens by the day their parent occurred, through a ``FilteredRelation``."""
+    """Filters scalar specimens through a ``FilteredRelation`` alias and two annotations."""
 
     parent_day_of = django_filters.DateTimeFilter(
         field_name="par__occurred_at",
         lookup_expr="date",
     )
     parent_days_span = RangeFilter(field_name="par__occurred_at", lookup_expr="date")
+    parent_lag_among = ListFilter(field_name="parent_lag", lookup_expr="in")
+    parent_lag_span = RangeFilter(field_name="parent_lag", lookup_expr="range")
+    child_count_among = ListFilter(field_name="child_count", lookup_expr="in")
+    child_count_span = RangeFilter(field_name="child_count", lookup_expr="range")
 
     class Meta:
         model = models.ScalarSpecimen

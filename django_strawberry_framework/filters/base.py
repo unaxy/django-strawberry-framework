@@ -134,6 +134,7 @@ from django_strawberry_framework.utils.querysets import (
 from django_strawberry_framework.utils.relations import (
     _classify_path_cached,
     _lookup_node_types,
+    _walk_lookup_expr,
     generated_column_source,
     is_model_class,
     lookup_operand,
@@ -479,10 +480,140 @@ def _bound_resolved_field(filter_instance: Filter) -> _ResolvedField | None:
     Reads the LIVE ``field_name`` against the filterset django-filter's
     ``BaseFilterSet.__init__`` stamps as ``filter_.parent``, so an expanded leaf whose
     ``field_name`` was rebased under a ``RelatedFilter`` prefix resolves the terminal
-    field (``_filterset_resolved_field``).
+    field (``_filterset_resolved_field``). A path the model names no field for and the
+    queryset that filterset was handed resolves (``_model_unresolved_query``: a queryset
+    annotation or alias, a ``FilteredRelation`` alias and the columns past it) answers the
+    field it names there (``_query_path_field``), on the filter's own path.
     """
     parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
-    return _filterset_resolved_field(parent, filter_instance)
+    resolved = _filterset_resolved_field(parent, filter_instance)
+    query = _model_unresolved_query(
+        filter_instance,
+        _filterset_lookup_operand(parent, filter_instance),
+    )
+    if query is None or (resolved is not None and resolved.field is not None):
+        return resolved
+    field_name = _bound_field_name(filter_instance)
+    field = _query_path_field(query, field_name)
+    return resolved if field is None else _ResolvedField(field, field_name)
+
+
+def _model_unresolved_query(filter_instance: Filter, operand: _LookupOperand) -> Query | None:
+    """Return ``_bound_query`` for a per-request filter its model's walk answers no field for.
+
+    ``operand`` is the model's answer (``_filterset_lookup_operand``), which reads every
+    path a fresh ``Query`` of the model resolves, cached per key; only a path it answers no
+    field for (a queryset annotation or alias, a ``FilteredRelation`` alias and the columns
+    past it) is read over the queryset the filter's ``FilterSet`` was handed. ``None`` for
+    every other filter, a ``method=`` filter included (its own method receives the value,
+    so it keeps the model's answer).
+    """
+    if read_attr(filter_instance, "method", None) is not None or operand.field is not None:
+        return None
+    return _bound_query(filter_instance)
+
+
+def _bound_query(filter_instance: Filter) -> Query | None:
+    """Return the query of the queryset a per-request filter's ``FilterSet`` was handed.
+
+    django-filter's ``BaseFilterSet.__init__`` stores the queryset (the model's default
+    one when handed none) before it stamps each per-request filter's ``parent``, so a
+    path only that queryset resolves (a queryset annotation or alias, a
+    ``FilteredRelation`` alias and the columns past it) is read where it is held. ``None``
+    for a filter bound to no ``FilterSet`` instance (a class-level declaration, a
+    standalone filter) and for one whose ``queryset`` is no ``QuerySet``.
+    """
+    parent = read_attr(filter_instance, "parent", None)
+    if not isinstance(parent, BaseFilterSet):
+        return None
+    queryset = read_attr(parent, "queryset", None)
+    return queryset.query if isinstance(queryset, models.QuerySet) else None
+
+
+def _query_path_field(query: Query, field_path: str) -> ModelField | None:
+    """Return the field ``field_path`` names over ``query``, ``None`` where it names none.
+
+    Split as ``Query.build_filter`` splits a filter argument
+    (``utils/querysets.py::split_lookup``): a path naming an annotation or alias
+    ``query`` holds answers its ``output_field``, one crossing a ``FilteredRelation``
+    alias the field it ends on, an alias of a reverse relation that relation (its
+    ``ForeignObjectRel``, as the model's walk answers the relation's own name). ``None``
+    where Django refuses the path (``FieldError``),
+    where a part of it is left over as a transform (``_query_lookup_operand`` reads that
+    output), and for an expression whose output Django cannot resolve.
+    """
+    try:
+        _names, start, leftover = split_lookup(query, field_path)
+        if leftover:
+            return None
+        if isinstance(start, models.ForeignObjectRel):
+            return start
+        output = start if is_concrete_field(start) else read_attr(start, "output_field", None)
+    except FieldError:
+        return None
+    return output if is_concrete_field(output) else None
+
+
+def _query_lookup_operand(
+    query: Query,
+    field_path: str,
+    lookup_expr: str,
+) -> _LookupOperand | None:
+    """Return ``_LookupOperand`` for ``field_path`` and ``lookup_expr`` read over ``query``.
+
+    Split as ``Query.build_filter`` splits the argument (``utils/querysets.py::split_lookup``)
+    and the leftover walked from where the path ends as ``Query.build_lookup`` walks it
+    (``utils/relations.py::_walk_lookup_expr``): the field is the output of the lookup's
+    left-hand side, an annotation's own or a transform's of it. Uncached: the query is
+    the request's. A path ending on a reverse relation (a ``FilteredRelation`` alias of
+    one) answers it as ``_model_lookup_operand`` answers the relation's own name on the
+    model: the relation, with its lookup left unresolved and the classes its predicate holds
+    (``_reverse_relation_node_types``). ``None`` where Django refuses the path or no walk
+    accepts the leftover (``FieldError``, ``LookupValidationError``).
+    """
+    try:
+        _names, start, leftover = split_lookup(
+            query,
+            LOOKUP_SEP.join((field_path, lookup_expr)),
+        )
+        if isinstance(start, models.ForeignObjectRel):
+            remainder = LOOKUP_SEP.join(leftover)
+            return _LookupOperand(
+                start,
+                _names_null_test(remainder),
+                node_types=_reverse_relation_node_types(start, remainder),
+            )
+        walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover))
+        output = read_attr(walk.lhs, "output_field", None)
+    except (FieldError, LookupValidationError):
+        return None
+    return _LookupOperand(
+        # Past a start that is no reverse relation, the left-hand side is a ``Col`` or an
+        # expression, whose resolved ``output_field`` is a model ``Field``.
+        require(output, is_concrete_field),
+        issubclass(walk.lookup, models.lookups.IsNull),
+        walk.lookup,
+        walk.node_types,
+    )
+
+
+def _bound_lookup_operand(filter_instance: Filter) -> _LookupOperand:
+    """Return what one value a per-request filter applies is compared as.
+
+    ``_filterset_lookup_operand`` over the filterset django-filter stamps as
+    ``filter_.parent``, read on its model; a path the model names no field for (a queryset
+    annotation or alias, a ``FilteredRelation`` alias) is read over the queryset that
+    filterset was handed (``_bound_query``, ``_query_lookup_operand``), the queryset the
+    filter's predicate is built on. A ``method=`` filter keeps the model's answer: its own
+    method receives the value.
+    """
+    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
+    operand = _filterset_lookup_operand(parent, filter_instance)
+    query = _model_unresolved_query(filter_instance, operand)
+    if query is None:
+        return operand
+    resolved = _query_lookup_operand(query, *_filterset_walked_lookup(parent, filter_instance))
+    return operand if resolved is None else resolved
 
 
 def _bound_model_field(filter_instance: Filter) -> ModelField | None:
@@ -497,11 +628,12 @@ def _bound_model_field(filter_instance: Filter) -> ModelField | None:
 def _bound_value_field(filter_instance: Filter) -> ModelField | None:
     """Return the field each value a per-request filter applies is a value of.
 
-    ``_filterset_value_field`` over the filterset django-filter's
-    ``BaseFilterSet.__init__`` stamps as ``filter_.parent``.
+    The field of ``_bound_lookup_operand``: ``_filterset_value_field`` over the filterset
+    django-filter's ``BaseFilterSet.__init__`` stamps as ``filter_.parent``, and for a path
+    only the queryset that filterset was handed resolves, the output of the lookup's
+    left-hand side read over it.
     """
-    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
-    return _filterset_value_field(parent, filter_instance)
+    return _bound_lookup_operand(filter_instance).field
 
 
 def _reads_integer_transform(filter_instance: Filter) -> bool:
@@ -818,10 +950,38 @@ def _filterset_lookup_lhs_path(
     model = _filterset_model(filterset)
     if model is None:
         return None
+    return _query_lookup_lhs_path(Query(model), field_name, lookup_expr)
+
+
+def _query_lookup_lhs_path(query: Query, field_name: str, lookup_expr: str) -> str | None:
+    """Return ``_lookup_lhs_path`` for ``field_name`` and ``lookup_expr`` over ``query``.
+
+    ``None`` where Django refuses the path (``FieldError``) or no walk from where it ends
+    accepts the ``lookup_expr`` (``LookupValidationError``).
+    """
     try:
-        return _lookup_lhs_path(Query(model), LOOKUP_SEP.join((field_name, lookup_expr)))
+        return _lookup_lhs_path(query, LOOKUP_SEP.join((field_name, lookup_expr)))
     except (FieldError, LookupValidationError):
         return None
+
+
+def _bound_lookup_lhs_path(filter_instance: Filter, field_name: str) -> str | None:
+    """Return ``_filterset_lookup_lhs_path`` for a per-request filter, read over its queryset too.
+
+    The model's answer; for a path only the queryset its ``FilterSet`` was handed resolves
+    (``_model_unresolved_query``), the answer over that queryset's query. ``None`` where
+    neither resolves it.
+    """
+    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
+    lookup_expr = _bound_lookup_expr(filter_instance)
+    path = _filterset_lookup_lhs_path(parent, field_name, lookup_expr)
+    query = _model_unresolved_query(
+        filter_instance,
+        _filterset_lookup_operand(parent, filter_instance),
+    )
+    if path is not None or query is None:
+        return path
+    return _query_lookup_lhs_path(query, field_name, lookup_expr)
 
 
 def _names_null_test(lookup_expr: str) -> bool:
@@ -836,11 +996,15 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     (``_bound_value_field``): the column itself, or the output of the transforms between
     it and the lookup (``year``'s ``IntegerField``, ``date``'s ``DateField``, an
     ``ArrayField`` index's ``base_field``), so a value is cleaned as the type it is
-    published as. The field is the one django-filter's own ``gte`` filter for the column builds
-    (``FilterSet._upstream_filter_for_lookup``: a ``NumberFilter``'s ``DecimalField`` for a
-    decimal or integer column, a ``DateTimeFilter``'s ``DateTimeField`` for a datetime one,
-    a ``CharFilter``'s ``CharField`` for text, ...), the owner of what one scalar value of
-    that column may be, so a value a declared filter hands the ORM is held to the rule
+    published as. For a path only the queryset the parent was handed resolves (a queryset
+    annotation or alias, a ``FilteredRelation`` alias and the columns past it) it is the
+    field that queryset compares, though the leaf is published ``String``: no queryset
+    exists when the schema is built. The field is the one django-filter's own ``gte``
+    filter for the column builds (``FilterSet._upstream_filter_for_lookup``: a
+    ``NumberFilter``'s ``DecimalField`` for a decimal or integer column, a
+    ``DateTimeFilter``'s ``DateTimeField`` for a datetime one, a ``CharFilter``'s
+    ``CharField`` for text, ...), the owner of what one scalar value of that column may
+    be, so a value a declared filter hands the ORM is held to the rule
     ``FilterSet._validate_form_or_raise`` already applies to ``gte`` / ``lte``. A
     comparison and not ``exact``: django-filter builds ``exact`` on a choice column as a
     ``ChoiceFilter``, whose ``ChoiceField`` refuses any value off the column's choices,
@@ -1079,9 +1243,14 @@ class _ElementField(Field):
     list or tuple member is cleaned as that array is, and any other member, ``None``
     included, is the field's error with ``MultipleChoiceField``'s ``invalid_list`` message,
     never a leaf, since ``ArrayInLookup`` turns each member into a tuple.
+    The value is read on the parent's model, or, for a path its model names no field for,
+    over the queryset the parent was handed (``_bound_value_field``: a queryset annotation
+    or alias, a ``FilteredRelation`` alias and the columns past it, each typed ``String``
+    on the wire, since no queryset exists when the schema is built).
     Any other ``None`` element, one inside such a member included, stays ``None``, and a
     value that is not a list or tuple, or a field with no ``element_field`` (a filter bound
-    to no ``FilterSet``, a relation compared on more than one column or on none, a
+    to no ``FilterSet``, a path neither its model nor that queryset resolves, an expression
+    with no output field, a relation compared on more than one column or on none, a
     crossing pair on a filter holding a ``filter`` of its own, a ``method=`` filter on a
     relation, a column django-filter builds no filter for), passes through as sent for the
     filter to judge.
@@ -1157,10 +1326,7 @@ class _ElementCleanedFilter(_ColumnCleanedFilter):
         if isinstance(field, _ElementField):
             field.element_field = _column_form_field(self, element=True)
             field.element_nests = array_leaf_field(_bound_value_field(self))[1] > 1
-            parent: BaseFilterSet | None = getattr(self, "parent", None)
-            field.members_are_arrays = is_array_in_lookup(
-                _filterset_lookup_operand(parent, self).lookup,
-            )
+            field.members_are_arrays = is_array_in_lookup(_bound_lookup_operand(self).lookup)
 
 
 class ArrayFilterMethod(_EmptyListAwareFilterMethod):
@@ -1198,7 +1364,9 @@ class ArrayFilter(_ElementCleanedFilter):
     compares, the column's or a transform output's, an ``ArrayField`` column's innermost
     ``base_field``'s, a relation's key column's (``_ElementField``), so an element that value
     cannot hold is a form error rather than a value handed to the ORM, a text element is
-    stripped and a naive datetime element made aware. An ``in`` over an integer column, or a
+    stripped and a naive datetime element made aware; over a path only the queryset its
+    ``FilterSet`` was handed resolves (a queryset annotation, a ``FilteredRelation`` alias)
+    the value is the one that queryset compares. An ``in`` over an integer column, or a
     relation compared on one, drops each element that names no row as ``ListFilter``'s does
     (``_integer_in_column``). An element of an integer column, a transform's integer output
     or an integer ``ArrayField``'s elements cleaned to a decimal past that column's range on
@@ -1473,19 +1641,22 @@ class RangeFilter(_ColumnCleanedFilter):
     ``lookup_expr``. A range with neither bound constrains nothing.
 
     Each bound is cleaned by the form field of the ``gte`` filter for the value the range
-    compares (``_column_form_field``): the column's, or the output's of the transforms
-    between it and the lookup (``year``'s ``IntegerField``, ``date``'s ``DateField``), so a
-    bound that value cannot hold (a non-finite decimal, a number past django-filter's
-    ``1e50`` cap) is a form error as it is on ``gte``, a naive datetime bound is made aware
-    and a text bound stripped; a bound off a choice column's choices is compared like any
-    other value. A relation's lone bound under a lookup Django applies to the relation
-    itself (``gte``, ``exact``) is cleaned as the target column the relation compares on
-    (its ``to_field``, else the primary key), as ``<relation>__<that column>``'s is
-    (``_compared_value_column``); a ``range`` over a relation, or a ``method=`` filter on
-    one, cleans no bound, since Django registers no ``range`` lookup on a relation and a
-    method applies no lookup of the filter's. A bound of an integer column (or a transform's
-    integer output, or a relation's integer key column) cleaned to a decimal past that
-    column's range on the queryset's database applies as the integer one past the same end
+    compares (``_column_form_field``): the column's, or the output's of the transforms between
+    it and the lookup (``year``'s ``IntegerField``, ``date``'s ``DateField``), so a bound that
+    value cannot hold (a non-finite decimal, a number past django-filter's ``1e50`` cap) is a
+    form error as it is on ``gte``, a naive datetime bound is made aware and a text bound
+    stripped; a bound off a choice column's choices is compared like any other value. Over a
+    path only the queryset its ``FilterSet`` was handed resolves (a queryset annotation, a
+    ``FilteredRelation`` alias and the columns past it) the value is the one that queryset
+    compares, and an integer annotation's ``range`` applies as ``gte`` + ``lte`` as an integer
+    column's does. A relation's lone bound under a lookup Django applies to the relation itself
+    (``gte``, ``exact``) is cleaned as the target column the relation compares on (its
+    ``to_field``, else the primary key), as ``<relation>__<that column>``'s is
+    (``_compared_value_column``); a ``range`` over a relation, or a ``method=`` filter on one,
+    cleans no bound, since Django registers no ``range`` lookup on a relation and a method
+    applies no lookup of the filter's. A bound of an integer column (or a transform's integer
+    output, or a relation's integer key column) cleaned to a decimal past that column's range
+    on the queryset's database applies as the integer one past the same end
     (``_held_column_value``): Django's range-aware lookups read it as the decimal, never
     converting a decimal whose ``int()`` takes seconds (``-1e1000000``).
     """
@@ -1590,8 +1761,7 @@ def _integer_compared_column(filter_instance: Filter) -> ModelField | None:
     where that is no ``IntegerField`` or no one column (a filter bound to no
     ``FilterSet``, a path naming no field).
     """
-    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
-    operand = _filterset_lookup_operand(parent, filter_instance)
+    operand = _bound_lookup_operand(filter_instance)
     if operand.field is None or not _django_prepares(operand.lookup):
         return None
     column = _compared_value_column(filter_instance, operand.field)
@@ -1656,7 +1826,10 @@ class ListFilter(_ElementCleanedFilter):
     ``in`` cleans its members, never by a row lookup, so an element that value cannot hold
     is a form error rather than a value handed to the ORM, a text element is stripped and a
     naive datetime element made aware; an element off a choice column's choices is a value
-    like any other.
+    like any other. Over a path only the queryset its ``FilterSet`` was handed resolves (a
+    queryset annotation, a ``FilteredRelation`` alias and the columns past it) the value is
+    the one that queryset compares: its annotation's output field, the column past the
+    alias, the alias's target key, an integer one dropping as a column's does.
     Over an integer column, or a relation compared on one, an ``in`` drops each element
     outside the column's integer range on the queryset's database: it can identify no row,
     and bound raw it would overflow the backend. A fractional element names no row and is
@@ -2885,10 +3058,7 @@ def _compared_value_column(filter_instance: Filter, field: ModelField) -> ModelF
     if read_attr(filter_instance, "method", None) is not None:
         return None
     field_name = _bound_field_name(filter_instance)
-    parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
-    if _filterset_lookup_lhs_path(parent, field_name, _bound_lookup_expr(filter_instance)) != (
-        field_name
-    ):
+    if _bound_lookup_lhs_path(filter_instance, field_name) != field_name:
         return None
     columns = _compared_columns(filter_instance, field)
     return columns[0] if len(columns) == 1 else None

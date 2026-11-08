@@ -172,11 +172,9 @@ from django_strawberry_framework.utils.querysets import (
     model_for,
     relation_path_visibility_types,
     run_in_one_sync_boundary,
-    split_lookup,
 )
 from django_strawberry_framework.utils.relations import (
     ClassifiedPath,
-    _walk_lookup_expr,
     classify_path,
     generated_column,
     is_many_side_relation_kind,
@@ -216,6 +214,7 @@ from .base import (
     _django_prepares,
     _filterset_walked_lookup,
     _integer_compared_column,
+    _query_lookup_operand,
     _reads_integer_transform,
     _RelationView,
     copied_declared_filter,
@@ -2887,8 +2886,10 @@ def _held_integer_value(
     A shipped filter (``_runs_shipped_filter``, read through a projected copy to the child
     filter it runs, ``_projected_terminal``) whose lookup is Django's own and prepares its
     value through an integer column, an integer transform's output or an integer
-    ``ArrayField``'s elements (``filters/base.py::_integer_compared_column``), or, on a path
-    only its queryset resolves, through an integer annotation, a column past a
+    ``ArrayField``'s elements (``filters/base.py::_integer_compared_column``, which reads a
+    path its model names no field for over the queryset its ``FilterSet`` was handed), or,
+    on a path only the queryset it is applied to resolves (a consumer ``filter_queryset``
+    annotating before it filters), through an integer annotation, a column past a
     ``FilteredRelation`` alias, that alias's target key or an integer transform of either
     (``_queryset_integer_column``), receives each ``Decimal`` its form cleaned past the
     range the database it runs on (``_terminal_queryset``) stores for that field as the
@@ -2958,20 +2959,24 @@ def _queryset_integer_column(filter_instance: Filter, query: Query) -> ModelFiel
     with no field of its own (a reverse relation), and an output that is no
     ``IntegerField``.
     """
+    operand = _query_lookup_operand(
+        query,
+        _declared_field_name(filter_instance),
+        filter_instance.lookup_expr,
+    )
+    if operand is None or not _django_prepares(operand.lookup):
+        return None
+    # A reverse relation's lookup is left unresolved, so only a field of the lookup's
+    # left-hand side reaches here.
+    field = require(operand.field, is_concrete_field)
     try:
-        _names, start, leftover = split_lookup(
-            query,
-            LOOKUP_SEP.join((_declared_field_name(filter_instance), filter_instance.lookup_expr)),
-        )
-        walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover))
-        output = read_attr(walk.lhs, "output_field", None)
-        if is_concrete_field(output) and output.is_relation:
-            output = read_attr(output, "target_field", None)
-    except (FieldError, LookupValidationError):
+        # Django's ``ForeignObject.target_field`` refuses a link carried by several columns.
+        output = read_attr(field, "target_field", None) if field.is_relation else field
+    except FieldError:
         return None
-    if not _django_prepares(walk.lookup) or not is_concrete_field(output):
-        return None
-    return output if isinstance(output, models.IntegerField) else None
+    return (
+        output if is_concrete_field(output) and isinstance(output, models.IntegerField) else None
+    )
 
 
 def _holds_decimal(value: object) -> bool:

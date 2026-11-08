@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 444 done, 115 to do. The CHANGELOG entries filed here moved to
+Progress: 445 done, 114 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1920,6 +1920,26 @@ Progress: 444 done, 115 to do. The CHANGELOG entries filed here moved to
   `get_form` instance override kept, `clean()` without `super()`, disabled and unfielded columns) and
   `tests/rest_framework/test_resolvers.py` (duration via `SCALAR_MAP`, `validate()` after `is_valid()`, a non-mapping
   `to_internal_value`); spec-038, spec-039, README, GLOSSARY `FieldError` envelope. Filed 810
+- [x] 804. fixed: a declared `ListFilter`, `ArrayFilter` or `RangeFilter` (and a `GlobalIDFilter` or key primitive)
+  whose path the model names no field for now reads the path over `filter.parent.queryset`, the queryset the set was
+  handed, under either parent; the model's walk stays first and the queryset is read only where the model answers no
+  field and the filter has no `method=`. Members and bounds over an annotation, a `FilteredRelation` alias (a reverse
+  relation's answered as the model answers the relation's own name) or a column past one are cleaned, held, dropped and
+  range-rewritten as that queryset compares them: duration values filter and junk is the form's error where HEAD gave
+  `AttributeError`, `ValueError` or `OverflowError`, masked over GraphQL; a GlobalID past a key annotation's range is
+  `GLOBALID_INVALID`. The schema is unchanged (`String`); a set handed no queryset is unchanged (`FieldError`). New
+  `filters/base.py::_bound_lookup_operand`, `::_model_unresolved_query`, `::_bound_query`, `::_query_path_field`,
+  `::_query_lookup_operand`, `::_bound_lookup_lhs_path`, `::_query_lookup_lhs_path`; `::_bound_resolved_field` and
+  `::_bound_value_field` read the fallback; `::_ElementCleanedFilter._hand_column_field`, `::_integer_compared_column`
+  and `::_compared_value_column` read the new root; `filters/sets.py::_queryset_integer_column` rebuilt on
+  `_query_lookup_operand`, kept for an annotation a consumer `filter_queryset` adds and answering `None` for a link
+  several columns carry. Fakeshop: `ScalarSpecimenParentStampFilter` `parent_lag_*` / `child_count_*` over the
+  resolver's annotations. Pinned live by `test_scalars_filter_api.py`, `test_raw_filter_forms_api.py`,
+  `test_scalar_predicate_binding_api.py` (the reverse alias and the key annotation included),
+  `test_declared_key_primitives_api.py` and `test_filter_apply_arguments_api.py` (`apply_sync` and `apply_async`, a
+  target type's `get_queryset` through a `RelatedFilter`), and
+  `tests/filters/test_sets.py::test_a_queryset_alias_of_a_multi_column_link_holds_nothing`. Docs: spec-027, README,
+  GLOSSARY `FilterSet`. Closes 792's element half
 
 ## Outside review of the fixes
 
@@ -2170,13 +2190,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   unwalked answers (`ScalarSpecimen.children` naming two children: walked `[]`, unwalked `['p1']`): each AND is re-read
   on the target key column over a single target row (`filters/sets.py::FilterSet._leaf_chain`,
   `_LeafChain.terminal_value`). One declaration, two answers (GOAL "Trust boundary"). Found researching 784
-- [ ] 792. A declared filter whose path names a `FilteredRelation` alias (`ListFilter("vshelf", lookup_expr="in")`,
-  `CharFilter("vshelf__code")`, fakeshop's `par__occurred_at`) is resolved without the queryset that holds the alias:
-  list elements are uncleaned (junk is Django's `ValueError`, masked over GraphQL), and the alias hop reads no
-  visibility, so a shelf `ShelfType.get_queryset` hides matches for anon through `vshelf` on GraphQL, `apply_sync` and
-  raw forms (README: a flat path "answers as Django would if every row the target type's `get_queryset` hides ... did
-  not exist"). Needs the queryset seam (`parent.queryset.query`, the applied queryset's `_filtered_relations`, as
-  `filters/sets.py::_queryset_integer_column` reads it). Split from 721
+- [ ] 792. A declared filter whose path crosses a `FilteredRelation` alias (`ListFilter("vshelf", lookup_expr="in")`,
+  `CharFilter("vshelf__code")`, fakeshop's `par__occurred_at`) reads no visibility on the alias hop: a shelf
+  `ShelfType.get_queryset` hides still matches for anon through `vshelf`, on GraphQL, `apply_sync` and raw forms
+  (README: a flat path "answers as Django would if every row the target type's `get_queryset` hides ... did not exist").
+  Its values are cleaned over the set's queryset (804). Needs the hop walk to treat the alias's relation as a walked hop
+  over the applied queryset's `_filtered_relations`. Split from 721
 - [ ] 793. (robustness) A set used only through raw form drivers (`FilterSet(data=...)`, `DjangoFilterBackend`) never
   publishes, so `refuse_unresolvable_lookup` / `refuse_identityless_relation` never run for it, though the glossary and
   spec-027 say a refusal fires for "an unserved set at its first use": `tests/filters/test_base.py::_ScalarRangeSet`
@@ -2186,14 +2205,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   an empty value) reads as constraining, so supplied empty or left out it keeps only the parents that reach a visible
   related row, where unwalked and django-filter keep every row: the identity-as-no-op rule on the rebound rows plus the
   EXISTS fold, not the double run. A to-many key's override answers as unwalked (item 796). Found researching 790
-- [ ] 804. (robustness) A declared `ListFilter` / `ArrayFilter` / `RangeFilter` whose `field_name` names a queryset
-  annotation (a type's `get_queryset` `annotate(elapsed_copy=F("elapsed"))`) applies each member or bound uncleaned:
-  `filters/base.py::_column_form_field` resolves the path through the model's `_meta` (`_bound_value_field`) where the
-  bind ask resolves it over the queryset (`utils/querysets.py::lookup_target_fields`), so `element_field` /
-  `bound_field` is `None` and the raw text reaches Django. On SQLite and MySQL a duration annotation raises
-  `AttributeError` (`'str' object has no attribute 'days'`) for every value, valid ones included, over GraphQL (a
-  masked unexpected error) and every raw driver (at `is_valid()` / `errors`); an integer annotation's `abc` / `1.5`
-  member is Django's `ValueError` and `2**63` an `OverflowError` on every path. Found researching 724
 - [ ] 810. (robustness) A nested writable serializer's own `ModelSerializer` uniqueness validator binds a nested value
   inside `is_valid()`, before the write's storability check (which reads only top-level written fields,
   `rest_framework/resolvers.py::_written_columns`) and before any consumer `create()` runs: on SQLite a unique duration

@@ -28,8 +28,14 @@ that day, flat, under ``not`` and through ``partner`` nested and flat. ``parentD
 field's queryset holds, a path the schema build cannot resolve, so it keeps its declared
 ``DateTime``: one whose date in the default time zone (``TIME_ZONE``) leaves years
 1..9999 is ``FILTER_INVALID`` on every backend. ``parentDaysSpan``, a ``RangeFilter`` over
-the same path with a bare ``date`` ``lookup_expr``, keeps its range form's ``String`` bounds
-and compares a lone bound through the parent's ``date``. The declared
+the same path with a bare ``date`` ``lookup_expr``, keeps its range form's ``String`` bounds,
+cleans each as the parent's ``date`` (a bound no date spells is ``FILTER_INVALID``) and
+compares a lone bound through it. ``parentLagAmong`` / ``parentLagSpan`` and
+``childCountAmong`` / ``childCountSpan`` name the resolver's duration and integer
+annotations: published ``String``, each member and bound is cleaned and compared as the
+annotation's output field, so junk or a duration past ``timedelta`` is ``FILTER_INVALID``, an
+integer member naming no row drops and an integer range bound past the column widens or
+empties the match as the column's does. The declared
 ``occurredYearAmong`` (``in``) and ``occurredYearSpan`` (``range``) over
 ``occurred_at__year``, a path through the column's ``year`` transform, are typed by the
 transform's ``IntegerField`` output (``[Int!]``,
@@ -904,6 +910,222 @@ def test_range_through_a_filtered_relation_alias_compares_a_lone_bound_through_i
             variables={"filter": {"parentDaysSpan": {"date": bounds}}},
         ),
     ) == {"data": {"allScalarSpecimensByParentStamp": [{"label": label} for label in labels]}}
+
+
+@pytest.mark.django_db
+def test_range_bound_through_a_filtered_relation_alias_is_cleaned_as_the_transform_compares() -> (
+    None
+):
+    """A ``parentDaysSpan`` bound no date can hold is the ``date`` transform's form error.
+
+    The path crosses the ``par`` alias only the resolver's queryset holds, so the bound is
+    cleaned as that queryset compares it, the ``DateField`` of the parent's ``date``: a
+    bound that is no date is ``FILTER_INVALID`` keyed to the range's form field, never
+    handed to the database.
+    """
+    _seed_specimen("child-of-alpha", parent=_seed_specimen("alpha"))
+    payload = response_json(
+        post_graphql(
+            _BY_PARENT_STAMP,
+            variables={"filter": {"parentDaysSpan": {"date": {"start": "2021-13-45"}}}},
+        ),
+    )
+
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {"parent_days_span": [{"message": "Enter a valid date.", "code": "invalid"}]},
+    }
+
+
+_ANNOTATION_TYPES_QUERY = """
+query {
+  lagAmong: __type(name: "ScalarSpecimenParentStampFilterParentLagAmongFilterInputType") {
+    inputFields { name type { kind ofType { kind ofType { name } } } }
+  }
+  lagSpan: __type(name: "ScalarSpecimenParentStampFilterParentLagRangeInputType") {
+    inputFields { name type { name } }
+  }
+  countSpan: __type(name: "ScalarSpecimenParentStampFilterChildCountRangeInputType") {
+    inputFields { name type { name } }
+  }
+}
+"""
+
+
+def _seed_parent_and_child() -> None:
+    """Seed ``alpha`` (one child, no parent) and ``child-of-alpha``, stamped a day later."""
+    alpha = _seed_specimen("alpha")
+    _seed_specimen(
+        "child-of-alpha",
+        parent=alpha,
+        occurred_at=_DATETIME + datetime.timedelta(days=1),
+    )
+
+
+@pytest.mark.django_db
+def test_a_filter_over_a_queryset_annotation_publishes_string_values() -> None:
+    """``parentLag*`` and ``childCount*`` name annotations no model field backs: ``String``.
+
+    No queryset exists when the schema is built, so the published type is the path's
+    ``String``; each value is cleaned as the queryset it runs on compares it.
+    """
+    assert _assert_graphql_success(_ANNOTATION_TYPES_QUERY) == {
+        "lagAmong": {
+            "inputFields": [
+                {
+                    "name": "in",
+                    "type": {
+                        "kind": "LIST",
+                        "ofType": {"kind": "NON_NULL", "ofType": {"name": "String"}},
+                    },
+                },
+            ],
+        },
+        "lagSpan": {
+            "inputFields": [
+                {"name": "start", "type": {"name": "String"}},
+                {"name": "end", "type": {"name": "String"}},
+            ],
+        },
+        "countSpan": {
+            "inputFields": [
+                {"name": "start", "type": {"name": "String"}},
+                {"name": "end", "type": {"name": "String"}},
+            ],
+        },
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_input", "labels"),
+    [
+        pytest.param(
+            {"parentLagAmong": {"in": ["1 00:00:00"]}},
+            ["child-of-alpha"],
+            id="lag-member",
+        ),
+        pytest.param({"parentLagAmong": {"in": ["2 00:00:00"]}}, [], id="lag-member-no-row"),
+        pytest.param(
+            {"parentLagSpan": {"range": {"start": "0", "end": "1 00:00:00"}}},
+            ["child-of-alpha"],
+            id="lag-range",
+        ),
+        pytest.param(
+            {"parentLagSpan": {"range": {"start": "12:00:00"}}},
+            ["child-of-alpha"],
+            id="lag-lone-start",
+        ),
+        pytest.param({"childCountAmong": {"in": ["1"]}}, ["alpha"], id="count-member"),
+        pytest.param(
+            {"childCountAmong": {"in": ["0", "1.5", str(2**63)]}},
+            ["child-of-alpha"],
+            id="count-members-naming-no-row-drop",
+        ),
+        pytest.param({"childCountAmong": {"in": [str(2**63)]}}, [], id="count-every-member-drops"),
+        pytest.param(
+            {"childCountSpan": {"range": {"start": "1", "end": str(2**63)}}},
+            ["alpha"],
+            id="count-range-past-the-column",
+        ),
+        pytest.param(
+            {"childCountSpan": {"range": {"start": str(-(2**63) - 1), "end": "0"}}},
+            ["child-of-alpha"],
+            id="count-range-below-the-column",
+        ),
+    ],
+)
+def test_a_filter_over_a_queryset_annotation_compares_its_values_as_the_queryset_does(
+    filter_input: dict[str, object],
+    labels: list[str],
+) -> None:
+    """Members and bounds over the duration and integer annotations filter as their outputs.
+
+    ``parent_lag`` is a ``DurationField`` expression, so ``"1 00:00:00"`` is cleaned to a
+    day and compared as one; ``child_count`` is a ``Count``, whose ``in`` drops a member
+    naming no integer row (a fraction, one past the 64-bit range) and whose ``range``
+    applies as ``gte`` + ``lte``, so a bound past the range widens rather than reaching
+    the database.
+    """
+    _seed_parent_and_child()
+
+    assert response_json(
+        post_graphql(_BY_PARENT_STAMP, variables={"filter": filter_input}),
+    ) == {"data": {"allScalarSpecimensByParentStamp": [{"label": label} for label in labels]}}
+
+
+_INVALID_DURATION = {"message": "Enter a valid duration.", "code": "invalid"}
+_DURATION_OVERFLOW = {
+    "message": "The number of days must be between -999999999 and 999999999.",
+    "code": "overflow",
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("filter_input", "form_key", "refusal"),
+    [
+        pytest.param(
+            {"parentLagAmong": {"in": ["1 00:00:00", "abc"]}},
+            "parent_lag_among",
+            _INVALID_DURATION,
+            id="lag-member-junk",
+        ),
+        pytest.param(
+            {"parentLagAmong": {"in": ["1000000000 00:00:00"]}},
+            "parent_lag_among",
+            _DURATION_OVERFLOW,
+            id="lag-member-past-timedelta",
+        ),
+        pytest.param(
+            {"parentLagSpan": {"range": {"start": "abc", "end": "1 00:00:00"}}},
+            "parent_lag_span",
+            _INVALID_DURATION,
+            id="lag-bound-junk",
+        ),
+        pytest.param(
+            {"parentLagSpan": {"range": {"end": "1000000000 00:00:00"}}},
+            "parent_lag_span",
+            _DURATION_OVERFLOW,
+            id="lag-bound-past-timedelta",
+        ),
+        pytest.param(
+            {"childCountAmong": {"in": ["abc"]}},
+            "child_count_among",
+            _NOT_A_NUMBER,
+            id="count-member-junk",
+        ),
+        pytest.param(
+            {"childCountSpan": {"range": {"start": "1", "end": "abc"}}},
+            "child_count_span",
+            _NOT_A_NUMBER,
+            id="count-bound-junk",
+        ),
+    ],
+)
+def test_a_value_a_queryset_annotation_cannot_hold_is_filter_invalid(
+    filter_input: dict[str, object],
+    form_key: str,
+    refusal: dict[str, str],
+) -> None:
+    """A member or bound the annotation's output cannot hold is a form error keyed to its field.
+
+    The value is cleaned by the form field django-filter's ``gte`` filter builds for the
+    annotation's output field (a ``DurationField``'s, a ``Count``'s ``IntegerField``'s), so
+    text no duration or number spells, and a duration past ``timedelta``'s days, are
+    ``FILTER_INVALID``, never handed to the database.
+    """
+    _seed_parent_and_child()
+    payload = response_json(post_graphql(_BY_PARENT_STAMP, variables={"filter": filter_input}))
+
+    assert payload["data"] is None, payload
+    (error,) = json_list(payload, "errors")
+    assert json_at(error, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: [refusal]},
+    }
 
 
 _YEAR_LEAF_TYPES_QUERY = """
