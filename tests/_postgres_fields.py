@@ -21,7 +21,11 @@ test where the module is unimportable (no PostgreSQL driver).
 ``FakeArrayField`` reads an index (``<column>__0``), a slice (``<column>__0_2``) and ``len``
 as a real ``ArrayField`` does: an index's output is ``base_field``, a slice's the array,
 ``len``'s an ``IntegerField``. Its ``in`` is ``FakeArrayInLookup``, whose members are whole
-array values as ``ArrayInLookup``'s are.
+array values as ``ArrayInLookup``'s are, and it registers ``contained_by`` and ``overlap``
+(``FakeArrayContainedBy``, ``FakeArrayOverlap``), the array lookups no core field carries.
+Its ``exact`` and ``contains`` stay the core field's. A test class is not Django's own, so
+a per-field ``"__all__"`` publishes neither ``in``, ``contained_by`` nor ``overlap`` on the
+double (``filters/sets.py::_lookups_for_field``); listed by name, each is published.
 
 A model hosting either double declares ``class Meta: managed = False``.
 
@@ -40,6 +44,7 @@ import pytest
 from django import forms
 from django.db import models
 from django.db.models.functions import Length
+from django.db.models.lookups import PostgresOperatorLookup
 from django.utils.functional import cached_property
 from typing_extensions import Never, override
 
@@ -150,6 +155,36 @@ def _array_in_member(value: object) -> object:
 
 
 FakeArrayField.register_lookup(FakeArrayInLookup)
+
+
+class FakeArrayContainedBy(PostgresOperatorLookup):
+    """An array's ``contained_by`` (``<@``), registered under the name a real ``ArrayField`` uses.
+
+    Adapted from ``django/contrib/postgres/lookups.py::ContainedBy`` (Django, BSD), which a
+    real ``ArrayField`` registers through ``ArrayContainedBy``; its module needs a PostgreSQL
+    driver. Only the operator is reproduced: ``ArrayRHSMixin``'s ``ARRAY[...]::type[]`` cast
+    of the right-hand side is not.
+    """
+
+    lookup_name = "contained_by"
+    postgres_operator = "<@"
+
+
+class FakeArrayOverlap(PostgresOperatorLookup):
+    """An array's ``overlap`` (``&&``), registered under the name a real ``ArrayField`` uses.
+
+    Adapted from ``django/contrib/postgres/lookups.py::Overlap`` (Django, BSD), which a real
+    ``ArrayField`` registers through ``ArrayOverlap``; its module needs a PostgreSQL driver.
+    Only the operator is reproduced: neither ``ArrayRHSMixin``'s ``ARRAY[...]::type[]`` cast
+    of the right-hand side nor ``Overlap.get_prep_lookup`` (which takes a subquery's values).
+    """
+
+    lookup_name = "overlap"
+    postgres_operator = "&&"
+
+
+FakeArrayField.register_lookup(FakeArrayContainedBy)
+FakeArrayField.register_lookup(FakeArrayOverlap)
 
 
 def patch_array_field(

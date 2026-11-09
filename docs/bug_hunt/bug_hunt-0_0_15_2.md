@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 451 done, 118 to do. The CHANGELOG entries filed here moved to
+Progress: 452 done, 118 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2049,6 +2049,22 @@ Progress: 451 done, 118 to do. The CHANGELOG entries filed here moved to
   `::test_consumer_code_counting_its_choices_at_build_builds_and_serves` and `tests/filters/test_inputs.py`'s deferred,
   iterator, expanded-child, override, `defers_choices` and `copied_filter` rows. Docs: spec-027 Decision 4. Filed 826,
   827. CHANGELOGTODO 828
+- [x] 739. Fixed by restating the rule, not by narrowing the generated set: a `Meta.filter_overrides` filter class
+  keeps the column's whole lookup set, since it owns the lookups it accepts, and the schema build refuses what a
+  served set's input cannot type. Over an `ArrayField` a list filter types only `exact`, `contains`, `contained_by` and
+  `overlap`, and the catch-all null test (a `BooleanFilter`, or any scalar filter naming `isnull`) types `Boolean`, so
+  a served set's per-field `"__all__"` (the dict form; the list form and the top-level `"__all__"` generate `exact`
+  only) is refused at `iexact`, and listing the lookups builds. Narrowing the set would have stopped an unserved set
+  (`FilterSet(...).qs`, `apply_sync`) from serving `gt` / `in` / `range` over an array, which run on PostgreSQL. A
+  list, CSV, typed or choice filter testing `isnull` over an array column stays refused, its advice now naming
+  `BooleanFilter(lookup_expr="isnull")` (`filters/inputs.py::_array_column_refusal`); only that advice text moves on a
+  real `ArrayField`. The test double `tests/_postgres_fields.py::FakeArrayField` registers `contained_by` /
+  `overlap`. Pinned by `tests/filters/test_inputs.py`'s whole-array-lookup, override-route (`"__all__"` refused at
+  `iexact`, the four listed building, `gt` listed refused), null-test-advice, range and `BooleanFilter` rows,
+  `tests/filters/test_all_lookups.py::test_override_selected_array_column_keeps_the_whole_lookup_catalog` and the
+  PostgreSQL-tier
+  `examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::test_an_array_filter_override_listing_the_whole_array_lookups_answers_each`.
+  Docs: spec-027 Decisions 3 and 4, README, GLOSSARY `FilterSet`. Filed 829. CHANGELOGTODO 830
 
 ## Outside review of the fixes
 
@@ -2089,14 +2105,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 739. spec-027 Decision 3's `FilterSet.get_fields` paragraph and `filters/sets.py::_lookups_for_field` say a
-  column made filterable through `Meta.filter_overrides` ("a `JSONField`, a `FileField`, an `ArrayField`") keeps the
-  whole lookup set "since its filter class owns the lookups it accepts", but `Meta.filter_overrides={ArrayField:
-  {"filter_class": ArrayFilter}}` with `Meta.fields={<col>: "__all__"}` (or the list form's generated lookups beyond
-  `exact`) is refused at build at `iexact` by `_array_column_refusal`; and a declared
-  `ArrayFilter(lookup_expr="isnull")` is refused with advice naming the four list lookups where a `BooleanFilter` is
-  the spelling that builds. No schema-build row pins `contains` / `contained_by` / `overlap` or the
-  `Meta.filter_overrides` route. Found fact-finding 656
 - [ ] 741. A JSON request body holding an integer of 4301 or more digits anywhere (an unused variable, `extensions`)
   answers HTTP 500 HTML on `DjangoGraphQLView`, DEBUG on and off: CPython's int-digits `ValueError` out of
   `json.loads` escapes upstream's `except json.JSONDecodeError`, and `views.py::DjangoGraphQLView.parse_json` /
@@ -2321,6 +2329,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `filters/sets.py::_widget_keys` read that `AttributeError` as "builds no field", so the build's widget and no-value
   checks are skipped for the leaf without a word. The schema and every request answer as without the package. Found
   verifying 738
+- [ ] 829. (robustness) On a set no connection serves (`FilterSet(data, queryset).qs`, `apply_sync`), a
+  `Meta.filter_overrides={ArrayField: {"filter_class": ArrayFilter}}` text-pattern leaf over an `ArrayField`
+  (`arr__icontains=1`, from a per-field `"__all__"` or listed) cleans its value into a list and compiles a match
+  against that list's Python repr (`UPPER("arr"::text) LIKE '%[DECIMAL('1')]%'`), silently matching nothing a consumer
+  means; Django compares the column's text rendering (`{1,2}`) with a string. Found fixing 739
 
 ## To do: holes found re-checking the fixes
 

@@ -1579,15 +1579,30 @@ def _array_column_refusal(
     ``lookup_expr`` names no input field (``_unnameable_lookup_refusal``). ``lookup``
     names what the filter applies when its ``lookup_expr`` does not (a ``RangeFilter``'s
     ``range``).
+
+    A null test (``isnull``, read as the catch-all reads it:
+    ``filters/base.py::_filterset_lookup_operand``) on a list, CSV, choice or typed filter
+    is refused too, since each publishes the column's elements where the test takes one
+    ``Boolean``; its advice names the ``BooleanFilter`` the catch-all types ``Boolean``
+    (django-filter's own filter for a generated ``isnull``). Every other refused lookup's
+    advice names the ``ArrayFilter`` lookups that take one array of the column's elements.
     """
     declaration = _declaration_of(filter_instance, filterset_cls)
     applied = lookup if lookup is not None else getattr(filter_instance, "lookup_expr", None)
+    if lookup is None and _filterset_lookup_operand(filterset_cls, filter_instance).null_test:
+        remedy = (
+            "a null test takes one Boolean, which this filter does not publish. Declare a "
+            "BooleanFilter with lookup_expr 'isnull'."
+        )
+    else:
+        remedy = (
+            "only exact, contains, contained_by and overlap take one array of the column's "
+            "elements. Declare an ArrayFilter with one of those lookup_expr values."
+        )
     return ConfigurationError(
         f"{_declaration_subject(declaration, filterset_cls)} "
         f"has no input type for lookup {truth.render(applied)} on the ArrayField column "
-        f"{_field_label(model_field)}: only exact, contains, contained_by and overlap take one "
-        "array of the column's elements. Declare an ArrayFilter with one of those lookup_expr "
-        "values.",
+        f"{_field_label(model_field)}: {remedy}",
     )
 
 
@@ -1650,7 +1665,7 @@ def _element_annotation(
     pass after ``_array_element_column`` admits the lookup; any other arm or lookup over an
     ``ArrayField`` column is refused here (``_array_column_refusal``), as the choice and range
     arms refuse it before their own reads, since no input of the element type, or a list of
-    it, carries that lookup's operand. ``isnull`` never reaches it (``bool``).
+    it, carries that lookup's operand. A catch-all null test never reaches it (``bool``).
 
     One lookup-driven arm comes first: a generated text-pattern leaf on a
     non-text column (``FilterSet.filter_for_lookup`` gives it ``TextPatternFilter``)

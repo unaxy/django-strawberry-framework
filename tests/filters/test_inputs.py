@@ -3858,6 +3858,218 @@ def test_a_choice_filter_over_an_outer_choices_array_column_is_refused(
     assert registry.get_enum(_ArraySpecimen, "flagged") is None
 
 
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param(
+            lambda: ArrayFilter(field_name="ints", lookup_expr="isnull"),
+            id="array-filter",
+        ),
+        pytest.param(
+            lambda: ListFilter(field_name="ints", lookup_expr="isnull"),
+            id="list-filter",
+        ),
+        pytest.param(
+            lambda: _NumbersInFilter(field_name="ints", lookup_expr="isnull"),
+            id="csv-filter",
+        ),
+        pytest.param(
+            lambda: TypedFilter(field_name="ints", lookup_expr="isnull"),
+            id="typed-filter",
+        ),
+        pytest.param(
+            lambda: ChoiceFilter(field_name="ints", lookup_expr="isnull", choices=[(1, "one")]),
+            id="choice-filter",
+        ),
+    ],
+)
+def test_an_array_column_null_test_on_a_filter_publishing_elements_names_a_boolean_filter(
+    monkeypatch: pytest.MonkeyPatch,
+    declare: Callable[[], Filter],
+) -> None:
+    """A null test on a list, CSV, typed or choice filter over an array names ``BooleanFilter``.
+
+    Each of them publishes the column's elements where the null test takes one ``Boolean``,
+    and its own form cleans no Boolean either; a ``BooleanFilter`` with the same lookup builds.
+    """
+    patch_array_field(monkeypatch)
+    declared = declare()
+    _ = _serve_array_filter(declared, exposed=True)
+
+    assert _build_refusal() == (
+        f"ArraySpecimenFilter: {type(declared).__name__} on 'ints' has no input type for "
+        "lookup 'isnull' on the ArrayField column _ArraySpecimen.ints: a null test takes one "
+        "Boolean, which this filter does not publish. Declare a BooleanFilter with lookup_expr "
+        "'isnull'."
+    )
+
+
+@pytest.mark.parametrize(
+    "range_class",
+    [
+        pytest.param(DjangoRangeFilter, id="range-filter"),
+        pytest.param(DateFromToRangeFilter, id="date-from-to-range-filter"),
+    ],
+)
+def test_a_range_filter_over_an_array_column_is_refused_for_the_range_it_applies(
+    monkeypatch: pytest.MonkeyPatch,
+    range_class: type[DjangoRangeFilter],
+) -> None:
+    """A ``RangeFilter`` applies ``range`` whatever its ``lookup_expr``, so its advice is the list one."""
+    patch_array_field(monkeypatch)
+    _ = _serve_array_filter(range_class(field_name="ints", lookup_expr="isnull"), exposed=True)
+
+    assert _build_refusal() == (
+        f"ArraySpecimenFilter: {range_class.__name__} on 'ints' has no input type for lookup "
+        "'range' on the ArrayField column _ArraySpecimen.ints: only exact, contains, "
+        "contained_by and overlap take one array of the column's elements. Declare an "
+        "ArrayFilter with one of those lookup_expr values."
+    )
+
+
+def test_a_boolean_null_test_over_an_array_column_is_boolean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``BooleanFilter`` the null-test refusal names builds over the array as ``Boolean``."""
+    patch_array_field(monkeypatch)
+    served = _serve_array_filter(
+        BooleanFilter(field_name="ints", lookup_expr="isnull"),
+        exposed=True,
+    )
+
+    assert _served_arr_annotation(served) is bool
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        "exact",
+        "contains",
+        "contained_by",
+        "overlap",
+    ],
+)
+@pytest.mark.parametrize("filter_class", _ARRAY_FILTER_CLASSES)
+def test_an_array_column_list_filter_takes_its_elements_for_each_whole_array_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_class: type[Filter],
+    lookup: str,
+) -> None:
+    """Each lookup whose operand is one array of the column's elements builds ``list[int]``."""
+    patch_array_field(monkeypatch)
+    served = _serve_array_filter(filter_class(field_name="ints", lookup_expr=lookup), exposed=True)
+
+    assert _served_arr_element(served) is int
+
+
+def _serve_array_lookups(
+    meta_fields: object,
+    filter_class: type[Filter] = ArrayFilter,
+) -> type[DjangoType]:
+    """Serve a set generating ``meta_fields`` over ``ints`` through a ``filter_class`` override."""
+
+    class ArraySpecimenFilter(FilterSet):
+        class Meta:
+            model = _ArraySpecimen
+            fields = meta_fields
+            filter_overrides = {FakeArrayField: {"filter_class": filter_class}}
+
+    meta: dict[str, object] = {
+        "model": _ArraySpecimen,
+        "fields": ("id",),
+        "filterset_class": ArraySpecimenFilter,
+    }
+    return type("ArraySpecimenType", (DjangoType,), {"Meta": type("Meta", (), meta)})
+
+
+@pytest.mark.parametrize("filter_class", _ARRAY_FILTER_CLASSES)
+def test_an_overridden_array_columns_all_lookups_are_refused_at_the_first_it_cannot_type(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_class: type[Filter],
+) -> None:
+    """A served per-field ``"__all__"`` over an array keeps the whole set, so the build refuses it.
+
+    The override's filter class owns the lookups it accepts, and the expansion publishes
+    the column's whole catalog; a list filter over an ``ArrayField`` types only the four
+    whole-array lookups, so the first other lookup (``iexact``) is refused naming them.
+    """
+    patch_array_field(monkeypatch)
+    _ = _serve_array_lookups({"ints": "__all__"}, filter_class)
+
+    assert _build_refusal() == (
+        f"ArraySpecimenFilter: {filter_class.__name__} on 'ints' has no input type for lookup "
+        "'iexact' on the ArrayField column _ArraySpecimen.ints: only exact, contains, "
+        "contained_by and overlap take one array of the column's elements. Declare an "
+        "ArrayFilter with one of those lookup_expr values."
+    )
+
+
+_WHOLE_ARRAY_LISTED = {
+    "exact": (list[int], type(None)),
+    "contains": (list[int], type(None)),
+    "contained_by": (list[int], type(None)),
+    "overlap": (list[int], type(None)),
+}
+
+
+@pytest.mark.parametrize(
+    ("listed", "expected"),
+    [
+        pytest.param([], _WHOLE_ARRAY_LISTED, id="four"),
+        pytest.param(
+            ["isnull"],
+            {**_WHOLE_ARRAY_LISTED, "is_null": (bool, type(None))},
+            id="four-and-null-test",
+        ),
+    ],
+)
+@pytest.mark.parametrize("filter_class", _ARRAY_FILTER_CLASSES)
+def test_an_overridden_array_columns_listed_whole_array_lookups_build(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_class: type[Filter],
+    listed: list[str],
+    expected: dict[str, tuple[object, ...]],
+) -> None:
+    """Listing the four whole-array lookups under the override builds each as ``[Int!]``.
+
+    A listed null test is generated as django-filter's ``BooleanFilter`` and is ``Boolean``.
+    """
+    patch_array_field(monkeypatch)
+    _ = _serve_array_lookups(
+        {
+            "ints": [
+                "exact",
+                "contains",
+                "contained_by",
+                "overlap",
+                *listed,
+            ],
+        },
+        filter_class,
+    )
+    finalize_django_types()
+
+    input_cls = FilterArgumentsFactory.input_object_types["ArraySpecimenFilterInputType"]
+    bag = _class_arg(_annotations(input_cls)["ints"])
+    published = {name: _args(annotation) for name, annotation in _annotations(bag).items()}
+    assert published == expected
+
+
+def test_an_overridden_array_columns_listed_lookup_its_input_cannot_carry_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Named in ``Meta.fields``, a lookup the expansion leaves out is still refused at build."""
+    patch_array_field(monkeypatch)
+    _ = _serve_array_lookups({"ints": ["exact", "gt"]})
+
+    assert _build_refusal() == (
+        "ArraySpecimenFilter: ArrayFilter on 'ints' has no input type for lookup 'gt' on the "
+        "ArrayField column _ArraySpecimen.ints: only exact, contains, contained_by and overlap "
+        "take one array of the column's elements. Declare an ArrayFilter with one of those "
+        "lookup_expr values."
+    )
+
+
 def _served_arr_annotation(served: type[DjangoType]) -> object:
     """Build the schema and return the served set's ``arr`` leaf annotation, ``None`` stripped."""
     finalize_django_types()

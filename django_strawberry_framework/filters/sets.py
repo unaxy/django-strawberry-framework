@@ -371,7 +371,12 @@ def _lookups_for_field(
     (``FilterSet.filter_for_lookup`` gives it a ``String`` input). A column whose
     filter the consumer supplies (``Meta.filter_overrides`` or a
     ``FILTER_DEFAULTS`` shadow) keeps the whole set: its filter class owns the
-    lookups it accepts.
+    lookups it accepts, and the schema build refuses a lookup a served set's input
+    cannot type. Over an ``ArrayField`` a list filter types only ``exact``,
+    ``contains``, ``contained_by`` and ``overlap``, and a ``BooleanFilter`` the null
+    test (``filters/inputs.py::_array_column_refusal``), so a served set's per-field
+    ``"__all__"`` there is refused naming the first lookup it cannot type, and the
+    consumer lists the lookups it wants.
 
     Lookups ``django.contrib.postgres`` registers onto a field that is not its
     own are EXCLUDED too (``_without_foreign_postgres_lookups``): importing its

@@ -14,10 +14,10 @@ unimportable (no PostgreSQL driver installed).
 Django's text-pattern lookups (``iexact``, the ``contains`` / ``startswith`` / ``endswith``
 families, ``regex`` / ``iregex``) join the set only on a text column, one whose default
 filter is ``CharFilter``, when the column's filter is the package's own default; a column
-whose filter ``Meta.filter_overrides`` supplies keeps the whole set. Listed explicitly on
-a non-text column, the framework's leaf is a ``TextPatternFilter`` typed ``str``; a
-``Meta.filter_overrides`` selection or a declared filter keeps its own class and the
-column's type.
+whose filter ``Meta.filter_overrides`` supplies, an ``ArrayField`` included, keeps the whole
+set. Listed explicitly on a non-text column, the framework's leaf is a
+``TextPatternFilter`` typed ``str``; a ``Meta.filter_overrides`` selection or a declared
+filter keeps its own class and the column's type.
 """
 
 from typing import TYPE_CHECKING
@@ -33,7 +33,7 @@ from django.test.utils import register_lookup
 from django_filters import CharFilter
 from django_filters.filterset import UnknownFieldBehavior
 
-from django_strawberry_framework.filters import FilterSet
+from django_strawberry_framework.filters import ArrayFilter, FilterSet, ListFilter
 from django_strawberry_framework.filters.base import EnumChoiceFilter, TextPatternFilter
 from django_strawberry_framework.filters.inputs import convert_filter_to_input_annotation
 from django_strawberry_framework.filters.sets import (
@@ -43,6 +43,7 @@ from django_strawberry_framework.filters.sets import (
     filter_generation_provenance,
 )
 from django_strawberry_framework.utils import truth
+from tests._postgres_fields import FakeArrayField, patch_array_field
 
 if TYPE_CHECKING:
     from django_strawberry_framework.utils.typing import ModelField
@@ -536,3 +537,47 @@ def test_override_selected_file_column_keeps_the_whole_lookup_catalog() -> None:
         "regex",
     } <= bag
     assert type(MediaFilter.get_filters()["attachment__icontains"]) is CharFilter
+
+
+class _ArrayCatalogSpecimen(models.Model):
+    """One ``ArrayField`` column a ``Meta.filter_overrides`` selection makes filterable."""
+
+    ints = FakeArrayField(models.IntegerField())
+
+    class Meta:
+        managed = False
+        app_label = "test_all_lookups_array_catalog"
+
+
+@pytest.mark.parametrize("filter_class", [ArrayFilter, ListFilter], ids=["array", "list"])
+def test_override_selected_array_column_keeps_the_whole_lookup_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_class: type[django_filters.Filter],
+) -> None:
+    """An ``ArrayField`` override keeps every lookup, those its input cannot type included.
+
+    The expansion is the column's whole catalog under the override's class; the schema
+    build, not the expansion, refuses what a served set's input cannot type
+    (``filters/inputs.py::_array_column_refusal``).
+    """
+    patch_array_field(monkeypatch)
+
+    class ArrayCatalogFilter(FilterSet):
+        class Meta:
+            model = _ArrayCatalogSpecimen
+            fields = {"ints": "__all__"}
+            filter_overrides = {FakeArrayField: {"filter_class": filter_class}}
+
+    bag = _all_bag(ArrayCatalogFilter, "ints")
+    # The double's ``in``, ``contained_by`` and ``overlap`` are test classes, never published.
+    test_classes = {"in", "contained_by", "overlap"}
+    assert bag == _parent_bag(_ArrayCatalogSpecimen._meta.get_field("ints")) - test_classes
+    assert {
+        "iexact",
+        "gt",
+        "range",
+        "regex",
+    } <= bag
+    filters = ArrayCatalogFilter.get_filters()
+    assert type(filters["ints__gt"]) is filter_class
+    assert type(filters["ints__isnull"]) is django_filters.BooleanFilter

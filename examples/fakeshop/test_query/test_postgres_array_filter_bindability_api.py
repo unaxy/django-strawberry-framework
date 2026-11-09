@@ -5,14 +5,16 @@ list-valued driver parameters require real PostgreSQL ArrayField columns. A func
 consumer model and table retain those declarations without installing a PostgreSQL-only
 model in the backend-neutral example app. Ordinary JSON arguments carry raw numeric search
 values; Time and DateTime list arguments retain their scalar's real aware Python values.
-A nested array's members are cleaned as its innermost column at any depth.
+A nested array's members are cleaned as its innermost column at any depth. A
+``Meta.filter_overrides`` route listing the four whole-array lookups is served through the
+output type's ``filterset_class`` and answers each lookup over the real columns.
 """
 
 import datetime
 import decimal
 from collections.abc import Iterator
 from functools import wraps
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Annotated, NamedTuple
 
 import django_filters
 import pytest
@@ -37,7 +39,7 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.filters import ArrayFilter, FilterSet, ListFilter
+from django_strawberry_framework.filters import ArrayFilter, FilterInput, FilterSet, ListFilter
 from django_strawberry_framework.utils._narrowing import read_attr
 from django_strawberry_framework.views import DjangoGraphQLView
 
@@ -161,10 +163,24 @@ def array_consumer() -> Iterator[_ArrayConsumer]:
         def raw_search(parent: str) -> type[BaseFilterSet]:
             return {"package": RawArraySearch, "django-filter": PlainRawArraySearch}[parent]
 
+        class ArrayOverrideSearch(FilterSet):
+            class Meta:
+                model = ArraySpecimen
+                fields = {
+                    "counts": [
+                        "exact",
+                        "contains",
+                        "contained_by",
+                        "overlap",
+                    ],
+                }
+                filter_overrides = {ArrayField: {"filter_class": ArrayFilter}}
+
         class ArrayOutput(DjangoType):
             class Meta:
                 model = ArraySpecimen
                 fields = ("label",)
+                filterset_class = ArrayOverrideSearch
 
         joined_type: ArrayField[list[int], list[int]] = ArrayField(models.SmallIntegerField())
 
@@ -212,6 +228,16 @@ def array_consumer() -> Iterator[_ArrayConsumer]:
             def _all_rows(self) -> QuerySet[ArraySpecimen]:
                 return rows()
 
+            def _typed_rows(
+                self,
+                info: Info,
+                where: Annotated[
+                    FilterInput[ArrayOverrideSearch],
+                    strawberry.argument(name="filter"),
+                ],
+            ) -> QuerySet[ArraySpecimen]:
+                return ArrayOverrideSearch.apply_sync(where, rows(), info)
+
             rows: QuerySet[ArraySpecimen] = strawberry.field(
                 resolver=_rows,
                 graphql_type=list[ArrayOutput],
@@ -230,6 +256,10 @@ def array_consumer() -> Iterator[_ArrayConsumer]:
             )
             all_rows: QuerySet[ArraySpecimen] = strawberry.field(
                 resolver=_all_rows,
+                graphql_type=list[ArrayOutput],
+            )
+            typed_rows: QuerySet[ArraySpecimen] = strawberry.field(
+                resolver=_typed_rows,
                 graphql_type=list[ArrayOutput],
             )
 
@@ -799,3 +829,33 @@ def test_raw_array_forms_keep_upstream_csv_and_explicit_empty_membership(
         {"parent": parent, "query": query, "where": where},
     )
     _assert_answer(payload, names, "priced")
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("lookup", "value", "names"),
+    [
+        pytest.param("exact", "[1, 2]", ["Match"], id="exact"),
+        pytest.param("contains", "[1]", ["Match"], id="contains"),
+        pytest.param("containedBy", "[1, 2, 3]", ["Match"], id="contained-by"),
+        pytest.param("overlap", "[5, 9]", ["Other"], id="overlap"),
+    ],
+)
+def test_an_array_filter_override_listing_the_whole_array_lookups_answers_each(
+    array_consumer: _ArrayConsumer,
+    lookup: str,
+    value: str,
+    names: list[str],
+) -> None:
+    """``Meta.filter_overrides`` with the four whole-array lookups listed builds and answers rows.
+
+    The override's ``ArrayFilter`` types each lookup ``[Int!]`` from the column's elements;
+    a per-field ``"__all__"`` there would be refused at build, so the set lists them.
+    """
+    payload = _post(
+        array_consumer,
+        f"{{ rows: typedRows(filter: {{ counts: {{ {lookup}: {value} }} }}) {{ label }} "
+        "allRows { label } }",
+        {},
+    )
+    _assert_answer(payload, names, "counts")

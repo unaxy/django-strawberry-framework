@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 199 to do.
+Progress: 0 done, 200 to do.
 
 ## From dry-0_0_15_3
 
@@ -908,6 +908,11 @@ Progress: 0 done, 199 to do.
   project whose choices read a table can run `check` and `migrate` on a fresh database again, and each request still
   evaluates them once; a CSV `ChoiceFilter` or `MultipleChoiceFilter` over a column without `choices` whose `choices`
   are a `CallableChoiceIterator` or an iterator no longer raises `TypeError` at schema build
+- [ ] 830. CHANGELOG entry for item 739: a list, CSV, typed or choice filter testing `isnull` over an `ArrayField`
+  column is still refused when the schema is built, and the error now names `BooleanFilter(lookup_expr="isnull")`,
+  which builds a `Boolean` null test; the docs now say that under a `Meta.filter_overrides` list filter a per-field
+  `"__all__"` over an `ArrayField` is refused at the first lookup its input cannot type, and that listing `exact`,
+  `contains`, `contained_by`, `overlap` (and `isnull`) builds
 
 ## From dry-upstream-0_0_15
 
