@@ -25,6 +25,7 @@ import dataclasses
 import datetime
 import decimal
 import gc
+import math
 import typing
 import uuid
 import weakref
@@ -77,6 +78,7 @@ from django_filters import (
     UUIDFilter,
 )
 from django_filters import RangeFilter as DjangoRangeFilter
+from django_filters.filters import BaseCSVFilter as DjangoBaseCSVFilter
 from django_filters.filters import BaseInFilter as DjangoBaseInFilter
 from django_filters.rest_framework import DjangoFilterBackend
 from django_filters.widgets import RangeWidget, SuffixedMultiWidget
@@ -4200,6 +4202,44 @@ class _JSONFormFilter(Filter):
     field_class = forms.JSONField
 
 
+class _IPAddressFormFilter(Filter):
+    """A consumer filter whose form cleans an IP address (``forms.GenericIPAddressField``)."""
+
+    field_class = forms.GenericIPAddressField
+
+
+class _ModelChoiceFormFilter(Filter):
+    """A consumer filter whose form reads a row of its ``queryset`` (``forms.ModelChoiceField``)."""
+
+    field_class = forms.ModelChoiceField
+
+
+class _URLFormFilter(Filter):
+    """A consumer filter whose form cleans a URL (``forms.URLField``)."""
+
+    field_class = forms.URLField
+
+
+class _MultipleChoiceFormFilter(Filter):
+    """A consumer filter whose form cleans a list of its own choices (``MultipleChoiceField``)."""
+
+    field_class = forms.MultipleChoiceField
+
+
+#: A consumer CSV filter whose members its form validates against its own ``choices``.
+_ChoicesInFilter: type[Filter] = type("ChoicesInFilter", (BaseInFilter, ChoiceFilter), {})
+#: A consumer CSV ``range`` whose bounds its form coerces after validating its own ``choices``.
+_TypedChoicesRangeFilter: type[Filter] = type(
+    "TypedChoicesRangeFilter",
+    (BaseRangeFilter, TypedChoiceFilter),
+    {},
+)
+
+
+class _TypedChoicesInFilter(BaseInFilter, TypedChoiceFilter):
+    """A consumer CSV filter whose members its form coerces after validating its own ``choices``."""
+
+
 class _OwnFilterNumberFilter(NumberFilter):
     """A consumer ``NumberFilter`` whose own ``filter`` decides what its value means."""
 
@@ -5375,6 +5415,98 @@ _NO_VALUE_CASES: dict[str, _NoValueCase] = {
         "JSONField",
         "exact",
     ),
+    "bare-in-on-a-big-integer": _NoValueCase(
+        lambda: _payload_set(Filter(field_name="signed_big", lookup_expr="in")),
+        "PayloadValueSet: Filter on 'signed_big'",
+        "ScalarSpecimen.signed_big",
+        "Field",
+        "in",
+    ),
+    "ip-address-form-on-a-big-integer": _NoValueCase(
+        lambda: _payload_set(_IPAddressFormFilter(field_name="signed_big")),
+        "PayloadValueSet: _IPAddressFormFilter on 'signed_big'",
+        "ScalarSpecimen.signed_big",
+        "GenericIPAddressField",
+        "exact",
+    ),
+    "url-form-on-an-integer": _NoValueCase(
+        lambda: _payload_set(
+            _URLFormFilter(field_name="number", assume_scheme="https"),
+            model=library_models.Issue,
+        ),
+        "PayloadValueSet: _URLFormFilter on 'number'",
+        "Issue.number",
+        "URLField",
+        "exact",
+    ),
+    "multiple-choice-form-on-text": _NoValueCase(
+        lambda: _payload_set(
+            _MultipleChoiceFormFilter(field_name="label", choices=[("alpha", "Alpha")]),
+        ),
+        "PayloadValueSet: _MultipleChoiceFormFilter on 'label'",
+        "ScalarSpecimen.label",
+        "MultipleChoiceField",
+        "exact",
+    ),
+    "integer-coerce-on-a-text-choice-column": _NoValueCase(
+        lambda: _payload_set(
+            _TypedChoicesInFilter(
+                field_name="condition",
+                lookup_expr="in",
+                choices=[("good", "Good"), ("1", "One")],
+                coerce=int,
+            ),
+            model=_SHELF,
+        ),
+        "PayloadValueSet: _TypedChoicesInFilter on 'condition'",
+        "Shelf.condition",
+        "TypedChoiceInField",
+        "in",
+    ),
+    "float-coerce-on-a-second-text-choice-column": _NoValueCase(
+        lambda: _payload_set(
+            _TypedChoicesInFilter(
+                field_name="circulation_status",
+                lookup_expr="in",
+                choices=[("available", "Available"), ("1", "One")],
+                coerce=float,
+            ),
+            model=library_models.Book,
+        ),
+        "PayloadValueSet: _TypedChoicesInFilter on 'circulation_status'",
+        "Book.circulation_status",
+        "TypedChoiceInField",
+        "in",
+    ),
+    "decimal-coerce-on-text": _NoValueCase(
+        lambda: _payload_set(
+            _TypedChoicesInFilter(
+                field_name="label",
+                lookup_expr="in",
+                choices=[("all", "All"), ("alpha", "Alpha")],
+                coerce=decimal.Decimal,
+            ),
+        ),
+        "PayloadValueSet: _TypedChoicesInFilter on 'label'",
+        "ScalarSpecimen.label",
+        "TypedChoiceInField",
+        "in",
+    ),
+    "integer-coerce-range-on-a-text-choice-column": _NoValueCase(
+        lambda: _payload_set(
+            _TypedChoicesRangeFilter(
+                field_name="condition",
+                lookup_expr="range",
+                choices=[("good", "Good"), ("1", "One")],
+                coerce=int,
+            ),
+            model=_SHELF,
+        ),
+        "PayloadValueSet: TypedChoicesRangeFilter on 'condition'",
+        "Shelf.condition",
+        "TypedChoiceRangeField",
+        "range",
+    ),
 }
 
 
@@ -5564,6 +5696,237 @@ def test_a_validate_reading_the_database_is_not_run_at_schema_build(
         assert _build_input_fields(
             _payload_set(_IssuedNumberFilter(field_name="number"), model=library_models.Issue),
         )
+
+
+@pytest.mark.parametrize(
+    ("filter_class", "lookup"),
+    [
+        pytest.param(_TypedChoicesInFilter, "in", id="in"),
+        pytest.param(_TypedChoicesRangeFilter, "range", id="range"),
+    ],
+)
+def test_a_consumer_coerce_is_not_run_at_schema_build(
+    filter_class: type[Filter],
+    lookup: str,
+) -> None:
+    """A typed choice form whose ``coerce`` is consumer code is a parser of its own: not asked.
+
+    The keys share no value with the date column, so asked they would refuse the leaf; the
+    consumer's ``coerce`` owns what each key means, so the leaf builds and the build never
+    calls it.
+    """
+    calls: list[object] = []
+
+    def coerce(value: object) -> object:
+        calls.append(value)
+        return value
+
+    assert _build_input_fields(
+        _payload_set(
+            filter_class(
+                field_name="occurred_on",
+                lookup_expr=lookup,
+                choices=[("x", "X")],
+                coerce=coerce,
+            ),
+        ),
+    )
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "lookup"),
+    [
+        pytest.param(BaseInFilter, "in", id="in"),
+        pytest.param(BaseRangeFilter, "range", id="range"),
+    ],
+)
+def test_a_consumer_member_form_defining_clean_is_not_run_at_schema_build(
+    wrapper: type[DjangoBaseCSVFilter],
+    lookup: str,
+) -> None:
+    """A CSV member form whose own class defines ``clean`` is a parser of its own: not asked.
+
+    django-filter's ``BaseCSVField`` resolves ``clean`` and hands each member to the classes
+    after it, so the consumer's ``clean`` is read too; it owns what a member means (a
+    ``DateField`` asked an integer column's sample would refuse the leaf), so the leaf builds
+    and the build never runs it.
+    """
+    calls: list[object] = []
+
+    class CountedDateField(forms.DateField):
+        @override
+        def clean(self, value: object) -> object:
+            calls.append(value)
+            return object_result(super().clean, value)
+
+    counted: type[Filter] = type(
+        "CountedDatesFilter",
+        (wrapper, DateFilter),
+        {"field_class": CountedDateField},
+    )
+    assert _build_input_fields(
+        _payload_set(
+            counted(field_name="number", lookup_expr=lookup),
+            model=library_models.Issue,
+        ),
+    )
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_callable_member_choices_are_not_evaluated_at_schema_build(
+    django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
+) -> None:
+    """A CSV choice form's callable ``choices`` stay deferred: no call, no query at build.
+
+    Its keys are evaluated only by the form each request builds, so the leaf is asked the
+    column's samples, which a ``ChoiceField`` with ``validate`` off reads, and builds.
+    """
+    calls: list[None] = []
+
+    def labels() -> list[tuple[str, str]]:
+        calls.append(None)
+        return [(category.name, category.name) for category in Category.objects.all()]
+
+    with django_assert_num_queries(0):
+        assert _build_input_fields(
+            _payload_set(
+                _ChoicesInFilter(field_name="occurred_on", lookup_expr="in", choices=labels),
+            ),
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "make_set",
+    [
+        pytest.param(
+            lambda: _payload_set(
+                _ChoicesInFilter(
+                    field_name="label",
+                    lookup_expr="in",
+                    choices=Category.objects.values_list("name", "name"),
+                ),
+            ),
+            id="csv-member-on-text",
+        ),
+        pytest.param(
+            lambda: _payload_set(
+                _ChoicesInFilter(
+                    field_name="occurred_on",
+                    lookup_expr="in",
+                    choices=Category.objects.values_list("name", "name"),
+                ),
+            ),
+            id="csv-member-on-a-date",
+        ),
+        pytest.param(
+            lambda: _payload_set(
+                ChoiceFilter(
+                    field_name="condition",
+                    choices=Category.objects.values_list("name", "name"),
+                ),
+                model=_SHELF,
+            ),
+            id="choice-column",
+        ),
+    ],
+)
+@pytest.mark.django_db
+def test_queryset_choices_are_not_evaluated_at_schema_build(
+    make_set: Callable[[], type[FilterSet]],
+    django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
+) -> None:
+    """A ``QuerySet`` handed as ``choices`` is left to the form each request builds: no query.
+
+    Neither the no-value ask (text and date columns) nor the choice-column check reads it,
+    so a table the queryset names need not exist when the schema builds.
+    """
+    payload_set = make_set()
+    with django_assert_num_queries(0):
+        assert _build_input_fields(payload_set)
+
+
+class _TableCode:
+    """A consumer ``coerce`` class reading each key from its own table: ``KeyError`` off it."""
+
+    TABLE: typing.ClassVar[dict[str, int]] = {"one": 1}
+
+    def __init__(self, value: str) -> None:
+        self.code: int = self.TABLE[value]
+
+
+class _PercentShare:
+    """A consumer ``coerce`` class dividing 100 by its key: ``ZeroDivisionError`` for ``"0"``."""
+
+    def __init__(self, value: str) -> None:
+        self.share: float = 100 / int(value)
+
+
+class _Growth:
+    """A consumer ``coerce`` class raising ``e`` to its key: ``OverflowError`` past a float's range."""
+
+    def __init__(self, value: str) -> None:
+        self.size: float = math.exp(float(value))
+
+
+@pytest.mark.parametrize(
+    ("coerce", "key", "error"),
+    [
+        pytest.param(_TableCode, "all", KeyError, id="key-error"),
+        pytest.param(_PercentShare, "0", ZeroDivisionError, id="zero-division"),
+        pytest.param(_Growth, "1000", OverflowError, id="overflow"),
+    ],
+)
+def test_a_coerce_class_raising_its_own_error_at_schema_build_propagates(
+    coerce: type[object],
+    key: str,
+    error: type[Exception],
+) -> None:
+    """Only the refusals a form raises answer no: a consumer ``coerce`` class's own error propagates.
+
+    Django's ``TypedChoiceField._coerce`` leaves a ``KeyError``, a ``ZeroDivisionError`` or an
+    ``OverflowError`` uncaught at every request, and the ask reads only ``ValidationError``, the temporal
+    ``AttributeError``, the JSON ``TypeError`` and ``coerce=Decimal``'s
+    ``decimal.InvalidOperation`` as no answer, never another ``ArithmeticError``, so the
+    consumer's error reaches the schema build as it would each request.
+    """
+    payload_set = _payload_set(
+        _TypedChoicesInFilter(
+            field_name="price",
+            lookup_expr="in",
+            choices=[(key, key)],
+            coerce=coerce,
+        ),
+    )
+    with pytest.raises(error):
+        _ = _build_input_fields(payload_set)
+
+
+@pytest.mark.parametrize(
+    "column",
+    ["signed_big", "occurred_on"],
+)
+@pytest.mark.django_db
+def test_a_model_choice_form_is_not_asked_at_schema_build(
+    column: str,
+    django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
+) -> None:
+    """A ``ModelChoiceField`` form cleans by reading its queryset, so the ask runs no query.
+
+    Asked, it would look each sample up as a row (``queryset.get``) when the schema builds;
+    the leaf builds and its queryset answers each request instead.
+    """
+    payload_set = _payload_set(
+        _ModelChoiceFormFilter(
+            field_name=column,
+            queryset=scalar_models.ScalarSpecimen.objects.all(),
+            to_field_name=column,
+        ),
+    )
+    with django_assert_num_queries(0):
+        assert _build_input_fields(payload_set)
 
 
 class _CodedIntegerField(models.IntegerField[int, int]):

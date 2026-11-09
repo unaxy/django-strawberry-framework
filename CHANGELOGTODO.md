@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 197 to do.
+Progress: 0 done, 198 to do.
 
 ## From dry-0_0_15_3
 
@@ -894,6 +894,14 @@ Progress: 0 done, 197 to do.
   (django-filter's `AllValuesMultipleFilter`, a `MultipleChoiceFilter` whose choices read the model field, a custom
   `filter()` re-cleaning its value) answers the nested branch's rows instead of a "Cannot resolve keyword ... into
   field" server error, sync, async and through a raw `FilterSet(...).qs`
+- [ ] 825. CHANGELOG entry for item 735: a declared or `Meta.filter_overrides` filter no value of its column can be
+  served by is now refused when the schema builds in the remaining shapes: a `DateRangeFilter` inside a CSV `in` (on
+  a text column its keys answered a server error) or `range`, a CSV `MultipleChoiceFilter`, a CSV `ChoiceFilter` whose
+  keys spell no value of a typed column, and a bare `in` `Filter`, `GenericIPAddressField`, `URLField` or
+  `MultipleChoiceField` form on a column it cannot read; before, they built and refused every request. A choice form
+  with its own `validate` or `valid_value` is judged as before. Callable, lazy and `QuerySet` `choices`, and
+  model-choice forms, are never read when the schema builds, so building runs no query (a choice filter over a choice
+  column with `QuerySet` choices no longer queries at build either)
 
 ## From dry-upstream-0_0_15
 

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 449 done, 115 to do. The CHANGELOG entries filed here moved to
+Progress: 450 done, 117 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2011,6 +2011,24 @@ Progress: 449 done, 115 to do. The CHANGELOG entries filed here moved to
   `tests/filters/test_sets.py::test_a_walked_terminal_binds_the_target_model_and_leaves_the_sets_copy_as_bound`; the
   late-copy and deferred-choices pins hold. Docs: spec-027 Layer 4 and Decision 8, README, GLOSSARY `FilterSet` and
   `RelatedFilter`. Filed 818, 819, 820. CHANGELOGTODO 821
+- [x] 735. (robustness) fixed. Item 708's no-value ask (`filters/inputs.py::_refuse_form_serving_no_value`)
+  already refused the Date / DateTime / Time / Float `in` shapes the item named, declared and `Meta.filter_overrides`
+  alike. The rest built and served no non-empty value because the ask exited on proxies: it now asks every form whose
+  cleaning is all Django's or django-filter's code (`::_cleans_in_shipped_code`, replacing the `_cleaned_kind is None`
+  exit, so a consumer parser keeps the exit), and on a column without `choices` asks a choice form its own eager keys,
+  the empty and null keys included, when its `validate` and `valid_value` are shipped (`::_asked_samples`,
+  `::_form_choice_samples`, `::_validates_its_keys`; a consumer validation keeps the scalar-sample verdict). Callable,
+  lazy and `QuerySet` choices are never evaluated at build (`::_defers_choices`, shared with 538's check, whose
+  `QuerySet` build query goes too), a model-choice form is never asked, and a `coerce=Decimal` key no decimal spells
+  answers no (`::_answers_sample`). Refused at build now: a `DateRangeFilter` in a text CSV `in` (its keys answered a
+  masked `TypeError`) and in every `range` wrapper, CSV `MultipleChoiceFilter` members, a CSV `ChoiceFilter` whose keys
+  spell no value of a typed column, a bare `in` `Filter`, `GenericIPAddressField` / `URLField` forms on an integer and
+  a `MultipleChoiceField` form; 24 of 81 research-grid shapes and 5 of 68 verifier-grid shapes, every one answering
+  `FILTER_INVALID` or a masked error for every non-empty value, no served shape lost, no build query. Pinned by
+  `examples/fakeshop/test_query/test_filter_declarations_api.py::test_a_csv_declaration_no_value_of_its_column_answers_refuses_the_schema`,
+  `::test_a_csv_declaration_some_value_of_its_column_answers_serves_it` and `tests/filters/test_inputs.py`'s
+  `_NO_VALUE_CASES`, coerce, consumer-clean, deferred-choices, model-choice and propagation rows. Docs: spec-027
+  Decision 4, README, GLOSSARY `FilterSet`. Filed 822, 823, 824. CHANGELOGTODO 825
 
 ## Outside review of the fixes
 
@@ -2051,14 +2069,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 735. (robustness) `DateRangeFilter` inside django-filter's CSV `in` wrapper (`BaseInFilter` + `DateRangeFilter`,
-  declared, or the `ConcreteInFilter` django-filter generates for `Meta.fields={col: ["in"]}` under
-  `Meta.filter_overrides={models.DateField: {"filter_class": DateRangeFilter}}`) on a column without `choices` builds
-  through the CSV arm as `[Date!]` / `[DateTime!]` / `[String!]`, and every value answers a coercion error,
-  `invalid_choice` or a masked `TypeError` (django-filter's `DateRangeFilter.filter` tests `value in self.filters`
-  with the list; plain django-filter raises the same). The declared `BaseInFilter` + `DateRangeFilter` half runs as
-  plain django-filter runs it (516); the package's half is the `Meta.filter_overrides` one. On a choice column 538's
-  refusal covers it. Found researching 538
 - [ ] 738. (robustness) `TypedChoiceFilter` / `TypedMultipleChoiceFilter(choices=SimpleLazyObject(fn))` is evaluated
   at schema build: `filters/inputs.py::_refuse_widget_reading_other_keys` builds the unbound form field
   (`_declared_form_field`), whose `TypedChoiceField.__init__` runs `normalize_choices` and forces the lazy object, so
@@ -2274,6 +2284,18 @@ tracker number are recorded there; open remainders and new defects are filed as 
   queryset=Branch.objects.all())` on a set walked flat or nested from a parent answers a masked `ValueError` ("Field
   'id' expected a number but got ...") for a value naming a branch by its `name`, where django-filter matches the
   `to_field_name` column. Found verifying 734
+- [ ] 822. (robustness) `AllValuesMultipleFilter` inside a CSV wrapper (`class X(BaseInFilter,
+  AllValuesMultipleFilter)`, declared, on a text column) builds and answers `FILTER_INVALID` `invalid_list` ("Enter a
+  list of values.") for every value: its form field is built per request, so the build-time no-value ask
+  (`filters/inputs.py::_refuse_form_serving_no_value`) never sees it. Found fixing 735
+- [ ] 823. (robustness) A scalar `TypedChoiceFilter` on a choice column whose `coerce` turns its keys into no value of
+  the column (`TypedChoiceFilter(field_name="condition", choices=[("good", ...), ("1", ...)], coerce=int)` on
+  `Shelf.condition`) builds and serves nothing: the choice arm of `filters/inputs.py::convert_filter_to_input_annotation`
+  never runs the no-value ask, and 538's `valid_value` check accepts `good` before the coerce. Found fixing 735
+- [ ] 824. (robustness) A `TypedChoiceFilter` (or its CSV wrapper) with `coerce=decimal.Decimal` and a key no decimal
+  spells (`choices=[("all", ...), ("1.5", ...)]` on a `DecimalField`) answers a masked `decimal.InvalidOperation` when
+  a request sends that key: Django's `TypedChoiceField._coerce` turns only `ValueError` / `TypeError` /
+  `ValidationError` into its `invalid_choice`. The schema builds (the key `1.5` answers). Found verifying 735
 
 ## To do: holes found re-checking the fixes
 

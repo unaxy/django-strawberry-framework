@@ -1,8 +1,11 @@
 """Consumer filter declarations publish inputs and apply callbacks and postponed annotations over HTTP."""
 
 import copy
+import datetime
+import decimal
 import logging
 import threading
+import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
@@ -12,20 +15,24 @@ import pytest
 import strawberry
 from apps.library.models import Book, Branch, Shelf, Venue
 from apps.scalars.models import ScalarSpecimen
-from django.db.models import F, Model, QuerySet
+from django.db.models import F, Model, QuerySet, TextField
 from django.forms import TextInput
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
 from django.utils.functional import SimpleLazyObject, lazy
 from django_filters import (
+    BaseInFilter,
+    BaseRangeFilter,
     CharFilter,
     ChoiceFilter,
+    DateFilter,
     DateRangeFilter,
     Filter,
     MultipleChoiceFilter,
     TypedChoiceFilter,
 )
+from django_filters.fields import ChoiceField
 from graphql_client import JSONObject, graphql_payload
 from strawberry import relay
 from strawberry.schema.name_converter import HasGraphQLName, NameConverter
@@ -628,6 +635,362 @@ def test_deferred_choices_are_evaluated_per_request_never_at_schema_build(
 
     assert _picked(schema, "good") == _GOOD_OR_LOWER
     assert len(calls) == 1
+
+
+def _csv_class(name: str, wrapper: type[Filter], member: type[Filter]) -> type[Filter]:
+    """The CSV class ``wrapper`` over ``member``, as django-filter's ``filter_for_lookup`` builds one."""
+    built: type[Filter] = type(name, (wrapper, member), {})
+    return built
+
+
+#: A CSV ``in`` whose members are ``DateRangeFilter``'s fixed date-range keys.
+_DateRangesInFilter = _csv_class("DateRangesInFilter", BaseInFilter, DateRangeFilter)
+#: A CSV ``range`` whose two bounds are ``DateRangeFilter``'s date-range keys.
+_DateRangesRangeFilter = _csv_class("DateRangesRangeFilter", BaseRangeFilter, DateRangeFilter)
+#: A CSV ``in`` whose every member its form reads as a list of choices.
+_MultipleChoicesInFilter = _csv_class(
+    "MultipleChoicesInFilter",
+    BaseInFilter,
+    MultipleChoiceFilter,
+)
+#: A CSV ``in`` whose members its form validates against its own ``choices``.
+_ChoicesInFilter = _csv_class("ChoicesInFilter", BaseInFilter, ChoiceFilter)
+
+
+class _AnyValueChoiceField(ChoiceField):
+    """A consumer choice form whose ``valid_value`` accepts any value, its keys or not."""
+
+    @override
+    def valid_value(self, value: object) -> bool:
+        return True
+
+
+class _UncheckedChoiceField(ChoiceField):
+    """A consumer choice form whose ``validate`` checks no value against its keys."""
+
+    @override
+    def validate(self, value: object) -> None:
+        _ = value
+
+
+#: A CSV ``in`` whose member form accepts any value in ``valid_value``.
+_AnyValueChoicesInFilter = _csv_class(
+    "AnyValueChoicesInFilter",
+    BaseInFilter,
+    type("AnyValueChoiceFilter", (ChoiceFilter,), {"field_class": _AnyValueChoiceField}),
+)
+#: A CSV ``in`` whose member form validates nothing in ``validate``.
+_UncheckedChoicesInFilter = _csv_class(
+    "UncheckedChoicesInFilter",
+    BaseInFilter,
+    type("UncheckedChoiceFilter", (ChoiceFilter,), {"field_class": _UncheckedChoiceField}),
+)
+
+
+class _TypedChoicesInFilter(BaseInFilter, TypedChoiceFilter):
+    """A consumer CSV ``in`` whose members its form coerces after validating its own ``choices``."""
+
+
+class _DatesRangeFilter(BaseRangeFilter, DateFilter):
+    """A consumer CSV ``range`` whose two bounds its form cleans as dates."""
+
+
+def _overridden_specimen_schema(
+    column: str,
+    lookup: str,
+    filter_class: type[Filter],
+) -> DjangoSchema:
+    """Serve specimens through a set whose ``column`` leaf ``Meta.filter_overrides`` selects."""
+
+    class OverrideDeclarationFilter(FilterSet):
+        class Meta:
+            model = ScalarSpecimen
+            fields = {column: [lookup]}
+            filter_overrides = {TextField: {"filter_class": filter_class}}
+
+    class OverrideDeclarationNode(DjangoType):
+        class Meta:
+            model = ScalarSpecimen
+            fields = ("id", "label")
+            interfaces = (relay.Node,)
+            filterset_class = OverrideDeclarationFilter
+
+    @strawberry.type
+    class Query:
+        rows: DjangoConnection[OverrideDeclarationNode] = DjangoConnectionField(
+            OverrideDeclarationNode,
+        )
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+def _no_value(
+    subject: str,
+    column: str,
+    form: str,
+    lookup: str,
+) -> str:
+    """The refusal of a leaf whose own form and lookup answer no value of its column."""
+    return (
+        f"{subject} is published as {column} values, but its own form field ({form}) and "
+        f"lookup {lookup!r} answer no value of that column, so every value of its input would "
+        "be refused or would constrain nothing (match every row); filter a transform of the "
+        'column whose output its form cleans (a TimeFilter on `field_name="<column>__time"`), '
+        "declare a filter class whose form cleans the column's kind, or read the value in "
+        "`method=`."
+    )
+
+
+@pytest.mark.parametrize(
+    ("make_schema", "expected"),
+    [
+        pytest.param(
+            lambda: _declared_choice_schema(
+                ScalarSpecimen,
+                _DateRangesInFilter(field_name="label", lookup_expr="in"),
+            ),
+            _no_value(
+                "ChoiceDeclarationFilter: DateRangesInFilter on 'label'",
+                "ScalarSpecimen.label",
+                "ChoiceInField",
+                "in",
+            ),
+            id="date-range-keys-in-on-text",
+        ),
+        pytest.param(
+            lambda: _overridden_specimen_schema("label", "in", DateRangeFilter),
+            _no_value(
+                "OverrideDeclarationFilter: DateRangeInFilter on 'label'",
+                "ScalarSpecimen.label",
+                "ChoiceInField",
+                "in",
+            ),
+            id="override-date-range-keys-in-on-text",
+        ),
+        pytest.param(
+            lambda: _declared_choice_schema(
+                ScalarSpecimen,
+                _DateRangesRangeFilter(field_name="occurred_on", lookup_expr="range"),
+            ),
+            _no_value(
+                "ChoiceDeclarationFilter: DateRangesRangeFilter on 'occurred_on'",
+                "ScalarSpecimen.occurred_on",
+                "ChoiceRangeField",
+                "range",
+            ),
+            id="date-range-keys-range-on-a-date",
+        ),
+        pytest.param(
+            lambda: _declared_choice_schema(
+                ScalarSpecimen,
+                _DateRangesRangeFilter(field_name="label", lookup_expr="range"),
+            ),
+            _no_value(
+                "ChoiceDeclarationFilter: DateRangesRangeFilter on 'label'",
+                "ScalarSpecimen.label",
+                "ChoiceRangeField",
+                "range",
+            ),
+            id="date-range-keys-range-on-text",
+        ),
+        pytest.param(
+            lambda: _declared_choice_schema(
+                ScalarSpecimen,
+                _MultipleChoicesInFilter(
+                    field_name="label",
+                    lookup_expr="in",
+                    choices=[("alpha", "Alpha")],
+                ),
+            ),
+            _no_value(
+                "ChoiceDeclarationFilter: MultipleChoicesInFilter on 'label'",
+                "ScalarSpecimen.label",
+                "MultipleChoiceInField",
+                "in",
+            ),
+            id="multiple-choice-members-in-on-text",
+        ),
+        pytest.param(
+            lambda: _declared_choice_schema(
+                Shelf,
+                _MultipleChoicesInFilter(
+                    field_name="condition",
+                    lookup_expr="in",
+                    choices=Shelf.Condition.choices,
+                ),
+            ),
+            _no_value(
+                "ChoiceDeclarationFilter: MultipleChoicesInFilter on 'condition'",
+                "Shelf.condition",
+                "MultipleChoiceInField",
+                "in",
+            ),
+            id="multiple-choice-members-in-on-a-choice-column",
+        ),
+        pytest.param(
+            lambda: _declared_choice_schema(
+                ScalarSpecimen,
+                _ChoicesInFilter(field_name="occurred_on", lookup_expr="in", choices=[("x", "X")]),
+            ),
+            _no_value(
+                "ChoiceDeclarationFilter: ChoicesInFilter on 'occurred_on'",
+                "ScalarSpecimen.occurred_on",
+                "ChoiceInField",
+                "in",
+            ),
+            id="disjoint-choices-in-on-a-date",
+        ),
+    ],
+)
+def test_a_csv_declaration_no_value_of_its_column_answers_refuses_the_schema(
+    make_schema: Callable[[], DjangoSchema],
+    expected: str,
+) -> None:
+    """A CSV leaf whose own form and lookup answer no value of its column is refused at build.
+
+    Each is asked as a request asks it, whatever the column: a choice form by each key of its
+    own choices (a ``DateRangeFilter``'s fixed keys, which its own ``filter`` cannot look up
+    as a list, or a key no date spells), any other form by the column's samples, and a
+    ``MultipleChoiceField`` member reads no single value. ``BaseRangeField`` and
+    ``BaseCSVField`` clean each member through django-filter's and Django's own classes, so
+    the wrapper is asked as its member is.
+    """
+    with pytest.raises(ConfigurationError) as exc:
+        _ = make_schema()
+
+    assert str(exc.value) == expected
+
+
+def _specimens() -> None:
+    for day, label, signed_big in ((1, "", 1), (2, "alpha", 2), (3, "beta", 3)):
+        _ = ScalarSpecimen.objects.create(
+            label=label,
+            occurred_on=datetime.date(2024, 1, day),
+            occurred_at=datetime.datetime(2024, 1, day, 12, tzinfo=datetime.timezone.utc),
+            occurred_time=datetime.time(day),
+            external_id=uuid.UUID(int=day),
+            signed_big=signed_big,
+            price=decimal.Decimal(day) + decimal.Decimal("0.5"),
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "declared",
+        "lookup",
+        "value",
+        "labels",
+    ),
+    [
+        pytest.param(
+            lambda: _ChoicesInFilter(
+                field_name="occurred_on",
+                lookup_expr="in",
+                choices=[("2024-01-02", "Second"), ("2024-01-03", "Third")],
+            ),
+            "in",
+            '["2024-01-02"]',
+            ["alpha"],
+            id="date-keys-in-on-a-date",
+        ),
+        pytest.param(
+            lambda: _DatesRangeFilter(field_name="occurred_on", lookup_expr="range"),
+            "range",
+            '["2024-01-02", "2024-01-03"]',
+            ["alpha", "beta"],
+            id="dates-range-on-a-date",
+        ),
+        pytest.param(
+            lambda: _ChoicesInFilter(
+                field_name="label",
+                lookup_expr="in",
+                choices=[("", "Blank")],
+            ),
+            "in",
+            '[""]',
+            [""],
+            id="blank-key-in-on-text",
+        ),
+        pytest.param(
+            lambda: _ChoicesInFilter(field_name="label", lookup_expr="in"),
+            "in",
+            '[""]',
+            [""],
+            id="no-choices-in-on-text",
+        ),
+        pytest.param(
+            lambda: _TypedChoicesInFilter(
+                field_name="signed_big",
+                lookup_expr="in",
+                choices=[(1, "One"), (2, "Two")],
+                coerce=int,
+            ),
+            "in",
+            "[2]",
+            ["alpha"],
+            id="integer-keys-in-on-a-big-integer",
+        ),
+        pytest.param(
+            lambda: _TypedChoicesInFilter(
+                field_name="price",
+                lookup_expr="in",
+                choices=[("all", "All"), ("1.5", "One and a half")],
+                coerce=decimal.Decimal,
+            ),
+            "in",
+            '["1.5"]',
+            [""],
+            id="decimal-coerce-keys-in-on-a-decimal",
+        ),
+        pytest.param(
+            lambda: _AnyValueChoicesInFilter(
+                field_name="occurred_on",
+                lookup_expr="in",
+                choices=[("x", "X")],
+            ),
+            "in",
+            '["2024-01-02"]',
+            ["alpha"],
+            id="consumer-valid-value-off-its-keys-on-a-date",
+        ),
+        pytest.param(
+            lambda: _UncheckedChoicesInFilter(
+                field_name="occurred_on",
+                lookup_expr="in",
+                choices=[("x", "X")],
+            ),
+            "in",
+            '["2024-01-03"]',
+            ["beta"],
+            id="consumer-validate-off-its-keys-on-a-date",
+        ),
+    ],
+)
+@pytest.mark.django_db
+def test_a_csv_declaration_some_value_of_its_column_answers_serves_it(
+    declared: Callable[[], Filter],
+    lookup: str,
+    value: str,
+    labels: list[str],
+) -> None:
+    """A CSV leaf one value of its column answers builds and filters by the value sent.
+
+    A choice form's keys spelling the column's values (dates, the blank text its own or
+    django-filter's empty choice declares, integers its ``coerce=int`` reads, the decimal
+    its ``coerce=Decimal`` reads beside a key it cannot parse) and a
+    ``BaseRangeFilter`` over a ``DateFilter`` each answer, so the schema builds and the request
+    selects exactly the rows the value names. A choice form whose ``validate`` or
+    ``valid_value`` is the consumer's accepts values off its keys, so it is asked the column's
+    samples instead, and serves the date sent though no key spells it.
+    """
+    _specimens()
+    schema = _declared_choice_schema(ScalarSpecimen, declared(), ("id", "label"))
+
+    assert _post(
+        schema,
+        f"{{ rows(filter: {{pick: {{{lookup}: {value}}}}}) {{ edges {{ node {{ label }} }} }} }}",
+    ) == {"data": {"rows": {"edges": [{"node": {"label": label}} for label in labels]}}}
 
 
 def test_same_named_ranges_with_different_axis_scalars_publish_distinct_inputs() -> None:

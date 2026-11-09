@@ -36,7 +36,7 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.lookups import FieldGetDbPrepValueMixin
-from django.utils.choices import CallableChoiceIterator, normalize_choices
+from django.utils.choices import CallableChoiceIterator, flatten_choices, normalize_choices
 from django.utils.functional import LazyObject, Promise
 from django_filters import (
     ChoiceFilter,
@@ -75,6 +75,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_list_or_tuple,
     is_mapping,
     is_queryset,
+    list_of,
     optional_annotation,
     read_attr,
     require,
@@ -566,7 +567,11 @@ def _form_value_fields(filter_instance: Filter) -> tuple[object, ...]:
     ``TimeRangeField`` kin) cleans each axis with one of its ``fields``, so those answer.
     Empty for a filter whose form field is not built unbound.
     """
-    form_field = _declared_form_field(filter_instance)
+    return _value_fields_of(_declared_form_field(filter_instance))
+
+
+def _value_fields_of(form_field: object) -> tuple[object, ...]:
+    """Return the fields of a built ``form_field`` cleaning one value (``_form_value_fields``)."""
     if form_field is None:
         return ()
     if isinstance(form_field, forms.MultiValueField):
@@ -598,13 +603,15 @@ _CLEANED_KINDS: Mapping[type[forms.Field], object] = MappingProxyType(
 )
 
 
-#: The form fields cleaning each value through their ``coerce`` (``_cleaned_kind``).
+#: The form fields cleaning each value through their ``coerce`` (``_cleaned_kind``,
+#: ``_cleans_in_shipped_code``).
 _COERCING_FORM_FIELDS: tuple[type[forms.Field], ...] = (
     forms.TypedChoiceField,
     forms.TypedMultipleChoiceField,
 )
 
-#: The methods whose own definition changes what a form field cleans (``_keeps_cleaning_of``).
+#: The methods whose own definition changes what a form field cleans (``_keeps_cleaning_of``,
+#: ``_cleans_in_shipped_code``).
 _CLEANING_METHODS: tuple[str, ...] = ("to_python", "clean", "_coerce")
 
 
@@ -649,6 +656,44 @@ def _cleaned_kind(form_field: object) -> object | None:
     if entry is None or not _keeps_cleaning_of(form_class, entry[0]):
         return None
     return entry[1]
+
+
+#: The packages whose form-field classes the no-value ask runs: Django's and django-filter's
+#: (``_cleans_in_shipped_code``).
+_SHIPPED_FORM_PACKAGES = frozenset(
+    {truth.module(forms.Field).partition(".")[0], truth.module(BaseCSVField).partition(".")[0]},
+)
+
+
+def _is_shipped_code(obj: object) -> bool:
+    """Whether the class or function ``obj`` is defined in a ``_SHIPPED_FORM_PACKAGES`` package."""
+    return truth.module(obj).partition(".")[0] in _SHIPPED_FORM_PACKAGES
+
+
+def _cleans_in_shipped_code(form_field: object) -> bool:
+    """Whether every cleaning ``form_field`` runs is Django's or django-filter's own code.
+
+    Each class of the form field's real MRO whose own namespace defines a cleaning method
+    (``_CLEANING_METHODS``) is read for the module defining it, as
+    ``filters/sets.py::_runs_shipped_filter`` reads ``filter``: every class is read, not only
+    the one resolving ``clean``, since django-filter's ``BaseCSVField`` and ``BaseRangeField``
+    clean each member through the classes after them. A ``TypedChoiceField`` /
+    ``TypedMultipleChoiceField`` also runs its ``coerce``: a class (``coerce=int``) or a
+    function shipped code defines (Django's identity default). A consumer class or
+    ``coerce`` function defining its own cleaning is a parser with its own syntax; a
+    ``coerce`` that is a class, a consumer's included (a ``TextChoices``), is asked, so the
+    build calls it with each sample.
+    """
+    form_class: type[object] = truth.class_of(form_field)
+    if any(truth.is_subclass(form_class, base) for base in _COERCING_FORM_FIELDS):
+        coerce = read_attr(form_field, "coerce", None)
+        if not truth.is_type(coerce) and not _is_shipped_code(coerce):
+            return False
+    return all(
+        _is_shipped_code(klass)
+        for klass in truth.mro(form_class)
+        if any(name in truth.class_dict(klass) for name in _CLEANING_METHODS)
+    )
 
 
 #: The kinds ``json.JSONEncoder`` encodes without calling ``default`` (the stdlib ``json``
@@ -897,7 +942,7 @@ def _published_samples(element: object) -> tuple[object, ...]:
     A choice column's enum holds every value: each member outside ``EMPTY_VALUES``, which a
     filter skips as no constraint (``_refuse_choices_off_the_column`` asks the same set). A
     scalar answers its row in ``_SCALAR_SAMPLES``; any other (text, a consumer ``SCALAR_MAP``
-    entry) none, and its leaf is not asked.
+    entry) none, so its leaf is asked only its choice form's keys (``_asked_samples``).
     """
     if truth.is_subclass(element, enum.Enum):
         return tuple(member for member in element if enum_value(member) not in EMPTY_VALUES)
@@ -905,6 +950,32 @@ def _published_samples(element: object) -> tuple[object, ...]:
         (samples for kind, samples in _SCALAR_SAMPLES.items() if kind is element),
         (),
     )
+
+
+def _asked_samples(
+    filter_instance: Filter,
+    element: object,
+    form_field: object,
+) -> tuple[object, ...] | None:
+    """Return the values the no-value ask hands the filter's form, ``None`` when it is not asked.
+
+    A choice column's enum is every value its input carries (``_published_samples``). On a
+    column without ``choices``, a form whose values are its own choices
+    (``_form_choice_samples``: eager choices, Django's own ``validate`` and ``valid_value``)
+    is asked each of its keys, as a client sends it (text as text; a typed scalar the form
+    reads as the text the key spells, so a key no value of the column spells is asked anyway
+    and builds), and a form declaring none answers no value; that ``validate`` passes each
+    key and nothing else, so the probe's ``validate`` being off decides nothing for it. Any
+    other form (deferred choices, a consumer ``validate`` or ``valid_value``) is asked the
+    published scalar's samples with ``validate`` off; a text scalar has none (the form
+    parses text by its own syntax, which no finite sample covers), nor does a consumer
+    ``SCALAR_MAP`` scalar, and the leaf is not asked.
+    """
+    if not truth.is_subclass(element, enum.Enum):
+        keys = _form_choice_samples(filter_instance, form_field)
+        if keys is not None:
+            return keys
+    return _published_samples(element) or None
 
 
 def _validates_nothing(value: object) -> None:
@@ -961,15 +1032,17 @@ def _answers_sample(
     (``Lookup.get_prep_lookup``) without running SQL.
     A form refusing the value (``ValidationError``; the ``AttributeError`` a temporal form
     raises stripping a kind it reads only as text; the ``TypeError`` a ``JSONField`` form
-    raises decoding one), a column refusing what the form cleaned
-    (``filters/sets.py::_PREPARATION_REFUSALS``, what ``_unbindable_predicate`` reads as a
-    value the query cannot bind), and a cleaned value applied as no constraint (a
-    ``BooleanFilter``'s ``None``) answer no. A validator or a ``validate`` bounds which
-    values of the kind pass (``min_value``, a slug's or an email's syntax, a consumer's
-    ``validate`` reading the database), never whether the form reads the kind (Django
-    reads the kind in ``to_python``), and no sample speaks for every bound, so neither
-    runs and no query does. A predicate Django resolves on no queryset never reaches here:
-    the set refused it when it published (``filters/base.py::refuse_unresolvable_lookup``).
+    raises decoding one; the ``decimal.InvalidOperation`` a ``coerce=Decimal`` raises for a
+    key it cannot parse, which Django's ``TypedChoiceField._coerce`` leaves uncaught), a
+    column refusing what the form cleaned (``filters/sets.py::_PREPARATION_REFUSALS``, what
+    ``_unbindable_predicate`` reads as a value the query cannot bind), and a cleaned value
+    applied as no constraint (a ``BooleanFilter``'s ``None``) answer no. A validator or a
+    ``validate`` bounds which values of the kind pass (``min_value``, a slug's or an email's
+    syntax, a consumer's ``validate`` reading the database), never whether the form reads the
+    kind (Django reads the kind in ``to_python``), and no sample speaks for every bound, so
+    neither runs and no query does. A predicate Django resolves on no queryset never reaches
+    here: the set refused it when it published
+    (``filters/base.py::refuse_unresolvable_lookup``).
     """
     from .sets import _PREPARATION_REFUSALS  # noqa: PLC0415 - import cycle
 
@@ -981,7 +1054,15 @@ def _answers_sample(
         field.validate = _validates_nothing
     try:
         cleaned = object_result(form_field.clean, form_value)
-    except (ValidationError, AttributeError, TypeError):
+    # ``TypedChoiceField._coerce`` turns only ``ValueError``, ``TypeError`` and
+    # ``ValidationError`` into its refusal, so a ``coerce=Decimal`` key no decimal spells
+    # reaches here as ``decimal.InvalidOperation``.
+    except (
+        ValidationError,
+        AttributeError,
+        TypeError,
+        decimal.InvalidOperation,
+    ):
         return False
     with warnings.catch_warnings():
         # A lossy preparation's warning (a ``date`` on a ``DateTimeField``) belongs to no query.
@@ -1006,14 +1087,16 @@ def _refuse_form_serving_no_value(
     ``TimeFilter`` on a ``DateTimeField`` is ``DateTime`` and its ``TimeField`` cannot read a
     ``datetime``; a ``UUIDFilter`` on an ``IntegerField`` reads no integer; a
     ``DurationFilter`` on an ``IntegerField`` cleans a ``timedelta`` the column cannot
-    prepare; a ``BooleanFilter`` on a ``DateField`` cleans every date to no constraint. Each
-    sample of the published ``element`` (``_published_samples``), turned by ``form_value``
-    into what the arm hands the form (``normalize_input_value``, ``_member_list``,
-    ``_range_bounds``), is asked of the form and the lookup (``_answers_sample``); a leaf
-    answering none is a declaration no value of its input can serve, refused naming the
-    column, its form field, the lookup and the advice. One answered sample builds, so a leaf
-    answering some values (``DateFilter`` on a ``DateTimeField``, ``CharFilter`` on an
-    integer) is never refused.
+    prepare; a ``BooleanFilter`` on a ``DateField`` cleans every date to no constraint; a
+    ``DateRangeFilter`` inside a CSV ``in`` or ``range`` hands its own ``filter`` a list it
+    cannot look up, and a ``MultipleChoiceField`` member reads no single value. Each sample
+    (``_asked_samples``: the published ``element``'s, or the keys of a choice form's own
+    choices on a column without ``choices``), turned by ``form_value`` into what the arm
+    hands the form (``normalize_input_value``, ``_member_list``, ``_range_bounds``), is asked
+    of the form and the lookup (``_answers_sample``); a leaf answering none is a declaration
+    no value of its input can serve, refused naming the column, its form field, the lookup
+    and the advice. One answered sample builds, so a leaf answering some values
+    (``DateFilter`` on a ``DateTimeField``, ``CharFilter`` on an integer) is never refused.
 
     The leaf asked is the filter the consumer wrote, on the set declaring it
     (``_declaration_of``: a ``RelatedFilter`` expansion's copy is its child filter on the
@@ -1021,13 +1104,14 @@ def _refuse_form_serving_no_value(
     ``Meta.filter_overrides`` selection (``filters/sets.py::filter_generation_provenance``),
     never a generated leaf, whose class django-filter selects for the column. A ``method=``
     filter or a consumer ``filter`` override (``filters/sets.py::_runs_shipped_filter``) owns
-    what its value means, a form field whose class defines its own cleaning
-    (``_cleaned_kind``) is a consumer's parser, and a column converting in its own
+    what its value means, a form field any consumer class or ``coerce`` cleans
+    (``_cleans_in_shipped_code``) is a consumer's parser, a model-choice form field cleans
+    by querying its queryset (the probe runs no query), and a column converting in its own
     ``to_python`` / ``get_prep_value`` (a relation's target key included,
-    ``_django_converts``) or a lookup preparing in its own
-    ``get_prep_lookup`` (``_django_resolves``) is consumer code bounding which values
-    pass, so none is asked. A transform, a column holding values as given, a package
-    column-cleaned filter and a null test type their leaf on other arms.
+    ``_django_converts``) or a lookup preparing in its own ``get_prep_lookup``
+    (``_django_resolves``) is consumer code bounding which values pass, so none is asked. A
+    transform, a column holding values as given, a package column-cleaned filter and a null
+    test type their leaf on other arms.
     """
     from .sets import (  # noqa: PLC0415 - import cycle
         _FRAMEWORK_GENERATED_ORIGINS,
@@ -1054,17 +1138,19 @@ def _refuse_form_serving_no_value(
         or (operand.lookup is not None and not _django_resolves(operand.lookup, "get_prep_lookup"))
     ):
         return
-    form_fields = _form_value_fields(declared)
+    form_field = _declared_form_field(declared)
+    form_fields = _value_fields_of(form_field)
     model = _filterset_model(owner)
-    samples = _published_samples(element)
     if (
         model is None
-        or not samples
         or not form_fields
-        or any(_cleaned_kind(form_field) is None for form_field in form_fields)
-        or any(
-            _answers_sample(declared, model, form_value(declared, sample)) for sample in samples
-        )
+        or any(isinstance(field, forms.ModelChoiceField) for field in form_fields)
+        or not all(_cleans_in_shipped_code(field) for field in form_fields)
+    ):
+        return
+    samples = _asked_samples(declared, element, form_field)
+    if samples is None or any(
+        _answers_sample(declared, model, form_value(declared, sample)) for sample in samples
     ):
         return
     form_kind = ", ".join(sorted({truth.kind(form_field) for form_field in form_fields}))
@@ -1358,21 +1444,12 @@ def _refuse_choices_off_the_column(
     input can serve, so it is refused naming the column. A filter whose form field is no
     ``ChoiceField`` (a ``CharFilter`` over a choices column), a model-choice field, a field
     built only per request (``AllValuesFilter``, ``_declared_form_field``) and ``choices``
-    evaluated per form build are not asked: this check never evaluates a callable or lazy
-    (``lazy()`` promise, ``SimpleLazyObject``) ``choices``, which may read the database. A
-    callable is one ``normalize_choices`` wraps in a ``CallableChoiceIterator``; a
-    ``Choices`` class is no such callable (Django reads its ``.choices``), so it is asked.
+    evaluated per form build are not asked: this check never evaluates a callable, lazy
+    (``lazy()`` promise, ``SimpleLazyObject``) or ``QuerySet`` ``choices``, which may read the
+    database (``_defers_choices``); a ``Choices`` class is asked.
     """
-    choices = dict_of(filter_instance.extra).get("choices")
-    if truth.is_one_of(choices, (Promise, LazyObject)) or (
-        callable(choices) and isinstance(normalize_choices(choices), CallableChoiceIterator)
-    ):
-        return
-    form_field = _declared_form_field(filter_instance)
-    if not isinstance(form_field, forms.ChoiceField) or isinstance(
-        form_field,
-        forms.ModelChoiceField,
-    ):
+    form_field = _eager_choice_form_field(filter_instance, _declared_form_field(filter_instance))
+    if form_field is None:
         return
     checked = [value for value in map(enum_value, choice_enum) if value not in EMPTY_VALUES]
     if not checked or any(form_field.valid_value(value) for value in checked):
@@ -1388,6 +1465,79 @@ def _refuse_choices_off_the_column(
         "`DateFromToRangeFilter`, its lookups in Meta.fields, or `CharFilter(method=...)` for "
         "a method filter).",
     )
+
+
+def _defers_choices(filter_instance: Filter) -> bool:
+    """Whether the filter's ``choices`` are evaluated only by the form each request builds.
+
+    A callable (one Django's ``normalize_choices`` wraps in a ``CallableChoiceIterator``), a
+    lazy value (``lazy()`` promise, ``SimpleLazyObject``) and a ``QuerySet`` may read the
+    database, so the build never evaluates them; a ``Choices`` class is no such callable
+    (Django reads its ``.choices``).
+    """
+    choices = dict_of(filter_instance.extra).get("choices")
+    return (
+        truth.is_one_of(choices, (Promise, LazyObject))
+        or is_queryset(choices)
+        or (callable(choices) and isinstance(normalize_choices(choices), CallableChoiceIterator))
+    )
+
+
+def _eager_choice_form_field(
+    filter_instance: Filter,
+    form_field: object,
+) -> forms.ChoiceField | None:
+    """Return the built ``form_field`` as a ``ChoiceField`` whose choices the build may read.
+
+    ``None`` when it is no ``ChoiceField`` (the multiple-choice and typed kin are), when it
+    is a model-choice field (its choices are a queryset), and when the filter's ``choices``
+    are deferred (``_defers_choices``): the form field is built lazily, so only reading its
+    ``choices`` would evaluate them.
+    """
+    if (
+        _defers_choices(filter_instance)
+        or not isinstance(form_field, forms.ChoiceField)
+        or isinstance(form_field, forms.ModelChoiceField)
+    ):
+        return None
+    return form_field
+
+
+#: The ``ChoiceField`` methods deciding which values its form accepts (``_validates_its_keys``).
+_CHOICE_VALIDATION_METHODS: tuple[str, ...] = ("validate", "valid_value")
+
+
+def _validates_its_keys(form_field: forms.ChoiceField) -> bool:
+    """Whether ``form_field`` accepts its own choices' keys and nothing else, as Django's does.
+
+    Its class's ``validate`` and ``valid_value`` (``_CHOICE_VALIDATION_METHODS``), each the
+    function its real MRO resolves, are read for the module defining them, as
+    ``_django_resolves`` reads a method: a consumer override accepting values off its keys
+    widens which values pass, so the keys do not stand in for it.
+    """
+    form_class = truth.class_of(form_field)
+    return all(
+        _is_shipped_code(truth.stored_function(truth.mro_attr(form_class, name)))
+        for name in _CHOICE_VALIDATION_METHODS
+    )
+
+
+def _form_choice_samples(filter_instance: Filter, form_field: object) -> tuple[object, ...] | None:
+    """Return the values the filter's built choice ``form_field`` accepts, ``None`` for any other.
+
+    Django's and django-filter's ``ChoiceField`` ``validate`` accepts its own choices' keys and
+    nothing else, so its values are those keys (``flatten_choices`` opens Django's option
+    groups); django-filter's empty and null choices included, since whether a key constrains
+    anything is asked of the filter's own ``filter`` (``_answers_sample``: a scalar ``""`` is
+    skipped, a CSV member ``""`` compares). ``None`` where the form is no ``ChoiceField``
+    whose choices the build may read (``_eager_choice_form_field``) or one whose
+    ``validate`` / ``valid_value`` is a consumer's (``_validates_its_keys``).
+    """
+    choice_field = _eager_choice_form_field(filter_instance, form_field)
+    if choice_field is None or not _validates_its_keys(choice_field):
+        return None
+    pairs = list_of(object_result(flatten_choices, choice_field.choices))
+    return tuple(list_of(pair)[0] for pair in pairs)
 
 
 def _unnameable_lookup_refusal(
