@@ -25,7 +25,7 @@ applies the leaves that cleaned.
 
 import contextlib
 import datetime
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from decimal import Decimal
 from functools import wraps
 from typing import TYPE_CHECKING, NamedTuple
@@ -45,6 +45,7 @@ from django.db.models import (
     ExpressionWrapper,
     F,
     Field,
+    FilteredRelation,
     IntegerField,
     Lookup,
     Model,
@@ -75,7 +76,11 @@ from django_strawberry_framework.filters import (
     RelatedFilter,
 )
 from django_strawberry_framework.filters.base import _lookup_operand, _model_lookup_operand
-from django_strawberry_framework.utils._narrowing import require_instance
+from django_strawberry_framework.utils._narrowing import (
+    is_list_or_tuple,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._cleaned_filter_sets import (
     KEPT_EXTERNAL_ID,
@@ -1368,6 +1373,10 @@ def _annotated_set(parent: str) -> type[BaseFilterSet]:
             "kids_among": ListFilter(field_name="kids", lookup_expr="in"),
             "kids_span": RangeFilter(field_name="kids", lookup_expr="range"),
             "kids_sent": ListFilter(field_name="kids", lookup_expr="in", method="kids_as_sent"),
+            "par_span": RangeFilter(field_name="par", lookup_expr="signed_big__range"),
+            "par_among": ListFilter(field_name="par", lookup_expr="signed_big__in"),
+            "offspring_among": ListFilter(field_name="offspring", lookup_expr="in"),
+            "offspring_array": ArrayFilter(field_name="offspring", lookup_expr="in"),
             "kids_as_sent": _kids_as_sent,
             "Meta": type("Meta", (), {"model": models.ScalarSpecimen, "fields": ()}),
         },
@@ -1402,6 +1411,11 @@ def _annotation_schema() -> DjangoSchema:
                 ),
                 kids=Count("children"),
             ).order_by("label")
+            if query.startswith(("par_", "offspring_")):
+                queryset = queryset.alias(
+                    par=FilteredRelation("parent"),
+                    offspring=FilteredRelation("children"),
+                )
             filterset = _annotated_set(parent)(data=QueryDict(query), queryset=queryset)
             if not filterset.is_valid():
                 errors = [
@@ -1487,6 +1501,58 @@ def test_a_raw_value_over_a_queryset_annotation_is_cleaned_as_the_queryset_compa
         "annotationRows(parent: $parent, query: $query, handed: true) { errors rows } }",
         {"parent": parent, "query": query},
     ) == {"data": {"annotationRows": {"errors": errors, "rows": rows}}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize(
+    ("query", "rows"),
+    [
+        pytest.param(
+            f"par_span_0=7&par_span_1={2**63}",
+            ["child"],
+            id="continued-alias-range",
+        ),
+        pytest.param("par_among=7.5", [], id="continued-alias-fraction"),
+        pytest.param(
+            "offspring_among=-1e999999999999999999",
+            [],
+            id="reverse-alias-extreme-list",
+        ),
+        pytest.param(
+            "offspring_among={child},-1e999999999999999999",
+            ["parent"],
+            id="reverse-alias-mixed-list",
+        ),
+        pytest.param(
+            "offspring_array=-1e999999999999999999",
+            [],
+            id="reverse-alias-extreme-array",
+        ),
+        pytest.param(
+            "offspring_array={child},-1e999999999999999999",
+            ["parent"],
+            id="reverse-alias-mixed-array",
+        ),
+    ],
+)
+def test_raw_filters_under_both_parents_clean_continued_and_reverse_alias_values(
+    parent: str,
+    query: str,
+    rows: list[str],
+) -> None:
+    """Raw QueryDict paths use the handed alias and hold before target-key coercion."""
+    parent_row = cleaned_specimen("parent", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = parent_row
+    child.save(update_fields=["parent"])
+    payload = _post(
+        _annotation_schema(),
+        "query($parent: String!, $query: String!) { "
+        "annotationRows(parent: $parent, query: $query, handed: true) { errors rows } }",
+        {"parent": parent, "query": query.format(child=saved_pk(child))},
+    )
+    assert payload == {"data": {"annotationRows": {"errors": [], "rows": rows}}}, payload
 
 
 @pytest.mark.django_db
@@ -1671,6 +1737,197 @@ def test_a_raw_form_refuses_what_its_typed_input_refuses(
         "data": {"rawErrors": errors, "rawRows": [{"label": label} for label in labels]},
     }, result
     assert len(recorded) == 1, recorded
+
+
+@pytest.mark.django_db
+def test_reused_generated_meta_forms_keep_one_current_owner_around_consumer_clean() -> None:
+    """A generated form may be reused twice; the final set owns the entire clean."""
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("other", kept=False)
+
+    class SourceSet(FilterSet):
+        after = django_filters.NumberFilter(field_name="signed_big", lookup_expr="gt")
+
+        class Meta:
+            model = models.ScalarSpecimen
+            fields = []
+
+    source_form = type(SourceSet(queryset=models.ScalarSpecimen.objects.all()).form)
+
+    class MiddleSet(SourceSet):
+        class Meta(SourceSet.Meta):
+            form: type[forms.Form] = source_form
+
+    middle_form = type(MiddleSet(queryset=models.ScalarSpecimen.objects.all()).form)
+    calls: list[str] = []
+
+    def consumer_full_clean(self: forms.Form) -> None:
+        calls.append("before")
+        middle_form.full_clean(self)
+        if self.cleaned_data.get("after") == Decimal(99999):
+            self.cleaned_data["after"] = Decimal(2000)
+        calls.append("after")
+
+    def consumer_clean(self: forms.Form) -> dict[str, object]:
+        calls.append("clean")
+        return middle_form.clean(self) or {}
+
+    consumer_form = type(
+        "ConsumerForm",
+        (middle_form,),
+        {"full_clean": consumer_full_clean, "clean": consumer_clean},
+    )
+
+    class CurrentSet(MiddleSet):
+        after = django_filters.NumberFilter(field_name="occurred_on__year", lookup_expr="gt")
+
+        class Meta(MiddleSet.Meta):
+            form: type[forms.Form] = consumer_form
+
+    class RawRow(DjangoType):
+        class Meta:
+            model = models.ScalarSpecimen
+            fields = ("label",)
+
+    def bound(query: str) -> CurrentSet:
+        return CurrentSet(
+            data=QueryDict(query),
+            queryset=models.ScalarSpecimen.objects.order_by("label"),
+        )
+
+    @strawberry.type
+    class Query:
+        def _raw_errors(self, query: str) -> dict[str, object]:
+            return require_instance(bound(query).errors, ErrorDict).get_json_data()
+
+        raw_errors: dict[str, object] = strawberry.field(resolver=_raw_errors, graphql_type=JSON)
+
+        def _raw_rows(self, query: str) -> QuerySet[models.ScalarSpecimen]:
+            return bound(query).qs
+
+        raw_rows: QuerySet[models.ScalarSpecimen] = strawberry.field(
+            resolver=_raw_rows,
+            graphql_type=list[RawRow],
+        )
+
+        def _typed_rows(
+            self,
+            info: strawberry.Info[object, object],
+            where: JSON,
+        ) -> QuerySet[models.ScalarSpecimen]:
+            return CurrentSet.apply_sync(
+                json_object(where),
+                models.ScalarSpecimen.objects.order_by("label"),
+                info,
+            )
+
+        typed_rows: QuerySet[models.ScalarSpecimen] = strawberry.field(
+            resolver=_typed_rows,
+            graphql_type=list[RawRow],
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(query=Query, config=strawberry_config(), error_policy={"enabled": False})
+    assert _post(
+        schema,
+        "query($query: String!) { rawErrors(query: $query) }",
+        {"query": "after=99999"},
+    ) == {"data": {"rawErrors": {}}}
+    assert calls == ["before", "clean", "after"]
+    calls.clear()
+    assert _post(
+        schema,
+        "query($query: String!) { rawErrors(query: $query) }",
+        {"query": "after=88888"},
+    ) == {"data": {"rawErrors": {"after": _UNBINDABLE}}}
+    assert calls == ["before", "clean", "after"]
+    calls.clear()
+    assert _post(
+        schema,
+        "query($query: String!) { rawErrors(query: $query) }",
+        {"query": "after=\ud800"},
+    ) == {"data": {"rawErrors": {"after": _SURROGATE}}}
+    assert calls == []
+    assert _post(
+        schema,
+        "query($where: JSON!) { typedRows(where: $where) { label } }",
+        {"where": {"after": {"gt": 99999}}},
+    ) == {"data": {"typedRows": [{"label": "kept"}, {"label": "other"}]}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("where", "errors", "labels"),
+    [
+        pytest.param({"names": ["kept", "\ud800"]}, {"names": _SURROGATE}, ["kept", "other"]),
+        pytest.param({"names": ["kept", ["\ud800"]]}, {"names": _SURROGATE}, ["kept", "other"]),
+        pytest.param(
+            {"names": ["kept", "bad\x00text"]},
+            {"names": _NULL_CHARACTER},
+            ["kept", "other"],
+        ),
+        pytest.param({"names": ["kept", "other"]}, {}, ["kept", "other"]),
+        pytest.param({"names": ["kept"]}, {}, ["kept"]),
+        pytest.param({"names": []}, {}, []),
+        pytest.param({"names": None}, {}, ["kept", "other"]),
+        pytest.param({}, {}, ["kept", "other"]),
+    ],
+)
+def test_raw_tuple_membership_text_is_refused_before_element_clean(
+    where: JSONObject,
+    errors: JSONObject,
+    labels: list[str],
+) -> None:
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("other", kept=False)
+
+    class NameSet(FilterSet):
+        names = ListFilter(field_name="label", lookup_expr="in")
+
+        class Meta:
+            model = models.ScalarSpecimen
+            fields = []
+
+    class RawRow(DjangoType):
+        class Meta:
+            model = models.ScalarSpecimen
+            fields = ("label",)
+
+    def bound(raw: Mapping[str, object]) -> NameSet:
+        data: dict[str, object] = {}
+        if "names" in raw:
+            value = raw["names"]
+            data["names"] = None if value is None else tuple(require(value, is_list_or_tuple))
+        return NameSet(
+            data=data,
+            queryset=models.ScalarSpecimen.objects.order_by("label"),
+        )
+
+    @strawberry.type
+    class Query:
+        def _errors(self, where: JSON) -> dict[str, object]:
+            return require_instance(bound(json_object(where)).errors, ErrorDict).get_json_data()
+
+        errors: dict[str, object] = strawberry.field(resolver=_errors, graphql_type=JSON)
+
+        def _rows(self, where: JSON) -> QuerySet[models.ScalarSpecimen]:
+            return bound(json_object(where)).qs
+
+        rows: QuerySet[models.ScalarSpecimen] = strawberry.field(
+            resolver=_rows,
+            graphql_type=list[RawRow],
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(query=Query, config=strawberry_config(), error_policy={"enabled": False})
+    payload = _post(
+        schema,
+        "query($where: JSON!) { errors(where: $where) rows(where: $where) { label } }",
+        {"where": where},
+    )
+    assert payload == {
+        "data": {"errors": errors, "rows": [{"label": label} for label in labels]},
+    }, payload
 
 
 class _RawElapsedProbe(Model):

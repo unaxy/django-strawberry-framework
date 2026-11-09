@@ -7660,7 +7660,6 @@ def test_integer_column_value_is_not_asked() -> None:
     ("field_name", "lookup_expr"),
     [
         pytest.param("missing", "gte", id="path-django-refuses"),
-        pytest.param("kids", "exact", id="reverse-relation-alias"),
         pytest.param("n", "bogus", id="remainder-no-walk-accepts"),
         pytest.param("label_copy", "gte", id="text-annotation"),
     ],
@@ -7671,9 +7670,8 @@ def test_a_queryset_path_comparing_no_integer_field_holds_nothing(
 ) -> None:
     """A path only the queryset resolves answers ``None`` wherever no integer field is compared.
 
-    A name the queryset does not hold, a ``FilteredRelation`` alias of a reverse relation
-    (no field of its own), a remainder that is no lookup of the annotation's output and a
-    text annotation leave a cleaned decimal as it is.
+    A name the queryset does not hold, a remainder that is no lookup of the
+    annotation's output and a text annotation leave a cleaned decimal as it is.
     """
     query = (
         scalar_models.ScalarSpecimen.objects.annotate(
@@ -7685,6 +7683,15 @@ def test_a_queryset_path_comparing_no_integer_field_holds_nothing(
     )
     filter_instance = django_filters.NumberFilter(field_name=field_name, lookup_expr=lookup_expr)
     assert _queryset_integer_column(filter_instance, query) is None
+
+
+def test_a_queryset_reverse_alias_compares_the_native_last_join_key() -> None:
+    """A reverse alias uses the integer key Django compares at its final join."""
+    query = scalar_models.ScalarSpecimen.objects.alias(
+        kids=dj_models.FilteredRelation("children"),
+    ).query
+    leaf = django_filters.NumberFilter(field_name="kids", lookup_expr="exact")
+    assert _queryset_integer_column(leaf, query) is scalar_models.ScalarSpecimen._meta.pk
 
 
 def test_a_queryset_alias_of_a_multi_column_link_holds_nothing() -> None:
@@ -12259,11 +12266,10 @@ def test_projected_field_identity_belongs_to_its_child_but_templates_are_fresh()
         queryset=library_models.Loan.objects.all(),
         request=HttpRequest(),
     )
-    child = bound._projection_child(PatronFilter)
-    assert (
-        bound.filters["patron__email_must_have_at_sign"].field
-        is child.filters["email_must_have_at_sign"].field
-    )
+    leaf = bound.filters["patron__email_must_have_at_sign"]
+    assert isinstance(leaf, ProjectedChildFilter)
+    child = leaf._child()
+    assert leaf.field is child.filters["email_must_have_at_sign"].field
     template = LoanFilter.base_filters["patron__email_must_have_at_sign"]
     assert isinstance(template, ProjectedChildFilter)
     assert template.field is not template.field
@@ -12332,7 +12338,12 @@ def test_a_projection_child_binds_its_own_deferred_copy_to_its_own_instance() ->
     _ = instance.qs
     children = instance._projection_children
     assert children is not None
-    child = children[LoanChild]
+    loan_children = [child for child in children.values() if isinstance(child, LoanChild)]
+    assert len(loan_children) == 1
+    child = loan_children[0]
+    leaf = instance.filters["loans__patron__email"]
+    assert isinstance(leaf, ProjectedChildFilter)
+    assert leaf._child() is child
     copied = child._copied_filters
     assert list(copied) == ["note", "patron", "patron__email"]
     assert copied["patron__email"] is not LoanChild.base_filters["patron__email"]
@@ -12378,9 +12389,9 @@ def test_projected_leaf_gets_no_candidate_row() -> None:
 
 
 def test_projected_leaf_child_runs_on_the_parents_database_with_its_request() -> None:
-    """One child instance per parent instance, built on first use, on the parent's alias.
+    """One child instance per declared hop, built on first use, on the parent's alias.
 
-    Every projected leaf of one parent instance expanded from ``PatronFilter``
+    Every projected leaf of one parent instance expanded from the same ``RelatedFilter``
     runs in the same child instance, which seeds the child model's rows on the
     parent queryset's alias and carries the parent's request; another parent
     instance builds its own.
@@ -12404,7 +12415,8 @@ def test_projected_leaf_child_runs_on_the_parents_database_with_its_request() ->
     assert child.queryset.model is library_models.Patron
     assert child.request is request
     assert sibling._child() is child
-    assert parent._projection_children == {PatronFilter: child}
+    assert parent._projection_children is not None
+    assert list(parent._projection_children.values()) == [child]
     other = LoanFilter(data={}, queryset=library_models.Loan.objects.all(), request=request)
     other_leaf = other.filters["patron__email_must_have_at_sign"]
     assert isinstance(other_leaf, ProjectedChildFilter)
@@ -17047,13 +17059,15 @@ def test_generated_column_filter_override_is_honoured() -> None:
     [
         pytest.param(
             django_models.FileField,
-            "GeneratedField GeneratedFilterOwner.computed has a file output_field 'FileField'",
+            "Meta.fields names GeneratedField GeneratedFilterOwner.computed with an unsupported "
+            "FileField output; remove the generated field from Meta.fields.",
             id="file",
         ),
         pytest.param(
             django_models.DurationField,
-            "Unsupported output_field type 'DurationField' on GeneratedField "
-            "GeneratedFilterOwner.computed",
+            "Meta.fields names GeneratedField GeneratedFilterOwner.computed with an unsupported "
+            "DurationField output; register DurationField in SCALAR_MAP or remove it from "
+            "Meta.fields.",
             id="unsupported",
         ),
     ],

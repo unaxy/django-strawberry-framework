@@ -23,6 +23,7 @@ import pytest
 import strawberry
 from apps.library import models
 from django import forms
+from django.core.exceptions import ValidationError
 from django.db.models import Case, DateTimeField, QuerySet, Value, When
 from django.http import HttpRequest, HttpResponseBase, QueryDict
 from django.test import override_settings
@@ -44,6 +45,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     is_list_or_tuple,
@@ -355,7 +357,7 @@ def test_a_parent_dependent_field_is_built_only_after_its_filter_is_bound() -> N
     assert payload == _expected(("Alpha", "Beta")), payload
 
 
-def _data_form(style: str) -> type[forms.Form]:
+def _data_form(style: str, *, empty_permitted: bool = False) -> type[forms.Form]:
     class DataForm(forms.Form):
         prefix: str | None = "search" if "prefix" in style else None
 
@@ -365,7 +367,12 @@ def _data_form(style: str) -> type[forms.Form]:
             *,
             prefix: str | None = None,
         ) -> None:
-            super().__init__(data=data, prefix=prefix)
+            super().__init__(
+                data=data,
+                prefix=prefix,
+                empty_permitted=empty_permitted,
+                use_required_attribute=not empty_permitted,
+            )
             current: Mapping[str, object] = self.data
             if style == "copy-and-edit":
                 self.data = {**current, "pick": ["Beta", "Gamma"]}
@@ -721,6 +728,7 @@ def test_nested_datetime_range_widgets_keep_each_supplied_axis(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("mapping", ["dict", "querydict-prefix"], ids=["dict", "querydict-prefix"])
+@pytest.mark.parametrize("empty_permitted", [False, True], ids=["ordinary", "empty-permitted"])
 @pytest.mark.parametrize("side", ["start", "end"])
 @pytest.mark.parametrize(
     ("zone", "bound", "expected"),
@@ -747,6 +755,9 @@ def test_a_nested_split_range_bound_the_zone_cannot_present_is_filter_invalid(
     zone: str,
     bound: str,
     expected: Mapping[str, tuple[str, ...]] | None,
+    record_compiled_sql: RecordCompiledSql,
+    *,
+    empty_permitted: bool,
 ) -> None:
     """A bound whose wall clock in the current time zone leaves years 1..9999 is refused.
 
@@ -764,9 +775,10 @@ def test_a_nested_split_range_bound_the_zone_cannot_present_is_filter_invalid(
         class Meta:
             model = models.Branch
             fields = []
-            form = _data_form(mapping)
+            form = _data_form(mapping, empty_permitted=empty_permitted)
 
     schema = _schema(RangeFilter, ranged=True)
+    recorded = record_compiled_sql()
     with override_settings(TIME_ZONE=zone):
         payload = _range_post(schema, *((bound, None) if side == "start" else (None, bound)))
 
@@ -785,6 +797,120 @@ def test_a_nested_split_range_bound_the_zone_cannot_present_is_filter_invalid(
             },
         ],
     }, payload
+    assert recorded == [], recorded
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("value", ["Beta", "\ud800"])
+def test_empty_permitted_form_delegates_unchanged_and_propagates_consumer_change_error(
+    value: str,
+) -> None:
+    _branches()
+    calls: list[str] = []
+
+    class EmptyForm(forms.Form):
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(
+                data=data,
+                prefix=prefix,
+                empty_permitted=True,
+                use_required_attribute=False,
+            )
+
+        @override
+        def full_clean(self) -> None:
+            calls.append("full_clean")
+            super().full_clean()
+
+        @override
+        def clean(self) -> dict[str, object]:
+            calls.append("clean")
+            return super().clean() or {}
+
+    class EmptySet(FilterSet):
+        pick = django_filters.CharFilter(field_name="name")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+            form: type[forms.Form] = EmptyForm
+
+    class RefusingChangeForm(EmptyForm):
+        @override
+        def has_changed(self) -> bool:
+            raise ValidationError("consumer change detection", code="consumer")
+
+    class RefusingSet(EmptySet):
+        class Meta(EmptySet.Meta):
+            form: type[forms.Form] = RefusingChangeForm
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def valid(self, *, refusing: bool) -> bool:
+            chosen = RefusingSet if refusing else EmptySet
+            return chosen(
+                data={"pick": value} if refusing else {},
+                queryset=models.Branch.objects.all(),
+            ).is_valid()
+
+    schema = DjangoSchema(query=Query, error_policy={"enabled": False})
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            unchanged = graphql_payload(
+                "{ valid(refusing: false) }",
+                url="/graphql-filter-widgets/",
+            )
+            assert unchanged == {"data": {"valid": True}}
+            assert calls == ["full_clean"]
+            calls.clear()
+            refused = graphql_payload("{ valid(refusing: true) }", url="/graphql-filter-widgets/")
+    finally:
+        _CURRENT["schema"] = None
+    assert json_at(refused, "errors", 0, "message") == "consumer change detection"
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_a_form_generated_by_typed_normalization_can_be_reused_as_meta_form() -> None:
+    _branches()
+    generated: list[type[forms.Form]] = []
+
+    class CapturingForm(forms.Form):
+        prefix = "search"
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, prefix=prefix)
+            generated.append(type(self))
+
+    class SourceSet(FilterSet):
+        pick = django_filters.CharFilter(field_name="name")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+            form: type[forms.Form] = CapturingForm
+
+    assert _post(_schema(SourceSet), {"pick": "Beta"}) == _expected(("Beta",))
+    assert len(generated) == 1
+
+    class ReusedSet(SourceSet):
+        class Meta(SourceSet.Meta):
+            form: type[forms.Form] = generated[0]
+
+    registry.clear()
+    assert _post(_schema(ReusedSet), {"pick": "Beta"}) == _expected(("Beta",))
 
 
 @pytest.mark.django_db

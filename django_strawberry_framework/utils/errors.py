@@ -115,6 +115,7 @@ from ._narrowing import (
     read_attr,
     require,
     require_instance,
+    tuple_iter,
 )
 from .lazy import unwrap_lazy_object
 from .relations import written_model_field
@@ -695,14 +696,14 @@ def unstorable_text(path: str, value: object) -> UnstorableText | None:
       answers, and every surface answers the same on every backend.
 
     Every other valid scalar value passes. Every text leaf is checked, not only a
-    top-level string: each element of a list and each key and value of a dict, at
+    top-level string: each element of a list or tuple and each key and value of a dict, at
     any depth (an explicit stack, so a deeply nested ``JSON`` value cannot exhaust the
     interpreter stack). The returned path joins ``path`` with each index or key
     (``tags.1``, ``attributes.color``, ``rows.0.name``) through ``join_error_path``;
     an unstorable dict KEY answers the dict's own path, since a segment holding the
     key would echo the refused text. A Django lazy proxy (``SimpleLazyObject``) is
     read as the object it stands for, and containers and strings through their base
-    ``list`` / ``dict`` / ``str`` slots, so a subclass's overridden iteration or
+    ``list`` / ``tuple`` / ``dict`` / ``str`` slots, so a subclass's overridden iteration or
     conversion cannot hide a leaf. Any other leaf (an int, ``None``, an enum member,
     an upload) is storable here.
     """
@@ -714,12 +715,14 @@ def unstorable_text(path: str, value: object) -> UnstorableText | None:
             refusal = _unstorable_leaf(current_path, truth.text(current))
             if refusal is not None:
                 return refusal
-        elif is_list(current):
+        elif is_list_or_tuple(current):
             pending.extend(
                 reversed(
                     [
                         (join_error_path(current_path, str(index)), element)
-                        for index, element in enumerate(list_iter(current))
+                        for index, element in enumerate(
+                            list_iter(current) if is_list(current) else tuple_iter(current),
+                        )
                     ],
                 ),
             )

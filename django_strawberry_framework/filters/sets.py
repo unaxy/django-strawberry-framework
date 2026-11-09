@@ -35,6 +35,7 @@ from typing import (
 )
 
 import django_filters
+from django import forms
 from django.core.exceptions import (
     EmptyResultSet,
     FieldDoesNotExist,
@@ -50,7 +51,7 @@ from django.db.models.expressions import BaseExpression
 from django.db.models.query_utils import check_rel_lookup_compatibility
 from django.db.models.sql.query import Query
 from django.db.models.sql.where import WhereNode
-from django.forms.utils import ErrorList
+from django.forms.utils import ErrorDict
 from django.utils.functional import Promise
 from django_filters import (
     BaseInFilter,
@@ -103,10 +104,10 @@ from django_strawberry_framework.sets_mixins import (
     require_sweep_model,
     should_cache_expansion,
 )
-from django_strawberry_framework.types.converters import generated_output_field
+from django_strawberry_framework.types.converters import _field_label, _generated_output_issue
 from django_strawberry_framework.types.relay import implements_relay_node
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._array_field import array_leaf_field
+from django_strawberry_framework.utils._array_field import array_leaf_field, is_array_in_lookup
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     dict_items,
@@ -202,6 +203,7 @@ from .base import (
     IntegerRangeFilter,
     ListFilter,
     MembershipInFilter,
+    RangeField,
     RangeFilter,
     RelatedFilter,
     RelationPkFilter,
@@ -210,15 +212,20 @@ from .base import (
     _bound_field_name,
     _bound_lookup_expr,
     _bound_value_field,
+    _ColumnCleanedFilter,
+    _compared_columns,
     _declared_field_name,
     _django_prepares,
+    _ElementField,
     _filterset_walked_lookup,
     _integer_compared_column,
     _query_lookup_operand,
     _reads_integer_transform,
     _RelationView,
+    comparison_form_field,
     copied_declared_filter,
     copied_form_field,
+    install_comparison_cleaner,
     membership_in_filter_class,
     refuse_identityless_relation,
     refuse_unresolvable_lookup,
@@ -242,6 +249,7 @@ from .inputs import (
     _field_specs,
     _is_declared_head,
     _RangeFormPatch,
+    _refuse_generated_filter_output,
     filter_lookup_table,
     leaf_gate_path,
     normalize_input_value,
@@ -265,6 +273,7 @@ _FILTER_ASYNC_RECOURSE = (
 
 #: The empty absent-leaf verdict map (``FilterSet._absent_leaf_verdicts``).
 _NO_VERDICTS: Mapping[str, tuple[object, bool]] = MappingProxyType({})
+_NO_FLAT_NAMES: frozenset[str] = frozenset()
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -279,7 +288,6 @@ if TYPE_CHECKING:
     )
     from typing import TypeAlias
 
-    from django import forms
     from django.db.models.fields.mixins import FieldCacheMixin
     from django.forms import Field as FormField
     from django.http import HttpRequest
@@ -287,6 +295,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
+    from django_strawberry_framework.types.relay import _RelayDjangoType
     from django_strawberry_framework.utils.typing import ModelField
 
     # ``(field_name, related_filter, child_input)`` per active related branch, as
@@ -329,6 +338,13 @@ _QUERYSET: type[models.QuerySet[models.Model, object]] = models.QuerySet
 # field's own bag carries (a transform chain's ``year_gt``), a mapping whose keys all
 # name one is an operator bag (``FilterSet._operator_bag_items``).
 _LOOKUP_PYTHON_ATTRS: frozenset[str] = frozenset(LOOKUP_NAME_MAP.values())
+
+
+def _relay_target_type_for_relation(field: ModelField) -> type[_RelayDjangoType] | None:
+    """Return the registered Relay target selected by generated relation filters, if any."""
+    related_model = read_attr(field, "related_model", None)
+    target_type = registry.get(related_model) if is_model_class(related_model) else None
+    return target_type if target_type is not None and implements_relay_node(target_type) else None
 
 
 def _lookups_for_field(
@@ -406,12 +422,12 @@ def _lookups_for_field(
     different sets, and a registration made at any time before the set builds is
     seen. A ``GeneratedField``'s registry is its ``output_field`` instance's, and
     it is classified as the column it computes
-    (``types/converters.py::generated_output_field``), so two generated columns
+    (``utils/relations.py::generated_column``), so two generated columns
     of different output types publish their outputs' sets.
     """
     if model_field is None:
         return []
-    field_class = type(generated_output_field(model_field) or model_field)
+    field_class = type(generated_column(model_field) or model_field)
     registered = lookup_registry(model_field).get_lookups()
     lookups = _non_transform_lookups(
         {
@@ -503,14 +519,14 @@ def _is_text_pattern_on_non_text(field: ModelField, lookup_type: str) -> bool:
     ``field`` is the non-relation field the lookup applies to (a transform's output
     field when the expression names one) and ``lookup_type`` one terminal lookup
     name, the pair django-filter hands ``filter_for_lookup``. A ``GeneratedField`` is
-    classified as the column it computes (``types/converters.py::generated_output_field``)
+    classified as the column it computes (``utils/relations.py::generated_column``)
     and its lookup is read off the registry Django's query resolves it on, its
     ``output_field`` instance (``utils/relations.py::lookup_registry``), never the copy of
     the output class's lookups the generated field files on itself: a registration on that
     instance, or on the output class after the model was built, that replaces a text
     pattern (Django's ``Exact`` as ``contains``) takes the column's own value.
     """
-    column = generated_output_field(field) or field
+    column = generated_column(field) or field
     return not _is_text_column(type(column)) and _is_text_pattern_lookup(
         lookup_registry(field).get_lookup(lookup_type),
     )
@@ -1398,6 +1414,13 @@ def _own_filter(filter_instance: Filter) -> object | None:
     return (truth.instance_dict(filter_instance) or {}).get("filter")
 
 
+def _has_comparison_cleaner(field: forms.Field) -> bool:
+    """Whether the field already owns the value cleaner a list/range needs."""
+    return (isinstance(field, _ElementField) and field.element_field is not None) or (
+        isinstance(field, RangeField) and field.bound_field is not None
+    )
+
+
 def _candidate_metadata_for(
     model: type[models.Model],
     filter_instance: Filter,
@@ -1704,7 +1727,7 @@ class ProjectedChildFilter(Filter):
     family recognition see the class they always saw, carrying a
     ``ChildProjection``. Bound to a parent filter set instance, its form field is
     the one a CHILD filter set instance builds for the child filter (one child
-    instance per parent instance and child class, ``FilterSet._projection_child``;
+    instance per parent instance and declared hop, ``FilterSet._projection_child``;
     a child ``__init__`` customization and a request-aware callable ``queryset``
     both apply), and ``filter`` runs the child filter inside that instance over
     the branch's visible child rows (the target type's ``get_queryset`` on the
@@ -1753,7 +1776,11 @@ class ProjectedChildFilter(Filter):
 
     def _child(self) -> FilterSet:
         """Return the child filter set instance this leaf runs in, shared per parent instance."""
-        return self.parent._projection_child(self._projection.filterset)
+        projection = self._projection
+        return self.parent._projection_child(
+            projection.filterset,
+            type(self.parent)._projection_hop(projection),
+        )
 
     @property
     @override
@@ -2300,6 +2327,9 @@ class _LeafChain:
     ``field_name`` bound to a ``FilteredRelation`` alias of its relation that joins
     only the rows each hop lets the request see (``FilterSet._relation_view``), so its
     own value, default and path answer as unwalked, over visible rows.
+    ``owned_rows`` carries each projected child set's constructor restriction into
+    the terminal filter and the outward correlation without replacing the shared
+    request-wide target visibility queryset.
     """
 
     hops: tuple[RelationHop, ...]
@@ -2310,6 +2340,7 @@ class _LeafChain:
     key_via: tuple[RelationHop, ...] = ()
     fallback: _LeafChain | None = None
     view: tuple[RelationHop, ...] = ()
+    owned_rows: tuple[models.QuerySet[models.Model] | None, ...] = ()
 
     def decoding_filters(self) -> tuple[Filter, ...]:
         """Return every filter this chain decodes a GlobalID value in, each as it is bound.
@@ -2654,6 +2685,9 @@ class _PipelineConstruction:
 
     owner: type[object]
     bindings: FilterFormBindings | None
+    flat_names: frozenset[str] = _NO_FLAT_NAMES
+    hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None = None
+    info: object = None
 
 
 _pipeline_build_var: ContextVar[_PipelineConstruction | None] = ContextVar(
@@ -2690,9 +2724,15 @@ def _construct_filterset(
 def _pipeline_built(
     owner: type[object],
     bindings: FilterFormBindings | None = None,
+    *,
+    flat_names: frozenset[str] = _NO_FLAT_NAMES,
+    hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None = None,
+    info: object = None,
 ) -> Generator[None, None, None]:
     """Mark the next intended metaclass constructor as built by the request pipeline."""
-    token = _pipeline_build_var.set(_PipelineConstruction(owner, bindings))
+    token = _pipeline_build_var.set(
+        _PipelineConstruction(owner, bindings, flat_names, hop_visibility, info),
+    )
     try:
         yield
     finally:
@@ -3064,6 +3104,44 @@ def _terminal_queryset(
     )
 
 
+def _bind_ask_terminal_source(
+    filterset_instance: FilterSet,
+    filter_instance: Filter,
+    queryset: models.QuerySet[models.Model, object],
+) -> tuple[Filter, models.QuerySet[models.Model, object]]:
+    """Read the actual terminal and last-hop rows without deriving a visibility hook.
+
+    ``FilterSet._leaf_chain`` follows every projection and remaining declared or
+    undeclared hop, as application does. A missing automatic inner parser's owner
+    was prepared after permissions and before field cleaning; a complete field's
+    owner is prepared after the actual form cleaned. An ordinary resolved flat
+    leaf still has no visibility cache entry until application and uses the target
+    model's base rows to ask its column's own binding. A projected child's ``owned_rows`` carries its
+    constructor restriction on top of the cached visible target rows.
+    """
+    chain = filterset_instance._leaf_chain(filter_instance)
+    if chain is None:
+        return filter_instance, queryset
+    if not chain.hops:
+        return chain.terminal, queryset
+    hop = chain.hops[-1]
+    visible = filterset_instance._flat_hop_visibility
+    if isinstance(hop, UndeclaredHop):
+        key: tuple[object, str | None] | None = (
+            None if hop.scope is None else (hop.scope, queryset.db)
+        )
+    else:
+        _owner, declaration = _filter_declaration(hop)
+        key = (id(declaration), queryset.db)
+    cached = None if key is None or visible is None else visible.get(key)
+    last_index = len(chain.hops) - 1
+    owned = chain.owned_rows[last_index] if last_index < len(chain.owned_rows) else None
+    source = owned if owned is not None else cached
+    if source is None:
+        source = base_queryset(_hop_model(hop), using=queryset.db)
+    return chain.terminal, source
+
+
 def _queryset_integer_column(filter_instance: Filter, query: Query) -> ModelField | None:
     """Return the integer field a filter only its queryset resolves compares values of, else ``None``.
 
@@ -3078,9 +3156,8 @@ def _queryset_integer_column(filter_instance: Filter, query: Query) -> ModelFiel
     lookups prepare a value through. ``None`` for a path Django refuses or a remainder no
     walk accepts (``FieldError``, ``LookupValidationError``), a lookup that is not Django's
     own preparing its value through the field (``filters/base.py::_django_prepares``:
-    ``iexact``, ``contains``, ``regex``, ``isnull``, a project lookup), a left-hand side
-    with no field of its own (a reverse relation), and an output that is no
-    ``IntegerField``.
+    ``iexact``, ``contains``, ``regex``, ``isnull``, a project lookup), a relation
+    with no single target column, and an output that is no ``IntegerField``.
     """
     operand = _query_lookup_operand(
         query,
@@ -3089,17 +3166,17 @@ def _queryset_integer_column(filter_instance: Filter, query: Query) -> ModelFiel
     )
     if operand is None or not _django_prepares(operand.lookup):
         return None
-    # A reverse relation's lookup is left unresolved, so only a field of the lookup's
-    # left-hand side reaches here.
-    field = require(operand.field, is_concrete_field)
-    try:
-        # Django's ``ForeignObject.target_field`` refuses a link carried by several columns.
-        output = read_attr(field, "target_field", None) if field.is_relation else field
-    except FieldError:
+    field = operand.field
+    if field is None:
         return None
-    return (
-        output if is_concrete_field(output) and isinstance(output, models.IntegerField) else None
-    )
+    # The same last-join target fields the handed-query comparison uses. A reverse
+    # relation is a ForeignObjectRel, not a concrete Field; no one column is returned
+    # for a multi-column join.
+    columns = _compared_columns(filter_instance, field)
+    if len(columns) != 1:
+        return None
+    output = columns[0]
+    return output if isinstance(output, models.IntegerField) else None
 
 
 def _holds_decimal(value: object) -> bool:
@@ -3117,7 +3194,8 @@ def _unbindable_value_errors(
 
     Each cleaned value a filter applies to a temporal or decimal column (a ``DateField``,
     ``DateTimeField``, ``TimeField``, ``DurationField`` or ``DecimalField`` its
-    ``field_name`` reaches over the filterset's queryset, as Django resolves the path,
+    ``field_name`` reaches over the actual terminal filter's queryset, as Django
+    resolves the path,
     ``utils/querysets.py::lookup_target_fields``: a queryset annotation's output field, a
     ``FilteredRelation`` alias and ``pk`` included, or an ``ArrayField`` whose innermost
     elements are stored through one, ``utils/_array_field.py::array_leaf_field``), or to an
@@ -3130,7 +3208,15 @@ def _unbindable_value_errors(
     leaf whose lookup reads an integer transform's output whatever its column
     (``filters/base.py::_reads_integer_transform``: an ``ArrayField``'s ``len``, a
     transform a project registers with an ``IntegerField`` output). Every filter family
-    reaches it whatever value kind its form cleans to: a datetime on a ``DateField`` or
+    also asks a named queryset ``Transform`` alias such as ``ExtractYear`` or
+    ``ExtractMonth`` through that transform's actual output; a ``Count`` or ``F``
+    alias keeps its ordinary integer member behavior. The filter's shipped
+    predicate and Django's selected lookup/compiler still own the bind verdict,
+    including a package range's emitted ``gte`` / ``lte`` year bounds. The actual
+    terminal source Query, which can be scoped visible child rows rather than the
+    synthetic terminal parent's nonexistent queryset, owns transform eligibility.
+    It reaches every filter family whatever value kind its form cleans to: a datetime on a
+    ``DateField`` or
     through a ``date`` transform, a date on a ``DateTimeField``, an integer transform's
     bound or member, a duration, each member of a list and each bound of a range,
     as the filter applies them, and on an ``ArrayField`` each element a whole-array lookup
@@ -3142,11 +3228,13 @@ def _unbindable_value_errors(
     django-filter or this package ships is run (``_runs_shipped_filter``): a ``filter``
     of the filter's own (a ``method=`` included, ``_own_filter``) or a class-level
     ``filter`` override is consumer code, which owns what its value means and is not
-    asked. A projected copy is
-    asked through the child filter it runs (``_projected_terminal``), over its child filter
-    set's queryset. A plain integer column is not asked: its generated ``in`` drops a
-    member past the column's range (``filters/base.py::_identifying_members``), and its
-    comparisons are Django's own range-aware ones. Every value asked is first held to its
+    asked. A projected copy is asked through the child filter it runs, over its child
+    filter set's queryset; a flat
+    leaf walking a scoped target's annotation is asked through its rebound terminal and
+    visible rows (``filters/sets.py::_bind_ask_terminal_source``). A plain integer column
+    is not asked: its generated ``in`` drops a member past the column's range
+    (``filters/base.py::_identifying_members``), and its comparisons are Django's own
+    range-aware ones. Every value asked is first held to its
     integer column's range (``_held_integer_value``), so a decimal past it is asked as the
     integer one past that end, never converted. The bound filter form runs it over its
     ``cleaned_data`` once it cleans (``filters/form_binding.py::BindAskingFilterForm``), so
@@ -3158,10 +3246,16 @@ def _unbindable_value_errors(
     copies = filterset_instance._copied_filters
     errors: dict[str, ValidationError] = {}
     for name, value in _cleaned_items(form):
-        filter_instance = copies.get(name)
-        if value is None or filter_instance is None or _own_filter(filter_instance) is not None:
+        if name in filterset_instance._bind_unavailable_names:
             continue
-        terminal = _projected_terminal(filter_instance)
+        filter_instance = copies.get(name)
+        if value is None or filter_instance is None or not _runs_shipped_filter(filter_instance):
+            continue
+        terminal, source = _bind_ask_terminal_source(
+            filterset_instance,
+            filter_instance,
+            queryset,
+        )
         if not (
             any(
                 isinstance(
@@ -3174,18 +3268,14 @@ def _unbindable_value_errors(
                 or (depth > 0 and isinstance(leaf, models.IntegerField))
                 for leaf, depth in (
                     array_leaf_field(column)
-                    for column in lookup_target_fields(
-                        queryset.query,
-                        _bound_field_name(filter_instance),
-                    )
+                    for column in lookup_target_fields(source.query, _bound_field_name(terminal))
                 )
             )
-            or _reads_integer_transform(terminal)
+            or _reads_integer_transform(terminal, source.query)
         ):
             continue
         if not _runs_shipped_filter(terminal):
             continue
-        source = _terminal_queryset(filter_instance, terminal, queryset)
         if _unbindable_predicate(terminal, source, _held_integer_value(terminal, value, source)):
             errors[name] = ValidationError(
                 UNBINDABLE_TEMPORAL_MESSAGE,
@@ -3229,13 +3319,6 @@ def _unstorable_text_errors(
         if refusal is not None:
             errors[bound.name] = ValidationError(refusal.message, code=refusal.code)
     return errors
-
-
-def _json_errors(refusals: Mapping[str, ValidationError]) -> dict[str, object]:
-    """Return ``refusals`` as ``ErrorDict.get_json_data`` spells a form's errors."""
-    return {
-        name: ErrorList(refusal.error_list).get_json_data() for name, refusal in refusals.items()
-    }
 
 
 def _own_related_filters(filterset: type[object]) -> Mapping[str, RelatedFilter]:
@@ -3551,10 +3634,18 @@ class FilterSet(
 
     # The child filter set instances this instance's relation leaves run in at a
     # declared hop's target (a ``ProjectedChildFilter``'s child, a walked leaf's
-    # deepest target), one per child class, built on first use by
+    # deepest target), one per child class and declared hop, built on first use by
     # ``_projection_child``. Per instance, so a request never sees another
     # request's child and each ``_q_for_branch`` sibling builds its own.
-    _projection_children: dict[type[FilterSet], FilterSet] | None = None
+    _projection_children: dict[tuple[type[FilterSet], object | None], FilterSet] | None = None
+
+    # The source rows the package installed when this projected child was built
+    # or last advanced from base to visible context. Consumer ``__init__`` may
+    # clone or annotate ``self.queryset``; its identity cannot mark installation.
+    _projection_context_rows: models.QuerySet[models.Model] | None = None
+
+    # Only named flat copies may derive a target comparison field for their form.
+    _flat_form_names: frozenset[str] = frozenset()
 
     # The instance whose ``_projection_children`` holds this one, set by
     # ``_projection_child``; ``None`` on every other instance. A child carries
@@ -3599,7 +3690,14 @@ class FilterSet(
     # its bound form (``get_form_class``) and never run (``_apply_flat_leaves``).
     _unnamed_copies: frozenset[str] = frozenset()
     _form_bindings: FilterFormBindings | None = None
+    _pipeline_constructed: bool = False
+    _bind_unavailable_names: set[str]
+    _suppress_new_bind_hooks: bool = False
     _form: forms.Form
+    _bind_asked_form: forms.BaseForm | None = None
+    _held_bind_errors: Mapping[str, ValidationError]
+    _native_policy_form: forms.BaseForm | None = None
+    _native_policy_invalid: bool = False
 
     # Whether each absent leaf walking a hop constrains anything for the value it
     # cleaned to (``_absent_leaf_applies``), by name, beside that value: a verdict
@@ -3658,6 +3756,13 @@ class FilterSet(
         construction = _active_construction_var.get()
         _ = _active_construction_var.set(None)
         self._form_bindings = None if construction is None else construction.bindings
+        self._pipeline_constructed = construction is not None
+        self._bind_unavailable_names = set()
+        self._suppress_new_bind_hooks = False
+        if construction is not None:
+            self._flat_form_names = construction.flat_names
+            self._flat_hop_visibility = construction.hop_visibility
+            self._apply_info = construction.info
         pipeline_built = construction is not None
         if not pipeline_built and request is not None:
             # Built directly: the type hooks this set's walks, hops and logical arms reach
@@ -3736,13 +3841,306 @@ class FilterSet(
         filter): an unnamed copy (``_unnamed_copies``) is never a field.
         """
         if not self.is_bound or (self._filters_settled and not self._unnamed_copies):
-            return super().get_form_class()
+            form_class = super().get_form_class()
+            overrides = self._flat_comparison_fields()
+            return (
+                type(f"{truth.kind(self)}ComparisonForm", (form_class,), overrides)
+                if overrides
+                else form_class
+            )
         copied = self._copied_filters
         names = copied if self._filters_settled else (n for n in self._copy_source if n in copied)
+        overrides = self._flat_comparison_fields()
         fields = OrderedDict(
-            (name, copied[name].field) for name in names if name not in self._unnamed_copies
+            (name, overrides.get(name) or copied[name].field)
+            for name in names
+            if name not in self._unnamed_copies
         )
         return type(f"{truth.kind(self)}Form", (self._meta.form,), fields)
+
+    def _flat_comparison_fields(self) -> dict[str, forms.Field]:
+        """Install missing comparison cleaners from the actual final source, if cached."""
+        fields: dict[str, forms.Field] = {}
+        if self._flat_hop_visibility is None:
+            return fields
+        for name in self._flat_form_names:
+            filter_instance = self._filter_named(name)
+            if not isinstance(filter_instance, (ArrayFilter, ListFilter, RangeFilter)):
+                continue
+            owned = filter_instance.field
+            if self._install_source_comparison(filter_instance, owned):
+                fields[name] = owned
+        return fields
+
+    def _refresh_materialized_form_comparisons(self) -> None:
+        """Install a newly visible inner cleaner on the actual already-built form field.
+
+        A consumer constructor may read ``self.form`` and then edit its fields
+        before permission checks. Django already deep-copied those fields, so a
+        later change to the filter's field cannot reach them. Keep that form and
+        its widget, validators and clean method; supply only a missing inner
+        comparison. A consumer may replace the actual form's inner field and
+        attach its own validators to that field.
+        """
+        form = self.form
+        for name in self._flat_form_names:
+            owned = form.fields.get(name)
+            if owned is None:
+                continue
+            filter_instance = self._filter_named(name)
+            if not isinstance(filter_instance, (ArrayFilter, ListFilter, RangeFilter)):
+                continue
+            _ = self._install_source_comparison(filter_instance, filter_instance.field)
+            _ = self._install_source_comparison(filter_instance, owned)
+
+    def _comparison_declaring_class(self, filter_instance: Filter) -> type[FilterSet]:
+        """Return the consumer class that declared the final projected filter."""
+        owner = self
+        current = filter_instance
+        while (projection := _expansion_record(current)) is not None and projection.holds_in(
+            type(owner),
+        ):
+            child = owner._projection_child(
+                projection.filterset,
+                type(owner)._projection_hop(projection),
+            )
+            current = child._filter_named(projection.name)
+            owner = child
+        return type(owner)
+
+    def _install_source_comparison(self, filter_instance: Filter, owned: forms.Field) -> bool:
+        """Ask the actual final Query and declaring consumer's django-filter policy.
+
+        A rebound undeclared terminal has no FilterSet queryset of its own. Its
+        comparison output must come from the visible final rows, not from a
+        parent model field or the unbound rebound filter's form field.
+        """
+        if not isinstance(filter_instance, (ArrayFilter, ListFilter, RangeFilter)):
+            return False
+        if _bound_value_field(filter_instance) is not None or _has_comparison_cleaner(owned):
+            return False
+        source_rows = require(self.queryset, is_queryset)
+        terminal, source = _bind_ask_terminal_source(self, filter_instance, source_rows)
+        if (
+            not isinstance(terminal, (ArrayFilter, ListFilter, RangeFilter))
+            or terminal.method is not None
+        ):
+            return False
+        operand = _query_lookup_operand(
+            source.query,
+            _declared_field_name(terminal),
+            terminal.lookup_expr,
+        )
+        if operand is None or operand.field is None:
+            return False
+        column = operand.field
+        leaf, depth = array_leaf_field(column)
+        element = isinstance(owned, _ElementField)
+        field = comparison_form_field(
+            self._comparison_declaring_class(filter_instance),
+            require(leaf if element and depth else column, is_concrete_field),
+            _bound_field_name(terminal),
+        )
+        if field is None:
+            return False
+        target: forms.Field
+        if element:
+            target = _ElementField(
+                element_field=field,
+                element_nests=depth > 1,
+                members_are_arrays=is_array_in_lookup(operand.lookup),
+            )
+        elif isinstance(owned, RangeField):
+            target = RangeField(bound_field=field)
+        else:
+            return False
+        return install_comparison_cleaner(owned, target)
+
+    def _prepare_raw_form_comparisons(self, form: forms.BaseForm) -> None:
+        """Prepare only missing automatic inner parsers before the actual form cleans.
+
+        Pipeline instances may materialize their form in a consumer constructor;
+        their permission pass owns preparation and remains before any hook.
+        """
+        if self._pipeline_constructed:
+            return
+        queryset = require(self.queryset, is_queryset)
+        for _name, field, filter_instance in self._missing_comparison_fields(form):
+            hop = self._necessary_annotation_hop(filter_instance)
+            if hop is not None:
+                _ = self._hop_visible_rows(hop, queryset.db)
+            _ = self._install_source_comparison(filter_instance, filter_instance.field)
+            _ = self._install_source_comparison(filter_instance, field)
+
+    @staticmethod
+    def _needs_automatic_comparison(field: forms.Field) -> bool:
+        """Whether the package's own parser actually needs its empty inner slot."""
+        if not isinstance(field, (_ElementField, RangeField)) or _has_comparison_cleaner(field):
+            return False
+        parser = (
+            _ElementField.to_python if isinstance(field, _ElementField) else RangeField.to_python
+        )
+        return (
+            truth.mro_attr(type(field), "to_python") is parser
+            and truth.mro_attr(type(field), "clean") is forms.Field.clean
+        )
+
+    def _missing_comparison_fields(
+        self,
+        form: forms.BaseForm,
+    ) -> tuple[tuple[str, forms.Field, Filter], ...]:
+        """Ask the actual route and widget before acquiring a missing parser owner."""
+        if isinstance(form, BindAskingFilterForm):
+            route = form._field_cleaning_route()
+        else:
+            route = form.is_bound and not (form.empty_permitted and not form.has_changed())
+        if route is not True or read_attr(form, "_errors", None):
+            return ()
+        fields: list[tuple[str, forms.Field, Filter]] = []
+        for name, raw_field in form.fields.items():
+            field = require_instance(raw_field, forms.Field)
+            declaration = self._copied_filters.get(name)
+            if (
+                declaration is None
+                or not _runs_shipped_filter(declaration)
+                or not self._needs_automatic_comparison(field)
+            ):
+                continue
+            value = read_attr(form[name], "initial" if field.disabled else "data")
+            if value not in field.empty_values:
+                fields.append((name, field, declaration))
+        return tuple(fields)
+
+    def _postclean_binding_hops(self, form: forms.BaseForm) -> tuple[RelationHop, ...]:
+        """Collect only final cleaned values needing a new annotation source to bind."""
+        self._bind_unavailable_names = set()
+        hops: list[RelationHop] = []
+        for name, value in _cleaned_items(form):
+            if name in self._unnamed_copies or value is None:
+                continue
+            if (
+                truth.is_exact_one_of(
+                    value,
+                    truth.IdentitySet(
+                        (
+                            str,
+                            list,
+                            tuple,
+                            dict,
+                        ),
+                    ),
+                )
+                and not value
+            ):
+                continue
+            filter_instance = self._copied_filters.get(name)
+            if filter_instance is None or not _runs_shipped_filter(filter_instance):
+                continue
+            hop = self._necessary_annotation_hop(filter_instance)
+            if hop is None or not self._annotation_hops_uncached((hop,)):
+                continue
+            if self._leaf_absent(name):
+                applies = self._recorded_verdict(name, value)
+                if applies is None:
+                    applies = self._absent_leaf_applies(filter_instance, value)
+                    self._absent_leaf_verdicts = dict(self._absent_leaf_verdicts) | {
+                        name: (value, applies),
+                    }
+                if not applies:
+                    continue
+            if self._native_form_is_invalid(form) or self._suppress_new_bind_hooks:
+                self._bind_unavailable_names.add(name)
+            else:
+                hops.append(hop)
+        return tuple(hops)
+
+    def _prepare_postclean_binding_sync(self, form: forms.BaseForm) -> None:
+        """Acquire valid active bind-only owners after the entire actual form clean."""
+        hops = self._postclean_binding_hops(form)
+        if hops:
+            parent_db = self._annotation_owner_alias()
+            for hop in hops:
+                _ = self._hop_visible_rows(hop, parent_db)
+
+    def _prepare_raw_form_binding(self, form: forms.BaseForm) -> bool:
+        """Defer a pipeline form; native-clean a raw logical domain before binding."""
+        if self._pipeline_constructed:
+            return False
+        arms: dict[str, _ProbedArm] = {}
+        self._probed_arms = arms
+        rows = self.queryset
+        if rows is None:
+            raise ConfigurationError("A bound filter set needs its model queryset.")
+        self._suppress_new_bind_hooks = self._native_form_is_invalid(form)
+        self._build_logic_arms_native(arms, rows, stop_on_error=False)
+        all_sets = (self, *(probed.instance for probed in arms.values()))
+        native_errors = any(
+            instance._native_form_is_invalid(instance.form) for instance in all_sets
+        )
+        for instance in all_sets:
+            instance._suppress_new_bind_hooks = native_errors
+        self._prepare_postclean_binding_sync(form)
+        return True
+
+    def _reset_form_binding(self) -> None:
+        """Start a fresh held verdict when a consumer explicitly cleans again."""
+        self._bind_asked_form = None
+        self._native_policy_form = None
+
+    def _native_form_is_invalid(self, form: forms.BaseForm) -> bool:
+        """Hold the actual consumer's native validation decision on this one form."""
+        if self._native_policy_form is not form:
+            self._native_policy_invalid = form.is_bound and not form.is_valid()
+            self._native_policy_form = form
+        return self._native_policy_invalid
+
+    def _held_unbindable_errors(self, form: forms.BaseForm) -> Mapping[str, ValidationError]:
+        """Hold one bind verdict for the same completed consumer form."""
+        if self._bind_asked_form is not form:
+            self._held_bind_errors = _unbindable_value_errors(self, form)
+            self._bind_asked_form = form
+        return self._held_bind_errors
+
+    def _preflight_form(self) -> forms.Form:
+        """Refuse text before parser preparation or the native form error read."""
+        form = self.form
+        if read_attr(form, "_errors", None) is not None:
+            return form
+        route = (
+            form._field_cleaning_route()
+            if isinstance(form, BindAskingFilterForm)
+            else form.is_bound and not (form.empty_permitted and not form.has_changed())
+        )
+        refusals = (
+            form._text_refusals()
+            if isinstance(form, BindAskingFilterForm) and route is True
+            else _unstorable_text_errors(self, form)
+            if route is True
+            else {}
+        )
+        if refusals:
+            # Adapted from Django BaseForm.full_clean (BSD-3-Clause;
+            # LICENSE.django): initialize the error generation before add_error.
+            truth.instance_state(form)["_errors"] = ErrorDict(renderer=form.renderer)
+            form.cleaned_data = {}
+            for name, refusal in refusals.items():
+                form.add_error(name, refusal)
+        return form
+
+    def _native_form(self) -> forms.Form:
+        """Clean the consumer's exact form once after its text preflight."""
+        form = self._preflight_form()
+        _ = form.errors
+        return form
+
+    def _finish_form_binding(self) -> None:
+        """Finalize this actual form's held bind errors without cleaning it again."""
+        form = self._native_form()
+        if isinstance(form, BindAskingFilterForm):
+            form._finish_binding()
+        elif self._bind_asked_form is not form:
+            for name, refusal in self._held_unbindable_errors(form).items():
+                form.add_error(name, refusal)
 
     @property
     @override
@@ -3764,8 +4162,11 @@ class FilterSet(
             form_class = bind_asking_form_class(
                 form_class,
                 FilterFormAsks(
+                    reset_binding=self._reset_form_binding,
                     unstorable_text=partial(_unstorable_text_errors, self),
-                    unbindable_values=partial(_unbindable_value_errors, self),
+                    prepare_comparisons=partial(self._prepare_raw_form_comparisons),
+                    prepare_binding=partial(self._prepare_raw_form_binding),
+                    unbindable_values=self._held_unbindable_errors,
                 ),
             )
             if self.is_bound:
@@ -4506,32 +4907,12 @@ class FilterSet(
         # filter must remain byte-for-byte unchanged, including its explicit
         # ``distinct=False`` choice. The framework's row-preserving to-many
         # policy is applied only to a proven ``framework_default`` leaf.
-        default_origin = cls._generation_origin_for_field(field, lookup_expr)
-        generation_shape_capable = not truth.overrides(
-            cls,
-            FilterSet,
-            *FilterSet._GENERATION_SEAMS,
-        )
-        effective_origin = default_origin
-        # A consumer ``filter_for_lookup`` override owns the wire shape when
-        # this package would otherwise apply its identity conversion (the
-        # own-PK GlobalID, or a relation key's GlobalID / raw-pk primitive).
-        # Scalar overrides intentionally retain the framework-origin stamp: the
-        # class capability gate still refuses optimization, while the candidate
-        # row remains available for the fail-closed metadata contract.
-        lookup_seam_overridden = truth.overrides(cls, FilterSet, "filter_for_lookup")
-        own_pk = cls._is_own_pk_under_relay_owner(field, field_name)
-        identity_policy_field = own_pk or getattr(
+        effective_origin, generation_shape_capable = cls._generation_policy_for_field(
             field,
-            "is_relation",
-            False,
+            field_name,
+            lookup_expr,
         )
-        if (
-            effective_origin == "framework_default"
-            and lookup_seam_overridden
-            and identity_policy_field
-        ):
-            effective_origin = "override_generated"
+        own_pk = cls._is_own_pk_under_relay_owner(field, field_name)
         model = cls._meta.model
         framework_added_distinct = (
             # A set without ``Meta.model`` has no relation path to classify: no fan-out.
@@ -4653,6 +5034,35 @@ class FilterSet(
         return identity_replacement
 
     @classmethod
+    def _generation_policy_for_field(
+        cls,
+        field: ModelField,
+        field_name: str,
+        lookup_expr: str | None,
+    ) -> tuple[FilterOrigin, bool]:
+        """Return the effective origin and package-shape capability of a generated leaf.
+
+        ``filter_for_field`` uses this verdict before replacing an identity filter;
+        relation diagnostics ask the same verdict before offering ``Meta.fields`` as a
+        remedy. A consumer generation hook owns its selected filter even when the
+        defaults table itself is untouched. The shape-capability gate conservatively
+        withholds package identity advice for either overridden hook, including a
+        delegating override whose selected class happens to be package-shaped.
+        """
+        origin = cls._generation_origin_for_field(field, lookup_expr)
+        shape_capable = not truth.overrides(cls, FilterSet, *FilterSet._GENERATION_SEAMS)
+        if (
+            origin == "framework_default"
+            and truth.overrides(cls, FilterSet, "filter_for_lookup")
+            and (
+                cls._is_own_pk_under_relay_owner(field, field_name)
+                or getattr(field, "is_relation", False)
+            )
+        ):
+            origin = "override_generated"
+        return origin, shape_capable
+
+    @classmethod
     def _generation_origin_for_field(
         cls,
         field: ModelField,
@@ -4706,13 +5116,14 @@ class FilterSet(
            is not upstream-authored, so its baseline record is tainted and every
            selection of it is ``override_generated``.
 
-        This is the SINGLE ownership oracle both ``filter_for_lookup`` (which
+        This is the SINGLE defaults-table ownership oracle both ``filter_for_lookup`` (which
         decides whether to convert a framework-owned relation key to a package
         identity primitive -- a GlobalID one for a Relay-node target, a raw-pk
         one otherwise) and ``filter_for_field`` (which reads the resulting
         stamp) route
-        through, so a consumer-selected relation override is never independently
-        rediscovered or silently reclassified. Resolving on the
+        through; ``_generation_policy_for_field`` adds the public generation-hook
+        verdict shared with relation diagnostics, so a consumer-selected relation
+        override is never independently rediscovered or silently reclassified. Resolving on the
         output field (not the unresolved model field) also handles ``isnull``: a
         leaf whose model field is e.g. a ``TextField`` is selected by a
         ``BooleanField`` override upstream, and this oracle agrees.
@@ -4888,39 +5299,79 @@ class FilterSet(
             and not cls._customizes_instances()
         )
 
-    def _projection_child(self, filterset_cls: type[FilterSet]) -> FilterSet:
+    def _projection_child(
+        self,
+        filterset_cls: type[FilterSet],
+        hop: DeclaredHop | None = None,
+    ) -> FilterSet:
         """Return the ``filterset_cls`` instance this instance's relation leaves run in.
 
         Built on first use and shared by every projected leaf of this instance
-        expanded from ``filterset_cls`` and every walked leaf whose deepest hop
+        expanded from the same declared hop and every walked leaf whose deepest hop
         targets it: django-filter's form reads every projected filter's
         ``.field``, so a per-leaf child would deep-copy the child's filters and
         rerun its ``__init__`` once per leaf per request. The child is unbound
-        (no form data; only its filters run), seeded with the child model's base
-        rows on this instance's database (an active leaf runs over the hop's
-        visible rows instead; ``_apply_relation_leaf``), and carries this
-        instance's request, so a request-aware
+        (no form data; only its filters run), seeded with already cached target
+        rows for this declared hop. A mere field read never derives visibility;
+        an omitted leaf uses base rows. If an active leaf later fills the same
+        request map, the cached child receives those rows and any already built
+        comparison fields are refreshed in place. The installed-context marker,
+        rather than the child queryset's identity, distinguishes this transition:
+        a consumer may clone the queryset in ``__init__`` without invalidating
+        its customized comparison field. It carries this instance's request, so a request-aware
         callable ``queryset`` and the child ``__init__`` see the same request the
         parent does.
         """
         children = self._projection_children
         if children is None:
             children = self._projection_children = {}
-        child = children.get(filterset_cls)
+        key = (filterset_cls, None if hop is None else id(hop.related_obj))
+        child = children.get(key)
+        parent_qs = require(self.queryset, is_queryset)
+        visible = self._flat_hop_visibility
+        cached_rows = (
+            None
+            if hop is None or visible is None
+            else visible.get((id(hop.related_obj), parent_qs.db))
+        )
         if child is None:
             # A ``RelatedFilter`` target always declares ``Meta.model``
             # (``_branch_visibility_seed`` trusts the same).
             child_model = require(filterset_cls._meta.model, is_model_class)
             # Never ``None`` on an instance (see ``ProjectedChildFilter.filter``).
-            parent_qs = require(self.queryset, is_queryset)
-            child_queryset = base_queryset(child_model, using=parent_qs.db)
-            with _pipeline_built(filterset_cls):
+            child_queryset = (
+                base_queryset(child_model, using=parent_qs.db)
+                if cached_rows is None
+                else cached_rows
+            )
+            with _pipeline_built(
+                filterset_cls,
+                hop_visibility=self._flat_hop_visibility,
+                info=self._apply_info,
+            ):
                 child = filterset_cls(
                     queryset=child_queryset,
                     request=self.request,
                 )
             child._projection_owner = self
-            children[filterset_cls] = child
+            child._projection_context_rows = cached_rows
+            children[key] = child
+        elif cached_rows is not None and child._projection_context_rows is not cached_rows:
+            # Keep the hook's own annotation/query plan. The consumer constructor's
+            # queryset supplies row membership through a native Django subquery;
+            # copying either Query's resolved expressions into the other would
+            # misbind joins and may reject compatible distinct selections.
+            constructed = require(child.queryset, is_queryset)
+            child.queryset = cached_rows.filter(pk__in=constructed.values("pk"))
+            for child_filter in child._copied_filters.values():
+                if isinstance(
+                    child_filter,
+                    _ColumnCleanedFilter,
+                ) and "_field" in truth.instance_state(
+                    child_filter,
+                ):
+                    child_filter._hand_column_field(child_filter.field)
+            child._projection_context_rows = cached_rows
         return child
 
     # The generation seams a consumer may override to change the filters a class generates.
@@ -4971,13 +5422,13 @@ class FilterSet(
         ``FILTER_DEFAULTS`` plus ``Meta.filter_overrides`` map (``_merged_filter_defaults``)
         holds no entry: upstream's ``try_dbfield`` walk finds none for it, and
         ``BaseFilterSet.filter_for_lookup`` answers ``(None, {})``, so the column it computes
-        (``types/converters.py::generated_output_field``: the output class, the generated
+        (``utils/relations.py::generated_column``: the output class, the generated
         field's choices) is selected in its place. A consumer entry for ``GeneratedField``
         (or a subclass) is reached as written. ``_upstream_filter_for_lookup`` asks upstream
         about this field and the ownership oracle (``_generation_origin_for_field``,
         ``_origin_for_selection_class``) classifies it, so the two read one selection.
         """
-        column = generated_output_field(field)
+        column = generated_column(field)
         if column is None or _entry_by_mro(cls._merged_filter_defaults(), type(field)) is not None:
             return field
         return column
@@ -5048,6 +5499,20 @@ class FilterSet(
         ``cls.filter_for_lookup``, so the raise propagates before any leaf is
         built.
         """
+        computed = generated_column(field)
+        if computed is not None and (issue := _generated_output_issue(computed)) is not None:
+            remedy = (
+                "remove the generated field from Meta.fields"
+                if issue == "file"
+                else "drop its output base_field choices or remove it from Meta.fields"
+                if issue == "array_choices"
+                else f"register {truth.kind(computed)} in SCALAR_MAP or remove it from Meta.fields"
+            )
+            raise ConfigurationError(
+                f"FilterSet {truth.qualname(cls)}: Meta.fields names GeneratedField "
+                f"{_field_label(computed)} with an unsupported {truth.kind(computed)} output; "
+                f"{remedy}.",
+            )
         default_class, params = cls._upstream_filter_for_lookup(field, lookup_type)
         if cls._is_own_pk_under_relay_owner(field, cls._generating_key()):
             if cls._generation_origin_for_field(field, lookup_type) != "framework_default":
@@ -5079,7 +5544,7 @@ class FilterSet(
             )
         if not field.is_relation:
             # A ``GeneratedField`` is the column it computes to every class test below.
-            column = generated_output_field(field) or field
+            column = generated_column(field) or field
             if (
                 default_class is not None
                 and isinstance(column, models.Field)
@@ -5179,9 +5644,7 @@ class FilterSet(
         # primary-first precedence. A relation with no model behind it (a
         # ``GenericForeignKey``, whose ``related_model`` is ``None``) has no target type;
         # ``filter_for_field`` then refuses its path by name.
-        related_model = read_attr(field, "related_model", None)
-        target_type = registry.get(related_model) if is_model_class(related_model) else None
-        relay_target = target_type is not None and implements_relay_node(target_type)
+        relay_target = _relay_target_type_for_relation(field) is not None
         many_side = is_many_side_relation_kind(relation_kind(field))
         if lookup_type == "in":
             # A relation ``in`` lookup consumes a LIST of identities, so it keeps the
@@ -5538,6 +6001,7 @@ class FilterSet(
         lookup writing no key remains unnamed (``_named_leaf_filters``) and absent
         (``_leaf_absent``).
         """
+        _refuse_generated_filter_output(filter_instance, None, cls)
         normalized = normalize_input_value(filter_instance, value, field_name=form_key)
         if isinstance(normalized, _RangeFormPatch):
             # Range-filter patch: the keys its widget reads, for one lookup.
@@ -6036,13 +6500,17 @@ class FilterSet(
         tree order, and the map comes back keyed by ``id(child_input)``. Every arm
         reads and fills ``hop_visibility``, the request-wide hop map, so a
         declaration several arms hold runs its target ``get_queryset`` once.
-        ``apply_sync`` calls it before the permission pass and form validation, as
-        ``apply_async`` calls its twin, so an input carrying an arm's branch error
-        beside a form error or a permission denial answers the same first error on
-        both colors (spec-027 Decision 8, step 3).
+        ``apply_sync`` calls it before the permission pass and form validation,
+        as ``apply_async`` calls its twin. Flat hops stay at their later sync
+        application boundary; nested branch errors retain their step-3 order.
         """
-        return {
-            id(child_input): cls._derive_related_visibility_querysets_sync(
+        result: dict[int, dict[str, models.QuerySet[models.Model]]] = {}
+        for child_input, arm_path, depth in cls._iter_logic_arms(
+            input_value,
+            _depth=_depth,
+            _branch_path=_branch_path,
+        ):
+            result[id(child_input)] = cls._derive_related_visibility_querysets_sync(
                 child_input,
                 info,
                 hop_visibility=hop_visibility,
@@ -6050,12 +6518,7 @@ class FilterSet(
                 _depth=depth,
                 _branch_path=arm_path,
             )
-            for child_input, arm_path, depth in cls._iter_logic_arms(
-                input_value,
-                _depth=_depth,
-                _branch_path=_branch_path,
-            )
-        }
+        return result
 
     @classmethod
     async def _collect_nested_visibility_querysets_async(
@@ -6227,7 +6690,8 @@ class FilterSet(
         the override sees both the policy-owning class (``cls``) and the
         actual filterset whose form to validate.
 
-        The asks run inside the form's own clean (``FilterSet.form`` builds a
+        The text preflight and final bind ask enter the actual form's errors
+        (``FilterSet.form`` builds a
         ``filters/form_binding.py::BindAskingFilterForm``), so this call reads them as
         form errors, and so does every raw driver (``is_valid()`` / ``errors``,
         ``DjangoFilterBackend``, ``FilterView``). A value holding text the package
@@ -6282,20 +6746,11 @@ class FilterSet(
         past the same end (``_held_integer_value``), never converted, so a ``year`` bound of
         ``-1e1000000`` is refused at once.
         """
-        form = filterset_instance.form
-        if isinstance(form, BindAskingFilterForm):
-            if form.is_valid():
-                return
-            errors: dict[str, object] = form.errors.get_json_data()
-        else:
-            # A consumer ``form`` override built a form the asks are not part of.
-            errors = _json_errors(_unstorable_text_errors(filterset_instance, form))
-            if not errors:
-                errors = form.errors.get_json_data() | _json_errors(
-                    _unbindable_value_errors(filterset_instance, form),
-                )
-                if not errors:
-                    return
+        filterset_instance._finish_form_binding()
+        form = filterset_instance._native_form()
+        if form.is_valid():
+            return
+        errors: dict[str, object] = form.errors.get_json_data()
         branch = filterset_instance._branch_path
         raise GraphQLError(
             "Invalid filter input",
@@ -6414,6 +6869,135 @@ class FilterSet(
             )
         walk = cls._flat_leaf_walk(filter_instance)
         return () if walk is None else walk[0]
+
+    def _necessary_annotation_hop(self, filter_instance: Filter) -> RelationHop | None:
+        """Find the final scoped owner when the actual comparison output is unresolved."""
+        if not _runs_shipped_filter(filter_instance):
+            return None
+        chain = self._leaf_chain(filter_instance)
+        if chain is None or not chain.hops or not _runs_shipped_filter(chain.terminal):
+            return None
+        hop = chain.hops[-1]
+        if isinstance(hop, UndeclaredHop) and hop.scope is None:
+            return None
+        if _bound_value_field(chain.terminal) is not None:
+            return None
+        if (
+            _query_lookup_operand(
+                Query(_hop_model(hop)),
+                _declared_field_name(chain.terminal),
+                chain.terminal.lookup_expr,
+            )
+            is not None
+        ):
+            return None
+        return hop
+
+    def _named_annotation_hops(self, _input_value: object) -> tuple[RelationHop, ...]:
+        """Return only owners needed to install an actual missing parser before clean."""
+        return tuple(
+            hop
+            for _name, _field, declaration in self._missing_comparison_fields(self.form)
+            if (hop := self._necessary_annotation_hop(declaration)) is not None
+        )
+
+    def _disabled_initial_annotation_fields(self) -> tuple[tuple[str, RelationHop | None], ...]:
+        """Retain active initial names for enrichment after their owner is visible."""
+        return tuple(
+            (name, self._necessary_annotation_hop(declaration))
+            for name, field, declaration in self._missing_comparison_fields(self.form)
+            if field.disabled
+        )
+
+    def _install_disabled_initial_comparisons(self, names: tuple[str, ...]) -> None:
+        """Enrich the canonical and actual form fields after their final owner is visible."""
+        form = self.form
+        for name in names:
+            owned = form.fields.get(name)
+            if owned is None:
+                continue
+            filter_instance = self._filter_named(name)
+            _ = self._install_source_comparison(filter_instance, filter_instance.field)
+            _ = self._install_source_comparison(filter_instance, owned)
+
+    def _annotation_owner_alias(self) -> str:
+        """Use the constructed instance's database for both readiness and acquisition."""
+        return require(self.queryset, is_queryset).db
+
+    def _annotation_hops_uncached(self, hops: tuple[RelationHop, ...]) -> bool:
+        """Whether an async preclean owner still needs an await outside the sync worker."""
+        visible = self._hop_visibility()
+        alias = self._annotation_owner_alias()
+        for hop in hops:
+            if isinstance(hop, UndeclaredHop):
+                key: tuple[object, str | None] = (hop.scope, alias)
+            else:
+                _owner, declaration = _filter_declaration(hop)
+                key = (id(declaration), alias)
+            if key not in visible:
+                return True
+        return False
+
+    def _prepare_annotation_hops_sync(self, input_value: object) -> None:
+        """Resolve only sources needed by missing automatic parsers before field cleaning."""
+        _ = self._preflight_form()
+        if self._suppress_new_bind_hooks:
+            return
+        parent_db = self._annotation_owner_alias()
+        for hop in self._named_annotation_hops(input_value):
+            _ = self._hop_visible_rows(hop, parent_db)
+        initial_fields = self._disabled_initial_annotation_fields()
+        for _name, hop in initial_fields:
+            if hop is not None:
+                _ = self._hop_visible_rows(hop, parent_db)
+        self._install_disabled_initial_comparisons(tuple(name for name, _hop in initial_fields))
+
+    def _finish_known_annotation_validation(
+        self,
+        initial_names: tuple[str, ...],
+        *,
+        defer_bind: bool,
+    ) -> tuple[RelationHop, ...]:
+        """Clean one actual form, then bind final values in the postclean phase."""
+        self._install_disabled_initial_comparisons(initial_names)
+        self._refresh_materialized_form_comparisons()
+        form = self._native_form()
+        if self._bind_asked_form is not form:
+            if defer_bind:
+                hops = self._postclean_binding_hops(form)
+                if self._annotation_hops_uncached(hops):
+                    return hops
+            else:
+                self._prepare_postclean_binding_sync(form)
+            self._finish_form_binding()
+        type(self)._validate_form_or_raise(self)
+        return ()
+
+    def _stage_known_annotation_validation(
+        self,
+        input_value: object,
+        *,
+        native_only: bool = False,
+    ) -> tuple[tuple[RelationHop, ...], tuple[str, ...], bool]:
+        """Expose parser or postclean bind owners for async awaiting on one form.
+
+        A cached owner can be used immediately. Otherwise the caller awaits
+        outside this worker and resumes this same instance and form.
+        """
+        _ = self._preflight_form()
+        named_hops = self._named_annotation_hops(input_value)
+        initial_fields = self._disabled_initial_annotation_fields()
+        hops = (*named_hops, *(hop for _name, hop in initial_fields if hop is not None))
+        names = tuple(name for name, _hop in initial_fields)
+        if not self._suppress_new_bind_hooks and self._annotation_hops_uncached(hops):
+            return hops, names, False
+        if native_only:
+            self._install_disabled_initial_comparisons(names)
+            self._refresh_materialized_form_comparisons()
+            _ = self._native_form()
+            return (), names, True
+        bind_hops = self._finish_known_annotation_validation(names, defer_bind=True)
+        return bind_hops, names, not bind_hops
 
     @classmethod
     def _supplied_leaf_filters(cls, input_value: object) -> list[tuple[str, Filter]]:
@@ -6604,32 +7188,56 @@ class FilterSet(
         *,
         parent_db: str | None,
     ) -> None:
-        """Await the target visibility of every hop a flat leaf the form data names walks.
+        """Preawait ordinary resolved hops a supplied flat leaf walks.
 
         The flat-leaf twin of ``_derive_related_visibility_querysets_async``:
         ``apply_async`` runs it for the top level and
         ``_collect_nested_visibility_querysets_async`` for every ``and`` / ``or``
         / ``not`` arm, so the sync ``.qs`` read finds each hop already in the
-        request-wide map and never runs an async-only ``get_queryset``; a hop a
+        request-wide map and never runs an ordinary async-only ``get_queryset``; a hop a
         nested branch already awaited (``_await_declared_hop_rows``) is not
         awaited again. The
         leaves are ``_named_leaf_filters``'s: those whose form data names a key,
         the one rule the sync form reads a flat leaf as supplied by
         (``_named_flat_copies``, ``_leaf_absent``), so the pre-pass sees exactly
         the leaves the form runs as supplied. It runs before any form exists, so a
-        named value the filter then skips (an empty string) costs one awaited
-        ``get_queryset`` and constrains nothing, as a present-but-empty nested
-        branch does. A leaf the form data does not name (absent, or a range
+        named ordinary value the filter then skips (an empty string) costs one
+        awaited ``get_queryset`` and constrains nothing, as a present-but-empty
+        nested branch does. An unresolved annotation with a complete field waits
+        for the postclean bind phase instead. A leaf the form data does not name (absent, or a range
         naming no bound) costs this pass nothing: once the form has cleaned it,
         ``apply_async`` awaits its hops only when its filter acts on the absent
         value (``_probe_absent_relation_leaves``).
         """
+        eager: list[RelationHop] = []
+        for _name, filter_instance in cls._named_leaf_filters(input_value):
+            hops = cls._visibility_hops(filter_instance)
+            terminal = filter_instance
+            terminal_owner = cls
+            while isinstance(terminal, ProjectedChildFilter):
+                projection = terminal._projection
+                terminal_owner = projection.filterset
+                terminal = _projection_child_filter(projection)
+            if hops and _runs_shipped_filter(terminal):
+                walk = terminal_owner._flat_leaf_walk(terminal)
+                field_path, lookup = _filterset_walked_lookup(terminal_owner, terminal)
+                remainder = field_path if walk is None else walk[1]
+                if (
+                    remainder
+                    and _query_lookup_operand(
+                        Query(_hop_model(hops[-1])),
+                        remainder,
+                        lookup,
+                    )
+                    is None
+                ):
+                    # Ask only the path left on the last hop's model. A relation
+                    # key has no remainder; it is already resolved by that hop.
+                    # The actual form stages unresolved annotation owners later.
+                    continue
+            eager.extend(hops)
         await cls._await_hop_visibility_async(
-            (
-                hop
-                for _name, filter_instance in cls._named_leaf_filters(input_value)
-                for hop in cls._visibility_hops(filter_instance)
-            ),
+            eager,
             info,
             into,
             parent_db=parent_db,
@@ -6908,7 +7516,7 @@ class FilterSet(
         """
         target_set = (
             # The walk continues only past a declared hop whose target resolved to a set class.
-            self._projection_child(_hop_target_set(hop))
+            self._projection_child(_hop_target_set(hop), hop)
             if isinstance(hop, DeclaredHop)
             else _UndeclaredHopSet(hop, self.request)
         )
@@ -6981,18 +7589,34 @@ class FilterSet(
         if isinstance(filter_instance, ProjectedChildFilter):
             projection = filter_instance._projection
             hop = type(self)._projection_hop(projection)
-            child = self._projection_child(projection.filterset)
+            child = self._projection_child(projection.filterset, hop)
             child_filter = child._filter_named(projection.name)
             inner = child._leaf_chain(child_filter)
+            visible = self._flat_hop_visibility
+            using = require(self.queryset, is_queryset).db
+            cached = None if visible is None else visible.get((id(hop.related_obj), using))
+            # Keep the hook's annotated query as the left side and ask Django to
+            # preserve the child's constructor row membership on the right.
+            # Reading the map here does not derive a hook during field inspection.
+            owned_rows = (
+                None
+                if cached is None
+                else cached.filter(pk__in=require(child.queryset, is_queryset).values("pk"))
+            )
             if inner is None:
-                return _LeafChain((hop,), child_filter)
+                return _LeafChain((hop,), child_filter, owned_rows=(owned_rows,))
             fallback = inner.fallback
             return replace(
                 inner,
                 hops=(hop, *inner.hops),
+                owned_rows=(owned_rows, *inner.owned_rows),
                 fallback=None
                 if fallback is None
-                else replace(fallback, hops=(hop, *fallback.hops)),
+                else replace(
+                    fallback,
+                    hops=(hop, *fallback.hops),
+                    owned_rows=(owned_rows, *fallback.owned_rows),
+                ),
             )
         return type(self)._routed_leaf_chain(filter_instance, self._bound_terminal)
 
@@ -7461,13 +8085,12 @@ class FilterSet(
         arms: dict[str, _ProbedArm],
         rows: models.QuerySet[models.Model],
     ) -> tuple[RelationHop, ...]:
-        """Build each ``and`` / ``or`` / ``not`` arm's sibling as the ``.qs`` read will; probe its leaves.
+        """Finalize each prebuilt logical sibling and probe its absent leaves.
 
         Walks this set's logical keys as ``_evaluate_logic_tree`` does (the same
-        depth cap, the same arm paths), building each arm's sibling as
-        ``_q_for_branch`` does (``_build_stashed_instance`` over the arm's
-        normalized input, this set's request, resolver ``info``, pre-derived
-        maps and verdicts) and validating its form, then asks the arm's absent
+        depth cap, the same arm paths), reusing the siblings built and native-cleaned
+        by ``_build_logic_arms_native`` before the input-wide bind-only gate. It
+        finalizes each form's available bind asks and asks its absent
         walking leaves (``_probe_absent_relation_leaves``) and recurses into its
         own arms. Each sibling lands in ``arms`` under its path, beside the input
         it was built from (``_ProbedArm``), for the ``.qs`` read to reuse, so a
@@ -7488,26 +8111,168 @@ class FilterSet(
             return ()
         cls._assert_logic_depth(self._logic_depth)
         for op, children in cls._iter_logic_branches(tree):
-            for index, child_input in enumerate(children):
+            for index, _child_input in enumerate(children):
                 path = _branch_key(self._branch_path, op.arm_key(index))
-                bindings: dict[str, NormalizedFormValue] = {}
-                arm = cls._build_stashed_instance(
-                    cls._normalize_input(child_input, _bindings=bindings),
-                    rows,
-                    self.request,
-                    self._apply_info,
-                    self._nested_qs_by_branch_id,
-                    self._hop_visibility(),
-                    branch_path=path,
-                    form_bindings=FilterFormBindings(MappingProxyType(bindings)),
-                )
-                arm._logic_depth = self._logic_depth + 1
+                arm = arms[path].instance
                 arm._absent_leaf_verdicts = self._absent_leaf_verdicts
-                arm._probed_arms = arms
-                arms[path] = _ProbedArm(child_input, arm, rows)
-                cls._validate_form_or_raise(arm)
+                _ = arm._finish_known_annotation_validation((), defer_bind=False)
                 hops.extend(arm._probe_absent_relation_leaves())
                 hops.extend(arm._probe_logic_arms(arms, rows))
+        return tuple(hops)
+
+    def _new_logic_arm(
+        self,
+        child_input: object,
+        path: str,
+        rows: models.QuerySet[models.Model],
+        arms: dict[str, _ProbedArm],
+    ) -> FilterSet:
+        """Construct one logical sibling over the root rows and retain its actual form."""
+        cls = type(self)
+        bindings: dict[str, NormalizedFormValue] = {}
+        arm = cls._build_stashed_instance(
+            cls._normalize_input(child_input, _bindings=bindings),
+            rows,
+            self.request,
+            self._apply_info,
+            self._nested_qs_by_branch_id,
+            self._hop_visibility(),
+            input_value=child_input,
+            branch_path=path,
+            form_bindings=FilterFormBindings(MappingProxyType(bindings)),
+        )
+        arm._logic_depth = self._logic_depth + 1
+        arm._absent_leaf_verdicts = self._absent_leaf_verdicts
+        arm._probed_arms = arms
+        arm._suppress_new_bind_hooks = self._suppress_new_bind_hooks
+        arms[path] = _ProbedArm(child_input, arm, rows)
+        return arm
+
+    def _validate_native_errors(self) -> None:
+        """Let the actual validation policy reject native errors before later siblings."""
+        form = self._native_form()
+        if self._native_form_is_invalid(form):
+            self._suppress_new_bind_hooks = True
+            self._prepare_postclean_binding_sync(form)
+            type(self)._validate_form_or_raise(self)
+            # A consumer FilterSet validation override may accept errors the
+            # form's own policy rejects. Its accepted domain may acquire owners.
+            self._native_policy_invalid = False
+            self._suppress_new_bind_hooks = False
+            if self._bind_unavailable_names:
+                self._bind_asked_form = None
+                if isinstance(form, BindAskingFilterForm):
+                    form._filter_bind_finalized = False
+                self._bind_unavailable_names = set()
+
+    def _build_logic_arms_native(
+        self,
+        arms: dict[str, _ProbedArm],
+        rows: models.QuerySet[models.Model],
+        *,
+        stop_on_error: bool = True,
+    ) -> None:
+        """Clean all logical forms before any new complete-field bind owner runs."""
+        cls = type(self)
+        tree = self.data
+        if stop_on_error:
+            self._validate_native_errors()
+        if not is_dict(tree) or not tree:
+            return
+        cls._assert_logic_depth(self._logic_depth)
+        for op, children in cls._iter_logic_branches(tree):
+            for index, child_input in enumerate(children):
+                path = _branch_key(self._branch_path, op.arm_key(index))
+                arm = self._new_logic_arm(child_input, path, rows, arms)
+                arm._prepare_annotation_hops_sync(child_input)
+                _ = arm._stage_known_annotation_validation(child_input, native_only=True)
+                arm._build_logic_arms_native(arms, rows, stop_on_error=stop_on_error)
+                if any(
+                    probed.instance._native_form_is_invalid(probed.instance.form)
+                    for probed in arms.values()
+                ):
+                    self._suppress_new_bind_hooks = True
+
+    async def _build_logic_arms_native_async(
+        self,
+        arms: dict[str, _ProbedArm],
+        rows: models.QuerySet[models.Model],
+    ) -> None:
+        """Await missing parser owners, then clean every arm on its one form."""
+        cls = type(self)
+        tree = self.data
+        await run_in_one_sync_boundary(self._validate_native_errors)
+        if not is_dict(tree) or not tree:
+            return
+        cls._assert_logic_depth(self._logic_depth)
+        for op, children in cls._iter_logic_branches(tree):
+            for index, child_input in enumerate(children):
+                path = _branch_key(self._branch_path, op.arm_key(index))
+
+                def stage_arm(
+                    child_input: object,
+                    path: str,
+                ) -> tuple[FilterSet, tuple[RelationHop, ...], bool]:
+                    arm = self._new_logic_arm(child_input, path, rows, arms)
+                    needed, _names, ready = arm._stage_known_annotation_validation(
+                        child_input,
+                        native_only=True,
+                    )
+                    return arm, needed, ready
+
+                arm, needed, ready = await run_in_one_sync_boundary(
+                    partial(stage_arm, child_input, path),
+                )
+                while not ready:
+                    await cls._await_hop_visibility_async(
+                        needed,
+                        self._apply_info,
+                        self._hop_visibility(),
+                        parent_db=arm._annotation_owner_alias(),
+                    )
+                    needed, _names, ready = await run_in_one_sync_boundary(
+                        partial(
+                            arm._stage_known_annotation_validation,
+                            child_input,
+                            native_only=True,
+                        ),
+                    )
+                await arm._build_logic_arms_native_async(arms, rows)
+
+    async def _probe_logic_arms_async(
+        self,
+        arms: dict[str, _ProbedArm],
+        rows: models.QuerySet[models.Model],
+    ) -> tuple[RelationHop, ...]:
+        """Finalize prebuilt logical siblings, awaiting postclean bind owners once."""
+        cls = type(self)
+        tree = self.data
+        if not is_dict(tree) or not tree:
+            return ()
+        cls._assert_logic_depth(self._logic_depth)
+        hops: list[RelationHop] = []
+        for op, children in cls._iter_logic_branches(tree):
+            for index, child_input in enumerate(children):
+                path = _branch_key(self._branch_path, op.arm_key(index))
+
+                arm = arms[path].instance
+                arm._absent_leaf_verdicts = self._absent_leaf_verdicts
+                needed, _initial_names, ready = await run_in_one_sync_boundary(
+                    partial(arm._stage_known_annotation_validation, child_input),
+                )
+                while not ready:
+                    await cls._await_hop_visibility_async(
+                        needed,
+                        self._apply_info,
+                        self._hop_visibility(),
+                        parent_db=arm._annotation_owner_alias(),
+                    )
+                    needed, _initial_names, ready = await run_in_one_sync_boundary(
+                        partial(arm._stage_known_annotation_validation, child_input),
+                    )
+                absent = await run_in_one_sync_boundary(arm._probe_absent_relation_leaves)
+                hops.extend(absent)
+                hops.extend(await arm._probe_logic_arms_async(arms, rows))
         return tuple(hops)
 
     def _chain_base(
@@ -7603,6 +8368,14 @@ class FilterSet(
         # A caller passes only a leaf ``_flat_leaf_walk`` reads or a ``ProjectedChildFilter``,
         # which always carries its projection hop. Derived before any target set is read:
         # a hop whose target does not resolve, or has no registered type, raises here
+        if (
+            supplied
+            and value in forms.Field.empty_values
+            and _runs_shipped_filter(filter_instance)
+            and self._necessary_annotation_hop(filter_instance) is not None
+            and not self._absent_leaf_applies(filter_instance, value)
+        ):
+            return queryset
         # (``_branch_visibility_seed``).
         for hop in type(self)._visibility_hops(filter_instance):
             _ = self._hop_visible_rows(hop, using)
@@ -7653,7 +8426,10 @@ class FilterSet(
             if chain.view:
                 return matched
             return matched.filter(self._reaches_key(matched, chain, key_hop, named, using))
-        visible = [self._hop_visible_rows(hop, using) for hop in chain.hops]
+        visible: list[models.QuerySet[models.Model]] = []
+        for index, hop in enumerate(chain.hops):
+            owned = chain.owned_rows[index] if index < len(chain.owned_rows) else None
+            visible.append(owned if owned is not None else self._hop_visible_rows(hop, using))
         source = visible[-1]
         if chain.view:
             source, terminal = self._relation_view(chain.view, terminal, source, using)
@@ -7699,7 +8475,12 @@ class FilterSet(
         consumer form seam put it on the form.
         """
         unnamed = self._unnamed_copies
-        return [(name, value) for name, value in _cleaned_items(self.form) if name not in unnamed]
+        unavailable = self._bind_unavailable_names
+        return [
+            (name, value)
+            for name, value in _cleaned_items(self.form)
+            if name not in unnamed and name not in unavailable
+        ]
 
     def _apply_flat_leaves(self, queryset: models.QuerySet[_M]) -> models.QuerySet[_M]:
         """Apply flat leaves in ``BaseFilterSet.filter_queryset``'s order, each over the rows it may read.
@@ -7802,6 +8583,8 @@ class FilterSet(
         for name, cleaned in self._cleaned_leaf_items():
             candidate = candidates.get(name)
             filter_instance = self._filter_named(name)
+            if not self._leaf_absent(name):
+                _refuse_generated_filter_output(filter_instance, None, type(self))
             value = _held_integer_value(filter_instance, cleaned, queryset)
             if type(self)._walks_relation_hops(filter_instance):
                 queryset = self._apply_relation_leaf(
@@ -7950,6 +8733,9 @@ class FilterSet(
         pipeline's probe built, by arm path (``FilterSet._probed_arms``), and
         ``_absent_leaf_verdicts`` the calling set's absent-leaf verdicts, which a
         sibling built afresh starts from (``FilterSet._absent_leaf_verdicts``).
+        Direct raw forms stage their logical siblings during their owning form
+        clean; this read reuses them and cannot acquire a new bind-only source
+        after a native error elsewhere in that input.
         ``_branch_path`` is the set's path from
         the request root; each arm's sibling applies under the arm's own path
         (``_branch_key`` of ``LogicOperatorDescriptor.arm_key``, the index the arm's
@@ -8111,6 +8897,9 @@ class FilterSet(
         if probed is not None and probed.instance.queryset is probed.rows:
             child_set = probed.instance
             child_set.queryset = constrained
+            form = child_set._native_form()
+            if child_set._bind_asked_form is not form:
+                _ = child_set._finish_known_annotation_validation((), defer_bind=False)
         else:
             bindings: dict[str, NormalizedFormValue] = {}
             child_set = cls._build_stashed_instance(
@@ -8120,6 +8909,7 @@ class FilterSet(
                 info,
                 _nested_qs_by_branch_id,
                 _flat_hop_visibility,
+                input_value=child_input,
                 branch_path=_branch_path,
                 form_bindings=FilterFormBindings(MappingProxyType(bindings)),
             )
@@ -8128,7 +8918,10 @@ class FilterSet(
                 _absent_leaf_verdicts if probed is None else probed.instance._absent_leaf_verdicts
             )
             child_set._probed_arms = _probed_arms
-            cls._validate_form_or_raise(child_set)
+            if probed is not None:
+                child_set._suppress_new_bind_hooks = probed.instance._suppress_new_bind_hooks
+            child_set._prepare_annotation_hops_sync(child_input)
+            _ = child_set._finish_known_annotation_validation((), defer_bind=False)
         if truth.overrides(type(child_set), filterset.BaseFilterSet, "qs"):
             # A consumer ``qs`` override (django-filter's seam) runs inside the arm as it
             # does at the top level; its rows compose as ``pk__in`` like any other arm.
@@ -8228,6 +9021,7 @@ class FilterSet(
         nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
         flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         *,
+        input_value: object,
         branch_path: str = "",
         form_bindings: FilterFormBindings | None = None,
     ) -> Self:
@@ -8244,7 +9038,14 @@ class FilterSet(
         # basedpyright: typeshed narrows ``request`` to ``HttpRequest``; upstream only stores it,
         # and the context request need not be a Django one. It rejects ``object`` for
         # ``HttpRequest | None``
-        with _pipeline_built(cls, form_bindings):
+        flat_names = frozenset(name for name, _ in cls._named_leaf_filters(input_value))
+        with _pipeline_built(
+            cls,
+            form_bindings,
+            flat_names=flat_names,
+            hop_visibility=flat_hop_visibility,
+            info=info,
+        ):
             instance = cls(
                 data=data,
                 queryset=constrained,
@@ -8289,10 +9090,9 @@ class FilterSet(
         it builds (``_probe_absent_relation_leaves``, ``_probe_logic_arms``),
         which the ``.qs`` read reuses, and the hops of an absent leaf that
         constrains are derived synchronously as the ``.qs`` read reaches them.
-        Async ``apply_async`` runs the same build, permission pass, validation
-        and probe through ``_probed_filterset`` in ``run_in_one_sync_boundary``
-        (the neutral ``sync_to_async(thread_sensitive=True)`` owner in
-        ``utils/querysets.py``) so a consumer's filterset constructor /
+        Async ``apply_async`` stages and resumes the same built forms through
+        ``run_in_one_sync_boundary`` (the neutral ``sync_to_async(thread_sensitive=True)``
+        owner in ``utils/querysets.py``) so a consumer's filterset constructor /
         ``check_*_permission`` hook / custom ``method=`` filter body /
         leaf-clause ORM evaluation does not block the event loop.
 
@@ -8334,10 +9134,10 @@ class FilterSet(
         branch_path: str,
         form_bindings: FilterFormBindings | None,
     ) -> Self:
-        """Build the filterset (``_build_stashed_instance``), run the permission pass, validate the form.
+        """Build the filterset, run permissions, and clean its native form once.
 
-        The start of ``_probed_filterset``, the work both colors run before the
-        ``.qs`` read.
+        The start of ``_probed_filterset``. New bind-only sources wait until
+        every logical sibling has also completed native cleaning.
         """
         filterset_instance = cls._build_stashed_instance(
             data,
@@ -8346,12 +9146,14 @@ class FilterSet(
             info,
             nested_qs_by_branch_id,
             flat_hop_visibility,
+            input_value=input_value,
             branch_path=branch_path,
             form_bindings=form_bindings,
         )
         if run_permissions:
             cls._run_permission_checks(input_value, request)
-        cls._validate_form_or_raise(filterset_instance)
+        filterset_instance._prepare_annotation_hops_sync(input_value)
+        _ = filterset_instance._stage_known_annotation_validation(input_value, native_only=True)
         return filterset_instance
 
     @classmethod
@@ -8375,8 +9177,9 @@ class FilterSet(
         its sync boundary, ``apply_sync`` through ``_apply_common_finalize``): the
         hops of every absent walking leaf whose filter constrains on the value it
         cleaned to, the root set's (``_probe_absent_relation_leaves``) and every
-        ``and`` / ``or`` / ``not`` arm's, whose siblings the probe builds for the
-        ``.qs`` read to reuse (``_probe_logic_arms``). With none, the ``.qs`` read
+        ``and`` / ``or`` / ``not`` arm's. The native stage builds their siblings
+        before any new bind-only owner runs; the probe reuses them for the
+        ``.qs`` read (``_probe_logic_arms``). With none, the ``.qs`` read
         runs here and its rows come back; otherwise the rows are ``None`` and the
         caller reads ``.qs`` itself: ``apply_async`` awaits the hops first and
         reads it in a second worker.
@@ -8395,6 +9198,14 @@ class FilterSet(
         )
         arms: dict[str, _ProbedArm] = {}
         filterset_instance._probed_arms = arms
+        filterset_instance._build_logic_arms_native(arms, constrained)
+        all_sets = (filterset_instance, *(probed.instance for probed in arms.values()))
+        native_errors = any(
+            instance._native_form_is_invalid(instance.form) for instance in all_sets
+        )
+        for instance in all_sets:
+            instance._suppress_new_bind_hooks = native_errors
+        _ = filterset_instance._finish_known_annotation_validation((), defer_bind=False)
         hops = (
             *filterset_instance._probe_absent_relation_leaves(),
             *filterset_instance._probe_logic_arms(arms, constrained),
@@ -8505,9 +9316,9 @@ class FilterSet(
                so every active ``RelatedFilter`` branch's target
                ``get_queryset`` runs on the async path, into the request-wide
                hop map every later step reads (``_await_declared_hop_rows``).
-            2. Await, via ``_derive_flat_hop_visibility_async``, the target
-               visibility of every declared hop a top-level flat relation
-               leaf the form data names walks, into the request-wide hop map.
+            2. Await, via ``_derive_flat_hop_visibility_async``, ordinary
+               resolved declared hops a top-level flat relation leaf names,
+               into the request-wide hop map.
             3. Pre-walk every ``and`` / ``or`` / ``not`` arm via
                ``_collect_nested_visibility_querysets_async`` so nested
                branches whose target type's ``get_queryset`` is async-only
@@ -8516,32 +9327,24 @@ class FilterSet(
                land in the same hop map. Without this step,
                ``_q_for_branch``'s sync derive (or a flat leaf's first-use
                derive) would raise ``SyncMisuseError`` mid-``.qs``.
-            4. Inside one ``run_in_one_sync_boundary`` worker, normalize the
+            4. Inside a ``run_in_one_sync_boundary`` worker, normalize the
                input and apply the related constraints via
                ``_apply_common_prelude`` (shared with ``apply_sync``), which
                calls a callable ``RelatedFilter`` ``queryset=``: consumer code
                that may read the ORM.
-            5. In the same worker, run ``_probed_filterset`` (filterset build with the
-               nested-visibility and hop-visibility maps stashed, then perm
-               check + form validate, then the absent-leaf probe), so a consumer's
-               ``check_*_permission`` hook that performs a blocking ORM read
-               does not block the event loop. The probe asks each absent
-               walking leaf whether its filter constrains on the value it
-               cleaned to (``_probe_absent_relation_leaves``), on the root set
-               and on every ``and`` / ``or`` / ``not`` arm's sibling, which it
-               builds as the ``.qs`` read will (``_probe_logic_arms``; an arm
-               asks only a leaf the set holding it did not answer for the value
-               it cleaned to there: one a consumer ``__init__`` adds from the
-               arm's data, or one a consumer form ``clean`` cleans to another
-               value). When none constrains, the same worker reads ``.qs``.
-               Otherwise the hops of every leaf that does are awaited into the
-               hop map (``_await_hop_visibility_async``) and a second worker
-               reads ``.qs``, which reuses those siblings and reads those
-               verdicts instead of asking again (``_q_for_branch``). A leaf the
-               form data names had its hops awaited in step 2 or 3, so the
-               ``.qs`` read derives no hop on its own. ``apply_sync`` runs the
-               same probe and reads the same verdicts, deriving the hops
-               synchronously.
+            5. Build the root, run its permission pass, and inspect its actual
+               form for a missing automatic parser. Await that parser's source
+               outside the worker when needed, then finish its one native clean.
+               Build and native-clean every logical sibling the same way before
+               acquiring any new bind-only annotation owner for this input.
+               Native form errors suppress those new owners. On native success,
+               collect the active final values of the same forms, await missing
+               bind-only owners outside the worker, finalize their bind errors,
+               then probe absent walking leaves. Await their needed hops and
+               read ``.qs`` in a worker using the captured siblings and verdicts.
+               A nested ``RelatedFilter`` child runs its own async pipeline;
+               ordinary resolved hops remain preawaited in step 2 or 3. All
+               constructor, gate, form and ORM work stays in sync workers.
 
         ``run_permissions`` defaults to ``True`` for consumer entry points;
         the related-visibility derivation passes ``False`` so a nested child
@@ -8578,10 +9381,13 @@ class FilterSet(
             flat_hop_visibility=flat_hop_visibility,
         )
 
-        def constrained_probe() -> tuple[
+        def constrained_stage() -> tuple[
             Self,
+            models.QuerySet[_M],
             tuple[RelationHop, ...],
-            models.QuerySet[_M] | None,
+            tuple[str, ...],
+            bool,
+            tuple[RelationHop, ...],
         ]:
             data, request, constrained, form_bindings = cls._apply_common_prelude(
                 input_value,
@@ -8590,27 +9396,84 @@ class FilterSet(
                 child_qs_by_branch,
                 flat_hop_visibility,
             )
-            return cls._probed_filterset(
-                input_value,
-                constrained,
+            instance = cls._build_stashed_instance(
                 data,
+                constrained,
                 request,
                 info,
-                nested_qs_by_branch_id=nested_qs_by_branch_id,
-                flat_hop_visibility=flat_hop_visibility,
-                run_permissions=run_permissions,
+                nested_qs_by_branch_id,
+                flat_hop_visibility,
+                input_value=input_value,
                 branch_path=_branch_path,
                 form_bindings=form_bindings,
             )
+            if run_permissions:
+                cls._run_permission_checks(input_value, request)
+            needed, initial_names, ready = instance._stage_known_annotation_validation(
+                input_value,
+                native_only=True,
+            )
+            return instance, constrained, needed, initial_names, ready, ()
 
-        filterset_instance, absent_hops, rows = await run_in_one_sync_boundary(constrained_probe)
-        if rows is not None:
-            return rows
+        (
+            filterset_instance,
+            constrained,
+            needed,
+            _initial_names,
+            ready,
+            root_absent,
+        ) = await run_in_one_sync_boundary(constrained_stage)
+        while not ready:
+            await cls._await_hop_visibility_async(
+                needed,
+                info,
+                flat_hop_visibility,
+                parent_db=filterset_instance._annotation_owner_alias(),
+            )
+            needed, _initial_names, ready = await run_in_one_sync_boundary(
+                partial(
+                    filterset_instance._stage_known_annotation_validation,
+                    input_value,
+                    native_only=True,
+                ),
+            )
+        arms: dict[str, _ProbedArm] = {}
+        filterset_instance._probed_arms = arms
+        await filterset_instance._build_logic_arms_native_async(arms, constrained)
+
+        def prepare_bind_phase() -> tuple[tuple[RelationHop, ...], bool]:
+            all_sets = (filterset_instance, *(probed.instance for probed in arms.values()))
+            native_errors = any(
+                instance._native_form_is_invalid(instance.form) for instance in all_sets
+            )
+            for instance in all_sets:
+                instance._suppress_new_bind_hooks = native_errors
+            needed, _names, ready = filterset_instance._stage_known_annotation_validation(
+                input_value,
+            )
+            return needed, ready
+
+        needed, ready = await run_in_one_sync_boundary(prepare_bind_phase)
+        while not ready:
+            await cls._await_hop_visibility_async(
+                needed,
+                info,
+                flat_hop_visibility,
+                parent_db=filterset_instance._annotation_owner_alias(),
+            )
+            needed, _names, ready = await run_in_one_sync_boundary(
+                partial(filterset_instance._stage_known_annotation_validation, input_value),
+            )
+        root_absent = await run_in_one_sync_boundary(
+            filterset_instance._probe_absent_relation_leaves,
+        )
+        arm_absent = await filterset_instance._probe_logic_arms_async(arms, constrained)
+        absent_hops = (*root_absent, *arm_absent)
         await cls._await_hop_visibility_async(
             absent_hops,
             info,
             flat_hop_visibility,
-            parent_db=queryset.db,
+            parent_db=filterset_instance._annotation_owner_alias(),
         )
         return await run_in_one_sync_boundary(lambda: filterset_instance.qs)
 

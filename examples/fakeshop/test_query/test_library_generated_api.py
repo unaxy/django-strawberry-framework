@@ -33,9 +33,11 @@ from apps.library import models
 from django import forms
 from django.db import connection
 from django.db import models as django_models
+from django.db.models import F
 from django.db.models.functions import Chr
 from django.db.models.lookups import Contains, Exact, Lookup, Transform
-from django.http import HttpRequest
+from django.forms.utils import ErrorDict
+from django.http import HttpRequest, QueryDict
 from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import register_lookup
@@ -65,10 +67,16 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.filters import FilterSet, GlobalIDFilter
+from django_strawberry_framework.filters import (
+    ArrayFilter,
+    FilterSet,
+    GlobalIDFilter,
+    ListFilter,
+)
 from django_strawberry_framework.filters.base import _lookup_operand, _model_lookup_operand
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.utils._narrowing import require_instance
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import ModelSerializerBase
 
@@ -180,6 +188,105 @@ def test_generated_bigint_lookups_hold_values_past_the_column_range_over_http(
         )
         == expected
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("family", ["list", "array"])
+@pytest.mark.parametrize(
+    ("members", "expected"),
+    [([_PAST_BIGINT], []), ([_PAST_BIGINT, 3], ["BBB"]), ([3], ["BBB"])],
+)
+def test_declared_package_members_drop_past_generated_integer_over_http(
+    family: str,
+    members: list[int],
+    expected: list[str],
+    private_registry: None,
+) -> None:
+    """Declared list and array membership read ``code_length`` as its stored integer."""
+    _seed_shelves()
+    del private_registry
+
+    class GeneratedMembersSet(FilterSet):
+        members = (
+            ListFilter(field_name="code_length", lookup_expr="in")
+            if family == "list"
+            else ArrayFilter(field_name="code_length", lookup_expr="in")
+        )
+        code = CharFilter(field_name="code")
+
+        class Meta:
+            model = models.Shelf
+            fields = []
+
+    with _rows_schema(models.Shelf, GeneratedMembersSet, ("id", "code")):
+        rendered = ", ".join(str(member) for member in members)
+        assert _row_codes(f'members: {{in: [{rendered}]}}, code: {{exact: "BBB"}}') == expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("family", ["list", "array", "generated-alias"])
+@pytest.mark.parametrize(
+    ("members", "expected"),
+    [(str(_PAST_BIGINT), []), (f"{_PAST_BIGINT},3", ["BBB"]), ("3", ["BBB"])],
+)
+def test_raw_generated_integer_members_keep_partial_qs_on_one_instance(
+    family: str,
+    members: str,
+    expected: list[str],
+    private_registry: None,
+) -> None:
+    """The raw form drops impossible stored members while a good code sibling stays active."""
+    _seed_shelves()
+    del private_registry
+
+    class GeneratedMembersSet(FilterSet):
+        members = (
+            ArrayFilter(field_name="code_length", lookup_expr="in")
+            if family == "array"
+            else ListFilter(
+                field_name="aliased_length" if family == "generated-alias" else "code_length",
+                lookup_expr="in",
+            )
+        )
+        code = CharFilter(field_name="code")
+
+        class Meta:
+            model = models.Shelf
+            fields = []
+
+    @strawberry.type
+    class Query:
+        def _answer(self) -> dict[str, object]:
+            rows = models.Shelf.objects.order_by("code")
+            if family == "generated-alias":
+                rows = rows.alias(aliased_length=F("code_length"))
+            instance = GeneratedMembersSet(
+                data=QueryDict(f"p-members={members}&p-code=BBB"),
+                queryset=rows,
+                prefix="p",
+            )
+            errors = require_instance(instance.errors, ErrorDict).get_json_data()
+            valid = instance.is_valid()
+            return {
+                "errors": errors,
+                "valid": valid,
+                "codes": list(instance.qs.values_list("code", flat=True)),
+            }
+
+        answer: dict[str, object] = strawberry.field(
+            resolver=_answer,
+            graphql_type=strawberry.scalars.JSON,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(query=Query, config=strawberry_config())
+    _HOLDER["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = _holder_payload("{ answer }")
+    finally:
+        _HOLDER["schema"] = None
+    assert json_at(payload, "data", "answer") == {"errors": {}, "valid": True, "codes": expected}
 
 
 @pytest.mark.django_db

@@ -11,15 +11,21 @@ A set declaring no ``Meta.model`` refuses a leaf by naming the missing model, ma
 under the default error policy, while its ``RelatedFilter`` branches still apply.
 A list or range criterion over a duration or integer annotation of the queryset handed to
 the set, or of a branch's target type's ``get_queryset``, is cleaned and compared as the
-annotation's output field under ``apply_sync`` and ``apply_async`` alike.
+annotation's output field under ``apply_sync`` and ``apply_async`` alike. Complete fields
+and values added by consumer cleaning acquire bind-only owners after the whole native
+logical domain succeeds; only missing package inner parsers prepare before cleaning.
+Raw ``.qs`` keeps safe sibling filtering on the same form when native errors suppress
+uncached bind-only hooks. Permission gates precede annotation parser and bind preparation;
+each owner is cached.
 """
 
 import asyncio
 import datetime
 import logging
+import os
 from collections.abc import Awaitable, Callable, Mapping
 from functools import wraps
-from typing import TYPE_CHECKING, Annotated, NoReturn
+from typing import TYPE_CHECKING, Annotated, ClassVar, NoReturn
 
 import pytest
 import strawberry
@@ -29,25 +35,62 @@ from apps.products.services import create_users
 from apps.scalars import models as scalar_models
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
+from django.db import connection
 from django.db import models as django_models
 from django.db.models import Lookup, Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
+from django.db.models.functions import Abs, ExtractIsoYear, ExtractMonth, ExtractYear, Length
+from django.forms import DurationField as FormDurationField
+from django.forms import Field as FormField
+from django.forms import Form, TextInput, Widget
+from django.forms.utils import ErrorDict
+from django.http import HttpRequest, HttpResponseBase, QueryDict
 from django.test import AsyncClient, Client, override_settings
-from django.test.utils import register_lookup
+from django.test.utils import isolate_apps, register_lookup
 from django.urls import path
-from django_filters import CharFilter, DateTimeFilter, MultipleChoiceFilter, NumberFilter
+from django_filters import (
+    BaseInFilter,
+    BaseRangeFilter,
+    BooleanFilter,
+    CharFilter,
+    DateTimeFilter,
+    DurationFilter,
+    ModelMultipleChoiceFilter,
+    MultipleChoiceFilter,
+    NumberFilter,
+)
 from django_filters import RangeFilter as UpstreamRangeFilter
 from graphql import GraphQLError
-from graphql_client import JSONObject, graphql_payload, json_at, json_object, response_json
+from graphql_client import (
+    JSONObject,
+    RecordCompiledSql,
+    graphql_payload,
+    json_at,
+    json_object,
+    response_json,
+)
 from strategy_schemas import make_django_type
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoSchema, finalize_django_types, strawberry_config
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
+from django_strawberry_framework.filters import (
+    ArrayFilter,
+    FilterSet,
+    ListFilter,
+    RangeField,
+    RangeFilter,
+    RelatedFilter,
+)
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils._narrowing import (
+    is_list_or_tuple,
+    read_attr,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.utils.input_values import UNSET
+from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._cleaned_filter_sets import cleaned_specimen
 
@@ -231,6 +274,106 @@ def _refused(
     if extensions is not None:
         error["extensions"] = extensions
     assert payload == {"data": None, "errors": [error]}, payload
+
+
+def _generated_raw_filter() -> tuple[type[Model], type[FilterSet]]:
+    """An unserved set with generated unsupported outputs and an ordinary duration column."""
+    meta = type("Meta", (), {"app_label": "scalars", "managed": False})
+    row = type(
+        "GeneratedRawRow",
+        (Model,),
+        {
+            "__module__": __name__,
+            "name": django_models.TextField(),
+            "plain": django_models.DurationField(),
+            "starts_at": django_models.DateTimeField(),
+            "ends_at": django_models.DateTimeField(),
+            "elapsed": django_models.GeneratedField(
+                expression=django_models.F("ends_at") - django_models.F("starts_at"),
+                output_field=django_models.DurationField(),
+                db_persist=True,
+            ),
+            "file": django_models.GeneratedField(
+                expression=django_models.Value("file"),
+                output_field=django_models.FileField(),
+                db_persist=True,
+            ),
+            "Meta": meta,
+        },
+    )
+    filter_meta = type("Meta", (), {"model": row, "fields": []})
+    filterset = type(
+        "GeneratedRawFilter",
+        (FilterSet,),
+        {
+            "elapsed": DurationFilter(field_name="elapsed"),
+            "file": CharFilter(field_name="file"),
+            "null_elapsed": BooleanFilter(field_name="elapsed", lookup_expr="isnull"),
+            "plain": DurationFilter(field_name="plain"),
+            "Meta": filter_meta,
+        },
+    )
+    return row, filterset
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("where", "field"),
+    [
+        ({"elapsed": {"exact": "00:00:01"}}, "DurationField"),
+        ({"file": {"exact": {"x": 1}}}, "FileField"),
+        ({"null_elapsed": {"isnull": True}}, "DurationField"),
+    ],
+    ids=["scalar", "object", "null-test"],
+)
+@isolate_apps("apps.scalars")
+def test_unserved_generated_source_policy_refuses_json_over_http(
+    where: JSONObject,
+    field: str,
+    transport: str,
+) -> None:
+    """An active raw JSON leaf gets its declaring FilterSet refusal before form dispatch."""
+    row, filterset = _generated_raw_filter()
+    schema = _schema(
+        filterset,
+        row,
+        transport=transport,
+        fields=("name",),
+        annotated=lambda qs: qs.none(),
+    )
+    ordinary = _post(schema, {"plain": {"exact": "00:00:01"}}, transport=transport)
+    assert ordinary == {"data": {"rows": []}}, ordinary
+    payload = _post(schema, where, transport=transport)
+    assert payload["data"] is None, payload
+    message = json_at(payload, "errors", 0, "message")
+    assert isinstance(message, str)
+    assert message.startswith("GeneratedRawFilter: "), message
+    assert f"GeneratedRawRow.{'file' if field == 'FileField' else 'elapsed'}, a {field}" in message
+    assert "Meta.exclude" not in message
+
+
+@pytest.mark.django_db
+@isolate_apps("apps.scalars")
+def test_direct_raw_generated_filter_refuses_and_ordinary_duration_still_builds() -> None:
+    """Direct ``FilterSet(data=...).qs`` applies the same generated-only policy."""
+    row, filterset = _generated_raw_filter()
+    schema = _schema(
+        filterset,
+        row,
+        transport="sync",
+        fields=("name",),
+        direct=True,
+        annotated=lambda qs: qs.none(),
+    )
+    ordinary = _post(schema, {"plain": "00:00:01"}, transport="sync")
+    assert ordinary == {"data": {"rows": []}}, ordinary
+    refused = _post(schema, {"elapsed": "00:00:01"}, transport="sync")
+    assert refused["data"] is None, refused
+    message = json_at(refused, "errors", 0, "message")
+    assert isinstance(message, str)
+    assert "GeneratedRawFilter: DurationFilter on 'elapsed'" in message
+    assert "register DurationField" in message
 
 
 def _branch_filter() -> type[FilterSet]:
@@ -750,6 +893,773 @@ class _AnnotationCriteriaSet(FilterSet):
         fields = []
 
 
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    (
+        "source_kind",
+        "where",
+        "labels",
+        "invalid_field",
+    ),
+    [
+        (
+            "year-annotate",
+            {"after": {"gte": 99999}},
+            None,
+            "after",
+        ),
+        (
+            "year-alias",
+            {"at": {"exact": 99999}},
+            None,
+            "at",
+        ),
+        (
+            "year-alias",
+            {"span": {"start": 2000, "end": 99999}},
+            None,
+            "span",
+        ),
+        (
+            "year-alias",
+            {"span": {"start": 99999}},
+            None,
+            "span",
+        ),
+        (
+            "year-alias",
+            {"span": {"end": 99999}},
+            None,
+            "span",
+        ),
+        (
+            "iso-alias",
+            {"span": {"start": 2000, "end": 99999}},
+            None,
+            "span",
+        ),
+        (
+            "year-alias",
+            {"span": {"start": 2000, "end": 2026}},
+            ["kept"],
+            None,
+        ),
+        (
+            "year-alias",
+            {"members": {"in_": [2026, 99999]}},
+            ["kept"],
+            None,
+        ),
+        (
+            "month-alias",
+            {"span": {"start": 0, "end": 99999}},
+            ["kept"],
+            None,
+        ),
+        (
+            "month-alias",
+            {"members": {"in_": [1]}},
+            ["kept"],
+            None,
+        ),
+        (
+            "month-alias",
+            {"members": {"in_": [999999999999999999999]}},
+            None,
+            "members",
+        ),
+        (
+            "month-alias",
+            {"members": {"in_": [1, 999999999999999999999]}},
+            None,
+            "members",
+        ),
+        (
+            "month-alias",
+            {"array_members": {"in_": [999999999999999999999]}},
+            None,
+            "array_members",
+        ),
+        (
+            "month-alias",
+            {"array_members": {"in_": [1, 999999999999999999999]}},
+            None,
+            "array_members",
+        ),
+        (
+            "month-alias",
+            {"array_members": {"in_": [1]}},
+            ["kept"],
+            None,
+        ),
+        (
+            "integer-alias",
+            {"members": {"in_": [999999999999999999999]}},
+            [],
+            None,
+        ),
+        (
+            "integer-alias",
+            {"span": {"start": 0, "end": 99999}},
+            ["kept"],
+            None,
+        ),
+        (
+            "count-alias",
+            {"members": {"in_": [999999999999999999999]}},
+            [],
+            None,
+        ),
+    ],
+)
+def test_expression_alias_bind_asks_follow_the_actual_shipped_predicate(
+    transport: str,
+    source_kind: str,
+    where: JSONObject,
+    labels: list[str] | None,
+    invalid_field: str | None,
+) -> None:
+    cleaned_specimen("kept", kept=True)
+
+    class AliasSet(FilterSet):
+        after = NumberFilter(field_name="stamp_value", lookup_expr="gte")
+        at = NumberFilter(field_name="stamp_value", lookup_expr="exact")
+        span = RangeFilter(field_name="stamp_value", lookup_expr="range")
+        members = ListFilter(field_name="stamp_value", lookup_expr="in")
+        array_members = ArrayFilter(field_name="stamp_value", lookup_expr="in")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    def with_alias(rows: QuerySet[Model]) -> QuerySet[Model]:
+        expression = (
+            ExtractYear("occurred_on")
+            if source_kind.startswith("year")
+            else ExtractIsoYear("occurred_on")
+            if source_kind == "iso-alias"
+            else ExtractMonth("occurred_on")
+            if source_kind == "month-alias"
+            else django_models.Count("children")
+            if source_kind == "count-alias"
+            else django_models.F("signed_big")
+        )
+        if source_kind == "year-annotate":
+            return rows.annotate(stamp_value=expression)
+        return rows.alias(stamp_value=expression)
+
+    schema = _schema(
+        AliasSet,
+        scalar_models.ScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        annotated=with_alias,
+    )
+    payload = _post(schema, where, transport=transport, selection="label")
+    if invalid_field is None:
+        assert payload == {"data": {"rows": [{"label": label} for label in labels or []]}}, payload
+    else:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    invalid_field: [
+                        {
+                            "message": "Enter a value the database can represent.",
+                            "code": "invalid",
+                        },
+                    ],
+                },
+            },
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "source_kind",
+        "query_string",
+        "invalid_field",
+        "ordinary_error",
+        "labels",
+    ),
+    [
+        (
+            "year",
+            "p-after=99999&p-label=kept&p-bad_number=abc",
+            "after",
+            True,
+            ["kept"],
+        ),
+        (
+            "year",
+            "p-at=99999&p-label=kept",
+            "at",
+            False,
+            ["kept"],
+        ),
+        (
+            "year",
+            "p-span_0=2000&p-span_1=99999&p-label=kept",
+            "span",
+            False,
+            ["kept"],
+        ),
+        (
+            "year",
+            "p-span_0=99999&p-label=kept",
+            "span",
+            False,
+            ["kept"],
+        ),
+        (
+            "year",
+            "p-span_1=99999&p-label=kept",
+            "span",
+            False,
+            ["kept"],
+        ),
+        (
+            "iso",
+            "p-span_0=2000&p-span_1=99999&p-label=kept",
+            "span",
+            False,
+            ["kept"],
+        ),
+        (
+            "year",
+            "p-native_span=2000,99999&p-label=kept",
+            None,
+            False,
+            ["kept"],
+        ),
+        (
+            "year",
+            "p-members=2026,99999&p-label=kept",
+            None,
+            False,
+            ["kept"],
+        ),
+        (
+            "month",
+            "p-span_0=0&p-span_1=99999&p-label=kept",
+            None,
+            False,
+            ["kept"],
+        ),
+        (
+            "month",
+            "p-members=999999999999999999999&p-label=kept",
+            "members",
+            False,
+            ["kept"],
+        ),
+        (
+            "month",
+            "p-members=1,999999999999999999999&p-label=kept",
+            "members",
+            False,
+            ["kept"],
+        ),
+        (
+            "month",
+            "p-array_members=999999999999999999999&p-label=kept",
+            "array_members",
+            False,
+            ["kept"],
+        ),
+        (
+            "month",
+            "p-array_members=1,999999999999999999999&p-label=kept",
+            "array_members",
+            False,
+            ["kept"],
+        ),
+        (
+            "month",
+            "p-array_members=1&p-label=kept",
+            None,
+            False,
+            ["kept"],
+        ),
+        (
+            "month",
+            "p-native_members=999999999999999999999&p-label=kept",
+            "native_members",
+            False,
+            ["kept"],
+        ),
+        (
+            "integer",
+            "p-members=999999999999999999999&p-label=kept",
+            None,
+            False,
+            [],
+        ),
+        (
+            "count",
+            "p-members=999999999999999999999&p-label=kept",
+            None,
+            False,
+            [],
+        ),
+    ],
+)
+def test_raw_expression_alias_bind_errors_preserve_good_siblings(
+    source_kind: str,
+    query_string: str,
+    invalid_field: str | None,
+    *,
+    ordinary_error: bool,
+    labels: list[str],
+) -> None:
+    cleaned_specimen("kept", kept=True)
+
+    class NativeNumberRange(BaseRangeFilter, NumberFilter):
+        """django-filter's CSV range keeps its one native numeric predicate."""
+
+    class NativeNumberIn(BaseInFilter, NumberFilter):
+        """django-filter's CSV membership binds each numeric transform member."""
+
+    class AliasSet(FilterSet):
+        after = NumberFilter(field_name="stamp_value", lookup_expr="gte")
+        at = NumberFilter(field_name="stamp_value", lookup_expr="exact")
+        span = RangeFilter(field_name="stamp_value", lookup_expr="range")
+        native_span = NativeNumberRange(field_name="stamp_value", lookup_expr="range")
+        native_members = NativeNumberIn(field_name="stamp_value", lookup_expr="in")
+        members = ListFilter(field_name="stamp_value", lookup_expr="in")
+        array_members = ArrayFilter(field_name="stamp_value", lookup_expr="in")
+        label = CharFilter(field_name="label")
+        bad_number = NumberFilter(field_name="signed_big")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    @strawberry.type
+    class Query:
+        def _answer(self) -> dict[str, object]:
+            rows = scalar_models.ScalarSpecimen.objects.order_by("label")
+            expression = (
+                ExtractYear("occurred_on")
+                if source_kind == "year"
+                else ExtractIsoYear("occurred_on")
+                if source_kind == "iso"
+                else ExtractMonth("occurred_on")
+                if source_kind == "month"
+                else django_models.Count("children")
+                if source_kind == "count"
+                else django_models.F("signed_big")
+            )
+            instance = AliasSet(
+                data=QueryDict(query_string),
+                queryset=rows.alias(stamp_value=expression),
+                prefix="p",
+            )
+            errors = require_instance(instance.errors, ErrorDict).get_json_data()
+            valid = instance.is_valid()
+            return {
+                "errors": errors,
+                "valid": valid,
+                "labels": list(instance.qs.values_list("label", flat=True)),
+            }
+
+        answer: dict[str, object] = strawberry.field(
+            resolver=_answer,
+            graphql_type=strawberry.scalars.JSON,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
+    finally:
+        _CURRENT["schema"] = None
+    errors: JSONObject = {}
+    if invalid_field is not None:
+        errors[invalid_field] = [
+            {"message": "Enter a value the database can represent.", "code": "invalid"},
+        ]
+    if ordinary_error:
+        errors["bad_number"] = [{"message": "Enter a number.", "code": "invalid"}]
+    assert payload == {
+        "data": {
+            "answer": {"errors": errors, "valid": not errors, "labels": labels},
+        },
+    }, payload
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    (
+        "source_kind",
+        "where",
+        "labels",
+        "invalid_field",
+    ),
+    [
+        (
+            "year",
+            {"after": {"gte": 99999}},
+            None,
+            "after",
+        ),
+        (
+            "year",
+            {"span": {"start": 2000, "end": 99999}},
+            None,
+            "span",
+        ),
+        (
+            "year",
+            {"span": {"end": 99999}},
+            None,
+            "span",
+        ),
+        (
+            "year",
+            {"span": {"start": 2000, "end": 2026}},
+            ["of-child"],
+            None,
+        ),
+        (
+            "month",
+            {"members": {"in_": [999999999999999999999]}},
+            None,
+            "members",
+        ),
+        (
+            "month",
+            {"members": {"in_": [1]}},
+            ["of-child"],
+            None,
+        ),
+        (
+            "integer",
+            {"span": {"start": 0, "end": 999999999999999999999}},
+            ["of-child"],
+            None,
+        ),
+        (
+            "integer",
+            {"span": {"start": 999999999999999999999, "end": 999999999999999999999}},
+            [],
+            None,
+        ),
+    ],
+)
+def test_scoped_integer_expression_uses_its_actual_source_for_bind_and_range(
+    transport: str,
+    source_kind: str,
+    where: JSONObject,
+    labels: list[str] | None,
+    invalid_field: str | None,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class ScopedSet(FilterSet):
+        after = NumberFilter(field_name="partner__stamp_value", lookup_expr="gte")
+        span = RangeFilter(field_name="partner__stamp_value", lookup_expr="range")
+        members = ListFilter(field_name="partner__stamp_value", lookup_expr="in")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    def annotated(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        del cls, info
+        calls.append(rows.db)
+        expression = (
+            ExtractYear("occurred_on")
+            if source_kind == "year"
+            else ExtractMonth("occurred_on")
+            if source_kind == "month"
+            else django_models.F("signed_big")
+        )
+        return rows.alias(stamp_value=expression)
+
+    target = make_django_type(
+        "ScopedIntegerExpressionTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated)},
+    )
+    schema = _schema(
+        ScopedSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    recorded = record_compiled_sql()
+    payload = _post(schema, where, transport=transport, selection="label")
+    if invalid_field is None:
+        assert payload == {"data": {"rows": [{"label": label} for label in labels or []]}}, payload
+    else:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    invalid_field: [
+                        {
+                            "message": "Enter a value the database can represent.",
+                            "code": "invalid",
+                        },
+                    ],
+                },
+            },
+        )
+        assert recorded == [], recorded
+    assert calls == ["default"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "source_kind",
+        "query_string",
+        "invalid_field",
+        "labels",
+    ),
+    [
+        (
+            "year",
+            "p-after=99999&p-label=of-child",
+            "after",
+            ["of-child"],
+        ),
+        (
+            "year",
+            "p-span_0=2000&p-span_1=99999&p-label=of-child",
+            "span",
+            ["of-child"],
+        ),
+        (
+            "year",
+            "p-span_1=99999&p-label=of-child",
+            "span",
+            ["of-child"],
+        ),
+        (
+            "year",
+            "p-native_span=2000,99999&p-label=of-child",
+            None,
+            ["of-child"],
+        ),
+        (
+            "month",
+            "p-members=999999999999999999999&p-label=of-child",
+            "members",
+            ["of-child"],
+        ),
+        (
+            "month",
+            "p-array_members=999999999999999999999&p-label=of-child",
+            "array_members",
+            ["of-child"],
+        ),
+        (
+            "month",
+            "p-native_members=999999999999999999999&p-label=of-child",
+            "native_members",
+            ["of-child"],
+        ),
+        (
+            "month",
+            "p-members=1&p-label=of-child",
+            None,
+            ["of-child"],
+        ),
+        (
+            "integer",
+            "p-span_0=0&p-span_1=999999999999999999999&p-label=of-child",
+            None,
+            ["of-child"],
+        ),
+        (
+            "integer",
+            "p-span_0=999999999999999999999&p-span_1=999999999999999999999&p-label=of-child",
+            None,
+            [],
+        ),
+        (
+            "integer",
+            "p-members=999999999999999999999&p-label=of-child",
+            None,
+            [],
+        ),
+    ],
+)
+def test_raw_scoped_integer_expression_reuses_the_source_for_errors_and_qs(
+    source_kind: str,
+    query_string: str,
+    invalid_field: str | None,
+    labels: list[str],
+) -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class NativeNumberRange(BaseRangeFilter, NumberFilter):
+        """Keep the shipped CSV range as one numeric predicate."""
+
+    class NativeNumberIn(BaseInFilter, NumberFilter):
+        """Keep the shipped CSV membership parser."""
+
+    class ScopedSet(FilterSet):
+        after = NumberFilter(field_name="partner__stamp_value", lookup_expr="gte")
+        span = RangeFilter(field_name="partner__stamp_value", lookup_expr="range")
+        native_span = NativeNumberRange(field_name="partner__stamp_value", lookup_expr="range")
+        members = ListFilter(field_name="partner__stamp_value", lookup_expr="in")
+        array_members = ArrayFilter(field_name="partner__stamp_value", lookup_expr="in")
+        native_members = NativeNumberIn(field_name="partner__stamp_value", lookup_expr="in")
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    def annotated(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        del cls, info
+        calls.append(rows.db)
+        expression = (
+            ExtractYear("occurred_on")
+            if source_kind == "year"
+            else ExtractMonth("occurred_on")
+            if source_kind == "month"
+            else django_models.F("signed_big")
+        )
+        return rows.alias(stamp_value=expression)
+
+    target = make_django_type(
+        "RawScopedIntegerExpressionTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated)},
+    )
+
+    @strawberry.type
+    class Query:
+        def _answer(self) -> dict[str, object]:
+            rows = scalar_models.NullableScalarSpecimen.objects.order_by("label")
+            instance = ScopedSet(data=QueryDict(query_string), queryset=rows, prefix="p")
+            errors = require_instance(instance.errors, ErrorDict).get_json_data()
+            valid = instance.is_valid()
+            return {
+                "errors": errors,
+                "valid": valid,
+                "labels": list(instance.qs.values_list("label", flat=True)),
+            }
+
+        answer: dict[str, object] = strawberry.field(
+            resolver=_answer,
+            graphql_type=strawberry.scalars.JSON,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        types=(target,),
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
+    finally:
+        _CURRENT["schema"] = None
+    errors: JSONObject = {}
+    if invalid_field is not None:
+        errors[invalid_field] = [
+            {"message": "Enter a value the database can represent.", "code": "invalid"},
+        ]
+    assert payload == {
+        "data": {
+            "answer": {"errors": errors, "valid": not errors, "labels": labels},
+        },
+    }, payload
+    assert calls == ["default"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("family", ["package-list", "native-csv"])
+def test_registered_integer_transform_with_same_output_field_asks_its_member_bind(
+    transport: str,
+    family: str,
+) -> None:
+    cleaned_specimen("kept", kept=True)
+
+    class NativeNumberIn(BaseInFilter, NumberFilter):
+        """Keep django-filter's native CSV member preparation."""
+
+    with register_lookup(django_models.BigIntegerField, Abs):
+
+        class AbsSet(FilterSet):
+            magnitude_members = (
+                ListFilter(field_name="signed_big", lookup_expr="abs__in")
+                if family == "package-list"
+                else NativeNumberIn(field_name="signed_big", lookup_expr="abs__in")
+            )
+
+            class Meta:
+                model = scalar_models.ScalarSpecimen
+                fields = []
+
+        schema = _schema(
+            AbsSet,
+            scalar_models.ScalarSpecimen,
+            transport=transport,
+            fields=("label",),
+        )
+        refused = _post(
+            schema,
+            {"magnitude_members": [999999999999999999999]},
+            transport=transport,
+            selection="label",
+        )
+        _refused(
+            refused,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "magnitude_members": [
+                        {
+                            "message": "Enter a value the database can represent.",
+                            "code": "invalid",
+                        },
+                    ],
+                },
+            },
+        )
+        accepted = _post(
+            schema,
+            {"magnitude_members": [7]},
+            transport=transport,
+            selection="label",
+        )
+        assert accepted == {"data": {"rows": [{"label": "kept"}]}}, accepted
+
+
 def _with_annotations(rows: QuerySet[Model]) -> QuerySet[Model]:
     """The duration since the parent's stamp and the count of children, as a resolver adds them."""
     return rows.annotate(
@@ -845,6 +1755,473 @@ class _PartnerAnnotationCriteriaSet(FilterSet):
         fields = []
 
 
+class _DurationMembersFromScopedTarget(BaseInFilter, DurationFilter):
+    """An ordinary django-filter CSV class whose own field cleans duration members."""
+
+
+class _UndeclaredAnnotationCriteriaSet(FilterSet):
+    lag_among = _DurationMembersFromScopedTarget(field_name="partner__lag", lookup_expr="in")
+
+    class Meta:
+        model = scalar_models.NullableScalarSpecimen
+        fields = []
+
+
+class _CustomizedAnnotationCriteriaSet(_AnnotationCriteriaSet):
+    """A child whose per-request constructor owns its member validator."""
+
+    constructor_calls: ClassVar[list[str]] = []
+    inner_installations: ClassVar[list[str]] = []
+    outer_installations: ClassVar[list[str]] = []
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        queryset: QuerySet[Model] | None = None,
+        *,
+        request: HttpRequest | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data, queryset, request=request, prefix=prefix)
+        rows = self.queryset
+        assert rows is not None
+        cloned = rows.all()
+        self.queryset = cloned
+        type(self).constructor_calls.append(cloned.db)
+        field = self.filters["lag_among"].field
+        element = read_attr(field, "element_field", None)
+        if isinstance(element, FormField):
+            element.validators.append(_reject_one_day)
+            type(self).inner_installations.append(cloned.db)
+        else:
+            # Sync flat preparation follows permission checks, so constructor-time
+            # base rows cannot yet supply the annotation's inner field.
+            field.validators.append(_reject_one_day_list)
+            type(self).outer_installations.append(cloned.db)
+
+
+def _reject_one_day(value: object) -> None:
+    """A real form validator that proves the child field owns flat cleaning."""
+    if value == datetime.timedelta(days=1):
+        raise ValidationError("One day is reserved.", code="reserved")
+
+
+def _reject_one_day_list(value: object) -> None:
+    if value == [datetime.timedelta(days=1)]:
+        raise ValidationError("One day is reserved.", code="reserved")
+
+
+class _CustomizedPartnerAnnotationCriteriaSet(FilterSet):
+    partner = RelatedFilter(_CustomizedAnnotationCriteriaSet, field_name="partner")
+
+    class Meta:
+        model = scalar_models.NullableScalarSpecimen
+        fields = []
+
+
+class _AliasDurationWidget(TextInput):
+    """Read a consumer's form spelling before the annotation member cleaner runs."""
+
+    @override
+    def value_from_datadict(
+        self,
+        data: Mapping[str, object],
+        files: object,
+        name: str,
+    ) -> object:
+        del files
+        value = data.get(name)
+        if value == ["one-day"]:
+            return ["1 00:00:00"]
+        if value == ["two-days"]:
+            return ["2 00:00:00"]
+        return value
+
+
+class _WholeDurationField(FormField):
+    """A consumer field whose complete clean owns duration member interpretation."""
+
+    @override
+    def clean(self, value: object) -> object:
+        cleaned = object_result(super().clean, value)
+        if cleaned == ["one-day"]:
+            return [datetime.timedelta(days=1)]
+        if cleaned == ["two-days"]:
+            return [datetime.timedelta(days=2)]
+        raise ValidationError("Use one-day or two-days.", code="whole_duration")
+
+
+class _WholeDurationListFilter(ListFilter):
+    field_class = _WholeDurationField
+
+
+class _WholeDurationChildSet(FilterSet):
+    lag_among = _WholeDurationListFilter(field_name="lag", lookup_expr="in")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = []
+
+
+class _WholeDurationParentSet(FilterSet):
+    partner = RelatedFilter(_WholeDurationChildSet, field_name="partner")
+
+    class Meta:
+        model = scalar_models.NullableScalarSpecimen
+        fields = []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("member", "labels"),
+    [
+        pytest.param("one-day", ["of-child"], id="consumer-field-accepts"),
+        pytest.param("not-a-day", None, id="consumer-field-refuses"),
+    ],
+)
+def test_a_whole_consumer_field_keeps_its_clean_over_a_child_annotation(
+    member: str,
+    labels: list[str] | None,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    target = make_django_type(
+        "WholeDurationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(_annotating_target)},
+    )
+    schema = _schema(
+        _WholeDurationParentSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="async",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"partner__lag_among": {"in_": [member]}},
+        transport="async",
+        selection="label",
+    )
+    if labels is not None:
+        assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+    else:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "partner__lag_among": [
+                        {"message": "Use one-day or two-days.", "code": "whole_duration"},
+                    ],
+                },
+            },
+        )
+
+
+class _GenericOutputChildSet(FilterSet):
+    opaque_among = ListFilter(field_name="opaque", lookup_expr="in")
+    opaque_span = RangeFilter(field_name="opaque", lookup_expr="range")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = []
+
+
+class _GenericOutputParentSet(FilterSet):
+    partner = RelatedFilter(_GenericOutputChildSet, field_name="partner")
+
+    class Meta:
+        model = scalar_models.NullableScalarSpecimen
+        fields = []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("where", "labels"),
+    [
+        pytest.param(
+            {"partner__opaque_among": {"in_": ["kept"]}},
+            ["of-child"],
+            id="generic-output-list-match",
+        ),
+        pytest.param(
+            {"partner__opaque_among": {"in_": ["missing"]}},
+            [],
+            id="generic-output-list-miss",
+        ),
+        pytest.param(
+            {"partner__opaque_span": {"start": "kept", "end": "kept"}},
+            ["of-child"],
+            id="generic-output-range-match",
+        ),
+        pytest.param(
+            {"partner__opaque_span": {"start": "missing", "end": "z"}},
+            [],
+            id="generic-output-range-miss",
+        ),
+    ],
+)
+def test_a_target_output_without_a_django_filter_comparison_field_keeps_its_outer_value(
+    where: JSONObject,
+    labels: list[str],
+) -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+
+    def generic_target(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        del cls, info
+        return rows.annotate(
+            opaque=django_models.Value("kept", output_field=django_models.Field()),
+        )
+
+    target = make_django_type(
+        "GenericOutputTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(generic_target)},
+    )
+    schema = _schema(
+        _GenericOutputParentSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="async",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(schema, where, transport="async", selection="label")
+    assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+
+
+def _reject_parent_one_day(value: object) -> None:
+    if value == [datetime.timedelta(days=1)]:
+        raise ValidationError("Parent reserved one day.", code="parent_reserved")
+
+
+class _ParentEditedAnnotationCriteriaSet(_PartnerAnnotationCriteriaSet):
+    """The rebound field's outer validator and widget belong to the parent copy."""
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        queryset: QuerySet[Model] | None = None,
+        *,
+        request: HttpRequest | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data, queryset, request=request, prefix=prefix)
+        field = self.filters["partner__lag_among"].field
+        field.validators.append(_reject_parent_one_day)
+        field.widget = _AliasDurationWidget()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("member", "answer"),
+    [
+        pytest.param(
+            "one-day",
+            {
+                "partner__lag_among": [
+                    {"message": "Parent reserved one day.", "code": "parent_reserved"},
+                ],
+            },
+            id="parent-validator-and-widget",
+        ),
+        pytest.param("two-days", ["of-two-days"], id="widget-accepted"),
+    ],
+)
+def test_parent_rebound_field_keeps_its_widget_and_outer_validator_with_annotation_cleaning(
+    transport: str,
+    member: str,
+    answer: JSONObject | list[str],
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    for days in (1, 2):
+        child = cleaned_specimen(f"child-{days}", kept=True)
+        child.parent = kept
+        child.occurred_at = kept.occurred_at + datetime.timedelta(days=days)
+        child.save(update_fields=["parent", "occurred_at"])
+        scalar_models.NullableScalarSpecimen.objects.create(
+            label=f"of-{['one', 'two'][days - 1]}-day{'s' if days == 2 else ''}",
+            partner=child,
+        )
+    target = make_django_type(
+        "ParentEditedAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(_annotating_target)},
+    )
+    schema = _schema(
+        _ParentEditedAnnotationCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"partner__lag_among": {"in_": [member]}},
+        transport=transport,
+        selection="label",
+    )
+    if isinstance(answer, list):
+        assert payload == {"data": {"rows": [{"label": label} for label in answer]}}, payload
+    else:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={"code": "FILTER_INVALID", "errors": answer},
+        )
+
+
+class _ReadOmittedProjectedCriteriaSet(_AnnotationCriteriaSet):
+    named = CharFilter(method="filter_named")
+
+    def filter_named(
+        self,
+        queryset: QuerySet[Model],
+        name: str,
+        value: str,
+    ) -> QuerySet[Model]:
+        del name
+        return queryset.filter(label=value)
+
+
+class _ReadingOmittedProjectedSet(FilterSet):
+    partner = RelatedFilter(_ReadOmittedProjectedCriteriaSet, field_name="partner")
+
+    class Meta:
+        model = scalar_models.NullableScalarSpecimen
+        fields = {"label": ["exact"]}
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        queryset: QuerySet[Model] | None = None,
+        *,
+        request: HttpRequest | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data, queryset, request=request, prefix=prefix)
+        widget = read_attr(self.filters["partner__named"].field, "widget")
+        assert isinstance(widget, Widget)
+        widget.attrs["data-inspected"] = "yes"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    "where",
+    [
+        pytest.param({"label": {"exact": "of-child"}}, id="omitted"),
+        pytest.param(
+            {"label": {"exact": "of-child"}, "partner__named": None},
+            id="null",
+        ),
+        pytest.param(
+            {"label": {"exact": "of-child"}, "partner__lag_span": {"start": None, "end": None}},
+            id="empty-range",
+        ),
+    ],
+)
+def test_reading_an_omitted_projected_field_does_not_derive_its_target(
+    transport: str,
+    where: JSONObject,
+) -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    async def async_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        del cls, info
+        calls.append(rows.db)
+        return rows
+
+    def sync_target(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        del cls, info
+        calls.append(rows.db)
+        return rows
+
+    target = make_django_type(
+        "UnreadProjectedTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(async_target if transport == "async" else sync_target),
+        },
+    )
+    schema = _schema(
+        _ReadingOmittedProjectedSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    assert calls == []
+    assert _post(schema, where, transport=transport, selection="label") == {
+        "data": {"rows": [{"label": "of-child"}]},
+    }
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_reading_a_projected_field_reuses_the_active_siblings_awaited_annotation() -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    async def annotated_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "ReadThenAnnotatedTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_async)},
+    )
+    schema = _schema(
+        _ReadingOmittedProjectedSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="async",
+        fields=("label",),
+        targets=(target,),
+    )
+    assert calls == []
+    payload = _post(
+        schema,
+        {"partner__lag_among": {"in_": ["1 00:00:00"]}},
+        transport="async",
+        selection="label",
+    )
+    assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    assert calls == ["default"]
+
+
 def _annotating_target(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
     """A target type's ``get_queryset`` adding the annotations its branch's filters name."""
     del cls, info
@@ -862,14 +2239,39 @@ def _annotating_target(cls: type[object], rows: QuerySet[Model], info: object) -
             id="duration-member",
         ),
         pytest.param(
+            {"partner__lag_among": {"in_": ["1 00:00:00"]}},
+            ["of-child"],
+            id="flat-duration-member",
+        ),
+        pytest.param(
+            {"partner__lag_span": {"start": "12:00:00", "end": "2 00:00:00"}},
+            ["of-child"],
+            id="flat-duration-range",
+        ),
+        pytest.param(
+            {"partner__kids_among": {"in_": ["1", "1.5", str(2**63)]}},
+            ["of-kept"],
+            id="flat-integer-members",
+        ),
+        pytest.param(
             {"partner": {"kids_span": {"start": "1", "end": str(2**63)}}},
             ["of-kept"],
             id="integer-range-past-the-column",
         ),
         pytest.param(
+            {"partner__kids_span": {"start": "1", "end": str(2**63)}},
+            ["of-kept"],
+            id="flat-integer-range-past-the-column",
+        ),
+        pytest.param(
             {"partner": {"lag_among": {"in_": ["abc"]}}},
             {"partner__lag_among": [{"message": "Enter a valid duration.", "code": "invalid"}]},
             id="duration-junk",
+        ),
+        pytest.param(
+            {"partner__lag_among": {"in_": ["abc"]}},
+            {"partner__lag_among": [{"message": "Enter a valid duration.", "code": "invalid"}]},
+            id="flat-duration-junk",
         ),
     ],
 )
@@ -913,6 +2315,3761 @@ def test_a_branch_criterion_over_its_target_types_annotation_is_cleaned_as_it_co
         "Invalid filter input",
         extensions={"code": "FILTER_INVALID", "errors": answer},
     )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("spelling", ["flat", "nested", "logical"])
+@pytest.mark.parametrize("lookup", ["member", "range"])
+@pytest.mark.parametrize("customized", [False, True], ids=["plain", "projected-consumer"])
+def test_child_annotation_bind_ask_reads_the_actual_terminal_rows(
+    transport: str,
+    spelling: str,
+    lookup: str,
+    record_compiled_sql: RecordCompiledSql,
+    *,
+    customized: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    target = make_django_type(
+        "OverflowAnnotatedPartnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(_annotating_target)},
+    )
+    schema = _schema(
+        _CustomizedPartnerAnnotationCriteriaSet if customized else _PartnerAnnotationCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    huge = "999999999 00:00:00"
+    name = "lag_among" if lookup == "member" else "lag_span"
+    value: JSONObject = (
+        {"in_": [huge] if customized else ["1 00:00:00", huge]}
+        if lookup == "member"
+        else {"start": "1 00:00:00", "end": huge}
+    )
+    leaf: JSONObject = {name: value} if spelling == "nested" else {f"partner__{name}": value}
+    where: JSONObject = {"partner": leaf} if spelling == "nested" else leaf
+    if spelling == "logical":
+        where = {"or_": [leaf]}
+    _CustomizedAnnotationCriteriaSet.constructor_calls.clear()
+    _CustomizedAnnotationCriteriaSet.inner_installations.clear()
+    _CustomizedAnnotationCriteriaSet.outer_installations.clear()
+    recorded = record_compiled_sql()
+    payload = _post(schema, where, transport=transport, selection="label")
+    if connection.features.has_native_duration_field:
+        native_labels = [] if customized and lookup == "member" else ["of-child"]
+        assert payload == {"data": {"rows": [{"label": label} for label in native_labels]}}, (
+            payload
+        )
+        return
+    _refused(
+        payload,
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {
+                f"{'or_0__' if spelling == 'logical' else ''}partner__{name}": [
+                    {"message": "Enter a value the database can represent.", "code": "invalid"},
+                ],
+            },
+        },
+    )
+    assert recorded == [], recorded
+    if customized:
+        assert _CustomizedAnnotationCriteriaSet.constructor_calls == ["default"]
+        assert _CustomizedAnnotationCriteriaSet.inner_installations == (
+            ["default"] if spelling == "nested" else []
+        )
+        assert _CustomizedAnnotationCriteriaSet.outer_installations == (
+            [] if spelling == "nested" else ["default"]
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("member", ["999999999 00:00:00", "not-a-duration"])
+def test_undeclared_scoped_target_annotation_uses_its_visible_query_to_ask_the_bind(
+    transport: str,
+    member: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    def annotated_once(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "UndeclaredAnnotatedPartnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_once)},
+    )
+    schema = _schema(
+        _UndeclaredAnnotationCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    recorded = record_compiled_sql()
+    payload = _post(
+        schema,
+        {"lag_among": {"in_": [member]}},
+        transport=transport,
+        selection="label",
+    )
+    if member == "not-a-duration":
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "lag_among": [{"message": "Enter a valid duration.", "code": "invalid"}],
+                },
+            },
+        )
+        assert recorded == [], recorded
+        assert calls == []
+        return
+    if connection.features.has_native_duration_field:
+        assert payload == {"data": {"rows": []}}, payload
+    else:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "lag_among": [
+                        {
+                            "message": "Enter a value the database can represent.",
+                            "code": "invalid",
+                        },
+                    ],
+                },
+            },
+        )
+        assert recorded == [], recorded
+    assert calls == ["default"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("deny", "member"),
+    [
+        pytest.param(True, "1 00:00:00", id="denied"),
+        pytest.param(False, "not-a-duration", id="invalid-before-owner"),
+        pytest.param(False, "1 00:00:00", id="valid-owner-once"),
+    ],
+)
+def test_complete_undeclared_annotation_owner_runs_after_consumer_form(
+    member: str,
+    *,
+    deny: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+
+    class RecordingForm(Form):
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class OrderedSet(_UndeclaredAnnotationCriteriaSet):
+        class Meta(_UndeclaredAnnotationCriteriaSet.Meta):
+            form = RecordingForm
+
+        def check_lag_among_permission(self, request: object) -> None:
+            del request
+            events.append("gate")
+            if deny:
+                raise GraphQLError("denied-undeclared-annotation")
+
+    def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "OrderedUndeclaredAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+    schema = _schema(
+        OrderedSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"lag_among": {"in_": [member]}},
+        transport="sync",
+        selection="label",
+    )
+    if deny:
+        _refused(payload, "denied-undeclared-annotation")
+        assert events == ["gate"]
+    elif member == "not-a-duration":
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "lag_among": [{"message": "Enter a valid duration.", "code": "invalid"}],
+                },
+            },
+        )
+        assert events == ["gate", "form.clean"]
+    else:
+        assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+        assert events == ["gate", "form.clean", "hook"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_undeclared_complete_invalid_member_wins_async_only_owner() -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    async def async_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "UndeclaredAsyncOnlyAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(async_target)},
+    )
+    schema = _schema(
+        _UndeclaredAnnotationCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"lag_among": {"in_": ["not-a-duration"]}},
+        transport="sync",
+        selection="label",
+    )
+    _refused(
+        payload,
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {"lag_among": [{"message": "Enter a valid duration.", "code": "invalid"}]},
+        },
+    )
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_unrelated_form_error_precedes_uncached_complete_async_owner() -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class Criteria(_UndeclaredAnnotationCriteriaSet):
+        bad_number = NumberFilter(field_name="signed_big")
+
+    async def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "UnrelatedErrorBeforeCompleteOwnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"lag_among": {"in_": ["1 00:00:00"]}, "bad_number": "abc"},
+        transport="sync",
+        selection="label",
+    )
+    _refused(
+        payload,
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {"bad_number": [{"message": "Enter a number.", "code": "invalid"}]},
+        },
+    )
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("operator", ["or_", "and_"])
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_logical_native_error_precedes_complete_annotation_owner_in_both_arm_orders(
+    transport: str,
+    operator: str,
+    *,
+    invalid_first: bool,
+) -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class Criteria(_UndeclaredAnnotationCriteriaSet):
+        bad_number = NumberFilter(field_name="signed_big")
+
+    def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "LogicalNativeErrorBeforeCompleteOwnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    bad = {"bad_number": "abc"}
+    lag = {"lag_among": {"in_": ["1 00:00:00"]}}
+    payload = _post(
+        schema,
+        {operator: [bad, lag] if invalid_first else [lag, bad]},
+        transport=transport,
+        selection="label",
+    )
+    index = 0 if invalid_first else 1
+    _refused(
+        payload,
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {
+                f"{operator}{index}__bad_number": [
+                    {"message": "Enter a number.", "code": "invalid"},
+                ],
+            },
+        },
+    )
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("deep", [False, True])
+def test_root_clean_created_annotation_waits_for_later_logical_native_error(
+    transport: str,
+    *,
+    deep: bool,
+) -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class DefaultsForm(Form):
+        @override
+        def clean(self) -> dict[str, object] | None:
+            cleaned = super().clean()
+            if self.cleaned_data.get("label") == "of-child":
+                self.cleaned_data["lag_among"] = [datetime.timedelta(days=1)]
+            return cleaned
+
+    class Criteria(_UndeclaredAnnotationCriteriaSet):
+        bad_number = NumberFilter(field_name="signed_big")
+        label = CharFilter(field_name="label")
+
+        class Meta(_UndeclaredAnnotationCriteriaSet.Meta):
+            form = DefaultsForm
+
+    def annotated(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "RootDefaultWaitsForLogicalNativeErrorTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated)},
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    bad: dict[str, object] = {"bad_number": "abc"}
+    if deep:
+        bad = {"not_": {"and_": [bad]}}
+    payload = _post(
+        schema,
+        {"label": {"exact": "of-child"}, "or_": [bad]},
+        transport=transport,
+        selection="label",
+    )
+    key = "or_0__not__and_0__bad_number" if deep else "or_0__bad_number"
+    _refused(
+        payload,
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {key: [{"message": "Enter a number.", "code": "invalid"}]},
+        },
+    )
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_valid_complete_value_reports_sync_misuse_after_actual_form_clean() -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+
+    class RecordingForm(Form):
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class Criteria(_UndeclaredAnnotationCriteriaSet):
+        class Meta(_UndeclaredAnnotationCriteriaSet.Meta):
+            form = RecordingForm
+
+    async def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "ValidCompleteAsyncOnlyTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"lag_among": {"in_": ["1 00:00:00"]}},
+        transport="sync",
+        selection="label",
+    )
+    assert payload["data"] is None, payload
+    message = json_at(payload, "errors", 0, "message")
+    assert isinstance(message, str)
+    assert "FilterSet.apply_async" in message
+    assert events == ["form.clean"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "query",
+        "errors",
+        "valid",
+        "labels",
+        "disabled_initial",
+    ),
+    [
+        pytest.param(
+            "p-lag_among=999999999+00%3A00%3A00&p-label=of-child",
+            {
+                "lag_among": [
+                    {"message": "Enter a value the database can represent.", "code": "invalid"},
+                ],
+            },
+            False,
+            ["of-child"],
+            False,
+            id="refused-member-keeps-valid-sibling",
+        ),
+        pytest.param(
+            "p-lag_among=1+00%3A00%3A00&p-label=of-child",
+            {},
+            True,
+            ["of-child"],
+            False,
+            id="valid-member",
+        ),
+        pytest.param(
+            "p-lag_list=999999999+00%3A00%3A00&p-label=of-child",
+            {
+                "lag_list": [
+                    {"message": "Enter a value the database can represent.", "code": "invalid"},
+                ],
+            },
+            False,
+            ["of-child"],
+            False,
+            id="refused-package-list-keeps-valid-sibling",
+        ),
+        pytest.param(
+            "p-lag_list=1+00%3A00%3A00&p-label=of-child",
+            {},
+            True,
+            ["of-child"],
+            False,
+            id="valid-package-list-uses-actual-duration-cleaner",
+        ),
+        pytest.param(
+            "p-lag_span_0=999999999+00%3A00%3A00&p-lag_span_1=999999999+00%3A00%3A00&p-label=of-child",
+            {
+                "lag_span": [
+                    {"message": "Enter a value the database can represent.", "code": "invalid"},
+                ],
+            },
+            False,
+            ["of-child"],
+            False,
+            id="refused-range-keeps-valid-sibling",
+        ),
+        pytest.param(
+            "p-lag_span_0=1+00%3A00%3A00&p-lag_span_1=1+00%3A00%3A00&p-label=of-child",
+            {},
+            True,
+            ["of-child"],
+            False,
+            id="valid-range-uses-actual-duration-cleaner",
+        ),
+        pytest.param("p-label=other", {}, True, ["other"], False, id="inactive-annotation"),
+        pytest.param(
+            "p-lag_among=&p-label=other",
+            {},
+            True,
+            ["other"],
+            False,
+            id="empty-raw-member",
+        ),
+        pytest.param("__null__", {}, True, ["other"], False, id="raw-null-member"),
+        pytest.param("__unbound__", {}, False, ["of-child", "other"], False, id="unbound"),
+        pytest.param(
+            "p-lag_among_csv=999999999+00%3A00%3A00&p-label=of-child",
+            {
+                "lag_among": [
+                    {"message": "Enter a value the database can represent.", "code": "invalid"},
+                ],
+            },
+            False,
+            ["of-child"],
+            False,
+            id="actual-alternate-widget-key-refused",
+        ),
+        pytest.param(
+            "p-lag_among_csv=1+00%3A00%3A00&p-label=of-child",
+            {},
+            True,
+            ["of-child"],
+            False,
+            id="actual-alternate-widget-key-valid",
+        ),
+        pytest.param(
+            "p-lag_among_csv=&p-label=other",
+            {},
+            True,
+            ["other"],
+            False,
+            id="actual-alternate-widget-key-empty",
+        ),
+        pytest.param(
+            "__custom_absent__",
+            {},
+            True,
+            ["other"],
+            False,
+            id="actual-alternate-widget-key-absent",
+        ),
+        pytest.param(
+            "p-label=of-child",
+            {
+                "lag_among": [
+                    {"message": "Enter a value the database can represent.", "code": "invalid"},
+                ],
+            },
+            False,
+            ["of-child"],
+            True,
+            id="disabled-initial-annotation",
+        ),
+    ],
+)
+def test_raw_scoped_annotation_form_asks_before_bare_qs(
+    query: str,
+    errors: dict[str, object],
+    labels: list[str],
+    *,
+    valid: bool,
+    disabled_initial: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    scalar_models.NullableScalarSpecimen.objects.create(label="other")
+    calls: list[str] = []
+    custom_widget = "lag_among_csv" in query or query == "__custom_absent__"
+
+    class PostedDurationInput(TextInput):
+        @override
+        def value_from_datadict(
+            self,
+            data: Mapping[str, object],
+            files: object,
+            name: str,
+        ) -> object:
+            return object_result(super().value_from_datadict, data, files, f"{name}_csv")
+
+    class RawForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, prefix=prefix)
+            if disabled_initial:
+                field = self.fields["lag_among"]
+                field.disabled = True
+                field.initial = [datetime.timedelta(days=999999999)]
+
+    class RawSet(FilterSet):
+        lag_among = (
+            _DurationMembersFromScopedTarget(
+                field_name="partner__lag",
+                lookup_expr="in",
+                widget=PostedDurationInput,
+            )
+            if custom_widget
+            else _DurationMembersFromScopedTarget(field_name="partner__lag", lookup_expr="in")
+        )
+        lag_list = ListFilter(field_name="partner__lag", lookup_expr="in")
+        lag_span = RangeFilter(field_name="partner__lag", lookup_expr="range")
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = RawForm
+
+    def annotated_once(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "RawScopedAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_once)},
+    )
+
+    @strawberry.type
+    class Query:
+        def _answer(self, query: str) -> dict[str, object]:
+            data: dict[str, object] | QueryDict | None
+            if query == "__unbound__":
+                data = None
+            elif query == "__null__":
+                data = {"p-lag_among": None, "p-label": "other"}
+            elif query == "__custom_absent__":
+                data = QueryDict("p-label=other")
+            else:
+                data = QueryDict(query)
+            instance = RawSet(
+                data=data,
+                queryset=scalar_models.NullableScalarSpecimen.objects.order_by("label"),
+                prefix="p",
+            )
+            errors = require_instance(instance.errors, ErrorDict).get_json_data()
+            valid = instance.is_valid()
+            preclean_calls = list(calls)
+            return {
+                "errors": errors,
+                "valid": valid,
+                "preclean_calls": preclean_calls,
+                "labels": list(instance.qs.values_list("label", flat=True)),
+            }
+
+        answer: dict[str, object] = strawberry.field(
+            resolver=_answer,
+            graphql_type=strawberry.scalars.JSON,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        types=(target,),
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload(
+                "query($query: String!) { answer(query: $query) }",
+                variables={"query": query},
+                url="/graphql-apply-arguments/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+    if connection.features.has_native_duration_field:
+        errors = {}
+        valid = query != "__unbound__"
+        labels = [] if "999999999" in query or disabled_initial else labels
+    preclean_calls = (
+        []
+        if query
+        in {
+            "p-label=other",
+            "p-lag_among=&p-label=other",
+            "p-lag_among_csv=&p-label=other",
+            "__null__",
+            "__unbound__",
+            "__custom_absent__",
+        }
+        else ["default"]
+    )
+    assert payload == {
+        "data": {
+            "answer": {
+                "errors": errors,
+                "valid": valid,
+                "preclean_calls": preclean_calls,
+                "labels": labels,
+            },
+        },
+    }, payload
+    assert calls == preclean_calls
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("cached_owner", [False, True], ids=["uncached", "parser-sibling-cached"])
+def test_raw_invalid_form_skips_only_uncached_bind_source_and_keeps_partial_qs(
+    record_compiled_sql: RecordCompiledSql,
+    *,
+    cached_owner: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class RawSet(FilterSet):
+        lag_among = _DurationMembersFromScopedTarget(field_name="partner__lag", lookup_expr="in")
+        lag_list = ListFilter(field_name="partner__lag", lookup_expr="in")
+        bad_number = NumberFilter(field_name="signed_big")
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    def annotated(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "RawInvalidPostcleanTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated)},
+    )
+    recorded = record_compiled_sql()
+
+    @strawberry.type
+    class Query:
+        def _answer(self) -> dict[str, object]:
+            sibling = "&p-lag_list=1+00%3A00%3A00" if cached_owner else ""
+            data = QueryDict(
+                f"p-lag_among=999999999+00%3A00%3A00{sibling}&p-bad_number=abc&p-label=of-child",
+            )
+            instance = RawSet(
+                data=data,
+                queryset=scalar_models.NullableScalarSpecimen.objects.order_by("label"),
+                prefix="p",
+            )
+            errors = require_instance(instance.errors, ErrorDict).get_json_data()
+            valid = instance.is_valid()
+            before_qs = list(calls)
+            before_sql = list(recorded)
+            return {
+                "errors": errors,
+                "valid": valid,
+                "before_qs": before_qs,
+                "before_sql": before_sql,
+                "labels": list(instance.qs.values_list("label", flat=True)),
+                "after_qs": list(calls),
+            }
+
+        answer: dict[str, object] = strawberry.field(
+            resolver=_answer,
+            graphql_type=strawberry.scalars.JSON,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        types=(target,),
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
+    finally:
+        _CURRENT["schema"] = None
+    errors: JSONObject = {"bad_number": [{"message": "Enter a number.", "code": "invalid"}]}
+    if cached_owner and not connection.features.has_native_duration_field:
+        errors["lag_among"] = [
+            {"message": "Enter a value the database can represent.", "code": "invalid"},
+        ]
+    expected_calls = ["default"] if cached_owner else []
+    expected_labels = (
+        []
+        if cached_owner and connection.features.has_native_duration_field
+        else [
+            "of-child",
+        ]
+    )
+    assert payload == {
+        "data": {
+            "answer": {
+                "errors": errors,
+                "valid": False,
+                "before_qs": expected_calls,
+                "before_sql": [],
+                "labels": expected_labels,
+                "after_qs": expected_calls,
+            },
+        },
+    }, payload
+
+
+@pytest.mark.django_db(transaction=True)
+def test_complete_disabled_initial_binds_after_form_clean() -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+
+    class InitialForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, prefix=prefix)
+            field = self.fields["lag_among"]
+            field.disabled = True
+            field.initial = [datetime.timedelta(days=999999999)]
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class InitialSet(FilterSet):
+        lag_among = _DurationMembersFromScopedTarget(field_name="partner__lag", lookup_expr="in")
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = InitialForm
+
+        def check_label_permission(self, request: object) -> None:
+            del request
+            events.append("gate")
+
+    def annotated_once(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "InitialAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_once)},
+    )
+    schema = _schema(
+        InitialSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"label": {"exact": "of-child"}},
+        transport="sync",
+        selection="label",
+    )
+    if connection.features.has_native_duration_field:
+        assert payload == {"data": {"rows": []}}, payload
+    else:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "lag_among": [
+                        {
+                            "message": "Enter a value the database can represent.",
+                            "code": "invalid",
+                        },
+                    ],
+                },
+            },
+        )
+    assert events == ["gate", "form.clean", "hook"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("family", "member", "expected"),
+    [
+        pytest.param("native", "1 00:00:00", "row", id="native-valid"),
+        pytest.param("native", "999999999 00:00:00", "bind", id="native-huge"),
+        pytest.param("list", "1 00:00:00", "row", id="package-list-valid-string"),
+        pytest.param("list", "junk", "parse", id="package-list-malformed"),
+        pytest.param("list", "999999999 00:00:00", "bind", id="package-list-huge"),
+        pytest.param("range", "1 00:00:00", "row", id="package-range-valid-string"),
+        pytest.param("range", "junk", "parse", id="package-range-malformed"),
+        pytest.param("range", "999999999 00:00:00", "bind", id="package-range-huge"),
+        pytest.param("list-policy", "1 00:00:00", "policy", id="declaring-list-policy"),
+        pytest.param("range-policy", "1 00:00:00", "policy", id="declaring-range-policy"),
+        pytest.param("native-denied", "1 00:00:00", "denied", id="denied-zero-hook"),
+    ],
+)
+def test_disabled_initial_uses_actual_owner_and_cleaner_on_both_colors(
+    transport: str,
+    family: str,
+    member: str,
+    expected: str,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+    is_range = family.startswith("range")
+    is_native = family.startswith("native")
+    policy = family.endswith("policy")
+
+    class InitialForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, prefix=prefix)
+            field = self.fields["lag_initial"]
+            field.disabled = True
+            value: object = (
+                datetime.timedelta(days=1 if member == "1 00:00:00" else 999999999)
+                if is_native
+                else member
+            )
+            field.initial = [value, value] if is_range else [value]
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class PolicyDurationFilter(DurationFilter):
+        @property
+        @override
+        def field(self) -> FormField:
+            field = super().field
+            if policy and _reject_one_day not in field.validators:
+                field.validators.append(_reject_one_day)
+            return field
+
+    class InitialSet(FilterSet):
+        lag_initial = (
+            _DurationMembersFromScopedTarget(field_name="partner__lag", lookup_expr="in")
+            if is_native
+            else RangeFilter(field_name="partner__lag", lookup_expr="range")
+            if is_range
+            else ListFilter(field_name="partner__lag", lookup_expr="in")
+        )
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = InitialForm
+            filter_overrides = {
+                django_models.DurationField: {"filter_class": PolicyDurationFilter},
+            }
+
+        def check_label_permission(self, request: object) -> None:
+            del request
+            events.append("gate")
+            if expected == "denied":
+                raise GraphQLError("denied-initial")
+
+    def annotated_sync(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    async def annotated_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "BothColorInitialAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(
+                annotated_async if transport == "async" else annotated_sync,
+            ),
+        },
+    )
+    schema = _schema(
+        InitialSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"label": {"exact": "of-child"}},
+        transport=transport,
+        selection="label",
+    )
+    if expected == "denied":
+        _refused(payload, "denied-initial")
+        assert events == ["gate"]
+        return
+    if expected == "bind" and connection.features.has_native_duration_field:
+        assert payload == {"data": {"rows": []}}, payload
+    elif expected == "row":
+        assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    else:
+        message, code = {
+            "bind": ("Enter a value the database can represent.", "invalid"),
+            "parse": ("Enter a valid duration.", "invalid"),
+            "policy": ("One day is reserved.", "reserved"),
+        }[expected]
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {"lag_initial": [{"message": message, "code": code}]},
+            },
+        )
+    assert events == (
+        ["gate", "form.clean", "hook"] if is_native else ["gate", "hook", "form.clean"]
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("family", ["list", "range"])
+@pytest.mark.parametrize(
+    ("scenario", "preinspect"),
+    [
+        ("valid", False),
+        ("valid", True),
+        ("malformed", False),
+        ("huge", False),
+        ("policy", False),
+        ("owned", True),
+    ],
+)
+def test_cached_declared_child_enriches_own_disabled_initial_field(
+    transport: str,
+    family: str,
+    scenario: str,
+    *,
+    preinspect: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+    member = (
+        "junk"
+        if scenario == "malformed"
+        else "999999999 00:00:00"
+        if scenario == "huge"
+        else "1 00:00:00"
+    )
+
+    class InitialForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, prefix=prefix)
+            field = self.fields["lag_initial"]
+            field.disabled = True
+            field.initial = [member, member] if family == "range" else [member]
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class PolicyDurationFilter(DurationFilter):
+        @property
+        @override
+        def field(self) -> FormField:
+            field = super().field
+            if scenario == "policy" and _reject_one_day not in field.validators:
+                field.validators.append(_reject_one_day)
+            return field
+
+    inner_cleaner = (
+        FormDurationField(validators=[_reject_one_day]) if scenario == "owned" else None
+    )
+
+    class RootSet(FilterSet):
+        partner = RelatedFilter(_AnnotationCriteriaSet, field_name="partner")
+        lag_initial = (
+            RangeFilter(field_name="partner__lag", lookup_expr="range", bound_field=inner_cleaner)
+            if family == "range"
+            else ListFilter(
+                field_name="partner__lag",
+                lookup_expr="in",
+                element_field=inner_cleaner,
+            )
+        )
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = InitialForm
+            filter_overrides = {
+                django_models.DurationField: {"filter_class": PolicyDurationFilter},
+            }
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            if preinspect:
+                _ = self.form
+
+    def annotated_sync(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    async def annotated_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "CachedDeclaredInitialTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(
+                annotated_async if transport == "async" else annotated_sync,
+            ),
+        },
+    )
+    schema = _schema(
+        RootSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"partner__kids_among": {"in_": [0]}},
+        transport=transport,
+        selection="label",
+    )
+    if scenario == "valid":
+        assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    elif scenario == "huge" and connection.features.has_native_duration_field:
+        assert payload == {"data": {"rows": []}}, payload
+    else:
+        message, code = {
+            "malformed": ("Enter a valid duration.", "invalid"),
+            "huge": ("Enter a value the database can represent.", "invalid"),
+            "policy": ("One day is reserved.", "reserved"),
+            "owned": ("One day is reserved.", "reserved"),
+        }[scenario]
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {"lag_initial": [{"message": message, "code": code}]},
+            },
+        )
+    assert events == ["hook", "form.clean"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("family", ["list", "range"])
+@pytest.mark.parametrize("member", ["1 00:00:00", "999999999 00:00:00"])
+def test_raw_cached_declared_sibling_enriches_own_initial_before_clean(
+    family: str,
+    member: str,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class InitialForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, prefix=prefix)
+            field = self.fields["lag_initial"]
+            field.disabled = True
+            field.initial = [member, member] if family == "range" else [member]
+            self.order_fields(["partner__kids_among", "lag_initial"])
+
+    class RawSet(FilterSet):
+        partner = RelatedFilter(_AnnotationCriteriaSet, field_name="partner")
+        lag_initial = (
+            RangeFilter(field_name="partner__lag", lookup_expr="range")
+            if family == "range"
+            else ListFilter(field_name="partner__lag", lookup_expr="in")
+        )
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = InitialForm
+
+    def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        del cls, info
+        calls.append("hook")
+        return _with_annotations(rows)
+
+    target = make_django_type(
+        "RawCachedDeclaredInitialTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+
+    @strawberry.type
+    class Query:
+        def _answer(self) -> dict[str, object]:
+            instance = RawSet(
+                data=QueryDict("p-partner__kids_among=0"),
+                queryset=scalar_models.NullableScalarSpecimen.objects.order_by("label"),
+                prefix="p",
+            )
+            errors = require_instance(instance.errors, ErrorDict).get_json_data()
+            valid = instance.is_valid()
+            return {
+                "errors": errors,
+                "valid": valid,
+                "labels": list(instance.qs.values_list("label", flat=True)),
+            }
+
+        answer: dict[str, object] = strawberry.field(
+            resolver=_answer,
+            graphql_type=strawberry.scalars.JSON,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        types=(target,),
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
+    finally:
+        _CURRENT["schema"] = None
+    huge = member.startswith("999999999")
+    bind_error = huge and not connection.features.has_native_duration_field
+    expected_errors: JSONObject = (
+        {
+            "lag_initial": [
+                {"message": "Enter a value the database can represent.", "code": "invalid"},
+            ],
+        }
+        if bind_error
+        else {}
+    )
+    assert payload == {
+        "data": {
+            "answer": {
+                "errors": expected_errors,
+                "valid": not bind_error,
+                "labels": [] if huge and not bind_error else ["of-child"],
+            },
+        },
+    }, payload
+    assert calls == ["hook"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("transport", "changed"),
+    [
+        ("sync", False),
+        ("async", False),
+        ("sync", True),
+        ("async", True),
+    ],
+)
+def test_unchanged_empty_permitted_initial_skips_its_annotation_owner(
+    transport: str,
+    *,
+    changed: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+
+    class EmptyInitialForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(
+                data=data,
+                prefix=prefix,
+                empty_permitted=True,
+                use_required_attribute=False,
+            )
+            field = self.fields["lag_initial"]
+            field.disabled = True
+            field.initial = [datetime.timedelta(days=1)]
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class InitialSet(FilterSet):
+        lag_initial = _DurationMembersFromScopedTarget(field_name="partner__lag", lookup_expr="in")
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = EmptyInitialForm
+
+    async def annotated_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    def annotated_sync(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "EmptyPermittedInitialTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(
+                annotated_async if transport == "async" or not changed else annotated_sync,
+            ),
+        },
+    )
+    schema = _schema(
+        InitialSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"label": {"exact": "of-child"}} if changed else {},
+        transport=transport,
+        selection="label",
+    )
+    assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    assert events == (["form.clean", "hook"] if changed else [])
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("added", [False, True])
+def test_unchanged_form_post_super_active_value_joins_postclean_bind_phase(
+    transport: str,
+    *,
+    added: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+
+    class PostSuperForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(
+                data=data,
+                prefix=prefix,
+                empty_permitted=True,
+                use_required_attribute=False,
+            )
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+        @override
+        def full_clean(self) -> None:
+            super().full_clean()
+            events.append("post.super")
+            if added:
+                self.cleaned_data["lag_among"] = [datetime.timedelta(days=1)]
+
+    class Criteria(_UndeclaredAnnotationCriteriaSet):
+        class Meta(_UndeclaredAnnotationCriteriaSet.Meta):
+            form = PostSuperForm
+
+    def annotated_sync(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    async def annotated_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "UnchangedPostSuperAddedAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(
+                annotated_async if transport == "async" else annotated_sync,
+            ),
+        },
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(schema, {}, transport=transport, selection="label")
+    assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    assert events == ["post.super", *(["hook"] if added else [])]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_async_logical_arm_awaits_its_own_disabled_initial_on_the_same_form() -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+
+    class InitialForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, prefix=prefix)
+            if "label" in self.data:
+                field = self.fields["lag_initial"]
+                field.disabled = True
+                field.initial = ["1 00:00:00"]
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class InitialSet(FilterSet):
+        lag_initial = ListFilter(field_name="partner__lag", lookup_expr="in")
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = InitialForm
+
+        def check_label_permission(self, request: object) -> None:
+            del request
+            events.append("gate")
+
+    async def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "LogicalInitialAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+    schema = _schema(
+        InitialSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="async",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"or_": [{"label": {"exact": "of-child"}}]},
+        transport="async",
+        selection="label",
+    )
+    assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    assert events == [
+        "gate",
+        "form.clean",
+        "hook",
+        "form.clean",
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_async_nested_child_awaits_its_disabled_initial_before_clean() -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+
+    class InitialForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, prefix=prefix)
+            field = self.fields["lag_initial"]
+            field.disabled = True
+            field.initial = ["1 00:00:00"]
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class ChildSet(FilterSet):
+        lag_initial = ListFilter(field_name="partner__lag", lookup_expr="in")
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = InitialForm
+
+        def check_label_permission(self, request: object) -> None:
+            del request
+            events.append("gate")
+
+    class OuterSet(FilterSet):
+        siblings = RelatedFilter(ChildSet, field_name="partner__nullable_partners")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    async def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "NestedInitialAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+    schema = _schema(
+        OuterSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="async",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"siblings": {"label": {"exact": "of-child"}}},
+        transport="async",
+        selection="label",
+    )
+    assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    assert events == ["hook", "form.clean", "gate"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("spelling", ["flat", "nested", "logical"])
+@pytest.mark.parametrize("projected", [False, True], ids=["plain", "constructor-projected"])
+@pytest.mark.parametrize("lookup", ["member", "package-list", "range"])
+@pytest.mark.parametrize("member", ["1 00:00:00", "999999999 00:00:00"])
+def test_projected_child_to_undeclared_annotation_asks_final_source(
+    transport: str,
+    spelling: str,
+    lookup: str,
+    member: str,
+    record_compiled_sql: RecordCompiledSql,
+    *,
+    projected: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class ChildSet(FilterSet):
+        lag_among = _DurationMembersFromScopedTarget(field_name="partner__lag", lookup_expr="in")
+        lag_list = ListFilter(field_name="partner__lag", lookup_expr="in")
+        lag_span = RangeFilter(field_name="partner__lag", lookup_expr="range")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    class ProjectedChildSet(ChildSet):
+        constructor_calls: ClassVar[list[str]] = []
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            rows = self.queryset
+            assert rows is not None
+            self.queryset = rows.filter(label="of-child")
+            type(self).constructor_calls.append(rows.db)
+
+    class OuterSet(FilterSet):
+        siblings = RelatedFilter(
+            ProjectedChildSet if projected else ChildSet,
+            field_name="partner__nullable_partners",
+        )
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    def annotated_once(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "ProjectedUndeclaredAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_once)},
+    )
+    schema = _schema(
+        OuterSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    name = (
+        "lag_span"
+        if lookup == "range"
+        else "lag_list"
+        if lookup == "package-list"
+        else "lag_among"
+    )
+    key = f"siblings__{name}"
+    value: JSONObject = (
+        {"in_": ["1 00:00:00", member]}
+        if lookup != "range"
+        else {"start": "1 00:00:00", "end": member}
+    )
+    leaf: JSONObject = {key: value}
+    where: JSONObject = leaf
+    if spelling == "nested":
+        where = {"siblings": {name: value}}
+    elif spelling == "logical":
+        where = {"or_": [leaf]}
+    ProjectedChildSet.constructor_calls.clear()
+    recorded = record_compiled_sql()
+    payload = _post(schema, where, transport=transport, selection="label")
+    if member == "1 00:00:00" or connection.features.has_native_duration_field:
+        assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    else:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    f"{'or_0__' if spelling == 'logical' else ''}{key}": [
+                        {
+                            "message": "Enter a value the database can represent.",
+                            "code": "invalid",
+                        },
+                    ],
+                },
+            },
+        )
+        assert recorded == [], recorded
+    assert calls == ["default"]
+    if projected:
+        assert ProjectedChildSet.constructor_calls == ["default"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("member", "labels"),
+    [
+        pytest.param("1 00:00:00", None, id="declaring-child-policy-refuses"),
+        pytest.param("2 00:00:00", ["of-child"], id="declaring-child-policy-accepts"),
+    ],
+)
+def test_undeclared_annotation_comparison_uses_declaring_child_filter_policy(
+    member: str,
+    labels: list[str] | None,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=2)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+
+    class PolicyDurationFilter(DurationFilter):
+        @property
+        @override
+        def field(self) -> FormField:
+            field = super().field
+            if _reject_one_day not in field.validators:
+                field.validators.append(_reject_one_day)
+            return field
+
+    class ChildSet(FilterSet):
+        lag_span = RangeFilter(field_name="partner__lag", lookup_expr="range")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            filter_overrides = {
+                django_models.DurationField: {"filter_class": PolicyDurationFilter},
+            }
+
+    class OuterSet(FilterSet):
+        siblings = RelatedFilter(ChildSet, field_name="partner__nullable_partners")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    target = make_django_type(
+        "PolicyUndeclaredAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(_annotating_target)},
+    )
+    schema = _schema(
+        OuterSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"siblings__lag_span": {"start": member, "end": "2 00:00:00"}},
+        transport="sync",
+        selection="label",
+    )
+    if labels is None:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "siblings__lag_span": [
+                        {"message": "One day is reserved.", "code": "reserved"},
+                    ],
+                },
+            },
+        )
+    else:
+        assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_a_projected_flat_child_keeps_its_constructor_validator_on_target_annotations(
+    transport: str,
+) -> None:
+    """The child instance owns a flat member's validator and its annotated cleaner."""
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    target = make_django_type(
+        "CustomizedAnnotatedPartnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(_annotating_target)},
+    )
+    schema = _schema(
+        _CustomizedPartnerAnnotationCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    _CustomizedAnnotationCriteriaSet.inner_installations.clear()
+    _CustomizedAnnotationCriteriaSet.outer_installations.clear()
+    payload = _post(
+        schema,
+        {"partner__lag_among": {"in_": ["1 00:00:00"]}},
+        transport=transport,
+        selection="label",
+    )
+    _refused(
+        payload,
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {
+                "partner__lag_among": [{"message": "One day is reserved.", "code": "reserved"}],
+            },
+        },
+    )
+    assert _CustomizedAnnotationCriteriaSet.inner_installations == []
+    assert _CustomizedAnnotationCriteriaSet.outer_installations == ["default"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("spelling", "member", "labels"),
+    [
+        pytest.param("flat", "1 00:00:00", None, id="flat-reserved"),
+        pytest.param("nested", "1 00:00:00", None, id="nested-reserved"),
+        pytest.param("flat", "2 00:00:00", ["of-two"], id="flat-allowed"),
+        pytest.param("nested", "2 00:00:00", ["of-two"], id="nested-allowed"),
+        pytest.param("flat-multi", "2 00:00:00", ["of-two"], id="two-fields-one-child"),
+        pytest.param("logical", "2 00:00:00", ["of-two"], id="logical-arm"),
+    ],
+)
+def test_child_queryset_clone_keeps_its_inner_validator_and_one_installed_context(
+    spelling: str,
+    member: str,
+    labels: list[str] | None,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    for days in (1, 2):
+        child = cleaned_specimen(f"child-{days}", kept=True)
+        child.parent = kept
+        child.occurred_at = kept.occurred_at + datetime.timedelta(days=days)
+        child.save(update_fields=["parent", "occurred_at"])
+        scalar_models.NullableScalarSpecimen.objects.create(
+            label=f"of-{'one' if days == 1 else 'two'}",
+            partner=child,
+        )
+    calls: list[str] = []
+
+    async def annotated_once(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "ClonedAnnotatedPartnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_once)},
+    )
+    schema = _schema(
+        _CustomizedPartnerAnnotationCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="async",
+        fields=("label",),
+        targets=(target,),
+    )
+    _CustomizedAnnotationCriteriaSet.constructor_calls.clear()
+    _CustomizedAnnotationCriteriaSet.inner_installations.clear()
+    _CustomizedAnnotationCriteriaSet.outer_installations.clear()
+    leaf: JSONObject = {"lag_among": {"in_": [member]}}
+    if spelling == "nested":
+        where: JSONObject = {"partner": leaf}
+    elif spelling == "logical":
+        where = {"or_": [{"partner__lag_among": {"in_": [member]}}]}
+    else:
+        where = {"partner__lag_among": {"in_": [member]}}
+        if spelling == "flat-multi":
+            where["partner__kids_among"] = {"in_": ["0"]}
+    payload = _post(schema, where, transport="async", selection="label")
+    if labels is None:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "partner__lag_among": [
+                        {"message": "One day is reserved.", "code": "reserved"},
+                    ],
+                },
+            },
+        )
+    else:
+        assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+    assert calls == ["default"]
+    assert _CustomizedAnnotationCriteriaSet.constructor_calls == ["default"]
+    assert _CustomizedAnnotationCriteriaSet.inner_installations == (
+        ["default"] if spelling == "nested" else []
+    )
+    assert _CustomizedAnnotationCriteriaSet.outer_installations == (
+        [] if spelling == "nested" else ["default"]
+    )
+
+
+class _FlatOrderChildSet(FilterSet):
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = {"label": ["exact"]}
+
+
+def _flat_order_parent_set(*, deny: bool) -> type[FilterSet]:
+    class FlatOrderParentSet(FilterSet):
+        partner = RelatedFilter(_FlatOrderChildSet, field_name="partner")
+        own_number = NumberFilter(field_name="signed_big")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+        def check_partner_permission(self, request: object) -> None:
+            del request
+            if deny:
+                raise GraphQLError("denied-flat-partner")
+
+    return FlatOrderParentSet
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("where", "denied", "error_key"),
+    [
+        pytest.param(
+            {"partner__label": {"exact": "child"}},
+            True,
+            None,
+            id="denied-before-flat-hook",
+        ),
+        pytest.param(
+            {"own_number": "abc", "partner__label": {"exact": "child"}},
+            False,
+            "own_number",
+            id="form-error-before-flat-hook",
+        ),
+        pytest.param(
+            {"or_": [{"own_number": "abc", "partner__label": {"exact": "child"}}]},
+            False,
+            "or_0__own_number",
+            id="logical-form-error-before-flat-hook",
+        ),
+    ],
+)
+def test_sync_flat_permission_and_ordinary_form_errors_precede_async_only_target(
+    where: JSONObject,
+    error_key: str | None,
+    *,
+    denied: bool,
+) -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    async def async_only_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        del cls, info
+        calls.append(rows.db)
+        return rows
+
+    target = make_django_type(
+        "FlatOrderAsyncTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(async_only_target)},
+    )
+    schema = _schema(
+        _flat_order_parent_set(deny=denied),
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    assert calls == []
+    payload = _post(schema, where, transport="sync", selection="label")
+    if error_key is None:
+        _refused(payload, "denied-flat-partner")
+    else:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    error_key: [{"message": "Enter a number.", "code": "invalid"}],
+                },
+            },
+        )
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("deny", "member", "labels"),
+    [
+        pytest.param(True, "two-days", None, id="denied-before-annotation"),
+        pytest.param(False, "one-day", None, id="form-owned-validator"),
+        pytest.param(False, "two-days", ["of-two-days"], id="one-hook-through-query"),
+    ],
+)
+def test_sync_flat_annotation_runs_after_gate_and_before_the_actual_form_clean(
+    member: str,
+    labels: list[str] | None,
+    *,
+    deny: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    for days in (1, 2):
+        child = cleaned_specimen(f"child-{days}", kept=True)
+        child.parent = kept
+        child.occurred_at = kept.occurred_at + datetime.timedelta(days=days)
+        child.save(update_fields=["parent", "occurred_at"])
+        scalar_models.NullableScalarSpecimen.objects.create(
+            label=f"of-{'one-day' if days == 1 else 'two-days'}",
+            partner=child,
+        )
+    events: list[str] = []
+
+    class RecordingForm(Form):
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class OrderedAnnotationSet(FilterSet):
+        partner = RelatedFilter(_AnnotationCriteriaSet, field_name="partner")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = RecordingForm
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            field = self.form.fields["partner__lag_among"]
+            field.widget = _AliasDurationWidget()
+            field.validators.append(_reject_parent_one_day)
+
+        def check_partner_permission(self, request: object) -> None:
+            del request
+            events.append("gate")
+            if deny:
+                raise GraphQLError("denied-annotation-partner")
+
+    def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "OrderedAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+    schema = _schema(
+        OrderedAnnotationSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"partner__lag_among": {"in_": [member]}},
+        transport="sync",
+        selection="label",
+    )
+    if deny:
+        _refused(payload, "denied-annotation-partner")
+        assert events == ["gate"]
+    elif labels is None:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "partner__lag_among": [
+                        {"message": "Parent reserved one day.", "code": "parent_reserved"},
+                    ],
+                },
+            },
+        )
+        assert events == ["gate", "hook", "form.clean"]
+    else:
+        assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+        assert events == ["gate", "hook", "form.clean"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_sync_invalid_annotation_input_reaches_async_hook_before_form_errors() -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    async def annotated_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "InvalidSyncAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_async)},
+    )
+    schema = _schema(
+        _PartnerAnnotationCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"partner__lag_among": {"in_": ["not-a-duration"]}},
+        transport="sync",
+        selection="label",
+    )
+    assert payload["data"] is None, payload
+    message = json_at(payload, "errors", 0, "message")
+    assert isinstance(message, str)
+    assert "FilterSet.apply_async" in message
+    assert "FILTER_INVALID" not in str(payload)
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_whole_consumer_invalid_value_precedes_unresolved_annotation_owner() -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class RuntimeWholeChildSet(_AnnotationCriteriaSet):
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            self.filters["lag_among"].field_class = _WholeDurationField
+
+    class RuntimeWholeParentSet(FilterSet):
+        partner = RelatedFilter(RuntimeWholeChildSet, field_name="partner")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    async def annotated_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "WholeFieldAsyncTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_async)},
+    )
+    schema = _schema(
+        RuntimeWholeParentSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"partner__lag_among": {"in_": ["not-a-day"]}},
+        transport="sync",
+        selection="label",
+    )
+    _refused(
+        payload,
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {
+                "partner__lag_among": [
+                    {"message": "Use one-day or two-days.", "code": "whole_duration"},
+                ],
+            },
+        },
+    )
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("insertion", ["clean", "post-super"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "valid",
+        "huge",
+        "inactive",
+        "removed",
+        "repaired",
+    ],
+)
+def test_clean_created_complete_annotation_binds_after_the_whole_actual_form(
+    transport: str,
+    insertion: str,
+    scenario: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    scalar_models.NullableScalarSpecimen.objects.create(label="other")
+    events: list[str] = []
+
+    class DefaultsForm(Form):
+        def add_default(self) -> None:
+            if scenario == "removed":
+                self.cleaned_data.pop("lag_among", None)
+                return
+            if self.cleaned_data.get("label") == "of-child":
+                days = 999999999 if scenario == "huge" else 1
+                self.cleaned_data["lag_among"] = [datetime.timedelta(days=days)]
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            cleaned = super().clean()
+            if insertion == "clean":
+                self.add_default()
+            return cleaned
+
+        @override
+        def full_clean(self) -> None:
+            super().full_clean()
+            if insertion == "post-super":
+                events.append("post.super")
+                self.add_default()
+
+    class DefaultsSet(FilterSet):
+        lag_among = _DurationMembersFromScopedTarget(field_name="partner__lag", lookup_expr="in")
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = DefaultsForm
+
+        def check_label_permission(self, request: object) -> None:
+            del request
+            events.append("gate")
+
+    def annotated_sync(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    async def annotated_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "CleanCreatedAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(
+                annotated_async if transport == "async" else annotated_sync,
+            ),
+        },
+    )
+    schema = _schema(
+        DefaultsSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    recorded = record_compiled_sql()
+    label = "other" if scenario == "inactive" else "of-child"
+    where: dict[str, object] = {"label": {"exact": label}}
+    if scenario in {"removed", "repaired"}:
+        where["lag_among"] = {
+            "in_": ["1 00:00:00" if scenario == "removed" else "2 00:00:00"],
+        }
+    payload = _post(
+        schema,
+        where,
+        transport=transport,
+        selection="label",
+    )
+    if scenario == "huge" and not connection.features.has_native_duration_field:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "lag_among": [
+                        {
+                            "message": "Enter a value the database can represent.",
+                            "code": "invalid",
+                        },
+                    ],
+                },
+            },
+        )
+        assert recorded == [], recorded
+    else:
+        labels = [] if scenario == "huge" else [label]
+        assert payload == {"data": {"rows": [{"label": value} for value in labels]}}, payload
+    assert events == [
+        "gate",
+        "form.clean",
+        *(["post.super"] if insertion == "post-super" else []),
+        *([] if scenario in {"inactive", "removed"} else ["hook"]),
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("insertion", ["clean", "post-super"])
+@pytest.mark.parametrize("scenario", ["valid", "huge", "inactive"])
+def test_raw_clean_created_complete_annotation_uses_one_form_and_source(
+    insertion: str,
+    scenario: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    scalar_models.NullableScalarSpecimen.objects.create(label="other")
+    events: list[str] = []
+
+    class DefaultsForm(Form):
+        def add_default(self) -> None:
+            if self.cleaned_data.get("label") == "of-child":
+                days = 999999999 if scenario == "huge" else 1
+                self.cleaned_data["lag_among"] = [datetime.timedelta(days=days)]
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            cleaned = super().clean()
+            if insertion == "clean":
+                self.add_default()
+            return cleaned
+
+        @override
+        def full_clean(self) -> None:
+            super().full_clean()
+            if insertion == "post-super":
+                events.append("post.super")
+                self.add_default()
+
+    class RawSet(FilterSet):
+        lag_among = _DurationMembersFromScopedTarget(field_name="partner__lag", lookup_expr="in")
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = DefaultsForm
+
+    def annotated(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "RawCleanCreatedAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated)},
+    )
+    recorded = record_compiled_sql()
+
+    @strawberry.type
+    class Query:
+        def _answer(self) -> dict[str, object]:
+            label = "other" if scenario == "inactive" else "of-child"
+            instance = RawSet(
+                data=QueryDict(f"p-label={label}"),
+                queryset=scalar_models.NullableScalarSpecimen.objects.order_by("label"),
+                prefix="p",
+            )
+            errors = require_instance(instance.errors, ErrorDict).get_json_data()
+            valid = instance.is_valid()
+            before_qs = list(events)
+            before_sql = list(recorded)
+            return {
+                "errors": errors,
+                "valid": valid,
+                "before_qs": before_qs,
+                "before_sql": before_sql,
+                "labels": list(instance.qs.values_list("label", flat=True)),
+                "after_qs": list(events),
+            }
+
+        answer: dict[str, object] = strawberry.field(
+            resolver=_answer,
+            graphql_type=strawberry.scalars.JSON,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        types=(target,),
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
+    finally:
+        _CURRENT["schema"] = None
+    label = "other" if scenario == "inactive" else "of-child"
+    errors: JSONObject = {}
+    if scenario == "huge" and not connection.features.has_native_duration_field:
+        errors["lag_among"] = [
+            {"message": "Enter a value the database can represent.", "code": "invalid"},
+        ]
+    expected_events = [
+        "form.clean",
+        *(["post.super"] if insertion == "post-super" else []),
+        *([] if scenario == "inactive" else ["hook"]),
+    ]
+    expected_labels = [label] if scenario != "huge" or errors else []
+    assert payload == {
+        "data": {
+            "answer": {
+                "errors": errors,
+                "valid": not errors,
+                "before_qs": expected_events,
+                "before_sql": [],
+                "labels": expected_labels,
+                "after_qs": expected_events,
+            },
+        },
+    }, payload
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("added", [False, True])
+def test_raw_unchanged_form_post_super_value_is_bound_on_the_same_instance(
+    *,
+    added: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+
+    class PostSuperForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(
+                data=data,
+                prefix=prefix,
+                empty_permitted=True,
+                use_required_attribute=False,
+            )
+
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+        @override
+        def full_clean(self) -> None:
+            super().full_clean()
+            events.append("post.super")
+            if added:
+                self.cleaned_data["lag_among"] = [datetime.timedelta(days=1)]
+
+    class RawSet(_UndeclaredAnnotationCriteriaSet):
+        class Meta(_UndeclaredAnnotationCriteriaSet.Meta):
+            form = PostSuperForm
+
+    def annotated(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "RawUnchangedPostSuperAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated)},
+    )
+
+    @strawberry.type
+    class Query:
+        def _answer(self) -> dict[str, object]:
+            instance = RawSet(
+                data=QueryDict(""),
+                queryset=scalar_models.NullableScalarSpecimen.objects.order_by("label"),
+            )
+            form = instance.form
+            return {
+                "errors": require_instance(instance.errors, ErrorDict).get_json_data(),
+                "valid": instance.is_valid(),
+                "same_form": instance.form is form,
+                "before_qs": list(events),
+                "labels": list(instance.qs.values_list("label", flat=True)),
+                "after_qs": list(events),
+            }
+
+        answer: dict[str, object] = strawberry.field(
+            resolver=_answer,
+            graphql_type=strawberry.scalars.JSON,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        types=(target,),
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
+    finally:
+        _CURRENT["schema"] = None
+    expected_events = ["post.super", *(["hook"] if added else [])]
+    assert payload == {
+        "data": {
+            "answer": {
+                "errors": {},
+                "valid": True,
+                "same_form": True,
+                "before_qs": expected_events,
+                "labels": ["of-child"],
+                "after_qs": expected_events,
+            },
+        },
+    }, payload
+
+
+@pytest.mark.django_db(transaction=True)
+def test_raw_logical_domain_error_suppresses_new_bind_owner_and_keeps_safe_sibling() -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class RawSet(_UndeclaredAnnotationCriteriaSet):
+        bad_number = NumberFilter(field_name="signed_big")
+        label = CharFilter(field_name="label")
+
+    def annotated(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "RawLogicalErrorSuppressesBindOwnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated)},
+    )
+
+    @strawberry.type
+    class Query:
+        def _answer(self) -> dict[str, object]:
+            instance = RawSet(
+                data={
+                    "label": "of-child",
+                    "bad_number": "abc",
+                    "or_": [{"lag_among": {"in_": ["1 00:00:00"]}}],
+                },
+                queryset=scalar_models.NullableScalarSpecimen.objects.order_by("label"),
+            )
+            return {
+                "errors": require_instance(instance.errors, ErrorDict).get_json_data(),
+                "valid": instance.is_valid(),
+                "before_qs": list(calls),
+                "labels": list(instance.qs.values_list("label", flat=True)),
+                "after_qs": list(calls),
+            }
+
+        answer: dict[str, object] = strawberry.field(
+            resolver=_answer,
+            graphql_type=strawberry.scalars.JSON,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        types=(target,),
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
+    finally:
+        _CURRENT["schema"] = None
+    assert payload == {
+        "data": {
+            "answer": {
+                "errors": {"bad_number": [{"message": "Enter a number.", "code": "invalid"}]},
+                "valid": False,
+                "before_qs": [],
+                "labels": ["of-child"],
+                "after_qs": [],
+            },
+        },
+    }, payload
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("operator", ["or_", "and_"])
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_raw_logical_child_error_wins_complete_owner_in_both_arm_orders(
+    operator: str,
+    *,
+    invalid_first: bool,
+) -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class RawSet(_UndeclaredAnnotationCriteriaSet):
+        bad_number = NumberFilter(field_name="signed_big")
+
+    def annotated(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "RawLogicalChildErrorBeforeBindOwnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated)},
+    )
+
+    @strawberry.type
+    class Query:
+        def _answer(self) -> dict[str, object]:
+            bad = {"bad_number": "abc"}
+            lag = {"lag_among": {"in_": ["1 00:00:00"]}}
+            instance = RawSet(
+                data={operator: [bad, lag] if invalid_first else [lag, bad]},
+                queryset=scalar_models.NullableScalarSpecimen.objects.order_by("pk"),
+            )
+            root_errors = require_instance(instance.errors, ErrorDict).get_json_data()
+            root_valid = instance.is_valid()
+            try:
+                _ = instance.qs
+            except GraphQLError as error:
+                return {
+                    "root_errors": root_errors,
+                    "root_valid": root_valid,
+                    "error": str(error),
+                    "extensions": error.extensions,
+                    "calls": list(calls),
+                }
+            raise AssertionError("The logical child must report its native form error")
+
+        answer: dict[str, object] = strawberry.field(
+            resolver=_answer,
+            graphql_type=strawberry.scalars.JSON,
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        types=(target,),
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload("query { answer }", url="/graphql-apply-arguments/")
+    finally:
+        _CURRENT["schema"] = None
+    index = 0 if invalid_first else 1
+    assert payload == {
+        "data": {
+            "answer": {
+                "root_errors": {},
+                "root_valid": True,
+                "error": "Invalid filter input",
+                "extensions": {
+                    "code": "FILTER_INVALID",
+                    "errors": {
+                        f"{operator}{index}__bad_number": [
+                            {"message": "Enter a number.", "code": "invalid"},
+                        ],
+                    },
+                },
+                "calls": [],
+            },
+        },
+    }, payload
+
+
+@pytest.mark.django_db(transaction=True)
+def test_whole_consumer_field_on_resolved_flat_column_cleans_before_async_target() -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class WholeResolvedSet(FilterSet):
+        occurred_among = _WholeDurationListFilter(
+            field_name="partner__occurred_at",
+            lookup_expr="in",
+        )
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    async def target_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "WholeResolvedAsyncTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(target_async)},
+    )
+    schema = _schema(
+        WholeResolvedSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    _refused(
+        _post(
+            schema,
+            {"occurred_among": {"in_": ["not-a-day"]}},
+            transport="sync",
+            selection="label",
+        ),
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {
+                "occurred_among": [
+                    {"message": "Use one-day or two-days.", "code": "whole_duration"},
+                ],
+            },
+        },
+    )
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "leaf",
+    ["stamp_year_path", "stamp_year_lookup", "stamp_alias_year"],
+)
+def test_sync_flat_annotation_transform_spelling_uses_the_hook_output_field(leaf: str) -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    class StampChildSet(FilterSet):
+        stamp_year_path = RangeFilter(field_name="stamp__year", lookup_expr="range")
+        stamp_year_lookup = RangeFilter(field_name="stamp", lookup_expr="year__range")
+        stamp_alias_year = RangeFilter(field_name="stamp__at", lookup_expr="year__range")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    class StampParentSet(FilterSet):
+        partner = RelatedFilter(StampChildSet, field_name="partner")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        del cls, info
+        calls.append(rows.db)
+        return rows.annotate(
+            **{
+                ("stamp__at" if leaf == "stamp_alias_year" else "stamp"): django_models.F(
+                    "occurred_at",
+                ),
+            },
+        )
+
+    target = make_django_type(
+        "StampYearTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+    schema = _schema(
+        StampParentSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {f"partner__{leaf}": {"start": str(child.occurred_at.year)}},
+        transport="sync",
+        selection="label",
+    )
+    assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    assert calls == ["default"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("member", "constructor_label", "labels"),
+    [
+        pytest.param("1 00:00:00", "child-1", None, id="owned-validator"),
+        pytest.param("2 00:00:00", "child-1", [], id="constructor-excludes"),
+        pytest.param("2 00:00:00", "child-2", ["of-child-2"], id="constructor-allows"),
+    ],
+)
+def test_preinspected_projected_child_is_promoted_without_losing_constructor_validator(
+    member: str,
+    constructor_label: str,
+    labels: list[str] | None,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    for days in (1, 2):
+        child = cleaned_specimen(f"child-{days}", kept=True)
+        child.parent = kept
+        child.occurred_at = kept.occurred_at + datetime.timedelta(days=days)
+        child.save(update_fields=["parent", "occurred_at"])
+        scalar_models.NullableScalarSpecimen.objects.create(
+            label=f"of-child-{days}",
+            partner=child,
+        )
+    calls: list[str] = []
+
+    class PreinspectedChild(_AnnotationCriteriaSet):
+        constructor_calls: ClassVar[list[str]] = []
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            rows = self.queryset
+            assert rows is not None
+            self.queryset = (
+                rows.all()
+                .annotate(constructor_label=django_models.F("label"))
+                .filter(
+                    constructor_label=constructor_label,
+                )
+            )
+            type(self).constructor_calls.append(rows.db)
+            self.filters["lag_among"].field.validators.append(_reject_parent_one_day)
+
+    class PreinspectingParent(FilterSet):
+        partner = RelatedFilter(PreinspectedChild, field_name="partner")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            _ = self.filters["partner__lag_among"].field
+
+    def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "PreinspectedAnnotationTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+    schema = _schema(
+        PreinspectingParent,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"partner__lag_among": {"in_": [member]}},
+        transport="sync",
+        selection="label",
+    )
+    if labels is None:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "partner__lag_among": [
+                        {"message": "Parent reserved one day.", "code": "parent_reserved"},
+                    ],
+                },
+            },
+        )
+    else:
+        assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+    assert calls == ["default"]
+    assert PreinspectedChild.constructor_calls == ["default"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("family", ["list", "range"])
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "direct",
+        "logical",
+        "valid",
+        "async-valid",
+        "sibling-valid",
+    ],
+)
+def test_projected_method_values_keep_ordinary_sync_flat_hook_timing(
+    family: str,
+    spelling: str,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+    received: list[object] = []
+    filter_class = ListFilter if family == "list" else RangeFilter
+    lookup = "in" if family == "list" else "range"
+
+    class MethodChild(FilterSet):
+        lag_sent = filter_class(field_name="lag", lookup_expr=lookup, method="filter_lag_sent")
+        lag_among = ListFilter(field_name="lag", lookup_expr="in")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+        def filter_lag_sent(
+            self,
+            queryset: QuerySet[Model],
+            name: str,
+            value: object,
+        ) -> QuerySet[Model]:
+            del name
+            received.append(value)
+            events.append("method")
+            return queryset.filter(label="child")
+
+    class RecordingForm(Form):
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class MethodParent(FilterSet):
+        partner = RelatedFilter(MethodChild, field_name="partner")
+        own_number = NumberFilter(field_name="signed_big")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = RecordingForm
+
+    async def async_only_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        del cls, info
+        events.append("hook")
+        return rows
+
+    def recording_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    async def async_annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "MethodTimingTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(
+                async_annotated_target
+                if spelling == "async-valid"
+                else recording_target
+                if spelling in {"valid", "sibling-valid"}
+                else async_only_target,
+            ),
+        },
+    )
+    schema = _schema(
+        MethodParent,
+        scalar_models.NullableScalarSpecimen,
+        transport="async" if spelling == "async-valid" else "sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    criterion: JSONObject = (
+        {"in_": ["sent"]} if family == "list" else {"start": "sent", "end": "sent"}
+    )
+    where: JSONObject = {"partner__lag_sent": criterion}
+    if spelling in {"valid", "async-valid", "sibling-valid"}:
+        if spelling == "sibling-valid":
+            where["partner__lag_among"] = {"in_": ["1 00:00:00"]}
+        payload = _post(
+            schema,
+            where,
+            transport="async" if spelling == "async-valid" else "sync",
+            selection="label",
+        )
+        assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+        assert events == (
+            ["form.clean", "hook", "method"]
+            if spelling == "valid"
+            else ["hook", "form.clean", "method"]
+        )
+        assert received == ([["sent"]] if family == "list" else [["sent", "sent"]])
+    else:
+        where["own_number"] = "abc"
+        if spelling == "logical":
+            where = {"or_": [where]}
+        payload = _post(schema, where, transport="sync", selection="label")
+        key = "or_0__own_number" if spelling == "logical" else "own_number"
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {key: [{"message": "Enter a number.", "code": "invalid"}]},
+            },
+        )
+        assert events == ["form.clean"] * (2 if spelling == "logical" else 1)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("days", "labels"),
+    [
+        pytest.param(1, None, id="consumer-inner-validator"),
+        pytest.param(2, ["of-two-days"], id="consumer-inner-accepts"),
+    ],
+)
+@pytest.mark.parametrize("owner", ["form", "filter"])
+@pytest.mark.parametrize("transport", ["async", "sync"])
+def test_filter_or_materialized_form_keeps_its_owned_range_bound_validator(
+    days: int,
+    labels: list[str] | None,
+    owner: str,
+    transport: str,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    for child_days in (1, 2):
+        child = cleaned_specimen(f"child-{child_days}", kept=True)
+        child.parent = kept
+        child.occurred_at = kept.occurred_at + datetime.timedelta(days=child_days)
+        child.save(update_fields=["parent", "occurred_at"])
+        scalar_models.NullableScalarSpecimen.objects.create(
+            label=f"of-{'one' if child_days == 1 else 'two'}-days",
+            partner=child,
+        )
+    events: list[str] = []
+
+    class RecordingForm(Form):
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class MaterializedRangeParent(FilterSet):
+        partner = RelatedFilter(_AnnotationCriteriaSet, field_name="partner")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = RecordingForm
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            if owner == "filter":
+                field = self.filters["partner__lag_span"].field
+                assert isinstance(field, RangeField)
+                field.bound_field = FormDurationField()
+            else:
+                field = self.form.fields["partner__lag_span"]
+                assert isinstance(field, RangeField)
+                field.bound_field = FormDurationField()
+            assert isinstance(field, RangeField)
+            bound = field.bound_field
+            assert isinstance(bound, FormField)
+            bound.validators.append(_reject_one_day)
+            _ = self.form
+
+    def annotated_sync(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    async def annotated_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "MaterializedRangeTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(
+                annotated_async if transport == "async" else annotated_sync,
+            ),
+        },
+    )
+    schema = _schema(
+        MaterializedRangeParent,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    bound = f"{days} 00:00:00"
+    payload = _post(
+        schema,
+        {"partner__lag_span": {"start": bound, "end": bound}},
+        transport=transport,
+        selection="label",
+    )
+    if labels is None:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "partner__lag_span": [
+                        {"message": "One day is reserved.", "code": "reserved"},
+                    ],
+                },
+            },
+        )
+    else:
+        assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+    assert events == (["form.clean"] if labels is None else ["form.clean", "hook"])
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("member", "with_sibling", "labels"),
+    [
+        pytest.param("1 00:00:00", True, None, id="owned-inner-survives-promotion"),
+        pytest.param("2 00:00:00", True, ["of-two"], id="allowed-inner-and-sibling"),
+        pytest.param("1 00:00:00", False, None, id="owned-inner-keeps-necessary-owner"),
+    ],
+)
+def test_projected_child_inner_range_validator_survives_sibling_promotion(
+    member: str,
+    labels: list[str] | None,
+    *,
+    with_sibling: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    for days in (1, 2):
+        child = cleaned_specimen(f"child-{days}", kept=True)
+        child.parent = kept
+        child.occurred_at = kept.occurred_at + datetime.timedelta(days=days)
+        child.save(update_fields=["parent", "occurred_at"])
+        scalar_models.NullableScalarSpecimen.objects.create(
+            label=f"of-{'one' if days == 1 else 'two'}",
+            partner=child,
+        )
+    events: list[str] = []
+
+    class OwnedChild(_AnnotationCriteriaSet):
+        constructor_calls: ClassVar[list[str]] = []
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            rows = self.queryset
+            assert rows is not None
+            type(self).constructor_calls.append(rows.db)
+            field = self.filters["lag_span"].field
+            assert isinstance(field, RangeField)
+            field.bound_field = FormDurationField(validators=[_reject_one_day])
+
+    class RecordingForm(Form):
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class OwnedParent(FilterSet):
+        partner = RelatedFilter(OwnedChild, field_name="partner")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = RecordingForm
+
+    def annotated_target(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "OwnedChildPromotionTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_target)},
+    )
+    schema = _schema(
+        OwnedParent,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+    )
+    where: JSONObject = {"partner__lag_span": {"start": member, "end": member}}
+    if with_sibling:
+        where["partner__kids_among"] = {"in_": ["0"]}
+    payload = _post(schema, where, transport="sync", selection="label")
+    if labels is None:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "partner__lag_span": [
+                        {"message": "One day is reserved.", "code": "reserved"},
+                    ],
+                },
+            },
+        )
+    else:
+        assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+    assert OwnedChild.constructor_calls == ["default"]
+    assert events == (
+        ["hook", "form.clean"]
+        if with_sibling
+        else ["form.clean"]
+        if labels is None
+        else ["form.clean", "hook"]
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("member", "labels", "events_after"),
+    [
+        pytest.param(
+            "junk",
+            None,
+            ["branch-hook", "form.clean"],
+            id="owner-before-invalid-form",
+        ),
+        pytest.param(
+            "4",
+            ["matching-book"],
+            ["branch-hook", "form.clean", "shelf-hook"],
+            id="earlier-hop-at-application",
+        ),
+    ],
+)
+def test_multihop_flat_annotation_prepares_only_its_owning_hop(
+    member: str,
+    labels: list[str] | None,
+    events_after: list[str],
+) -> None:
+    branch = models.Branch.objects.create(name="West")
+    shelf = models.Shelf.objects.create(branch=branch, code="west")
+    models.Book.objects.create(shelf=shelf, title="matching-book")
+    events: list[str] = []
+
+    class BranchCriteria(FilterSet):
+        name_lengths = ListFilter(field_name="name_len", lookup_expr="in")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+
+    class ShelfCriteria(FilterSet):
+        branch = RelatedFilter(BranchCriteria, field_name="branch")
+
+        class Meta:
+            model = models.Shelf
+            fields = []
+
+    class RecordingForm(Form):
+        @override
+        def clean(self) -> dict[str, object] | None:
+            events.append("form.clean")
+            return super().clean()
+
+    class BookCriteria(FilterSet):
+        shelf = RelatedFilter(ShelfCriteria, field_name="shelf")
+        branch_name_lengths = ListFilter(field_name="shelf__branch__name_len", lookup_expr="in")
+
+        class Meta:
+            model = models.Book
+            fields = []
+            form = RecordingForm
+
+    def shelf_hook(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        del cls, info
+        events.append("shelf-hook")
+        return rows
+
+    def branch_hook(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        del cls, info
+        events.append("branch-hook")
+        return rows.annotate(name_len=Length("name"))
+
+    shelf_type = make_django_type(
+        "OwnedAnnotationShelf",
+        models.Shelf,
+        ("code",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(shelf_hook)},
+    )
+    branch_type = make_django_type(
+        "OwnedAnnotationBranch",
+        models.Branch,
+        ("name",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(branch_hook)},
+    )
+    schema = _schema(
+        BookCriteria,
+        models.Book,
+        transport="sync",
+        fields=("title",),
+        targets=(shelf_type, branch_type),
+    )
+    payload = _post(
+        schema,
+        {"branch_name_lengths": {"in_": [member]}},
+        transport="sync",
+        selection="title",
+    )
+    if labels is None:
+        _refused(
+            payload,
+            "Invalid filter input",
+            extensions={
+                "code": "FILTER_INVALID",
+                "errors": {
+                    "branch_name_lengths": [
+                        {"message": "Enter a number.", "code": "invalid"},
+                    ],
+                },
+            },
+        )
+    else:
+        assert payload == {"data": {"rows": [{"title": label} for label in labels]}}, payload
+    assert events == events_after
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_flat_nested_and_logical_annotation_leaves_share_one_target_hook(
+    transport: str,
+) -> None:
+    """One declared hop supplies every active spelling's annotated form field."""
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    def annotated_once(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "OnceAnnotatedPartnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_once)},
+    )
+    schema = _schema(
+        _PartnerAnnotationCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    assert calls == []
+    payload = _post(
+        schema,
+        {
+            "or_": [
+                {
+                    "partner": {"lag_among": {"in_": ["1 00:00:00"]}},
+                    "partner__kids_among": {"in_": ["0"]},
+                },
+                {"partner__lag_span": {"start": "1 00:00:00"}},
+            ],
+        },
+        transport=transport,
+        selection="label",
+    )
+    assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    assert calls == ["default"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_flat_annotation_field_awaits_its_async_only_target_hook() -> None:
+    """Flat form cleaning uses the target rows awaited by the async apply path."""
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    calls: list[str] = []
+
+    async def annotated_async(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "AsyncAnnotatedPartnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(annotated_async)},
+    )
+    schema = _schema(
+        _PartnerAnnotationCriteriaSet,
+        scalar_models.NullableScalarSpecimen,
+        transport="async",
+        fields=("label",),
+        targets=(target,),
+    )
+    assert calls == []
+    payload = _post(
+        schema,
+        {"partner__lag_among": {"in_": ["1 00:00:00"]}},
+        transport="async",
+        selection="label",
+    )
+    assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    assert calls == ["default"]
 
 
 class _ReadingFiltersSet(FilterSet):
@@ -1456,3 +6613,843 @@ def test_a_declared_head_refuses_an_extra_lookup_after_an_active_valid_lookup(
         f"FilterSet {DeclaredBranchFilter.__qualname__}: filter input field 'custom' has no "
         "'starts_with' lookup (lookups: ['i_contains']); it would apply nothing.",
     )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "valid",
+        "year",
+        "text",
+        "arm",
+    ],
+)
+def test_plain_cached_consumer_form_uses_the_complete_apply_protocol(
+    transport: str,
+    scenario: str,
+) -> None:
+    cleaned_specimen("kept", kept=True)
+    models.Branch.objects.create(name="choice")
+    forms_built: list[Form] = []
+    cleans: list[Form] = []
+
+    class ConsumerForm(Form):
+        @override
+        def full_clean(self) -> None:
+            cleans.append(self)
+            super().full_clean()
+
+    class Criteria(FilterSet):
+        pick = ModelMultipleChoiceFilter(
+            field_name="label",
+            queryset=models.Branch.objects.all(),
+            to_field_name="name",
+        )
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = {"occurred_on": ["year__gt"], "signed_big": ["exact"]}
+            form = ConsumerForm
+
+        @property
+        @override
+        def form(self) -> Form:
+            if not hasattr(self, "_consumer_form"):
+                self._consumer_form = self.get_form_class()(self.data, prefix=self.form_prefix)
+                forms_built.append(self._consumer_form)
+            return self._consumer_form
+
+    scenarios: dict[str, JSONObject] = {
+        "valid": {"occurred_on": {"year_gt": "2000"}, "or_": [{"signed_big": "7"}]},
+        "year": {"occurred_on": {"year_gt": "99999"}},
+        "text": {"pick": ["\ud800"]},
+        "arm": {"or_": [{"signed_big": "abc"}]},
+    }
+    criteria = scenarios[scenario]
+    schema = _schema(
+        Criteria,
+        scalar_models.ScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+    )
+    payload = _post(schema, criteria, transport=transport, selection="label")
+    if scenario == "valid":
+        assert payload == {"data": {"rows": [{"label": "kept"}]}}, payload
+    else:
+        key = {"year": "occurred_on__year__gt", "text": "pick", "arm": "or_0__signed_big"}[
+            scenario
+        ]
+        code = "invalid"
+        if scenario == "text":
+            assert json_at(payload, "errors", 0, "extensions", "errors", key, 0, "message") == (
+                "Text contains invalid Unicode (unpaired surrogate code points)."
+            )
+        assert json_at(payload, "errors", 0, "extensions", "code") == "FILTER_INVALID", payload
+        assert json_at(payload, "errors", 0, "extensions", "errors", key, 0, "code") == code
+    assert len(forms_built) == (2 if scenario in {"valid", "arm"} else 1)
+    assert len(cleans) == (0 if scenario == "text" else len(forms_built))
+    assert all(any(form is owned for owned in forms_built) for form in cleans)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("invalid", [False, True])
+def test_consumer_range_parser_owns_native_validation_before_annotation_hook(
+    transport: str,
+    *,
+    invalid: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    events: list[str] = []
+
+    class CompleteRangeField(RangeField):
+        @override
+        def to_python(self, value: object) -> object:
+            events.append("parser")
+            if value in self.empty_values:
+                return None
+            values = require(value, is_list_or_tuple)
+            return [
+                None if bound is None else FormDurationField().clean(bound) for bound in values
+            ]
+
+    class CompleteRangeFilter(RangeFilter):
+        field_class = CompleteRangeField
+
+    class Criteria(FilterSet):
+        lag = CompleteRangeFilter(field_name="partner__lag", lookup_expr="range")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+    async def async_owner(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    def sync_owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "CompleteRangeParserOwner",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(
+                async_owner if invalid or transport == "async" else sync_owner,
+            ),
+        },
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"lag": {"start": "not-a-duration" if invalid else "1 00:00:00"}},
+        transport=transport,
+        selection="label",
+    )
+    if invalid:
+        assert json_at(payload, "errors", 0, "extensions", "code") == "FILTER_INVALID", payload
+        assert json_at(payload, "errors", 0, "extensions", "errors", "lag", 0, "code") == "invalid"
+        assert events == ["parser"]
+    else:
+        assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+        assert events == ["parser", "hook"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("empty", ["list", "disabled", "unchanged"])
+def test_inactive_missing_inner_parser_never_acquires_annotation_owner(
+    transport: str,
+    empty: str,
+) -> None:
+    scalar_models.NullableScalarSpecimen.objects.create(label="kept")
+    calls: list[str] = []
+
+    class EmptyForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(
+                data=data,
+                prefix=prefix,
+                empty_permitted=empty == "unchanged",
+                use_required_attribute=False,
+            )
+            if empty == "disabled":
+                self.fields["lag"].disabled = True
+                self.fields["lag"].initial = []
+
+    class Criteria(FilterSet):
+        lag = ListFilter(field_name="partner__lag", lookup_expr="in")
+        amount = NumberFilter(field_name="signed_big", lookup_expr="gt")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = EmptyForm
+
+    async def owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "InactiveMissingParserOwner",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(owner)},
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    where: JSONObject = (
+        {} if empty == "unchanged" else {"lag": {"in_": []}, "amount": {"gt": "1e51"}}
+    )
+    payload = _post(schema, where, transport=transport, selection="label")
+    if empty == "unchanged":
+        assert payload == {"data": {"rows": [{"label": "kept"}]}}, payload
+    else:
+        assert json_at(payload, "errors", 0, "extensions", "code") == "FILTER_INVALID", payload
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_invalid_root_stops_logical_construction_before_missing_parser_owner(
+    transport: str,
+) -> None:
+    scalar_models.NullableScalarSpecimen.objects.create(label="kept")
+    constructed: list[FilterSet] = []
+    calls: list[str] = []
+
+    class Criteria(FilterSet):
+        lag = ListFilter(field_name="partner__lag", lookup_expr="in")
+        amount = NumberFilter(field_name="signed_big", lookup_expr="gt")
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            constructed.append(self)
+
+    async def owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "InvalidRootParserOwner",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(owner)},
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(
+        schema,
+        {"amount": {"gt": "1e51"}, "or_": [{"lag": {"in_": ["1 00:00:00"]}}]},
+        transport=transport,
+        selection="label",
+    )
+    assert json_at(payload, "errors", 0, "extensions", "code") == "FILTER_INVALID", payload
+    assert len(constructed) == 1
+    assert calls == []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", ["repair", "pop", "pop-async"])
+def test_raw_reused_generated_form_binds_only_after_outer_full_clean(mode: str) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    scalar_models.NullableScalarSpecimen.objects.create(label="unrelated")
+    events: list[str] = []
+
+    class InnerForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(
+                data=data,
+                prefix=prefix,
+                empty_permitted=True,
+                use_required_attribute=False,
+            )
+
+        @override
+        def full_clean(self) -> None:
+            super().full_clean()
+            events.append("inner")
+            self.cleaned_data["lag_among"] = [datetime.timedelta(days=999999999)]
+
+    class Source(_UndeclaredAnnotationCriteriaSet):
+        class Meta(_UndeclaredAnnotationCriteriaSet.Meta):
+            form = InnerForm
+
+    generated = type(
+        Source(data={}, queryset=scalar_models.NullableScalarSpecimen.objects.all()).form,
+    )
+
+    class OuterForm(generated):
+        @override
+        def full_clean(self) -> None:
+            super().full_clean()
+            events.append("outer")
+            if mode == "repair":
+                self.cleaned_data["lag_among"] = [datetime.timedelta(days=1)]
+            else:
+                self.cleaned_data.pop("lag_among", None)
+
+    class Criteria(_UndeclaredAnnotationCriteriaSet):
+        class Meta(_UndeclaredAnnotationCriteriaSet.Meta):
+            form = OuterForm
+
+    def owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    async def async_owner(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "ReusedOuterFormOwner",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(async_owner if mode == "pop-async" else owner),
+        },
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        targets=(target,),
+        direct=True,
+    )
+    payload = _post(schema, {}, transport="sync", selection="label")
+    labels = ["of-child"] if mode == "repair" else ["of-child", "unrelated"]
+    assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+    assert events == ["inner", "outer", *(["hook"] if mode == "repair" else [])]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("always", [False, True])
+def test_absent_disabled_multiple_choice_initial_obeys_native_noop_before_owner(
+    transport: str,
+    *,
+    always: bool,
+) -> None:
+    child = cleaned_specimen("child", kept=True)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    scalar_models.NullableScalarSpecimen.objects.create(label="unrelated")
+    calls: list[str] = []
+
+    class InitialForm(Form):
+        def __init__(
+            self,
+            data: dict[str, object] | QueryDict | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, prefix=prefix)
+            self.fields["kids"].disabled = True
+            self.fields["kids"].initial = ["0", "1"]
+
+    class ChoicesFilter(MultipleChoiceFilter):
+        always_filter = always
+
+    class Criteria(FilterSet):
+        kids = ChoicesFilter(
+            field_name="partner__kids",
+            choices=[("0", "None"), ("1", "One")],
+            required=True,
+        )
+
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = []
+            form = InitialForm
+
+    def owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    async def async_owner(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        calls.append(rows.db)
+        return _annotating_target(cls, rows, info)
+
+    target = make_django_type(
+        "AbsentMultipleChoiceOwner",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(
+                async_owner if transport == "async" or not always else owner,
+            ),
+        },
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    payload = _post(schema, {}, transport=transport, selection="label")
+    labels = ["of-child"] if always else ["of-child", "unrelated"]
+    assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+    assert calls == (["default"] if always else [])
+
+
+@pytest.mark.skipif(
+    os.environ.get("FAKESHOP_SHARDED") != "1",
+    reason="requires FAKESHOP_SHARDED=1",
+)
+@pytest.mark.django_db(transaction=True, databases=["default", "shard_b"])
+@pytest.mark.parametrize("family", ["complete", "missing-parser"])
+def test_async_annotation_readiness_uses_constructor_selected_shard(family: str) -> None:
+    branch = models.Branch.objects.using("shard_b").create(name="remote")
+    models.Shelf.objects.using("shard_b").create(branch=branch, code="remote")
+    models.Shelf.objects.create(branch=models.Branch.objects.create(name="local"), code="local")
+    calls: list[str] = []
+
+    class Criteria(FilterSet):
+        rank = (
+            NumberFilter(field_name="branch__rank")
+            if family == "complete"
+            else ListFilter(field_name="branch__rank", lookup_expr="in")
+        )
+
+        class Meta:
+            model = models.Shelf
+            fields = []
+
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            assert self.queryset is not None
+            self.queryset = self.queryset.using("shard_b")
+
+    async def owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        del cls, info
+        calls.append(rows.db)
+        return rows.annotate(
+            rank=django_models.Value(1, output_field=django_models.IntegerField()),
+        )
+
+    target = make_django_type(
+        "ConstructorShardAnnotationOwner",
+        models.Branch,
+        ("name",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(owner)},
+    )
+    schema = _schema(
+        Criteria,
+        models.Shelf,
+        transport="async",
+        fields=("code",),
+        targets=(target,),
+    )
+    where: JSONObject = {"rank": "1" if family == "complete" else {"in_": ["1"]}}
+
+    async def bounded_request() -> JSONObject:
+        return await asyncio.wait_for(
+            _async_post(
+                "query($where: JSON!) { rows(where: $where) { code } }",
+                {"where": where},
+                None,
+            ),
+            timeout=5,
+        )
+
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = asyncio.run(bounded_request())
+    finally:
+        _CURRENT["schema"] = None
+    assert payload == {"data": {"rows": [{"code": "remote"}]}}, payload
+    assert calls == ["shard_b"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("policy", ["form", "filterset"])
+def test_consumer_form_validation_policy_keeps_accepted_root_logical_arms(
+    transport: str,
+    policy: str,
+) -> None:
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("other", kept=False)
+
+    class AcceptingForm(Form):
+        @override
+        def is_valid(self) -> bool:
+            return True if policy == "form" else super().is_valid()
+
+    class Criteria(FilterSet):
+        label = CharFilter(field_name="label")
+        bad = NumberFilter(field_name="signed_big")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+            form = AcceptingForm
+
+        @classmethod
+        @override
+        def _validate_form_or_raise(cls, filterset_instance: FilterSet) -> None:
+            if policy != "filterset":
+                super()._validate_form_or_raise(filterset_instance)
+
+    schema = _schema(
+        Criteria,
+        scalar_models.ScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+    )
+    payload = _post(
+        schema,
+        {"bad": "abc", "or_": [{"label": "kept"}]},
+        transport=transport,
+        selection="label",
+    )
+    assert payload == {"data": {"rows": [{"label": "kept"}]}}, payload
+
+
+@pytest.mark.django_db(transaction=True)
+def test_raw_native_root_error_preserves_safe_logical_sibling_filters() -> None:
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("other", kept=False)
+
+    class Criteria(FilterSet):
+        label = CharFilter(field_name="label")
+        bad = NumberFilter(field_name="signed_big")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+    schema = _schema(
+        Criteria,
+        scalar_models.ScalarSpecimen,
+        transport="sync",
+        fields=("label",),
+        direct=True,
+    )
+    payload = _post(
+        schema,
+        {"bad": "abc", "or_": [{"label": "kept"}]},
+        transport="sync",
+        selection="label",
+    )
+    assert payload == {"data": {"rows": [{"label": "kept"}]}}, payload
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("family", ["list", "range"])
+def test_plain_cached_consumer_form_receives_its_missing_annotation_parser(
+    transport: str,
+    family: str,
+) -> None:
+    branch = models.Branch.objects.create(name="branch")
+    models.Shelf.objects.create(branch=branch, code="kept")
+    events: list[str] = []
+
+    class ConsumerForm(Form):
+        @override
+        def full_clean(self) -> None:
+            events.append("clean")
+            super().full_clean()
+
+    class Criteria(FilterSet):
+        rank = (
+            ListFilter(field_name="branch__rank", lookup_expr="in")
+            if family == "list"
+            else RangeFilter(field_name="branch__rank", lookup_expr="range")
+        )
+
+        class Meta:
+            model = models.Shelf
+            fields = []
+            form = ConsumerForm
+
+        @property
+        @override
+        def form(self) -> Form:
+            if not hasattr(self, "_consumer_form"):
+                self._consumer_form = self.get_form_class()(self.data, prefix=self.form_prefix)
+            return self._consumer_form
+
+    def owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        del cls, info
+        events.append("hook")
+        return rows.annotate(
+            rank=django_models.Value(1, output_field=django_models.IntegerField()),
+        )
+
+    async def async_owner(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        return owner(cls, rows, info)
+
+    target = make_django_type(
+        "PlainFormMissingParserOwner",
+        models.Branch,
+        ("name",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(async_owner if transport == "async" else owner),
+        },
+    )
+    schema = _schema(
+        Criteria,
+        models.Shelf,
+        transport=transport,
+        fields=("code",),
+        targets=(target,),
+    )
+    value: JSONObject = {"in_": ["1"]} if family == "list" else {"start": "1", "end": "1"}
+    payload = _post(schema, {"rank": value}, transport=transport, selection="code")
+    assert payload == {"data": {"rows": [{"code": "kept"}]}}, payload
+    assert events == ["hook", "clean"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("logical", [False, True])
+@pytest.mark.parametrize("policy", ["form", "filterset"])
+def test_accepted_native_field_error_keeps_active_annotation_binding(
+    transport: str,
+    policy: str,
+    *,
+    logical: bool,
+) -> None:
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    scalar_models.NullableScalarSpecimen.objects.create(label="unrelated")
+    events: list[str] = []
+
+    class AcceptingForm(Form):
+        @override
+        def full_clean(self) -> None:
+            events.append("clean")
+            super().full_clean()
+
+        @override
+        def is_valid(self) -> bool:
+            return set(self.errors).issubset({"bad"}) if policy == "form" else super().is_valid()
+
+    class Criteria(_UndeclaredAnnotationCriteriaSet):
+        bad = NumberFilter(field_name="signed_big")
+
+        class Meta(_UndeclaredAnnotationCriteriaSet.Meta):
+            form = AcceptingForm
+
+        @classmethod
+        @override
+        def _validate_form_or_raise(cls, filterset_instance: FilterSet) -> None:
+            if policy != "filterset":
+                super()._validate_form_or_raise(filterset_instance)
+
+    def owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        events.append("hook")
+        return _annotating_target(cls, rows, info)
+
+    async def async_owner(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        return owner(cls, rows, info)
+
+    target = make_django_type(
+        "AcceptedNativeErrorAnnotationOwner",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(async_owner if transport == "async" else owner),
+        },
+    )
+    schema = _schema(
+        Criteria,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+    )
+    leaf: JSONObject = {"lag_among": {"in_": ["1 00:00:00"]}}
+    where: JSONObject = {"bad": "abc", "or_": [leaf]} if logical else {"bad": "abc", **leaf}
+    payload = _post(schema, where, transport=transport, selection="label")
+    assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    assert events == ["clean", *(["clean"] if logical else []), "hook"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_supplied_empty_resolved_flat_leaf_keeps_ordinary_owner_acquisition(
+    transport: str,
+) -> None:
+    models.Branch.objects.create(name="empty")
+    calls: list[str] = []
+
+    class Criteria(FilterSet):
+        code = CharFilter(field_name="shelves__code")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+
+    def owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        del cls, info
+        calls.append(rows.db)
+        return rows.exclude(topic="hidden")
+
+    async def async_owner(
+        cls: type[object],
+        rows: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        return owner(cls, rows, info)
+
+    target = make_django_type(
+        "OrdinaryEmptyFlatOwner",
+        models.Shelf,
+        ("code",),
+        node=False,
+        namespace_extra={
+            "get_queryset": classmethod(async_owner if transport == "async" else owner),
+        },
+    )
+    schema = _schema(Criteria, models.Branch, transport=transport, targets=(target,))
+    payload = _post(schema, {"code": ""}, transport=transport)
+    assert payload == {"data": {"rows": [{"name": "empty"}]}}, payload
+    assert calls == ["default"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "key-null",
+        "key-membership",
+        "exclude",
+        "logical",
+    ],
+)
+def test_async_resolved_relation_leaf_awaits_its_actual_terminal_owner(scenario: str) -> None:
+    models.Genre.objects.create(name="empty")
+    calls: list[str] = []
+
+    class Child(FilterSet):
+        class Meta:
+            model = models.Book
+            fields = {"title": ["exact"]}
+
+    class Criteria(FilterSet):
+        visible_books = RelatedFilter(Child, field_name="books")
+        without_title = CharFilter(field_name="books__title", exclude=True)
+
+        class Meta:
+            model = models.Genre
+            fields = {"books": ["exact", "isnull"]}
+
+    async def owner(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+        del cls, info
+        calls.append(rows.db)
+        return rows.exclude(circulation_status="repair")
+
+    target = make_django_type(
+        "ResolvedRelatedTerminalOwner",
+        models.Book,
+        ("title",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(owner)},
+    )
+    schema = _schema(Criteria, models.Genre, transport="async", targets=(target,))
+    scenarios: dict[str, JSONObject] = {
+        "key-null": {"books": {"is_null": True}},
+        "key-membership": {"books": {"exact": [0]}},
+        "exclude": {"without_title": "x"},
+        "logical": {"not_": {"books": {"is_null": False}}},
+    }
+    payload = _post(schema, scenarios[scenario], transport="async")
+    assert payload == {
+        "data": {"rows": [] if scenario == "key-membership" else [{"name": "empty"}]},
+    }, payload
+    assert calls == ["default"]

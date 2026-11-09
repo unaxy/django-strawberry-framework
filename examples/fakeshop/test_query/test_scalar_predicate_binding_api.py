@@ -578,6 +578,11 @@ class _QuerysetIntegerPathFilter(FilterSet):
     parent_node = GlobalIDFilter(field_name="par")
     costs_among = ListFilter(field_name="cost", lookup_expr="in")
     offspring_among = ListFilter(field_name="offspring", lookup_expr="in")
+    crossed_big_span = RangeFilter(field_name="par", lookup_expr="signed_big__range")
+    direct_big_span = RangeFilter(field_name="par__signed_big", lookup_expr="range")
+    crossed_big_among = ListFilter(field_name="par", lookup_expr="signed_big__in")
+    direct_big_among = ListFilter(field_name="par__signed_big", lookup_expr="in")
+    implicit_big_span = RangeFilter(field_name="par", lookup_expr="signed_big")
     offspring_node = GlobalIDFilter(field_name="offspring")
     parent_ref_node = GlobalIDFilter(field_name="parent_ref")
     names_among = ListFilter(field_name="named", lookup_expr="in")
@@ -1088,6 +1093,89 @@ def test_a_declared_list_over_a_reverse_relation_alias_compares_the_related_key(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
+    ("members", "labels"),
+    [
+        pytest.param(["-1e999999999999999999"], (), id="all-extreme-members-drop"),
+        pytest.param(["child", "-1e999999999999999999"], ("kept",), id="valid-and-extreme"),
+    ],
+)
+def test_a_reverse_alias_drops_extreme_negative_members_before_integer_conversion(
+    members: list[str],
+    labels: tuple[str, ...],
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """The real reverse alias compares its key without converting an enormous Decimal."""
+    child_pk = _child_pk_after_seed()
+    sent = ", ".join(f'"{child_pk if member == "child" else member}"' for member in members)
+    sqls = record_compiled_sql()
+    payload = _post_typed_queryset_path(
+        "{ rows(filter: { offspringAmong: { in: [%s] } }) { label } }" % sent,
+        {},
+        _typed_queryset_path_holder(),
+    )
+    assert payload == _expected(labels), payload
+    if not labels:
+        assert _root_sql(sqls, scalar_models.ScalarSpecimen) == [], sqls
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("criterion", "labels"),
+    [
+        pytest.param(
+            'crossedBigSpan: { signedBigRange: { start: "7", end: "9223372036854775808" } }',
+            ("child",),
+            id="continued-integer-range",
+        ),
+        pytest.param(
+            'directBigSpan: { range: { start: "7", end: "9223372036854775808" } }',
+            ("child",),
+            id="direct-integer-range-control",
+        ),
+        pytest.param(
+            'crossedBigAmong: { signedBigIn: ["7.5"] }',
+            (),
+            id="continued-fractional-member",
+        ),
+        pytest.param(
+            'directBigAmong: { in: ["7.5"] }',
+            (),
+            id="direct-fractional-member-control",
+        ),
+    ],
+)
+def test_a_continued_alias_uses_its_terminal_integer_column_and_operation(
+    criterion: str,
+    labels: tuple[str, ...],
+) -> None:
+    """The alias spelling and direct spelling clean and apply the same lookup."""
+    _kept_pk_after_seed()
+    payload = _post_typed_queryset_path(
+        "{ rows(filter: { %s }) { label } }" % criterion,
+        {},
+        _typed_queryset_path_holder(),
+    )
+    assert payload == _expected(labels), payload
+
+
+@pytest.mark.django_db
+def test_a_continued_alias_with_implicit_exact_cleans_a_lone_range_bound() -> None:
+    """Django's implicit exact still supplies the terminal integer comparison field."""
+    _kept_pk_after_seed()
+    payload = _post_typed_queryset_path(
+        '{ rows(filter: { implicitBigSpan: { signedBig: { start: "abc" } } }) { label } }',
+        {},
+        _typed_queryset_path_holder(),
+    )
+    assert payload["data"] is None, payload
+    assert json_at(payload, "errors", 0, "extensions") == {
+        "code": "FILTER_INVALID",
+        "errors": {"implicit_big_span": [{"message": "Enter a number.", "code": "invalid"}]},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
     ("leaf", "node_id", "labels"),
     [
         pytest.param("offspringNode", "child", ("kept",), id="reverse-alias-key"),
@@ -1135,6 +1223,88 @@ class _LateAnnotationFilter(FilterSet):
     @override
     def filter_queryset(self, queryset: QuerySet[_M]) -> QuerySet[_M]:
         return super().filter_queryset(queryset.annotate(late=F("signed_big")))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("late_alias", [False, True], ids=["handed", "added-in-filter_queryset"])
+@pytest.mark.parametrize(
+    ("number", "labels"),
+    [
+        pytest.param("child", ("kept",), id="related-key"),
+        pytest.param("0", (), id="missing-key"),
+        pytest.param("-1e999999999999999999", (), id="held-below-key"),
+    ],
+)
+def test_a_reverse_alias_added_only_by_filter_queryset_keeps_its_integer_target(
+    number: str,
+    labels: tuple[str, ...],
+    *,
+    late_alias: bool,
+) -> None:
+    """A reverse alias uses its native related lookup, holding huge decimals to one past.
+
+    The related lookup lacks integer-column overflow handling. Ask the same
+    one-past wire value for its backend-owned outcome rather than assuming it
+    matches no rows; the fitting and missing-key controls retain their rowsets.
+    """
+    child_pk = _child_pk_after_seed()
+
+    class ReverseAliasFilter(FilterSet):
+        child_is = django_filters.NumberFilter(field_name="offspring", lookup_expr="exact")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = []
+
+        @override
+        def filter_queryset(self, queryset: QuerySet[_M]) -> QuerySet[_M]:
+            if late_alias:
+                queryset = queryset.alias(offspring=FilteredRelation("children"))
+            return super().filter_queryset(queryset)
+
+    class ReverseAliasOutput(DjangoType):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = ("label",)
+            filterset_class = ReverseAliasFilter
+
+    @strawberry.type
+    class Query:
+        def _rows(
+            self,
+            info: Info[object, object],
+            filter: FilterInput[ReverseAliasFilter],  # noqa: A002
+        ) -> QuerySet[scalar_models.ScalarSpecimen]:
+            rows = scalar_models.ScalarSpecimen.objects.order_by("pk")
+            if not late_alias:
+                rows = rows.alias(offspring=FilteredRelation("children"))
+            return ReverseAliasFilter.apply_sync(filter, rows, info)
+
+        # The local consumer class is resolved now, before Strawberry evaluates
+        # this module's postponed annotations outside the test's local scope.
+        _rows.__annotations__["filter"] = FilterInput[ReverseAliasFilter]
+
+        rows: QuerySet[scalar_models.ScalarSpecimen] = strawberry.field(
+            resolver=_rows,
+            graphql_type=StrawberryList(ReverseAliasOutput),
+        )
+
+    finalize_django_types()
+    sent = child_pk if number == "child" else number
+    schema = DjangoSchema(query=Query, config=strawberry_config(), error_policy={"enabled": False})
+    document = (
+        "query($number: Decimal!) { rows(filter: { childIs: { exact: $number } }) { label } }"
+    )
+    payload = _post_typed_queryset_path(
+        document,
+        {"number": sent},
+        schema,
+    )
+    if number == "-1e999999999999999999":
+        one_past = _post_typed_queryset_path(document, {"number": str(-(2**63) - 1)}, schema)
+        assert payload == one_past, payload
+    else:
+        assert payload == _expected(labels), payload
 
 
 @pytest.mark.django_db
@@ -1796,6 +1966,95 @@ def test_a_declared_lookup_can_continue_across_its_foreign_key(
     statements = _root_sql(sqls, library_models.Shelf)
     assert len(statements) == 1, sqls
     assert '"library_branch"' in statements[0], statements
+
+
+@pytest.mark.django_db
+def test_projected_child_lookup_crossing_relations_uses_its_declaring_model() -> None:
+    """A flat projected filter types and executes a child's crossed text column over HTTP."""
+    first = library_models.Branch.objects.create(name="b1", city="Boston")
+    other = library_models.Branch.objects.create(name="b1extra", city="Boston")
+    first_shelf = library_models.Shelf.objects.create(code="S1", topic="Fiction", branch=first)
+    other_shelf = library_models.Shelf.objects.create(code="S2", topic="History", branch=other)
+    library_models.Book.objects.create(title="first", shelf=first_shelf)
+    library_models.Book.objects.create(title="other", shelf=other_shelf)
+
+    class ShelfByBranchName(FilterSet):
+        branch_named = django_filters.CharFilter(field_name="branch", lookup_expr="name__contains")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+        @override
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[django_models.Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+            self.filters["branch_named"].lookup_expr = "name__iexact"
+
+    class BookByShelf(FilterSet):
+        shelf = RelatedFilter(ShelfByBranchName, field_name="shelf")
+
+        class Meta:
+            model = library_models.Book
+            fields = []
+
+    class BranchOutput(DjangoType):
+        class Meta:
+            model = library_models.Branch
+            fields = ("name",)
+
+    class ShelfOutput(DjangoType):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("code",)
+
+    class BookOutput(DjangoType):
+        class Meta:
+            model = library_models.Book
+            fields = ("title",)
+            filterset_class = BookByShelf
+
+    @strawberry.type
+    class Query:
+        def _rows(
+            self,
+            info: Info[object, object],
+            filter: FilterInput[BookByShelf],  # noqa: A002
+        ) -> QuerySet[library_models.Book]:
+            return BookByShelf.apply_sync(
+                filter,
+                library_models.Book.objects.order_by("pk"),
+                info,
+            )
+
+        # The local consumer class is resolved now, before Strawberry evaluates
+        # this module's postponed annotations outside the test's local scope.
+        _rows.__annotations__["filter"] = FilterInput[BookByShelf]
+
+        rows: QuerySet[library_models.Book] = strawberry.field(
+            resolver=_rows,
+            graphql_type=StrawberryList(BookOutput),
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=Query,
+        types=(BranchOutput, ShelfOutput),
+        config=strawberry_config(),
+        error_policy={"enabled": False},
+    )
+    payload = _post_typed_queryset_path(
+        '{ rows(filter: {shelfBranchNamed: {nameContains: "b1"}}) { title } }',
+        {},
+        schema,
+    )
+    assert payload == {"data": {"rows": [{"title": "first"}]}}, payload
 
 
 @pytest.mark.django_db

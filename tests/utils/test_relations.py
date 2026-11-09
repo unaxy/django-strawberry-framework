@@ -63,6 +63,7 @@ from django_strawberry_framework.utils.relations import (
     carrier_backed_link,
     classify_path,
     generated_column,
+    generated_column_source,
     has_composite_pk,
     instance_accessor,
     is_forward_concrete_relation,
@@ -2192,3 +2193,8 @@ def test_a_generated_column_lives_exactly_as_long_as_its_field(*, read: bool) ->
     del model, field
     _ = gc.collect()
     assert reference() is None
+
+
+def test_unbound_transform_output_has_no_generated_column_source() -> None:
+    """A transform's output field is concrete but has no model column to invert."""
+    assert generated_column_source(models.IntegerField()) is None

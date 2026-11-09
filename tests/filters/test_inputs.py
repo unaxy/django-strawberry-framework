@@ -34,7 +34,14 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sized
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType, SimpleNamespace
-from typing import TYPE_CHECKING, Protocol, TypeAlias, get_args, get_origin, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Protocol,
+    TypeAlias,
+    get_args,
+    get_origin,
+    runtime_checkable,
+)
 
 import django_filters
 import pytest
@@ -144,12 +151,16 @@ from django_strawberry_framework.filters.inputs import (
     normalize_input_value,
     range_form_keys,
 )
-from django_strawberry_framework.filters.sets import _widget_keys, filter_generation_provenance
+from django_strawberry_framework.filters.sets import (
+    _is_filterset_class,
+    _widget_keys,
+    filter_generation_provenance,
+)
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import ClassBasedTypeNameMixin
 from django_strawberry_framework.types import converters as converters_mod
 from django_strawberry_framework.types.finalizer import finalize_django_types
-from django_strawberry_framework.utils._narrowing import dict_of, read_attr
+from django_strawberry_framework.utils._narrowing import dict_of, read_attr, require
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.typing import object_result
 from tests._cleaned_filter_sets import cleaned_specimen
@@ -5392,6 +5403,668 @@ def test_a_relation_key_onto_an_unregistered_primary_key_is_refused_naming_the_k
         f"{filterset.__name__}: {kind} on 'keyed' reads _TokenKeyed.token, a Base36Field"
         + _COLUMN_REMEDY
     )
+
+
+@pytest.mark.parametrize("joined_key_is_unmapped", [False, True])
+@isolate_apps("apps.scalars")
+def test_relation_remedies_name_their_distinct_scalar_prerequisites(
+    *,
+    joined_key_is_unmapped: bool,
+) -> None:
+    """The default choice key is the target pk; the related-column route uses ``to_field``."""
+
+    class _TokenKeyed(models.Model):
+        token: models.AutoField[int | Combinable, int] | scalar_models.Base36Field = (
+            models.AutoField(primary_key=True)
+            if joined_key_is_unmapped
+            else scalar_models.Base36Field(primary_key=True)
+        )
+        code: models.TextField[str | Combinable, str] | scalar_models.Base36Field = (
+            scalar_models.Base36Field(unique=True)
+            if joined_key_is_unmapped
+            else models.TextField(unique=True)
+        )
+        label: models.TextField[str | Combinable, str] = models.TextField()
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class _TokenRef(models.Model):
+        keyed: models.ForeignKey[_TokenKeyed | Combinable, _TokenKeyed] = models.ForeignKey(
+            _TokenKeyed,
+            to_field="code",
+            on_delete=models.CASCADE,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    filterset = _payload_set(CharFilter(field_name="keyed"), model=_TokenRef)
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(filterset)
+
+    message = str(excinfo.value)
+    assert "_TokenRef.keyed, a ForeignKey" in message
+    assert "field_name 'keyed__code'" in message
+    pk_prerequisite = "first register Base36Field for _TokenKeyed.token in SCALAR_MAP"
+    joined_prerequisite = "first register Base36Field for _TokenKeyed.code in SCALAR_MAP"
+    assert (pk_prerequisite in message) is not joined_key_is_unmapped
+    assert (joined_prerequisite in message) is joined_key_is_unmapped
+
+    if not joined_key_is_unmapped:
+        assert _build_input_fields(
+            _payload_set(CharFilter(field_name="keyed__code"), model=_TokenRef),
+        )
+    else:
+        assert _build_input_fields(_meta_fields_set(_TokenRef, {"keyed": ["exact"]}))
+        assert _build_input_fields(
+            _payload_set(_keyed_model_choice(_TokenKeyed), model=_TokenRef),
+        )
+
+
+@isolate_apps("apps.scalars")
+def test_unmapped_relation_key_remedies_build_with_the_stated_prerequisite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unregistered key's related-row route works alone; key routes need registration."""
+
+    class _TokenKeyed(models.Model):
+        token = scalar_models.Base36Field(primary_key=True)
+        label: models.TextField[str | Combinable, str] = models.TextField()
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class _TokenRef(models.Model):
+        keyed: models.ForeignKey[_TokenKeyed | Combinable, _TokenKeyed] = models.ForeignKey(
+            _TokenKeyed,
+            on_delete=models.CASCADE,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(_payload_set(CharFilter(field_name="keyed"), model=_TokenRef))
+    message = str(excinfo.value)
+    assert "first register Base36Field for _TokenKeyed.token in SCALAR_MAP" in message
+
+    class _KeyedFilter(FilterSet):
+        label = CharFilter(field_name="label")
+
+        class Meta:
+            model = _TokenKeyed
+            fields = []
+
+    class _RefFilter(FilterSet):
+        keyed = RelatedFilter(_KeyedFilter, field_name="keyed")
+
+        class Meta:
+            model = _TokenRef
+            fields = []
+
+    assert _build_input_fields(_RefFilter)
+    monkeypatch.setitem(converters_mod.SCALAR_MAP, scalar_models.Base36Field, str)
+    assert _build_input_fields(_meta_fields_set(_TokenRef, {"keyed": ["exact"]}))
+    assert _build_input_fields(_payload_set(_keyed_model_choice(_TokenKeyed), model=_TokenRef))
+    assert _build_input_fields(
+        _payload_set(CharFilter(field_name="keyed__token"), model=_TokenRef),
+    )
+
+
+@isolate_apps("apps.scalars")
+def test_unmapped_relation_key_public_meta_build_names_required_scalar() -> None:
+    """Normal type finalization reaches the declaration's route-specific prerequisite."""
+
+    class _TokenKeyed(models.Model):
+        token = scalar_models.Base36Field(primary_key=True)
+        label: models.TextField[str | Combinable, str] = models.TextField()
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class _TokenRef(models.Model):
+        keyed: models.ForeignKey[_TokenKeyed | Combinable, _TokenKeyed] = models.ForeignKey(
+            _TokenKeyed,
+            on_delete=models.CASCADE,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class _RefFilter(FilterSet):
+        leaf = CharFilter(field_name="keyed")
+
+        class Meta:
+            model = _TokenRef
+            fields = []
+
+    _serve_on_a_column(_TokenRef, _RefFilter)
+    message = _build_refusal()
+    assert "_RefFilter: CharFilter on 'keyed' reads _TokenRef.keyed" in message
+    assert "first register Base36Field for _TokenKeyed.token in SCALAR_MAP" in message
+
+
+@pytest.mark.parametrize(
+    "remedy",
+    [
+        "meta-fields",
+        "model-choice",
+        "related-column",
+        "related-filter",
+    ],
+)
+@isolate_apps("apps.scalars")
+def test_unmapped_relation_key_remedies_finalize_with_their_prerequisite(
+    monkeypatch: pytest.MonkeyPatch,
+    remedy: str,
+) -> None:
+    """Each suggested route can build a serving type once its actual prerequisite is met."""
+
+    class _TokenKeyed(models.Model):
+        token = scalar_models.Base36Field(primary_key=True)
+        label: models.TextField[str | Combinable, str] = models.TextField()
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class _TokenRef(models.Model):
+        keyed: models.ForeignKey[_TokenKeyed | Combinable, _TokenKeyed] = models.ForeignKey(
+            _TokenKeyed,
+            on_delete=models.CASCADE,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    if remedy == "related-filter":
+
+        class _KeyFilter(FilterSet):
+            label = CharFilter(field_name="label")
+
+            class Meta:
+                model = _TokenKeyed
+                fields = []
+
+        class _RefFilter(FilterSet):
+            keyed = RelatedFilter(_KeyFilter, field_name="keyed")
+
+            class Meta:
+                model = _TokenRef
+                fields = []
+
+        filterset = _RefFilter
+    else:
+        monkeypatch.setitem(converters_mod.SCALAR_MAP, scalar_models.Base36Field, str)
+        if remedy == "meta-fields":
+            filterset = _meta_fields_set(_TokenRef, {"keyed": ["exact"]})
+        elif remedy == "model-choice":
+            filterset = _payload_set(_keyed_model_choice(_TokenKeyed), model=_TokenRef)
+        else:
+            filterset = _payload_set(CharFilter(field_name="keyed__token"), model=_TokenRef)
+
+    meta = {"model": _TokenKeyed, "fields": ("label",)}
+    _ = type("TokenKeyedType", (DjangoType,), {"Meta": type("Meta", (), meta)})
+    _serve_on_a_column(_TokenRef, filterset)
+    finalize_django_types()
+
+    assert filter_lookup_table(filterset).by_input_attr
+
+
+@pytest.mark.parametrize("base", [FilterSet, _CustomizingFilterSet])
+def test_crossed_relation_refusal_keeps_projected_declaration_namespace(
+    base: type[FilterSet],
+) -> None:
+    """The field and remedy path are both read from the child declaration's namespace."""
+    child = _shelf_leaf_set(CharFilter(field_name="branch", lookup_expr="shelves"), base)
+    parent = _book_shelf_set(child, FilterSet)
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, parent)
+
+    message = _build_refusal()
+    assert f"{child.__name__}.leaf: CharFilter on 'branch'" in message
+    assert f"reached through {parent.__name__}.shelf" in message
+    assert "reads Branch.shelves, a ManyToOneRel" in message
+    assert "through 'branch__shelves' in Meta.fields" in message
+    assert "field_name 'branch__shelves__id'" in message
+    assert "branch__branch" not in message
+
+
+def test_projected_method_lookup_is_not_walked_for_its_remedy() -> None:
+    """A child's ``method=`` owns its lookup token even when projection is required."""
+    child = _shelf_leaf_set(
+        CharFilter(field_name="branch", lookup_expr="shelves", method="filter_leaf"),
+        _CustomizingFilterSet,
+    )
+    parent = _book_shelf_set(child, FilterSet)
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, parent)
+
+    message = _build_refusal()
+    assert "reads Shelf.branch, a ForeignKey" in message
+    assert "through 'branch' in Meta.fields" in message
+    assert "field_name 'branch__id'" in message
+    assert "branch__shelves__id" not in message
+
+
+@isolate_apps("apps.scalars")
+def test_generated_unmapped_filter_refuses_in_filterset_words_before_output_policy() -> None:
+    """A selected plain output cannot make a declared generated filter give DjangoType advice."""
+
+    class _Span(models.Model):
+        starts_at: models.DateTimeField[
+            str | datetime.datetime | datetime.date | Combinable,
+            datetime.datetime,
+        ] = models.DateTimeField()
+        ends_at: models.DateTimeField[
+            str | datetime.datetime | datetime.date | Combinable,
+            datetime.datetime,
+        ] = models.DateTimeField()
+        elapsed = models.GeneratedField(
+            expression=models.F("ends_at") - models.F("starts_at"),
+            output_field=models.DurationField(),
+            db_persist=True,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class _SpanFilter(FilterSet):
+        elapsed_text = CharFilter(field_name="elapsed")
+
+        class Meta:
+            model = _Span
+            fields = []
+
+    _serve_on_a_column(_Span, _SpanFilter)
+    message = _build_refusal()
+    assert "_SpanFilter: CharFilter on 'elapsed' reads _Span.elapsed, a DurationField" in message
+    assert "register DurationField" in message
+    assert "Meta.exclude" not in message
+
+
+@isolate_apps("apps.scalars")
+def test_projected_generated_filter_keeps_child_route_in_early_refusal() -> None:
+    """A generated output refusal under a flat copy names the original child declaration."""
+
+    class _Span(models.Model):
+        starts_at: models.DateTimeField[
+            str | datetime.datetime | datetime.date | Combinable,
+            datetime.datetime,
+        ] = models.DateTimeField()
+        ends_at: models.DateTimeField[
+            str | datetime.datetime | datetime.date | Combinable,
+            datetime.datetime,
+        ] = models.DateTimeField()
+        elapsed = models.GeneratedField(
+            expression=models.F("ends_at") - models.F("starts_at"),
+            output_field=models.DurationField(),
+            db_persist=True,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class _SpanHost(models.Model):
+        span: models.ForeignKey[_Span | Combinable, _Span] = models.ForeignKey(
+            _Span,
+            on_delete=models.CASCADE,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class _SpanFilter(_CustomizingFilterSet):
+        elapsed_text = CharFilter(field_name="elapsed")
+
+        class Meta:
+            model = _Span
+            fields = []
+
+    class _HostFilter(FilterSet):
+        span = RelatedFilter(_SpanFilter, field_name="span")
+
+        class Meta:
+            model = _SpanHost
+            fields = []
+
+    _serve_model(_Span, None)
+    _serve_on_a_column(_SpanHost, _HostFilter)
+    message = _build_refusal()
+    assert "_SpanFilter.elapsed_text: CharFilter on 'elapsed'" in message
+    assert "reached through _HostFilter.span" in message
+    assert "reads _Span.elapsed, a DurationField" in message
+    assert "Meta.exclude" not in message
+
+
+@pytest.mark.parametrize(
+    "declare",
+    [
+        lambda: BooleanFilter(field_name="computed", lookup_expr="isnull"),
+        lambda: CharFilter(field_name="computed", lookup_expr="icontains"),
+    ],
+    ids=["null-test", "text-pattern"],
+)
+@isolate_apps("apps.scalars")
+def test_generated_file_policy_precedes_every_filter_input_arm(
+    declare: Callable[[], Filter],
+) -> None:
+    """A Boolean or form-typed leaf cannot publish a generated file output."""
+
+    class _GeneratedFile(models.Model):
+        source: models.TextField[str | Combinable, str] = models.TextField()
+        computed = models.GeneratedField(
+            expression=models.Value("file"),
+            output_field=models.FileField(),
+            db_persist=True,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    filterset = _payload_set(declare(), model=_GeneratedFile)
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(filterset)
+    message = str(excinfo.value)
+    assert "_GeneratedFile.computed, a FileField" in message
+    assert "a database expression stores no file" in message
+    assert "Meta.exclude" not in message
+
+
+@isolate_apps("apps.scalars")
+def test_generated_meta_fields_uses_filterset_output_policy_at_generation() -> None:
+    """An unsupported generated field listed in Meta.fields fails before filter selection."""
+
+    class _GeneratedFile(models.Model):
+        computed = models.GeneratedField(
+            expression=models.Value("file"),
+            output_field=models.FileField(),
+            db_persist=True,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = type(
+            "_GeneratedFilter",
+            (FilterSet,),
+            {
+                "Meta": type(
+                    "Meta",
+                    (),
+                    {"model": _GeneratedFile, "fields": {"computed": ["exact"]}},
+                ),
+            },
+        )
+
+    message = str(excinfo.value)
+    assert "FilterSet _GeneratedFilter: Meta.fields names GeneratedField" in message
+    assert "_GeneratedFile.computed" in message
+    assert "remove the generated field from Meta.fields" in message
+    assert "Meta.exclude" not in message
+
+
+@isolate_apps("apps.scalars")
+def test_generated_array_base_choices_refuse_before_transform_operand_typing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mapped ``len`` operand cannot hide invalid choices on the generated array source."""
+    patch_array_field(monkeypatch)
+
+    class _GeneratedArray(models.Model):
+        source: models.IntegerField[float | int | str | Combinable, int] = models.IntegerField()
+        computed = models.GeneratedField(
+            expression=models.Value(1),
+            output_field=FakeArrayField(models.IntegerField(choices=[(1, "One")])),
+            db_persist=True,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    filterset = _payload_set(NumberFilter(field_name="computed__len"), model=_GeneratedArray)
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(filterset)
+    message = str(excinfo.value)
+    assert "_GeneratedArray.computed, a FakeArrayField" in message
+    assert "base_field declares choices Django never validates" in message
+    assert "Meta.exclude" not in message
+
+
+@isolate_apps("apps.scalars")
+def test_composite_target_key_is_not_offered_as_one_scalar_relation_remedy() -> None:
+    """A single to_field join can coexist with a composite target identity."""
+
+    class _CompositeTarget(models.Model):
+        tenant: models.IntegerField[float | int | str | Combinable, int] = models.IntegerField()
+        code: models.TextField[str | Combinable, str] = models.TextField()
+        pk = models.CompositePrimaryKey("tenant", "code")
+        join_code: models.TextField[str | Combinable, str] = models.TextField(unique=True)
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    class _CompositeRef(models.Model):
+        target: models.ForeignKey[
+            _CompositeTarget | Combinable,
+            _CompositeTarget,
+        ] = models.ForeignKey(
+            _CompositeTarget,
+            to_field="join_code",
+            on_delete=models.CASCADE,
+        )
+
+        class Meta:
+            app_label = "scalars"
+            managed = False
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(_payload_set(CharFilter(field_name="target"), model=_CompositeRef))
+    message = str(excinfo.value)
+    assert "field_name 'target__join_code'" in message
+    assert "RelatedFilter" in message
+    assert "Meta.fields" not in message
+    assert "ModelChoiceFilter" not in message
+    assert _build_input_fields(
+        _payload_set(CharFilter(field_name="target__join_code"), model=_CompositeRef),
+    )
+
+
+def _relay_unmapped_target(
+    *,
+    composite: bool,
+) -> tuple[type[models.Model], type[models.Model], str]:
+    """Return a target with a public mapped NodeID distinct from its unmapped primary key."""
+    target_columns: dict[str, object] = {"__module__": __name__, "label": models.TextField()}
+    if composite:
+        target_columns["tenant"] = models.IntegerField()
+        target_columns["code"] = models.TextField()
+        target_columns["pk"] = models.CompositePrimaryKey("tenant", "code")
+        target_columns["join_code"] = models.TextField(unique=True)
+        id_attr = "join_code"
+    else:
+        target_columns["token"] = scalar_models.Base36Field(primary_key=True)
+        target_columns["code"] = models.TextField(unique=True)
+        id_attr = "code"
+    target_columns["Meta"] = type("Meta", (), {"app_label": "scalars", "managed": False})
+    target = type("_RelayKeyed", (models.Model,), target_columns)
+    reference = type(
+        "_RelayRef",
+        (models.Model,),
+        {
+            "__module__": __name__,
+            "keyed": models.ForeignKey(
+                target,
+                to_field="join_code" if composite else None,
+                on_delete=models.CASCADE,
+            ),
+            "Meta": type("Meta", (), {"app_label": "scalars", "managed": False}),
+        },
+    )
+    return target, reference, id_attr
+
+
+@pytest.mark.parametrize("composite", [False, True], ids=["unmapped-pk", "composite-pk"])
+@pytest.mark.parametrize("replacement", [False, True], ids=["refusal", "generated-gid"])
+@isolate_apps("apps.scalars")
+def test_relay_public_id_distinguishes_generated_key_from_default_choice(
+    *,
+    composite: bool,
+    replacement: bool,
+) -> None:
+    """A registered non-pk NodeID makes generated Meta.fields a GID without a pk scalar."""
+    target, reference, id_attr = _relay_unmapped_target(composite=composite)
+    meta = {
+        "model": target,
+        "fields": ("label",),
+        "interfaces": (relay.Node,),
+    }
+    node = type(
+        "RelayKeyedType",
+        (DjangoType,),
+        {"__annotations__": {id_attr: relay.NodeID[str]}, "Meta": type("Meta", (), meta)},
+    )
+    assert issubclass(node, DjangoType)
+    filterset = (
+        _meta_fields_set(reference, {"keyed": ["exact"]})
+        if replacement
+        else _payload_set(CharFilter(field_name="keyed"), model=reference)
+    )
+    _serve_on_a_column(reference, filterset)
+    if replacement:
+        finalize_django_types()
+        assert isinstance(filterset.base_filters["keyed"], GlobalIDFilter)
+        return
+
+    message = _build_refusal()
+    assert f"public {id_attr!r} GlobalID through 'keyed' in Meta.fields" in message
+    assert "first register" not in message.split("ModelChoiceFilter")[0]
+    if composite:
+        assert "ModelChoiceFilter" not in message
+    else:
+        assert "ModelChoiceFilter" in message
+        assert "first register Base36Field for _RelayKeyed.token in SCALAR_MAP" in message
+
+
+@isolate_apps("apps.scalars")
+@pytest.mark.parametrize("generated", [False, True], ids=["declared", "meta-fields"])
+def test_relation_override_disables_generated_globalid_remedy(*, generated: bool) -> None:
+    """An own relation override wins before the package's Relay selection."""
+    target, reference, id_attr = _relay_unmapped_target(composite=False)
+    meta = {"model": target, "fields": ("label",), "interfaces": (relay.Node,)}
+    node = type(
+        "RelayKeyedType",
+        (DjangoType,),
+        {"__annotations__": {id_attr: relay.NodeID[str]}, "Meta": type("Meta", (), meta)},
+    )
+    assert issubclass(node, DjangoType)
+    override_meta = type(
+        "Meta",
+        (),
+        {
+            "model": reference,
+            "fields": {"keyed": ["exact"]} if generated else [],
+            "filter_overrides": {models.ForeignKey: {"filter_class": CharFilter}},
+        },
+    )
+    attrs: dict[str, object] = {"Meta": override_meta}
+    if not generated:
+        attrs["leaf"] = CharFilter(field_name="keyed")
+    filterset = type("OverriddenRefFilter", (FilterSet,), attrs)
+    _serve_on_a_column(reference, filterset)
+
+    message = _build_refusal()
+    assert "ModelChoiceFilter" in message
+    assert "first register Base36Field for _RelayKeyed.token in SCALAR_MAP" in message
+    assert "Meta.fields" not in message
+
+
+@pytest.mark.parametrize(
+    "hook",
+    ["lookup", "field"],
+    ids=["filter-for-lookup", "filter-for-field"],
+)
+@pytest.mark.parametrize("delegating", [False, True], ids=["custom-class", "delegating"])
+@pytest.mark.parametrize("replacement", [False, True], ids=["declared", "meta-fields"])
+def test_relation_generation_hook_advice_follows_its_actual_selection(
+    hook: str,
+    *,
+    delegating: bool,
+    replacement: bool,
+) -> None:
+    """A public generation hook owns the relation leaf; optional identity advice stays honest."""
+
+    class BranchNode(DjangoType):
+        class Meta:
+            model = library_models.Branch
+            fields = ("name",)
+            interfaces = (relay.Node,)
+
+    assert issubclass(BranchNode, DjangoType)
+
+    class LookupHook(FilterSet):
+        @classmethod
+        @override
+        def filter_for_lookup(
+            cls,
+            field: ModelField,
+            lookup_type: str,
+        ) -> tuple[type[Filter] | None, dict[str, object]]:
+            if field.is_relation and not delegating:
+                return CharFilter, {}
+            return super().filter_for_lookup(field, lookup_type)
+
+    class FieldHook(FilterSet):
+        @classmethod
+        @override
+        def filter_for_field(
+            cls,
+            field: ModelField,
+            field_name: str,
+            lookup_expr: str | None = None,
+        ) -> Filter | None:
+            if field.is_relation and not delegating:
+                return CharFilter(field_name=field_name, lookup_expr=lookup_expr or "exact")
+            return super().filter_for_field(field, field_name, lookup_expr)
+
+    base: type[FilterSet] = LookupHook if hook == "lookup" else FieldHook
+    fields: dict[str, list[str]] | list[str] = {"branch": ["exact"]} if replacement else []
+    attrs: dict[str, object] = {
+        "Meta": type("Meta", (), {"model": library_models.Shelf, "fields": fields}),
+    }
+    if not replacement:
+        attrs["leaf"] = CharFilter(field_name="branch")
+    filterset = require(type("ShelfHooked", (base,), attrs), _is_filterset_class)
+
+    _serve_on_a_column(library_models.Shelf, filterset)
+    if replacement and delegating:
+        finalize_django_types()
+        assert isinstance(filterset.base_filters["branch"], GlobalIDFilter)
+        return
+
+    if replacement:
+        assert isinstance(filterset.base_filters["branch"], CharFilter)
+        assert not isinstance(filterset.base_filters["branch"], GlobalIDFilter)
+    message = _build_refusal()
+    assert "ModelChoiceFilter" in message
+    assert "field_name 'branch__id'" in message
+    assert "Meta.fields" not in message
 
 
 @pytest.mark.parametrize(

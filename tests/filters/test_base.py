@@ -172,8 +172,8 @@ class _RecordingQs(QuerySet[Model]):
     recognise by identity.
     """
 
-    def __init__(self) -> None:
-        super().__init__(model=models.Shelf)
+    def __init__(self, model: type[Model] = models.Shelf) -> None:
+        super().__init__(model=model)
         self.captured: dict[str, object] = {}
         self.distinct_calls = 0
         self.exclude_calls = 0
@@ -197,7 +197,7 @@ class _RecordingQs(QuerySet[Model]):
 
     @override
     def none(self) -> Self:
-        self.nothing = type(self)()
+        self.nothing = type(self)(model=self.model)
         return self.nothing
 
 
@@ -1189,8 +1189,8 @@ def test_range_filter_one_sided_applies_lone_bound(
     [[5, 9], [0, 9], [5, 0]],
     ids=["both-bounds", "zero-start", "zero-end"],
 )
-def test_range_filter_two_bounds_keep_declared_lookup(value: list[int]) -> None:
-    """Two bounds retain their supplied Python list under the declared range keyword.
+def test_range_filter_integer_bounds_use_range_aware_comparisons(value: list[int]) -> None:
+    """Integer bounds use Django's range-aware gte/lte lookup pair.
 
     Real integer and decimal predicates live in
     ``test_raw_filter_forms_api.py::test_declared_scalar_ranges_and_lists_match_the_rows_their_forms_clean``.
@@ -1199,7 +1199,7 @@ def test_range_filter_two_bounds_keep_declared_lookup(value: list[int]) -> None:
 
     f = RangeFilter(field_name="tier", lookup_expr="range")
     f.filter(qs, value)
-    assert qs.captured == {"tier__range": value}
+    assert qs.captured == {"tier__gte": value[0], "tier__lte": value[1]}
 
 
 @pytest.mark.parametrize(
@@ -1387,7 +1387,7 @@ def test_integer_in_filter_binds_a_transform_members_uncoerced_by_the_column(
     ask, which refuses it over HTTP in
     ``examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_project_integer_transform_members_bind_as_the_transform_output``.
     """
-    qs = _RecordingQs()
+    qs = _RecordingQs(model=model)
     f = _bound_integer_filter(
         model,
         IntegerInFilter(field_name=column, lookup_expr=f"{transform}__in"),
@@ -1409,7 +1409,7 @@ def test_integer_in_filter_drops_a_transform_fractional_member(
 
     A list whose every member is fractional matches nothing, never the empty-value skip.
     """
-    qs = _RecordingQs()
+    qs = _RecordingQs(model=model)
     f = _bound_integer_filter(
         model,
         IntegerInFilter(field_name=column, lookup_expr=f"{transform}__in"),
@@ -1425,7 +1425,7 @@ def test_integer_in_filter_drops_a_transform_fractional_member(
         ],
     )
     assert qs.captured == {f"{column}__{transform}__in": [Decimal(3), Decimal("3.0")]}
-    nothing = _RecordingQs()
+    nothing = _RecordingQs(model=model)
     assert f.filter(nothing, [Decimal("2020.5"), 0.9]) is nothing.nothing
 
 

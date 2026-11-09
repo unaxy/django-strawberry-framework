@@ -44,6 +44,7 @@ from django.core.exceptions import FieldError, ValidationError
 from django.core.files.uploadedfile import UploadedFile
 from django.db import connections, models
 from django.db.models.constants import LOOKUP_SEP
+from django.db.models.lookups import Transform
 from django.db.models.options import Options
 from django.db.models.sql import Query
 from django.forms import (
@@ -87,7 +88,7 @@ from django_strawberry_framework.sets_mixins import (
     LazyRelatedClassMixin as LazyRelatedClassMixin,  # noqa: PLC0414 - kept re-export path
 )  # re-exported via filters.__init__
 from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin
-from django_strawberry_framework.types.converters import _field_label, generated_output_field
+from django_strawberry_framework.types.converters import _field_label
 from django_strawberry_framework.types.definition import DjangoTypeDefinition, _resolves_id_off_pk
 
 # ``filters -> types`` is the documented safe (acyclic) import direction:
@@ -135,8 +136,8 @@ from django_strawberry_framework.utils.querysets import (
 )
 from django_strawberry_framework.utils.relations import (
     _classify_path_cached,
-    _lookup_node_types,
     _walk_lookup_expr,
+    generated_column,
     generated_column_source,
     is_model_class,
     lookup_operand,
@@ -571,8 +572,8 @@ def _query_lookup_operand(
     left-hand side, an annotation's own or a transform's of it. Uncached: the query is
     the request's. A path ending on a reverse relation (a ``FilteredRelation`` alias of
     one) answers it as ``_model_lookup_operand`` answers the relation's own name on the
-    model: the relation, with its lookup left unresolved and the classes its predicate holds
-    (``_reverse_relation_node_types``). ``None`` where Django refuses the path or no walk
+    model: the relation and the lookup its forward field registers. ``None`` where Django
+    refuses the path or no walk
     accepts the leftover (``FieldError``, ``LookupValidationError``).
     """
     try:
@@ -581,13 +582,14 @@ def _query_lookup_operand(
             LOOKUP_SEP.join((field_path, lookup_expr)),
         )
         if isinstance(start, models.ForeignObjectRel):
-            remainder = LOOKUP_SEP.join(leftover)
+            walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover) or "exact")
             return _LookupOperand(
                 start,
-                _names_null_test(remainder),
-                node_types=_reverse_relation_node_types(start, remainder),
+                issubclass(walk.lookup, models.lookups.IsNull),
+                walk.lookup,
+                walk.node_types,
             )
-        walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover))
+        walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover) or "exact")
         output = read_attr(walk.lhs, "output_field", None)
     except (FieldError, LookupValidationError):
         return None
@@ -640,19 +642,58 @@ def _bound_value_field(filter_instance: Filter) -> ModelField | None:
     return _bound_lookup_operand(filter_instance).field
 
 
-def _reads_integer_transform(filter_instance: Filter) -> bool:
-    """Whether a per-request filter compares an integer transform's output, not its column.
+def _reads_integer_transform(filter_instance: Filter, query: Query | None = None) -> bool:
+    """Whether a per-request filter compares an integer transform output.
 
     A generated ``<column>__year__in``, an ``ArrayField``'s ``len``, or a transform a
     project registers on a column (``Field.register_lookup``) with an ``IntegerField``
     output: its values are integers no column stores (``_bound_value_field``), held to
     their range where the filter form asks the database
     (``filters/sets.py::_unbindable_value_errors``), never coerced through the column.
+    A named ``ExtractYear`` / ``ExtractMonth`` alias starts at the actual ``Transform``
+    expression even though its path and value fields are the same output object;
+    ``split_lookup`` distinguishes it from a ``Col`` alias and a non-transform
+    annotation such as ``Count``, which keep their existing integer-member behavior.
+    A transform registered on a stored integer column can keep the column's
+    output-field identity too; the actual operand's ``node_types`` records that
+    transform even when the Query starts at the stored field. ``query`` is the
+    queryset the filter will actually apply to: a scoped terminal's synthetic
+    parent holds no queryset, while its visible child rows already hold the
+    annotation and must answer the same question as a handed queryset. Field
+    identity alone cannot prove a transform: a stored ``GeneratedField`` is a
+    wrapper around the ``output_field`` its native ``cached_col`` exposes, so
+    only an actual transform node or starting expression establishes one.
     """
-    value_field = _bound_value_field(filter_instance)
-    return isinstance(value_field, models.IntegerField) and value_field is not (
-        _bound_model_field(filter_instance)
+    field_name, lookup_expr = (
+        _bound_field_name(filter_instance),
+        _bound_lookup_expr(filter_instance),
     )
+    operand = (
+        _query_lookup_operand(query, field_name, lookup_expr)
+        if query is not None
+        else _bound_lookup_operand(filter_instance)
+    )
+    if operand is None:
+        return False
+    value_field = operand.field
+    if not isinstance(value_field, models.IntegerField):
+        return False
+    if any(issubclass(node_type, Transform) for node_type in operand.node_types):
+        return True
+    if query is None:
+        parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
+        model_operand = _filterset_lookup_operand(parent, filter_instance)
+        query = _model_unresolved_query(filter_instance, model_operand)
+    if query is None:
+        return False
+    try:
+        _names, start, _leftover = split_lookup(
+            query,
+            LOOKUP_SEP.join((field_name, lookup_expr)),
+        )
+    except FieldError:
+        return False
+    return isinstance(start, Transform)
 
 
 class _LookupOperand(NamedTuple):
@@ -669,7 +710,7 @@ class _LookupOperand(NamedTuple):
     prepared through the column (Django's ``FieldGetDbPrepValueMixin``).
     ``node_types`` are the classes the predicate holds past the column, each transform's then
     the lookup's (``utils/relations.py::_LookupWalk.node_types``), a reverse relation key's
-    too (``_reverse_relation_node_types``, its ``lookup`` left ``None``), empty where no walk
+    too (the relation delegates its lookup registry to its forward field), empty where no walk
     resolved them.
     """
 
@@ -774,11 +815,35 @@ def _filterset_resolved_field(
     return _model_resolved_field(model, _filterset_walked_lookup(filterset, filter_instance)[0])
 
 
+def _filterset_lookup_source_field(
+    filterset: type[BaseFilterSet] | BaseFilterSet | None,
+    filter_instance: Filter,
+) -> ModelField | None:
+    """Return the field Django starts a leaf's lookup walk from, before any transform.
+
+    The query's own split finds the field part when ``field_name`` or ``lookup_expr``
+    contains transforms. A method owns its lookup token, so only its declared field name
+    is read. This source is used to retain generated-output policy even when the final
+    operand is a Boolean null test or a transform's different output field.
+    """
+    model = _filterset_model(filterset)
+    if model is None:
+        return None
+    path, lookup_expr = _filterset_walked_lookup(filterset, filter_instance)
+    if read_attr(filter_instance, "method", None) is not None:
+        return _model_resolved_field(model, path).field
+    try:
+        head, _start, _leftover = split_lookup(Query(model), LOOKUP_SEP.join((path, lookup_expr)))
+    except FieldError:
+        return _model_resolved_field(model, path).field
+    return _model_resolved_field(model, LOOKUP_SEP.join(head)).field
+
+
 def _model_resolved_field(model: type[models.Model], field_path: str) -> _ResolvedField:
     """Resolve ``field_path`` on ``model``: ``_filterset_resolved_field`` once the model is read.
 
     A path naming a ``GeneratedField`` answers the column it computes
-    (``types/converters.py::generated_output_field``), so every read of a filter's column
+    (``utils/relations.py::generated_column``), so every read of a filter's column
     (its input type, the form field that cleans a value, the integer range guards of
     ``IntegerInFilter`` and ``IntegerRangeFilter``) sees the output's class; the path still
     names the generated field, so the predicate is the one Django builds for it. A path the
@@ -797,7 +862,7 @@ def _model_resolved_field(model: type[models.Model], field_path: str) -> _Resolv
             return _ResolvedField(None, field_path)
         return _ResolvedField(get_model_field(model, field_path), field_path)
     if field_path.rpartition(LOOKUP_SEP)[2] != "pk":
-        return _ResolvedField(generated_output_field(field) or field, field_path)
+        return _ResolvedField(generated_column(field) or field, field_path)
     column, links = stored_value_link(field)
     return _ResolvedField(column, LOOKUP_SEP.join((field_path, *links)))
 
@@ -863,6 +928,14 @@ def _filterset_lookup_operand(
     that walk (a ``method=`` filter's too, whose method applies no lookup of the filter's:
     ``filters/inputs.py`` lets its own form type a value it cleans).
     """
+    from .sets import FilterSet, ProjectedChildFilter, _leaf_declaration  # noqa: PLC0415 - import cycle
+
+    if isinstance(filter_instance, ProjectedChildFilter):
+        owner = filterset if isinstance(filterset, type) else type(filterset)
+        if issubclass(owner, FilterSet):
+            declaration = _leaf_declaration(filter_instance, owner)
+            if declaration.declared is not filter_instance:
+                return _filterset_lookup_operand(declaration.filterset, declaration.declared)
     lookup_expr = filter_instance.lookup_expr
     if read_attr(filter_instance, "method", None) is not None:
         return _LookupOperand(
@@ -903,34 +976,18 @@ def _model_lookup_operand(
         operand = _lookup_operand(path_column, LOOKUP_SEP.join((*transforms, lookup_expr)))
         return _LookupOperand(None, _names_null_test(lookup_expr)) if operand is None else operand
     if not is_concrete_field(column):
+        try:
+            walk = _walk_lookup_expr(column, lookup_expr)
+        except LookupValidationError:
+            return _LookupOperand(column, _names_null_test(lookup_expr))
         return _LookupOperand(
             column,
-            _names_null_test(lookup_expr),
-            node_types=_reverse_relation_node_types(column, lookup_expr),
+            issubclass(walk.lookup, models.lookups.IsNull),
+            walk.lookup,
+            walk.node_types,
         )
     operand = _lookup_operand(column, lookup_expr)
     return _LookupOperand(column, _names_null_test(lookup_expr)) if operand is None else operand
-
-
-def _reverse_relation_node_types(
-    relation: models.ForeignObjectRel,
-    lookup_expr: str,
-) -> tuple[type[object], ...]:
-    """Return the classes the predicate of a reverse relation key holds.
-
-    A reverse ``ForeignObjectRel`` has no column; Django's query resolves its lookups
-    through its forward field (``RelatedExact`` / ``RelatedIn`` / ``RelatedIsNull``, or a
-    class a project registers on the forward field's class), which the walk from the
-    relation asks (``utils/relations.py::_lookup_node_types``). The operand's field and
-    lookup stay the relation's own reading. Empty where the walk refuses the expression (a
-    lookup the relation does not register: a set refuses it when it publishes a leaf running
-    shipped ``filter`` code, ``refuse_unresolvable_lookup``, so only a consumer ``filter``
-    override, which reads its value as it likes, publishes one).
-    """
-    try:
-        return _lookup_node_types(relation, lookup_expr)
-    except LookupValidationError:
-        return ()
 
 
 def _filterset_lookup_lhs_path(
@@ -1400,8 +1457,8 @@ class _ElementCleanedFilter(_ColumnCleanedFilter):
 
     @override
     def _hand_column_field(self, field: Field, /) -> None:
-        """Hand an ``_ElementField`` the comparison form field of an innermost element."""
-        if isinstance(field, _ElementField):
+        """Fill only a missing comparison cleaner on an owned ``_ElementField``."""
+        if isinstance(field, _ElementField) and field.element_field is None:
             field.element_field = _column_form_field(self, element=True)
             field.element_nests = array_leaf_field(_bound_value_field(self))[1] > 1
             field.members_are_arrays = is_array_in_lookup(_bound_lookup_operand(self).lookup)
@@ -1479,7 +1536,7 @@ class ArrayFilter(_ElementCleanedFilter):
         if value == []:
             return _apply_lookup_predicate(self, qs, value)
         value = _held_column_value(self, qs, value)
-        column = _integer_in_column(self)
+        column = _integer_in_column(self, qs.query)
         if column is not None and is_list_or_tuple(value):
             kept = _identifying_members(column, list(value), qs.db)
             if not kept:
@@ -1743,8 +1800,8 @@ class RangeFilter(_ColumnCleanedFilter):
 
     @override
     def _hand_column_field(self, field: Field, /) -> None:
-        """Hand a ``RangeField`` the column's comparison form field as its ``bound_field``."""
-        if isinstance(field, RangeField):
+        """Fill only a missing bound cleaner on an owned ``RangeField``."""
+        if isinstance(field, RangeField) and field.bound_field is None:
             field.bound_field = _column_form_field(self)
 
     @override
@@ -1765,6 +1822,9 @@ class RangeFilter(_ColumnCleanedFilter):
         column's lookups, never the relation's, which bind a bound past the column raw; a
         two-bound range over a relation-valued key storing a non-integer column applies
         ``range`` to the stored column too, which Django refuses on the relation itself.
+        A scoped terminal's synthetic parent has no queryset, so a path it cannot resolve
+        is read from ``qs.query`` before deciding whether the two-bound integer rewrite
+        applies. The same actual query owns the integer holding before that decision.
         """
         if not (is_list_or_tuple(value) and len(value) == _RANGE_BOUNDS):
             return super().filter(qs, value)
@@ -1774,6 +1834,10 @@ class RangeFilter(_ColumnCleanedFilter):
             return qs
         resolved = _bound_resolved_field(self)
         field_name, lookup_expr = _bound_field_name(self), _bound_lookup_expr(self)
+        if (resolved is None or resolved.field is None) and (
+            actual_field := _query_path_field(qs.query, field_name)
+        ) is not None:
+            resolved = _ResolvedField(actual_field, field_name)
         path = field_name if resolved is None else resolved.path
         if start is None or end is None:
             # A lone bound compares what the range compares: every transform Django's query
@@ -1791,18 +1855,52 @@ class RangeFilter(_ColumnCleanedFilter):
         return super().filter(qs, value)
 
 
-def _integer_in_column(filter_instance: Filter) -> ModelField | None:
+def install_comparison_cleaner(owned: Field, target: Field) -> bool:
+    """Give an owned list/range field only its target's comparison cleaner.
+
+    The containing field keeps the consumer's ``clean`` override, widget, and
+    validators. An existing inner field also belongs to the consumer, so only
+    a missing one is filled from the target's output column. Return whether
+    the owned field has a usable inner cleaner afterward.
+    """
+    if isinstance(owned, _ElementField) and isinstance(target, _ElementField):
+        if owned.element_field is not None:
+            return True
+        if target.element_field is None:
+            return False
+        owned.element_field = target.element_field
+        owned.element_nests = target.element_nests
+        owned.members_are_arrays = target.members_are_arrays
+        return True
+    if isinstance(owned, RangeField) and isinstance(target, RangeField):
+        if owned.bound_field is not None:
+            return True
+        if target.bound_field is None:
+            return False
+        owned.bound_field = target.bound_field
+        return True
+    return False
+
+
+def _integer_in_column(filter_instance: Filter, query: Query) -> ModelField | None:
     """Return the integer column a per-request filter's ``in`` compares its members on, else ``None``.
 
     The column the path names, a relation's the target column it compares on, its
     ``to_field``, else the primary key (``_compared_value_column``), so
     ``field_name="tag"`` keeps the members ``<relation>__<that column>`` keeps
-    (``_identifying_members``). ``None`` for any other lookup, a column that is not an
-    integer, or a path naming no field.
+    (``_identifying_members``). A queryset-only ``F`` or ``Count`` alias names
+    an ordinary integer output and keeps this rule. A true integer ``Transform``
+    in the actual query does not name a stored integer column: its complete
+    member list must reach the form's bind ask. ``None`` for any other lookup,
+    a non-integer column, or a path naming no field.
     """
     if _bound_lookup_expr(filter_instance) != "in":
         return None
+    if _reads_integer_transform(filter_instance, query):
+        return None
     model_field = _bound_model_field(filter_instance)
+    if model_field is None:
+        model_field = _query_path_field(query, _bound_field_name(filter_instance))
     column = None if model_field is None else _compared_value_column(filter_instance, model_field)
     return column if isinstance(column, models.IntegerField) else None
 
@@ -1824,7 +1922,10 @@ def _django_prepares(lookup: type[models.lookups.Lookup] | None) -> bool:
     )
 
 
-def _integer_compared_column(filter_instance: Filter) -> ModelField | None:
+def _integer_compared_column(
+    filter_instance: Filter,
+    query: Query | None = None,
+) -> ModelField | None:
     """Return the integer column whose ``int()`` each number a bound filter compares runs, else ``None``.
 
     The column a value is cleaned as (``_column_form_field``): the field each value is a
@@ -1837,10 +1938,19 @@ def _integer_compared_column(filter_instance: Filter) -> ModelField | None:
     hands the value on as it is; a project lookup, which owns what its value means),
     where no walk resolved one, and
     where that is no ``IntegerField`` or no one column (a filter bound to no
-    ``FilterSet``, a path naming no field).
+    ``FilterSet``, a path naming no field). The actual ``query`` is read for a
+    scoped terminal whose synthetic parent has no queryset of its own.
     """
-    operand = _bound_lookup_operand(filter_instance)
-    if operand.field is None or not _django_prepares(operand.lookup):
+    operand = (
+        _query_lookup_operand(
+            query,
+            _bound_field_name(filter_instance),
+            _bound_lookup_expr(filter_instance),
+        )
+        if query is not None
+        else _bound_lookup_operand(filter_instance)
+    )
+    if operand is None or operand.field is None or not _django_prepares(operand.lookup):
         return None
     column = _compared_value_column(filter_instance, operand.field)
     if column is None:
@@ -1858,7 +1968,7 @@ def _held_column_value(filter_instance: Filter, qs: models.QuerySet[_M], value: 
     never hand Django a decimal whose ``int()`` takes seconds, under any django-filter
     ``FilterSet`` parent; ``value`` as it is for any other column.
     """
-    column = _integer_compared_column(filter_instance)
+    column = _integer_compared_column(filter_instance, qs.query)
     if column is None:
         return value
     return held_past_integer_range(connections[qs.db], column, value)
@@ -1960,7 +2070,7 @@ class ListFilter(_ElementCleanedFilter):
         if len(value) == 0:
             return _match_none_queryset(self, qs)
         value = require(_held_column_value(self, qs, value), is_list)
-        column = _integer_in_column(self)
+        column = _integer_in_column(self, qs.query)
         if column is not None:
             kept = _identifying_members(column, value, qs.db)
             if not kept:
@@ -2082,12 +2192,17 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
             message="Invalid filter value: expected a list of integers.",
             code=FILTER_INVALID_ERROR_CODE,
         )
-        if _reads_integer_transform(self):
+        if _reads_integer_transform(self, qs.query):
             # A transform's output names no stored column: each member binds as the
             # lookup prepares it, so one past the integer range the database stores for
             # the output is refused by the filter form's bind ask, never dropped. A
             # fractional member equals no integer output and is dropped.
-            output = _bound_value_field(self)
+            operand = _query_lookup_operand(
+                qs.query,
+                _bound_field_name(self),
+                _bound_lookup_expr(self),
+            )
+            output = None if operand is None else operand.field
             kept = [member for member in value if not truncates_to_integer(output, member)]
             if not kept:
                 return _match_none_queryset(self, qs)
@@ -3427,12 +3542,17 @@ def _filterset_walked_lookup(
     ``filter`` override walks, as ``filters/sets.py::FilterSet._flat_leaf_walk`` walks it:
     it reads its pair off the per-request copy the walk binds.
     """
-    field_name = _declared_field_name(filter_instance)
-    lookup_expr = filter_instance.lookup_expr
+    field_name = truth.text(_declared_field_name(filter_instance))
+    lookup_expr = truth.text(filter_instance.lookup_expr)
     model = _filterset_model(filterset)
     if model is None:
         return field_name, lookup_expr
-    walked = _model_walked_lookup(model, truth.text(field_name), truth.text(lookup_expr))
+    walked = _model_walked_lookup(model, field_name, lookup_expr)
+    if walked == (field_name, lookup_expr):
+        operand = _model_lookup_operand(model, field_name, lookup_expr)
+        query = _model_unresolved_query(filter_instance, operand)
+        if query is not None:
+            walked = _query_walked_lookup(query, field_name, lookup_expr)
     if walked[1] == lookup_expr or not _walks_declared_lookup(filter_instance):
         return field_name, lookup_expr
     return walked
@@ -3471,11 +3591,13 @@ def _model_walked_lookup(
     ``FilteredRelation`` alias) included. Kept per key, each fixed when the FilterSet is
     defined.
     """
+    return _query_walked_lookup(Query(model), field_name, lookup_expr)
+
+
+def _query_walked_lookup(query: Query, field_name: str, lookup_expr: str) -> tuple[str, str]:
+    """Walk a bound lookup on its actual query, retaining Django's implicit ``exact``."""
     try:
-        head, _start, leftover = split_lookup(
-            Query(model),
-            LOOKUP_SEP.join((field_name, lookup_expr)),
-        )
+        head, _start, leftover = split_lookup(query, LOOKUP_SEP.join((field_name, lookup_expr)))
     except FieldError:
         return field_name, lookup_expr
     if len(head) <= len(field_name.split(LOOKUP_SEP)):

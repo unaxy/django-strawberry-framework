@@ -38,9 +38,10 @@ Public surface:
   (the matched ``SCALAR_MAP`` key class, its scalar, and whether the choice
   enum replaces it). ``inspect_django_type`` names its converter column from
   the same route.
-- ``generated_output_field(field)`` - the column a ``GeneratedField`` computes,
-  which every conversion and filter read takes in its place (``None`` for any
-  other field), with the refusals of the outputs no conversion can publish.
+- ``generated_output_field(field)`` - the column a ``GeneratedField`` computes
+  for output conversion (``None`` for any other field), with the refusals of
+  outputs no conversion can publish. Filter resolution reads the neutral
+  ``generated_column`` and applies the same policy with FilterSet context.
 - ``refuse_nested_array(field, element)`` - the one nested-``ArrayField``
   refusal, asked by ``convert_scalar``'s array arm and by the filter-input
   element read (``filters/inputs.py::_array_element_column``).
@@ -360,6 +361,20 @@ def _field_label(field: object) -> str:
     return f"{model_name}.{truth.text(getattr(field, 'name', '<unknown>'), '<unknown>')}"
 
 
+def _generated_output_issue(column: "ConcreteField") -> str | None:
+    """Classify a computed column that cannot be published as a generated output."""
+    if _field_output_type_for(column) is not None:
+        return "file"
+    element = array_element_field(column)
+    if element is not None:
+        return "array_choices" if element.choices else None
+    if _HSTORE_FIELD_CLS is not None and truth.is_instance(column, _HSTORE_FIELD_CLS):
+        return None
+    if truth.mro_entry(SCALAR_MAP, truth.class_of(column)) is None:
+        return "unregistered"
+    return None
+
+
 def generated_output_field(field: object) -> "ConcreteField | None":
     """Return the column a ``GeneratedField`` computes for conversion, or ``None`` for any other field.
 
@@ -368,9 +383,10 @@ def generated_output_field(field: object) -> "ConcreteField | None":
     either-flag ``null``), so every read of it, the ``Model.field`` label of every message
     included, answers for the generated field. The one ``GeneratedField`` unwrap of the type
     side (``scalar_route``, ``convert_scalar``, ``_scalar_map_entry``,
-    ``_column_admits_empty_string``) and the filter side (``filters/sets.py``,
-    ``filters/base.py``). It refuses, each time it is read, the three outputs no conversion
-    can publish, each a ``ConfigurationError`` naming the generated field:
+    ``_column_admits_empty_string``). Filter resolution reads the neutral
+    ``generated_column`` and asks ``_generated_output_issue`` in its own context before
+    input dispatch. This output reader refuses three outputs no conversion can publish,
+    each a ``ConfigurationError`` naming the generated field:
 
     - a ``FileField`` / ``ImageField`` output: the file output types resolve a stored file
       through its storage, and a database expression stores none (refused here, so a filter
@@ -387,22 +403,19 @@ def generated_output_field(field: object) -> "ConcreteField | None":
     if column is None:
         return None
     output = truth.kind(column)
-    if _field_output_type_for(column) is not None:
+    issue = _generated_output_issue(column)
+    if issue == "file":
         raise ConfigurationError(
             f"GeneratedField {_field_label(column)} has a file output_field {truth.render(output)}; "
             "a database expression stores no file. Exclude the field via Meta.exclude.",
         )
-    element = array_element_field(column)
-    if element is not None:
-        if element.choices:
-            raise ConfigurationError(
-                f"GeneratedField {_field_label(column)} declares choices on its ArrayField "
-                "output_field's base_field; Django never validates a GeneratedField's "
-                "output_field choices, so they publish no enum. Drop them.",
-            )
-    elif not (_HSTORE_FIELD_CLS is not None and truth.is_instance(column, _HSTORE_FIELD_CLS)) and (
-        truth.mro_entry(SCALAR_MAP, truth.class_of(column)) is None
-    ):
+    if issue == "array_choices":
+        raise ConfigurationError(
+            f"GeneratedField {_field_label(column)} declares choices on its ArrayField "
+            "output_field's base_field; Django never validates a GeneratedField's "
+            "output_field choices, so they publish no enum. Drop them.",
+        )
+    if issue == "unregistered":
         raise ConfigurationError(
             f"Unsupported output_field type {truth.render(output)} on GeneratedField "
             f"{_field_label(column)}. Add an entry to SCALAR_MAP or exclude this field via "

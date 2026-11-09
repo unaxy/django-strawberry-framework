@@ -1339,9 +1339,10 @@ def generated_column(field: object) -> ConcreteField | None:
     discarded model (a test's isolated app) is collected with it. A column filed for
     another model (a copy Django's abstract inheritance takes of a field already read) is
     filed again.
-    The type and filter conversions read it through
-    ``types/converters.py::generated_output_field``, which refuses the outputs no
-    conversion can publish; the identity codec reads it through ``stored_value_link``.
+    Type output conversion reads it through ``types/converters.py::generated_output_field``;
+    filter resolution reads it directly, then checks the same output policy in the
+    declaring FilterSet's context before input dispatch. The identity codec reads it
+    through ``stored_value_link``.
     """
     if not truth.is_instance(field, models.GeneratedField):
         return None
@@ -1385,9 +1386,14 @@ def generated_column_source(column: ConcreteField) -> models.GeneratedField | No
     the column's name, when ``generated_column`` files ``column`` for it. A filter's
     path resolves to the clone, so its lookups are read through this field
     (``lookup_registry``, ``lookup_operand``), never through the clone, whose registry is
-    its class's alone.
+    its class's alone. An unbound transform output has no model or column name and
+    answers ``None``; it cannot be a clone filed on a model field.
     """
-    field = column.model._meta.get_field(column.name)
+    model = getattr(column, "model", None)
+    name = getattr(column, "name", None)
+    if not is_model_class(model) or not isinstance(name, str):
+        return None
+    field = model._meta.get_field(name)
     if truth.is_instance(field, models.GeneratedField) and generated_column(field) is column:
         return field
     return None

@@ -55,10 +55,12 @@ from django_strawberry_framework.conf import hide_flat_filters_setting
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.converter import FORM_FIELD_SCALARS, form_field_scalar
 from django_strawberry_framework.registry import register_subsystem_clear
+from django_strawberry_framework.relay import _node_id_slot
 from django_strawberry_framework.scalars import BigInt
 from django_strawberry_framework.sets_mixins import declaration_map
 from django_strawberry_framework.types.converters import (
     _field_label,
+    _generated_output_issue,
     _registered_scalar_entry,
     holds_values_as_given,
     refuse_nested_array,
@@ -98,6 +100,7 @@ from django_strawberry_framework.utils.inputs import (
     make_set_input_namespace,
     optional_field_kwargs,
 )
+from django_strawberry_framework.utils.relations import generated_column_source
 from django_strawberry_framework.utils.strings import flatten_lookup_path, pascal_case_or_raise
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.widgets import multi_widget_keys, widget_keys
@@ -122,6 +125,7 @@ from .base import (
     _EnumMemberFilterMixin,
     _filterset_lookup_lhs_path,
     _filterset_lookup_operand,
+    _filterset_lookup_source_field,
     _filterset_model,
     _filterset_model_field,
     _filterset_value_field,
@@ -132,6 +136,7 @@ from .base import (
     copied_form_field,
     defers_choices,
     model_choice_identity_column,
+    relation_identity_column,
 )
 
 # Domain-local aliases for the shared generated-input substrate (the mechanics
@@ -413,15 +418,19 @@ def _unscalared_field_refusal(
     filter_instance: Filter,
     model_field: ModelField,
     filterset_cls: type[FilterSet] | None,
+    *,
+    generated_issue: str | None = None,
 ) -> ConfigurationError:
     """Build the refusal for a leaf typed from a model field no ``SCALAR_MAP`` entry covers.
 
     The remedy follows what the field is. A relation's value is a related row's key: one
-    Django joins on a single column is filtered by that key through the relation listed in
-    ``Meta.fields`` (``RelationPkFilter``) or a model-choice filter, by the related column
-    named past it (``filters/base.py::_related_column_path``, on the path Django walks,
-    ``_filterset_walked_lookup``), or by the related row's own fields through a
-    ``RelatedFilter``; one linked by several columns only by the last; a
+    Django joins on a single column is filtered through generated ``Meta.fields`` only
+    when the declaring set's generation seam selects the package identity primitive
+    (a registered Relay target uses its public GlobalID; otherwise the target key),
+    through a default model-choice filter on the target's primary key when scalar,
+    by the related column named past it (``filters/base.py::_related_column_path``, on
+    the path Django walks, ``_filterset_walked_lookup``), or by the related row's fields
+    through a ``RelatedFilter``; one linked by several columns only by the last; a
     ``GenericForeignKey``, which Django builds no join for (``_compared_columns`` answers
     none), through the ``GenericRelation`` reversing it or the two columns it reads. A
     ``CompositePrimaryKey`` holds no one value, so its columns are named one by one. Any
@@ -432,6 +441,17 @@ def _unscalared_field_refusal(
         f"{_declaration_subject(declaration, filterset_cls)} reads {_field_label(model_field)}, "
         f"a {truth.kind(model_field)}"
     )
+    if generated_issue == "file":
+        return ConfigurationError(
+            f"{subject} computed by a GeneratedField as a file output; a database expression "
+            "stores no file. Remove or change this filter declaration.",
+        )
+    if generated_issue == "array_choices":
+        return ConfigurationError(
+            f"{subject} computed by a GeneratedField whose ArrayField base_field declares "
+            "choices Django never validates, so they publish no enum. Drop those choices "
+            "or remove this filter declaration.",
+        )
     if isinstance(model_field, models.CompositePrimaryKey):
         columns = ", ".join(repr(column.name) for column in model_field.fields)
         return ConfigurationError(
@@ -458,12 +478,84 @@ def _unscalared_field_refusal(
     walked = truth.text(_filterset_walked_lookup(declaration.filterset, declaration.declared)[0])
     path = LOOKUP_SEP.join((*walked.split(LOOKUP_SEP)[:-1], model_field.name))
     column = _related_column_path(model_field, path)
-    past = "" if column is None else f", name the related column past it (field_name {column!r})"
+    key = relation_identity_column(model_field)
+    if isinstance(key, models.CompositePrimaryKey):
+        key = None
+    from .sets import _relay_target_type_for_relation  # noqa: PLC0415 - import cycle
+
+    target_type = _relay_target_type_for_relation(model_field)
+    owner = declaration.filterset or filterset_cls
+    generated_available = False
+    if owner is not None:
+        origin, shape_capable = owner._generation_policy_for_field(model_field, path, "exact")
+        generated_available = origin == "framework_default" and shape_capable
+    if target_type is not None:
+        id_attr, id_field = _node_id_slot(target_type)
+        generated_route = (
+            f"filter by the related row's public {id_attr!r} GlobalID through {path!r} "
+            "in Meta.fields"
+            if generated_available
+            and id_field is not None
+            and not isinstance(id_field, models.CompositePrimaryKey)
+            else ""
+        )
+        choice_route = (
+            ""
+            if key is None
+            else (
+                f"use a ModelChoiceFilter / ModelMultipleChoiceFilter{_scalar_prerequisite(key)}"
+            )
+        )
+        key_route = ", ".join(route for route in (generated_route, choice_route) if route)
+    elif key is None:
+        key_route = ""
+    elif generated_available:
+        key_route = (
+            f"filter by the related row's key through {path!r} in Meta.fields or a "
+            f"ModelChoiceFilter / ModelMultipleChoiceFilter{_scalar_prerequisite(key)}"
+        )
+    else:
+        key_route = (
+            f"use a ModelChoiceFilter / ModelMultipleChoiceFilter{_scalar_prerequisite(key)}"
+        )
+    compared_prerequisite = _scalar_prerequisite(next(iter(compared), None))
+    past = "" if column is None else f"name the related column past it (field_name {column!r})"
+    if column is not None:
+        past += compared_prerequisite
+    routes = ", ".join(route for route in (key_route, past) if route)
+    if routes:
+        routes += ", or "
     return ConfigurationError(
-        f"{unscalared}; filter by the related row's key through {path!r} in Meta.fields or a "
-        f"ModelChoiceFilter / ModelMultipleChoiceFilter{past}, or filter the related row's own "
-        "fields through a RelatedFilter.",
+        f"{unscalared}; {routes}filter the related row's own fields through a RelatedFilter.",
     )
+
+
+def _scalar_prerequisite(column: ModelField | None) -> str:
+    """State the missing scalar a suggested key or joined-column route must first register."""
+    if column is None or _registered_scalar_entry(column) is not None:
+        return ""
+    return f" (first register {truth.kind(column)} for {_field_label(column)} in SCALAR_MAP)"
+
+
+def _refuse_generated_filter_output(
+    filter_instance: Filter,
+    model_field: ModelField | None,
+    filterset_cls: type[FilterSet],
+) -> None:
+    """Apply generated-output policy before typed or active raw filter input dispatch."""
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    source = _filterset_lookup_source_field(declaration.filterset, declaration.declared)
+    for field in (source, model_field):
+        if not is_concrete_field(field) or generated_column_source(field) is None:
+            continue
+        issue = _generated_output_issue(field)
+        if issue is not None:
+            raise _unscalared_field_refusal(
+                filter_instance,
+                field,
+                filterset_cls,
+                generated_issue=issue,
+            )
 
 
 def _declaration_of(
@@ -2007,6 +2099,7 @@ def convert_filter_to_input_annotation(
     ``ConfigurationError`` (``_refuse_widget_reading_other_keys``); the range arm asks the
     widget for its two keys (``range_form_keys``).
     """
+    _refuse_generated_filter_output(filter_instance, model_field, filterset_cls)
     if truth.is_instance(filter_instance, LookupChoiceFilter):
         declaration = _declaration_of(filter_instance, filterset_cls)
         raise ConfigurationError(
