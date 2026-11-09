@@ -99,6 +99,7 @@ from django_strawberry_framework._boundary_ordering import (
     _CSRF_ORDERING_EXEMPTION,
     consume_prepared_view,
 )
+from django_strawberry_framework._json_decode import decode_json
 from django_strawberry_framework._multipart import _MULTIPART_CONTROL_FIELDS
 from django_strawberry_framework._request_body import body_exceeds_limit
 from django_strawberry_framework.conf import django_setting, max_request_body_bytes_setting
@@ -114,15 +115,19 @@ if TYPE_CHECKING:
     from cross_web import AsyncHTTPRequestAdapter, SyncHTTPRequestAdapter
     from django.http import HttpRequest, HttpResponseBase
 
-    # The one upstream member the boundary mixin extends (``parse_json`` delegates to
-    # Strawberry's ``BaseView``); at run time the mixin's base stays ``object`` so it
-    # adds nothing to either view's MRO. Declared without a constructor so each view
-    # below inherits exactly one.
+    # The two upstream members the boundary mixin extends (``parse_json`` and
+    # ``decode_json`` delegate to Strawberry's ``BaseView``); at run time the mixin's
+    # base stays ``object`` so it adds nothing to either view's MRO. Declared without a
+    # constructor so each view below inherits exactly one.
     class _BoundaryMixinBase:
-        """The one upstream member the boundary mixin extends."""
+        """The two upstream members the boundary mixin extends."""
 
         def parse_json(self, data: str | bytes) -> object:
             """Return upstream's parse of ``data``."""
+            return data
+
+        def decode_json(self, data: str | bytes) -> object:
+            """Return upstream's decode of ``data``."""
             return data
 else:
     _BoundaryMixinBase = object
@@ -517,7 +522,10 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
        enforced by overriding ``parse_json`` for a ``bytes`` body and, for the
        multipart control documents Django decodes before the package sees them,
        by :meth:`_enforce_multipart_form_encoding` and
-       :meth:`_reject_lossy_multipart_control_fields`.
+       :meth:`_reject_lossy_multipart_control_fields`. Overriding ``decode_json``
+       answers the one document upstream's ``json.loads`` refuses without a
+       ``json.JSONDecodeError`` - an integer literal past the interpreter's
+       digit limit - through upstream's own ``400``.
 
     They belong together because they are the same boundary read twice: the cap
     decides which bytes reach the parse, and the parse decides how those exact
@@ -869,6 +877,23 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
                 raise HTTPException(400, _JSON_PARSE_REASON) from exc
         return object_result(super().parse_json, data)
 
+    @override
+    def decode_json(self, data: str | bytes) -> object:
+        """Decode through upstream, refusing an over-long integer literal as unparseable JSON.
+
+        Every JSON document this endpoint parses - the body, the GET ``variables`` /
+        ``extensions`` parameters, the multipart ``operations`` / ``map`` fields -
+        reaches upstream's ``decode_json`` through ``parse_json``, which answers only a
+        ``json.JSONDecodeError``. An integer literal past CPython's integer string
+        conversion limit raises a plain ``ValueError`` there instead;
+        ``_json_decode.py::decode_json`` re-raises exactly that refusal as the
+        ``JSONDecodeError`` upstream's ``parse_json`` turns into its own ``400`` and
+        literal, on both views and in every ``APPLY_UPSTREAM_PATCHES`` state. See that
+        module for the type and provenance scope that keeps a consumer override's own
+        ``ValueError`` a ``500``.
+        """
+        return decode_json(super().decode_json, data)
+
 
 def _run_after_csrf_check(
     request: HttpRequest,
@@ -1052,16 +1077,21 @@ def _evaluate_request_user(request: HttpRequest) -> None:
 class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValue]):
     """The package's synchronous Django GraphQL view.
 
-        A subclass of ``strawberry.django.views.GraphQLView`` that overrides exactly
-        one thing - the raw request body: the cumulative cap, enforced at the top of
-        ``run`` (spec-046 Decision 7), and the strict UTF-8 decode of the bytes that
-        survive it (Decision 9). Everything else is inherited: every upstream
-        ``as_view()`` keyword still applies and behaves identically - ``schema``,
-        ``graphql_ide``, ``allow_queries_via_get``, and
-        ``multipart_uploads_enabled`` - as do the ``get_context`` /
-        ``get_root_value`` / ``process_result`` hooks a consumer may override. The
-        one package keyword it adds is ``max_request_body_bytes=``, whose contract
-        lives on ``_RequestBodyBoundaryMixin``.
+        A subclass of ``strawberry.django.views.GraphQLView`` that overrides two
+        things on the request's way in. The raw request body: the cumulative cap,
+        enforced at the top of ``run`` (spec-046 Decision 7), and the strict UTF-8
+        decode of the bytes that survive it (Decision 9). And the JSON decode of
+        every document the request carries (``decode_json``: the body, the GET
+        ``variables`` / ``extensions`` parameters and the multipart ``operations`` /
+        ``map`` fields), which answers an integer literal past the interpreter's
+        digit limit with upstream's own ``400`` instead of a ``500`` (Decision 9).
+        Everything else is inherited: every upstream ``as_view()`` keyword still
+        applies and behaves identically - ``schema``, ``graphql_ide``,
+        ``allow_queries_via_get``, and ``multipart_uploads_enabled`` - as do the
+        ``get_context`` / ``get_root_value`` / ``process_result`` hooks a consumer
+        may override. The one package keyword it adds is
+        ``max_request_body_bytes=``, whose contract lives on
+        ``_RequestBodyBoundaryMixin``.
 
         Like upstream's view it is generic over Strawberry's ``Context`` and
         ``RootValue`` type variables (each defaulting to ``None``), so a consumer
@@ -1074,11 +1104,10 @@ class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValu
         one class instead of forking between "upstream's view" and "the package's"
         (spec-046 Decision 6).
 
-        The one other thing it overrides is upstream's ``request_adapter_class``,
-        with a subclass that hands the raw body bytes to ``parse_json`` instead of
-        decoding them inside a property. That is the sync half of the wire contract's
-        independence from ``APPLY_UPSTREAM_PATCHES``; see
-        :class:`_RawBodyRequestAdapter`.
+        Beyond those it overrides upstream's ``request_adapter_class``, with a subclass
+        that hands the raw body bytes to ``parse_json`` instead of decoding them inside
+        a property. That is the sync half of the wire contract's independence from
+        ``APPLY_UPSTREAM_PATCHES``; see :class:`_RawBodyRequestAdapter`.
 
     The ordering half of the body boundary - the ``csrf_exempt`` mark on the
         callback ``as_view`` returns - comes from the shared mixin, so it cannot
@@ -1140,8 +1169,9 @@ class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context
     mounts the sync view because the package's live tier runs under WSGI.
 
     It carries the same ``max_request_body_bytes=`` keyword, the same cap
-    contract, and the same strict UTF-8 wire contract - all three from the one
-    shared mixin, so the two transports cannot diverge. The cap check itself is
+    contract, the same strict UTF-8 wire contract and the same refusal of an
+    over-long integer literal in any JSON document it parses - all four from the
+    one shared mixin, so the two transports cannot diverge. The cap check itself is
     synchronous on both because ``request.META`` is a dict and, once the cap has
     run, the bytes are either already in memory or bounded to at most
     ``limit + 1``: the view never performs an unbounded synchronous disk read on

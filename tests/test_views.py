@@ -34,7 +34,12 @@ What stays here:
 - the strict UTF-8 wire contract the package view owns
   (spec-046 Decision 9): the per-encoding ``__cause__`` matrix, which is
   invisible over the wire because all nine rejected shapes carry the identical
-  status and message by design.
+  status and message by design;
+- the integer digit-limit translation in ``decode_json``: the translated
+  ``json.JSONDecodeError``'s ``__cause__``, the untouched ``UnicodeDecodeError``
+  subclass, and the provenance scope a wire response cannot show - a consumer
+  ``decode_json``'s own ``ValueError`` stays a ``500``, while one that delegates
+  to upstream through ``super()`` still gets the translation.
 
 The schema is module-local and ORM-free: none of these contracts touches the
 database, so no ``django_db`` marker and no registry mutation.
@@ -2279,6 +2284,88 @@ def test_the_wire_reason_is_upstreams_own_parse_json_literal() -> None:
 
     assert excinfo.value.reason == _JSON_PARSE_REASON
     assert patches._UPSTREAM_JSON_PARSE_REASON == _JSON_PARSE_REASON
+
+
+@pytest.mark.parametrize("view_class", [DjangoGraphQLView, AsyncDjangoGraphQLView])
+def test_decode_json_reports_the_integer_digit_limit_as_a_json_decode_error(
+    view_class: type[DjangoGraphQLView] | type[AsyncDjangoGraphQLView],
+) -> None:
+    """The refusal upstream's callers answer, with the interpreter's own error as its cause."""
+    with pytest.raises(json.JSONDecodeError) as excinfo:
+        view_class(schema=SCHEMA).decode_json('{"x": %s}' % ("9" * 4301))
+
+    assert type(excinfo.value.__cause__) is ValueError
+
+
+def test_decode_json_leaves_a_value_error_subclass_untranslated() -> None:
+    """Only an exact ``ValueError`` is the digit-limit refusal.
+
+    ``json.loads`` on undecodable ``bytes`` raises ``UnicodeDecodeError``, a
+    ``ValueError`` subclass, from the same upstream frame; it passes through as
+    raised (the package views decode ``bytes`` strictly in ``parse_json`` before this
+    seam, so only a direct call reaches it).
+    """
+    with pytest.raises(UnicodeDecodeError):
+        DjangoGraphQLView(schema=SCHEMA).decode_json(b'{"x": "\x80"}')
+
+
+class _CooperativeDecode(GraphQLView):
+    """A consumer ``decode_json`` the MRO places between the package mixin and upstream's."""
+
+    @override
+    def decode_json(self, data: str | bytes) -> object:
+        raise ValueError("the consumer's own refusal")
+
+
+class _CooperativeDecodeView(DjangoGraphQLView, _CooperativeDecode):
+    """A package view composed with the cooperative consumer decode above."""
+
+
+def test_a_consumer_decode_json_value_error_is_not_reported_as_unparseable_json() -> None:
+    """Provenance, not type alone: the error must come from upstream's own ``decode_json``.
+
+    A consumer's ``decode_json`` reached through the mixin's ``super()`` raises an exact
+    ``ValueError`` too; it is the consumer's bug, so it keeps its ``500`` instead of
+    being dressed up as the client's malformed JSON.
+    """
+    with pytest.raises(ValueError, match="the consumer's own refusal") as excinfo:
+        _CooperativeDecodeView(schema=SCHEMA).decode_json('{"x": 1}')
+
+    assert type(excinfo.value) is ValueError
+
+
+class _DelegatingDecode(GraphQLView):
+    """A consumer ``decode_json`` between the package mixin and upstream's that delegates."""
+
+    @override
+    def decode_json(self, data: str | bytes) -> object:
+        return super().decode_json(data)
+
+
+class _DelegatingDecodeView(DjangoGraphQLView, _DelegatingDecode):
+    """A package view composed with the delegating consumer decode above."""
+
+
+def test_a_delegating_consumer_decode_json_still_gets_the_digit_limit_translation() -> None:
+    """Provenance is the whole traceback, not the helper's direct callee.
+
+    A consumer ``decode_json`` the MRO places below the package mixin that calls
+    ``super()`` puts its own frame between the helper and upstream's
+    ``BaseView.decode_json``; the interpreter's refusal still comes from upstream's
+    ``json.loads``, so it is reported as the client's unparseable JSON, and
+    ``parse_json`` answers upstream's own ``400``.
+    """
+    view = _DelegatingDecodeView(schema=SCHEMA)
+    document = '{"x": %s}' % ("9" * 4301)
+    with pytest.raises(json.JSONDecodeError) as excinfo:
+        view.decode_json(document)
+
+    assert type(excinfo.value.__cause__) is ValueError
+    with pytest.raises(HTTPException) as refused:
+        view.parse_json(document)
+
+    assert refused.value.status_code == 400
+    assert refused.value.reason == _JSON_PARSE_REASON
 
 
 def _json_request(raw: bytes) -> WSGIRequest:

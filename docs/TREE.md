@@ -197,6 +197,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── _completion.py                # Join graphql-core-owned concurrent completion before returning to its owner.
 ├── _cross_web_patches.py         # Defensive patches for upstream ``cross_web`` bugs, applied at app load.
 ├── _django_patches.py            # Defensive patches for upstream Django bugs, applied at app load.
+├── _json_decode.py               # Strawberry's JSON decode seam, answered for every document a client can send.
 ├── _logger.py                    # The package logger, in a leaf module so the package ``__init__`` imports it like any name.
 ├── _multipart.py                 # GraphQL multipart request wire vocabulary, owned once for both transports.
 ├── _request_body.py              # The one place the package touches Django's private request-body internals.
@@ -338,6 +339,7 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 ├── _completion.py                # Join graphql-core-owned concurrent completion before returning to its owner.
 ├── _cross_web_patches.py         # Defensive patches for upstream ``cross_web`` bugs, applied at app load.
 ├── _django_patches.py            # Defensive patches for upstream Django bugs, applied at app load.
+├── _json_decode.py               # Strawberry's JSON decode seam, answered for every document a client can send.
 ├── _logger.py                    # The package logger, in a leaf module so the package ``__init__`` imports it like any name.
 ├── _multipart.py                 # GraphQL multipart request wire vocabulary, owned once for both transports.
 ├── _request_body.py              # The one place the package touches Django's private request-body internals.

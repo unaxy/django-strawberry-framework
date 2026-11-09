@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 200 to do.
+Progress: 0 done, 201 to do.
 
 ## From dry-0_0_15_3
 
@@ -913,6 +913,12 @@ Progress: 0 done, 200 to do.
   which builds a `Boolean` null test; the docs now say that under a `Meta.filter_overrides` list filter a per-field
   `"__all__"` over an `ArrayField` is refused at the first lookup its input cannot type, and that listing `exact`,
   `contains`, `contained_by`, `overlap` (and `isnull`) builds
+- [ ] 831. CHANGELOG entry for item 741: a JSON integer literal longer than CPython's integer string conversion
+  limit (4300 digits by default) anywhere in a request's JSON (the body, GET `variables` / `extensions`, multipart
+  `operations` / `map`) now gets upstream's own 400 "Unable to parse request body as JSON" on both package views
+  instead of a server error, and in a WebSocket frame the package consumer's upstream non-JSON refusal (4400 on
+  `graphql-transport-ws`, a dropped frame on legacy `graphql-ws`) instead of a 1011 close, whatever
+  `APPLY_UPSTREAM_PATCHES` says; `DjangoGraphQLView` and `AsyncDjangoGraphQLView` gain a public `decode_json` override
 
 ## From dry-upstream-0_0_15
 

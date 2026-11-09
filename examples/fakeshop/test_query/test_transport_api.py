@@ -48,6 +48,13 @@ the async transport must reject UTF-16 and a leading UTF-8 BOM exactly as the sy
 those rows because this module already owns the ``/async-graphql/`` mount and the
 ``AsyncClient`` scaffolding it needs.
 
+An integer literal one digit past CPython's integer string conversion limit is
+pinned in every position a request's JSON can carry it - body members, a batch
+element, a bare scalar body, GET ``variables`` / ``extensions``, multipart
+``operations`` / ``map`` - on both views and with the Strawberry patch opted out:
+each is upstream's own ``400`` and literal, through the views' ``decode_json``,
+against a control one digit shorter that executes.
+
 The final section pins the strict UTF-8 wire contract as package policy on the
 *view*, not as one of the upstream-bug patches, so it is asserted on both
 transports with ``APPLY_UPSTREAM_PATCHES = {"strawberry": False}`` in effect -
@@ -2276,6 +2283,189 @@ async def test_the_async_view_keeps_the_utf8_wire_contract_with_the_patch_opted_
 
     assert control.status_code == 200
     assert control.json()["data"] == {"__typename": "Query"}
+
+
+# ---------------------------------------------------------------------------
+# An integer literal past CPython's integer string conversion limit. ``json.loads``
+# refuses it with a plain ``ValueError`` rather than a ``json.JSONDecodeError``,
+# which upstream's ``parse_json`` does not catch; the package views' ``decode_json``
+# (``_json_decode.py::decode_json``) re-raises exactly that refusal as the
+# ``JSONDecodeError`` upstream answers, so every JSON document a request carries
+# gets upstream's own ``400`` and literal, in every patch state.
+# ---------------------------------------------------------------------------
+
+#: One digit past the interpreter's default limit (``sys.get_int_max_str_digits``,
+#: 4300), and the longest literal the default limit still converts.
+_OVER_LIMIT_INTEGER = "9" * 4301
+_AT_LIMIT_INTEGER = "9" * 4300
+
+#: Every position a JSON request body can carry the literal in. ``{n}`` is the
+#: literal; none of the positions is read by the operation, so the refusal is the
+#: parse's alone.
+_INTEGER_LIMIT_BODIES = (
+    pytest.param('{"query": "{ __typename }", "variables": {"x": {n}}}', id="unused-variable"),
+    pytest.param('{"query": "{ __typename }", "extensions": {"x": {n}}}', id="extensions"),
+    pytest.param('{"query": "{ __typename }", "operationName": {n}}', id="operation-name"),
+    pytest.param(
+        '{"query": "{ __typename }", "variables": {"x": [[-{n}]]}}',
+        id="nested-negative",
+    ),
+    pytest.param('[{"query": "{ __typename }", "variables": {"x": {n}}}]', id="batch-element"),
+    pytest.param("{n}", id="bare-scalar-body"),
+)
+
+
+def _with_integer(template: str, literal: str) -> str:
+    """``template`` with its ``{n}`` slot holding ``literal``."""
+    return template.replace("{n}", literal)
+
+
+def _assert_upstreams_parse_refusal(response: "_TestResponse") -> None:
+    """Upstream's own ``parse_json`` refusal, byte for byte, before the schema ran."""
+    assert response.status_code == 400
+    assert response.content == b"Unable to parse request body as JSON"
+    _assert_no_graphql_envelope(response)
+
+
+@pytest.mark.parametrize("template", _INTEGER_LIMIT_BODIES)
+def test_an_over_limit_integer_in_a_json_body_gets_upstreams_400(template: str) -> None:
+    """Sync view: the digit-limit refusal answers as unparseable JSON, never a ``500``."""
+    response = _post_bytes(
+        Client(raise_request_exception=False),
+        _with_integer(template, _OVER_LIMIT_INTEGER),
+    )
+
+    _assert_upstreams_parse_refusal(response)
+
+
+@pytest.mark.parametrize("template", _INTEGER_LIMIT_BODIES)
+async def test_an_over_limit_integer_in_a_json_body_gets_upstreams_400_on_the_async_view(
+    template: str,
+) -> None:
+    """Async view: the same one mixin method, so neither transport can drift."""
+    with override_settings(ROOT_URLCONF=__name__):
+        response = await _post_bytes(
+            AsyncClient(raise_request_exception=False),
+            _with_integer(template, _OVER_LIMIT_INTEGER),
+            path="/async-graphql/",
+        )
+
+    _assert_upstreams_parse_refusal(response)
+
+
+@pytest.mark.django_db
+def test_an_integer_at_the_limit_still_parses() -> None:
+    """The control: one digit fewer is an ordinary request, so the 400 is the limit's."""
+    response = _post_bytes(
+        Client(),
+        _with_integer('{"query": "{ __typename }", "variables": {"x": {n}}}', _AT_LIMIT_INTEGER),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"data": {"__typename": "Query"}}
+
+
+@pytest.mark.parametrize("param", ["variables", "extensions"])
+def test_an_over_limit_integer_in_a_get_param_gets_upstreams_400(param: str) -> None:
+    """GET ``variables`` / ``extensions`` reach the same ``decode_json`` through ``parse_json``."""
+    response = Client(raise_request_exception=False).get(
+        "/graphql/",
+        {"query": _TYPENAME, param: '{"x": %s}' % _OVER_LIMIT_INTEGER},
+    )
+
+    _assert_upstreams_parse_refusal(response)
+
+
+@pytest.mark.parametrize("param", ["variables", "extensions"])
+async def test_an_over_limit_integer_in_a_get_param_gets_upstreams_400_on_the_async_view(
+    param: str,
+) -> None:
+    """The async colour of the GET row."""
+    with override_settings(ROOT_URLCONF=__name__):
+        response = await AsyncClient(raise_request_exception=False).get(
+            "/async-graphql/",
+            {"query": _TYPENAME, param: '{"x": %s}' % _OVER_LIMIT_INTEGER},
+        )
+
+    _assert_upstreams_parse_refusal(response)
+
+
+#: The two multipart control documents, each carrying the literal.
+_INTEGER_LIMIT_MULTIPART_FIELDS = (
+    pytest.param(
+        "operations",
+        ('{"query": "{ __typename }", "variables": {"x": %s}}' % _OVER_LIMIT_INTEGER).encode(),
+        id="operations",
+    ),
+    pytest.param("map", ('{"0": %s}' % _OVER_LIMIT_INTEGER).encode(), id="map"),
+)
+
+
+@pytest.mark.parametrize(("field", "raw"), _INTEGER_LIMIT_MULTIPART_FIELDS)
+def test_an_over_limit_integer_in_a_multipart_control_document_gets_upstreams_400(
+    field: str,
+    raw: bytes,
+) -> None:
+    """Multipart ``operations`` / ``map``: Django-decoded ``str``, the same decode seam."""
+    response = _post_multipart(
+        Client(raise_request_exception=False),
+        "/graphql/",
+        _multipart_fields(field, raw),
+        files=(("0", "0.txt", b"x"),),
+    )
+
+    _assert_upstreams_parse_refusal(response)
+
+
+@pytest.mark.parametrize(("field", "raw"), _INTEGER_LIMIT_MULTIPART_FIELDS)
+async def test_an_over_limit_integer_in_a_multipart_control_document_on_the_async_view(
+    field: str,
+    raw: bytes,
+) -> None:
+    """The async multipart colour."""
+    with override_settings(ROOT_URLCONF=__name__):
+        response = await _post_multipart(
+            AsyncClient(raise_request_exception=False),
+            "/async-multipart/",
+            _multipart_fields(field, raw),
+            files=(("0", "0.txt", b"x"),),
+        )
+
+    _assert_upstreams_parse_refusal(response)
+
+
+def test_the_integer_limit_refusal_survives_the_upstream_patch_kill_switch() -> None:
+    """Patch opted out: the refusal is view-owned, so it holds whatever the switch says.
+
+    The package's resource policy names this limit as what bounds an integer a request
+    carries and states the request is refused as malformed input (spec-047 Decision 13),
+    so the translation lives on the views rather than in the opt-out patch module.
+    """
+    with _strawberry_patch_opted_out():
+        client = Client(raise_request_exception=False)
+        body = _post_bytes(
+            client,
+            _with_integer(
+                '{"query": "{ __typename }", "variables": {"x": {n}}}',
+                _OVER_LIMIT_INTEGER,
+            ),
+        )
+        get = client.get("/graphql/", {"query": _TYPENAME, "variables": _OVER_LIMIT_INTEGER})
+
+    _assert_upstreams_parse_refusal(body)
+    _assert_upstreams_parse_refusal(get)
+
+
+async def test_the_async_integer_limit_refusal_survives_the_upstream_patch_kill_switch() -> None:
+    """The async colour of the kill-switch row."""
+    with _strawberry_patch_opted_out():
+        response = await _post_bytes(
+            AsyncClient(raise_request_exception=False),
+            _OVER_LIMIT_INTEGER,
+            path="/async-graphql/",
+        )
+
+    _assert_upstreams_parse_refusal(response)
 
 
 @contextlib.contextmanager

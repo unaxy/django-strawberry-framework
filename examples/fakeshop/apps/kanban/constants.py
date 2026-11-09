@@ -6,6 +6,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "django_strawberry_framework/_completion.py",
     "django_strawberry_framework/_cross_web_patches.py",
     "django_strawberry_framework/_django_patches.py",
+    "django_strawberry_framework/_json_decode.py",
     "django_strawberry_framework/_logger.py",
     "django_strawberry_framework/_multipart.py",
     "django_strawberry_framework/_request_body.py",

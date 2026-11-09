@@ -296,27 +296,32 @@ a server defect reported as a parse failure would blame the client for it.
 Cancellation propagates untouched. ``_strawberry_patches.py``'s ``RecursionError``
 translation does not reach this path - it wraps ``BaseView.parse_json`` on the
 HTTP tier, and the WebSocket decodes through ``view.decode_json`` inside the
-message loop - which is why the containment is here.
+message loop - which is why the containment is here. That ``decode_json`` is the
+package consumer's own override: an integer literal past the interpreter's digit
+limit raises a plain ``ValueError`` from ``json.loads``, which would otherwise reach
+the containment as a server-side failure, so the override re-raises it as the
+``json.JSONDecodeError`` upstream's ``iter_json`` answers (``_json_decode.py``).
 
-Importing this module is ``channels``-free, which is what lets ``routers.py``
-import it above its own guard: the module level reaches only for the standard
-library, Django's own ``ASGIRequest`` / ``DisallowedHost`` (a HARD dependency, and
-the whole point of the Host boundary below), this package's logger,
-``exceptions.ConfigurationError``, the truthful readers in ``utils/truth.py`` and
-``utils/_narrowing.py``, the error-policy masking helpers from
-``extensions/error_policy.py`` (whose own imports add ``strawberry`` and ``graphql``,
-both HARD dependencies), and the connection-actor-lease helpers from
+Importing this module is ``channels``-free, which is what lets ``routers.py`` import
+it above its own guard: the module level reaches only for the standard library,
+Django's own ``ASGIRequest`` / ``DisallowedHost`` (a HARD dependency, and the whole
+point of the Host boundary below), this package's logger, the decode helper in
+``_json_decode.py`` (whose own imports add ``strawberry.http.base``, a HARD
+dependency), ``exceptions.ConfigurationError``, the truthful readers in
+``utils/truth.py`` and ``utils/_narrowing.py``, the error-policy masking helpers
+from ``extensions/error_policy.py`` (whose own imports add ``strawberry`` and
+``graphql``, both HARD dependencies), and the connection-actor-lease helpers from
 ``utils/sessions.py`` - a module whose own imports are ``__future__``, ``asyncio``,
-``contextlib``, ``dataclasses`` and typing names, so it adds nothing to the import graph.
-``channels.auth.get_user`` and the package's session-store resolver are imported
-**inside** the revalidation coroutine (the
+``contextlib``, ``dataclasses`` and typing names, so it adds nothing to the import
+graph. ``channels.auth.get_user`` and the package's session-store resolver are
+imported **inside** the revalidation coroutine (the
 ``auth/mutations.py::_channels_http_login_establish`` precedent),
 ``channels.security.websocket.WebsocketDenier`` **inside** the Host validator's
 denial arm, and neither the two protocol handler base classes nor upstream's
 WebSocket adapter are imported at all - all three are read off the base consumer
 class the factory is handed, so an upstream re-point is tracked for free.
-``views.py`` does not import this module, so the package's Django GraphQL view
-stays adoptable without the soft dependency.
+``views.py`` does not import this module, so the package's Django GraphQL view stays
+adoptable without the soft dependency.
 
 The session-store resolver the revalidation reaches - like the connection actor
 lease it shares with the auth layer - is
@@ -387,6 +392,7 @@ from django.core.handlers.asgi import ASGIRequest
 from typing_extensions import override
 
 from . import logger
+from ._json_decode import decode_json
 from .exceptions import ConfigurationError
 from .extensions.error_policy import (
     is_maskable_result,
@@ -1769,6 +1775,22 @@ def build_revalidating_consumer_class(
             self.revalidation_window: float = revalidation_window
             self._revocation: _ConnectionRevocation = _ConnectionRevocation()
             super().__init__(*args, **kwargs)
+
+        @override
+        def decode_json(self, data: str | bytes) -> object:
+            """Decode a frame through upstream, refusing an over-long integer literal as non-JSON.
+
+            The Channels adapter's ``iter_json`` decodes every frame through this
+            method and answers only a ``json.JSONDecodeError`` (``NonJsonMessageReceived``:
+            ``4400`` / "WebSocket message must be valid JSON" on ``graphql-transport-ws``,
+            the frame dropped on legacy ``graphql-ws``). An integer literal past CPython's
+            integer string conversion limit raises a plain ``ValueError`` instead, which
+            would unwind the message loop into the internal-error close as though the
+            server had failed; ``_json_decode.py::decode_json`` re-raises exactly that
+            refusal as the ``JSONDecodeError`` upstream answers, the same seam
+            ``views.py::_RequestBodyBoundaryMixin.decode_json`` overrides on HTTP.
+            """
+            return decode_json(super().decode_json, data)
 
         @override
         def is_websocket_origin_allowed(self, request: GraphQLWSConsumer, origin: str) -> bool:

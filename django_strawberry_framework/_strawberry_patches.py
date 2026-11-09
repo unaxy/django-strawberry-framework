@@ -83,9 +83,13 @@ views inherit, so widening its ``except`` to also catch
 ``UnicodeDecodeError`` and ``RecursionError`` fixes both transports from
 one site. Combined with the ``cross_web`` patch (which routes the sync
 path's bytes through ``parse_json`` rather than decoding them eagerly),
-every malformed-body request becomes a clean ``400`` for every consumer
-of the installed Strawberry - including one who mounts Strawberry's own
-view.
+an undecodable or over-nested body becomes a clean ``400`` for every
+consumer of the installed Strawberry - including one who mounts
+Strawberry's own view. An integer literal past the interpreter's digit
+limit is not this module's: ``json.loads`` raises a plain ``ValueError``
+for it, which the package views and WebSocket consumer answer through
+upstream's ``decode_json`` seam (``_json_decode.py``), permanently and on
+both transports, while Strawberry's own view keeps upstream's ``500``.
 
 Where the strict UTF-8 wire contract lives (and why not here)
 -------------------------------------------------------------

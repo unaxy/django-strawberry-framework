@@ -912,13 +912,15 @@ class _ValueBudget:
         validators it exists for take text. A numeric leaf is not measured here
         and is not claimed to be. What actually bounds a huge integer is CPython's
         own ``sys.get_int_max_str_digits`` conversion limit (4300 digits by
-        default): a variable's digits raise while the request body is parsed, and
-        a document literal's raise at the ``int()`` inside graphql-core's own
-        value coercion. Either way the request is refused rather than executed,
-        but it is refused as a malformed-input failure, not as a
-        package-configured resource rejection - stating the reach honestly is
-        the point, since a bound the package does not own is not a bound it can
-        promise.
+        default): JSON digits raise while the request's JSON is parsed, which the
+        package views and WebSocket consumer answer as unparseable JSON with
+        upstream's own refusal (``_json_decode.py::decode_json``), and a literal in
+        an ``Int``-typed position of the document raises at the ``int()`` inside
+        graphql-core's own value coercion during validation (an ``ID`` or ``Float``
+        position takes it). Either way the request is refused rather than
+        executed, but not as a package-configured resource rejection - stating
+        the reach honestly is the point, since a bound the package does not own
+        is not a bound it can promise.
 
         Both sizes are taken through the operation the type itself defines, not
         through a method the value carries. An in-process caller's

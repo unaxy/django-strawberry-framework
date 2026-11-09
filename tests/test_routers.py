@@ -7163,6 +7163,79 @@ async def test_a_stack_overflowing_document_is_refused_and_the_connection_ends(
     assert closed["reason"] == _INVALID_FRAME_CLOSE_REASON
 
 
+#: An integer literal one digit past CPython's default integer string conversion
+#: limit (``sys.get_int_max_str_digits``, 4300): ``json.loads`` refuses it with a
+#: plain ``ValueError``, not a ``json.JSONDecodeError``.
+_OVER_LIMIT_INTEGER = "9" * 4301
+
+#: Upstream's own ``graphql-transport-ws`` refusal of a frame that is not JSON
+#: (``handle_invalid_message`` on ``NonJsonMessageReceived``), re-typed like every
+#: other contract literal here.
+_NON_JSON_FRAME_CLOSE_REASON = "WebSocket message must be valid JSON"
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        pytest.param(
+            '{"type": "connection_init", "payload": {"x": ' + _OVER_LIMIT_INTEGER + "}}",
+            id="connection-init-payload",
+        ),
+        pytest.param(
+            '{"id": "1", "type": "subscribe", "payload": {"query": "{ __typename }", '
+            '"variables": {"x": ' + _OVER_LIMIT_INTEGER + "}}}",
+            id="subscribe-variables",
+        ),
+        pytest.param(_OVER_LIMIT_INTEGER, id="bare-scalar"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+async def test_an_over_limit_integer_frame_gets_upstreams_non_json_close(
+    frame: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``graphql-transport-ws``: a frame ``json.loads`` refuses by digit count is not JSON.
+
+    The consumer's ``decode_json`` re-raises the interpreter's ``ValueError`` as the
+    ``json.JSONDecodeError`` upstream's ``iter_json`` answers, so the close is
+    upstream's own ``4400`` / "WebSocket message must be valid JSON" - never the
+    internal-error close and its server-side failure record, which would blame the
+    server for the client's frame.
+    """
+    with caplog.at_level(logging.ERROR, logger="django_strawberry_framework"):
+        async with _open_ws(_router(), subprotocol=_TRANSPORT_WS) as communicator:
+            await communicator.send_to(text_data=frame)
+            closed, frames = await _drain_until_close(communicator)
+    assert frames == [], frames
+    assert closed["code"] == _INVALID_FRAME_CLOSE_CODE
+    assert closed["reason"] == _NON_JSON_FRAME_CLOSE_REASON
+    assert _package_logger_records(caplog) == []
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_an_over_limit_integer_frame_is_dropped_on_the_legacy_protocol(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Legacy ``graphql-ws`` drops a frame that is not JSON and keeps serving the socket.
+
+    Upstream's legacy handler iterates with ``ignore_parsing_errors=True``, so once
+    the consumer's ``decode_json`` reports the digit-limit refusal as a
+    ``json.JSONDecodeError`` the frame is dropped exactly like any other unparseable
+    one: no close, no frame, no server-side failure record, and the next operation on
+    the same socket is served.
+    """
+    with caplog.at_level(logging.ERROR, logger="django_strawberry_framework"):
+        async with _open_ws(_router(), subprotocol=_LEGACY_WS) as communicator:
+            await communicator.send_to(
+                text_data='{"id": "1", "type": "start", "payload": {"query": '
+                '"subscription { tick }", "variables": {"x": ' + _OVER_LIMIT_INTEGER + "}}}",
+            )
+            served = await _ws_operation(communicator, _TICK_SUBSCRIPTION, op_id="2")
+    assert served["type"] == "data", served
+    assert json_at(served, "payload", "data") == {"tick": "tock"}
+    assert _package_logger_records(caplog) == []
+
+
 @pytest.mark.parametrize("subprotocol", [_TRANSPORT_WS, _LEGACY_WS])
 @pytest.mark.django_db(transaction=True)
 async def test_a_non_string_query_delivered_over_a_socket_does_not_break_the_loop(

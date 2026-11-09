@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 452 done, 118 to do. The CHANGELOG entries filed here moved to
+Progress: 453 done, 117 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2065,6 +2065,22 @@ Progress: 452 done, 118 to do. The CHANGELOG entries filed here moved to
   PostgreSQL-tier
   `examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::test_an_array_filter_override_listing_the_whole_array_lookups_answers_each`.
   Docs: spec-027 Decisions 3 and 4, README, GLOSSARY `FilterSet`. Filed 829. CHANGELOGTODO 830
+- [x] 741. A JSON integer literal past CPython's int-digit limit (4301+ digits at the default; the limit is
+  runtime-configurable) anywhere a request's JSON is parsed now gets upstream's own refusal, in every
+  `APPLY_UPSTREAM_PATCHES` state: both package views answer HTTP 400 "Unable to parse request body as JSON" (POST body
+  in any position, GET `variables` / `extensions`, multipart `operations` / `map`, sync, async, under ASGI) instead of
+  a 500, and the package WebSocket consumer closes `graphql-transport-ws` 4400 "WebSocket message must be valid JSON"
+  (legacy `graphql-ws` drops the frame) instead of 1011 with a logged server failure. Both override Strawberry's
+  `decode_json` seam (`views.py::_RequestBodyBoundaryMixin.decode_json`, the consumer's in
+  `consumers.py::build_revalidating_consumer_class`) through `_json_decode.py::decode_json`, which turns only an exact
+  `ValueError` raised inside upstream's `BaseView.decode_json` into `json.JSONDecodeError` (no message match: the text
+  differs between 3.10 and 3.11+); a consumer `decode_json`'s own `ValueError` and a subclass pass through. The nested
+  `RecursionError` stays with `_strawberry_patches.py` (spec-046 Decision 9); Strawberry's own view keeps upstream's
+  answer; the inline query literal is Waiting 742. Research grid: 124 HTTP 500 cells to 400, 6 + 6 WebSocket cells, no
+  other move. Pinned by `examples/fakeshop/test_query/test_transport_api.py`'s over-limit integer rows,
+  `tests/test_routers.py`'s frame rows and `tests/test_views.py`'s `__cause__`, subclass and consumer-override rows.
+  Docs: spec-046, spec-047 Decision 13 (now scoped: a document literal fails only in an `Int` position), the view
+  docstrings, the KANBAN card 55 item, GLOSSARY `DjangoGraphQLView` and "Upstream patches". CHANGELOGTODO 831
 
 ## Outside review of the fixes
 
@@ -2105,12 +2121,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 741. A JSON request body holding an integer of 4301 or more digits anywhere (an unused variable, `extensions`)
-  answers HTTP 500 HTML on `DjangoGraphQLView`, DEBUG on and off: CPython's int-digits `ValueError` out of
-  `json.loads` escapes upstream's `except json.JSONDecodeError`, and `views.py::DjangoGraphQLView.parse_json` /
-  `_strawberry_patches.py::_patched_parse_json` translate the `UnicodeDecodeError` / `RecursionError` siblings but not
-  this one; the KANBAN row saying an oversized numeric literal is already refused and only its envelope is wrong does
-  not hold for this path, and the fix corrects that row in the same change. Found researching 673
 - [ ] 745. The finalizer's GlobalID encode-only audit
   (`types/finalizer.py::_audit_globalid_filter_strategies`) resolves each filter's original `field_name` against
   its wired owner, but a request first rebinds the leaf through its declared hops or an undeclared hop's face

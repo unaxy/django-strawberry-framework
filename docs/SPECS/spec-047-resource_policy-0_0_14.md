@@ -1130,10 +1130,16 @@ package-owned upload handler or streaming body reader, alongside
 
 **Not this layer — a configured bound on numeric literal size.** CPython's
 `sys.get_int_max_str_digits` (4,300) raises during JSON parsing or graphql-core's literal
-coercion, so an enormous integer literal *is* refused — but as a malformed-input failure, not as
-a typed resource rejection carrying this policy's code. A configured bound means a pre-coercion
-scan of the raw variables JSON, which duplicates the body cap's layer; `_charge_leaf` and
-[Edge cases](#edge-cases-and-constraints) document the behaviour rather than promising the bound.
+coercion, so an enormous integer literal in JSON or in an `Int`-typed position of the document
+is refused before execution, not as a typed resource rejection carrying this policy's code. In
+JSON — a variable, `extensions`, any other member of a body, GET parameter, multipart control
+document or WebSocket frame — the package views and the package WebSocket consumer answer it as
+unparseable JSON with upstream's own refusal (`_json_decode.py::decode_json`, spec-046
+Decision 9), whatever `APPLY_UPSTREAM_PATCHES` says. A literal in an `Int`-typed position of the
+document fails graphql-core's own `Int` coercion during validation; an `ID` or `Float` position
+takes it. A configured bound means a pre-coercion scan of the raw variables JSON, which
+duplicates the body cap's layer; `_charge_leaf` and [Edge cases](#edge-cases-and-constraints)
+document the behaviour rather than promising the bound.
 
 **Not this stage — what a custom scalar's `parse_value` returns.** The walk reads the RAW
 argument values a request carried: `execution_context.variables` as the transport decoded them,
@@ -1321,11 +1327,14 @@ check runs rather than about how long anything takes.
   multiplicatively as nested collections do.
 - **A large numeric literal is not measured by `max_scalar_bytes`**, which measures text
   because the superlinear parsers it exists for take text. What bounds a huge integer is
-  CPython's own `sys.get_int_max_str_digits` conversion limit (4,300 digits by default),
-  which raises while a variable's JSON body is parsed or at the `int()` inside graphql-core's
-  literal coercion. The request is refused either way, but as a malformed-input failure
-  rather than a typed resource rejection — a bound the package does not own is not a bound
-  it promises.
+  CPython's own `sys.get_int_max_str_digits` conversion limit (4,300 digits by default), which
+  raises while a variable's JSON body is parsed or at the `int()` inside graphql-core's
+  literal coercion of an `Int`-typed position. Either way the request is refused before
+  execution rather than as a typed resource rejection: in JSON as unparseable JSON with
+  upstream's own refusal, on every package mount and in every patch state, and as a document
+  literal in an `Int`-typed position by graphql-core's `Int` coercion during validation (an
+  `ID` or `Float` position takes it) — a bound the package does not own is not a bound it
+  promises.
 - **A subscription or mutation against a schema that defines no such root** charges no
   shape; its values are still charged, untyped.
 - **Only the named operation is charged** when `operationName` is supplied, for the shape
