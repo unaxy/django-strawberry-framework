@@ -266,7 +266,46 @@ def _declaration(kind: str) -> CharFilter:
     return CharFilter(field_name="code", widget=_LockedInput())
 
 
-def _copyable_schema(kind: str) -> DjangoSchema:
+def _expansion_override_filterset() -> type[FilterSet]:
+    """``ShelfFilter`` whose ``get_filters()`` adds ``code_is`` only over its expanded surface."""
+
+    class BranchFilter(FilterSet):
+        class Meta:
+            model = Branch
+            fields = {"name": ["exact"]}
+
+    class ShelfFilter(FilterSet):
+        branch = RelatedFilter(BranchFilter, field_name="branch")
+
+        class Meta:
+            model = Shelf
+            fields = []
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = OrderedDict(super().get_filters())
+            if "branch__name" in filters:
+                filters["code_is"] = CharFilter(
+                    field_name="code",
+                    method=_ClassLockHolder().code_is,
+                )
+            return filters
+
+    class BranchNode(DjangoType):
+        class Meta:
+            model = Branch
+            fields = ("id", "name")
+
+    del BranchNode
+    assert "code_is" not in ShelfFilter.base_filters
+    return ShelfFilter
+
+
+def _copyable_filterset(kind: str) -> type[FilterSet]:
+    if kind == "expansion-override":
+        return _expansion_override_filterset()
+
     class ShelfFilter(FilterSet):
         code_is = _declaration(kind)
 
@@ -282,12 +321,18 @@ def _copyable_schema(kind: str) -> DjangoSchema:
         ) -> QuerySet[Shelf]:
             return _code_is(queryset, name, value)
 
+    return ShelfFilter
+
+
+def _copyable_schema(kind: str) -> DjangoSchema:
+    filterset_cls = _copyable_filterset(kind)
+
     class ShelfNode(DjangoType):
         class Meta:
             model = Shelf
             fields = ("id", "code")
             interfaces = (relay.Node,)
-            filterset_class = ShelfFilter
+            filterset_class = filterset_cls
 
     @strawberry.type
     class Query:
@@ -305,11 +350,16 @@ def _copyable_schema(kind: str) -> DjangoSchema:
         "plain-function",
         "logger",
         "widget-lock",
+        "expansion-override",
     ],
 )
 @pytest.mark.django_db
 def test_a_copyable_declared_filter_answers_a_real_filtered_request(kind: str) -> None:
-    """A copied callback or widget keeps the requested predicate and excludes the other shelf."""
+    """A copied callback or widget keeps the requested predicate and excludes the other shelf.
+
+    The filter is declared on the set, or added by a ``get_filters()`` override only once
+    the surface is expanded, which the build's copy audit asks on the published table.
+    """
     branch = Branch.objects.create(name="Copyable declarations")
     Shelf.objects.create(branch=branch, code="a")
     Shelf.objects.create(branch=branch, code="b")

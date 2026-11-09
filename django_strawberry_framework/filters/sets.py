@@ -3305,8 +3305,9 @@ def _expand_related_filter(
     deep-copied onto the parent under ``<filter_name>__<child name>`` with
     ``field_name`` rebound to the relation path, so the target filterset's own
     instances are never mutated. A child filter a deep copy refuses is refused
-    by name (``filters/base.py::copied_declared_filter``): a child set the
-    schema reaches only through ``f`` is probed nowhere else. A child filter
+    by name (``filters/base.py::copied_declared_filter``), naming ``f``: a surface a
+    child contributes along a path it reaches back into is published in no table of
+    its own, so the finalizer's copy audit never sees it. A child filter
     whose behavior the child filter set owns (``_owner_bound_child``) is copied
     as a ``ProjectedChildFilter`` instead, since a rebind cannot carry a
     ``method=``, any other ``filter`` the child filter holds of its own, or a

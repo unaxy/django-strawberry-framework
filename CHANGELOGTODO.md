@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 202 to do.
+Progress: 0 done, 203 to do.
 
 ## From dry-0_0_15_3
 
@@ -926,6 +926,13 @@ Progress: 0 done, 202 to do.
   `filter` override) is no longer refused, nor a declared re-entry that decodes against a decodable secondary; the
   message names the serving filterset, the request key, the declaring filter and the `RelatedFilter` path; a refused
   leaf's `null` and `[]` requests, which served, go with it
+- [ ] 835. CHANGELOG entry for item 746: a filter a `FilterSet.get_filters()` override publishes over the expanded
+  `RelatedFilter` surface (added, borrowed, re-keyed or edited in place) is now checked at `finalize_django_types()`
+  like a declared one: if a deep copy refuses it (a `method=` bound to an object holding a lock, a lock in `extra`),
+  the build raises a `ConfigurationError` naming the set, the published key and the `RelatedFilter` path, where it
+  raised an unnamed `TypeError` inside the build or on every filtered request; an in-place edit to a copied
+  `RelatedFilter` head or a hidden flat copy is refused too, since django-filter's own constructor copies the whole
+  published table; a lock-holding declaration the override removes from the published table now builds
 
 ## From dry-upstream-0_0_15
 

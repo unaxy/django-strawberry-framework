@@ -19,9 +19,11 @@ Covers:
   package was never imported (subprocess test pins the cycle-safe
   contract per spec-027 Decision 9).
 - Unresolved ``RelatedFilter`` propagates as ``ConfigurationError``.
-- A declared filter a deep copy refuses fails the build naming its set and
-  attribute (a served set's by the subpass-1.5 probe, an unserved
-  ``RelatedFilter`` child's by the expansion copy).
+- A filter a deep copy refuses fails the build naming its set and the key its
+  table publishes it under (every published table a served set reaches by the
+  subpass-2.5 copy audit, with the ``RelatedFilter`` path for a reached set, a
+  ``get_filters()`` override's additions and in-place edits included; an unserved
+  ``RelatedFilter`` child's by the expansion copy when it copies first).
 - A declared leaf whose ``field_name`` and ``lookup_expr`` Django resolves on no
   queryset is refused when its set publishes, under every serving shape (a relation
   key's lookup asked of the relation, to-one or to-many), while the shapes Django
@@ -2849,6 +2851,11 @@ class _InstanceLockHolder:
     ) -> QuerySet[Shelf]:
         return _code_is(queryset, name, value)
 
+    def shelves(self, request: object) -> QuerySet[Shelf]:
+        """A request-aware ``queryset=`` callable bound to the instance."""
+        del request
+        return Shelf.objects.all()
+
 
 class _CacheHolder:
     """A service holding Django's default cache handler on the instance."""
@@ -2983,9 +2990,9 @@ def test_finalize_refuses_a_declared_filter_a_deep_copy_refuses(
     django-filter deep-copies every declared filter into each request's
     ``FilterSet``, so such a filter could serve no request (a ``ListFilter``
     builds without a copy and would fail every filtered request instead).
-    Subpass 1.5 copies each declared filter once and refuses the first, naming
-    the set, the attribute and the filter's class, the copy's error kept as
-    ``__cause__``.
+    Subpass 2.5 copies each filter of the published table once and refuses the
+    first, naming the set, the attribute and the filter's class, the copy's error
+    kept as ``__cause__``.
     """
     _ = _wire_shelf_type(_shelf_filter(declare()))
 
@@ -3031,9 +3038,9 @@ def test_finalize_refuses_a_related_child_filter_a_deep_copy_refuses() -> None:
     """A ``RelatedFilter`` child set no type serves is refused by its expansion copy.
 
     The child set is reached only through the served set's ``RelatedFilter``,
-    so the probe of served sets never copies its filters; the expansion copy
-    refuses the filter naming the child set, its attribute and the
-    ``RelatedFilter`` it was reached through.
+    whose expansion copies its filters during subpass 2, before the subpass-2.5
+    audit asks the child's own table: the expansion copy refuses the filter naming
+    the child set, its attribute and the ``RelatedFilter`` it was reached through.
     """
     shelf_filter = _shelf_filter(
         CharFilter(field_name="code", method=_InstanceLockHolder().code_is),
@@ -3065,6 +3072,473 @@ def test_finalize_refuses_a_related_child_filter_a_deep_copy_refuses() -> None:
     cause = exc_info.value.__cause__
     where = f"ShelfFilter.code_is (reached through RelatedFilter {BookFilter.__qualname__}.shelf)"
     assert str(exc_info.value) == _copy_refusal(where, "CharFilter", cause, has_method=True)
+
+
+_Reshape = Callable[[OrderedDict[str, Filter]], None]
+
+
+class _LockedShelfChoice(ModelChoiceFilter):
+    """A ``ModelChoiceFilter`` whose rows come from ``get_queryset``, read through a lock holder.
+
+    No ``queryset=`` is passed, so no form field is built for it at schema build.
+    """
+
+    def __init__(self, *, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        self.holder: _InstanceLockHolder = _InstanceLockHolder()
+
+    @override
+    def get_queryset(self, request: HttpRequest | None) -> QuerySet[Shelf]:
+        return self.holder.shelves(request)
+
+
+def _add_a_locked_filter(filters: OrderedDict[str, Filter]) -> None:
+    filters["topic_is"] = CharFilter(
+        field_name="shelf__topic",
+        method=_InstanceLockHolder().code_is,
+    )
+
+
+def _add_a_locked_choice(filters: OrderedDict[str, Filter]) -> None:
+    filters["shelf_is"] = _LockedShelfChoice(field_name="shelf")
+
+
+def _borrow_a_locked_head(filters: OrderedDict[str, Filter]) -> None:
+    """Publish a donor set's ``RelatedFilter`` head, its ``method=`` over a lock, under a flat copy's key."""
+
+    class DonorFilter(FilterSet):
+        shelf = RelatedFilter(
+            _shelf_filter(CharFilter(field_name="code")),
+            field_name="shelf",
+            method=_InstanceLockHolder().code_is,
+        )
+
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"]}
+
+    filters["shelf__code_is"] = DonorFilter.base_filters["shelf"]
+
+
+def _lock_a_declared_filter(filters: OrderedDict[str, Filter]) -> None:
+    filters["title_is"].method = _InstanceLockHolder().code_is
+
+
+def _lock_a_flat_copy(filters: OrderedDict[str, Filter]) -> None:
+    filters["shelf__code_is"].extra["help_text"] = threading.Lock()
+
+
+_PUBLISHED_ONLY = [
+    pytest.param(_add_a_locked_filter, "topic_is", "CharFilter", True, id="added"),
+    pytest.param(
+        _add_a_locked_choice,
+        "shelf_is",
+        "_LockedShelfChoice",
+        False,
+        id="added-choice-no-form-field-copies",
+    ),
+    pytest.param(
+        _borrow_a_locked_head,
+        "shelf__code_is",
+        "RelatedFilter",
+        True,
+        id="borrowed-head-under-a-flat-copy-key",
+    ),
+    pytest.param(_lock_a_declared_filter, "title_is", "CharFilter", True, id="declared-edited"),
+    pytest.param(_lock_a_flat_copy, "shelf__code_is", "CharFilter", False, id="flat-copy-edited"),
+]
+
+
+@pytest.mark.parametrize(
+    (
+        "reshape",
+        "key",
+        "kind",
+        "has_method",
+    ),
+    _PUBLISHED_ONLY,
+)
+def test_finalize_refuses_a_published_filter_a_deep_copy_refuses(
+    reshape: _Reshape,
+    key: str,
+    kind: str,
+    *,
+    has_method: bool,
+) -> None:
+    """A filter a ``get_filters()`` override publishes over the expanded surface is probed.
+
+    The class-creation ``base_filters`` never holds it: the override adds, borrows or
+    edits it only once ``super().get_filters()`` returns the expanded surface, which
+    is the table every request copies. The build copies that published table and
+    refuses the filter by the key it is published under, before the input build
+    copies any form field (a ``get_queryset`` choice builds none) and before a request.
+    """
+    shelf_filter = _shelf_filter(CharFilter(field_name="code"))
+
+    class BookFilter(FilterSet):
+        shelf = RelatedFilter(shelf_filter, field_name="shelf")
+        title_is = CharFilter(field_name="title", method=_code_is)
+
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = super().get_filters()
+            if "shelf__topic" in filters:
+                reshape(filters)
+            return filters
+
+    assert "shelf__topic" not in BookFilter.base_filters
+    _ = _relay_node(Shelf, ("id", "code"), None)
+    _ = _relay_node(Book, ("id", "title"), BookFilter)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    cause = exc_info.value.__cause__
+    where = f"{BookFilter.__qualname__}.{key}"
+    assert str(exc_info.value) == _copy_refusal(where, kind, cause, has_method=has_method)
+
+
+def _lock_a_copied_head(filters: OrderedDict[str, Filter]) -> None:
+    filters["shelf__branch"].extra["help_text"] = threading.Lock()
+
+
+def _lock_a_hidden_flat_copy(filters: OrderedDict[str, Filter]) -> None:
+    filters["shelf__code_is"].method = _InstanceLockHolder().code_is
+
+
+def _lock_a_hidden_flat_copy_extra(filters: OrderedDict[str, Filter]) -> None:
+    filters["shelf__code_is"].extra["help_text"] = threading.Lock()
+
+
+_UNNAMED_COPIES = [
+    pytest.param(
+        _lock_a_copied_head,
+        "shelf__branch",
+        "RelatedFilter",
+        False,
+        False,
+        id="copied-head-edited",
+    ),
+    pytest.param(
+        _lock_a_hidden_flat_copy,
+        "shelf__code_is",
+        "CharFilter",
+        True,
+        True,
+        id="hidden-flat-copy-edited",
+    ),
+    pytest.param(
+        _lock_a_hidden_flat_copy_extra,
+        "shelf__code_is",
+        "CharFilter",
+        False,
+        True,
+        id="hidden-flat-copy-extra-edited",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    (
+        "reshape",
+        "key",
+        "kind",
+        "has_method",
+        "hide",
+    ),
+    _UNNAMED_COPIES,
+)
+def test_finalize_refuses_an_edited_copy_no_graphql_key_names(
+    reshape: _Reshape,
+    key: str,
+    kind: str,
+    *,
+    has_method: bool,
+    hide: bool,
+) -> None:
+    """A copy the schema publishes under no GraphQL key, edited in place, is refused too.
+
+    A copied ``RelatedFilter`` head and a flat copy ``HIDE_FLAT_FILTERS`` hides are
+    deferred on a pipeline-built instance, but django-filter's own constructor copies
+    the published table whole on every other construction (a raw ``FilterSet(data)``,
+    ``DjangoFilterBackend``), so a table holding one a deep copy refuses is refused by
+    the key it is published under.
+    """
+
+    class BranchFilter(FilterSet):
+        class Meta:
+            model = Branch
+            fields = {"id": ["exact"]}
+
+    class ShelfFilter(FilterSet):
+        code_is = CharFilter(field_name="code")
+        branch = RelatedFilter(BranchFilter, field_name="branch")
+
+        class Meta:
+            model = Shelf
+            fields = {"topic": ["exact"]}
+
+    class BookFilter(FilterSet):
+        shelf = RelatedFilter(ShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = super().get_filters()
+            if key in filters:
+                reshape(filters)
+            return filters
+
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": hide}):
+        _ = _relay_node(Branch, ("id", "name"), None)
+        _ = _relay_node(Shelf, ("id", "code"), None)
+        _ = _relay_node(Book, ("id", "title"), BookFilter)
+        with pytest.raises(ConfigurationError) as exc_info:
+            finalize_django_types()
+    cause = exc_info.value.__cause__
+    where = f"{BookFilter.__qualname__}.{key}"
+    assert str(exc_info.value) == _copy_refusal(where, kind, cause, has_method=has_method)
+
+
+def _locked(filters: OrderedDict[str, Filter], *, lap: str) -> OrderedDict[str, Filter]:
+    """``filters`` with a locked ``locked`` filter added when they hold ``lap``."""
+    if lap in filters:
+        filters["locked"] = CharFilter(field_name="pk", method=_InstanceLockHolder().code_is)
+    return filters
+
+
+def test_finalize_refuses_a_reached_filter_only_its_own_table_holds_naming_its_path() -> None:
+    """A set reached around a cycle is probed on its own published table.
+
+    ``ShelfFilter`` reaches back to ``BookFilter``, so ``BookFilter``'s expansion copies
+    the surface ``ShelfFilter`` contributes along that path, which ends at the lap and
+    lacks the key the override waits for; only ``ShelfFilter``'s own table, which every
+    request through the nested ``shelf`` branch copies, holds the locked filter. The
+    refusal names the set, the key and the ``RelatedFilter`` it was reached through.
+    """
+    later: dict[str, type[FilterSet]] = {}
+
+    class ShelfFilter(FilterSet):
+        books = RelatedFilter(lambda: later["book"], field_name="books")
+
+        class Meta:
+            model = Shelf
+            fields = {"id": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            return _locked(super().get_filters(), lap="books__shelf__id")
+
+    class BookFilter(FilterSet):
+        shelf = RelatedFilter(ShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = Book
+            fields = {"id": ["exact"]}
+
+    later["book"] = BookFilter
+    _ = _relay_node(Shelf, ("id", "code"), None)
+    _ = _relay_node(Book, ("id", "title"), BookFilter)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    assert "shelf__locked" not in BookFilter._filter_table()
+    cause = exc_info.value.__cause__
+    where = f"{ShelfFilter.__qualname__}.locked (reached through RelatedFilter BookFilter.shelf)"
+    assert str(exc_info.value) == _copy_refusal(where, "CharFilter", cause, has_method=True)
+
+
+def test_finalize_refuses_a_filter_two_branches_down_naming_both() -> None:
+    """A set reached across two ``RelatedFilter`` branches is named with both, outermost first."""
+    later: dict[str, type[FilterSet]] = {}
+
+    class BranchFilter(FilterSet):
+        shelves = RelatedFilter(lambda: later["shelf"], field_name="shelves")
+
+        class Meta:
+            model = Branch
+            fields = {"id": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            return _locked(super().get_filters(), lap="shelves__branch__id")
+
+    class ShelfFilter(FilterSet):
+        branch = RelatedFilter(BranchFilter, field_name="branch")
+
+        class Meta:
+            model = Shelf
+            fields = {"id": ["exact"]}
+
+    class BookFilter(FilterSet):
+        shelf = RelatedFilter(ShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = Book
+            fields = {"id": ["exact"]}
+
+    later["shelf"] = ShelfFilter
+    _ = _relay_node(Branch, ("id", "name"), None)
+    _ = _relay_node(Shelf, ("id", "code"), None)
+    _ = _relay_node(Book, ("id", "title"), BookFilter)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    cause = exc_info.value.__cause__
+    where = (
+        f"{BranchFilter.__qualname__}.locked (reached through RelatedFilter BookFilter.shelf, "
+        "then ShelfFilter.branch)"
+    )
+    assert str(exc_info.value) == _copy_refusal(where, "CharFilter", cause, has_method=True)
+
+
+def test_finalize_refuses_a_filter_three_branches_down_naming_each() -> None:
+    """A set reached across three ``RelatedFilter`` branches is named with each, outermost first."""
+    later: dict[str, type[FilterSet]] = {}
+
+    class BranchFilter(FilterSet):
+        shelves = RelatedFilter(lambda: later["shelf"], field_name="shelves")
+
+        class Meta:
+            model = Branch
+            fields = {"id": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            return _locked(super().get_filters(), lap="shelves__branch__id")
+
+    class ShelfFilter(FilterSet):
+        branch = RelatedFilter(BranchFilter, field_name="branch")
+
+        class Meta:
+            model = Shelf
+            fields = {"id": ["exact"]}
+
+    class BookFilter(FilterSet):
+        shelf = RelatedFilter(ShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = Book
+            fields = {"id": ["exact"]}
+
+    class LoanFilter(FilterSet):
+        book = RelatedFilter(BookFilter, field_name="book")
+
+        class Meta:
+            model = Loan
+            fields = {"id": ["exact"]}
+
+    later["shelf"] = ShelfFilter
+    _ = _relay_node(Branch, ("id", "name"), None)
+    _ = _relay_node(Shelf, ("id", "code"), None)
+    _ = _relay_node(Book, ("id", "title"), None)
+    _ = _relay_node(Loan, ("id",), LoanFilter)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    cause = exc_info.value.__cause__
+    where = (
+        f"{BranchFilter.__qualname__}.locked (reached through RelatedFilter LoanFilter.book, "
+        "then BookFilter.shelf, then ShelfFilter.branch)"
+    )
+    assert str(exc_info.value) == _copy_refusal(where, "CharFilter", cause, has_method=True)
+
+
+def test_finalize_builds_a_set_whose_override_drops_a_filter_no_copy_takes() -> None:
+    """A filter the override removes from the published table is never copied, so it builds.
+
+    The class-creation ``base_filters`` holds the locked declaration; the table the set
+    publishes, which every request copies, does not.
+    """
+
+    class BranchFilter(FilterSet):
+        class Meta:
+            model = Branch
+            fields = {"id": ["exact"]}
+
+    class ShelfFilter(FilterSet):
+        code_is = CharFilter(field_name="code", method=_InstanceLockHolder().code_is)
+        branch = RelatedFilter(BranchFilter, field_name="branch")
+
+        class Meta:
+            model = Shelf
+            fields = {"id": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = super().get_filters()
+            if "branch__id" in filters:
+                del filters["code_is"]
+            return filters
+
+    assert "code_is" in ShelfFilter.base_filters
+    _ = _relay_node(Branch, ("id", "name"), None)
+    _ = _relay_node(Shelf, ("id", "code"), ShelfFilter)
+
+    finalize_django_types()
+
+    assert "code_is" not in ShelfFilter._filter_table()
+
+
+def _locked_method_filter() -> CharFilter:
+    return CharFilter(field_name="title", method=_InstanceLockHolder().code_is)
+
+
+def _locked_extra_filter() -> CharFilter:
+    return CharFilter(field_name="title", help_text=threading.Lock())
+
+
+@pytest.mark.parametrize(
+    ("declare", "has_method"),
+    [
+        pytest.param(_locked_method_filter, True, id="method"),
+        pytest.param(_locked_extra_filter, False, id="extra"),
+    ],
+)
+def test_finalize_refuses_an_uncopyable_filter_before_an_unregistered_target(
+    declare: Callable[[], CharFilter],
+    *,
+    has_method: bool,
+) -> None:
+    """The copy audit runs first among the published-table audits.
+
+    ``BookFilter``'s own filter holds a lock (on its ``method=``, or in its ``extra``) and
+    its ``RelatedFilter`` target model has no registered type: the build names the filter
+    no request can copy, not the target.
+    """
+
+    class ShelfFilter(FilterSet):
+        class Meta:
+            model = Shelf
+            fields = {"id": ["exact"]}
+
+    class BookFilter(FilterSet):
+        shelf = RelatedFilter(ShelfFilter, field_name="shelf")
+        code_is = declare()
+
+        class Meta:
+            model = Book
+            fields = {"id": ["exact"]}
+
+    _ = _relay_node(Book, ("id", "title"), BookFilter)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    cause = exc_info.value.__cause__
+    where = f"{BookFilter.__qualname__}.code_is"
+    assert str(exc_info.value) == _copy_refusal(where, "CharFilter", cause, has_method=has_method)
 
 
 # ---------------------------------------------------------------------------

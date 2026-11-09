@@ -32,8 +32,9 @@ without rewriting the walk: it hands the walk the path Django walks for a leaf
    follow runtime routing (`_leaf_chain`, `_bound_terminal`, undeclared-hop re-entry) for wired sets too, and must skip
    consumer decoders (`_decodes_before_binding`). 216 may not ship a gap with a follow-up card (AGENTS root-cause
    rule), so it builds on 745's audit and changes no GlobalID code (D3).
-7. **(2026-11-03) The copy-probe completion gap is tracker item 746.** It predates `flat=False`. D3's coverage claim is
-   parity with HEAD.
+7. **(2026-11-03) The copy-probe completion gap is tracker item 746.** It predates `flat=False`. As 746 lands it, the
+   subpass-2.5 copy audit (`types/finalizer.py::_audit_filter_copies`) copies every filter of every published table a
+   wired set serves (`filters/inputs.py::_served_reach`), so 216 adds no deep-copy probe (D3).
 
 Items 729, 745, 746 and 748 to 757 were filed in `26ab8295`. This plan is committed so the item's next agent starts
 from v7; the landing commit deletes it.
@@ -175,44 +176,36 @@ from v7; the landing commit deletes it.
 
 ## D3: validation that expansion supplies today (implementation constraint)
 
-### Deep-copy probe
+### Deep-copy probe: built on 746 (ruling 7)
 
-- **Where (v6 reuse).** Inside the existing loop in `FilterSet.get_filters::_build_in_scope` that already calls
-  `target._filter_table()` for each retained target. The loop iterates `.items()` to keep the attribute name, keeps
-  the returned table, and, for a disabled declaration, probes each entry with `not _is_flat_copy(target, f)`.
-  - It is the third caller of `filters/base.py::copied_declared_filter`, which owns the refusal text, `__cause__` and
-    `via` rendering. No message builder is added.
-  - `via = f"{truth.qualname(path[-1])}.{filter_name}"` is hoisted from `_expand_related_filter` into one helper
-    (`_declaration_via`), so "(reached through RelatedFilter Owner.attr)" has one spelling.
-  - `_expansion_record(f) is None` is wrong as the predicate: a filter a `get_filters()` override borrows keeps its
-    record but is the borrowing set's own (`_is_flat_copy` docstring).
-- **Mid-build targets are probed (v6 trace).** v6 skipped a target mid-build at the loop. At HEAD that target's own
-  entries are probed by its enabled copy; with the copy gone, the skip drops them. The trace's cycle matrix (a
-  three-set ring, all eight disabled subsets, three roots; a two-set cycle, four subsets, two roots) missed own probes
-  in 16 of 32 rows with the skip and in none without it. A direct build of an unwired cyclic set then raised a raw
-  `TypeError: cannot pickle '_thread.lock' object` on first use where HEAD raised `ConfigurationError` at build.
-  - The probe therefore runs for a disabled declaration whatever the target's build state. The publish loop's own
-    mid-build skip stays.
-  - R1 confirms reading a mid-build target's `_filter_table()` there starts no re-entrant build and returns its own
-    entries.
-- **Work unit.** One disabled declaration per declaring-set build. Two disabled declarations into one set probe its
-  own entries twice, which is accepted.
-- **Coverage claim: parity with HEAD (ruling 7).** Every own entry HEAD probes, through subpass 1.5 or an enabled
-  declaration's expansion copy, is still probed under any flag combination. Entries HEAD never probes (item 746) stay
-  unprobed; 216 neither fixes nor widens that gap. The trace confirmed parity for nested (enabled then disabled), lazy
-  string targets, and override-added entries under an incoming edge.
-- **Enabled declarations keep the expansion probe unchanged.**
-- **One target reached through both a disabled and an enabled declaration** names `via` by build order. Rows assert
-  the set and attribute, not `via`.
+- **No third caller.** A disabled declaration copies nothing, but its target stays served: the published table keeps
+  the declared `RelatedFilter` head, which `_served_reach` follows (the precondition the GlobalID audit below states),
+  and 746's copy audit copies that target's published table after every set has published. So every entry a request
+  copies is still copied at build under any flag combination, a cyclic target mid-build included (the audit runs after
+  subpass 2, when no build is in flight), and `filters/base.py::copied_declared_filter` keeps its two callers. No
+  `_declaration_via` helper is hoisted.
+- **Message.** A target reached only through a disabled declaration is refused by the audit, naming the path from the
+  served set (`(reached through RelatedFilter A.b, then B.c)`), whatever the build order; through an enabled
+  declaration the expansion copy may refuse it first, naming that one declaration. Rows assert the set, the key and
+  the path the audit prints.
+- **Precondition, stated for R1 to verify.** `_served_reach` reaches a disabled declaration's target: one reached only
+  through disabled declarations, nested two deep (wired W, enabled into A, A disabled into B), and the two-set cycle
+  with each edge disabled in turn, each with a lock on the target's own entry and on an override-added one.
+- **Enabled declarations keep the expansion copy unchanged.**
+- **One target reached through both a disabled and an enabled declaration** is named by whichever copy refuses first.
+  Rows assert the set and the key, not the path.
+- **A set no schema serves is not probed** (spec-027 Decision 6, as 746 leaves it): a direct `get_filters()` build of
+  an unwired set outside `finalize_django_types()` copies nothing through a disabled declaration and raises
+  django-filter's own `TypeError` on first use, as any set nothing the schema reaches does.
 - **Rows (v6 reuse: parameters of existing tests).**
   - `tests/filters/test_finalizer.py::test_finalize_refuses_a_related_child_filter_a_deep_copy_refuses` is
-    parametrized over `flat`, keeping its "(reached through RelatedFilter BookFilter.shelf)" pin, and gains the
-    borrowed-head parameter (a `get_filters()` override borrowing a donor filter under `shelf__branch`). It reuses
-    `_InstanceLockHolder` and `_shelf_filter`.
-  - (v6 trace) Cycle rows, direct builds of an unwired cyclic set: the two-set cycle with the lock on the root and the
-    back-edge disabled, refused naming the disabled edge's `via`; the same with the lock on an override-added root
-    entry.
-  - (v6 trace) The nested row: wired W, enabled into A, A disabled into B, lock on B, refused naming `A.<attr>`.
+    parametrized over `flat`: enabled, its "(reached through RelatedFilter BookFilter.shelf)" pin; disabled, the
+    audit's path (`_served_reach` spells a step with the set's name, the expansion copy with its qualified name). It
+    reuses `_InstanceLockHolder` and `_shelf_filter`.
+  - (v6 trace) Cycle rows, finalized: the two-set cycle with the lock on the unwired side and the back-edge disabled,
+    refused naming the audit's path; the same with the lock on an override-added entry.
+  - (v6 trace) The nested row: wired W, enabled into A, A disabled into B, lock on B, refused naming
+    `(reached through RelatedFilter W.<attr>, then A.<attr>)`.
   - (v6 trace) A disabled declaration with an invalid target (no `Meta.model`, or an uncorrelated model) still
     raises its `ConfigurationError` at build.
 
@@ -252,7 +245,7 @@ from v7; the landing commit deletes it.
 | `FilterSet._expand_along` | The only reader of `flat`. Validates every declaration, copies enabled ones. |
 | `_expand_related_filter`, `_filters_along` | Unchanged callees. `_expand_related_filter` takes one declaration; `_filters_along`'s reach test reads all. |
 | `_reachable_filtersets` | Unchanged: all declarations (v3 review). R1 measures build cost on the seven-set graph with reverse edges disabled (v6 reuse: disabled edges keep every set reachable, which can defeat `_filters_along`'s `target._filter_table()` shortcut). A visible cost restricts it through the same `flat` read, pinned by a structural row (`_expand_along` call count or `scope.surfaces` size). Its docstring's "as `FilterSet._expand_along` does" is corrected. |
-| `FilterSet.get_filters` target-publication loop | All retained targets, plus the disabled-declaration probe, mid-build targets included. |
+| `FilterSet.get_filters` target-publication loop | All retained targets. |
 | `reject_captured_branches` / `_target_reaches` | All declarations. |
 | `should_cache_expansion` | Every declaration, disabled included: a disabled lazy target still blocks caching. |
 | Finalizer registered-target audit | All declarations, unchanged. |
@@ -399,8 +392,7 @@ from v7; the landing commit deletes it.
 ## Research (R1, `opus-high`, private clone, after 745 lands)
 
 - **Rebase.** Every cited symbol, docstring, pin and test at the base; items 537, 538 and 681 against D2 and D3.
-- **Deep copy.** The mid-build probe starts no re-entrant build; the probed-entry sets equal HEAD's on the trace's
-  cycle matrix, the nested shape and the borrowed head. The probe's build-time cost.
+- **Deep copy.** D3's precondition against 746's landed audit, on the trace's cycle matrix and the nested shape.
 - **`_reachable_filtersets` cost.** The seven-set graph with reverse edges disabled, paired, warmed, alternated
   against the all-enabled graph.
 - **GlobalID precondition.** D3's statement against 745's landed audit, with all three rows.
@@ -427,10 +419,7 @@ from v7; the landing commit deletes it.
   row), a construction failure (killed by a construction row), or equivalent (documented, with no unpinned branch).
   - a disabled declaration still expands (valid schema);
   - an enabled one is skipped (valid schema);
-  - the deep-copy probe is skipped for a disabled declaration (construction);
-  - the probe uses record absence instead of `_is_flat_copy` (construction, by the borrowed row);
-  - (v6 trace) the probe skips mid-build targets (construction, by the cycle rows);
-  - (v6 trace) the probe runs only in the root build, not nested publishes (construction, by the nested row);
+  - the copy audit's reach stops at a disabled declaration's head (construction, by the D3 rows);
   - (v6 trace) the skip moves above `_require_relation_path` / `_require_correlated_target` (construction, by the
     invalid-target row);
   - the GlobalID audit reads only copies, so a disabled declaration escapes it (construction, by the D3 rows);
@@ -453,20 +442,15 @@ from v7; the landing commit deletes it.
     `RelatedFilter` term and in `docs/README.md`.
   - The path rule and cap accounting: the `FilterSet.get_filters` docstring and spec-027 Decision 3 Layer 4. The raise
     site's accounting goes in the `_expand_along` docstring.
-  - Who probes what for deep copy: the `copied_declared_filter` docstring, one clause naming its three callers.
 - **Pointer sites:**
   - spec-027: the `HIDE_FLAT_FILTERS` paragraph's last sentence; the `MAX_FLAT_FILTERS` paragraph and remedy (the
-    override exclusion included); Decision 6's deep-copy probe; the Subpass 1.5 checklist line ("probed by its
-    expansion copy" becomes "probed where its declaration is built"); the "Circular RelatedFilter cycles" edge case
+    override exclusion included); the "Circular RelatedFilter cycles" edge case
     (one clause, "except through a declaration marked `flat=False`, which copies nothing"); Test plan and DoD get
     test-file pointers only.
   - Checks: the spec-027 rationale companion; spec-051's flat-copy mention and its two test citations; spec-031
     Decision 13 and spec-027 Decision 6, as 745 left them, assume no copies exist.
   - spec-028: the Layer 4 sentence.
-  - `types/finalizer.py::_audit_filter_copies` and `_bind_filtersets`: "probed by its expansion copy" becomes "probed
-    where its declaration is built, see `filters/base.py::copied_declared_filter`".
   - `filters/sets.py::_reachable_filtersets`: it follows every declaration, `flat=False` included.
-  - `filters/sets.py::_expand_related_filter`: only if `_declaration_via` is hoisted from it.
   - `conf.py`: the HIDE comment (D4) and the `MAX_FLAT_FILTERS` comment naming `flat=False` as a remedy.
 - **Consumer docs:** `docs/README.md` gets the opt-out, reachable from the root README. It says:
   - flat and nested differ in meaning, so `flat=False` removes a capability;
@@ -497,7 +481,6 @@ from v7; the landing commit deletes it.
   surfaces are the only guard.
 - **The 745 dependency.** 216 cannot start R1 until 745 lands. If 745's audit does not meet D3's precondition, the
   plan is revised, not shipped with a gap.
-- **Mid-build probing** reads a table during a build. R1 proves it is not re-entrant before implementation.
 - **`_reachable_filtersets` cost** on dense graphs with disabled reverse edges. R1 measures it.
 - **Rebase drift.** 745 will touch the finalizer and the GlobalID resolvers. R1 rechecks every citation first.
 

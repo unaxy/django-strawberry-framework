@@ -1193,7 +1193,11 @@ def copied_declared_filter(
     class and carries the copy's own error as ``__cause__``. A filter whose ``method``
     itself refuses the copy is told the spellings a copy keeps (a FilterSet method's
     name, a plain function); any other is told to keep the object off the filter.
-    ``via`` names the ``RelatedFilter`` the filter was reached through, when it was.
+    ``via`` names the ``RelatedFilter`` attributes the filter was reached through,
+    outermost first and joined by ``, then``, when it was. Two callers copy: the
+    finalizer's audit of every published table a wired set serves
+    (``types/finalizer.py::_audit_filter_copies``) and a ``RelatedFilter`` expansion,
+    naming the one declaration it copies through (``filters/sets.py::_expand_related_filter``).
     """
     try:
         return copy.deepcopy(filter_instance)

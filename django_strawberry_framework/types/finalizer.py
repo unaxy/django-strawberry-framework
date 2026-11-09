@@ -19,18 +19,18 @@ decoration touches a consumer-facing class:
 - Phase 2.5: ``apply_interfaces`` injects ``Meta.interfaces`` entries into
   ``cls.__bases__``; types that resolve to ``relay.Node`` (either via
   ``Meta.interfaces`` or direct inheritance) are gated against composite
-  primary keys and receive the four ``resolve_*`` defaults Strawberry's
-  Relay interface expects. ``_synthesize_relation_connections`` then attaches
-  the ``<field>_connection`` siblings for eligible many-side relations per
+  primary keys and receive the four ``resolve_*`` defaults Strawberry's Relay
+  interface expects. ``_synthesize_relation_connections`` then attaches the
+  ``<field>_connection`` siblings for eligible many-side relations per
   ``Meta.relation_shapes`` (spec-032 Decision 6) before the sidecar binding
-  runs. ``_bind_filtersets`` then runs ordered subpasses (bind owners,
-  probe every filter's deep copy, expand filtersets, reject orphan
-  ``filter_input_type`` references, materialize input classes) per spec-027 Decision 6
-  - every subpass MUST complete across all wired types
-  before the next subpass starts so cross-filterset references resolve
-  against bound owners regardless of registration order. Runs before
-  Phase 3 so the ``strawberry.type`` decorator sees the mutated bases
-  AND the materialized input-class module globals.
+  runs. ``_bind_filtersets`` then runs ordered subpasses (bind owners, expand
+  filtersets, audit the published tables, every filter's deep copy first,
+  reject orphan ``filter_input_type`` references, materialize input classes)
+  per spec-027 Decision 6 - every subpass MUST complete across all wired
+  types before the next subpass starts so cross-filterset references resolve
+  against bound owners regardless of registration order. Runs before Phase 3
+  so the ``strawberry.type`` decorator sees the mutated bases AND the
+  materialized input-class module globals.
 - Phase 3: ``strawberry.type(cls, name=..., description=...)`` decorates
   each type and sets ``definition.finalized = True``.
 
@@ -1630,10 +1630,8 @@ class _SidecarBindingSpec(Generic[_SetT]):
     The ordered subpass skeleton (``_bind_sidecar_sets``) is shared
     by FilterSet and OrderSet; this carries the family
     differences. ``expand`` runs Layer-4 expansion for one set;
-    ``pre_expand_audit`` is the optional filter-only deep-copy probe of
-    every class-level filter and ``post_expand_audit`` the optional
-    filter-only unregistered-``RelatedFilter``-target walk (both ``None``
-    for orders).
+    ``post_expand_audit`` runs the optional filter-only audits of the
+    published tables (``None`` for orders).
     """
 
     read_set: Callable[[DjangoTypeDefinition], _SetT | None]
@@ -1648,7 +1646,6 @@ class _SidecarBindingSpec(Generic[_SetT]):
     materialize: Callable[[str, type[object]], None]
     format_orphans: Callable[[list[_SetT]], str]
     expand: Callable[[_SetT], None]
-    pre_expand_audit: Callable[[list[_SetT]], None] | None
     post_expand_audit: Callable[[list[_SetT]], None] | None
 
 
@@ -1728,16 +1725,13 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
     owners regardless of registration order.
 
     1. Bind every owner (``spec.bind_owner``) before any expansion runs.
-    1.5. (Optional) ``spec.pre_expand_audit`` -- the filter-only deep-copy
-       probe of every wired set's class-level filters, before any expansion
-       copies one.
     2. Expand every set (``spec.expand``); ``ImportError`` from an unresolved
        lazy related target rewraps as ``ConfigurationError`` naming the
        offending set, ``from exc`` preserving ``__cause__``. Any other
        exception is consumer behaviour (a ``get_filters`` / ``get_fields``
        override, a lazy factory) and propagates unchanged.
-    2.5. (Optional) ``spec.post_expand_audit`` -- the filter-only transitive
-       unregistered-``RelatedFilter``-target walk.
+    2.5. (Optional) ``spec.post_expand_audit`` -- the filter-only audits of
+       every published table (``_audit_filterset_subpass_2_5``).
     3. Orphan validation: helper-referenced sets not wired to any DjangoType
        raise via ``spec.format_orphans``. Runs BEFORE materialization so a
        failure leaves no half-materialized input classes in the namespace.
@@ -1759,10 +1753,6 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
         spec.bind_owner(set_cls, definition)
         wired.append(set_cls)
 
-    # Subpass 1.5 (filter-only today): every declared filter survives a deep copy.
-    if spec.pre_expand_audit is not None:
-        spec.pre_expand_audit(wired)
-
     # Subpass 2: expand every set; cross-references now resolve.
     for set_cls in wired:
         # PERF203 (try/except in a loop) is intentional: the per-iteration try
@@ -1776,7 +1766,7 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
                 f"{spec.related_noun} target. {truth.text(exc)}",
             ) from exc
 
-    # Subpass 2.5 (filter-only today): unregistered related-target audit.
+    # Subpass 2.5 (filter-only today): the audits of the published tables.
     if spec.post_expand_audit is not None:
         spec.post_expand_audit(wired)
 
@@ -1861,7 +1851,6 @@ def _bind_ordersets() -> None:
                 meta_key="orderset_class",
             ),
             expand=_expand_orderset,
-            pre_expand_audit=None,
             post_expand_audit=None,
         ),
     )
@@ -1975,47 +1964,59 @@ def _format_globalid_encode_only_filter_error(
 
 
 def _audit_filter_copies(wired: list[type[FilterSet]]) -> None:
-    """Filter-only subpass 1.5: every wired set's class-level filters survive a deep copy.
+    """Filter-only subpass 2.5: every filter a request copies survives a deep copy.
 
-    django-filter deep-copies every filter of a ``FilterSet`` class into each
-    instance, and the package's input build reads a filter's form field on a
-    copy (``filters/base.py::copied_form_field``), so a filter a deep copy
-    refuses could serve no request. Each filter in the set's ``base_filters``
-    (declared, inherited declarations included, and generated from
-    ``Meta.fields``, a ``Meta.filter_overrides`` ``extra`` included) is copied
-    once here, before expansion copies any, through
-    ``filters/base.py::copied_declared_filter``, which refuses the first one
-    naming its set and attribute. A set reached only as a ``RelatedFilter``
-    target is probed by that expansion copy instead.
+    django-filter deep-copies a ``FilterSet`` class's ``base_filters`` into each
+    instance, and the package's request pipeline copies its published table
+    (``filters/sets.py::FilterSet._publish_filters``: what ``cls.get_filters()``
+    makes of the expansion, a consumer override's additions, borrowings, renames and
+    in-place edits included), so a filter a deep copy refuses could serve no request.
+    Every set a wired set serves is asked (``filters/inputs.py::_served_reach``: the
+    wired set, and each set it reaches through a ``RelatedFilter``, which a nested
+    branch or a projected leaf builds an instance of), and each filter of its
+    published table (``filters/sets.py::FilterSet._filter_table``), its ``RelatedFilter``
+    heads and flat copies included, is copied once through
+    ``filters/base.py::copied_declared_filter``, which refuses the first one naming the
+    set, the key it is published under and the ``RelatedFilter`` attributes it was
+    reached through. A child filter an expansion copies along a path whose sets the
+    child reaches back to never publishes as a table of its own; that copy refuses it
+    (``filters/sets.py::_expand_related_filter``).
     """
     from django_strawberry_framework.filters.base import copied_declared_filter  # noqa: PLC0415 - binds only a subsystem the consumer imported
+    from django_strawberry_framework.filters.inputs import _served_reach  # noqa: PLC0415 - binds only a subsystem the consumer imported
 
-    for filterset_cls in wired:
-        for name, class_filter in filterset_cls.base_filters.items():
-            _ = copied_declared_filter(class_filter, filterset_cls, name)
+    for _root, filterset_cls, through in _served_reach(wired):
+        via = ", then ".join(through)
+        for name, published in filterset_cls._filter_table().items():
+            _ = copied_declared_filter(published, filterset_cls, name, via=via)
 
 
 def _audit_filterset_subpass_2_5(wired: list[type[FilterSet]]) -> None:
     """Run every filter-only subpass-2.5 audit in order over the wired filtersets.
 
-    1. ``_audit_unregistered_related_filter_targets`` -- every reachable
+    1. ``_audit_filter_copies`` -- every filter of every published table a wired set
+       serves survives the deep copy each request makes of it.
+    2. ``_audit_unregistered_related_filter_targets`` -- every reachable
        ``RelatedFilter`` target must be registered.
-    2. ``_audit_globalid_filter_strategies`` -- no ``GlobalIDFilter`` /
+    3. ``_audit_globalid_filter_strategies`` -- no ``GlobalIDFilter`` /
        ``GlobalIDMultipleChoiceFilter`` a wired set serves, its own or a reached set's,
        may decode against an encode-only (``callable`` / ``custom``) strategy.
-    3. ``filters/inputs.py::_refuse_unsealable_served_leaves`` -- no leaf of a set a
+    4. ``filters/inputs.py::_refuse_unsealable_served_leaves`` -- no leaf of a set a
        connection serves (``_connection_served_filtersets``, recorded by
        ``connection.py::_synthesized_signature`` for a root connection and every nested
        ``<relation>Connection``), or of a set it reaches through a ``RelatedFilter``,
        resolves to a class the visibility seal refuses.
 
-    The related-target audit runs first: an unregistered relation target makes
-    the relation head unresolvable, so running it first keeps the GlobalID
-    audit's target resolution operating on a validated relation graph.
+    The copy audit runs first, so a filter no request can copy is refused before any
+    audit asks it anything. The related-target audit runs before the GlobalID audit:
+    an unregistered relation target makes the relation head unresolvable, so running
+    it first keeps the GlobalID audit's target resolution operating on a validated
+    relation graph.
     """
     from django_strawberry_framework.filters import _connection_served_filtersets  # noqa: PLC0415 - binds only a subsystem the consumer imported
     from django_strawberry_framework.filters.inputs import _refuse_unsealable_served_leaves  # noqa: PLC0415 - binds only a subsystem the consumer imported
 
+    _audit_filter_copies(wired)
     _audit_unregistered_related_filter_targets(wired)
     _audit_globalid_filter_strategies(wired)
     _refuse_unsealable_served_leaves(
@@ -2036,17 +2037,18 @@ def _bind_filtersets() -> None:
     (``_check_filterset_owner_axes``) reject diverging multi-owner reuse
     before any subsequent subpass runs.
 
-    Subpass 1.5 - deep-copy probe. Copies every wired filterset's
-    class-level filters once (``_audit_filter_copies``) and refuses the first
-    a deep copy refuses, naming the set and attribute, before expansion
-    or any request copies one.
-
     Subpass 2 - expand every filterset. Publishes
     ``filterset_cls._filter_table()`` so Layer-4 expansion resolves lazy
     ``RelatedFilter`` refs and cycle guards apply uniformly. Owner
     binding from subpass 1 is visible to every filterset's own-PK branch
     in ``filter_for_field`` / ``filter_for_lookup`` regardless of which
     type-cls is iterated first.
+
+    Subpass 2.5 - audit the published tables (``_audit_filterset_subpass_2_5``).
+    The first audit (``_audit_filter_copies``) copies every filter of every
+    table a wired set serves once and refuses the first a deep copy refuses,
+    naming the set, the key and the ``RelatedFilter`` path, before input
+    building or any request copies one.
 
     Subpass 3 - orphan validation. Compares the FilterSets passed to
     ``filter_input_type(...)`` (per Decision 11) against the set of
@@ -2090,7 +2092,6 @@ def _bind_filtersets() -> None:
                 meta_key="filterset_class",
             ),
             expand=_expand_filterset,
-            pre_expand_audit=_audit_filter_copies,
             post_expand_audit=_audit_filterset_subpass_2_5,
         ),
     )

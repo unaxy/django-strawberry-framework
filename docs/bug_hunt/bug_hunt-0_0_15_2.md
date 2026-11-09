@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 454 done, 118 to do. The CHANGELOG entries filed here moved to
+Progress: 455 done, 117 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2099,6 +2099,21 @@ Progress: 454 done, 118 to do. The CHANGELOG entries filed here moved to
   projected-copy rows and `examples/fakeshop/test_query/test_projected_owned_filters_api.py`'s consumer-decoder and
   secondary re-entry rows. Docs: spec-027, spec-031 and its rationale, GLOSSARY `Meta.globalid_strategy`, the 216 plan.
   Filed 832, 833. CHANGELOGTODO 834
+- [x] 746. The finalizer's deep-copy probe now copies the table every request copies:
+  `types/finalizer.py::_audit_filter_copies` runs first in subpass 2.5, after every served set has published, walks
+  `filters/inputs.py::_served_reach` and copies every entry of each set's published `_filter_table()` (own filters,
+  flat copies, `RelatedFilter` heads, and what a `get_filters()` override adds, borrows, re-keys or edits over the
+  expanded surface) through `filters/base.py::copied_declared_filter`, naming the set, the published key and the
+  `RelatedFilter` path. Subpass 1.5 and `_SidecarBindingSpec.pre_expand_audit` are removed. Grid: 32 cells that raised
+  an unnamed pickle `TypeError` inside `finalize_django_types()` and 40 that built and raised it on every filtered
+  request (masked) now refuse with the named `ConfigurationError`; an override editing a copied head or a hidden flat
+  copy in place is refused too (django-filter's own constructor copies the published table whole outside the
+  pipeline); a lock-holding declaration the override drops now builds. On a schema with two defects the first error can
+  differ (still a build refusal). About +32 ms on the fakeshop build. Pinned by `tests/filters/test_finalizer.py`'s
+  published-table, edited-copy, reached-path, ordering and dropped-filter rows and the live `expansion-override`
+  parameter of
+  `examples/fakeshop/test_query/test_filter_declarations_api.py::test_a_copyable_declared_filter_answers_a_real_filtered_request`.
+  Docs: spec-027 Decision 6, the 216 plan. CHANGELOGTODO 835
 
 ## Outside review of the fixes
 
@@ -2139,12 +2154,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 746. The finalizer's deep-copy probe (`types/finalizer.py::_audit_filter_copies`) reads each wired set's
-  `base_filters` before expansion, so an entry a `get_filters()` override publishes after expansion
-  (`filters/sets.py::FilterSet._publish_filters`), such as a borrowed `RelatedFilter` head keyed by an expanded
-  name, is never probed when no enabled declaration copies it: a lock-holding `method=` on it passes
-  `finalize_django_types()` and the first request raises `TypeError: cannot pickle '_thread.lock' object`. Found
-  planning 216
 - [ ] 748. A raw-form `RelatedFilter` head (`FilterSet(data=...)`, `DjangoFilterBackend`) skips the visibility and
   declaration scope every walked key gets. An own head is a `ModelChoiceFilter` over
   `filters/base.py::RelatedFilter.get_queryset`'s base queryset, not the target type's `get_queryset`, and a copied
