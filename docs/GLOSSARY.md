@@ -1410,7 +1410,7 @@ A net-new, Relay-Node-gated `Meta` key selecting how a [`DjangoType`](#djangotyp
 
 Precedence is `Meta.globalid_strategy` → [`RELAY_GLOBALID_STRATEGY`](#relay_globalid_strategy) → `"model"`, resolved once at finalization and frozen for the schema's lifetime.
 
-Callable and other encode-only strategies fail closed on `GlobalID` filter inputs: a filterset bound to a callable-strategy [`DjangoType`](#djangotype) raises [`ConfigurationError`](#configurationerror) at schema build through the Phase-2.5 filterset-binding audit (`types/finalizer.py::_audit_globalid_filter_strategies`), with a runtime `GraphQLError` (`extensions.code` `"GLOBALID_UNVALIDATABLE"`) as the backstop.
+Callable and other encode-only strategies fail closed on `GlobalID` filter inputs: a `GlobalID` filter a wired filterset serves (its own, or one of a set it reaches through a [`RelatedFilter`](#relatedfilter)) that a request decodes against a callable-strategy [`DjangoType`](#djangotype) raises [`ConfigurationError`](#configurationerror) at schema build through the Phase-2.5 filterset-binding audit (`types/finalizer.py::_audit_globalid_filter_strategies`), which asks the type the request's own routing decodes against; a consumer decoder (`method=`, a class-level `filter` override) reads the value as its own code and is admitted. A filterset no wired type serves answers a runtime `GraphQLError` (`extensions.code` `"GLOBALID_UNVALIDATABLE"`) instead.
 
 ```python
 class ItemType(DjangoType):

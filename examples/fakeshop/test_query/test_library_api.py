@@ -6863,8 +6863,8 @@ def test_relay_global_id_filter_rejects_wrong_type_name() -> None:
 def test_relay_global_id_filter_multihop_leaf_validates_against_the_terminal_model() -> None:
     """A multi-hop GlobalID leaf validates against its TERMINAL model, not the first hop.
 
-    ``filters/base.py::resolve_globalid_target_definition`` walks every segment
-    of a relation path rather than resolving only the head. The public
+    ``filters/base.py::_resolve_globalid_target`` walks every segment of a
+    relation path rather than resolving only the head. The public
     ``genresBooksId`` leaf on ``BookFilterInputType`` is the flattened
     ``genres__books__id`` expansion (``BookFilter.genres`` ->
     ``GenreFilter.books`` -> pk), so its terminal target is ``library.book``
@@ -7659,8 +7659,8 @@ def test_relay_global_id_filter_through_a_relation_primary_key_validates_the_ter
 
     ``PatronProfile``'s primary key is the ``patron`` one-to-one key, so
     ``patron__card`` and ``pk__card`` walk THROUGH the primary key to
-    ``MembershipCard``. ``filters/base.py::resolve_globalid_target_definition``
-    walks a relation primary key like any relation: a ``library.membershipcard``
+    ``MembershipCard``. ``filters/base.py::_resolve_globalid_target`` walks a
+    relation primary key like any relation: a ``library.membershipcard``
     id selects its profile, a ``library.patron`` id carrying the same pk is a
     type mismatch, and a well-typed id whose node id is not an integer is the
     coded ``GLOBALID_INVALID`` rejection rather than a raw Django ``ValueError``.

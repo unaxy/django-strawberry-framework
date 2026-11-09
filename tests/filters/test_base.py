@@ -94,9 +94,9 @@ from django_strawberry_framework.filters.base import (
     _held_column_value,
     _integer_compared_column,
     _marked_pk_field_name,
+    _resolve_globalid_target,
     membership_in_filter_class,
     relation_identity_column,
-    resolve_globalid_target_definition,
 )
 from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import convert_filter_to_input_annotation
@@ -3333,8 +3333,15 @@ def test_multi_value_filter_forwards_integer_keys_to_upstream_callback(
     assert all(type(key) is int for keys in captured for key in keys)
 
 
-def test_resolve_globalid_target_definition_multihop() -> None:
-    """`resolve_globalid_target_definition` walks multi-hop relation paths.
+def _walked_target(owner: DjangoTypeDefinition, field_name: object) -> DjangoTypeDefinition | None:
+    """The definition ``_resolve_globalid_target`` walks ``field_name`` to from ``owner``, stable registry."""
+    # basedpyright: a non-str field name is the hostile input one row passes; the walk types it str | None
+    resolved = _resolve_globalid_target(owner, owner.model, field_name, stable=True)  # pyright: ignore[reportArgumentType]
+    return None if resolved is None else resolved[0]
+
+
+def test_resolve_globalid_target_walks_multihop_relation_paths() -> None:
+    """``_resolve_globalid_target`` walks multi-hop relation paths.
 
     Scope note. The CONSUMER-VISIBLE half of this contract is pinned live at
     ``examples/fakeshop/test_query/test_library_api.py::test_relay_global_id_filter_multihop_leaf_validates_against_the_terminal_model``,
@@ -3354,28 +3361,26 @@ def test_resolve_globalid_target_definition_multihop() -> None:
     owner = _owner("type")
 
     # Single-hop own pk
-    assert resolve_globalid_target_definition(owner, "id") is owner
-    assert resolve_globalid_target_definition(owner, "pk") is owner
+    assert _walked_target(owner, "id") is owner
+    assert _walked_target(owner, "pk") is owner
 
     # Single-hop relation
-    assert resolve_globalid_target_definition(owner, "shelf") is shelf_def
-    assert resolve_globalid_target_definition(owner, "shelf__id") is shelf_def
-    assert resolve_globalid_target_definition(owner, "shelf__pk") is shelf_def
+    assert _walked_target(owner, "shelf") is shelf_def
+    assert _walked_target(owner, "shelf__id") is shelf_def
+    assert _walked_target(owner, "shelf__pk") is shelf_def
 
     # Multi-hop relation
-    assert resolve_globalid_target_definition(owner, "shelf__branch") is branch_def
-    assert resolve_globalid_target_definition(owner, "shelf__branch__id") is branch_def
-    assert resolve_globalid_target_definition(owner, "shelf__branch__pk") is branch_def
+    assert _walked_target(owner, "shelf__branch") is branch_def
+    assert _walked_target(owner, "shelf__branch__id") is branch_def
+    assert _walked_target(owner, "shelf__branch__pk") is branch_def
 
     # Unresolvable paths return None
-    assert resolve_globalid_target_definition(owner, "shelf__branch__id__extra") is None
-    assert resolve_globalid_target_definition(owner, "shelf__nonexistent") is None
-    assert resolve_globalid_target_definition(owner, "nonexistent") is None
-    assert resolve_globalid_target_definition(owner, "") is None
-    assert resolve_globalid_target_definition(owner, None) is None
-    # basedpyright: the non-str field name is the hostile input under test;
-    # resolve_globalid_target_definition types the parameter as str | None
-    assert resolve_globalid_target_definition(owner, 123) is None  # pyright: ignore[reportArgumentType]
+    assert _walked_target(owner, "shelf__branch__id__extra") is None
+    assert _walked_target(owner, "shelf__nonexistent") is None
+    assert _walked_target(owner, "nonexistent") is None
+    assert _walked_target(owner, "") is None
+    assert _walked_target(owner, None) is None
+    assert _walked_target(owner, 123) is None
 
 
 @pytest.mark.parametrize(
@@ -3397,7 +3402,7 @@ def test_resolve_globalid_target_definition_multihop() -> None:
         (models.SelfServeDesk, "lendingdesk_ptr__venue_ptr__id", models.Venue),
     ],
 )
-def test_resolve_globalid_target_definition_walks_a_relation_primary_key(
+def test_resolve_globalid_target_walks_a_relation_primary_key(
     owner_model: type[Model],
     field_name: str,
     expected_model: type[Model],
@@ -3422,7 +3427,7 @@ def test_resolve_globalid_target_definition_walks_a_relation_primary_key(
         models.SelfServeDesk: _definition(models.SelfServeDesk, "SelfServeDeskType"),
     }
 
-    resolved = resolve_globalid_target_definition(definitions[owner_model], field_name)
+    resolved = _walked_target(definitions[owner_model], field_name)
 
     assert resolved is definitions[expected_model]
 

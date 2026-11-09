@@ -81,7 +81,6 @@ from django_strawberry_framework.utils.typing import object_result
 
 from .base import DEFAULT_RELATION_SHAPE
 from .converters import resolved_relation_annotation
-from .definition import DjangoTypeDefinition
 from .relay import (
     _accepts_model_label_decode,
     _check_composite_pk_for_relay_node,
@@ -105,6 +104,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.inputs import GeneratedInputArgumentsFactory
 
     from .base import DjangoType
+    from .definition import DjangoTypeDefinition
     from .relations import PendingRelation
 
 # The sidecar family one phase-2.5 binding pass runs over: every hook in one
@@ -1868,72 +1868,109 @@ def _bind_ordersets() -> None:
 
 
 def _audit_globalid_filter_strategies(wired: list[type[FilterSet]]) -> None:
-    """Filter-only subpass 2.5: reject GlobalID filters bound to encode-only targets.
+    """Filter-only subpass 2.5: refuse a GlobalID filter decoding against an encode-only type.
 
     Runs AFTER every Relay type's ``effective_globalid_strategy`` is stamped
     (Phase 2.5 install; see the ``_bind_filtersets`` docstring and
-    ``install_globalid_typename_resolver``). Every ``GlobalIDFilter`` /
-    ``GlobalIDMultipleChoiceFilter`` on a bound filterset resolves the target
-    definition it would validate against -- the owner itself for the own-PK
-    branch, the relation target otherwise -- through the same single-sited
-    resolver the runtime path uses
-    (``filters/base.py::resolve_globalid_target_definition``).
+    ``install_globalid_typename_resolver``). Every set a wired set reaches is asked
+    (``filters/inputs.py::_served_reach``: the wired set, and each set it reaches
+    through a ``RelatedFilter``, wired or not), each ``GlobalIDFilter`` /
+    ``GlobalIDMultipleChoiceFilter`` of its published table that decodes its value
+    (``filters/sets.py::_decodes_before_binding``: a ``method=`` or a class-level
+    ``filter`` override reads the value as consumer code, and is skipped). The
+    request's own routing answers where each runs
+    (``filters/sets.py::FilterSet._globalid_decode_sites``: over a declared hop's
+    target set, an undeclared hop's face, or the set itself) and the runtime's
+    resolver answers the definition it decodes against there
+    (``filters/base.py::_globalid_target``, read with a stable registry), so the build
+    reads the type a request validates against, a secondary type a re-entry is bound to
+    included.
 
     When that target's ``effective_globalid_strategy`` is ``callable`` or
     ``custom``, the strategy is encode-only: ``decode_global_id`` has no decode
-    path for it, so a typed filter input of the target's GlobalID could never
-    validly consume the IDs the target emits. That mismatch surfaces here -- at
-    schema build, naming the filterset and field -- rather than as the runtime
-    backstop reject in ``_decode_and_validate_global_id`` on the first request
-    that hits the input.
+    path for it, so the filter input refuses every nonempty value
+    (``GLOBALID_UNVALIDATABLE``); refusing the schema at build also removes the
+    ``null`` and ``[]`` values such a leaf answers without decoding. A rebound flat copy
+    is asked where it is published, since its walk starts on that set, and is named by
+    the declaration it stands for (``filters/sets.py::_leaf_declaration``). Every reached
+    set's own leaves are asked before any expansion copy, so a leaf a wired set declares
+    is refused as that set's own, ahead of a flat copy another wired set publishes of it.
     """
     from django_strawberry_framework.filters.base import (  # noqa: PLC0415 - binds only a subsystem the consumer imported
         ENCODE_ONLY_GLOBALID_STRATEGIES,
         GlobalIDFilter,
         GlobalIDMultipleChoiceFilter,
-        _filterset_walked_lookup,
-        resolve_globalid_target_definition,
+        _globalid_target,
+    )
+    from django_strawberry_framework.filters.inputs import _served_reach  # noqa: PLC0415 - binds only a subsystem the consumer imported
+    from django_strawberry_framework.filters.sets import (  # noqa: PLC0415 - binds only a subsystem the consumer imported
+        ProjectedChildFilter,
+        _decodes_before_binding,
+        _expansion_record,
+        _leaf_declaration,
     )
 
-    for filterset_cls in wired:
-        # Subpass 1 bound every wired filterset's owner before this audit runs.
-        owner = require_instance(set_bound_definition(filterset_cls), DjangoTypeDefinition)
-        for field_name, filter_instance in filterset_cls._filter_table().items():
-            if not isinstance(filter_instance, GlobalIDFilter | GlobalIDMultipleChoiceFilter):
-                continue
-            target = resolve_globalid_target_definition(
-                owner,
-                _filterset_walked_lookup(filterset_cls, filter_instance)[0],
-            )
-            if target is None:
-                continue
-            strategy = target.effective_globalid_strategy
-            if strategy in ENCODE_ONLY_GLOBALID_STRATEGIES:
-                raise ConfigurationError(
-                    _format_globalid_encode_only_filter_error(
-                        filterset_cls,
-                        field_name,
-                        target,
-                        strategy,
-                    ),
-                )
+    reached = list(_served_reach(wired))
+    for copies in (False, True):
+        for root, filterset_cls, through in reached:
+            for key, filter_instance in filterset_cls._filter_table().items():
+                if (
+                    not isinstance(filter_instance, GlobalIDFilter | GlobalIDMultipleChoiceFilter)
+                    or (_expansion_record(filter_instance) is not None) is not copies
+                    # A projected copy runs its child filter in the child set, asked there.
+                    or isinstance(filter_instance, ProjectedChildFilter)
+                    or not _decodes_before_binding(filter_instance)
+                ):
+                    continue
+                for site in filterset_cls._globalid_decode_sites(filter_instance):
+                    target = _globalid_target(site, stable=True)
+                    if target is None:
+                        continue
+                    strategy = target.definition.effective_globalid_strategy
+                    if strategy in ENCODE_ONLY_GLOBALID_STRATEGIES:
+                        declaration = _leaf_declaration(filter_instance, filterset_cls)
+                        raise ConfigurationError(
+                            _format_globalid_encode_only_filter_error(
+                                root,
+                                "__".join([step.rpartition(".")[2] for step in through] + [key]),
+                                (*through, *declaration.through),
+                                declaration.attribute
+                                if declaration.attribute is not None
+                                else f"{truth.name(filterset_cls)}.{key}",
+                                target.definition,
+                                strategy,
+                            ),
+                        )
 
 
 def _format_globalid_encode_only_filter_error(
     filterset_cls: type[FilterSet],
-    field_name: str,
+    request_key: str,
+    through: tuple[str, ...],
+    attribute: str,
     target: DjangoTypeDefinition,
     strategy: str,
 ) -> str:
-    """Build the encode-only GlobalID-filter ConfigurationError message."""
+    """Build the encode-only GlobalID-filter ConfigurationError message.
+
+    ``filterset_cls`` is the wired set serving ``request_key``; ``through`` the
+    ``RelatedFilter`` attributes the leaf is reached across (empty for the wired set's
+    own declaration) and ``attribute`` the declaration, ``<Set>.<name>``.
+    """
+    route = (
+        ""
+        if not through
+        else f" ({attribute}, reached through RelatedFilter {', then '.join(through)})"
+    )
     return (
         f"Cannot finalize Django types: filterset "
-        f"{truth.qualname(filterset_cls)} declares "
-        f"GlobalID filter {truth.render(field_name)} targeting {target.graphql_type_name}, whose "
+        f"{truth.qualname(filterset_cls)} {'serves' if through else 'declares'} "
+        f"GlobalID filter {truth.render(request_key)}{route} targeting "
+        f"{target.graphql_type_name}, whose "
         f"globalid strategy is '{strategy}'. The '{strategy}' strategy is encode-only "
         f"(no decode path exists), so this filter input could never validly consume the "
-        f"IDs its target emits. Remove the filter or give {target.graphql_type_name} a "
-        f"decodable globalid strategy (model / type / type+model)."
+        f"IDs its target emits. Remove the filter, read its value in `method=`, or give "
+        f"{target.graphql_type_name} a decodable globalid strategy (model / type / type+model)."
     )
 
 
@@ -1964,8 +2001,8 @@ def _audit_filterset_subpass_2_5(wired: list[type[FilterSet]]) -> None:
     1. ``_audit_unregistered_related_filter_targets`` -- every reachable
        ``RelatedFilter`` target must be registered.
     2. ``_audit_globalid_filter_strategies`` -- no ``GlobalIDFilter`` /
-       ``GlobalIDMultipleChoiceFilter`` may target an encode-only
-       (``callable`` / ``custom``) strategy.
+       ``GlobalIDMultipleChoiceFilter`` a wired set serves, its own or a reached set's,
+       may decode against an encode-only (``callable`` / ``custom``) strategy.
     3. ``filters/inputs.py::_refuse_unsealable_served_leaves`` -- no leaf of a set a
        connection serves (``_connection_served_filtersets``, recorded by
        ``connection.py::_synthesized_signature`` for a root connection and every nested

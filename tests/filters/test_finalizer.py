@@ -55,6 +55,7 @@ from apps.library.models import (
     Branch,
     Edition,
     Genre,
+    KioskFault,
     LendingDesk,
     Loan,
     MembershipCard,
@@ -63,6 +64,8 @@ from apps.library.models import (
     Printing,
     ProxyBranch,
     Publisher,
+    RepairTicket,
+    SelfServeDesk,
     Shelf,
     TaggedItem,
     Venue,
@@ -148,7 +151,6 @@ from django_strawberry_framework.filters.inputs import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.finalizer import (
-    _audit_globalid_filter_strategies,
     _bind_filterset_owner,
 )
 from django_strawberry_framework.types.relay import apply_interfaces
@@ -281,18 +283,6 @@ def test_phase_2_5_binds_all_owners_before_expansion(monkeypatch: pytest.MonkeyP
 # ---------------------------------------------------------------------------
 # Strict multi-owner reuse.
 # ---------------------------------------------------------------------------
-
-
-def test_globalid_strategy_audit_refuses_a_filterset_with_no_bound_owner() -> None:
-    """The audit reads only wired filtersets; one bound to no owner is a typed error."""
-
-    class UnboundBookFilter(FilterSet):
-        class Meta:
-            model = Book
-            fields = {"title": ["exact"]}
-
-    with pytest.raises(TypeError, match="expected an instance of"):
-        _audit_globalid_filter_strategies([UnboundBookFilter])
 
 
 def test_phase_2_5_rejects_multi_owner_with_diverging_pk_identity() -> None:
@@ -2051,7 +2041,7 @@ def test_phase_2_5_rejects_globalid_filter_on_callable_strategy_target() -> None
     ``callable`` is encode-only (no decode path), so the schema would otherwise
     carry a typed GlobalID filter input that can never validly consume the IDs
     its target emits. ``_audit_globalid_filter_strategies`` raises at finalize,
-    naming the filterset and field.
+    naming the filterset and the request key.
     """
 
     def encode(_type_cls: type[DjangoType], _model: type[Model], _root: object) -> str:
@@ -2234,11 +2224,11 @@ def test_phase_2_5_globalid_audit_skips_unresolvable_target() -> None:
     """The audit skips a GlobalID filter whose target definition resolves to ``None``.
 
     A consumer-declared ``GlobalIDFilter`` pointed at a scalar field ('name')
-    is neither the own PK nor a relation head, so
-    ``resolve_globalid_target_definition`` returns ``None`` during the audit and
-    the filter is skipped (there is no target strategy to fail-close on). This
-    is a legal filterset - the pre-existing unregistered-related-target audit
-    only walks ``RelatedFilter`` instances - so finalization succeeds.
+    is neither the own PK nor a relation head, so ``_globalid_target`` resolves
+    ``None`` for it during the audit and the filter is skipped (there is no
+    target strategy to fail-close on). This is a legal filterset - the
+    pre-existing unregistered-related-target audit only walks ``RelatedFilter``
+    instances - so finalization succeeds.
     """
 
     class GenreFilter(FilterSet):
@@ -2258,6 +2248,538 @@ def test_phase_2_5_globalid_audit_skips_unresolvable_target() -> None:
     # Finalization succeeds: the unresolvable-target branch is a no-op skip.
     finalize_django_types()
     assert GenreType.__django_strawberry_definition__.finalized
+
+
+def _encode_by_name(type_cls: type[DjangoType], _model: type[Model], _root: object) -> str:
+    """A ``callable`` GlobalID strategy: encode-only, no decode path."""
+    return type_cls.__name__
+
+
+def _relay_type(
+    model: type[Model],
+    fields: tuple[str, ...],
+    *,
+    name: str,
+    filterset_class: type[FilterSet] | None = None,
+    strategy: object = None,
+    primary: bool | None = None,
+    hook: bool = False,
+) -> type[DjangoType]:
+    """Build a Relay ``DjangoType`` named ``name`` over ``model`` for the GlobalID audit rows."""
+    meta: dict[str, object] = {"model": model, "fields": fields, "interfaces": (relay.Node,)}
+    if filterset_class is not None:
+        meta["filterset_class"] = filterset_class
+    if strategy is not None:
+        meta["globalid_strategy"] = strategy
+    if primary is not None:
+        meta["primary"] = primary
+    namespace: dict[str, object] = {"Meta": type("Meta", (), meta)}
+    if hook:
+
+        def get_queryset(
+            _cls: type[DjangoType],
+            queryset: QuerySet[Model],
+            _info: object,
+            **_kwargs: object,
+        ) -> QuerySet[Model]:
+            return queryset.exclude(pk=0)
+
+        namespace["get_queryset"] = classmethod(get_queryset)
+    return type(name, (DjangoType,), namespace)
+
+
+def _desk_world(desk_set: str) -> None:
+    """A ticket set whose ``venue`` branch targets an unwired set over an MTI descendant of ``Venue``.
+
+    ``"self_serve"``: ``SelfServeDeskFilter`` publishes ``faults`` into a ``callable``
+    ``KioskFault`` type (``"self_serve_init"``: its ``__init__`` override projects every
+    copy, so the ticket set holds no rebound copy of ``faults``; ``"self_serve_wired"``:
+    ``SelfServeDeskType`` wires the desk set too); ``"lending"``: ``LendingDeskFilter``
+    publishes ``selfservedesk`` into a ``callable`` ``SelfServeDesk`` type.
+    """
+    if desk_set in {"self_serve", "self_serve_init", "self_serve_wired"}:
+
+        class SelfServeDeskFilter(FilterSet):
+            class Meta:
+                model = SelfServeDesk
+                fields = {"kiosk_code": ["exact"], "faults": ["exact"]}
+
+        class InitSelfServeDeskFilter(FilterSet):
+            @override
+            def __init__(
+                self,
+                data: Mapping[str, object] | None = None,
+                queryset: QuerySet[Model] | None = None,
+                *,
+                request: HttpRequest | None = None,
+                prefix: str | None = None,
+            ) -> None:
+                super().__init__(data, queryset, request=request, prefix=prefix)
+
+            class Meta:
+                model = SelfServeDesk
+                fields = {"kiosk_code": ["exact"], "faults": ["exact"]}
+
+        target: type[FilterSet] = (
+            InitSelfServeDeskFilter if desk_set == "self_serve_init" else SelfServeDeskFilter
+        )
+        _relay_type(KioskFault, ("id", "note"), name="FaultType", strategy=_encode_by_name)
+        _relay_type(
+            SelfServeDesk,
+            ("id", "kiosk_code"),
+            name="SelfServeDeskType",
+            filterset_class=target if desk_set == "self_serve_wired" else None,
+        )
+    else:
+
+        class LendingDeskFilter(FilterSet):
+            class Meta:
+                model = LendingDesk
+                fields = {"window_count": ["exact"], "selfservedesk": ["exact"]}
+
+        target = LendingDeskFilter
+        _relay_type(
+            SelfServeDesk,
+            ("id", "kiosk_code"),
+            name="SelfServeDeskType",
+            strategy=_encode_by_name,
+        )
+        _relay_type(LendingDesk, ("id", "window_count"), name="LendingDeskType")
+
+    class RepairTicketFilter(FilterSet):
+        venue = RelatedFilter(target, field_name="venue")
+
+        class Meta:
+            model = RepairTicket
+            fields = {"code": ["exact"]}
+
+    _relay_type(
+        RepairTicket,
+        ("id", "code", "venue"),
+        name="TicketType",
+        filterset_class=RepairTicketFilter,
+    )
+    _relay_type(Venue, ("id", "name"), name="VenueType")
+
+
+def _scoped_reentry_world(*, callable_primary: bool = False, key: str = "shelf__books") -> None:
+    """``key`` re-enters ``Book`` past undeclared hops; a scoping secondary owns the set.
+
+    The secondary is ``callable`` and the primary ``model``; with ``callable_primary`` the
+    primary is ``callable`` and the secondary ``type``: the to-many key builds its declared
+    predicate on the owner's rows first (``_LeafChain.terminal_value``), decoding against
+    the primary its relation reaches. ``key`` is ``shelf__books`` (a foreign key, then its
+    reverse) or ``genres__books`` (a many-to-many, then its reverse).
+    """
+    book_filter = type(
+        "ReentryBookFilter",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": Book, "fields": {key: ["exact"]}})},
+    )
+    _relay_type(
+        Book,
+        ("id", "title"),
+        name="BookPrimary",
+        primary=True,
+        strategy=_encode_by_name if callable_primary else None,
+    )
+    _relay_type(
+        Book,
+        ("id", "title"),
+        name="BookSecondary",
+        filterset_class=book_filter,
+        strategy="type" if callable_primary else _encode_by_name,
+        hook=True,
+    )
+
+
+def _unwired_hop_world(
+    *,
+    init: bool = False,
+    wired: bool = False,
+    callable_branch: bool = True,
+) -> None:
+    """``BookFilter.shelf`` targets an unwired ``ShelfFilter`` publishing a ``callable`` ``branch``.
+
+    With ``init`` the shelf set overrides ``__init__``, so ``BookFilter`` holds only a
+    projected copy of ``branch`` and the leaf is reached only through the nested branch;
+    with ``wired`` ``ShelfType`` wires the shelf set too; without ``callable_branch`` the
+    ``Branch`` type keeps the default strategy.
+    """
+
+    class ShelfFilter(FilterSet):
+        class Meta:
+            model = Shelf
+            fields = {"code": ["exact"], "branch": ["exact"]}
+
+    class InitShelfFilter(FilterSet):
+        @override
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            queryset: QuerySet[Model] | None = None,
+            *,
+            request: HttpRequest | None = None,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data, queryset, request=request, prefix=prefix)
+
+        class Meta:
+            model = Shelf
+            fields = {"code": ["exact"], "branch": ["exact"]}
+
+    class BookFilter(FilterSet):
+        shelf = RelatedFilter(InitShelfFilter if init else ShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"]}
+
+    _relay_type(
+        Branch,
+        ("id", "name"),
+        name="BranchType",
+        strategy=_encode_by_name if callable_branch else None,
+    )
+    _relay_type(
+        Shelf,
+        ("id", "code", "branch"),
+        name="ShelfType",
+        filterset_class=ShelfFilter if wired else None,
+    )
+    _relay_type(Book, ("id", "title", "shelf"), name="BookType", filterset_class=BookFilter)
+
+
+def _walked_own_leaf_world(*, shelf_id: bool = False) -> None:
+    """An own ``BookFilter`` leaf walks the declared ``shelf`` hop and decodes in ``ShelfFilter``.
+
+    ``branch_is`` (``shelf__branch``) reaches a ``callable`` ``Branch`` type past an
+    unwired ``ShelfFilter``; with ``shelf_id``, ``shelf_is`` (``shelf__id``) reaches the
+    shelf's own key, in a ``ShelfFilter`` wired to a ``callable`` ``Shelf`` type.
+    """
+
+    class ShelfFilter(FilterSet):
+        class Meta:
+            model = Shelf
+            fields = {"code": ["exact"]}
+
+    leaf = (
+        {"shelf_is": GlobalIDFilter(field_name="shelf__id")}
+        if shelf_id
+        else {"branch_is": GlobalIDFilter(field_name="shelf__branch")}
+    )
+    book_filter = type(
+        "BookFilter",
+        (FilterSet,),
+        {
+            "shelf": RelatedFilter(ShelfFilter, field_name="shelf"),
+            **leaf,
+            "Meta": type("Meta", (), {"model": Book, "fields": {"title": ["exact"]}}),
+        },
+    )
+    _relay_type(
+        Branch,
+        ("id", "name"),
+        name="BranchType",
+        strategy=None if shelf_id else _encode_by_name,
+    )
+    _relay_type(
+        Shelf,
+        ("id", "code", "branch"),
+        name="ShelfType",
+        filterset_class=ShelfFilter if shelf_id else None,
+        strategy=_encode_by_name if shelf_id else None,
+    )
+    _relay_type(Book, ("id", "title", "shelf"), name="BookType", filterset_class=book_filter)
+
+
+def _scoped_hop_world() -> None:
+    """An own ``BookFilter`` key ``shelf__branch`` walks ``shelf``, an undeclared hop a scoping type reads.
+
+    ``ShelfType``'s ``get_queryset`` makes the request walk the hop, so the key's terminal
+    runs bound to the hop's face (``_UndeclaredHopSet``) and decodes against the
+    ``callable`` ``Branch`` type it reaches.
+    """
+
+    class BookFilter(FilterSet):
+        class Meta:
+            model = Book
+            fields = {"title": ["exact"], "shelf__branch": ["exact"]}
+
+    _relay_type(Branch, ("id", "name"), name="BranchType", strategy=_encode_by_name)
+    _relay_type(Shelf, ("id", "code"), name="ShelfType", hook=True)
+    _relay_type(Book, ("id", "title"), name="BookType", filterset_class=BookFilter)
+
+
+def _encode_only_refusal(head: str, type_name: str) -> str:
+    """The audit's whole message: ``head`` names the leaf, ``type_name`` its ``callable`` target."""
+    return (
+        f"Cannot finalize Django types: {head} targeting {type_name}, whose globalid "
+        "strategy is 'callable'. The 'callable' strategy is encode-only (no decode path "
+        "exists), so this filter input could never validly consume the IDs its target "
+        f"emits. Remove the filter, read its value in `method=`, or give {type_name} a "
+        "decodable globalid strategy (model / type / type+model)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("world", "head", "type_name"),
+    [
+        pytest.param(
+            functools.partial(_desk_world, "self_serve"),
+            "filterset _desk_world.<locals>.RepairTicketFilter serves GlobalID filter "
+            "'venue__faults' (SelfServeDeskFilter.faults, reached through RelatedFilter "
+            "RepairTicketFilter.venue)",
+            "FaultType",
+            id="unwired-set-over-an-mti-descendant",
+        ),
+        pytest.param(
+            functools.partial(_desk_world, "self_serve_init"),
+            "filterset _desk_world.<locals>.RepairTicketFilter serves GlobalID filter "
+            "'venue__faults' (InitSelfServeDeskFilter.faults, reached through RelatedFilter "
+            "RepairTicketFilter.venue)",
+            "FaultType",
+            id="unwired-set-reached-only-through-its-nested-branch",
+        ),
+        pytest.param(
+            functools.partial(_desk_world, "lending"),
+            "filterset _desk_world.<locals>.RepairTicketFilter serves GlobalID filter "
+            "'venue__selfservedesk' (LendingDeskFilter.selfservedesk, reached through "
+            "RelatedFilter RepairTicketFilter.venue)",
+            "SelfServeDeskType",
+            id="unwired-set-key-into-an-mti-child",
+        ),
+        pytest.param(
+            _scoped_reentry_world,
+            "filterset ReentryBookFilter declares GlobalID filter 'shelf__books'",
+            "BookSecondary",
+            id="undeclared-reentry-onto-the-bound-secondary",
+        ),
+        pytest.param(
+            functools.partial(_scoped_reentry_world, callable_primary=True),
+            "filterset ReentryBookFilter declares GlobalID filter 'shelf__books'",
+            "BookPrimary",
+            id="undeclared-reentry-declared-predicate-onto-the-primary",
+        ),
+        pytest.param(
+            functools.partial(_scoped_reentry_world, callable_primary=True, key="genres__books"),
+            "filterset ReentryBookFilter declares GlobalID filter 'genres__books'",
+            "BookPrimary",
+            id="many-to-many-reentry-declared-predicate-onto-the-primary",
+        ),
+        pytest.param(
+            _unwired_hop_world,
+            "filterset _unwired_hop_world.<locals>.BookFilter serves GlobalID filter "
+            "'shelf__branch' (ShelfFilter.branch, reached through RelatedFilter "
+            "BookFilter.shelf)",
+            "BranchType",
+            id="unwired-declared-hop-named-by-its-declaration",
+        ),
+        pytest.param(
+            functools.partial(_unwired_hop_world, init=True),
+            "filterset _unwired_hop_world.<locals>.BookFilter serves GlobalID filter "
+            "'shelf__branch' (InitShelfFilter.branch, reached through RelatedFilter "
+            "BookFilter.shelf)",
+            "BranchType",
+            id="unwired-declared-hop-reached-only-through-its-nested-branch",
+        ),
+        pytest.param(
+            functools.partial(_desk_world, "self_serve_wired"),
+            "filterset _desk_world.<locals>.SelfServeDeskFilter declares GlobalID filter 'faults'",
+            "FaultType",
+            id="wired-declaring-set-named-ahead-of-a-sibling-flat-copy-over-an-mti-descendant",
+        ),
+        pytest.param(
+            functools.partial(_unwired_hop_world, wired=True),
+            "filterset _unwired_hop_world.<locals>.ShelfFilter declares GlobalID filter 'branch'",
+            "BranchType",
+            id="wired-declaring-set-named-ahead-of-a-sibling-flat-copy",
+        ),
+        pytest.param(
+            _scoped_hop_world,
+            "filterset _scoped_hop_world.<locals>.BookFilter declares GlobalID filter "
+            "'shelf__branch'",
+            "BranchType",
+            id="own-key-past-a-scoped-undeclared-hop-decodes-on-its-face",
+        ),
+        pytest.param(
+            _walked_own_leaf_world,
+            "filterset BookFilter declares GlobalID filter 'branch_is'",
+            "BranchType",
+            id="own-leaf-walking-a-declared-hop-decodes-in-the-target-set",
+        ),
+        pytest.param(
+            functools.partial(_walked_own_leaf_world, shelf_id=True),
+            "filterset BookFilter declares GlobalID filter 'shelf_is'",
+            "ShelfType",
+            id="own-leaf-walking-a-declared-hop-onto-the-wired-target-key",
+        ),
+    ],
+)
+def test_phase_2_5_refuses_a_globalid_leaf_a_request_decodes_against_an_encode_only_type(
+    world: Callable[[], None],
+    head: str,
+    type_name: str,
+) -> None:
+    """The audit asks where a request decodes each GlobalID leaf, every reached set included.
+
+    A ``RelatedFilter`` into a set no type wires runs its leaves bound to that set (its
+    model's registry primary), an own leaf walking a declared hop decodes in the hop's
+    target set, an undeclared hop re-entering the owner's table decodes against the type
+    the walking set is bound to (a to-many key's declared predicate against the primary
+    its relation reaches), and a leaf both a nested branch and a flat copy serve is named
+    by its declaration, as its wired declaring set's own ahead of a wired sibling's flat
+    copy. Each would build and answer ``GLOBALID_UNVALIDATABLE`` for every
+    nonempty value. The ``null`` and ``[]`` values such a leaf answers without decoding
+    go with it: no schema holding the leaf builds, so no request reaches either.
+    """
+    world()
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+
+    assert str(exc_info.value) == _encode_only_refusal(head, type_name)
+
+
+def _consumer_decoder_world(shape: str) -> None:
+    """A GlobalID leaf into a ``callable`` type whose value consumer code reads (``method=`` or override)."""
+
+    class _OverridingGlobalIDFilter(GlobalIDFilter):
+        @override
+        def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+            return qs
+
+    def decode(
+        _fs: FilterSet,
+        queryset: QuerySet[Model],
+        _name: str,
+        _value: object,
+    ) -> QuerySet[Model]:
+        return queryset
+
+    if shape in {"own-method", "own-override"}:
+        own = (
+            GlobalIDFilter(field_name="id", method="decode")
+            if shape == "own-method"
+            else _OverridingGlobalIDFilter(field_name="id")
+        )
+        genre_filter = type(
+            "GenreFilter",
+            (FilterSet,),
+            {
+                "id": own,
+                "decode": decode,
+                "Meta": type("Meta", (), {"model": Genre, "fields": {"name": ["exact"]}}),
+            },
+        )
+        _relay_type(
+            Genre,
+            ("id", "name"),
+            name="GenreType",
+            filterset_class=genre_filter,
+            strategy=_encode_by_name,
+        )
+        return
+    book_filter = type(
+        "BookFilter",
+        (FilterSet,),
+        {
+            "branch_is": GlobalIDFilter(field_name="shelf__branch", method="decode"),
+            "decode": decode,
+            "Meta": type("Meta", (), {"model": Book, "fields": {"title": ["exact"]}}),
+        },
+    )
+    _relay_type(Branch, ("id", "name"), name="BranchType", strategy=_encode_by_name)
+    _relay_type(Shelf, ("id", "code"), name="ShelfType")
+    _relay_type(Book, ("id", "title"), name="BookType", filterset_class=book_filter)
+
+
+@pytest.mark.parametrize("shape", ["own-method", "own-override", "walked-method"])
+def test_phase_2_5_admits_a_globalid_leaf_whose_value_consumer_code_reads(shape: str) -> None:
+    """A ``method=`` or a class-level ``filter`` override reads the value undecoded, so it builds.
+
+    ``filters/sets.py::_decodes_before_binding`` is the request's own answer: the
+    consumer's code receives the value, whatever type the leaf's path reaches.
+    """
+    _consumer_decoder_world(shape)
+
+    finalize_django_types()
+
+
+@pytest.mark.parametrize("init", [False, True], ids=["plain-shelf-set", "init-override-shelf-set"])
+def test_phase_2_5_admits_a_declared_reentry_decoding_against_the_bound_secondary(
+    *,
+    init: bool,
+) -> None:
+    """A declared re-entry decodes against the secondary its set is bound to, never the primary.
+
+    ``BookFilter.shelf`` -> ``ShelfFilter.books`` -> ``BookFilter``: the ``id`` the
+    request reaches runs in a ``BookFilter`` bound to ``BookSecondary`` (``type``), so a
+    ``callable`` primary is no target of it. With ``init`` the shelf set overrides
+    ``__init__``, so ``BookFilter`` holds the re-entry only as a projected copy, which the
+    audit asks in the child set that runs it, never on the copy itself.
+    """
+
+    def __init__(  # noqa: N807 - the consumer's own __init__ override
+        self: FilterSet,
+        data: Mapping[str, object] | None = None,
+        queryset: QuerySet[Model] | None = None,
+        *,
+        request: HttpRequest | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        FilterSet.__init__(self, data, queryset, request=request, prefix=prefix)
+
+    shelf_filter = type(
+        "ShelfFilter",
+        (FilterSet,),
+        {
+            "books": RelatedFilter(lambda: book_filter, field_name="books"),
+            **({"__init__": __init__} if init else {}),
+            "Meta": type("Meta", (), {"model": Shelf, "fields": {"code": ["exact"]}}),
+        },
+    )
+    book_filter = type(
+        "BookFilter",
+        (FilterSet,),
+        {
+            "shelf": RelatedFilter(shelf_filter, field_name="shelf"),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": Book, "fields": {"title": ["exact"], "id": ["exact"]}},
+            ),
+        },
+    )
+    _relay_type(
+        Book,
+        ("id", "title", "shelf"),
+        name="BookPrimary",
+        primary=True,
+        strategy=_encode_by_name,
+    )
+    _relay_type(
+        Book,
+        ("id", "title", "shelf"),
+        name="BookSecondary",
+        filterset_class=book_filter,
+        strategy="type",
+    )
+    _relay_type(Shelf, ("id", "code"), name="ShelfType")
+
+    finalize_django_types()
+
+
+def test_phase_2_5_asks_a_projected_copy_in_the_child_set_that_runs_it() -> None:
+    """A projected copy of a reached set's leaf is asked in that set, never on the copy.
+
+    ``ShelfFilter`` overrides ``__init__``, so ``BookFilter`` holds its ``branch`` key only
+    as a projected copy, a filter no set binds; the audit asks ``ShelfFilter.branch``
+    where it is declared and the schema builds (``Branch`` keeps the default strategy).
+    """
+    _unwired_hop_world(init=True, callable_branch=False)
+
+    finalize_django_types()
 
 
 def test_finalize_surfaces_the_related_filter_target_gate_identity() -> None:

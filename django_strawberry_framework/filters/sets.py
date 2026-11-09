@@ -2311,6 +2311,18 @@ class _LeafChain:
     fallback: _LeafChain | None = None
     view: tuple[RelationHop, ...] = ()
 
+    def decoding_filters(self) -> tuple[Filter, ...]:
+        """Return every filter this chain decodes a GlobalID value in, each as it is bound.
+
+        ``terminal``, and for a to-many key the leaf as declared, whose predicate
+        ``terminal_value`` builds first. A chain matching keys (``key_match``, with its
+        ``fallback``) belongs to a leaf running consumer code, whose value no shipped
+        decode reads first (``_decodes_before_binding``), so it is never asked.
+        """
+        if self.to_many_key is None:
+            return (self.terminal,)
+        return (self.terminal, self.to_many_key.declared)
+
     def terminal_value(self, value: object, using: str) -> object:
         """Return the ``terminal`` value: ``value``, or the target key for a to-many key leaf.
 
@@ -2408,7 +2420,8 @@ class _UndeclaredHopSet:
     bound to this instead of a child filter set instance: ``_meta.model`` is the
     hop's model (a raw-key or integer terminal coerces through it),
     ``_owner_definition`` the definition of the type the rows answer for (a
-    GlobalID terminal validates against it) and ``request`` the walking set's.
+    GlobalID terminal validates against it) and ``request`` the walking set's
+    (``None`` for the build's ask, ``FilterSet._globalid_decode_sites``).
     """
 
     def __init__(self, hop: UndeclaredHop, request: object) -> None:
@@ -2436,11 +2449,45 @@ def _bind_filter(
     a consumer ``field`` or ``filter`` calling ``get_model_field(self.model, ...)``)
     resolves the path against the one model its owner filters. Every site that
     binds a filter (``FilterSet._copy_filter``, a walked terminal's
-    ``FilterSet._bound_terminal``) binds both here, so none can move ``parent``
-    and leave ``model`` behind. Written into the instance dict: the stubs declare
-    neither attribute.
+    ``_rebound_terminal``, the build's ``FilterSet._globalid_decode_sites``) binds
+    both here, so none can move ``parent`` and leave ``model`` behind. Written into
+    the instance dict: the stubs declare neither attribute.
     """
     truth.instance_state(filter_instance).update(model=model, parent=owner)
+
+
+def _rebound_terminal(
+    set_cls: type[FilterSet],
+    filter_instance: Filter,
+    hop: RelationHop,
+    field_name: str,
+    face: FilterSet | _UndeclaredHopSet,
+) -> Filter:
+    """Return a shallow copy of ``filter_instance`` filtering ``field_name``, bound to ``face``.
+
+    The terminal ``FilterSet._bound_terminal`` runs over the rows ``hop`` reaches:
+    its own ``extra`` (a ``field`` read writes there, ``AllValuesMultipleFilter`` its
+    target's choices, ``QuerySetRequestMixin`` its queryset, never on the set's copy),
+    the lookup applied where the walked path ends
+    (``filters/base.py::_filterset_walked_lookup``), and ``face`` with the hop's model.
+    """
+    terminal = copy.copy(filter_instance)
+    terminal.extra = {**filter_instance.extra}
+    terminal.field_name = field_name
+    terminal.lookup_expr = _filterset_walked_lookup(set_cls, filter_instance)[1]
+    _bind_filter(terminal, face, _hop_model(hop))
+    return terminal
+
+
+def _face_of_set(set_cls: type[FilterSet]) -> FilterSet:
+    """Return an instance of ``set_cls`` no ``__init__`` ran on, a build-time binding face.
+
+    ``filters/base.py::_globalid_target`` reads a bound filter's ``parent`` by its class
+    alone (the class's own binding, else its ``Meta.model``), so this answers as the
+    child instance a request builds (``FilterSet._projection_child``) does, without
+    running the consumer's ``__init__`` or touching a queryset at schema build.
+    """
+    return object.__new__(set_cls)
 
 
 def _require_relation_path(owner: type[FilterSet], declared_attr: str, f: RelatedFilter) -> None:
@@ -6804,20 +6851,40 @@ class FilterSet(
         visible target rows with the path left on that target as its ``field_name`` and
         the walked lookup as its ``lookup_expr``.
         """
-        terminal = copy.copy(filter_instance)
-        # Its own ``extra``: a ``field`` read writes there (``AllValuesMultipleFilter`` its
-        # target's choices, ``QuerySetRequestMixin`` its queryset), never on this set's copy.
-        terminal.extra = {**filter_instance.extra}
-        terminal.field_name = field_name
-        terminal.lookup_expr = _filterset_walked_lookup(type(self), filter_instance)[1]
         target_set = (
             # The walk continues only past a declared hop whose target resolved to a set class.
             self._projection_child(_hop_target_set(hop))
             if isinstance(hop, DeclaredHop)
             else _UndeclaredHopSet(hop, self.request)
         )
-        _bind_filter(terminal, target_set, _hop_model(hop))
-        return terminal
+        return _rebound_terminal(type(self), filter_instance, hop, field_name, target_set)
+
+    @classmethod
+    def _globalid_decode_sites(cls, filter_instance: Filter) -> tuple[Filter, ...]:
+        """Return every filter a request running ``filter_instance`` decodes its value in, bound.
+
+        The build-time ask of the request's own routing (``_routed_leaf_chain``, the
+        chain ``_leaf_chain`` runs): ``filter_instance`` bound to a face of this set, then
+        each filter its chain runs (``_LeafChain.decoding_filters``), every terminal bound
+        as ``_bound_terminal`` binds it but to a face no ``__init__`` ran on
+        (``_face_of_set``), whose class is the one the request's child instance has, or to
+        the undeclared hop's face. ``filters/base.py::_globalid_target`` read on each
+        answers the definition the request decodes against. Runs no consumer code and no
+        query.
+        """
+        declared = copy.copy(filter_instance)
+        _bind_filter(declared, _face_of_set(cls), require(cls._meta.model, is_model_class))
+
+        def bind(leaf: Filter, hop: RelationHop, field_name: str) -> Filter:
+            face = (
+                _face_of_set(_hop_target_set(hop))
+                if isinstance(hop, DeclaredHop)
+                else _UndeclaredHopSet(hop, None)
+            )
+            return _rebound_terminal(cls, leaf, hop, field_name, face)
+
+        chain = cls._routed_leaf_chain(declared, bind)
+        return (declared,) if chain is None else chain.decoding_filters()
 
     def _leaf_chain(self, filter_instance: Filter) -> _LeafChain | None:
         """Return how an active leaf of this set reads the related rows, ``None`` for a leaf walking no hop.
@@ -6872,7 +6939,22 @@ class FilterSet(
                 if fallback is None
                 else replace(fallback, hops=(hop, *fallback.hops)),
             )
-        walk = type(self)._flat_leaf_walk(filter_instance)
+        return type(self)._routed_leaf_chain(filter_instance, self._bound_terminal)
+
+    @classmethod
+    def _routed_leaf_chain(
+        cls,
+        filter_instance: Filter,
+        bind: Callable[[Filter, RelationHop, str], Filter],
+    ) -> _LeafChain | None:
+        """Return the chain a walked leaf of this set runs, each terminal bound by ``bind``.
+
+        The routing of ``_leaf_chain`` past a projected copy: ``bind`` is
+        ``_bound_terminal`` on a request, and the build-time ask
+        (``_globalid_decode_sites``) binds each terminal to a face no ``__init__`` ran on,
+        so the build reads the routing a request runs.
+        """
+        walk = cls._flat_leaf_walk(filter_instance)
         if walk is None:
             return None
         hops, target_path = walk
@@ -6880,20 +6962,20 @@ class FilterSet(
         if target_path:
             return _LeafChain(
                 hops,
-                self._bound_terminal(filter_instance, last, target_path),
+                bind(filter_instance, last, target_path),
             )
         target_pk = _hop_model(last)._meta.pk
-        if _filterset_walked_lookup(type(self), filter_instance)[1] == "isnull":
+        if _filterset_walked_lookup(cls, filter_instance)[1] == "isnull":
             return _LeafChain(
                 hops,
-                self._bound_terminal(filter_instance, last, target_pk.name),
+                bind(filter_instance, last, target_pk.name),
             )
         owner_model = _hop_source_model(hops, len(hops) - 1)
         relation = _hop_relation(last)
         shipped = _runs_shipped_filter(filter_instance)
         to_many = path_traverses_to_many(owner_model, relation)
         if not to_many and (shipped or len(hops) == 1):
-            return self._folded_key_chain(filter_instance, hops, relation)
+            return cls._folded_key_chain(filter_instance, hops, relation, bind)
         # The relation's last link names the target column Django's relation lookup
         # compares: the target's primary key, or a single non-key ``to_field``. A
         # GlobalID / raw-key leaf marked for a non-pk ``to_field`` carries the pk.
@@ -6909,7 +6991,7 @@ class FilterSet(
             and not getattr(filter_instance, _GLOBALID_RELATION_PK_ATTR, False)
         ):
             key_name, key_attname = targets[0].name, targets[0].attname
-        terminal = self._bound_terminal(filter_instance, last, key_name)
+        terminal = bind(filter_instance, last, key_name)
         setattr(terminal, _GLOBALID_RELATION_PK_ATTR, False)
         if shipped:
             # Shipped and forward returned above: this leaf is a to-many key.
@@ -6934,7 +7016,7 @@ class FilterSet(
                 )
             )
             if to_many
-            else self._folded_key_chain(filter_instance, hops, relation),
+            else cls._folded_key_chain(filter_instance, hops, relation, bind),
         )
 
     def _relation_view(
@@ -7068,11 +7150,13 @@ class FilterSet(
         view.field_name = names[-1]
         return rows.alias(**aliases), view
 
+    @classmethod
     def _folded_key_chain(
-        self,
+        cls,
         filter_instance: Filter,
         hops: tuple[RelationHop, ...],
         relation: str,
+        bind: Callable[[Filter, RelationHop, str], Filter],
     ) -> _LeafChain:
         """Return the chain of a forward relation-key leaf comparing the stored key it holds.
 
@@ -7081,11 +7165,7 @@ class FilterSet(
         of the last hop (``_LeafChain.key_hop``).
         """
         folded = hops[:-1]
-        terminal = (
-            self._bound_terminal(filter_instance, folded[-1], relation)
-            if folded
-            else filter_instance
-        )
+        terminal = bind(filter_instance, folded[-1], relation) if folded else filter_instance
         return _LeafChain(folded, terminal, key_hop=hops[-1])
 
     def _reaches_hop(

@@ -1,9 +1,10 @@
 # Item 216 plan v7: a per-declaration opt-out for flat RelatedFilter copies
 
-Status: PLAN v7. HEAD `1462297f` (`main`). Process: `docs/bug_hunt/FIX.md`. **Blocked on tracker items 745,** which
-lands first (ruling 6), **and 748,** whose fix walks raw-form `RelatedFilter` heads through `FilterSet._flat_leaf_walk`,
-the walk D2's restored-own-key routing rows describe; R1 re-derives those rows against it. 749 landed without
-rewriting the walk: it hands the walk the path Django walks for a leaf (`filters/base.py::_filterset_walked_lookup`).
+Status: PLAN v7. HEAD `1462297f` (`main`). Process: `docs/bug_hunt/FIX.md`. **Blocked on tracker item 748,** whose fix
+walks raw-form `RelatedFilter` heads through `FilterSet._flat_leaf_walk`, the walk D2's restored-own-key routing rows
+describe; R1 re-derives those rows against it. 745 (ruling 6) is the GlobalID audit this plan builds on. 749 landed
+without rewriting the walk: it hands the walk the path Django walks for a leaf
+(`filters/base.py::_filterset_walked_lookup`).
 - v1 was reviewed at `8d47f31f` (REVISE). The v1 review is in the repository's docs folder.
 - v2 was reviewed at `a3c97aa4` (REVISE).
 - v3 was reviewed at `703d538a` (REVISE, Sonnet High).
@@ -218,11 +219,20 @@ from v7; the landing commit deletes it.
 ### GlobalID encode-only audit: built on 745 (ruling 6)
 
 - 216 changes no GlobalID code and no GlobalID docstring or spec text.
-- **Precondition, stated for R1 to verify (v6 trace).** After 745, for every set `_reachable_filtersets` returns
-  from a wired set, the audit resolves each GlobalID entry of that set's published table at the hop path a request
-  walks from the wired owner, declared hops and undeclared-hop re-entry included. It skips entries that do not decode
-  before binding (`_decodes_before_binding`). It refuses naming the wired set and the request key, identically under
-  both flags. If 745 lands a different identity rule or reach, R1 stops and the plan is revised.
+- **Precondition, stated for R1 to verify (v6 trace).** As 745 lands it, the audit
+  (`types/finalizer.py::_audit_globalid_filter_strategies`) asks every set `filters/inputs.py::_served_reach` yields
+  from a wired set: the wired set, then each set reached through a branch the table publishes (the declared
+  `RelatedFilter` head, or a flat copy `HIDE_FLAT_FILTERS` does not hide), not every declaration
+  `_reachable_filtersets` follows. Each GlobalID entry of a reached set's table is resolved where a request decodes it
+  (`filters/sets.py::FilterSet._globalid_decode_sites`, the routing `_leaf_chain` runs: declared hops, an undeclared
+  hop's face and re-entry included); a projected copy is asked in its child set, and entries that do not decode before
+  binding (`_decodes_before_binding`) are skipped. It refuses naming the wired set and the request key, identically
+  under both flags, with the landed template: `filterset <Wired> serves GlobalID filter '<request key>'
+  (<DeclaringSet>.<name>, reached through RelatedFilter <Set>.<attribute>, then ...) targeting <Type>, whose globalid
+  strategy is '<strategy>'.` for a reached leaf, `filterset <Wired> declares GlobalID filter '<key>' targeting <Type>,
+  ...` for an own one. R1 re-derives the rows against this reach, including whether a `flat=False` declaration's
+  target set is still reached. If a later change moves the identity rule or the reach, R1 stops and the plan is
+  revised.
 - **Rows (v6 reuse: a `flat` parameter on 745's rows, no new Book/Shelf/Branch world):**
   - the declared-hop callable-strategy shape: refused under both flags with the same message;
   - the undeclared-hop re-entry shape: refused under both flags with the same message;

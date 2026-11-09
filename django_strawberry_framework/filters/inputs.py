@@ -1180,53 +1180,31 @@ def _is_hidden_flat_copy(filterset_cls: type[FilterSet], filter_instance: Filter
     return bool(hide_flat_filters_setting()) and _is_flat_copy(filterset_cls, filter_instance)
 
 
-def _refuse_unsealable_served_leaves(served: Iterable[type[FilterSet]]) -> None:
-    """Refuse a leaf of a connection-served set whose predicate holds a class the seal refuses.
+def _served_reach(
+    served: Iterable[type[FilterSet]],
+) -> Iterator[tuple[type[FilterSet], type[FilterSet], tuple[str, ...]]]:
+    """Yield ``(root, set, through)`` for each set ``served`` reaches through a ``RelatedFilter``.
 
-    A ``DjangoConnectionField`` (root, or the ``<relation>Connection`` a Relay type grows)
-    applies its ``filter:`` argument inside the visibility boundary
-    (``utils/querysets.py::apply_filterset_sync``), whose seal admits only Django's own node
-    classes (``utils/querysets.py::_type_is_genuinely_django``, spec-045 Decision 2). A leaf
-    whose path resolves to any other transform or lookup class (a project ``Transform`` or
-    ``Lookup``, a ``Func``-based transform, a subclass of a Django class, a third-party
-    app's lookup; registered on a field class, on an instance, or on a transform) is
-    published on that argument yet refused on every request, so the build refuses it. The
-    classes asked are the ones Django's query resolves for the leaf's ``field_name`` and
-    ``lookup_expr`` (``filters/base.py::_filterset_lookup_operand``, the ``get_transform`` /
-    ``get_lookup`` walk), each asked of the seal's own predicate, so the build and the
-    request cannot disagree.
-
-    Every set a served set reaches through a ``RelatedFilter`` is served too, as its nested
-    branch, through a branch the set's published filter table still holds (the declared
-    ``RelatedFilter`` itself or one held under its declared name, never an expansion copy)
-    or a flat copy the schema publishes (each copy's child set, ``ChildProjection.filterset``,
-    unless ``HIDE_FLAT_FILTERS`` hides the copy: ``_is_hidden_flat_copy``, the input
-    builder's own rule); a ``get_filters`` override that drops both serves no request
-    through the branch. Each
-    reached set's own filter table is asked, its expansion copies skipped
-    (``filters/sets.py::_expansion_record``), so every leaf is judged once, on the set that
-    declares it, and named there with the ``RelatedFilter`` path it was
-    reached through. A leaf whose ``filter`` is consumer code on its own set (a ``method=``
-    filter, a ``filter`` override, a ``filter`` held on the instance:
-    ``filters/sets.py::_runs_shipped_filter``) owns its query, and a path the model alone
-    cannot resolve (a queryset annotation) has no walk; the seal judges both per request. A
-    predicate Django resolves on no queryset never reaches here: its set refused it when it
-    published (``filters/base.py::refuse_unresolvable_lookup``). A
-    set no connection serves, applied from the project's own resolver, is never sealed and
-    is not asked.
+    Every set a served set reaches is served too, as its nested branch, through a branch
+    the set's published filter table still holds (the declared ``RelatedFilter`` itself or
+    one held under its declared name, never an expansion copy) or a flat copy the schema
+    publishes (each copy's child set, ``ChildProjection.filterset``, unless
+    ``HIDE_FLAT_FILTERS`` hides the copy: ``_is_hidden_flat_copy``, the input builder's own
+    rule); a ``get_filters`` override that drops both serves no request through the branch.
+    Breadth first, each set once, the served sets first, each yielded before its branches
+    are read, so a caller refusing a set's leaf stops before a later set builds: ``root``
+    is the served set it was first reached from and ``through`` the ``RelatedFilter``
+    attributes crossed, ``<Set>.<attribute>`` outermost first (empty for a served set).
     """
-    from django_strawberry_framework.utils.querysets import (  # noqa: PLC0415 - import cycle
-        _type_is_genuinely_django,
-    )
+    from .sets import _expansion_record  # noqa: PLC0415 - import cycle
 
-    from .sets import _expansion_record, _runs_shipped_filter  # noqa: PLC0415 - import cycle
-
-    # Breadth first: the list grows while it is walked, each reached set once.
-    pending: list[tuple[type[FilterSet], tuple[str, ...]]] = [
-        (filterset_cls, ()) for filterset_cls in served
+    # The list grows while it is walked.
+    pending: list[tuple[type[FilterSet], type[FilterSet], tuple[str, ...]]] = [
+        (filterset_cls, filterset_cls, ()) for filterset_cls in served
     ]
-    seen = {filterset_cls for filterset_cls, _through in pending}
-    for filterset_cls, through in pending:
+    seen = {filterset_cls for _root, filterset_cls, _through in pending}
+    for root, filterset_cls, through in pending:
+        yield root, filterset_cls, through
         table = filterset_cls._filter_table()
         heads = {
             name: leaf
@@ -1251,7 +1229,48 @@ def _refuse_unsealable_served_leaves(served: Iterable[type[FilterSet]]) -> None:
         for child, branch in branches:
             if child is not None and child not in seen:
                 seen.add(child)
-                pending.append((child, (*through, f"{truth.name(filterset_cls)}.{branch}")))
+                pending.append(
+                    (root, child, (*through, f"{truth.name(filterset_cls)}.{branch}")),
+                )
+
+
+def _refuse_unsealable_served_leaves(served: Iterable[type[FilterSet]]) -> None:
+    """Refuse a leaf of a connection-served set whose predicate holds a class the seal refuses.
+
+    A ``DjangoConnectionField`` (root, or the ``<relation>Connection`` a Relay type grows)
+    applies its ``filter:`` argument inside the visibility boundary
+    (``utils/querysets.py::apply_filterset_sync``), whose seal admits only Django's own node
+    classes (``utils/querysets.py::_type_is_genuinely_django``, spec-045 Decision 2). A leaf
+    whose path resolves to any other transform or lookup class (a project ``Transform`` or
+    ``Lookup``, a ``Func``-based transform, a subclass of a Django class, a third-party
+    app's lookup; registered on a field class, on an instance, or on a transform) is
+    published on that argument yet refused on every request, so the build refuses it. The
+    classes asked are the ones Django's query resolves for the leaf's ``field_name`` and
+    ``lookup_expr`` (``filters/base.py::_filterset_lookup_operand``, the ``get_transform`` /
+    ``get_lookup`` walk), each asked of the seal's own predicate, so the build and the
+    request cannot disagree.
+
+    Every set a served set reaches through a ``RelatedFilter`` is served too, as its nested
+    branch (``_served_reach``, the reach the GlobalID audit reads too). Each reached set's
+    own filter table is asked, its expansion copies skipped
+    (``filters/sets.py::_expansion_record``), so every leaf is judged once, on the set that
+    declares it, and named there with the ``RelatedFilter`` path it was reached through. A
+    leaf whose ``filter`` is consumer code on its own set (a ``method=`` filter, a
+    ``filter`` override, a ``filter`` held on the instance:
+    ``filters/sets.py::_runs_shipped_filter``) owns its query, and a path the model alone
+    cannot resolve (a queryset annotation) has no walk; the seal judges both per request. A
+    predicate Django resolves on no queryset never reaches here: its set refused it when it
+    published (``filters/base.py::refuse_unresolvable_lookup``). A set no connection serves,
+    applied from the project's own resolver, is never sealed and is not asked.
+    """
+    from django_strawberry_framework.utils.querysets import (  # noqa: PLC0415 - import cycle
+        _type_is_genuinely_django,
+    )
+
+    from .sets import _expansion_record, _runs_shipped_filter  # noqa: PLC0415 - import cycle
+
+    for _root, filterset_cls, through in _served_reach(served):
+        table = filterset_cls._filter_table()
         for name, leaf in table.items():
             if (
                 truth.is_instance(leaf, RelatedFilter)

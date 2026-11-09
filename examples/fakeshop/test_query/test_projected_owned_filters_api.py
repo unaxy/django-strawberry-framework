@@ -4,6 +4,10 @@ These requests pin the independently observable distinctions:
 constraining none versus identity, two method projections with independent
 sibling predicates, the callable's own exclude/isnull behavior, and typed text
 refusals before either a consumer binding or the inherited GlobalID decoder.
+The GlobalID leaves the build admits beside an encode-only (``callable``) type
+serve too: a consumer decoder (``method=``, a class-level ``filter`` override)
+reads its value as its own code, and a declared re-entry decodes against the
+secondary type its set is bound to, never a ``callable`` primary.
 """
 
 import asyncio
@@ -31,6 +35,7 @@ from graphql_client import (
     response_json,
 )
 from strategy_schemas import make_django_type
+from strawberry import relay
 from strawberry.types.base import StrawberryObjectDefinition
 from typing_extensions import override
 
@@ -115,6 +120,7 @@ def _holder(
     *,
     targets: Sequence[type[DjangoType]] = (),
     primary: bool = True,
+    strategy: object = None,
 ) -> tuple[DjangoSchema, type[DjangoType]]:
     meta: dict[str, object] = {
         "filterset_class": filterset,
@@ -124,6 +130,8 @@ def _holder(
     if not primary:
         # A non-Relay primary cannot decode a secondary output's model-label ID.
         meta["globalid_strategy"] = "type"
+    if strategy is not None:
+        meta["globalid_strategy"] = strategy
     row_type = make_django_type(
         "OwnedFilterRoot",
         model,
@@ -855,3 +863,154 @@ def test_globalid_consumer_binding_refusals_follow_the_filter_that_actually_runs
         }
     assert _root_sql(sqls[boundary:], models.Book) == []
     assert _root_sql(sqls[boundary:], models.Shelf) == []
+
+
+def _encode_by_name(
+    type_cls: type[DjangoType],
+    _model: type[django_models.Model],
+    _root: object,
+) -> str:
+    """A ``callable`` GlobalID strategy: encode-only, no decode path."""
+    return f"Encoded{type_cls.__name__}"
+
+
+def _node_id(value: object) -> str:
+    """The node id of a GlobalID value a consumer decoder receives, decoded by its own code."""
+    return relay.GlobalID.from_id(str(value)).node_id
+
+
+class _DecodingGlobalIDFilter(GlobalIDFilter):
+    """A class-level ``filter`` override: the consumer's own decode of its value."""
+
+    @override
+    def filter(self, qs: django_models.QuerySet[_M], value: object) -> django_models.QuerySet[_M]:
+        if value in (None, ""):
+            return qs
+        return qs.filter(pk=_node_id(value))
+
+
+class _MethodGenres(FilterSet):
+    gid = GlobalIDFilter(field_name="id", method="filter_gid")
+
+    class Meta:
+        model = models.Genre
+        fields = []
+
+    def filter_gid(
+        self,
+        queryset: django_models.QuerySet[models.Genre],
+        _name: str,
+        value: object,
+    ) -> django_models.QuerySet[models.Genre]:
+        return queryset.filter(pk=_node_id(value))
+
+
+class _OverrideGenres(FilterSet):
+    gid = _DecodingGlobalIDFilter(field_name="id")
+
+    class Meta:
+        model = models.Genre
+        fields = []
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.parametrize(
+    "filterset",
+    [_MethodGenres, _OverrideGenres],
+    ids=["method", "class-filter-override"],
+)
+def test_globalid_consumer_decoder_on_a_callable_strategy_type_serves_its_own_decode(
+    filterset: type[FilterSet],
+) -> None:
+    """A consumer decoder of a ``callable`` type's own id builds and answers the row it decodes.
+
+    The value reaches the consumer's code undecoded
+    (``filters/sets.py::_decodes_before_binding``), so the encode-only audit does not ask
+    it: the id the type emits filters to its row.
+    """
+    first = models.Genre.objects.create(pk=7451, name="first")
+    models.Genre.objects.create(pk=7452, name="second")
+    schema, _row_type = _holder(models.Genre, "name", filterset, strategy=_encode_by_name)
+    listed = _post(schema, _document(schema, "name"), {})
+    emitted = json_str(listed, "data", "rows", "edges", 0, "node", "id")
+    assert relay.GlobalID.from_id(emitted).type_name == "EncodedOwnedFilterRoot"
+
+    payload = _post(schema, _document(schema, "name"), _where(schema, ("gid", "exact"), emitted))
+
+    assert payload == {
+        "data": {
+            "rows": {"totalCount": 1, "edges": [{"node": {"id": emitted, "name": "first"}}]},
+        },
+    }
+    assert relay.GlobalID.from_id(emitted).node_id == str(saved_pk(first))
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("private_registry")
+def test_globalid_declared_reentry_decodes_against_the_secondary_its_set_is_bound_to() -> None:
+    """A declared re-entry onto a ``type`` secondary builds and serves beside a ``callable`` primary.
+
+    ``ReentryBooks.shelf`` -> ``ReentryShelves.books`` -> ``ReentryBooks``: the nested
+    ``id`` runs in the set the secondary is bound to, so it decodes the secondary's ids
+    and answers every book sharing a shelf with the one it names.
+    """
+
+    class ReentryShelves(FilterSet):
+        books = RelatedFilter(lambda: ReentryBooks, field_name="books")
+
+        class Meta:
+            model = models.Shelf
+            fields = []
+
+    class ReentryBooks(FilterSet):
+        shelf = RelatedFilter(ReentryShelves, field_name="shelf")
+
+        class Meta:
+            model = models.Book
+            fields = {"id": ["exact"]}
+
+    near = models.Shelf.objects.create(
+        pk=7451,
+        branch=models.Branch.objects.create(pk=7451, name="near"),
+        code="NEAR",
+    )
+    far = models.Shelf.objects.create(
+        pk=7452,
+        branch=models.Branch.objects.create(pk=7452, name="far"),
+        code="FAR",
+    )
+    named = models.Book.objects.create(pk=7451, shelf=near, title="named")
+    beside = models.Book.objects.create(pk=7452, shelf=near, title="beside")
+    models.Book.objects.create(pk=7453, shelf=far, title="elsewhere")
+    primary = make_django_type(
+        "ReentryBookPrimary",
+        models.Book,
+        ("id", "title"),
+        meta_extra={"primary": True, "globalid_strategy": _encode_by_name},
+    )
+    shelf_type = make_django_type("ReentryShelf", models.Shelf, ("id", "code"))
+    schema, row_type = _holder(
+        models.Book,
+        "title",
+        ReentryBooks,
+        targets=(primary, shelf_type),
+        primary=False,
+    )
+
+    payload = _post(
+        schema,
+        _document(schema, "title"),
+        _where(
+            schema,
+            (
+                "shelf",
+                "books",
+                "id",
+                "exact",
+            ),
+            global_id_for(row_type, saved_pk(named)),
+        ),
+    )
+
+    assert payload == _expected(row_type, [(named, "named"), (beside, "beside")])

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 453 done, 117 to do. The CHANGELOG entries filed here moved to
+Progress: 454 done, 118 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2081,6 +2081,24 @@ Progress: 453 done, 117 to do. The CHANGELOG entries filed here moved to
   `tests/test_routers.py`'s frame rows and `tests/test_views.py`'s `__cause__`, subclass and consumer-override rows.
   Docs: spec-046, spec-047 Decision 13 (now scoped: a document literal fails only in an `Int` position), the view
   docstrings, the KANBAN card 55 item, GLOSSARY `DjangoGraphQLView` and "Upstream patches". CHANGELOGTODO 831
+- [x] 745. The finalizer's encode-only GlobalID audit now asks the filter a request executes, where it decodes:
+  `types/finalizer.py::_audit_globalid_filter_strategies` reads every set a wired filterset serves
+  (`filters/inputs.py::_served_reach`, the reach the unsealable-leaf audit walks, now shared), resolves each GlobalID
+  leaf through the request's own routing (`filters/sets.py::FilterSet._routed_leaf_chain`, shared by
+  `FilterSet._leaf_chain` and the build-time `FilterSet._globalid_decode_sites`, which binds a declared hop to a bare
+  instance of the target set class and an undeclared hop to its face) and `filters/base.py::_globalid_target(...,
+  stable=True)`, asks projected copies in the child set that runs them, and skips consumer decoders
+  (`_decodes_before_binding`: `method=`, a class-level `filter` override). Now refused at build: a `RelatedFilter`
+  into an unwired set whose key reaches a `callable` / `custom` type (an MTI descendant's reverse key, a key into an
+  MTI child) and a scoped re-entry onto a callable secondary, each of which refused every nonempty value with
+  `GLOBALID_UNVALIDATABLE`; their `null` and `[]` requests, which served, go with them. Now built and serving: consumer
+  decoders over an encode-only type and a declared re-entry onto a decodable secondary with a callable primary. The
+  message names the serving filterset, the request key, the declaring filter and the `RelatedFilter` path, and offers
+  `method=`. `resolve_globalid_target_definition` is deleted; the `None`-strategy and non-Relay arms stay runtime-only.
+  Pinned by `tests/filters/test_finalizer.py`'s refusal (twelve-plus shapes, whole message), admission and
+  projected-copy rows and `examples/fakeshop/test_query/test_projected_owned_filters_api.py`'s consumer-decoder and
+  secondary re-entry rows. Docs: spec-027, spec-031 and its rationale, GLOSSARY `Meta.globalid_strategy`, the 216 plan.
+  Filed 832, 833. CHANGELOGTODO 834
 
 ## Outside review of the fixes
 
@@ -2121,16 +2139,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 745. The finalizer's GlobalID encode-only audit
-  (`types/finalizer.py::_audit_globalid_filter_strategies`) resolves each filter's original `field_name` against
-  its wired owner, but a request first rebinds the leaf through its declared hops or an undeclared hop's face
-  (`filters/sets.py::FilterSet._leaf_chain` / `_bound_terminal`), and it never reads unwired targets. A schema
-  whose executing filter decodes into a `callable` / `custom` type passes `finalize_django_types()` and fails every
-  request supplying a nonempty value with `GLOBALID_UNVALIDATABLE`: a `RelatedFilter` into an unwired set over an
-  MTI descendant whose `faults` key reaches a callable-strategy type, or a re-entry `shelf__books__id` that the
-  runtime decodes against a secondary Book type. The fix must audit the filter that executes, skip consumer
-  decoders (`_decodes_before_binding`: `method=` or a class-level `filter` override), and record that refusing at
-  construction also removes empty-list and null requests that succeed today. Found planning 216
 - [ ] 746. The finalizer's deep-copy probe (`types/finalizer.py::_audit_filter_copies`) reads each wired set's
   `base_filters` before expansion, so an entry a `get_filters()` override publishes after expansion
   (`filters/sets.py::FilterSet._publish_filters`), such as a borrowed `RelatedFilter` head keyed by an expanded
@@ -2150,8 +2158,8 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 216. A dense `RelatedFilter` graph publishes a flat surface factorial in its size (path-relative expansion over every
   simple path: six sets each related to every other give about 11k flat keys per set, seven about 94k). The bound
   landed in `47dd4daa`; the maintainer ruled the per-declaration opt-out `RelatedFilter(flat=False)`. Plan:
-  `docs/related-filter-flat-opt-out-plan.md` (v7, reviewed five rounds). Blocked on 745 and on 748, which land
-  first. Tracked on BACKLOG.md `related_filter_flat_opt_out`, removed when this lands. Moved from Waiting on you
+  `docs/related-filter-flat-opt-out-plan.md` (v7, reviewed five rounds). Blocked on 748, which lands first.
+  Tracked on BACKLOG.md `related_filter_flat_opt_out`, removed when this lands. Moved from Waiting on you
 - [ ] 750. A raw `FilterSet(data=..., request=...)` (`DjangoFilterBackend`) never sets `_apply_info` (only
   `apply_sync` / `apply_async` do, `_build_stashed_instance`), so every hop and choice hook scopes with `info=None`: a
   staff request is filtered as anonymous (`CatalogueBookFilter` `shelf=<secret pk>` returns nothing for staff), and a
@@ -2344,6 +2352,19 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`arr__icontains=1`, from a per-field `"__all__"` or listed) cleans its value into a list and compiles a match
   against that list's Python repr (`UPPER("arr"::text) LIKE '%[DECIMAL('1')]%'`), silently matching nothing a consumer
   means; Django compares the column's text rendering (`{1,2}`) with a string. Found fixing 739
+- [ ] 832. (robustness) A flat key into a `RelatedFilter` target set over a multi-table-inheritance descendant
+  answers a Django `FieldError` for every nonempty value, whatever its GlobalID strategy: `RepairTicketFilter.venue =
+  RelatedFilter(SelfServeDeskFilter, field_name="venue")` publishes `venueFaults`, which applies `venue__faults` from a
+  `Venue` relation where only `venue__lendingdesk__selfservedesk__faults` resolves ("Unsupported lookup 'faults' for
+  ForeignKey or join on the field not permitted", `filters/sets.py::_apply_relation_leaf`; a class-level `filter`
+  override answers "Venue has no field named 'faults'" from `::_names_every_through`). The nested branch serves. Found
+  fact-finding 745
+- [ ] 833. (robustness) A to-many relation-key GlobalID leaf whose undeclared hops re-enter the walking set's table
+  under a scoping secondary type decodes its value twice, the declared predicate in
+  `filters/sets.py::_LeafChain.terminal_value` against the relation's primary (`related_target_for`) and the terminal
+  against `utils/querysets.py::relation_target_type(root=...)`, so when the two types' strategies differ (`model`
+  primary, `type` secondary, key `shelf__books` on a set wired to the secondary) every nonempty value is refused, a
+  primary-minted id as "expects BookSecondary", a secondary-minted id as "expects library.book". Found researching 745
 
 ## To do: holes found re-checking the fixes
 

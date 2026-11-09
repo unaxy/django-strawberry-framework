@@ -170,10 +170,12 @@ FRAMEWORK_GLOBALID_STRATEGIES = MODEL_LABEL_STRATEGIES | TYPE_NAME_STRATEGIES
 # deliberately no decode path - see ``types/relay.py`` #"no ``{"callable",
 # "custom"}`` literal"). A typed filter input for such a target can never
 # validly consume the IDs its target emits, so the build-time audit
-# (``finalizer._audit_globalid_filter_strategies``) rejects those bindings and
-# this runtime guard is the defense-in-depth backstop for hand-built filtersets
-# constructed outside finalization. The names are needed for the reject message
-# so the literal lives here rather than being derived by exclusion.
+# (``finalizer._audit_globalid_filter_strategies``) refuses every leaf a wired
+# filterset serves (its reached sets' included) that decodes against one, and
+# this runtime guard answers for what the audit does not ask: a filterset no
+# wired type serves, applied from a project's own resolver. The names are needed
+# for the reject message so the literal lives here rather than being derived by
+# exclusion.
 ENCODE_ONLY_GLOBALID_STRATEGIES = frozenset({"callable", "custom"})
 
 if TYPE_CHECKING:
@@ -2198,7 +2200,7 @@ def _off_pk_id_slot(definition: DjangoTypeDefinition) -> _OffPkIdSlot | None:
     return _OffPkIdSlot(origin, *_node_id_slot(origin))
 
 
-def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
+def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _GlobalIDTarget | None:
     """Resolve where a GlobalID-aware filter validates and compiles its node id.
 
     Reads the owner of the filter's runtime ``parent``: a filter set instance's
@@ -2207,7 +2209,10 @@ def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
     definition an undeclared hop's face carries, and resolves the LIVE
     ``field_name`` (a leaf ``_expand_related_filter`` rebased resolves its
     rebased path). Rows no definition answers for resolve from their model once
-    the registry is stable (``registry.is_finalized()``): an unbound set instance (a
+    the registry is stable (``registry.is_finalized()``, or ``stable``: the
+    finalizer's build-time audit asks once every type is collected and its strategy
+    stamped, ``types/finalizer.py::_audit_globalid_filter_strategies``, so the build
+    resolves the definition a request resolves): an unbound set instance (a
     ``RelatedFilter`` target no ``DjangoType`` wires, a subclass of a wired set
     included) from its model's registry primary (``registry.get``), the type its
     relation leaves are generated from, for the relation branch only (its own key
@@ -2235,7 +2240,7 @@ def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
     off-pk id slot ``_off_pk_id_slot`` reads), resolved once per ``filter()``
     call and threaded through every element of a list. Returns ``None`` when
     nothing resolves a definition (no ``parent`` or no model, an unbound set
-    before the registry is finalized), for an unbound set's own key, or when
+    before the registry is stable), for an unbound set's own key, or when
     the lookup cannot resolve a target; the filter then decodes the GlobalID
     without type-name validation
     (the node-id-only fallback, spec-031 Decision 13; a relation's node id is still
@@ -2266,7 +2271,7 @@ def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
         # GlobalID of its model's primary.
         meta = optional_instance(truth.static_attr(parent, "_meta", None), FilterSetOptions)
         model = getattr(meta, "model", None)
-        if not registry.is_finalized() or not is_model_class(model):
+        if not (stable or registry.is_finalized()) or not is_model_class(model):
             return None
         start_model = model
         if relation_only:
@@ -2279,51 +2284,13 @@ def _globalid_target(filter_instance: Filter) -> _GlobalIDTarget | None:
         if view is None
         else view.path
     )
-    resolved = _resolve_globalid_target(owner, start_model, field_name)
+    resolved = _resolve_globalid_target(owner, start_model, field_name, stable=stable)
     if resolved is None:
         return None
     definition, row_path = resolved
     if relation_only and not row_path:
         return None
     return _GlobalIDTarget(definition, row_path, _off_pk_id_slot(definition))
-
-
-def resolve_globalid_target_definition(
-    owner: DjangoTypeDefinition,
-    field_name: str | None,
-) -> DjangoTypeDefinition | None:
-    """Resolve the target definition a GlobalID filter validates against, given its owner.
-
-    The target definition ``_globalid_target`` resolves, read from an owner
-    instead of a live filter's ``parent`` so the finalizer's build-time
-    audit (``finalizer._audit_globalid_filter_strategies``) resolves the SAME
-    target definition from a bound filterset's own binding
-    (``utils/permissions.py::set_bound_definition``) + ``filter.field_name``
-    that the runtime path resolves from a live filter instance - the
-    own-PK-vs-relation decision stays single-sited here.
-
-    A ``"pk"`` segment names the current model's primary key. A scalar primary
-    key is the current definition's own Relay id, so it ends the path (owner
-    itself when it is the whole path). A primary key that is itself a relation
-    (``OneToOneField(primary_key=True)``, an MTI ``<parent>_ptr``) is walked like
-    any other relation, so ``"pk"`` on such a model resolves to the definition
-    the key points at, matching how ``FilterSet._is_own_pk_under_relay_owner``
-    keeps a relation primary key out of the own-PK filter branch.
-
-    Returns the owner itself for the own-PK branch, the terminal related target's
-    definition for relation paths (including multi-hop relations like
-    ``"shelf__branch__id"`` and paths through a relation primary key like
-    ``"pk__card"``), or ``None`` when the path does not end on a registered
-    target (a scalar segment before the end, an unknown field, a terminal model no
-    ``DjangoType`` exposes). A hop whose model no type exposes does not end the
-    walk: a relation leaf is generated from its own relation's model, whatever the
-    hops before it expose. The audit calls this once every type is collected and
-    its strategy stamped, before ``registry.is_finalized()`` flips, so the walk reads
-    the registry as stable (``stable=True``) and resolves the target the request-time
-    walk resolves once the registry is finalized.
-    """
-    resolved = _resolve_globalid_target(owner, owner.model, field_name, stable=True)
-    return None if resolved is None else resolved[0]
 
 
 def _resolve_globalid_target(
@@ -2335,23 +2302,26 @@ def _resolve_globalid_target(
 ) -> tuple[DjangoTypeDefinition, str] | None:
     """Resolve ``field_name`` from ``owner`` to ``(target definition, row path)``.
 
-    The walk behind ``resolve_globalid_target_definition`` and
-    ``_globalid_target``: the row path is the prefix of ``field_name`` that
-    reaches the target's rows, every segment before a terminal scalar primary
-    key (``""`` for the owner's own id), or the whole path when it ends on a
-    relation. It comes from the walk, never from trimming ``field_name``: a
-    relation may be named like the target's primary key. A hop into a model no
-    ``DjangoType`` exposes continues on that model, so the target is the terminal
-    relation's ``registry.get`` exactly as generation types the leaf (a
-    ``shelf__branch`` key with no ``Shelf`` type validates against ``Branch``'s);
-    a primary key ending on such a model resolves nothing. The walk starts on
-    ``start_model``: the owner's own model, or the model of rows no definition answers
-    for when there is no ``owner``. Continuing past a
-    hop no definition resolves waits for a stable registry: ``stable`` (the
-    finalizer's build-time audit, which runs once every type is collected and its
-    strategy stamped, before ``registry.is_finalized()`` flips) or a finalized
-    registry; before either the walk ends at that hop, so a filter set applied before
-    finalization reads such a leaf node-id-only.
+    The walk behind ``_globalid_target``: the row path is the prefix of ``field_name``
+    that reaches the target's rows, every segment before a terminal scalar primary key
+    (``""`` for the owner's own id), or the whole path when it ends on a relation. It
+    comes from the walk, never from trimming ``field_name``: a relation may be named
+    like the target's primary key. A ``"pk"`` segment names the current model's primary
+    key: a scalar primary key is the current definition's own Relay id and ends the
+    path, and one that is itself a relation (``OneToOneField(primary_key=True)``, an MTI
+    ``<parent>_ptr``) is walked like any other relation, as
+    ``filters/sets.py::FilterSet._is_own_pk_under_relay_owner`` keeps a relation primary
+    key out of the own-PK branch. A hop into a model no ``DjangoType`` exposes continues
+    on that model, so the target is the terminal relation's ``registry.get`` exactly as
+    generation types the leaf (a ``shelf__branch`` key with no ``Shelf`` type validates
+    against ``Branch``'s); a primary key ending on such a model resolves nothing. The
+    walk starts on ``start_model``: the owner's own model, or the model of rows no
+    definition answers for when there is no ``owner``. Continuing past a hop no
+    definition resolves waits for a stable registry: ``stable`` (the finalizer's
+    build-time audit, which runs once every type is collected and its strategy stamped,
+    before ``registry.is_finalized()`` flips) or a finalized registry; before either the
+    walk ends at that hop, so a filter set applied before finalization reads such a leaf
+    node-id-only.
     """
     if not isinstance(field_name, str) or not field_name:
         return None
@@ -2540,10 +2510,11 @@ def _decode_and_validate_global_id(
     `effective_globalid_strategy` is `None` (an unfinalized or non-Relay
     target), is a fail-closed reject with a coded
     `GraphQLError(..., extensions={"code": "GLOBALID_UNVALIDATABLE"})`.
-    `finalizer._audit_globalid_filter_strategies` refuses encode-only targets
-    during finalization; that runtime arm is its backstop for hand-built
-    filtersets. A finalized non-Relay target has no recorded strategy and can
-    reach the separate missing-strategy refusal through an ordinary request.
+    `finalizer._audit_globalid_filter_strategies` refuses, during finalization,
+    every leaf a wired filterset serves that decodes against an encode-only target;
+    that runtime arm answers for a filterset no wired type serves. A finalized
+    non-Relay target has no recorded strategy and can reach the separate
+    missing-strategy refusal through an ordinary request.
     A malformed wire string (unparseable base64 / not a
     `type_name:node_id` payload) raises `GraphQLError(..., extensions={"code":
     "GLOBALID_INVALID"})` - the uniform coded error the node-refetch path emits
@@ -2609,8 +2580,9 @@ def _decode_and_validate_global_id(
             # decode + validate. ``callable`` / ``custom`` are encode-only; a
             # ``None`` strategy on a known definition means the type was never
             # finalized as a Relay node. The encode-only audit refuses callable
-            # and custom targets during finalization; their runtime arm backs
-            # up that audit. A finalized non-Relay target can reach this refusal
+            # and custom targets of every leaf a wired set serves during
+            # finalization; their runtime arm answers for a set no wired type
+            # serves. A finalized non-Relay target can reach this refusal
             # through an ordinary request because the audit admits it.
             suffix = "" if index is None else f" at index {index}"
             if strategy in ENCODE_ONLY_GLOBALID_STRATEGIES:

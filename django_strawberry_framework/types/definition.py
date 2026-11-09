@@ -186,8 +186,8 @@ class DjangoTypeDefinition:
           and the strategy-aware ``GlobalID`` filter fails closed on it too - a
           known ``None`` on a resolved definition raises the coded
           ``GLOBALID_UNVALIDATABLE`` error at request time
-          (``filters/base.py::_decode_and_validate_global_id``, the runtime
-          backstop behind the build-time audit). The only surviving
+          (``filters/base.py::_decode_and_validate_global_id``; the build-time
+          audit refuses only the encode-only strategies). The only surviving
           node-id-only paths are those with no target definition - and
           therefore no strategy - at all: no owner, an unbound set's own key,
           or a path into a model no ``DjangoType`` exposes (spec-031

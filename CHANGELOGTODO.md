@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 201 to do.
+Progress: 0 done, 202 to do.
 
 ## From dry-0_0_15_3
 
@@ -919,6 +919,13 @@ Progress: 0 done, 201 to do.
   instead of a server error, and in a WebSocket frame the package consumer's upstream non-JSON refusal (4400 on
   `graphql-transport-ws`, a dropped frame on legacy `graphql-ws`) instead of a 1011 close, whatever
   `APPLY_UPSTREAM_PATCHES` says; `DjangoGraphQLView` and `AsyncDjangoGraphQLView` gain a public `decode_json` override
+- [ ] 834. CHANGELOG entry for item 745: a GlobalID filter that a request decodes against a `callable` / `custom`
+  strategy type is now refused by `finalize_django_types()` wherever the schema serves it (in a `RelatedFilter` target
+  set no type wires, past declared hops, on a re-entry bound to a secondary type), where the schema built and every
+  nonempty value answered `GLOBALID_UNVALIDATABLE`; a filter whose value your own code reads (`method=`, a class-level
+  `filter` override) is no longer refused, nor a declared re-entry that decodes against a decodable secondary; the
+  message names the serving filterset, the request key, the declaring filter and the `RelatedFilter` path; a refused
+  leaf's `null` and `[]` requests, which served, go with it
 
 ## From dry-upstream-0_0_15
 
