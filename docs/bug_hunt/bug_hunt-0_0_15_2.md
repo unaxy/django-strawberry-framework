@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 448 done, 113 to do. The CHANGELOG entries filed here moved to
+Progress: 449 done, 115 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1998,6 +1998,19 @@ Progress: 448 done, 113 to do. The CHANGELOG entries filed here moved to
   `tests/filters/test_base.py`'s relation-key and composite-key rows and
   `tests/filters/test_sets.py::test_an_object_sent_to_an_unserved_relation_leaf_is_refused_naming_its_remedies`. Docs:
   spec-027 Decision 4, README, GLOSSARY `FilterSet` and `ConfigurationError`. Filed 816. CHANGELOGTODO 817
+- [x] 734. A flat field that walks a relation now runs on a copy bound to the last hop's target model as well as its
+  target set, as django-filter's `BaseFilterSet.__init__` binds `model` and `parent` together: a filter that resolves
+  its path against `self.model` while it filters (django-filter's `AllValuesMultipleFilter` copied flat from a
+  `RelatedFilter` child set, a consumer `MultipleChoiceFilter` reading `get_model_field(self.model, ...)`, a consumer
+  `filter()` re-cleaning with its own field) answers the nested branch's rows instead of an uncoded "Cannot resolve
+  keyword ... into field", on every hop shape (forward, reverse, to-many key, key-folded), sync, async and through a raw
+  `FilterSet(data, queryset, request).qs`; a set's own leaf walking a scoped undeclared relation too. New
+  `filters/sets.py::_bind_filter` binds both; `FilterSet._bound_terminal` binds the terminal to `_hop_model(hop)` and
+  gives it its own `extra`, so the set's per-request copy stays bound to the parent; `FilterSet._copy_filter` binds
+  through the helper. Pinned by `examples/fakeshop/test_query/test_flat_copy_binding_api.py` (34 rows) and
+  `tests/filters/test_sets.py::test_a_walked_terminal_binds_the_target_model_and_leaves_the_sets_copy_as_bound`; the
+  late-copy and deferred-choices pins hold. Docs: spec-027 Layer 4 and Decision 8, README, GLOSSARY `FilterSet` and
+  `RelatedFilter`. Filed 818, 819, 820. CHANGELOGTODO 821
 
 ## Outside review of the fixes
 
@@ -2038,10 +2051,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 734. A plain `AllValuesMultipleFilter(field_name="code")` on a `RelatedFilter` child set (Shelf under Book),
-  served flat on the parent (`shelfPick`), answers an uncoded "Cannot resolve keyword 'code' into field", while the
-  nested branch and the same declaration with `method=` both work; docs/README.md's filter section serves flat copies
-  of a child filter on the parent. Found verifying 537
 - [ ] 735. (robustness) `DateRangeFilter` inside django-filter's CSV `in` wrapper (`BaseInFilter` + `DateRangeFilter`,
   declared, or the `ConcreteInFilter` django-filter generates for `Meta.fields={col: ["in"]}` under
   `Meta.filter_overrides={models.DateField: {"filter_class": DateRangeFilter}}`) on a column without `choices` builds
@@ -2255,12 +2264,28 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`filters/inputs.py::_unscalared_field_refusal`) can name the filter and a remedy a `FilterSet` has. Pinned on the
   filter path by `tests/types/test_converters.py::test_generated_column_refuses_an_output_no_conversion_publishes`.
   Found fixing 730
+- [ ] 818. (robustness) A nested `RelatedFilter` branch declared with `queryset=` whose child set holds a
+  `distinct=True` filter (an `AllValuesMultipleFilter`, a static `MultipleChoiceFilter` over a forward, reverse or
+  many-to-many path, a forward `ModelMultipleChoiceFilter`, a `CharFilter(distinct=True)`) answers a masked
+  "Cannot combine a unique query with a non-unique query." from `filters/sets.py::_admitted_rows`, which combines the
+  branch's `queryset=` with the child's distinct rows; the same branch without `queryset=`, and a two-hop walk with
+  `queryset=` on the first hop, filter. Found fixing 734
+- [ ] 819. (robustness) A `ModelMultipleChoiceFilter(field_name="branch", to_field_name="name",
+  queryset=Branch.objects.all())` on a set walked flat or nested from a parent answers a masked `ValueError` ("Field
+  'id' expected a number but got ...") for a value naming a branch by its `name`, where django-filter matches the
+  `to_field_name` column. Found verifying 734
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 820. Decide: which values a choices-reading filter copied flat from a `RelatedFilter` child set validates
+  against. Its form field is built once for the parent's copy, so a flat copy validates against the values the
+  parent's rows reach, while the nested branch validates against the child's own: `shelfCodeValues: ["D-4"]` (a code
+  only an unreached shelf holds) is `invalid_choice` flat and rows `[]` nested, and a nullable key's `["None"]` is rows
+  `[]` flat and `FILTER_INVALID` nested. Rebuilding the field on the walk's target changes what the flat copy refuses,
+  a validation contract no rule settles. (Found fixing 734)
 - [ ] 729. Decide: the to-one shape for the relation-quantifier contract change. The ruled part: `{}` constrains
   nothing everywhere and a to-many `RelatedFilter` is typed as a per-target `some` / `none` / `every` wrapper (Prisma's
   shape), which retires spec-027's contradictory `apply_async` sentence (a present nested branch is active whatever its

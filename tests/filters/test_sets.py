@@ -2720,6 +2720,56 @@ def test_a_late_copied_filter_binds_to_the_instance_model(read: str) -> None:
     assert vars(copy_)["model"] is library_models.Periodical
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("pipeline", [False, True], ids=["raw", "pipeline"])
+def test_a_walked_terminal_binds_the_target_model_and_leaves_the_sets_copy_as_bound(
+    *,
+    pipeline: bool,
+) -> None:
+    """The walked copy of a flat ``AllValuesMultipleFilter`` reads its target; the set's copy stays.
+
+    The rows and the terminal's binding are the live tier's
+    (``examples/fakeshop/test_query/test_flat_copy_binding_api.py``); this pins the instance
+    state a request leaves: the flat copy the set holds keeps its parent model and the
+    choices its own ``field`` read (codes some book's shelf holds), while the terminal's
+    ``field`` read of the shelf codes lands in the terminal's own ``extra``.
+    """
+
+    class ValuesShelfFilter(FilterSet):
+        code_values = django_filters.AllValuesMultipleFilter(field_name="code")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = ()
+
+    class ValuesBookFilter(FilterSet):
+        shelf = RelatedFilter(ValuesShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = library_models.Book
+            fields = ()
+
+    _register_plain_types(library_models.Shelf, library_models.Book)
+    ValuesBookFilter.get_filters()
+    branch = library_models.Branch.objects.create(name="North", city="Oslo")
+    held = library_models.Shelf.objects.create(branch=branch, code="A-1")
+    library_models.Shelf.objects.create(branch=branch, code="B-2")
+    library_models.Book.objects.create(title="Dune", shelf=held)
+    data = QueryDict("shelf__code_values=A-1")
+    queryset = library_models.Book.objects.all()
+    instance = (
+        _pipeline_instance(ValuesBookFilter, data=data, queryset=queryset)
+        if pipeline
+        else ValuesBookFilter(data=data, queryset=queryset)
+    )
+    held_copy = instance.filters["shelf__code_values"]
+
+    matched: QuerySet[library_models.Book] = instance.qs
+    assert list(matched.values_list("title", flat=True)) == ["Dune"]
+    assert vars(held_copy)["model"] is library_models.Book
+    assert held_copy.extra["choices"] == [("A-1", "A-1")]
+
+
 def test_filterset_get_fields_includes_pk_for_all_fields_shorthand() -> None:
     class ItemFilter(FilterSet):
         class Meta:

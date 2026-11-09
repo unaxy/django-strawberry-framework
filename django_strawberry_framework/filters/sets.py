@@ -1676,17 +1676,22 @@ class ProjectedChildFilter(Filter):
     Rebinding ``field_name`` reproduces a filter only while its behavior is a
     function of the filter object alone (``field_name``, ``lookup_expr``,
     ``exclude``, ``distinct``, the form field its class builds, a class-level
-    ``filter`` override). Three behaviors belong to the OWNING filter set
-    instead: a ``method=`` resolves on ``filter.parent`` (a string by attribute
-    lookup; a callable by the model its body was written for), any other
-    ``filter`` a filter holds of its own (``_own_filter``: a callable its
-    ``__init__`` stores on the instance) was written for the owner's model and
-    may read the object it was bound to rather than a rebound copy, and a filter
-    set ``__init__`` override may replace or mutate any of ``self.filters``
-    after the per-request deepcopy. A plain copy of such a filter on the parent
-    has no owner: the method resolves on the parent class, the instance
-    ``filter`` runs its child path over the parent's rows, and the child's
-    ``__init__`` never runs for the copy.
+    ``filter`` override) and of the set it is bound to, which a walked copy
+    reads as its nested twin does: ``FilterSet._bound_terminal`` binds the
+    copy's ``model`` and ``parent`` to the last hop's target set
+    (``_bind_filter``), so a filter reading ``self.model`` with its rebound
+    ``field_name`` (``AllValuesMultipleFilter``) resolves it on that model.
+    Three behaviors belong to the OWNING filter set instead: a ``method=``
+    resolves on ``filter.parent`` (a string by attribute lookup; a callable by
+    the model its body was written for), any other ``filter`` a filter holds of
+    its own (``_own_filter``: a callable its ``__init__`` stores on the
+    instance) was written for the owner's model and may read the object it was
+    bound to rather than a rebound copy, and a filter set ``__init__`` override
+    may replace or mutate any of ``self.filters`` after the per-request
+    deepcopy. A plain copy of such a filter on the parent has no owner: the
+    method resolves on the parent class, the instance ``filter`` runs its child
+    path over the parent's rows, and the child's ``__init__`` never runs for the
+    copy.
 
     ``_expand_related_filter`` therefore builds this copy for every owner-bound
     child leaf (``_owner_bound_child``): an instance of the child filter's own
@@ -2411,6 +2416,26 @@ class _UndeclaredHopSet:
             else None
         )
         self.request: object = request
+
+
+def _bind_filter(
+    filter_instance: Filter,
+    owner: FilterSet | _UndeclaredHopSet,
+    model: type[models.Model],
+) -> None:
+    """Bind ``filter_instance`` to ``owner``, whose rows are ``model``'s, as django-filter binds.
+
+    ``BaseFilterSet.__init__`` stamps ``model`` (the set's ``queryset.model``) and
+    ``parent`` on every per-request filter together, so a filter that reads either
+    beside its ``field_name`` (``AllValuesFilter.field``, ``LookupChoiceFilter``,
+    a consumer ``field`` or ``filter`` calling ``get_model_field(self.model, ...)``)
+    resolves the path against the one model its owner filters. Every site that
+    binds a filter (``FilterSet._copy_filter``, a walked terminal's
+    ``FilterSet._bound_terminal``) binds both here, so none can move ``parent``
+    and leave ``model`` behind. Written into the instance dict: the stubs declare
+    neither attribute.
+    """
+    truth.instance_state(filter_instance).update(model=model, parent=owner)
 
 
 def _require_relation_path(owner: type[FilterSet], declared_attr: str, f: RelatedFilter) -> None:
@@ -3581,14 +3606,9 @@ class FilterSet(
     def _copy_filter(self, original: Filter) -> Filter:
         """Return a copy of the class-level ``original`` bound to this instance, as django-filter binds."""
         copied = copy.deepcopy(original)
-        # ``BaseFilterSet.__init__`` stamps ``model`` and ``parent`` on every copy as instance
-        # attributes its stubs do not declare, so they are written into the instance dict
-        # (``queryset`` is never ``None`` on an instance: the same ``__init__`` defaults it, and
-        # anything else is a ``TypeError``).
-        truth.instance_state(copied).update(
-            model=require(self.queryset, is_queryset).model,
-            parent=self,
-        )
+        # ``queryset`` is never ``None`` on an instance: ``BaseFilterSet.__init__`` defaults it,
+        # and anything else is a ``TypeError``.
+        _bind_filter(copied, self, require(self.queryset, is_queryset).model)
         return copied
 
     def _filter_named(self, name: str) -> Filter:
@@ -6752,31 +6772,37 @@ class FilterSet(
     ) -> Filter:
         """Return a copy of ``filter_instance`` filtering ``field_name`` over the rows ``hop`` reaches.
 
-        The copy's ``parent``, which a live-``field_name`` filter resolves its
-        model and owner against, is the hop's target set instance
-        (``_projection_child``), or for an undeclared hop the face its rows offer
-        in place of one (``_UndeclaredHopSet``). A shallow copy of the
-        per-request filter, so the form field it already built carries over and
-        this set's own instance is untouched. The copy's ``lookup_expr`` is the one
-        applied where the walked path ends (``filters/base.py::_filterset_walked_lookup``:
-        ``in`` for ``shelf`` + ``tier__in``); the filter the set holds keeps the pair it
-        was declared with. Only the class's ``filter`` reads
-        the copy's rebound ``field_name``: a filter holding a ``filter`` of its
-        own (``_own_filter``, whose bound receiver stays the pre-copy object)
-        never walks a hop (``_flat_leaf_walk``), so it never reaches here. A
-        relation-key leaf whose class overrides ``filter`` runs as declared
-        (``_leaf_chain``) when its value names rows of the relation's target, its
-        copy here read by the shipped comparison of its class (``_KeyMatch``);
-        for a value naming no row it runs on its chain's ``fallback``: a forward
-        key's copy comparing the stored key it holds, a to-many key's leaf as
-        declared through its relation's visible rows (``_LeafChain.view``). A
-        class-level ``isnull`` override's copy here tests the target's primary
-        key over the related rows. A class-level override on a path into a
-        target column runs over the last hop's visible target rows with the
-        path left on that target as its ``field_name`` and the walked lookup as its
-        ``lookup_expr``.
+        The copy is bound (``_bind_filter``) as the hop's target set binds its own
+        filters: its ``parent`` is the target set instance (``_projection_child``), or
+        for an undeclared hop the face its rows offer in place of one
+        (``_UndeclaredHopSet``), and its ``model`` the model of the hop's rows
+        (``_hop_model``), so a filter re-reading ``self.model`` or ``self.field`` with
+        its rebound ``field_name`` (``AllValuesMultipleFilter.field``, which
+        ``MultipleChoiceFilter.get_filter_predicate`` reads) resolves the path on the
+        model it names, as its nested twin does. A shallow copy of the per-request
+        filter, so the form field it already built, which cleaned the value the copy
+        receives, carries over; it holds its own ``extra``, so this set's own instance
+        is untouched. The copy's ``lookup_expr`` is the one applied where the walked
+        path ends (``filters/base.py::_filterset_walked_lookup``: ``in`` for ``shelf`` +
+        ``tier__in``); the filter the set holds keeps the pair it was declared with.
+        Only the class's ``filter`` reads the copy's rebound ``field_name``: a filter
+        holding a ``filter`` of its own (``_own_filter``, whose bound receiver stays the
+        pre-copy object) never walks a hop (``_flat_leaf_walk``), so it never reaches
+        here. A relation-key leaf whose class overrides ``filter`` runs as declared
+        (``_leaf_chain``) when its value names rows of the relation's target, its copy
+        here read by the shipped comparison of its class (``_KeyMatch``); for a value
+        naming no row it runs on its chain's ``fallback``: a forward key's copy
+        comparing the stored key it holds, a to-many key's leaf as declared through its
+        relation's visible rows (``_LeafChain.view``). A class-level ``isnull``
+        override's copy here tests the target's primary key over the related rows. A
+        class-level override on a path into a target column runs over the last hop's
+        visible target rows with the path left on that target as its ``field_name`` and
+        the walked lookup as its ``lookup_expr``.
         """
         terminal = copy.copy(filter_instance)
+        # Its own ``extra``: a ``field`` read writes there (``AllValuesMultipleFilter`` its
+        # target's choices, ``QuerySetRequestMixin`` its queryset), never on this set's copy.
+        terminal.extra = {**filter_instance.extra}
         terminal.field_name = field_name
         terminal.lookup_expr = _filterset_walked_lookup(type(self), filter_instance)[1]
         target_set = (
@@ -6785,8 +6811,7 @@ class FilterSet(
             if isinstance(hop, DeclaredHop)
             else _UndeclaredHopSet(hop, self.request)
         )
-        # django-filter stamps ``parent`` on every per-request filter; the stubs omit it.
-        setattr(terminal, "parent", target_set)  # noqa: B010
+        _bind_filter(terminal, target_set, _hop_model(hop))
         return terminal
 
     def _leaf_chain(self, filter_instance: Filter) -> _LeafChain | None:

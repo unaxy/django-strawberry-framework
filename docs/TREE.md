@@ -780,6 +780,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_filter_publication_api.py  # Generated filter and write inputs keep their declared shapes over HTTP, shared names included.
 ├── test_filter_querysets_api.py  # Live HTTP filters preserve consumer row occurrences and paginate generated deep loan predicates.
 ├── test_filter_widget_binding_api.py  # Native filter widgets read supplied values through their bound forms over HTTP.
+├── test_flat_copy_binding_api.py # A walked flat copy filters as a filter of the hop's target set, model included.
 ├── test_form_construction_api.py # Live HTTP form construction, validation and narrowed-update contracts.
 ├── test_form_relation_binding_api.py  # Live HTTP form tests for relation-key reconstruction, replacement and decode refusals.
 ├── test_generated_relation_filters_api.py  # Native HTTP generated relation filters over Relay keys, ForeignObject and to_field links.

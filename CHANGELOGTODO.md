@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 196 to do.
+Progress: 0 done, 197 to do.
 
 ## From dry-0_0_15_3
 
@@ -889,6 +889,11 @@ Progress: 0 done, 196 to do.
   a `RelatedFilter`, the `GenericRelation` or the content type and object id columns, the composite key's own columns,
   or a `SCALAR_MAP` entry for the column's class), instead of the DjangoType advice to add a `SCALAR_MAP` entry or
   exclude the field via `Meta.exclude`. The same declarations are refused as before.
+- [ ] 821. CHANGELOG entry for item 734: a filter copied flat from a `RelatedFilter` child set (or a set's own leaf
+  walking a relation) now filters bound to the related model it reaches, so one that reads its model while filtering
+  (django-filter's `AllValuesMultipleFilter`, a `MultipleChoiceFilter` whose choices read the model field, a custom
+  `filter()` re-cleaning its value) answers the nested branch's rows instead of a "Cannot resolve keyword ... into
+  field" server error, sync, async and through a raw `FilterSet(...).qs`
 
 ## From dry-upstream-0_0_15
 
