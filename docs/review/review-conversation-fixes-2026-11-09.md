@@ -43,8 +43,8 @@ hop-owned child and verify reuse without assuming the former class-only cache ke
 
 ## Verification and cleanup
 
-Targeted pytest was explicitly authorized after the external review. Tests run only in
-isolated copies with their own environments. Every pre-commit hook runs against each carved
+Targeted pytest was explicitly authorized after the external review. Tests ran only in
+isolated copies with their own environments. All 14 pre-commit hooks passed against each carved
 tree, including both type-check configurations, installed public-type completeness, truthful
 reads, executable/annotation subscripts and the metadata/spec/citation gates. Final receipts
 and candidate tree hashes are preserved under `.work/evidence/fix-fix100-review/`.
@@ -54,16 +54,37 @@ implementation used Sol High agents. Source-review acceptance and executed tests
 separately. PostgreSQL-only rows skipped in the SQLite runs; the full suite, coverage gate and
 version matrix remain CI work.
 
-The three coherent groups are serializer/decimal/numeric changes, inherited/composite relation
-views, and the remaining filter changes with these review records. Ready hunks are carved
-into isolated indexes. No stash, branch switch or unrelated working-tree cleanup is needed.
-The foreign item-748/751 handoff in the bug-hunt document stays outside these commits.
+The reviewed changes landed in three commits, carved through isolated indexes:
+
+| Commit | Scope | Targeted results |
+| --- | --- | --- |
+| `4ddfa5c2` | Serializer/decimal/numeric guards and runtime subscript gate | 1,303 passed, 107 skipped; one sharded case and 15 annotation cases passed separately. |
+| `62c68ea7` | Inherited/composite relation-view identity | 442 passed. |
+| `93679177` | Annotation binding, consumer forms and review records | 5,318 passed, 20 skipped; two sharded cases passed separately. |
+
+The committed tree hashes match the tested candidates. No stash or branch switch was used.
+The foreign item-748/751 handoff in the bug-hunt document remains byte-for-byte unchanged
+from the start of this work and stays outside these commits.
 
 The durable evidence replaces the former temporary location. Bulky companion JSON is archived
 byte-for-byte in `.work/evidence/fix-fix100-review/review-records/`, with a SHA-256 manifest;
-the Markdown records remain versioned. The response working note is removed once the fixes
-are ready. Historical reports and the original handoff describe their recorded snapshots,
-not the final tree's test status.
+the Markdown records remain versioned. The response working note was deleted after the fixes
+were ready, as requested. All four task-owned private copies were saved and removed; their
+evidence and saved pins remain. Historical reports and the original handoff describe their
+recorded snapshots, not the final tree's test status.
+
+## Final independent verification
+
+A final Sol 6.1 Extra High verifier reviewed the combined landed change from `acc642d3` through
+`93679177` and found no further contract-breaking defect. The review covered held consumer
+forms and validation policy, empty and absent leaves, async database cache keys, annotation
+owner timing and reuse, compiler parameter provenance, nested serializer ownership, and
+inherited/composite relation identity. The detailed source-review record is preserved at
+`.work/evidence/fix-fix100-review/final-verifier.md`.
+
+This last pass changed only this report to record completed landings and cleanup. It reused
+the exact-tree test receipts above; it did not rerun pytest or the PostgreSQL tier. The original
+historical audit remains paused.
 
 <!-- LINK DEFINITIONS -->
 
