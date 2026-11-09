@@ -11,7 +11,7 @@ the same session: the anonymous viewer never matches through the secret shelf
 """
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import ClassVar, NamedTuple
 
 import pytest
@@ -346,20 +346,14 @@ def test_a_consumer_built_set_scopes_its_logical_arms_as_the_requests_actor(
     client = _client(viewer)
     expected = ["b-secret"] if viewer == "staff" else []
 
-    with override_settings(ROOT_URLCONF=__name__):
-        response = client.post(
-            "/direct/consumer-books/",
-            data=json.dumps(data),
-            content_type="application/json",
-        )
-
-    assert response.status_code == 200, response.content
-    assert json_list(json_loads(response.content), "titles") == expected
+    assert _post_consumer(client, "consumer-books", data) == expected
     assert _graphql_names(client, document) == expected
 
 
-def _post_consumer(client: Client, route: str, data: dict[str, object]) -> list[object]:
+def _post_consumer(client: Client, route: str, data: Mapping[str, object]) -> list[object]:
     with override_settings(ROOT_URLCONF=__name__):
+        # raw-envelope exemption: a consumer's own non-GraphQL view (a DRF / django-filter
+        # route), which no GraphQL client helper reaches.
         response = client.post(
             f"/direct/{route}/",
             data=json.dumps(data),

@@ -415,8 +415,11 @@ def test_the_sentinel_makes_git_fail_closed_in_a_folder_without_its_own_git(repo
     _ = _new("build-thing")
     evidence = repo / ".work" / "evidence" / "build-thing"
     completed = _git.run_git(evidence, "rev-parse", "--show-toplevel")
-    assert completed.returncode != 0
-    assert "not a git repository" in completed.stderr
+    # git's wording for a gitfile naming no repository differs between releases; its die() exit
+    # and an empty answer do not, and an empty answer means no walk up to the shared checkout.
+    assert completed.returncode == 128
+    assert completed.stdout == ""
+    assert completed.stderr.startswith("fatal:")
     broken = repo / ".work" / "clones" / "build-thing"
     work.delete_tree(broken / ".git")
     assert _git.run_git(broken, "status").returncode != 0

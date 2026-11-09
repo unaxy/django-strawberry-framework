@@ -82,7 +82,7 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
     ``.git``
         A file holding ``gitdir: /nonexistent/dsf-work-sentinel``. A copy whose
         own ``.git`` is missing (or any folder under ``.work/`` without one)
-        then makes git fail ("not a git repository") instead of silently
+        then makes git fail (exit 128) instead of silently
         resolving to the shared checkout around it. ``new`` and ``repair``
         write it.
 
