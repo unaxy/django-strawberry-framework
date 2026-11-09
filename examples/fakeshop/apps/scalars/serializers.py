@@ -9,17 +9,19 @@ serializer half of the temporal write surface over ``ScalarSpecimen``.
 ``UniqueValidator`` / ``UniqueTogetherValidator`` bind in a query inside ``is_valid()``; its
 ``validate_opened_at`` reads the instant sent as shop time.
 ``UniqueScalarSpecimenUnboundedAmountSerializer`` declares ``amount`` as a ``DecimalField``
-holding no digits, which passes a decimal PostgreSQL's ``numeric`` refuses.
+holding no digits, with an explicit two-field DRF uniqueness validator after its field hook.
 ``TagWithUniqueSpecimensSerializer`` writes a ``ScalarSpecimenTag`` and a bundle of
 specimens, a nested writable ``specimens`` list of ``UniqueScalarSpecimenSerializer`` items,
 which its own ``create()`` writes; the specimens hold no key to the tag.
 """
 
 import datetime
+from decimal import Decimal
 from typing import TypedDict
 
 from drf_serializers import ModelSerializerBase
 from rest_framework import serializers
+from rest_framework.validators import UniqueTogetherValidator
 from typing_extensions import NotRequired, override
 
 from .models import ScalarSpecimen, ScalarSpecimenTag, UniqueScalarSpecimen
@@ -83,12 +85,51 @@ class UniqueScalarSpecimenUnboundedAmountSerializer(UniqueScalarSpecimenSerializ
     """``UniqueScalarSpecimenSerializer`` declaring ``amount`` as a digitless ``DecimalField``.
 
     DRF's ``DecimalField(max_digits=None, decimal_places=None)`` passes any finite decimal, so
-    a zero whose exponent PostgreSQL's ``numeric`` refuses reaches the conditional
-    ``UniqueConstraint`` on ``amount``; the mutation answers it as the field's ``invalid``
-    error on PostgreSQL first.
+    a zero whose exponent PostgreSQL's ``numeric`` refuses passes field conversion. A
+    two-field ``UniqueTogetherValidator`` queries ``amount`` and ``active`` after the
+    field hook; the mutation answers an unbindable query operand as the field's
+    ``invalid`` error.
     """
 
     amount = serializers.DecimalField(max_digits=None, decimal_places=None)
+
+    class Meta(UniqueScalarSpecimenSerializer.Meta):
+        validators = [
+            UniqueTogetherValidator(
+                queryset=UniqueScalarSpecimen.objects.all(),
+                fields=("amount", "active"),
+            ),
+        ]
+
+    def validate_amount(self, value: Decimal) -> Decimal:
+        """Let a fitting input become an unbindable operand for the uniqueness check."""
+        return Decimal("0E+1073741824") if value == Decimal(7) else value
+
+
+class UniqueScalarSpecimenReadOnlyLabelSerializer(ModelSerializerBase[UniqueScalarSpecimen]):
+    """Use a read-only default to complete the opened-at uniqueness validator's pair."""
+
+    default_label = serializers.CharField(source="label", read_only=True, default="defaulted")
+
+    class Meta:
+        model = UniqueScalarSpecimen
+        fields = (
+            "default_label",
+            "opened_time",
+            "opened_at",
+            "amount",
+            "active",
+        )
+        validators = [
+            UniqueTogetherValidator(
+                queryset=UniqueScalarSpecimen.objects.all(),
+                fields=("opened_at", "default_label"),
+            ),
+        ]
+
+    def validate_opened_at(self, value: datetime.datetime) -> datetime.datetime:
+        """Read the wall clock sent as ``SHOP_TIME``."""
+        return value.replace(tzinfo=SHOP_TIME)
 
 
 class _UniqueSpecimenData(TypedDict):
@@ -130,5 +171,28 @@ class TagWithUniqueSpecimensSerializer(ModelSerializerBase[ScalarSpecimenTag]):
         for specimen in validated_data["specimens"]:
             _ = UniqueScalarSpecimen.objects.create(
                 **{**specimen, "opened_time": specimen["opened_time"].replace(tzinfo=None)},
+            )
+        return tag
+
+
+class TagWithReadOnlyLabelSpecimensSerializer(ModelSerializerBase[ScalarSpecimenTag]):
+    """Write nested specimens whose uniqueness partner is a read-only default."""
+
+    specimens = UniqueScalarSpecimenReadOnlyLabelSerializer(many=True)
+
+    class Meta:
+        model = ScalarSpecimenTag
+        fields = ("label", "specimens")
+
+    @override
+    def create(self, validated_data: _TagWithUniqueSpecimensData) -> ScalarSpecimenTag:
+        tag = ScalarSpecimenTag.objects.create(label=validated_data["label"])
+        for specimen in validated_data["specimens"]:
+            _ = UniqueScalarSpecimen.objects.create(
+                **{
+                    **specimen,
+                    "label": "defaulted",
+                    "opened_time": specimen["opened_time"].replace(tzinfo=None),
+                },
             )
         return tag

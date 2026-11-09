@@ -906,6 +906,16 @@ class CreateScalarSpecimenTagWithUniqueSpecimens(SerializerMutation):
         permission_classes = []
 
 
+class CreateScalarSpecimenTagWithReadOnlyLabelSpecimens(SerializerMutation):
+    """Write nested specimens whose uniqueness partner is a read-only default."""
+
+    class Meta:
+        serializer_class = serializers.TagWithReadOnlyLabelSpecimensSerializer
+        operation = "create"
+        nested_fields = {"specimens": NestedSerializerConfig()}
+        permission_classes = []
+
+
 class CreateUniqueScalarSpecimenViaUnboundedAmountSerializer(SerializerMutation):
     """Create a ``UniqueScalarSpecimen`` through the digitless-``amount`` serializer."""
 
@@ -1000,6 +1010,9 @@ class Mutation:
     )
     create_scalar_specimen_tag_with_unique_specimens = DjangoMutationField(
         CreateScalarSpecimenTagWithUniqueSpecimens,
+    )
+    create_scalar_specimen_tag_with_read_only_label_specimens = DjangoMutationField(
+        CreateScalarSpecimenTagWithReadOnlyLabelSpecimens,
     )
     create_unique_scalar_specimen_via_unbounded_amount_serializer = DjangoMutationField(
         CreateUniqueScalarSpecimenViaUnboundedAmountSerializer,

@@ -65,10 +65,9 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
   serializer-only field declaring a ``UniqueValidator`` over another model): the item
   field's ``invalid`` error at its dotted path, nested values no validator binds left to
   the consumer's ``create()``, and a serializer-level validator's values held only where
-  DRF reaches its query (a ``None`` partner, an omitted partner or ``date_field``, an
-  update changing no checked value bind nothing). Fakeshop declares no ``DurationField``;
-  its nested datetime row is live in
-  ``examples/fakeshop/test_query/test_scalars_mutation_api.py``.
+  DRF reaches its query (a ``None`` partner, an omitted partner or ``date_field``).
+  Dynamic duration and conditional cases are covered over HTTP in
+  ``examples/fakeshop/test_query/test_serializer_validator_bind_api.py``.
 
 **No create/update happy path, envelope, reverse-map, partial-update, visibility,
 write-auth, authorize-before-decode, Upload, request-context, or re-fetch BEHAVIORAL test
@@ -8419,6 +8418,66 @@ def _nullable_partner_model(name: str) -> type[Model]:
 
 
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("sent", [_PAST_64_BITS, "5 00:00:00"])
+def test_nested_together_read_only_callable_default_is_evaluated_once(
+    sent: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A validator sees DRF's one read-only default and holds the value it will bind."""
+    monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
+    parent_model = _nested_parent_model("ReadOnlyDefaultParent")
+    child_model = _nullable_partner_model("ReadOnlyDefaultChild")
+    calls: list[int] = []
+
+    def rank_default() -> int:
+        calls.append(1)
+        return 1
+
+    child_cls = _serializer_over(
+        child_model,
+        ("span", "amount"),
+        {"amount": serializers.IntegerField(read_only=True, default=rank_default)},
+        meta={
+            "validators": [
+                UniqueTogetherValidator(
+                    queryset=child_model._default_manager.all(),
+                    fields=("span", "amount"),
+                ),
+            ],
+        },
+    )
+    serializer_cls, nested = _nested_parent_serializer(
+        parent_model,
+        child_model,
+        child_cls(),
+        "single",
+        clamp=True,
+    )
+    with _synthetic_table(parent_model), _synthetic_table(child_model):
+        schema, create_input, _ = _blank_columns_schema(
+            serializer_cls,
+            parent_model,
+            nested_fields=nested,
+        )
+        calls.clear()
+        payload = _run_row_write(schema, create_input, {"amount": 1, "child": {"span": sent}})
+        stored = list(child_model._default_manager.values_list("span", flat=True))
+
+    assert calls == [1]
+    if sent == _PAST_64_BITS and not connections["default"].features.has_native_duration_field:
+        assert payload == {
+            "result": None,
+            "errors": [
+                {"field": "child.span", "messages": _UNREPRESENTABLE, "codes": ["invalid"]},
+            ],
+        }
+        assert stored == []
+    else:
+        assert json_at(payload, "errors") == []
+        assert stored == [_CLAMPED if sent == _PAST_64_BITS else datetime.timedelta(days=5)]
+
+
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("case", ["null-partner", "null-partner-bound", "omitted-partner"])
 def test_serializer_together_value_drf_binds_in_no_query_is_not_held(
     case: str,
@@ -9031,7 +9090,7 @@ _PAST_NUMERIC = [
     pytest.param("amount", "1E+131072", id="131073-integer-digits"),
     pytest.param("amount", "0E-16384", id="zero-16384-fraction-digits"),
     pytest.param("spare", "1e1000000", id="nullable-huge-exponent"),
-    pytest.param("priced", "0E+1073741823", id="bounded-zero-at-exponent-limit"),
+    pytest.param("priced", "0E+1073741824", id="bounded-zero-past-exponent-limit"),
 ]
 
 _REQUIRES_UNBOUNDED_DECIMAL = pytest.mark.skipif(
@@ -9217,3 +9276,95 @@ def test_serializer_write_holds_the_decimal_its_column_to_python_gives(
         assert is_object_dict(payload), payload
         assert payload["errors"] == []
         assert SerializerUnboundedAmount.objects.get().rounded == decimal.Decimal(0)
+
+
+def _unique_amount_model() -> type[Model]:
+    """A synthetic integer column whose generated DRF field has a UniqueValidator."""
+    return type(
+        "UnpatchedUniqueAmount",
+        (Model,),
+        {
+            "__module__": __name__,
+            "amount": models.IntegerField(unique=True),
+            "Meta": type("Meta", (), {"app_label": "scalars", "managed": False}),
+        },
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.skipif(connections["default"].vendor != "sqlite", reason="SQLite integer binding")
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("duplicate", [False, True], ids=["available", "duplicate"])
+def test_serializer_unique_validator_without_django_stubs_runtime_patch(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    duplicate: bool,  # noqa: FBT001
+) -> None:
+    """An ordinary consumer's unpatched Field class supports native uniqueness outcomes.
+
+    Fakeshop enables django-stubs' runtime patch globally; deleting that hook is a
+    configuration test no request under those settings can express.
+    """
+    model = _unique_amount_model()
+    serializer = _serializer_over(model, ("amount",))
+    with _synthetic_table(model):
+        row = model._default_manager.create(amount=1)
+        _ = model._default_manager.create(amount=2)
+        schema, create_input, update_input = _blank_columns_schema(serializer, model)
+        monkeypatch.delattr(models.Field, "__class_getitem__")
+        payload = _run_row_write(
+            schema,
+            update_input if operation == "update" else create_input,
+            {"amount": 2 if duplicate else 1 if operation == "update" else 3},
+            saved_pk(row) if operation == "update" else None,
+        )
+    if duplicate:
+        assert json_at(payload, "result") is None
+        assert json_at(payload, "errors", 0, "field") == "amount"
+        assert json_at(payload, "errors", 0, "codes") == ["unique"]
+    else:
+        assert json_at(payload, "errors") == []
+        assert json_at(payload, "result", "id") is not None
+
+
+@pytest.mark.parametrize("unique", [False, True], ids=["ordinary-present", "unique-omitted"])
+def test_guard_installation_does_not_run_a_star_fields_native_source_lookup(
+    unique: bool,  # noqa: FBT001
+) -> None:
+    """Guard installation preserves native validators and inactive source lookup order.
+
+    Public Meta source ownership refuses writable star fields through
+    django_strawberry_framework/rest_framework/inputs.py::raise_writable_source_ownership_errors,
+    so a live request cannot reach this raw DRF configuration. The direct installer
+    must still avoid forcing a native validator's lookup before it runs.
+    """
+    validators = [UniqueValidator(queryset=ScalarSpecimen.objects.all())] if unique else []
+
+    class MergeText(serializers.CharField):
+        @override
+        def run_validation(self, data: object = serializers.empty) -> dict[str, str]:
+            cleaned = require_instance(object_result(super().run_validation, data), str)
+            return {"text": cleaned}
+
+    class StarSerializer(serializers.Serializer[object]):
+        merged = MergeText(source="*", required=False, validators=validators)
+
+    data: dict[str, object] = {} if unique else {"merged": "clean"}
+    native = StarSerializer(data=data)
+    assert native.is_valid(), serializer_errors(native)
+    held = StarSerializer(data=data)
+    serializer_resolvers._pin_validator_querysets(held, "default")
+    before = tuple(bound_fields(held)["merged"].validators)
+    assert bound_fields(held)["merged"].source_attrs == []
+    with write_pipeline("default", lock=False):
+        serializer_resolvers._hold_serializer_values(held, {})
+    assert all(
+        original is current
+        for original, current in zip(before, bound_fields(held)["merged"].validators, strict=True)
+    )
+    assert held.is_valid(), serializer_errors(held)
+    assert (
+        validated_data_of(held)
+        == validated_data_of(native)
+        == ({} if unique else {"text": "clean"})
+    )

@@ -22,9 +22,6 @@ over), the SQLite read-back trial over columns no fakeshop model declares (a
 ``DecimalField(309, 0)`` an infinity reaches, one with no ``max_digits``) and the write
 alias it never opens, and, on the Postgres tier, the real connection and ``ArrayField``.
 
-``unbindable_query_value``, the bind a DRF uniqueness validator makes, is pinned live
-through a nested serializer item in ``examples/fakeshop/test_query/test_scalars_mutation_api.py``;
-its rows here hold each backend's answer beside the save rule's on the same stand-in aliases.
 """
 
 import ast
@@ -35,8 +32,8 @@ import sqlite3
 import uuid
 import warnings
 from collections.abc import Callable, Generator
-from contextlib import AbstractContextManager, contextmanager
-from decimal import Decimal
+from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
@@ -49,7 +46,7 @@ from apps.scalars import models as scalar_models
 from django.apps.registry import Apps
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator
-from django.db import DEFAULT_DB_ALIAS, DataError, connections, models, transaction
+from django.db import DEFAULT_DB_ALIAS, DataError, connection, connections, models, transaction
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.mysql.operations import DatabaseOperations as MySQLOperations
@@ -96,7 +93,6 @@ from django_strawberry_framework.utils.errors import (
     refuses_utc_offset,
     rekey_error_segment,
     save_time_error_key_map,
-    unbindable_query_value,
     unbindable_temporal,
     unstorable_decimal,
     unstorable_temporal,
@@ -105,6 +101,7 @@ from django_strawberry_framework.utils.errors import (
 )
 from django_strawberry_framework.utils.inputs import RELATION_SINGLE, SCALAR, InputFieldSpec
 from django_strawberry_framework.utils.typing import object_result
+from tests._idioms import saved_pk
 from tests._postgres_fields import FakeArrayField, patch_array_field, real_array_of
 from tests._postgresql_stand_in import (
     BINDING_MODES,
@@ -1430,7 +1427,7 @@ _NUMERIC_SPELLINGS = [
     pytest.param("12.50", False, id="plain"),
     pytest.param("0E+1000000", False, id="zero-huge-exponent"),
     pytest.param("-0E+1073741822", False, id="zero-below-exponent-limit"),
-    pytest.param("0E+1073741823", True, id="zero-at-exponent-limit"),
+    pytest.param("0E+1073741824", True, id="zero-past-exponent-limit"),
     pytest.param("0E-16383", False, id="zero-16383-fraction-digits"),
     pytest.param("0E-16384", True, id="zero-16384-fraction-digits"),
 ]
@@ -1459,6 +1456,36 @@ def test_refuses_numeric_format_holds_each_decimal_a_query_binds_to_numeric(
     ]
     with postgresql_stand_in(driver, cursor_factory) as alias:
         assert refuses_numeric_format(connections[alias], params) is refused
+
+
+@pytest.mark.parametrize(
+    "server_major",
+    [
+        14,
+        15,
+        16,
+        17,
+    ],
+)
+@pytest.mark.parametrize(
+    ("raw", "accepted_from"),
+    [
+        pytest.param("0E+1073741822", 14, id="below-endpoint"),
+        pytest.param("0E+1073741823", 16, id="at-endpoint"),
+        pytest.param("-0E+1073741823", 16, id="negative-zero-at-endpoint"),
+        pytest.param("0E+1073741824", None, id="past-endpoint"),
+    ],
+)
+def test_numeric_positive_zero_exponent_uses_the_server_version(
+    server_major: int,
+    raw: str,
+    accepted_from: int | None,
+) -> None:
+    """The server's parser accepts equality from PostgreSQL 16, and no larger exponent."""
+    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
+    with postgresql_stand_in(driver, cursor_factory, server_major=server_major) as alias:
+        accepted = accepted_from is not None and server_major >= accepted_from
+        assert refuses_numeric_format(connections[alias], [Decimal(raw)]) is not accepted
 
 
 @pytest.mark.parametrize(("raw", "refused"), _NUMERIC_SPELLINGS)
@@ -1820,8 +1847,8 @@ def test_unstorable_decimal_holds_an_unbounded_column_to_numeric(
 @pytest.mark.parametrize(
     ("raw", "refused"),
     [
-        pytest.param("0E+1073741823", True, id="zero-at-exponent-limit"),
-        pytest.param("-0E+1073741823", True, id="negative-zero-at-exponent-limit"),
+        pytest.param("0E+1073741824", True, id="zero-past-exponent-limit"),
+        pytest.param("-0E+1073741824", True, id="negative-zero-past-exponent-limit"),
         pytest.param("0E+1073741822", False, id="zero-below-exponent-limit"),
         pytest.param("1e1000000", False, id="validator-refuses-huge-exponent"),
         pytest.param("1e-1000000", False, id="validator-refuses-tiny-exponent"),
@@ -1901,7 +1928,7 @@ _LARGEST_DOUBLE = "1.7976931348623157E+308"
         pytest.param(_PRICE, "-9999999999999999.9999", True, id="negative-carried"),
         pytest.param(_PRICE, "99999999999999.9999", False, id="rounded-within-the-digits"),
         pytest.param(_PRICE, "12.5", False, id="plain"),
-        pytest.param(_PRICE, "0E+1073741823", False, id="zero-past-numeric"),
+        pytest.param(_PRICE, "0E+1073741824", False, id="zero-past-numeric"),
         # SQLite stores an integral double past 2**51 as an integer, which Django 6.1 reads
         # exactly and Django 5.2 / 6.0 round to 15 digits.
         pytest.param(
@@ -1968,12 +1995,18 @@ def test_unstorable_decimal_read_back_trial_runs_no_query_on_a_django_connection
 
 
 @pytest.fixture
-def _decimal_read_as_text() -> Generator[None, None, None]:
-    """Register a ``sqlite3`` converter reading the ``decimal`` declared type as its text."""
+def decimal_read_as_text() -> Generator[list[bytes], None, None]:
+    """Register a ``decimal`` converter and expose the bytes it actually reads."""
     kept = sqlite3.converters.get("DECIMAL")
+    seen: list[bytes] = []
+
+    def _decoded(raw: bytes) -> str:
+        seen.append(raw)
+        return raw.decode("ascii")
+
     sqlite3.register_converter("decimal", _decoded)
     try:
-        yield
+        yield seen
     finally:
         if kept is None:
             del sqlite3.converters["DECIMAL"]
@@ -1981,29 +2014,51 @@ def _decimal_read_as_text() -> Generator[None, None, None]:
             sqlite3.register_converter("decimal", kept)
 
 
-def _decoded(raw: bytes) -> str:
-    return raw.decode()
-
-
-@pytest.mark.usefixtures("_decimal_read_as_text")
-def test_unstorable_decimal_reads_back_under_the_alias_detect_types() -> None:
+@pytest.mark.skipif(connection.vendor != "sqlite", reason="SQLite declared-type converter")
+@pytest.mark.django_db(transaction=True)
+def test_unstorable_decimal_reads_back_under_the_alias_detect_types(
+    decimal_read_as_text: list[bytes],
+) -> None:
     """A converter registered for the column's declared type applies to the read-back trial.
 
-    The write alias opens its connection with ``PARSE_DECLTYPES``, so the re-fetch reads
-    the stored double as the text the converter returns. Django 6.1 quantizes that text
-    into ``DecimalField(16, 2)``, where read as a ``float`` it would round to a 15th digit
-    before the point: not refused. Django 5.2 / 6.0 read the value only as a ``float`` and
-    raise ``TypeError`` for the text, at the re-fetch and in the trial alike.
+    A real ORM read of the declared column supplies the expectation. Supported SQLite
+    versions render a stored double with different text precision, so Django 6.1 can
+    either read the near-capacity value or raise ``InvalidOperation``. Earlier Django
+    versions cannot convert the registered text and raise ``TypeError`` on both paths.
     """
-    with _sqlite_alias(None) as alias:
-        if django.VERSION >= (6, 1):
+    with connection.schema_editor() as editor:
+        editor.create_model(_SixteenDigits)
+    try:
+        small = _SixteenDigits.objects.create(value=Decimal("12.50"))
+        boundary = _SixteenDigits.objects.create(value=Decimal(_ROUNDED_PAST_SIXTEEN))
+        if django.VERSION < (6, 1):
+            with pytest.raises(TypeError):
+                _ = _SixteenDigits.objects.get(pk=saved_pk(small))
+            decimal_read_as_text.clear()
+            with _sqlite_alias(None) as alias, pytest.raises(TypeError):
+                _ = unstorable_decimal(_SIXTEEN, Decimal("12.50"), lambda: alias)
+            assert decimal_read_as_text
+            return
+        assert _SixteenDigits.objects.get(pk=saved_pk(small)).value == Decimal("12.50")
+        decimal_read_as_text.clear()
+        with _sqlite_alias(None) as alias:
+            assert unstorable_decimal(_SIXTEEN, Decimal("12.50"), lambda: alias) is False
+            assert decimal_read_as_text
+            try:
+                _ = _SixteenDigits.objects.get(pk=saved_pk(boundary))
+            except InvalidOperation:
+                refused = True
+            else:
+                refused = False
+            decimal_read_as_text.clear()
             assert (
                 unstorable_decimal(_SIXTEEN, Decimal(_ROUNDED_PAST_SIXTEEN), lambda: alias)
-                is False
+                is refused
             )
-            return
-        with pytest.raises(TypeError):
-            _ = unstorable_decimal(_SIXTEEN, Decimal(_ROUNDED_PAST_SIXTEEN), lambda: alias)
+        assert decimal_read_as_text
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(_SixteenDigits)
 
 
 @pytest.mark.skipif(
@@ -2035,7 +2090,7 @@ def test_unstorable_decimal_raises_where_the_backend_cannot_build_the_converter(
         "-1E+309",
         "1e1000000",
         "9999999999999999.9999",
-        "0E+1073741823",
+        "0E+1073741824",
         "0E-16384",
         "1E+131072",
     ],
@@ -2573,216 +2628,3 @@ def test_unstorable_temporal_answers_postgresql_for_array_elements_on_server_sid
     with _postgresql_alias(server_side_binding=True) as alias:
         assert _postgresql_refuses_array(alias, field, value) is refused
         assert unstorable_temporal(field, value, lambda: alias) is refused
-
-
-@contextmanager
-def _psycopg3_client_alias() -> Generator[str, None, None]:
-    """A never-opened stand-in alias reading as PostgreSQL under psycopg 3's client-side binding."""
-    driver, cursor_factory, _ = BINDING_MODES["psycopg3-client"]
-    with postgresql_stand_in(driver, cursor_factory) as alias:
-        yield alias
-
-
-@contextmanager
-def _mysql_alias() -> Generator[str, None, None]:
-    """A stand-in alias reading as MySQL, held to its own operations, storing no aware instant."""
-    with _stand_in_alias(MySQLOperations, supports_timezones=False) as alias:
-        connections[alias].vendor = "mysql"
-        yield alias
-
-
-@contextmanager
-def _storing_alias() -> Generator[str, None, None]:
-    """A stand-in alias whose adapters pass every value through and that stores the instant."""
-    with _stand_in_alias(StoringOperations, supports_timezones=True) as alias:
-        yield alias
-
-
-#: Each backend a bind is asked of, by the alias standing in for it.
-_BIND_BACKENDS: dict[str, Callable[[], AbstractContextManager[str]]] = {
-    "sqlite": lambda: _sqlite_alias(None),
-    "mysql": _mysql_alias,
-    "postgresql-stored-instant": _storing_alias,
-    "postgresql": _psycopg3_client_alias,
-}
-
-
-@pytest.mark.parametrize(
-    (
-        "backend",
-        "settings",
-        "column",
-        "value",
-        "unbindable",
-        "unstorable",
-    ),
-    [
-        pytest.param(
-            "sqlite",
-            {},
-            _DURATION,
-            datetime.timedelta(days=_LONGEST_DAYS_IN_64_BITS + 1),
-            True,
-            True,
-            id="sqlite-duration-past-64-bits",
-        ),
-        pytest.param(
-            "sqlite",
-            {},
-            _DURATION,
-            datetime.timedelta(days=_LONGEST_DAYS_IN_64_BITS),
-            False,
-            False,
-            id="sqlite-duration-in-64-bits",
-        ),
-        pytest.param(
-            "sqlite",
-            {},
-            _STAMP,
-            _PAST_YEAR_9999,
-            True,
-            True,
-            id="sqlite-datetime-past-year-9999",
-        ),
-        pytest.param("sqlite", {}, _STAMP, _IN_RANGE, False, False, id="sqlite-in-range"),
-        pytest.param(
-            "sqlite",
-            {},
-            _PRICE,
-            Decimal("9999999999999999.9999"),
-            False,
-            True,
-            id="sqlite-decimal-carried-past-the-digits",
-        ),
-        pytest.param(
-            "sqlite",
-            {},
-            _WIDEST,
-            Decimal("9" * 309),
-            False,
-            True,
-            id="sqlite-decimal-stored-as-an-infinity",
-        ),
-        pytest.param("sqlite", {}, _TIME, _AWARE_TIME, False, True, id="sqlite-aware-time"),
-        pytest.param(
-            "sqlite",
-            {"USE_TZ": False},
-            _STAMP,
-            _IN_RANGE,
-            False,
-            True,
-            id="sqlite-aware-datetime-without-time-zone-support",
-        ),
-        pytest.param("mysql", {}, _TIME, _AWARE_TIME, False, True, id="mysql-aware-time"),
-        pytest.param(
-            "mysql",
-            {},
-            _DURATION,
-            datetime.timedelta(days=_LONGEST_DAYS_IN_64_BITS + 1),
-            False,
-            True,
-            id="mysql-duration-past-64-bits",
-        ),
-        pytest.param(
-            "mysql",
-            {},
-            _STAMP,
-            _PAST_YEAR_9999,
-            True,
-            True,
-            id="mysql-datetime-past-year-9999",
-        ),
-        pytest.param(
-            "postgresql-stored-instant",
-            {},
-            _STAMP,
-            _BEFORE_YEAR_ONE,
-            False,
-            True,
-            id="postgresql-session-wall-clock-before-year-one",
-        ),
-        pytest.param(
-            "postgresql",
-            {},
-            _TIME,
-            datetime.time(12, tzinfo=_OFFSET_16),
-            True,
-            True,
-            id="postgresql-utc-offset-16-00",
-        ),
-        pytest.param(
-            "postgresql",
-            {},
-            _DURATION,
-            datetime.timedelta(days=_LONGEST_DAYS_IN_64_BITS + 1),
-            False,
-            False,
-            id="postgresql-duration-as-interval",
-        ),
-        pytest.param(
-            "postgresql",
-            {},
-            _UNBOUNDED_DECIMAL,
-            Decimal("0E+1073741823"),
-            True,
-            True,
-            id="postgresql-decimal-past-numeric",
-        ),
-        pytest.param(
-            "postgresql",
-            {},
-            _UNBOUNDED_DECIMAL,
-            Decimal("12.50"),
-            False,
-            False,
-            id="postgresql-decimal-in-numeric",
-        ),
-    ],
-)
-def test_unbindable_query_value_refuses_a_bind_no_failed_query_reading_survives(
-    backend: str,
-    settings: dict[str, object],
-    column: models.Field[object, object],
-    value: object,
-    unbindable: bool,  # noqa: FBT001
-    unstorable: bool,  # noqa: FBT001
-) -> None:
-    """A query binding a value is refused only where reading its failure as no match fails.
-
-    DRF's ``qs_exists`` reads a ``TypeError`` / ``ValueError`` / ``DataError`` from a
-    uniqueness query as no duplicate. An ``OverflowError`` Django's preparation raises (a
-    datetime past year 9999 once projected onto SQLite's or MySQL's UTC), a duration past
-    64 bits of microseconds on SQLite, whose driver raises ``OverflowError`` binding it, and
-    on PostgreSQL a UTC offset or a decimal the server refuses (whose ``DataError`` aborts
-    the transaction) are refused, as the save refuses them. A ``ValueError`` Django's
-    preparation raises before the statement (an aware time on SQLite and MySQL, an aware
-    datetime under ``USE_TZ = False``), a duration past 64 bits on MySQL, whose driver
-    interpolates it as a literal the server compares without error, an instant PostgreSQL
-    stores but cannot load back, and a decimal SQLite binds and stores but a bounded
-    column cannot read back (one carried past ``ScalarSpecimen.price``'s digits, one stored
-    as an infinity) bind as that reading expects, so only the save refuses them.
-    PostgreSQL binds a duration as an ``interval``.
-    """
-    with override_settings(**settings), _BIND_BACKENDS[backend]() as alias:
-        assert unbindable_query_value(column, value, lambda: alias) is unbindable
-        assert unstorable_value(column, value, lambda: alias) is unstorable
-
-
-def test_unbindable_query_value_asks_psycopg_for_no_array_as_a_whole(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A list psycopg 3 refuses to dump is no refused bind: it fails before reaching the server.
-
-    The save asks the driver to dump the list as a whole and refuses it on the driver's
-    ``DataError``; a query binding it meets that error before any statement is sent, which
-    a reading of the failure as no match recovers from, so the driver is never asked.
-    """
-    patch_array_field(monkeypatch)
-    dumps: list[_Dump] = []
-    driver = _psycopg3_driver(_DriverDataError("cannot dump"), dumps)
-    value = [_NAIVE_TIME, _AWARE_TIME]
-    with postgresql_stand_in(driver, DjangoClientCursor) as alias:
-        assert unbindable_query_value(_TIMES, value, lambda: alias) is False
-        assert dumps == []
-        assert unstorable_value(_TIMES, value, lambda: alias) is True
-    assert len(dumps) == 1

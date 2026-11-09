@@ -10,7 +10,8 @@ evaluates the module-level annotations an introspector can reach, in the slow te
 cells; this gate reads the same shape statically, in the lint job, and also where that
 evaluation does not reach: a function or class defined inside a function, a
 function-local variable annotation, anything under ``if TYPE_CHECKING:``, and an
-unquoted ``typing.cast`` type argument, which runs on every call.
+unquoted ``typing.cast`` type argument, which runs on every call, and evaluated
+Django subscripts such as ``models.BigIntegerField[object, object]()``.
 
 Each ``.py`` under ``django_strawberry_framework/`` is parsed with ``ast`` (never
 imported). The sweep visits every annotation (parameter, return, and annotated
@@ -21,7 +22,11 @@ first argument of a call that resolves to ``typing.cast`` / ``typing_extensions.
 ``if TYPE_CHECKING:`` and outside a function body is visited as an evaluated annotation,
 since an annotation naming the alias evaluates to it, a string value included; under
 ``if TYPE_CHECKING:`` it is not visited: a module-private alias there with a bare-class
-``else:`` is the package's one home for a subscript of such a class.
+``else:`` is the package's one home for a subscript of such a class. Runtime
+``Subscript`` expressions resolving to Django imports are checked too, including
+constructors, base classes, default arguments and function-local assignments. Indexable
+Django objects (such as ``connections``) have their hooks audited in the same table;
+container indexing with no Django import is outside this expression sweep.
 Each subscripted name resolves to the dotted target it is bound to in the module: an
 import in any scope (``import x as y``, relative imports resolved against the module's
 package), a module-level class or assignment, else a builtin; an attribute chain
@@ -128,8 +133,12 @@ SUBSCRIPTABLE: dict[str, bool | tuple[int, int]] = {
     "weakref.ReferenceType": True,
     "weakref.WeakKeyDictionary": True,
     "weakref.ref": True,
+    # Django objects indexed at runtime, audited by the same hook check.
+    "django.db.connections": True,
+    "django.forms.MultipleChoiceField.default_error_messages": True,
     # Django: ``QuerySet`` and ``BaseManager`` (so ``Manager``) define ``__class_getitem__``;
     # ``MultiValueDict`` inherits ``dict``'s. The rest are generic only in django-stubs.
+    "django.db.models.BigIntegerField": False,
     "django.db.models.Field": False,
     "django.db.models.Manager": True,
     "django.db.models.QuerySet": True,
@@ -329,7 +338,7 @@ def bindings(tree: ast.Module, module: str, package: str) -> dict[str, set[str]]
 
 
 class _Sweep(ast.NodeVisitor):
-    """Collect every subscripted name in an annotation context of one module."""
+    """Collect annotation subscripts and evaluated Django subscripts in one module."""
 
     def __init__(self, path: str, bound: Mapping[str, set[str]]) -> None:
         self.path: str = path
@@ -489,24 +498,52 @@ class _Sweep(ast.NodeVisitor):
             self.visit(node.value)
 
     @override
-    def visit_Call(self, node: ast.Call) -> None:
-        if self.resolve(node.func) & _CAST:
-            typed = [keyword.value for keyword in node.keywords if keyword.arg == "typ"]
-            first = node.args[0] if node.args else (typed[0] if typed else None)
-            if first is not None and not (
-                isinstance(first, ast.Constant) and isinstance(first.value, str)
-            ):
-                evaluated = not self.type_checking
-                self.annotation(
-                    first,
-                    evaluated=evaluated,
-                    context=self._context("`cast` argument", evaluated=evaluated),
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        if not self.type_checking:
+            targets = frozenset(
+                target for target in self.resolve(node.value) if target.startswith("django.")
+            )
+            if targets:
+                self.found.append(
+                    Subscript(
+                        self.path,
+                        node.lineno,
+                        ast.unparse(node.value),
+                        targets,
+                        evaluated=True,
+                        context="runtime expression",
+                    ),
                 )
         self.generic_visit(node)
 
+    @override
+    def visit_Call(self, node: ast.Call) -> None:
+        if not self.resolve(node.func) & _CAST:
+            self.generic_visit(node)
+            return
+        typed = [keyword.value for keyword in node.keywords if keyword.arg == "typ"]
+        first = node.args[0] if node.args else (typed[0] if typed else None)
+        if first is not None and not (
+            isinstance(first, ast.Constant) and isinstance(first.value, str)
+        ):
+            evaluated = not self.type_checking
+            self.annotation(
+                first,
+                evaluated=evaluated,
+                context=self._context("`cast` argument", evaluated=evaluated),
+            )
+        # The type expression was already audited above; visiting it as executable
+        # syntax again would count each Django subscript twice.
+        self.visit(node.func)
+        for argument in node.args[1:]:
+            self.visit(argument)
+        for keyword in node.keywords:
+            if keyword.arg != "typ":
+                self.visit(keyword.value)
+
 
 def scan_source(source: str, relative: str) -> list[Subscript]:
-    """Return every subscripted name in an annotation context of one module's source."""
+    """Return annotation subscripts and evaluated Django subscripts in module source."""
     tree = ast.parse(source)
     module, package = module_identity(relative)
     sweep = _Sweep(relative, bindings(tree, module, package))

@@ -1964,19 +1964,24 @@ Progress: 456 done, 117 to do. The CHANGELOG entries filed here moved to
   `::test_unstorable_decimal_raises_where_the_backend_cannot_build_the_converter`); spec-036, spec-038, spec-039,
   README, GLOSSARY `FieldError` envelope. Filed 813
 - [x] 810. (robustness) fixed: the serializer flavor holds each value a DRF uniqueness validator binds, at every level.
-  `rest_framework/resolvers.py::_hold_unstorable_values` walks `_validation_tree` and holds every `Serializer` node once
-  (`::_hold_serializer_values`): the root's written columns to the save rule (`utils/errors.py::unstorable_value`), and
-  each value a field `UniqueValidator`, a `UniqueTogetherValidator` (`fields` and `condition_fields`) or a
-  `UniqueFor*Validator` binds to the new bind rule `utils/errors.py::unbindable_query_value` (what DRF's `qs_exists`
-  cannot absorb: `_refused_temporal(stored=False)` and `_refused_decimal(stored=False)`, the server's `numeric` refusal
-  without 726's SQLite read-back; an integer past the range only where the driver refuses it, SQLite) against the column
-  read from the validator's own queryset model (`::_validator_column`, `::_serializer_validator_binds`). A
-  serializer-level validator's values are held only where DRF reaches its query (`::_validator_queries`, adapted from
-  DRF 3.17-3.18's `UniqueTogetherValidator.__call__` / `enforce_required_fields`; `LICENSE.drf` ships with it): a
-  missing field keeps DRF's `required` error, an update changing no checked value and a checked `None` (unless
-  `nulls_distinct=False`) bind nothing. A nested item's unbindable value is its field's `invalid` error at its dotted
-  path, nothing written; an aware time, a decimal SQLite stores but cannot read back, and every value no validator binds
-  stay the consumer's `create()` / `update()`'s. Pinned by
+  `django_strawberry_framework/rest_framework/resolvers.py::_hold_unstorable_values` walks
+  `django_strawberry_framework/rest_framework/resolvers.py::_validation_tree` and visits each owning
+  `Serializer` once. `django_strawberry_framework/rest_framework/resolvers.py::_hold_serializer_values`
+  holds actual writable root columns to the save rule
+  (`django_strawberry_framework/utils/errors.py::unstorable_value`) and guards field validators at
+  their fields and serializer validators at their owning level.
+  `django_strawberry_framework/rest_framework/validator_guard.py::guard_uniqueness_validator`
+  leaves each original DRF validator call in control of required, changed, null and condition
+  decisions. Its copied pinned queryset uses
+  `django_strawberry_framework/rest_framework/query_bind.py::guard_query` to follow
+  Django's actual lookup preparation and one compiler execution; only parameters surviving final
+  executable SQL are checked by
+  `django_strawberry_framework/rest_framework/query_bind.py::_refused_params`, with the lookup's source retained for the
+  field error. SQLite's signed driver range, PostgreSQL's actual typed parameter or integer-array
+  cast, server offset and numeric-format refusals are distinct from a column's storage check;
+  psycopg list-dump `DataError` before execution remains DRF's recoverable no-match case. A
+  nested item's unbindable value is its field's `invalid` error at its dotted path, nothing
+  written; a value no validator prepares or binds stays the consumer's `create()` / `update()`'s. Pinned by
   `examples/fakeshop/test_query/test_scalars_mutation_api.py::test_nested_value_a_uniqueness_validator_cannot_bind_is_the_item_field_error`
   (new fakeshop `createScalarSpecimenTagWithUniqueSpecimens`) and `tests/rest_framework/test_resolvers.py` /
   `tests/utils/test_errors.py` rows. Docs: spec-039, README, GLOSSARY `FieldError` envelope. CHANGELOGTODO 815

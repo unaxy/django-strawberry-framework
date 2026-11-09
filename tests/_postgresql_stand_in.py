@@ -92,6 +92,16 @@ class ServerBindingCursor:
     """psycopg 3's ``Cursor``, which binds parameters on the server."""
 
 
+class PostgreSQLVersionStandIn(SQLiteDatabaseWrapper):
+    """A SQLite-backed test alias with an explicit PostgreSQL server version."""
+
+    server_major = 16
+
+    @override
+    def get_database_version(self) -> tuple[int, int]:
+        return self.server_major, 0
+
+
 def driver_module(**exports: type[object]) -> ModuleType:
     """A database driver module exporting ``exports``."""
     module = ModuleType("driver_stand_in")
@@ -115,6 +125,8 @@ BINDING_MODES = {
 def postgresql_stand_in(
     driver: ModuleType,
     cursor_factory: type[object] | None,
+    *,
+    server_major: int = 16,
 ) -> Generator[str, None, None]:
     """Register an alias that reads as PostgreSQL, on ``driver`` and ``cursor_factory``.
 
@@ -123,12 +135,14 @@ def postgresql_stand_in(
     which Django reads in place of the duration adapter on some releases), and it is never
     opened: the binding mode is read from its connection parameters. Its
     settings carry the ``TIME_ZONE`` key Django's connection handler fills in.
+    ``server_major`` determines the PostgreSQL parser rule at its exponent endpoint.
     """
     alias = "postgresql_stand_in"
-    wrapper = SQLiteDatabaseWrapper(
+    wrapper = PostgreSQLVersionStandIn(
         {"NAME": "stand-in", "TIME_ZONE": None, "OPTIONS": {"cursor_factory": cursor_factory}},
         alias,
     )
+    wrapper.server_major = server_major
     wrapper.vendor = "postgresql"
     wrapper.Database = driver
     connections[alias] = wrapper
@@ -169,7 +183,7 @@ def numeric_refusing_postgresql(*routed: type[models.Model]) -> Generator[str, N
     and write of those models is routed to it.
     """
     alias = "postgresql_numeric_stand_in"
-    wrapper = SQLiteDatabaseWrapper(
+    wrapper = PostgreSQLVersionStandIn(
         {**connections.databases[DEFAULT_DB_ALIAS], "NAME": ":memory:", "OPTIONS": {}},
         alias,
     )

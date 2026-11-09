@@ -2027,19 +2027,16 @@ The pipeline steps:
      (`utils/relations.py::written_model_field`;
      `django_strawberry_framework/rest_framework/resolvers.py::_written_columns`) is held to
      `django_strawberry_framework/utils/errors.py::unstorable_value` on the pinned alias,
-     the rule the model flavor's decode applies, first inside `is_valid()`: DRF's
-     queryset-backed validators (`UniqueValidator`, `UniqueTogetherValidator` with or
-     without a constraint `condition`) bind each checked value in a query, where SQLite's
-     `OverflowError` (a duration past 64 bits of microseconds, an instant past year 9999 in
-     UTC) escapes DRF's `qs_exists` raw and a `TypeError` / `ValueError` / `DataError` it
-     swallows reads as no duplicate (on PostgreSQL leaving the write transaction aborted).
-     So each such field's `to_internal_value` is wrapped on the instance, failing a
-     converted value the rule refuses before the field's validators run, and the
-     serializer's `run_validators` likewise, failing a `validate_<field>` hook's value
-     before any serializer-level validator runs
-     (`django_strawberry_framework/rest_framework/resolvers.py::_hold_unstorable_values`).
-     After the relation-intent proof, `_unstorable_value_errors` holds the same fields
-     again, for a value `validate()` sets after every validator ran. A
+     the rule the model flavor's decode applies. Each such field's
+     `to_internal_value` is wrapped on its request-local instance, failing a converted
+     root write the rule refuses before its field validators run
+     (`django_strawberry_framework/rest_framework/resolvers.py::_hold_serializer_values`).
+     DRF then runs its original serializer validators in their original order, with
+     actual uniqueness query operations guarded as described below; a `validate_<field>`
+     hook's changed value reaches those actual queries. After the relation-intent proof,
+     `_unstorable_value_errors` checks the final `validated_data` for root writes changed
+     by either hook or later validators. Read-only defaults merged by DRF for validation
+     are operands, not root writes. A
      `DecimalField(max_digits=None, decimal_places=None)` (the field a column with no
      `max_digits` needs, since DRF's `ModelSerializer` cannot build one) holds no digits,
      and a field the serializer declares itself runs no model validator (a field
@@ -2076,41 +2073,39 @@ The pipeline steps:
      `is_valid()`, which each `DateTimeField` instance in the validation tree answers as
      DRF's own `overflow` error
      (`django_strawberry_framework/rest_framework/resolvers.py::_translate_datetime_overflow`).
-   - **A bind check at every level.** DRF's uniqueness validators bind each checked value in
-     a query at every serializer of the validation tree, the root and each nested
-     serializer, a `ListSerializer`'s child included: a field's `UniqueValidator` (filtering
-     on its last `source` segment), a serializer's `UniqueTogetherValidator` (its `fields`
-     and constraint `condition_fields`) and `UniqueForDateValidator` and kin (their
-     `field`). Each such value is held, on the pinned alias, to
-     `django_strawberry_framework/utils/errors.py::unbindable_query_value` against the
-     column the validator binds it on, read from the validator's own queryset model, so a
-     nested item's value, a plain nested `Serializer`'s declared `UniqueValidator`'s and a
-     root serializer-only field's over another model are held as the root's written columns
-     are: the field's `to_internal_value` before its own validators, and the serializer's
-     `run_validators` for a `validate_<field>` hook's value before any serializer-level
-     validator runs
-     (`django_strawberry_framework/rest_framework/resolvers.py::_hold_unstorable_values`). A
-     serializer-level validator's values are held only where DRF reaches its query on them
-     (`django_strawberry_framework/rest_framework/resolvers.py::_validator_queries`, adapted
-     from DRF's `UniqueTogetherValidator.__call__` and `enforce_required_fields`): not where
-     a field it names is missing on a create (DRF's own `required` error answers), not on an
-     update whose checked values all equal the instance's, and not where a checked value is
-     `None` unless its `nulls_distinct` is `False`. The bind's rule refuses only what DRF's
-     `qs_exists`, which reads a `TypeError` / `ValueError` / `DataError` as no duplicate,
-     cannot survive: an `OverflowError` raised preparing or binding it (on SQLite a duration
-     past 64 bits of microseconds, an instant past year 9999 in UTC; MySQL's driver
-     interpolates an integer past its range as a literal its server compares without error,
-     so a duration binds there), and on PostgreSQL a UTC offset or a decimal past `numeric`
-     the server refuses, whose `DataError` leaves the transaction aborted. An aware time on
-     SQLite, MySQL and Oracle, whose bind Django refuses with a `ValueError` before the
-     statement, an instant PostgreSQL stores but cannot load back, and a decimal SQLite
-     binds and stores but a bounded column cannot read back pass to the consumer's
-     `create()` / `update()`, which may store them differently; a root written column is
-     held to the save's rule first, which refuses every value the bind's does. A value
-     `validate()` sets and a hook's value behind a field's own `UniqueValidator` (which ran
-     first) are past the bind and are not held there. A refused value is the field's
-     `invalid` `"Enter a value the database can represent."` at its dotted path
-     (`children.1.span`), nothing written.
+   - **A bind check at every level.** DRF's original `UniqueValidator`,
+     `UniqueTogetherValidator` (including `condition_fields`) and `UniqueForDateValidator`
+     and kin run in their original order at the root and in every nested serializer.
+     Their copied, write-alias-pinned querysets carry a per-instance Django `Query`
+     guard (`django_strawberry_framework/rest_framework/query_bind.py::guard_query`).
+     Django's own `build_filter` owns source resolution and eager lookup preparation;
+     the real compiler owns transforms, annotations, iterable RHS preparation and
+     final SQL parameters. An `OverflowError` during eager preparation is the bound
+     serializer field's `invalid` error. A compiled bind is refused only when its
+     parameter survives into the executable outer SQL and the pinned backend or driver
+     would refuse it in a way DRF cannot recover. SQLite's signed driver width, a
+     PostgreSQL typed server parameter and an actual integer-array cast are distinct
+     from a positive column's storage check; MySQL and PostgreSQL client numeric
+     literals can compare beyond a column's stored range. A psycopg list dump that
+     raises `DataError` before sending the statement stays with DRF's ordinary no-match
+     handling. `EmptyResultSet` and a discarded predicate bind nothing. The
+     source is the actual lookup expression, so an annotation alias and an `in` or
+     `range` member receive the correct validator field's path. No trial SQL runs.
+     DRF's `__call__` still decides required fields, instance fallback, changed values,
+     null behavior and whether an exists query runs; the guard sees normal earlier
+     validator mutations and DRF's read-only defaults, each evaluated once. Its
+     eager filter construction can fail before a later null/unchanged skip. A value
+     that reaches no preparation or compiled bind stays with DRF and the consumer's
+     `create()` / `update()`; a root writable value is independently held to the
+     save rule using actual writable conversion and final `validated_data`, never a
+     validation-only read-only default. The conditional `Q.check` uses the same pinned
+     alias, through a narrow adaptation of Django's check body
+     (`django_strawberry_framework/rest_framework/validator_guard.py::_checked_q_check`),
+     preserving the installed Django body's nullable-boolean handling. DRF's own
+     `TypeError` / `ValueError` / `DataError` no-match reading remains, while an
+     overflowing preparation or an unrecoverable PostgreSQL server/cast refusal is the field's
+     `invalid` `"Enter a value the database can represent."` at its dotted path,
+     nothing written.
    - **Validator queryset pinning.** `_pin_validator_querysets` walks the serializer's
      validators recursively — per instance, on a copy — and pins each one's queryset to
      the operation's write alias, so a `UniqueTogetherValidator` (or any author validator)
@@ -3210,8 +3205,11 @@ same transport, different app.
     `unique_together`, an aware unique time and an `amount` SQLite would store past its
     digits
     (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_value_a_uniqueness_check_would_bind_is_the_field_error`),
-    and on PostgreSQL a digitless `amount` past `numeric`
-    (`::test_serializer_decimal_postgresql_cannot_bind_through_a_field_holding_no_digits`).
+    and on PostgreSQL a digitless `amount` past `numeric`'s server-version boundary,
+    with a field hook that changes a fitting input before an explicit
+    `UniqueTogetherValidator` queries it
+    (`::test_serializer_decimal_postgresql_numeric_endpoint_with_a_digitless_field`,
+    `::test_serializer_decimal_field_hook_operand_is_checked_at_uniqueness_query`).
   - `tests/rest_framework/test_resolvers.py::test_serializer_nested_duration_a_uniqueness_validator_cannot_bind_is_the_item_error`
     — a duration past 64 bits of microseconds in a single, `many=True` and two-deep nested
     item under `unique=True`, `unique_together` and a conditional `UniqueConstraint` is
@@ -3227,15 +3225,25 @@ same transport, different app.
     `::test_serializer_together_value_drf_binds_in_no_query_is_not_held` writes a nested
     duration beside a `null` partner unheld, holds it under `nulls_distinct=False` and keeps
     DRF's `required` error for an omitted partner;
-    `::test_serializer_together_condition_value_is_held_only_where_drf_queries` leaves a
-    root `condition_fields` value unheld on an update that changes no checked value and
-    holds it on a changed update and a create;
+    `::test_serializer_together_condition_value_is_held_only_where_drf_queries` follows
+    DRF's changed-field decision: a change to a condition-only field on update
+    leaves unchanged constraint fields without a uniqueness query;
     `::test_serializer_unique_for_date_value_is_held_only_with_its_date` keeps DRF's
-    `required` error for a missing `date_field`; `tests/utils/test_errors.py::test_unbindable_query_value_refuses_a_bind_no_failed_query_reading_survives`
-    and `::test_unbindable_query_value_asks_psycopg_for_no_array_as_a_whole` pin the
-    bind's rule per backend beside the save's. Live, a nested `UniqueScalarSpecimen`
+    `required` error for a missing `date_field`;
+    `django_strawberry_framework/rest_framework/query_bind.py::guard_query` holds only
+    parameters that survive the validator's actual ORM compilation. Live, a nested
+    `UniqueScalarSpecimen`
     item's `validate_opened_at` instant past year 9999 in UTC
     (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_nested_value_a_uniqueness_validator_cannot_bind_is_the_item_field_error`).
+    `examples/fakeshop/test_query/test_serializer_validator_bind_api.py` covers
+    read-only defaults as bound operands versus validation-only non-writes,
+    annotation and iterable lookups, signed integer versus positive storage bounds,
+    PostgreSQL scalar/array binding and recoverable list dumping, single/deep nested
+    validator paths, a late empty predicate, prior validator mutation, instance fallback,
+    eager date preparation, DRF validator decisions, and Django Q.check variants through
+    live HTTP. Its sharded sibling
+    `examples/fakeshop/test_query/test_serializer_validator_bind_sharded_api.py`
+    proves conditional create, update and nested validation use the pinned alias.
   - `test_converter.py` — each supported serializer-field class → annotation +
     required-ness; `PrimaryKeyRelatedField` / `ManyRelatedField` id mapping
     (Relay-`GlobalID` vs raw pk); `FileField` → [`Upload`][glossary-upload-scalar]; the

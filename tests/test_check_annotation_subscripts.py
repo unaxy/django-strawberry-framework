@@ -344,3 +344,73 @@ def test_cli_refuses_an_unparseable_file(repo: Path, capsys: pytest.CaptureFixtu
 def test_the_package_passes(capsys: pytest.CaptureFixture[str]) -> None:
     assert cas.main([]) == 0
     assert capsys.readouterr().out.endswith(" 0 finding(s)\n")
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "field = models.BigIntegerField[object, object]()",
+        "def f():\n    return models.BigIntegerField[object, object]()",
+        "def f(field=models.BigIntegerField[object, object]()): ...",
+        "class Field(models.BigIntegerField[object, object]): ...",
+        "def f():\n    field: object = models.BigIntegerField[object, object]()",
+    ],
+)
+def test_runtime_django_subscript_fails_without_an_annotation(
+    tmp_path: Path,
+    expression: str,
+) -> None:
+    source = "from django.db import models\n" + expression + "\n"
+    (line,) = _findings(tmp_path, source, table={"django.db.models.BigIntegerField": False})
+    assert "has no runtime subscript hook and this runtime expression can be evaluated" in line
+
+
+@pytest.mark.parametrize(
+    ("imports", "expression"),
+    [
+        ("from django.db.models import BigIntegerField as Big", "Big[object, object]()"),
+        ("import django.db.models as dbm", "dbm.BigIntegerField[object, object]()"),
+    ],
+)
+def test_runtime_django_subscript_resolves_import_aliases(
+    tmp_path: Path,
+    imports: str,
+    expression: str,
+) -> None:
+    (line,) = _findings(
+        tmp_path,
+        imports + "\nfield = " + expression + "\n",
+        table={"django.db.models.BigIntegerField": False},
+    )
+    assert "`django.db.models.BigIntegerField`" in line
+
+
+def test_runtime_django_subscript_unknown_target_fails_closed(tmp_path: Path) -> None:
+    (line,) = _findings(tmp_path, "from django.db import models\nfield = models.NewField[int]()\n")
+    assert "`django.db.models.NewField` (runtime expression)" in line
+    assert "neither SUBSCRIPTABLE nor CHECKER_ONLY" in line
+
+
+def test_runtime_safe_django_subscript_and_container_indexing_pass(tmp_path: Path) -> None:
+    source = """
+        from django.db.models import QuerySet
+
+        rows = QuerySet[int]()
+        def first(values):
+            return values[0]
+    """
+    assert _findings(tmp_path, source, table={"django.db.models.QuerySet": True}) == []
+
+
+def test_runtime_type_checking_alias_keeps_its_bare_class_fallback(tmp_path: Path) -> None:
+    source = """
+        from typing import TYPE_CHECKING
+        from django.db.models import BigIntegerField
+
+        if TYPE_CHECKING:
+            _Field = BigIntegerField[object, object]
+        else:
+            _Field = BigIntegerField
+        field = _Field()
+    """
+    assert _findings(tmp_path, source) == []

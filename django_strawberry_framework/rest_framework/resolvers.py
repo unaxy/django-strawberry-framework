@@ -82,15 +82,15 @@ The serializer-specific invariants this module owns:
   validated date, datetime, time or duration the pinned alias cannot store (or, on
   PostgreSQL, read back), or a decimal past PostgreSQL ``numeric``'s format its column's
   own validators accept, is the field's ``invalid`` error through the same flattener
-  before any write: inside ``is_valid()`` before DRF's uniqueness validators bind it in a
-  query, for the field's converted value and a ``validate_<field>`` hook's
-  (``_hold_unstorable_values``), and after it for a value ``validate()`` sets
-  (``_unstorable_value_errors``). A value a DRF uniqueness validator binds in a query at
-  any level, a nested serializer's included, is held inside ``is_valid()`` to the bind's
-  rule (``utils/errors.py::unbindable_query_value``), so a bind SQLite or PostgreSQL
-  refuses is the field's ``invalid`` error at its nested path, never a raw error or an
-  aborted transaction (``_hold_unstorable_values``); a nested value no such validator
-  binds is the consumer ``create()`` / ``update()``'s to write. DRF's own ``overflow``
+  before any write: at each writable root field's conversion
+  (``_hold_unstorable_values``), and after ``is_valid()`` for a value a
+  ``validate_<field>`` or ``validate()`` hook sets
+  (``_unstorable_value_errors``). Each DRF uniqueness validator's original call at any
+  level, a nested serializer's included, runs on a copied pinned queryset whose actual
+  ORM lookup construction and one compilation are guarded. An unbindable value is the
+  field's ``invalid`` error at its nested path, never a raw error or an aborted
+  transaction (``rest_framework/query_bind.py::guard_query``); a nested value no such
+  validator binds is the consumer ``create()`` / ``update()``'s to write. DRF's own ``overflow``
   answer comes first, and a datetime DRF cannot place in a time zone, which it raises as
   a raw ``OverflowError``, fails its ``DateTimeField`` with that same ``overflow`` error
   (``_translate_datetime_overflow``).
@@ -210,7 +210,6 @@ from django_strawberry_framework.utils.errors import (
     null_field_error,
     rekey_error_segment,
     save_time_error_key_map,
-    unbindable_query_value,
     unstorable_value,
 )
 from django_strawberry_framework.utils.inputs import optional_input_field, published_input_specs
@@ -278,6 +277,7 @@ from .serializer_converter import (
     resolve_serializer_field,
     serializer_field_fits_kind,
 )
+from .validator_guard import guard_uniqueness_validator
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Iterator, Mapping, Sequence
@@ -338,11 +338,6 @@ if TYPE_CHECKING:
 
         def __call__(self, data: object) -> object: ...
 
-    class _RunValidators(Protocol):
-        """A serializer's ``run_validators``, as the storability hold wraps it."""
-
-        def __call__(self, value: object) -> None: ...
-
     class _Refuses(Protocol):
         """A storability rule: whether the alias ``using()`` names refuses a column's value."""
 
@@ -353,8 +348,6 @@ if TYPE_CHECKING:
             using: Callable[[], str],
             /,
         ) -> bool: ...
-
-    _UniquenessValidator: TypeAlias = UniqueTogetherValidator | BaseUniqueForValidator
 
     class _RowSource(Protocol):
         """A validator's ``queryset``: a queryset or a manager, either of which ``all()`` re-reads."""
@@ -1361,6 +1354,8 @@ def _assert_field_agreement(
     mutation_cls: type[SerializerMutation],
     serializer: DRFSerializer,
     spec: InputFieldSpec,
+    *,
+    nested_path: tuple[str, ...] = (),
 ) -> None:
     """Assert ONE schema-time field spec agrees with the runtime serializer.
 
@@ -1371,7 +1366,9 @@ def _assert_field_agreement(
     ``ManyRelatedField(PrimaryKeyRelatedField)`` over the SAME ``related_model``, and keep a
     file / scalar kind compatible (``serializer_field_fits_kind``, the reading the schema
     build refuses a kind mismatch by). Any divergence is a framework ``ConfigurationError`` at
-    the boundary.
+    the boundary. ``nested_path`` locates this serializer level's normalized
+    configuration, so nested model resolution and optionality do not inherit the
+    root mutation's settings.
     """
     runtime_fields = bound_fields(serializer)
     name = truth.name(type(serializer))
@@ -1404,7 +1401,12 @@ def _assert_field_agreement(
     if spec.kind in (RELATION_SINGLE, RELATION_MULTI):
         _assert_relation_agreement(mutation_cls, spec, runtime)
     elif spec.kind in (NESTED_SINGLE, NESTED_MULTI):
-        _assert_nested_agreement(mutation_cls, spec, runtime)
+        _assert_nested_agreement(
+            mutation_cls,
+            spec,
+            runtime,
+            nested_path=(*nested_path, spec.target_name),
+        )
     elif spec.kind == FILE:
         if not serializer_field_fits_kind(runtime, FILE):
             raise ConfigurationError(
@@ -1436,7 +1438,10 @@ def _assert_field_agreement(
             "invariant violation, not a supported configuration.",
         )
     operation = read_attr(meta, "operation")
-    declared_optional = read_attr(meta, "optional_fields")
+    level_meta = meta
+    for name in nested_path:
+        level_meta = require(read_attr(level_meta, "nested_fields"), is_mapping)[name]
+    declared_optional = read_attr(level_meta, "optional_fields")
     optional_fields = frozenset(list_of(declared_optional) if declared_optional else ())
     runtime_required = (
         False
@@ -1465,7 +1470,9 @@ def _assert_field_agreement(
         # annotation is checked there - so the container's annotation is covered by
         # that walk plus the requiredness check above.
         return
-    snapshot_model = read_attr(meta, "model")
+    snapshot_model = (
+        serializer_model(type(serializer)) if nested_path else read_attr(meta, "model")
+    )
     try:
         _python_attr, runtime_annotation, _runtime_spec = resolve_serializer_field(
             runtime,
@@ -1545,6 +1552,8 @@ def _assert_nested_agreement(
     mutation_cls: type[SerializerMutation],
     spec: InputFieldSpec,
     runtime: DRFField,
+    *,
+    nested_path: tuple[str, ...],
 ) -> None:
     """Confirm a runtime nested serializer field matches the schema-time nested spec.
 
@@ -1572,7 +1581,12 @@ def _assert_nested_agreement(
         )
     child_serializer, _many = nested_serializer_child(runtime)
     for child_spec in _nested_specs_of(spec):
-        _assert_field_agreement(mutation_cls, child_serializer, child_spec)
+        _assert_field_agreement(
+            mutation_cls,
+            child_serializer,
+            child_spec,
+            nested_path=nested_path,
+        )
 
 
 def _scope_relation_querysets_to_visibility(
@@ -1737,27 +1751,14 @@ def _written_columns(
 
 
 def _hold_unstorable_values(serializer: DRFSerializer, model: type[models.Model]) -> None:
-    """Fail each value the database refuses before a validator binds it, at every level.
+    """Guard each actual uniqueness query and each root writable field's conversion.
 
-    DRF's queryset-backed validators bind each checked value in a query inside
-    ``is_valid()``: ``UniqueValidator`` on a field, and on a serializer
-    ``UniqueTogetherValidator`` (its constraint ``condition_fields`` included) and
-    ``UniqueForDateValidator`` and kin, at every level of the validation tree
-    (``_validation_tree``): the root and each nested serializer, a ``ListSerializer``'s
-    child included. A value the database refuses there raises its own error: SQLite's
-    ``OverflowError`` binding a duration past 64 bits of microseconds, or an aware datetime
-    a ``validate_<field>`` hook leaves whose projection onto the connection's time zone
-    leaves years 1..9999, escapes ``is_valid()`` raw, and PostgreSQL's ``DataError``, which
-    DRF's ``qs_exists`` reads as "no duplicate", leaves the write transaction aborted. Each
-    serializer is held once (``_hold_serializer_values``): the root's writable top-level
-    fields writing a concrete column of ``model`` (``_written_columns``) to the write's own
-    rule (``utils/errors.py::unstorable_value``), and each value a uniqueness validator
-    binds, at any level, to the bind's rule (``utils/errors.py::unbindable_query_value``)
-    against the column the validator binds it on, a serializer-level validator's only where
-    DRF reaches its query (``_validator_queries``). A value ``validate()`` sets is held after
-    ``is_valid()`` (``_unstorable_value_errors``). A nested serializer's values no
-    uniqueness validator binds are written by the consumer's own ``create()`` /
-    ``update()`` and are not held here.
+    A field or serializer validator at any nested level retains DRF's own call order,
+    default handling and query reachability. Its per-instance Query guard intercepts
+    Django's eager lookup preparation and the one compiler execution the validator
+    chooses. Root save storability is separate: only writable concrete columns are
+    held here and in ``_unstorable_value_errors`` after validation; DRF's read-only
+    defaults enter validator attrs but never become root writes by sharing a source.
     """
     written = _written_columns(serializer, model)
     held: set[int] = set()
@@ -1773,21 +1774,12 @@ def _hold_serializer_values(
     serializer: DRFSerializer,
     written: Mapping[str, tuple[DRFField, _FieldAny]],
 ) -> None:
-    """Fail one serializer's refused values with the ``invalid`` error before its validators run.
+    """Hold real root writes and guard each uniqueness validator in DRF's own order.
 
-    Each field's current ``to_internal_value`` is wrapped on the instance, so a converted
-    value its rule refuses fails the field with the ``invalid``
-    ``UNBINDABLE_TEMPORAL_MESSAGE`` error before the field's own validators run: a field of
-    ``written`` against its written column under the write's rule
-    (``utils/errors.py::unstorable_value``), and a field a ``UniqueValidator`` checks
-    against the column the validator binds (``_field_validator_columns``) under the bind's
-    rule (``utils/errors.py::unbindable_query_value``). The serializer's ``run_validators``
-    is wrapped likewise for a value a ``validate_<field>`` hook set, failing every refused
-    field of ``written``, and of each serializer-level uniqueness validator
-    (``_serializer_validator_binds``) whose query DRF reaches on those values
-    (``_validator_queries``), together before any of them runs, as DRF runs none after a
-    field error. A bind against the column ``written`` holds the field to is not asked
-    again: the write's rule refuses every value the bind's does.
+    The writable field's conversion is checked against its save column. Read-only
+    defaults are absent from that write path: DRF adds them only to its separate
+    validator mapping. Each validator's copied, pinned queryset is guarded at its
+    actual filter/exists calls, after defaults and earlier validators have run.
     """
     for name, field in bound_fields(serializer).items():
         entry = written.get(name)
@@ -1797,148 +1789,59 @@ def _hold_serializer_values(
                 field.to_internal_value,
                 unstorable_value,
             )
-        for column in _field_validator_columns(field):
-            if entry is None or entry[1] is not column:
-                field.to_internal_value = _storability_failing(
-                    column,
-                    field.to_internal_value,
-                    unbindable_query_value,
+        # A nested Serializer owns its serializer-level validators. It appears here
+        # as a parent field and is visited again as its own validation-tree node.
+        if not field.read_only and not isinstance(field, serializers.Serializer):
+            field.validators = [
+                guard_uniqueness_validator(
+                    validator,
+                    alias=pinned_write_alias(),
+                    field_name=None,
+                    # DRF UniqueValidator queries the bound source's final
+                    # attribute, even when the field writes a nested attrs path.
+                    sources={name: field.source_attrs[-1]} if field.source_attrs else {},
                 )
-    binds = [
-        (validator, held)
-        for validator, columns in _serializer_validator_binds(serializer)
-        if (
-            held := {
-                name: (field, column)
-                for name, (field, column) in columns.items()
-                if (entry := written.get(name)) is None or entry[1] is not column
-            }
-        )
-    ]
-    if written or binds:
-        serializer.run_validators = _storability_checked_validators(
-            serializer,
-            written,
-            binds,
-            serializer.run_validators,
-        )
-
-
-def _validator_column(validator: object, source: str) -> _FieldAny | None:
-    """Return the concrete column a uniqueness validator's filter on ``source`` binds, else ``None``.
-
-    The column is read from the validator's own ``queryset`` model, the one its query runs
-    against (``utils/relations.py::written_model_field``); a ``source`` naming no concrete
-    column of it (a queryset annotation's alias) binds no column value.
-    """
-    model = require(read_attr(read_attr(validator, "queryset"), "model"), is_model_class)
-    return written_model_field(model, source)
-
-
-def _field_validator_columns(field: DRFField) -> list[_FieldAny]:
-    """Return the column each ``UniqueValidator`` on writable ``field`` binds its value against.
-
-    DRF filters on the field's last ``source`` segment (``UniqueValidator.__call__``).
-    """
-    if field.read_only or not field.source_attrs:
-        return []
-    return [
-        column
-        for validator in field.validators
-        if isinstance(validator, UniqueValidator)
-        and (column := _validator_column(validator, field.source_attrs[-1])) is not None
-    ]
-
-
-def _serializer_validator_binds(
-    serializer: DRFSerializer,
-) -> list[tuple[_UniquenessValidator, dict[str, tuple[DRFField, _FieldAny]]]]:
-    """Pair each serializer-level uniqueness validator with the writable fields it binds, by column.
-
-    ``UniqueTogetherValidator`` filters on each of its ``fields``' and ``condition_fields``'
-    ``source``, and ``UniqueForDateValidator`` and kin on their ``field``'s last ``source``
-    segment (the date parts they bind are integers). A validator binding no column, and a
-    ``UniqueTogetherValidator`` naming a field the serializer lacks (whose own call raises
-    ``KeyError``), is left out.
-    """
-    fields = bound_fields(serializer)
-    binds: list[tuple[_UniquenessValidator, dict[str, tuple[DRFField, _FieldAny]]]] = []
-    for validator in serializer.validators:
-        if isinstance(validator, UniqueTogetherValidator) and all(
-            name in fields for name in _together_names(validator)
-        ):
-            named = [
-                (name, source)
-                for name in _together_names(validator)
-                if (source := fields[name].source)
+                if isinstance(validator, UniqueValidator)
+                else validator
+                for validator in field.validators
             ]
-        elif isinstance(validator, BaseUniqueForValidator) and validator.field in fields:
-            field = fields[validator.field]
-            named = [(validator.field, field.source_attrs[-1])] if field.source_attrs else []
-        else:
-            continue
-        columns: dict[str, tuple[DRFField, _FieldAny]] = {}
-        for name, source in named:
-            column = _validator_column(validator, source)
-            if column is not None and not fields[name].read_only:
-                _ = columns.setdefault(name, (fields[name], column))
-        if columns:
-            binds.append((validator, columns))
-    return binds
-
-
-def _together_names(validator: UniqueTogetherValidator, *, checked: bool = False) -> list[str]:
-    """Return a ``UniqueTogetherValidator``'s ``fields``, then its ``condition_fields``.
-
-    ``checked`` answers the ``fields`` alone, the names whose values DRF checks.
-    """
-    # drf-stubs declare no ``condition_fields`` (DRF 3.16 added it).
-    names = [
-        *list_of(read_attr(validator, "fields")),
-        *([] if checked else list_of(read_attr(validator, "condition_fields", ()))),
-    ]
-    return [name for name in names if is_str(name)]
-
-
-def _validator_queries(
-    validator: _UniquenessValidator,
-    attrs: Mapping[object, object],
-    serializer: DRFSerializer,
-) -> bool:
-    """Return whether DRF's ``validator``, called on ``attrs``, reaches its uniqueness query.
-
-    DRF returns before its query in four places: ``enforce_required_fields`` raises the
-    ``required`` error when a field it names is missing (on a create only, for
-    ``UniqueTogetherValidator``, whose update fills a missing field from the instance), an
-    update whose checked values all equal the instance's checks nothing, and a checked
-    ``None`` is skipped unless the validator's ``nulls_distinct`` is ``False``. A value
-    DRF binds no query for is the consumer's to write, so it is held only where the query
-    runs. A multiple update DRF refuses with ``RuntimeError`` needs an instance on a
-    ``ListSerializer`` child, which the pipeline never sets.
-    """
-    # Adapted from DRF rest_framework/validators.py UniqueTogetherValidator.__call__ /
-    # enforce_required_fields and BaseUniqueForValidator.enforce_required_fields
-    # (BSD-3-Clause; LICENSE.drf). Audited 3.17.0 to 3.18.0: the bodies agree but for
-    # ``nulls_distinct`` (3.18), whose absence in 3.17 skips every checked ``None``.
-    if isinstance(validator, BaseUniqueForValidator):
-        return validator.field in attrs and validator.date_field in attrs
     fields = bound_fields(serializer)
-    names = _together_names(validator)
-    instance: object = serializer.instance
-    sources = [fields[name].source or name for name in _together_names(validator, checked=True)]
-    if instance is None:
-        if any((fields[name].source or name) not in attrs for name in names):
-            return False
-        checked = [attrs[source] for source in sources]
-    else:
-        checked = [
-            attrs[source]
-            for source in sources
-            if source in attrs and attrs[source] != read_attr(instance, source)
-        ]
-    if not checked:
-        return False
-    return read_attr(validator, "nulls_distinct", None) is False or None not in checked
+
+    def _guard_serializer_validator(validator: _ValidatorT) -> _ValidatorT:
+        if isinstance(validator, UniqueTogetherValidator):
+            checked_names = list(validator.fields)
+            names = [
+                *checked_names,
+                *(
+                    name
+                    for name in list_of(read_attr(validator, "condition_fields", ()))
+                    if is_str(name)
+                ),
+            ]
+            field_name = checked_names[0] if checked_names else ""
+            sources = {name: fields[name].source or name for name in names if name in fields}
+        elif isinstance(validator, BaseUniqueForValidator):
+            names = [validator.field]
+            field_name = validator.field
+            # BaseUniqueForValidator.__call__ uses source_attrs[-1], whereas
+            # UniqueTogetherValidator.filter_queryset uses the complete source.
+            sources = {
+                name: fields[name].source_attrs[-1]
+                for name in names
+                if name in fields and fields[name].source_attrs
+            }
+        else:
+            return validator
+        return guard_uniqueness_validator(
+            validator,
+            alias=pinned_write_alias(),
+            field_name=field_name,
+            sources=sources,
+        )
+
+    serializer.validators = [
+        _guard_serializer_validator(validator) for validator in serializer.validators
+    ]
 
 
 def _storability_failing(
@@ -1946,12 +1849,7 @@ def _storability_failing(
     original: _ToInternal,
     refuses: _Refuses,
 ) -> _ToInternal:
-    """Return ``original`` wrapped to fail its field on a value ``refuses`` refuses for ``column``.
-
-    ``refuses`` is the write's storability rule (``utils/errors.py::unstorable_value``) or
-    the rule of the bind a uniqueness validator makes
-    (``utils/errors.py::unbindable_query_value``), asked on the pinned alias.
-    """
+    """Fail a converted root writable value the pinned alias cannot save to ``column``."""
 
     def _to_internal_value(data: object) -> object:
         value = original(data)
@@ -1962,34 +1860,6 @@ def _storability_failing(
     return _to_internal_value
 
 
-def _storability_checked_validators(
-    serializer: DRFSerializer,
-    written: Mapping[str, tuple[DRFField, _FieldAny]],
-    binds: Sequence[tuple[_UniquenessValidator, Mapping[str, tuple[DRFField, _FieldAny]]]],
-    original: _RunValidators,
-) -> _RunValidators:
-    """Return ``original`` run after every refused field fails, all at once.
-
-    Each field of ``written`` is held to the write's rule, and each field a validator of
-    ``binds`` binds to the bind's rule where DRF reaches that validator's query on the
-    values (``_validator_queries``), the serializer's ``instance`` read as the validator
-    reads it (``_unstorable_written_values``).
-    """
-
-    def _run_validators(value: object) -> None:
-        refused = _unstorable_written_values(written, value, unstorable_value)
-        for validator, columns in binds:
-            bound = _unstorable_written_values(columns, value, unbindable_query_value)
-            if bound and is_mapping(value) and _validator_queries(validator, value, serializer):
-                for name, errors in bound.items():
-                    _ = refused.setdefault(name, errors)
-        if refused:
-            raise DRFValidationError(refused)
-        original(value)
-
-    return _run_validators
-
-
 def _unstorable_written_values(
     columns: Mapping[str, tuple[DRFField, _FieldAny]],
     values: object,
@@ -1997,9 +1867,8 @@ def _unstorable_written_values(
 ) -> dict[str, list[ErrorDetail]]:
     """Map each field of ``columns`` whose value in ``values`` ``refuses`` refuses for its column.
 
-    ``values`` is keyed by each field's ``source``: the serializer's validated values inside
-    ``is_valid()`` (``_storability_checked_validators``) or its ``validated_data`` after it
-    (``_unstorable_value_errors``), asked on the pinned alias. A refused field answers the
+    ``values`` is the serializer's final ``validated_data``, keyed by each writable
+    field's ``source`` and asked on the pinned alias after ``is_valid()``. A refused field answers the
     ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` ``ErrorDetail`` under its field name, the
     shape ``serializer.errors`` carries. A value that is no mapping (what a
     ``to_internal_value`` or ``validate()`` override returns in its place, which DRF passes
@@ -3118,11 +2987,11 @@ def _unstorable_value_errors(
     (``_unstorable_written_values``); a refused one answers
     the ``invalid`` ``UNBINDABLE_TEMPORAL_MESSAGE`` ``ErrorDetail`` under its field name,
     the shape ``serializer.errors`` carries, so the flattener keys it to the input the
-    client sent. Inside ``is_valid()`` each such value is held before DRF's uniqueness
-    validators bind it (``_hold_unstorable_values``), so this answers a value ``validate()``
-    sets. A nested serializer's values are written by the consumer's own ``create()`` /
-    ``update()`` and are not read here; inside ``is_valid()`` each one a uniqueness validator
-    binds is held to the bind's rule (``_hold_unstorable_values``).
+    client sent. A converted root input is also checked inside ``is_valid()`` by
+    ``_hold_unstorable_values``; this final check catches changes from
+    ``validate_<field>`` and ``validate()``. Its uniqueness queries are separately
+    guarded at Django's lookup/compiler seams. A nested serializer's values are written
+    by the consumer's own ``create()`` / ``update()`` and are not read here.
     """
     return _unstorable_written_values(
         _written_columns(serializer, model),

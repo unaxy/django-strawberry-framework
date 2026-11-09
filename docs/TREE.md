@@ -279,9 +279,11 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 │   ├── accessors.py              # Typed reads of the DRF attributes djangorestframework-stubs declares with bare generics.
 │   ├── hook_context.py           # The frozen serializer-hook context + upload metadata.
 │   ├── inputs.py                 # DRF-serializer-derived ``@strawberry.input`` generation substrate.
+│   ├── query_bind.py             # Guard the one ORM compilation a DRF uniqueness validator actually performs.
 │   ├── resolvers.py              # The sync + async serializer-mutation resolver pipeline.
 │   ├── serializer_converter.py   # DRF serializer-field -> Strawberry input conversion + the per-input-field reverse map.
-│   └── sets.py                   # ``SerializerMutation`` base + ``Meta`` validation + the input seams the phase-2.5 bind calls.
+│   ├── sets.py                   # ``SerializerMutation`` base + ``Meta`` validation + the input seams the phase-2.5 bind calls.
+│   └── validator_guard.py        # Keep DRF's validator call in control while guarding its actual ORM operations.
 ├── templates/
 │   └── django_strawberry_framework/
 │       └── debug_toolbar.html
@@ -425,9 +427,11 @@ django_strawberry_framework/    # Public API of django-strawberry-framework, a D
 │   ├── accessors.py              # Typed reads of the DRF attributes djangorestframework-stubs declares with bare generics.
 │   ├── hook_context.py           # The frozen serializer-hook context + upload metadata.
 │   ├── inputs.py                 # DRF-serializer-derived ``@strawberry.input`` generation substrate.
+│   ├── query_bind.py             # Guard the one ORM compilation a DRF uniqueness validator actually performs.
 │   ├── resolvers.py              # The sync + async serializer-mutation resolver pipeline.
 │   ├── serializer_converter.py   # DRF serializer-field -> Strawberry input conversion + the per-input-field reverse map.
-│   └── sets.py                   # ``SerializerMutation`` base + ``Meta`` validation + the input seams the phase-2.5 bind calls.
+│   ├── sets.py                   # ``SerializerMutation`` base + ``Meta`` validation + the input seams the phase-2.5 bind calls.
+│   └── validator_guard.py        # Keep DRF's validator call in control while guarding its actual ORM operations.
 ├── templates/
 │   └── django_strawberry_framework/
 │       └── debug_toolbar.html
@@ -763,6 +767,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_crossing_lookup_filters_api.py  # A declared filter whose ``lookup_expr`` crosses a relation answers as its joined spelling.
 ├── test_debug_extension_api.py   # Live GraphQL HTTP tests for the ``DjangoDebugExtension`` request-visible contract.
 ├── test_debug_toolbar_api.py     # Live HTTP tests for ``DebugToolbarMiddleware`` across GraphQL, panel, and pass-through routes.
+├── test_decimal_column_name_readback_api.py  # Live model, ModelForm and serializer writes through SQLite column-name conversion.
 ├── test_declared_key_forms_api.py  # Native key filters publish their stored-column scalar and validate raw key bounds over HTTP.
 ├── test_declared_key_primitives_api.py  # Declared key primitives compare the real column stored by scalar and relation-valued keys.
 ├── test_declared_temporal_bindability_api.py  # Declared temporal filters and resolver annotations use the real database's bind boundary.
@@ -846,6 +851,8 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_scalars_mutation_api.py  # Live GraphQL HTTP tests for model input normalization and database storability.
 ├── test_schema_composition_api.py  # Live ``/graphql/`` proof that fakeshop's composed project schema publishes every app's surface.
 ├── test_serializer_runtime_api.py  # Live HTTP serializer tests for save errors, runtime field ownership and post-save conflicts.
+├── test_serializer_validator_bind_api.py  # Live HTTP coverage for the values DRF uniqueness validators actually bind.
+├── test_serializer_validator_bind_sharded_api.py  # Live sharded HTTP checks for conditional DRF uniqueness on the write alias.
 ├── test_single_parent_fastpath_api.py  # Live GraphQL HTTP tests for the single-parent windowed-prefetch fast path.
 ├── test_transport_api.py         # Live ``/graphql/`` transport-boundary acceptance tests.
 ├── test_transport_chain_api.py   # Live HTTP tests for configured middleware policies and GraphQL callback fallbacks.

@@ -43,6 +43,7 @@ include = [
     "/LICENSE.django-filter",
     "/LICENSE.django-graphiql-debug-toolbar",
     "/LICENSE.drf",
+    "/LICENSE.postgresql",
     "/LICENSE.strawberry",
     "/LICENSE.strawberry-django",
     "/CHANGELOG.md",
@@ -62,6 +63,7 @@ license-files = [
     "LICENSE.django-filter",
     "LICENSE.django-graphiql-debug-toolbar",
     "LICENSE.drf",
+    "LICENSE.postgresql",
     "LICENSE.strawberry",
     "LICENSE.strawberry-django",
 ]

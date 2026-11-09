@@ -124,7 +124,7 @@ from __future__ import annotations
 import datetime
 import logging
 import uuid
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from contextlib import contextmanager
 from decimal import Decimal
 from functools import wraps
@@ -136,7 +136,7 @@ import pytest
 from apps.scalars import models
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
-from django.db import connection
+from django.db import DataError, connection, transaction
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
@@ -145,6 +145,7 @@ from graphql_client import JSONObject, json_at, post_graphql, response_json
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.testing import AsyncTestClient
+from django_strawberry_framework.utils._narrowing import is_dict, is_list_or_tuple
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 if TYPE_CHECKING:
@@ -2232,47 +2233,120 @@ def test_value_a_uniqueness_check_would_bind_is_the_field_error(operation: str, 
         assert models.UniqueScalarSpecimen.objects.count() == 1
 
 
-#: A zero whose written exponent PostgreSQL's ``numeric`` refuses at the bind, which ``amount``'s
-#: bounded ``DecimalValidator`` passes, as does a ``DecimalField`` holding no digits.
-_ZERO_AT_NUMERIC_EXPONENT_LIMIT = "0E+1073741823"
+def _native_numeric_accepts(wire: str) -> bool:
+    """Ask the real server to store and read the spelling, then roll that row back."""
+    try:
+        with transaction.atomic():
+            native = models.UniqueScalarSpecimen.objects.create(
+                label="native-control",
+                opened_time=datetime.time(12, 13),
+                opened_at=_STORED_AT,
+                amount=Decimal(wire),
+                active=True,
+            )
+            native.refresh_from_db()
+            assert native.amount == Decimal(0)
+            transaction.set_rollback(True)
+    except DataError:
+        return False
+    return True
+
+
+@contextmanager
+def _amount_select_decimal_spellings() -> Generator[list[tuple[str, ...]], None, None]:
+    """Record Decimal parameters before adaptation, forwarding every real statement."""
+    observed: list[tuple[str, ...]] = []
+
+    def observe(
+        execute: Callable[
+            [
+                str,
+                object,
+                bool,
+                dict[str, object],
+            ],
+            object,
+        ],
+        sql: str,
+        params: object,
+        many: bool,  # noqa: FBT001 - Django execute_wrapper signature
+        context: dict[str, object],
+    ) -> object:
+        if (
+            sql.lstrip().upper().startswith("SELECT")
+            and '"scalars_uniquescalarspecimen"' in sql
+            and '"amount"' in sql
+        ):
+            values: Iterable[object]
+            if is_dict(params):
+                values = params.values()
+            elif is_list_or_tuple(params):
+                values = params
+            else:
+                values = ()
+            observed.append(tuple(str(value) for value in values if isinstance(value, Decimal)))
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(observe):
+        yield observed
+
+
+_NUMERIC_ZERO_ENDPOINTS = [
+    pytest.param("0E+1073741822", 14, id="below-endpoint"),
+    pytest.param("0E+1073741823", 16, id="at-endpoint"),
+    pytest.param("0E+1073741824", None, id="past-endpoint"),
+]
 
 
 @pytest.mark.pg
 @pytest.mark.django_db
 @pytest.mark.parametrize("operation", ["create", "update"])
-def test_form_decimal_postgresql_cannot_bind_under_a_conditional_constraint(
+@pytest.mark.parametrize(("wire", "accepted_from"), _NUMERIC_ZERO_ENDPOINTS)
+def test_form_decimal_postgresql_numeric_endpoint_under_a_conditional_constraint(
     operation: str,
+    wire: str,
+    accepted_from: int | None,
 ) -> None:
-    """A decimal ``numeric`` refuses is ``amount``'s error before its constraint check binds it.
+    """The real server controls the form's endpoint answer before its constraint query.
 
     ``amount`` is unique among active rows (a conditional ``UniqueConstraint``), whose check
-    inside ``is_valid()`` would bind the value and read the server's ``DataError`` as a
-    violation, the wrong ``"__all__"`` answer. The form answers ``amount``'s ``invalid``
-    ``FieldError`` instead, nothing created and an updated row kept.
+    inside ``is_valid()`` binds the sent value. A refused spelling is ``amount``'s
+    ``invalid`` error, while a spelling the native ORM stores succeeds.
     """
+    accepted = accepted_from is not None and connection.get_database_version()[0] >= accepted_from
+    assert _native_numeric_accepts(wire) is accepted
     specimen = None if operation == "create" else _unique_seed()
     root, payload = _unique_write(
         _UNIQUE_FLAVORS["form"],
         specimen,
         "amount",
-        _ZERO_AT_NUMERIC_EXPONENT_LIMIT,
+        wire,
     )
 
-    assert payload == _field_refusal(root, "amount", _UNSTORABLE)
-    _assert_nothing_written(specimen)
+    if accepted:
+        assert json_at(payload, "data", root, "errors") == [], payload
+        assert Decimal(str(json_at(payload, "data", root, "result", "amount"))) == 0
+        assert [row[3] for row in _unique_rows()] == [Decimal(0)]
+    else:
+        assert payload == _field_refusal(root, "amount", _UNSTORABLE)
+        _assert_nothing_written(specimen)
 
 
 @pytest.mark.pg
 @pytest.mark.django_db
-def test_serializer_decimal_postgresql_cannot_bind_through_a_field_holding_no_digits() -> None:
-    """A decimal a digitless ``DecimalField`` passes but ``numeric`` refuses is ``amount``'s error.
+@pytest.mark.parametrize(("wire", "accepted_from"), _NUMERIC_ZERO_ENDPOINTS)
+def test_serializer_decimal_postgresql_numeric_endpoint_with_a_digitless_field(
+    wire: str,
+    accepted_from: int | None,
+) -> None:
+    """A digitless field accepts each spelling; the server decides its storage boundary.
 
-    ``UniqueScalarSpecimenUnboundedAmountSerializer`` declares ``amount`` with no
-    ``max_digits``, so DRF passes the zero whose exponent PostgreSQL refuses; its uniqueness
-    check would bind it, and DRF reads the server's ``DataError`` as no duplicate, leaving the
-    transaction aborted. The serializer answers ``amount``'s ``invalid`` ``FieldError`` first,
-    nothing created.
+    The native ORM control is independent of the framework's numeric predicate. An
+    accepted spelling reaches the explicit two-field validator and stores zero; a refused
+    spelling is the field's error with no row written.
     """
+    accepted = accepted_from is not None and connection.get_database_version()[0] >= accepted_from
+    assert _native_numeric_accepts(wire) is accepted
     root = "createUniqueScalarSpecimenViaUnboundedAmountSerializer"
     _, payload = _unique_write(
         (
@@ -2283,11 +2357,60 @@ def test_serializer_decimal_postgresql_cannot_bind_through_a_field_holding_no_di
         ),
         None,
         "amount",
-        _ZERO_AT_NUMERIC_EXPONENT_LIMIT,
+        wire,
     )
 
+    if accepted:
+        assert json_at(payload, "data", root, "errors") == [], payload
+        assert Decimal(str(json_at(payload, "data", root, "result", "amount"))) == 0
+        assert [row[3] for row in _unique_rows()] == [Decimal(0)]
+    else:
+        assert payload == _field_refusal(root, "amount", _UNSTORABLE)
+        _assert_nothing_written(None)
+
+
+@pytest.mark.pg
+@pytest.mark.django_db
+def test_serializer_decimal_field_hook_operand_is_checked_at_uniqueness_query() -> None:
+    """A fitting input becomes unbindable after conversion and before the query."""
+    root = "createUniqueScalarSpecimenViaUnboundedAmountSerializer"
+    fields = (
+        root,
+        "UniqueScalarSpecimenUnboundedAmountSerializerInput",
+        "",
+        "",
+    )
+    with _amount_select_decimal_spellings() as observed:
+        _, payload = _unique_write(fields, None, "amount", "7")
+    assert all("0E+1073741824" not in spellings for spellings in observed)
     assert payload == _field_refusal(root, "amount", _UNSTORABLE)
     _assert_nothing_written(None)
+
+
+@pytest.mark.pg
+@pytest.mark.django_db
+def test_serializer_decimal_two_field_validator_rejects_a_fitting_duplicate() -> None:
+    """A normal duplicate proves the declared serializer uniqueness validator runs."""
+    _ = models.UniqueScalarSpecimen.objects.create(
+        label="existing",
+        opened_time=datetime.time(12, 13),
+        opened_at=_STORED_AT,
+        amount=Decimal(8),
+        active=True,
+    )
+    root = "createUniqueScalarSpecimenViaUnboundedAmountSerializer"
+    fields = (
+        root,
+        "UniqueScalarSpecimenUnboundedAmountSerializerInput",
+        "",
+        "",
+    )
+    with _amount_select_decimal_spellings() as observed:
+        _, payload = _unique_write(fields, None, "amount", "8")
+    assert any("8" in spellings for spellings in observed)
+    assert json_at(payload, "data", root, "result") is None
+    assert json_at(payload, "data", root, "errors", 0, "codes") == ["unique"]
+    assert models.UniqueScalarSpecimen.objects.count() == 1
 
 
 #: The first ``createScalarSpecimenTagWithUniqueSpecimens`` item, a value each column stores.
@@ -2425,3 +2548,47 @@ def test_nested_value_a_uniqueness_validator_cannot_bind_is_the_item_field_error
         assert specimens == [("first", datetime.time(8)), ("second", cell.stored_time)]
         assert tags == ["tag"]
     assert len(queries.captured_queries) == cell.query_count(), queries.captured_queries
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("opened_at", "refused"),
+    [("9999-12-31T23:30:00", True), ("2021-06-15T09:30:00", False)],
+)
+def test_nested_uniqueness_uses_read_only_default_before_binding(
+    opened_at: str,
+    refused: bool,  # noqa: FBT001
+) -> None:
+    """A read-only default completes the pair DRF queries; the refused value is field keyed."""
+    document = (
+        "mutation Write($openedAt: DateTime!) {"
+        " createScalarSpecimenTagWithReadOnlyLabelSpecimens(data: {"
+        ' label: "tag", specimens: [{ openedAt: $openedAt, openedTime: "08:30:00",'
+        ' amount: "2.0000", active: true }]'
+        " }) { result { label } errors { field messages codes path } } }"
+    )
+    payload = response_json(post_graphql(document, variables={"openedAt": opened_at}))
+    root = "createScalarSpecimenTagWithReadOnlyLabelSpecimens"
+    if refused and connection.vendor == "sqlite":
+        assert payload == {
+            "data": {
+                root: {
+                    "result": None,
+                    "errors": [
+                        {
+                            "field": "specimens.0.openedAt",
+                            "messages": [_UNSTORABLE],
+                            "codes": ["invalid"],
+                            "path": ["specimens", "0", "openedAt"],
+                        },
+                    ],
+                },
+            },
+        }
+        assert not models.ScalarSpecimenTag.objects.exists()
+        assert not models.UniqueScalarSpecimen.objects.exists()
+    else:
+        assert payload == {"data": {root: {"result": {"label": "tag"}, "errors": []}}}
+        assert list(models.UniqueScalarSpecimen.objects.values_list("label", flat=True)) == [
+            "defaulted",
+        ]

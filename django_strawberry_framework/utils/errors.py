@@ -61,10 +61,8 @@ write flavors):
 - ``unstorable_value`` - the one write-side storability rule, ``unstorable_temporal`` or
   ``unstorable_decimal``, applied by every write flavor before the save
   (``utils/write_values.py::unstorable_value_error`` on the model flavor);
-- ``unbindable_query_value`` - its read-side twin for a value a uniqueness check binds in a
-  query: the refusals no caller reading a failed query as no match survives, held by the
-  serializer flavor for each value a DRF uniqueness validator binds
-  (``rest_framework/resolvers.py::_hold_unstorable_values``);
+- ``rest_framework/query_bind.py::guard_query`` guards the actual ORM compilation of a
+  DRF uniqueness check, retaining the validator's own decisions and recoverable failures;
 - ``binds_integer`` - whether a backend binds an integer as a value of a column, held
   to the range it stores for the column's internal type (none where the backend states
   no range for that type); shared with the filter bind ask
@@ -172,7 +170,6 @@ __all__ = [
     "rekey_error_segment",
     "relation_field_error",
     "save_time_error_key_map",
-    "unbindable_query_value",
     "unbindable_temporal",
     "unstorable_decimal",
     "unstorable_temporal",
@@ -879,7 +876,10 @@ _POSTGRESQL_NUMERIC_FRACTION_DIGITS = 16383
 """Digits PostgreSQL's unconstrained ``numeric`` stores after the decimal point."""
 
 _POSTGRESQL_NUMERIC_EXPONENT_LIMIT = 1073741823
-"""The written exponent ``numeric_in`` refuses at or past (``INT_MAX / 2``), a zero's included."""
+"""The positive exponent endpoint in PostgreSQL's ``numeric_in`` parser."""
+
+_POSTGRESQL_NUMERIC_ENDPOINT_ACCEPTED_FROM = 16
+"""The first PostgreSQL major version accepting a positive zero exponent at the endpoint."""
 
 
 def refuses_numeric_format(connection: BaseDatabaseWrapper, values: Iterable[object]) -> bool:
@@ -911,7 +911,7 @@ def refuses_numeric_format(connection: BaseDatabaseWrapper, values: Iterable[obj
         if is_list_or_tuple(value):
             if refuses_numeric_format(connection, value):
                 return True
-        elif isinstance(value, Decimal) and not _fits_numeric(value):
+        elif isinstance(value, Decimal) and not _fits_numeric(connection, value):
             return True
     return False
 
@@ -947,12 +947,20 @@ def refuses_integer_range(
     return False
 
 
-def _fits_numeric(number: Decimal) -> bool:
+def _fits_numeric(connection: BaseDatabaseWrapper, number: Decimal) -> bool:
     """Whether ``number``'s spelling stays within PostgreSQL ``numeric``'s format."""
     exponent = number.adjusted() - len(number.as_tuple().digits) + 1
     if number.is_zero():
-        return (
-            -_POSTGRESQL_NUMERIC_FRACTION_DIGITS <= exponent < _POSTGRESQL_NUMERIC_EXPONENT_LIMIT
+        # PostgreSQL src/backend/utils/adt/numeric.c::set_var_from_str accepts this
+        # endpoint from version 16; versions 14 and 15 reject equality. The server has
+        # no numeric parser preflight API, so ask Django for its version at equality.
+        return exponent >= -_POSTGRESQL_NUMERIC_FRACTION_DIGITS and (
+            exponent < _POSTGRESQL_NUMERIC_EXPONENT_LIMIT
+            or (
+                exponent == _POSTGRESQL_NUMERIC_EXPONENT_LIMIT
+                and connection.get_database_version()[0]
+                >= _POSTGRESQL_NUMERIC_ENDPOINT_ACCEPTED_FROM
+            )
         )
     return (
         max(number.adjusted() + 1, 0) <= _POSTGRESQL_NUMERIC_INTEGER_DIGITS
@@ -1020,28 +1028,11 @@ def unstorable_temporal(column: object, value: object, using: Callable[[], str])
     column, and a value holding nothing the column converts, answer ``False`` without
     calling ``using`` or touching ``django.db.connections``.
     """
-    return _refused_temporal(column, value, using, stored=True)
+    return _refused_temporal(column, value, using)
 
 
-def _refused_temporal(
-    column: object,
-    value: object,
-    using: Callable[[], str],
-    *,
-    stored: bool,
-) -> bool:
-    """Return whether ``using()`` refuses ``value`` for ``column`` at a save, or else at a query's bind.
-
-    ``stored`` asks the save (``unstorable_temporal``). Otherwise a query binding ``value``
-    against ``column`` is asked (``unbindable_query_value``): Django prepares it as the save
-    does, but a ``ValueError`` its preparation raises surfaces while the query compiles, where
-    a caller reading a failed query as no match recovers from it; an integer past the
-    backend's range fails the query only where the driver refuses it at the bind (sqlite3
-    raises ``OverflowError`` past 64 bits; MySQL's driver interpolates it as a literal the
-    server compares as a decimal, and PostgreSQL's and Oracle's bind it as a number, so the
-    query runs); a list the driver refuses to dump as a whole is refused before anything
-    reaches the server; and nothing is read back.
-    """
+def _refused_temporal(column: object, value: object, using: Callable[[], str]) -> bool:
+    """Return whether ``using()`` refuses temporal ``value`` for ``column`` at a save."""
     column, depth = array_leaf_field(column)
     values = _leaf_elements(value, depth)
     kinds = _converted_kinds(column)
@@ -1068,30 +1059,21 @@ def _refused_temporal(
             answer = object_result(column.get_db_prep_save, bound, connection)
             prepared.append(answer)
             asked.append(answer)
-    except OverflowError:
+    except (OverflowError, ValueError):
         return True
-    except ValueError:
-        return stored
     in_array = depth > 0
-    # A query binding an integer past the range raises only on SQLite's driver.
-    integers_refused = stored or connection.vendor == "sqlite"
     if (
         any(
             isinstance(answer, int)
             and not isinstance(answer, bool)
-            and integers_refused
             and not binds_integer(connection, column, answer)
             for answer in asked
         )
         or refuses_utc_offset(connection, asked, bound_as_text=in_array)
-        or (stored and in_array and _psycopg_refuses_list(connection, prepared, stored_type))
+        or (in_array and _psycopg_refuses_list(connection, prepared, stored_type))
     ):
         return True
-    if (
-        not stored
-        or not isinstance(column, models.DateTimeField)
-        or not connection.features.supports_timezones
-    ):
+    if not isinstance(column, models.DateTimeField) or not connection.features.supports_timezones:
         return False
     zone = zoneinfo.ZoneInfo(connection.timezone_name)
     return any(
@@ -1122,24 +1104,11 @@ def unstorable_decimal(column: object, value: object, using: Callable[[], str]) 
     holding no decimal the validators accept, answer ``False`` without calling ``using`` or
     touching ``django.db.connections``.
     """
-    return _refused_decimal(column, value, using, stored=True)
+    return _refused_decimal(column, value, using)
 
 
-def _refused_decimal(
-    column: object,
-    value: object,
-    using: Callable[[], str],
-    *,
-    stored: bool,
-) -> bool:
-    """Return whether ``using()`` refuses decimal ``value`` for ``column`` at a save, or else at a bind.
-
-    ``stored`` asks the save (``unstorable_decimal``): the server's ``numeric`` format and,
-    on SQLite, the read-back (``_refused_read_back``). Otherwise a query binding ``value``
-    is asked (``unbindable_query_value``): only the server's refusal, since SQLite binds
-    every decimal as its text, which its ``NUMERIC`` column compares as a double, and a
-    query reads nothing back.
-    """
+def _refused_decimal(column: object, value: object, using: Callable[[], str]) -> bool:
+    """Return whether ``using()`` refuses decimal ``value`` for ``column`` at a save."""
     column, depth = array_leaf_field(column)
     if not isinstance(column, models.DecimalField):
         return False
@@ -1152,7 +1121,7 @@ def _refused_decimal(
         return False
     connection = connections[using()]
     return refuses_numeric_format(connection, decimals) or (
-        stored and _refused_read_back(connection, column, decimals)
+        _refused_read_back(connection, column, decimals)
     )
 
 
@@ -1179,8 +1148,10 @@ def _refused_read_back(
     the same conversion: it keeps a double past 2**51 that the column stores as an
     integer), and the stored value is read back as the re-fetch reads it: under the
     alias's own ``detect_types`` (``get_connection_params``), so a converter a project
-    registers for the column's declared type applies, then through the backend's own
-    converter chain. No statement reaches the write alias. A column with no
+    registers for the column's declared type or selected column name applies, then through
+    the backend's own converter chain. The scratch column retains the real ``db_column``
+    name so SQLite's ``PARSE_COLNAMES`` dispatch sees the same bracketed type label as the
+    ORM re-fetch. No statement reaches the write alias. A column with no
     ``max_digits`` reads an infinity back as ``Infinity`` and refuses nothing. Every other
     backend stores the decimal's digits and is not asked.
     """
@@ -1190,16 +1161,17 @@ def _refused_read_back(
     expression = column.cached_col
     converters: list[Callable[..., object]] = connection.ops.get_db_converters(expression)
     prepared = [object_result(column.get_db_prep_save, number, connection) for number in decimals]
-    # The alias's own ``detect_types`` applies any converter registered for the column's
-    # declared type, as the re-fetch's cursor does.
+    # The alias's own ``detect_types`` applies converters registered for the declared
+    # type or the real selection name, as the re-fetch's cursor does.
     params = require(object_result(connection.get_connection_params), is_dict)
     connect = require(read_attr(read_attr(connection, "Database"), "connect"), callable)
+    quoted_column = connection.ops.quote_name(require_instance(column.column, str))
     scratch = object_result(connect, ":memory:", detect_types=params["detect_types"])
     try:
         _ = call_method(
             scratch,
             "execute",
-            f"CREATE TABLE stored (value {column.db_type(connection)})",
+            f"CREATE TABLE stored ({quoted_column} {column.db_type(connection)})",
         )
         _ = call_method(
             scratch,
@@ -1207,8 +1179,10 @@ def _refused_read_back(
             "INSERT INTO stored VALUES (?)",
             [(value,) for value in prepared],
         )
+        # Django quotes the trusted model column name; decimal values remain bound parameters.
+        selection = f"SELECT {quoted_column} FROM stored"  # noqa: S608
         rows = list_of(
-            call_method(call_method(scratch, "execute", "SELECT value FROM stored"), "fetchall"),
+            call_method(call_method(scratch, "execute", selection), "fetchall"),
         )
     finally:
         _ = call_method(scratch, "close")
@@ -1258,37 +1232,6 @@ def unstorable_value(column: object, value: object, using: Callable[[], str]) ->
     other column answers ``False`` without calling ``using``.
     """
     return unstorable_temporal(column, value, using) or unstorable_decimal(column, value, using)
-
-
-def unbindable_query_value(column: object, value: object, using: Callable[[], str]) -> bool:
-    """Return whether a query binding ``value`` against ``column`` on ``using()`` cannot recover.
-
-    The read-side twin of ``unstorable_value`` for a value a lookup binds rather than a save
-    stores, as DRF's ``UniqueValidator`` / ``UniqueTogetherValidator`` bind each checked value
-    in a query whose ``TypeError`` / ``ValueError`` / ``DataError`` they read as no duplicate
-    (``rest_framework.validators.qs_exists``). Refused is a bind no such reading survives: an
-    ``OverflowError`` Django's preparation raises (on SQLite, MySQL and Oracle an aware
-    datetime whose projection onto the connection's time zone leaves years 1..9999), an
-    integer SQLite's driver refuses at the bind (``binds_integer``: a duration past 64 bits
-    of microseconds), and on PostgreSQL a value the server refuses
-    (``refuses_utc_offset``, ``refuses_numeric_format``), whose ``DataError`` leaves the
-    transaction aborted for every later statement. A ``ValueError`` Django's preparation
-    raises (an aware time, an aware datetime under ``USE_TZ = False``), an integer past the
-    range on a backend whose driver binds it without refusing it (MySQL's interpolates a
-    literal its server compares as a decimal), a list psycopg 3 refuses to dump before
-    anything reaches the server, a datetime PostgreSQL stores but cannot load back, and a
-    decimal SQLite stores but a bounded column cannot read back bind as the reading expects
-    (``_refused_temporal``, ``_refused_decimal``). The absorbed tuple is the one fact read
-    from DRF, which offers no seam to ask what a bind survives:
-    ``qs_exists`` catches exactly those three in every release from the supported floor,
-    3.17, to 3.18.
-    """
-    return _refused_temporal(column, value, using, stored=False) or _refused_decimal(
-        column,
-        value,
-        using,
-        stored=False,
-    )
 
 
 def _converted_kinds(column: object) -> tuple[tuple[type[object], ...], type[object]] | None:

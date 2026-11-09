@@ -3166,7 +3166,7 @@ behavior reachable through `/graphql/`, package tests own internals.
     unique columns of `UniqueScalarSpecimen`, an `amount` SQLite would store past its
     digits included
     (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_value_a_uniqueness_check_would_bind_is_the_field_error`,
-    `::test_form_decimal_postgresql_cannot_bind_under_a_conditional_constraint`); and
+    `::test_form_decimal_postgresql_numeric_endpoint_under_a_conditional_constraint`); and
     a form `clean()`'s own `OverflowError`, any other exception and a plain form's
     propagating (`tests/forms/test_resolvers.py::test_an_exception_naming_no_unstorable_column_propagates_from_is_valid`,
     `::test_an_overflow_inside_a_plain_form_s_is_valid_propagates`);

@@ -8188,7 +8188,7 @@ _PAST_NUMERIC = [
     pytest.param("amount", "1E+131072", id="131073-integer-digits"),
     pytest.param("amount", "0E-16384", id="zero-16384-fraction-digits"),
     pytest.param("spare", "1e1000000", id="nullable-huge-exponent"),
-    pytest.param("priced", "0E+1073741823", id="bounded-zero-at-exponent-limit"),
+    pytest.param("priced", "0E+1073741824", id="bounded-zero-past-exponent-limit"),
 ]
 
 _AMOUNT_FORMS = [
@@ -8681,7 +8681,7 @@ def _unstorable_payload(field: str) -> dict[str, object]:
 @pytest.mark.parametrize(
     ("wire", "stored"),
     [
-        pytest.param("0E+1073741823", None, id="zero-at-exponent-limit"),
+        pytest.param("0E+1073741824", None, id="zero-past-exponent-limit"),
         pytest.param("12.5", decimal.Decimal("12.5"), id="in-range"),
     ],
 )
