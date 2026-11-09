@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 450 done, 117 to do. The CHANGELOG entries filed here moved to
+Progress: 451 done, 118 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2029,6 +2029,26 @@ Progress: 450 done, 117 to do. The CHANGELOG entries filed here moved to
   `::test_a_csv_declaration_some_value_of_its_column_answers_serves_it` and `tests/filters/test_inputs.py`'s
   `_NO_VALUE_CASES`, coerce, consumer-clean, deferred-choices, model-choice and propagation rows. Docs: spec-027
   Decision 4, README, GLOSSARY `FilterSet`. Filed 822, 823, 824. CHANGELOGTODO 825
+- [x] 738. (robustness) fixed: a filter's deferred `choices` are never evaluated at schema build, whatever its form
+  field class. Django's own choice fields (`TypedChoiceFilter`, `TypedMultipleChoiceFilter`, their CSV / range wrappers,
+  a `field_class` naming `forms.ChoiceField` and kin) normalize `choices` at construction, forcing a `SimpleLazyObject`
+  and running a `QuerySet` up to five times per leaf, so a project whose choices read a table could not run `check` /
+  `migrate` on a fresh database. Every form field the build reads is now built on `filters/base.py::copied_filter`'s
+  copy, which hands such choices over in `::_UnreadChoices` (Django's `CallableChoiceIterator`, answering `len()` by
+  iterating and true unread); `copied_form_field` and `filters/inputs.py::_answers_sample` build through it, and the
+  request path keeps the declared choices. `::defers_choices` moved to `filters/base.py`, covers `BaseChoiceIterator`
+  instances (a callable-choices column's `Field.choices`) and reads classes through `utils/truth.py`. Item 735's
+  regressions go too: Typed + `SimpleLazyObject` evaluated twice at build, and a bare `TypeError` for a CSV
+  `ChoiceFilter` / `MultipleChoiceFilter` over a column without `choices` whose `choices` are a `CallableChoiceIterator`
+  or an iterator (`_form_choice_samples` flattens an iterator). A consumer `field_class` or `field` override reading
+  its own choices, `len()` included, evaluates them where it is built at the declared value's count. Grid: 77 of 419
+  cells evaluating at build down to those 12 consumer cells; 0 request counts moved; fresh-database `check` / `migrate`
+  10 of 10. Pinned by
+  `examples/fakeshop/test_query/test_filter_declarations_api.py::test_deferred_choices_are_evaluated_per_request_never_at_schema_build`
+  (six classes by four shapes), `::test_queryset_choices_are_run_per_request_never_at_schema_build`,
+  `::test_consumer_code_counting_its_choices_at_build_builds_and_serves` and `tests/filters/test_inputs.py`'s deferred,
+  iterator, expanded-child, override, `defers_choices` and `copied_filter` rows. Docs: spec-027 Decision 4. Filed 826,
+  827. CHANGELOGTODO 828
 
 ## Outside review of the fixes
 
@@ -2069,12 +2089,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 738. (robustness) `TypedChoiceFilter` / `TypedMultipleChoiceFilter(choices=SimpleLazyObject(fn))` is evaluated
-  at schema build: `filters/inputs.py::_refuse_widget_reading_other_keys` builds the unbound form field
-  (`_declared_form_field`), whose `TypedChoiceField.__init__` runs `normalize_choices` and forces the lazy object, so
-  choices reading the database query it while the schema is built ("Database access not allowed" before `migrate`); a
-  `lazy()` promise and the same object on `ChoiceFilter` / `MultipleChoiceFilter` are not evaluated. Found verifying
-  538
 - [ ] 739. spec-027 Decision 3's `FilterSet.get_fields` paragraph and `filters/sets.py::_lookups_for_field` say a
   column made filterable through `Meta.filter_overrides` ("a `JSONField`, a `FileField`, an `ArrayField`") keeps the
   whole lookup set "since its filter class owns the lookups it accepts", but `Meta.filter_overrides={ArrayField:
@@ -2296,6 +2310,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   spells (`choices=[("all", ...), ("1.5", ...)]` on a `DecimalField`) answers a masked `decimal.InvalidOperation` when
   a request sends that key: Django's `TypedChoiceField._coerce` turns only `ValueError` / `TypeError` /
   `ValidationError` into its `invalid_choice`. The schema builds (the key `1.5` answers). Found verifying 735
+- [ ] 826. (robustness) A CSV `MultipleChoiceFilter` (`class X(BaseInFilter, MultipleChoiceFilter)`) with deferred
+  `choices` (a callable, a `lazy()` promise, a `SimpleLazyObject`, a `QuerySet` or a `CallableChoiceIterator`) on a text
+  column builds and answers `FILTER_INVALID` `invalid_list` for every value: its refusal does not depend on the choices,
+  but the no-value ask (`filters/inputs.py::_refuse_form_serving_no_value`) skips a choice form's keys when they are
+  deferred, and a text column has no scalar samples. Found fixing 738
+- [ ] 827. (robustness) A declared filter's `field` override that reads its deferred `choices` as the declared type
+  (`self.extra["choices"].filter(...)` on a `QuerySet`) raises `AttributeError` on the schema build's copy, whose
+  choices are `filters/base.py::_UnreadChoices`; `filters/inputs.py::_declared_form_field` and
+  `filters/sets.py::_widget_keys` read that `AttributeError` as "builds no field", so the build's widget and no-value
+  checks are skipped for the leaf without a word. The schema and every request answer as without the package. Found
+  verifying 738
 
 ## To do: holes found re-checking the fixes
 

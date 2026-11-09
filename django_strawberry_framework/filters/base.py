@@ -55,7 +55,8 @@ from django.forms import (
     TextInput,
     Widget,
 )
-from django.utils.functional import Promise
+from django.utils.choices import BaseChoiceIterator, CallableChoiceIterator, normalize_choices
+from django.utils.functional import LazyObject, Promise
 from django_filters import (
     CharFilter,
     ChoiceFilter,
@@ -106,6 +107,7 @@ from django_strawberry_framework.types.relay import (
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._array_field import array_leaf_field, is_array_in_lookup
 from django_strawberry_framework.utils._narrowing import (
+    dict_of,
     is_concrete_field,
     is_list,
     is_list_or_tuple,
@@ -1083,15 +1085,85 @@ def comparison_form_field(
 def copied_form_field(filter_instance: Filter) -> Field:
     """Return the form field the filter's own class builds, read on a copy of the filter.
 
-    ``Filter.field`` caches the field in the filter's ``_field`` (and a subclass may
-    write more: a ``queryset`` into ``extra``, a field half built before it raises); a
-    class-level declaration is shared by every request and deep-copied into each one, so
-    a read of it must not write to it. The read runs on a deep copy, the copy
-    django-filter itself makes per request, so the filter class's own ``field``,
-    a consumer subclass's override included, builds it and the declaration keeps
-    nothing.
+    ``Filter.field`` caches the field in the filter's ``_field`` (and a subclass may write
+    more: a ``queryset`` into ``extra``, a field half built before it raises); a class-level
+    declaration is shared by every request and deep-copied into each one, so a read of it
+    must not write to it. The read runs on ``copied_filter``'s copy, so the filter class's
+    own ``field``, a consumer subclass's override included, builds it, the declaration keeps
+    nothing and no deferred ``choices`` are evaluated.
     """
-    return copy.deepcopy(filter_instance).field
+    return copied_filter(filter_instance).field
+
+
+def defers_choices(filter_instance: Filter) -> bool:
+    """Whether the filter's ``choices`` are evaluated only by the form each request builds.
+
+    Django's ``normalize_choices`` leaves a value it reads as lazy to whoever iterates it: a
+    ``BaseChoiceIterator`` (the ``CallableChoiceIterator`` it makes of callable choices,
+    django-filter's ``ChoiceIterator``), a ``lazy()`` promise, and a callable, which it wraps
+    in a ``CallableChoiceIterator``. A ``SimpleLazyObject`` and a ``QuerySet`` are left
+    unread by django-filter's own choice fields and by the build's copy
+    (``copied_filter``). Any of them may read the database, so the build never evaluates
+    them; a ``Choices`` class is no such callable (Django reads its ``.choices``). Each
+    class is read off the value's real class (``utils/truth.py::is_one_of``), which forces
+    no ``SimpleLazyObject``.
+    """
+    choices = dict_of(filter_instance.extra).get("choices")
+    return truth.is_one_of(
+        choices,
+        (
+            BaseChoiceIterator,
+            Promise,
+            LazyObject,
+            models.QuerySet,
+        ),
+    ) or (callable(choices) and isinstance(normalize_choices(choices), CallableChoiceIterator))
+
+
+class _UnreadChoices(CallableChoiceIterator):
+    """Django's ``CallableChoiceIterator`` that also answers ``len()``, for the build's copy.
+
+    ``copied_filter`` hands a ``SimpleLazyObject`` or ``QuerySet`` ``choices`` over in it, so
+    building a Django choice form field evaluates nothing. Django's own wrapper has no
+    ``__len__``, but the value it stands in for has one, and consumer code reading
+    ``len(self.choices)`` in a ``field_class.__init__`` (or ``len(self.extra["choices"])`` in
+    a ``field`` override) built against the declared value: ``__len__`` counts what iterating
+    answers, evaluating the choices as the declared value would (a ``SimpleLazyObject`` and a
+    ``QuerySet`` cache what they evaluate, so the count of evaluations is the declared
+    value's). It counts by iterating, never ``len(list(self))``, which asks ``__len__`` for a
+    length hint and recurses. ``__bool__`` keeps the wrapper's own truthiness (an object
+    without ``__len__`` is true), so a truth test still evaluates nothing.
+    """
+
+    def __len__(self) -> int:
+        return sum(1 for _ in iter(self))
+
+    def __bool__(self) -> bool:
+        return True
+
+
+def copied_filter(filter_instance: Filter) -> Filter:
+    """Return the schema build's copy of the filter: a deep copy, as django-filter makes per request.
+
+    Django's own choice form fields (``ChoiceField``, ``TypedChoiceField``,
+    ``MultipleChoiceField``, ``TypedMultipleChoiceField``, a consumer ``field_class`` on
+    them) normalize ``choices`` when they are built, which forces a ``SimpleLazyObject`` and
+    runs a ``QuerySet``; django-filter's own choice fields leave them to whoever iterates
+    them. The build reads the filter's form field, never its deferred choices
+    (``defers_choices``), so on the copy such ``choices`` are handed over in the lazy wrapper
+    ``normalize_choices`` makes of callable choices and leaves unread (``_UnreadChoices``, a
+    ``CallableChoiceIterator`` answering ``len()``): building the field evaluates nothing,
+    and iterating its choices still answers the declared ones. A consumer ``field_class``
+    whose ``__init__`` reads its own ``choices`` (``len()`` included), or a ``field``
+    override reading ``extra["choices"]``, evaluates them where it is built, as often as it
+    would on the declared value. Each request's copy is django-filter's and keeps the
+    ``choices`` as declared.
+    """
+    probe = copy.deepcopy(filter_instance)
+    choices = dict_of(probe.extra).get("choices")
+    if truth.is_one_of(choices, (LazyObject, models.QuerySet)):
+        probe.extra["choices"] = object_result(_UnreadChoices, lambda: choices)
+    return probe
 
 
 def _refuses_deep_copy(value: object) -> bool:

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 198 to do.
+Progress: 0 done, 199 to do.
 
 ## From dry-0_0_15_3
 
@@ -902,6 +902,12 @@ Progress: 0 done, 198 to do.
   with its own `validate` or `valid_value` is judged as before. Callable, lazy and `QuerySet` `choices`, and
   model-choice forms, are never read when the schema builds, so building runs no query (a choice filter over a choice
   column with `QuerySet` choices no longer queries at build either)
+- [ ] 828. CHANGELOG entry for item 738: building the schema no longer evaluates a filter's lazy `choices` (a
+  `SimpleLazyObject`, a `QuerySet`, Django's `CallableChoiceIterator`) under a `TypedChoiceFilter`, a
+  `TypedMultipleChoiceFilter`, their CSV `in` / `range` forms or a `field_class` naming Django's own choice field, so a
+  project whose choices read a table can run `check` and `migrate` on a fresh database again, and each request still
+  evaluates them once; a CSV `ChoiceFilter` or `MultipleChoiceFilter` over a column without `choices` whose `choices`
+  are a `CallableChoiceIterator` or an iterator no longer raises `TypeError` at schema build
 
 ## From dry-upstream-0_0_15
 

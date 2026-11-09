@@ -17,7 +17,6 @@ namespace-clear pair (``materialize_input_class`` /
 
 from __future__ import annotations
 
-import copy
 import datetime
 import decimal
 import enum
@@ -36,8 +35,7 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.lookups import FieldGetDbPrepValueMixin
-from django.utils.choices import CallableChoiceIterator, flatten_choices, normalize_choices
-from django.utils.functional import LazyObject, Promise
+from django.utils.choices import flatten_choices
 from django_filters import (
     ChoiceFilter,
     Filter,
@@ -130,7 +128,9 @@ from .base import (
     _filterset_walked_lookup,
     _related_column_path,
     comparison_form_field,
+    copied_filter,
     copied_form_field,
+    defers_choices,
     model_choice_identity_column,
 )
 
@@ -1024,12 +1024,12 @@ def _answers_sample(
 ) -> bool:
     """Whether the filter's own form and lookup turn ``form_value`` into a predicate on ``model``.
 
-    Asked of upstream, as a request asks it: the form field the filter's class builds (on a
-    deep copy of the filter, as ``copied_form_field`` reads it) cleans the value with its
-    and its axes' validators and ``validate`` removed, and the filter's own ``filter``
-    applies the cleaned value to a fresh queryset of ``model``, holding no predicate,
-    which builds the lookup and prepares the value through the column
-    (``Lookup.get_prep_lookup``) without running SQL.
+    Asked of upstream, as a request asks it: the form field the filter's class builds (on
+    ``filters/base.py::copied_filter``'s copy of the filter, which evaluates no deferred
+    ``choices``) cleans the value with its and its axes' validators and ``validate`` removed,
+    and the filter's own ``filter`` applies the cleaned value to a fresh queryset of
+    ``model``, holding no predicate, which builds the lookup and prepares the value through
+    the column (``Lookup.get_prep_lookup``) without running SQL.
     A form refusing the value (``ValidationError``; the ``AttributeError`` a temporal form
     raises stripping a kind it reads only as text; the ``TypeError`` a ``JSONField`` form
     raises decoding one; the ``decimal.InvalidOperation`` a ``coerce=Decimal`` raises for a
@@ -1046,7 +1046,7 @@ def _answers_sample(
     """
     from .sets import _PREPARATION_REFUSALS  # noqa: PLC0415 - import cycle
 
-    probe = copy.deepcopy(filter_instance)
+    probe = copied_filter(filter_instance)
     form_field = probe.field
     axes = form_field.fields if isinstance(form_field, forms.MultiValueField) else ()
     for field in (form_field, *axes):
@@ -1445,8 +1445,9 @@ def _refuse_choices_off_the_column(
     ``ChoiceField`` (a ``CharFilter`` over a choices column), a model-choice field, a field
     built only per request (``AllValuesFilter``, ``_declared_form_field``) and ``choices``
     evaluated per form build are not asked: this check never evaluates a callable, lazy
-    (``lazy()`` promise, ``SimpleLazyObject``) or ``QuerySet`` ``choices``, which may read the
-    database (``_defers_choices``); a ``Choices`` class is asked.
+    (``lazy()`` promise, ``SimpleLazyObject``), choice-iterator or ``QuerySet`` ``choices``,
+    which may read the database (``filters/base.py::defers_choices``); a ``Choices`` class is
+    asked.
     """
     form_field = _eager_choice_form_field(filter_instance, _declared_form_field(filter_instance))
     if form_field is None:
@@ -1467,22 +1468,6 @@ def _refuse_choices_off_the_column(
     )
 
 
-def _defers_choices(filter_instance: Filter) -> bool:
-    """Whether the filter's ``choices`` are evaluated only by the form each request builds.
-
-    A callable (one Django's ``normalize_choices`` wraps in a ``CallableChoiceIterator``), a
-    lazy value (``lazy()`` promise, ``SimpleLazyObject``) and a ``QuerySet`` may read the
-    database, so the build never evaluates them; a ``Choices`` class is no such callable
-    (Django reads its ``.choices``).
-    """
-    choices = dict_of(filter_instance.extra).get("choices")
-    return (
-        truth.is_one_of(choices, (Promise, LazyObject))
-        or is_queryset(choices)
-        or (callable(choices) and isinstance(normalize_choices(choices), CallableChoiceIterator))
-    )
-
-
 def _eager_choice_form_field(
     filter_instance: Filter,
     form_field: object,
@@ -1491,11 +1476,11 @@ def _eager_choice_form_field(
 
     ``None`` when it is no ``ChoiceField`` (the multiple-choice and typed kin are), when it
     is a model-choice field (its choices are a queryset), and when the filter's ``choices``
-    are deferred (``_defers_choices``): the form field is built lazily, so only reading its
+    are deferred (``defers_choices``): the form field is built lazily, so only reading its
     ``choices`` would evaluate them.
     """
     if (
-        _defers_choices(filter_instance)
+        defers_choices(filter_instance)
         or not isinstance(form_field, forms.ChoiceField)
         or isinstance(form_field, forms.ModelChoiceField)
     ):
@@ -1529,14 +1514,17 @@ def _form_choice_samples(filter_instance: Filter, form_field: object) -> tuple[o
     nothing else, so its values are those keys (``flatten_choices`` opens Django's option
     groups); django-filter's empty and null choices included, since whether a key constrains
     anything is asked of the filter's own ``filter`` (``_answers_sample``: a scalar ``""`` is
-    skipped, a CSV member ``""`` compares). ``None`` where the form is no ``ChoiceField``
-    whose choices the build may read (``_eager_choice_form_field``) or one whose
-    ``validate`` / ``valid_value`` is a consumer's (``_validates_its_keys``).
+    skipped, a CSV member ``""`` compares). ``flatten_choices`` is handed an iterator over the
+    choices, as ``valid_value`` iterates them: django-filter's ``ChoiceIterator`` answers the
+    truthiness ``flatten_choices`` asks with the size of the choices it wraps, which an
+    iterator declared as ``choices`` has none of. ``None`` where the form is no
+    ``ChoiceField`` whose choices the build may read (``_eager_choice_form_field``) or one
+    whose ``validate`` / ``valid_value`` is a consumer's (``_validates_its_keys``).
     """
     choice_field = _eager_choice_form_field(filter_instance, form_field)
     if choice_field is None or not _validates_its_keys(choice_field):
         return None
-    pairs = list_of(object_result(flatten_choices, choice_field.choices))
+    pairs = list_of(object_result(flatten_choices, object_result(iter, choice_field.choices)))
     return tuple(list_of(pair)[0] for pair in pairs)
 
 

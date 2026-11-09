@@ -7,7 +7,7 @@ import logging
 import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping, Sized
 from contextlib import contextmanager
 from functools import wraps
 
@@ -15,11 +15,15 @@ import pytest
 import strawberry
 from apps.library.models import Book, Branch, Shelf, Venue
 from apps.scalars.models import ScalarSpecimen
+from django import forms
+from django.db import connection
 from django.db.models import F, Model, QuerySet, TextField
 from django.forms import TextInput
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import path
+from django.utils.choices import CallableChoiceIterator
 from django.utils.functional import SimpleLazyObject, lazy
 from django_filters import (
     BaseInFilter,
@@ -31,6 +35,7 @@ from django_filters import (
     Filter,
     MultipleChoiceFilter,
     TypedChoiceFilter,
+    TypedMultipleChoiceFilter,
 )
 from django_filters.fields import ChoiceField
 from graphql_client import JSONObject, graphql_payload
@@ -49,6 +54,7 @@ from django_strawberry_framework import (
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet, RangeFilter, RelatedFilter
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.utils._narrowing import dict_of
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import consumer_module, consumer_query
 
@@ -606,35 +612,255 @@ def _as_lazy_promise(choices: _Choices) -> object:
     return lazy(choices, list)()
 
 
+def _as_choice_iterator(choices: _Choices) -> object:
+    """Hand the declaration Django's own lazy wrapper over ``choices``."""
+    return CallableChoiceIterator(choices)
+
+
+class _TypedFieldChoiceFilter(ChoiceFilter):
+    """A consumer ``ChoiceFilter`` whose ``field_class`` is Django's own ``TypedChoiceField``."""
+
+    field_class: type[forms.TypedChoiceField] = forms.TypedChoiceField
+
+
+def _choice(choices: object) -> Filter:
+    return ChoiceFilter(field_name="condition", choices=choices)
+
+
+def _typed_choice(choices: object) -> Filter:
+    return TypedChoiceFilter(field_name="condition", choices=choices, coerce=str)
+
+
+def _multiple_choice(choices: object) -> Filter:
+    return MultipleChoiceFilter(field_name="condition", choices=choices)
+
+
+def _typed_multiple_choice(choices: object) -> Filter:
+    return TypedMultipleChoiceFilter(field_name="condition", choices=choices, coerce=str)
+
+
+def _typed_field_choice(choices: object) -> Filter:
+    return _TypedFieldChoiceFilter(field_name="condition", choices=choices)
+
+
+def _typed_choices_in(choices: object) -> Filter:
+    return _TypedChoicesInFilter(
+        field_name="condition",
+        lookup_expr="in",
+        choices=choices,
+        coerce=str,
+    )
+
+
+#: Each choice filter class, built over ``Shelf.condition`` with the ``choices`` it is handed,
+#: and the operator bag a request selecting the ``good`` shelf sends it.
+_DEFERRING_CLASSES = [
+    pytest.param(_choice, "{exact: good}", id="choice"),
+    pytest.param(_typed_choice, "{exact: good}", id="typed-choice"),
+    pytest.param(_multiple_choice, "{exact: [good]}", id="multiple-choice"),
+    pytest.param(_typed_multiple_choice, "{exact: [good]}", id="typed-multiple-choice"),
+    pytest.param(_typed_field_choice, "{exact: good}", id="django-typed-choice-field-class"),
+    pytest.param(_typed_choices_in, "{in: [good]}", id="typed-choice-csv-in"),
+]
+
+
+#: The statements a request filtering by a ``QuerySet`` declared as ``choices`` runs: the
+#: queryset itself, then the rows.
+_QUERYSET_CHOICES_REQUEST_STATEMENTS = 2
+
+
+#: The ``choices`` evaluations and statements a consumer reading ``len()`` of its deferred
+#: choices runs at schema build: one per form field the build reads.
+_LEN_BUILD_CALLS = 2
+_LEN_BUILD_STATEMENTS = 2
+
+
+def _as_counted_queryset(_choices: _Choices) -> object:
+    """Hand the declaration a ``QuerySet`` of ``Shelf.condition`` pairs keeping ``good``."""
+    return Shelf.objects.filter(condition="good").values_list("condition", "condition")
+
+
+def _picked_by(schema: DjangoSchema, operators: str) -> JSONObject:
+    return _post(
+        schema,
+        f"{{ rows(filter: {{pick: {operators}}}) {{ edges {{ node {{ code }} }} }} }}",
+    )
+
+
 @pytest.mark.parametrize(
     "wrap",
     [
         pytest.param(_as_called, id="callable"),
         pytest.param(_as_lazy_promise, id="lazy-promise"),
         pytest.param(SimpleLazyObject, id="simple-lazy-object"),
+        pytest.param(_as_choice_iterator, id="choice-iterator"),
     ],
 )
+@pytest.mark.parametrize(("declare", "operators"), _DEFERRING_CLASSES)
 @pytest.mark.django_db
 def test_deferred_choices_are_evaluated_per_request_never_at_schema_build(
+    declare: Callable[[object], Filter],
+    operators: str,
     wrap: Callable[[_Choices], object],
 ) -> None:
     """A declaration's callable or lazy ``choices`` are left to the form each request builds.
 
-    Building the schema evaluates no consumer choices, so the declaration builds whatever
-    they would return; the one request's form evaluates them once and filters by the kept
-    member.
+    Building the schema evaluates no consumer choices and runs no query, whatever form field
+    the filter's class builds: django-filter's choice fields, Django's own
+    ``TypedChoiceField`` and ``TypedMultipleChoiceField`` (which normalize ``choices`` when
+    they are built), a consumer ``field_class`` on one, and a CSV ``in`` over a typed choice
+    form. The declaration builds whatever the choices would return; the one request's form
+    evaluates them once and filters by the kept member.
     """
     _shelves()
     calls: list[None] = []
-    schema = _declared_choice_schema(
-        Shelf,
-        ChoiceFilter(field_name="condition", choices=wrap(_counted_choices(calls))),
-        ("id", "code"),
-    )
+    with CaptureQueriesContext(connection) as captured:
+        schema = _declared_choice_schema(
+            Shelf,
+            declare(wrap(_counted_choices(calls))),
+            ("id", "code"),
+        )
     assert calls == []
+    assert captured.captured_queries == []
 
-    assert _picked(schema, "good") == _GOOD_OR_LOWER
+    assert _picked_by(schema, operators) == _GOOD_OR_LOWER
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(("declare", "operators"), _DEFERRING_CLASSES)
+@pytest.mark.django_db
+def test_queryset_choices_are_run_per_request_never_at_schema_build(
+    declare: Callable[[object], Filter],
+    operators: str,
+) -> None:
+    """A ``QuerySet`` handed as ``choices`` runs no query at build and one per request.
+
+    The schema builds before the rows its queryset reads exist; the request's form runs it
+    beside the request's own rows statement, and filters by the member it returned.
+    """
+    with CaptureQueriesContext(connection) as built:
+        schema = _declared_choice_schema(
+            Shelf,
+            declare(Shelf.objects.filter(condition="good").values_list("condition", "condition")),
+            ("id", "code"),
+        )
+    assert built.captured_queries == []
+    _shelves()
+
+    with CaptureQueriesContext(connection) as served:
+        assert _picked_by(schema, operators) == _GOOD_OR_LOWER
+    assert len(served.captured_queries) == _QUERYSET_CHOICES_REQUEST_STATEMENTS
+
+
+class _CountingChoiceField(forms.TypedChoiceField):
+    """A consumer choice form whose ``__init__`` reads ``len()`` of its own ``choices``."""
+
+    choice_count: int
+
+    def __init__(
+        self,
+        *,
+        choices: Iterable[tuple[str, str]],
+        coerce: Callable[[str], object] = str,
+        required: bool,
+        label: str | None,
+    ) -> None:
+        super().__init__(choices=choices, coerce=coerce, required=required, label=label)
+        field_choices: object = self.choices
+        assert isinstance(field_choices, Sized)
+        self.choice_count = len(field_choices)
+
+
+class _CountingFieldClassFilter(TypedChoiceFilter):
+    """A ``TypedChoiceFilter`` whose ``field_class`` counts its ``choices`` when built."""
+
+    field_class: type[forms.TypedChoiceField] = _CountingChoiceField
+
+
+class _CountingFieldOverrideFilter(TypedChoiceFilter):
+    """A ``TypedChoiceFilter`` whose ``field`` override reads ``len()`` of its ``choices``."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        choices = dict_of(self.extra).get("choices")
+        assert isinstance(choices, Sized)
+        self.choice_count: int = len(choices)
+        return super().field
+
+
+def _counting_field_class(choices: object) -> Filter:
+    return _CountingFieldClassFilter(field_name="condition", choices=choices, coerce=str)
+
+
+def _counting_field_override(choices: object) -> Filter:
+    return _CountingFieldOverrideFilter(field_name="condition", choices=choices, coerce=str)
+
+
+@pytest.mark.parametrize(
+    (
+        "wrap",
+        "build_calls",
+        "build_statements",
+        "request_calls",
+        "request_statements",
+    ),
+    [
+        pytest.param(
+            SimpleLazyObject,
+            _LEN_BUILD_CALLS,
+            0,
+            1,
+            1,
+            id="simple-lazy-object",
+        ),
+        pytest.param(
+            _as_counted_queryset,
+            0,
+            _LEN_BUILD_STATEMENTS,
+            0,
+            _QUERYSET_CHOICES_REQUEST_STATEMENTS,
+            id="queryset",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param(_counting_field_class, id="field-class-init"),
+        pytest.param(_counting_field_override, id="field-override"),
+    ],
+)
+@pytest.mark.django_db
+def test_consumer_code_counting_its_choices_at_build_builds_and_serves(
+    declare: Callable[[object], Filter],
+    wrap: Callable[[_Choices], object],
+    build_calls: int,
+    build_statements: int,
+    request_calls: int,
+    request_statements: int,
+) -> None:
+    """A consumer ``field_class`` or ``field`` override reading ``len()`` of its choices builds.
+
+    Consumer code reading its own deferred ``choices`` evaluates them where it is built, the
+    schema build included, as often as it would on the declared value (a
+    ``SimpleLazyObject`` and a ``QuerySet`` cache what they evaluate); the request's form
+    evaluates them once more and filters by the kept member.
+    """
+    calls: list[None] = []
+    with CaptureQueriesContext(connection) as built:
+        schema = _declared_choice_schema(
+            Shelf,
+            declare(wrap(_counted_choices(calls))),
+            ("id", "code"),
+        )
+    assert (len(calls), len(built.captured_queries)) == (build_calls, build_statements)
+    _shelves()
+    del calls[:]
+
+    with CaptureQueriesContext(connection) as served:
+        assert _picked_by(schema, "{exact: good}") == _GOOD_OR_LOWER
+    assert (len(calls), len(served.captured_queries)) == (request_calls, request_statements)
 
 
 def _csv_class(name: str, wrapper: type[Filter], member: type[Filter]) -> type[Filter]:

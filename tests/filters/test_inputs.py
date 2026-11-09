@@ -30,7 +30,7 @@ import typing
 import uuid
 import weakref
 from collections import OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sized
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType, SimpleNamespace
@@ -52,6 +52,7 @@ from django.db.models.functions import ExtractYear
 from django.db.models.lookups import Exact, GreaterThan, GreaterThanOrEqual
 from django.http import HttpRequest
 from django.test.utils import isolate_apps, register_lookup
+from django.utils.choices import CallableChoiceIterator
 from django.utils.functional import SimpleLazyObject, lazy
 from django_filters import (
     AllValuesFilter,
@@ -110,6 +111,8 @@ from django_strawberry_framework.filters.base import (
     RelationPkMultipleFilter,
     _lookup_operand,
     _model_lookup_operand,
+    copied_filter,
+    defers_choices,
 )
 from django_strawberry_framework.filters.factories import FilterArgumentsFactory
 from django_strawberry_framework.filters.inputs import (
@@ -1139,6 +1142,24 @@ def _conditions_on_record() -> list[tuple[str, str]]:
     return [(shelf.condition, shelf.condition) for shelf in _SHELF.objects.all()]
 
 
+class _DjangoChoiceFieldFilter(ChoiceFilter):
+    """A consumer ``ChoiceFilter`` whose ``field_class`` is Django's own ``ChoiceField``."""
+
+    field_class: type[forms.ChoiceField] = forms.ChoiceField
+
+
+class _DjangoTypedChoiceFieldFilter(ChoiceFilter):
+    """A consumer ``ChoiceFilter`` whose ``field_class`` is Django's own ``TypedChoiceField``."""
+
+    field_class: type[forms.TypedChoiceField] = forms.TypedChoiceField
+
+
+class _DjangoMultipleChoiceFieldFilter(MultipleChoiceFilter):
+    """A consumer ``MultipleChoiceFilter`` whose ``field_class`` is Django's own form field."""
+
+    field_class: type[forms.MultipleChoiceField] = forms.MultipleChoiceField
+
+
 @pytest.mark.parametrize(
     ("make_filter", "is_list"),
     [
@@ -1174,6 +1195,46 @@ def _conditions_on_record() -> list[tuple[str, str]]:
             True,
             id="multiple-choice-simple-lazy-object",
         ),
+        pytest.param(
+            lambda: TypedChoiceFilter(
+                field_name="condition",
+                choices=SimpleLazyObject(_conditions_on_record),
+            ),
+            False,
+            id="typed-choice-simple-lazy-object",
+        ),
+        pytest.param(
+            lambda: TypedMultipleChoiceFilter(
+                field_name="condition",
+                choices=SimpleLazyObject(_conditions_on_record),
+            ),
+            True,
+            id="typed-multiple-choice-simple-lazy-object",
+        ),
+        pytest.param(
+            lambda: _DjangoChoiceFieldFilter(
+                field_name="condition",
+                choices=SimpleLazyObject(_conditions_on_record),
+            ),
+            False,
+            id="django-choice-field-class-simple-lazy-object",
+        ),
+        pytest.param(
+            lambda: _DjangoTypedChoiceFieldFilter(
+                field_name="condition",
+                choices=SimpleLazyObject(_conditions_on_record),
+            ),
+            False,
+            id="django-typed-choice-field-class-simple-lazy-object",
+        ),
+        pytest.param(
+            lambda: _DjangoMultipleChoiceFieldFilter(
+                field_name="condition",
+                choices=SimpleLazyObject(_conditions_on_record),
+            ),
+            True,
+            id="django-multiple-choice-field-class-simple-lazy-object",
+        ),
     ],
 )
 def test_lazy_choices_reading_the_database_are_not_evaluated_at_schema_build(
@@ -1183,7 +1244,11 @@ def test_lazy_choices_reading_the_database_are_not_evaluated_at_schema_build(
 ) -> None:
     """Lazy ``choices`` are evaluated per form build, so building the input reads no rows.
 
-    The test holds no database access, so evaluating these choices would raise.
+    The test holds no database access, so evaluating these choices would raise. Django's own
+    choice form fields (``TypedChoiceField``, ``TypedMultipleChoiceField``, a consumer
+    ``field_class`` naming Django's ``ChoiceField``, ``TypedChoiceField`` or
+    ``MultipleChoiceField``) normalize ``choices`` when they are built, so the build reads
+    their form field on a copy handing over the choices unread.
     """
     column = _SHELF._meta.get_field("condition")
     annotation = convert_filter_to_input_annotation(make_filter(), column, None, FilterSet)
@@ -5831,6 +5896,48 @@ def test_callable_member_choices_are_not_evaluated_at_schema_build(
             ),
             id="choice-column",
         ),
+        pytest.param(
+            lambda: _payload_set(
+                TypedChoiceFilter(
+                    field_name="condition",
+                    choices=Category.objects.values_list("name", "name"),
+                ),
+                model=_SHELF,
+            ),
+            id="typed-choice-column",
+        ),
+        pytest.param(
+            lambda: _payload_set(
+                TypedMultipleChoiceFilter(
+                    field_name="condition",
+                    choices=Category.objects.values_list("name", "name"),
+                ),
+                model=_SHELF,
+            ),
+            id="typed-multiple-choice-column",
+        ),
+        pytest.param(
+            lambda: _payload_set(
+                _TypedChoicesInFilter(
+                    field_name="condition",
+                    lookup_expr="in",
+                    choices=Category.objects.values_list("name", "name"),
+                ),
+                model=_SHELF,
+            ),
+            id="typed-csv-in-on-a-choice-column",
+        ),
+        pytest.param(
+            lambda: _payload_set(
+                _TypedChoicesRangeFilter(
+                    field_name="condition",
+                    lookup_expr="range",
+                    choices=Category.objects.values_list("name", "name"),
+                ),
+                model=_SHELF,
+            ),
+            id="typed-csv-range-on-a-choice-column",
+        ),
     ],
 )
 @pytest.mark.django_db
@@ -5840,12 +5947,416 @@ def test_queryset_choices_are_not_evaluated_at_schema_build(
 ) -> None:
     """A ``QuerySet`` handed as ``choices`` is left to the form each request builds: no query.
 
-    Neither the no-value ask (text and date columns) nor the choice-column check reads it,
-    so a table the queryset names need not exist when the schema builds.
+    Neither the no-value ask (text and date columns, and each sample of a choice column a
+    typed CSV ``in`` or ``range`` is asked) nor the choice-column check reads it, nor building
+    a Django ``TypedChoiceField`` or ``TypedMultipleChoiceField``, which normalizes its
+    ``choices``, so a table the queryset names need not exist when the schema builds.
     """
     payload_set = make_set()
     with django_assert_num_queries(0):
         assert _build_input_fields(payload_set)
+
+
+#: A consumer CSV filter whose every member its form reads as a list of choices.
+_MultipleChoicesInFilter: type[Filter] = type(
+    "MultipleChoicesInFilter",
+    (BaseInFilter, MultipleChoiceFilter),
+    {},
+)
+
+
+def _counted_categories(calls: list[None]) -> Callable[[], list[tuple[str, str]]]:
+    """Choices reading the categories table, recording each evaluation."""
+
+    def labels() -> list[tuple[str, str]]:
+        calls.append(None)
+        return [(category.name, category.name) for category in Category.objects.all()]
+
+    return labels
+
+
+@pytest.mark.parametrize(
+    "filter_class",
+    [
+        pytest.param(_ChoicesInFilter, id="choice"),
+        pytest.param(_MultipleChoicesInFilter, id="multiple-choice"),
+    ],
+)
+@pytest.mark.django_db
+def test_choice_iterator_member_choices_on_a_column_without_choices_build_unevaluated(
+    filter_class: type[Filter],
+    django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
+) -> None:
+    """Django's ``CallableChoiceIterator`` as a CSV member's ``choices`` stays deferred.
+
+    Django's ``normalize_choices`` leaves the iterator unread, so its keys are evaluated
+    only by the form each request builds: the leaf is asked the text column's samples,
+    builds, and the build calls nothing and runs no query.
+    """
+    calls: list[None] = []
+    payload_set = _payload_set(
+        filter_class(
+            field_name="label",
+            lookup_expr="in",
+            choices=CallableChoiceIterator(_counted_categories(calls)),
+        ),
+    )
+    with django_assert_num_queries(0):
+        assert _build_input_fields(payload_set)
+    assert calls == []
+
+
+def test_iterator_member_choices_on_a_text_column_build() -> None:
+    """An iterator declared as a CSV choice member's ``choices`` is asked its keys, as a list is.
+
+    Each copy of the filter holds its own copy of the iterator, so the keys the form reads
+    are the declared ones, and a key spelling a text value answers.
+    """
+    assert _build_input_fields(
+        _payload_set(
+            _ChoicesInFilter(
+                field_name="label",
+                lookup_expr="in",
+                choices=iter([("alpha", "Alpha")]),
+            ),
+        ),
+    )
+
+
+def test_iterator_member_choices_of_a_multiple_choice_member_are_refused_as_a_list_is() -> None:
+    """A CSV ``MultipleChoiceFilter`` reads no single value whatever iterable its ``choices`` are.
+
+    The iterator is asked as a list of pairs would be, so the leaf is refused naming its
+    member form.
+    """
+    payload_set = _payload_set(
+        _MultipleChoicesInFilter(
+            field_name="label",
+            lookup_expr="in",
+            choices=iter([("alpha", "Alpha")]),
+        ),
+    )
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(payload_set)
+    assert str(excinfo.value) == _no_value_refusal(
+        "PayloadValueSet: MultipleChoicesInFilter on 'label'",
+        "ScalarSpecimen.label",
+        "MultipleChoiceInField",
+        "in",
+    )
+
+
+@pytest.mark.parametrize(
+    "base",
+    [FilterSet, _CustomizingFilterSet],
+    ids=["plain-child", "child-init"],
+)
+def test_an_expanded_child_leafs_lazy_choices_are_not_evaluated_at_schema_build(
+    base: type[FilterSet],
+) -> None:
+    """A child leaf's lazy ``choices`` stay unread through the child set and its parent's copy.
+
+    The child set publishes the leaf, and its parent's ``RelatedFilter`` copies it (rebound
+    onto ``shelf__condition``, or projected when the child set overrides ``__init__``); each
+    copy's Django ``TypedChoiceField`` is built at schema build without evaluating the
+    ``SimpleLazyObject``, and the test holds no database access.
+    """
+    calls: list[None] = []
+
+    def conditions() -> list[tuple[str, str]]:
+        calls.append(None)
+        return _conditions_on_record()
+
+    child = _shelf_leaf_set(
+        TypedChoiceFilter(field_name="condition", choices=SimpleLazyObject(conditions)),
+        base,
+    )
+    parent = _book_shelf_set(child, base)
+    _serve_model(library_models.Shelf, child)
+    _serve_model(library_models.Book, parent)
+
+    finalize_django_types()
+    assert "shelf__leaf" in filter_lookup_table(parent).by_input_attr
+    assert calls == []
+
+
+@pytest.mark.django_db
+def test_a_filter_overrides_typed_choice_on_a_column_without_choices_is_refused_unevaluated(
+    django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
+) -> None:
+    """A ``Meta.filter_overrides`` typed choice leaf on a text column is refused, its queryset unrun.
+
+    The column declares no ``choices``, so no choice enum types the leaf; the refusal reads
+    its form field on a copy that hands the ``QuerySet`` over unread, so no query runs.
+    """
+    payload_set = _overridden_text_set(
+        lambda _field: {"choices": Category.objects.values_list("name", "name")},
+    )
+    with django_assert_num_queries(0), pytest.raises(ConfigurationError) as excinfo:
+        _ = _build_input_fields(payload_set)
+    assert str(excinfo.value) == _OVERRIDDEN_TEXT_REFUSAL
+
+
+def _overridden_text_set(
+    extra: Callable[[models.Field[object, object]], dict[str, object]],
+) -> type[FilterSet]:
+    """A ``ScalarSpecimen`` set whose generated ``label`` leaf is a ``TypedChoiceFilter``."""
+    meta = {
+        "model": scalar_models.ScalarSpecimen,
+        "fields": {"label": ["exact"]},
+        "filter_overrides": {
+            models.TextField: {"filter_class": TypedChoiceFilter, "extra": extra},
+        },
+    }
+    return type("OverriddenTextSet", (FilterSet,), {"Meta": type("Meta", (), meta)})
+
+
+#: The refusal of the overridden ``label`` leaf: its column declares no ``choices``.
+_OVERRIDDEN_TEXT_REFUSAL = (
+    "OverriddenTextSet: TypedChoiceFilter on 'label' reads ScalarSpecimen.label, which declares "
+    "no `choices`, so no choice enum types its input (the filter's own `choices` never feed the "
+    "enum); declare `choices` on the column it filters (a `choices=` list of pairs, or a "
+    "`TextChoices` / `IntegerChoices` class's `.choices`), or filter the column through a "
+    "non-choice filter (`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its lookups in "
+    "Meta.fields, or `CharFilter(method=...)` for a method filter)."
+)
+
+
+def _counted_lazy(calls: list[None]) -> object:
+    """A ``SimpleLazyObject`` recording each evaluation."""
+    return SimpleLazyObject(_counted_callable(calls))
+
+
+def _counted_callable(calls: list[None]) -> Callable[[], list[tuple[str, str]]]:
+    """A callable recording each evaluation."""
+
+    def choices() -> list[tuple[str, str]]:
+        calls.append(None)
+        return [("good", "Good")]
+
+    return choices
+
+
+_ChoicesMaker: TypeAlias = Callable[[list[None]], object]
+
+#: Declared ``choices`` by kind, each made over the evaluation record it is handed, and whether
+#: only a request's form evaluates them.
+_DEFERRED_KIND_CASES: dict[str, tuple[_ChoicesMaker, bool]] = {
+    "list": (lambda _calls: [("good", "Good")], False),
+    "iterator": (lambda _calls: iter([("good", "Good")]), False),
+    "choices-class": (lambda _calls: _SHELF.Condition, False),
+    "mapping": (lambda _calls: {"good": "Good"}, False),
+    "callable": (_counted_callable, True),
+    "lazy-promise": (lambda calls: lazy(_counted_callable(calls), list)(), True),
+    "simple-lazy-object": (_counted_lazy, True),
+    "choice-iterator": (lambda calls: CallableChoiceIterator(_counted_callable(calls)), True),
+    "queryset": (lambda _calls: Category.objects.values_list("name", "name"), True),
+}
+
+
+@pytest.mark.parametrize("kind", list(_DEFERRED_KIND_CASES))
+def test_defers_choices_reads_each_lazy_kind_without_evaluating_it(kind: str) -> None:
+    """Which declared ``choices`` only a request's form evaluates, asked without evaluating any.
+
+    A callable, a ``lazy()`` promise, a ``SimpleLazyObject``, Django's
+    ``CallableChoiceIterator`` and a ``QuerySet`` are deferred; a list, an iterator, a mapping
+    and a ``Choices`` class are read at build. The test holds no database access, and no
+    deferred value is called.
+    """
+    make_choices, expected = _DEFERRED_KIND_CASES[kind]
+    calls: list[None] = []
+    declared = ChoiceFilter(field_name="condition", choices=make_choices(calls))
+    assert defers_choices(declared) is expected
+    assert calls == []
+
+
+def test_defers_choices_is_false_for_a_filter_declaring_no_choices() -> None:
+    """A choice filter declaring no ``choices`` defers nothing."""
+    assert defers_choices(ChoiceFilter(field_name="condition")) is False
+
+
+@pytest.mark.parametrize("kind", ["simple-lazy-object", "queryset"])
+def test_copied_filter_builds_a_django_choice_field_leaving_the_declaration_unread(
+    kind: str,
+) -> None:
+    """The build's copy builds a Django ``TypedChoiceField`` evaluating nothing, the declaration kept.
+
+    The copy hands its form field the choices unread; the declaration keeps the very object
+    it declared, unevaluated. The test holds no database access.
+    """
+    make_choices, _deferred = _DEFERRED_KIND_CASES[kind]
+    calls: list[None] = []
+    declared_choices = make_choices(calls)
+    declared = TypedChoiceFilter(field_name="condition", choices=declared_choices)
+
+    field = copied_filter(declared).field
+
+    assert isinstance(field, forms.TypedChoiceField)
+    assert declared.extra["choices"] is declared_choices
+    assert calls == []
+
+
+def test_copied_filter_choices_answer_the_declared_ones_when_read() -> None:
+    """A copy's form field answers its declared choices, evaluating that copy's lazy ones only.
+
+    Django's ``valid_value`` reads the choices the copy handed over unread, so it accepts a
+    declared key. Each copy holds its own copy of the ``SimpleLazyObject``, so a second copy
+    evaluates afresh: the declaration keeps nothing a copy evaluated.
+    """
+    calls: list[None] = []
+    declared = TypedChoiceFilter(field_name="condition", choices=_counted_lazy(calls))
+
+    for evaluated in (1, 2):
+        field = copied_filter(declared).field
+        assert isinstance(field, forms.TypedChoiceField)
+        assert field.valid_value("good")
+        assert len(calls) == evaluated
+
+
+class _CountingChoiceField(forms.TypedChoiceField):
+    """A consumer choice form whose ``__init__`` reads ``len()`` of its own ``choices``."""
+
+    choice_count: int
+
+    def __init__(
+        self,
+        *,
+        choices: Iterable[tuple[str, str]],
+        coerce: Callable[[str], object] = str,
+        required: bool,
+        label: str | None,
+    ) -> None:
+        super().__init__(choices=choices, coerce=coerce, required=required, label=label)
+        field_choices: object = self.choices
+        assert isinstance(field_choices, Sized)
+        self.choice_count = len(field_choices)
+
+
+class _CountingFieldClassFilter(TypedChoiceFilter):
+    """A ``TypedChoiceFilter`` whose ``field_class`` counts its ``choices`` when built."""
+
+    field_class: type[forms.TypedChoiceField] = _CountingChoiceField
+
+
+class _CountingFieldOverrideFilter(TypedChoiceFilter):
+    """A ``TypedChoiceFilter`` whose ``field`` override reads ``len()`` of its ``choices``."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        choices = dict_of(self.extra).get("choices")
+        assert isinstance(choices, Sized)
+        self.choice_count: int = len(choices)
+        return super().field
+
+
+@pytest.mark.parametrize(
+    "filter_class",
+    [
+        pytest.param(_CountingFieldClassFilter, id="field-class-init"),
+        pytest.param(_CountingFieldOverrideFilter, id="field-override"),
+    ],
+)
+def test_consumer_code_counting_lazy_choices_builds_evaluating_them_as_declared(
+    filter_class: type[Filter],
+) -> None:
+    """Consumer code reading ``len()`` of a ``SimpleLazyObject`` ``choices`` builds the input.
+
+    The build's copy hands the choices over in a wrapper answering ``len()`` by iterating
+    them, so the consumer evaluates them where it is built, once per form field the build
+    reads, as it would on the declared value.
+    """
+    calls: list[None] = []
+    payload_set = _payload_set(
+        filter_class(field_name="condition", choices=_counted_lazy(calls)),
+        model=_SHELF,
+    )
+    assert _build_input_fields(payload_set)
+    assert len(calls) == _COUNTING_BUILD_EVALUATIONS
+
+
+@pytest.mark.parametrize(
+    "filter_class",
+    [
+        pytest.param(_CountingFieldClassFilter, id="field-class-init"),
+        pytest.param(_CountingFieldOverrideFilter, id="field-override"),
+    ],
+)
+@pytest.mark.django_db
+def test_consumer_code_counting_queryset_choices_builds_running_them_as_declared(
+    filter_class: type[Filter],
+    django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
+) -> None:
+    """Consumer code reading ``len()`` of a ``QuerySet`` ``choices`` builds the input.
+
+    The queryset runs where the consumer counts it, once per form field the build reads (each
+    copy's queryset caches its rows), as it would on the declared value.
+    """
+    payload_set = _payload_set(
+        filter_class(field_name="condition", choices=Category.objects.values_list("name", "name")),
+        model=_SHELF,
+    )
+    with django_assert_num_queries(_COUNTING_BUILD_EVALUATIONS):
+        assert _build_input_fields(payload_set)
+
+
+#: The evaluations a consumer counting its deferred ``choices`` runs while the input builds.
+_COUNTING_BUILD_EVALUATIONS = 2
+
+
+def _shelf_conditions_lazily() -> object:
+    """A ``SimpleLazyObject`` over the ``Shelf`` conditions on record."""
+    return SimpleLazyObject(_conditions_on_record)
+
+
+def _shelf_codes_queryset() -> object:
+    """A ``QuerySet`` of ``Shelf`` code pairs."""
+    return _SHELF.objects.values_list("code", "code")
+
+
+@pytest.mark.parametrize(
+    "make_choices",
+    [
+        pytest.param(_shelf_conditions_lazily, id="simple-lazy-object"),
+        pytest.param(_shelf_codes_queryset, id="queryset"),
+    ],
+)
+@pytest.mark.django_db
+def test_copied_filter_choices_are_true_without_evaluating(
+    make_choices: Callable[[], object],
+    django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
+) -> None:
+    """The copy's wrapped ``choices`` answer a truth test without reading the database."""
+    copied = copied_filter(TypedChoiceFilter(field_name="condition", choices=make_choices()))
+    with django_assert_num_queries(0):
+        assert dict_of(copied.extra).get("choices")
+
+
+@pytest.mark.parametrize(
+    "make_choices",
+    [
+        pytest.param(_shelf_conditions_lazily, id="simple-lazy-object"),
+        pytest.param(_shelf_codes_queryset, id="queryset"),
+    ],
+)
+@pytest.mark.django_db
+def test_copied_filter_choices_answer_len_by_counting_them_once(
+    make_choices: Callable[[], object],
+    django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
+) -> None:
+    """The copy's wrapped ``choices`` count what iterating them answers, reading them once.
+
+    Both the ``SimpleLazyObject`` and the ``QuerySet`` cache what they read, so a second
+    ``len()`` runs no query.
+    """
+    branch = library_models.Branch.objects.create(name="Counted")
+    _ = _SHELF.objects.create(branch=branch, code="c", condition="good")
+    copied = copied_filter(TypedChoiceFilter(field_name="condition", choices=make_choices()))
+    choices = dict_of(copied.extra).get("choices")
+    assert isinstance(choices, Sized)
+    with django_assert_num_queries(1):
+        assert len(choices) == 1
+        assert len(choices) == 1
 
 
 class _TableCode:
