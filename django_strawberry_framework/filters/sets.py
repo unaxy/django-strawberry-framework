@@ -43,7 +43,7 @@ from django.core.exceptions import (
     ValidationError,
 )
 from django.db import connections, models
-from django.db.models import Exists, F, FilteredRelation, Q, Subquery
+from django.db.models import Exists, F, FilteredRelation, OuterRef, Q, Subquery
 from django.db.models import lookups as model_lookups
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression
@@ -7088,7 +7088,10 @@ class FilterSet(
         request may reach there: an intermediate model's visible rows (``_via_rows``) and
         each hop's admitted visible rows (``_admitted_rows``); with no ``using`` (asking
         whether an absent leaf constrains, ``_absent_leaf_applies``) every join is Django's
-        own. A many-to-many joins its through rows by a ``FilteredRelation`` of their own
+        own. An inherited first key scopes its identity turn through native
+        ``Exists`` and follows the forward key with an ordinary join, avoiding
+        Django's repeated parent join for a multi-hop filtered alias ending on
+        an inherited field. A many-to-many joins its through rows by a ``FilteredRelation`` of their own
         (``<relation>_links``, ``_through_link``) conditioned on the visible target rows,
         then the target through them, so a through row onto a hidden target is no row of
         the view (a ``NULL`` test reads only visible targets). A first relation Django
@@ -7155,12 +7158,37 @@ class FilterSet(
                     # Django joins this key inner: the view reaches the row again round
                     # its target (``_round_trip``), an outer join, and the key from there.
                     turn = f"{segment}{LOOKUP_SEP}{back}"
+                    # The reverse path ends at the field's declaring model, which may
+                    # be an ancestor of the queryset model with a different primary key.
+                    # Compare its concrete components: TupleExact rejects F("pk") for
+                    # a composite primary key before SQL generation.
+                    source_model = require(field.model, is_model_class)
+                    identity = Q()
+                    for key in source_model._meta.pk_fields:
+                        identity &= Q(
+                            **{f"{turn}{LOOKUP_SEP}{key.attname}": F(key.attname)},
+                        )
+                    inherited = bool(model._meta.get_path_to_parent(source_model))
+                    if inherited and condition_rows is not None:
+                        target = require(read_attr(field, "target_field"), is_concrete_field)
+                        source = require_instance(read_attr(field, "attname"), str)
+                        identity &= Q(
+                            Exists(condition_rows.filter(**{target.attname: OuterRef(source)})),
+                        )
                     names_back = alias(
                         f"{segment}_round",
                         turn,
-                        Q(**{f"{turn}{LOOKUP_SEP}pk": F("pk")}),
+                        identity,
                     )
                     relation_name = f"{names_back}{LOOKUP_SEP}{segment}"
+                    if inherited:
+                        # Django's FilteredRelation path resolution repeats the parent
+                        # join when an inherited field ends a multi-hop alias. Scope the
+                        # identity turn with native Exists and keep its forward join
+                        # ordinary, preserving null extension without the repeated join.
+                        names.append(relation_name)
+                        model = require(field.related_model, is_model_class)
+                        continue
                 else:
                     relation_name = f"{names[-1]}{LOOKUP_SEP}{segment}" if names else segment
                 through = _through_link(model, field)

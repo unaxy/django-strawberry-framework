@@ -24,16 +24,17 @@ own form.
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import wraps
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import pytest
 import strawberry
 from apps.library import models
 from asgiref.sync import sync_to_async
 from django.db import connection
+from django.db import models as db_models
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
@@ -70,6 +71,9 @@ from django_strawberry_framework.utils._narrowing import list_of, read_attr, req
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 _M = TypeVar("_M", bound=Model)
+if TYPE_CHECKING:
+    from django.db.models.expressions import Combinable
+
 pytestmark = pytest.mark.usefixtures("private_registry")
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _CALLS: list[tuple[str, str, str]] = []
@@ -1939,3 +1943,248 @@ def test_a_to_many_view_through_a_key_no_round_trip_reaches_keeps_its_inner_join
     assert _answer(payload) == list(rows), payload
     segment = field_name.rsplit("__", 1)[-1]
     assert [(f"{segment}_visible", "QuerySet", model.__name__)] == _CALLS
+
+
+def _round_trip_model_meta(table: str) -> type[object]:
+    return type("Meta", (), {"app_label": "library", "managed": False, "db_table": table})
+
+
+def _round_trip_source_models() -> dict[str, type[Model]]:
+    """Register source models only while their test-local database tables exist."""
+    linked = type(
+        "RoundTripLinkedBook",
+        (models.Book,),
+        {"__module__": __name__, "Meta": _round_trip_model_meta("live_round_trip_linked_book")},
+    )
+    independent = type(
+        "RoundTripIndependentBook",
+        (models.Book,),
+        {
+            "__module__": __name__,
+            "Meta": _round_trip_model_meta("live_round_trip_independent_book"),
+            "catalog_number": db_models.IntegerField(primary_key=True),
+        },
+    )
+
+    class RoundTripCompositeBook(db_models.Model):
+        """Both source key columns identify the row reached by the reverse shelf join."""
+
+        tenant: db_models.IntegerField["float | int | str | Combinable", int] = (
+            db_models.IntegerField()
+        )
+        sequence: db_models.IntegerField["float | int | str | Combinable", int] = (
+            db_models.IntegerField()
+        )
+        pk = db_models.CompositePrimaryKey("tenant", "sequence")
+        title: db_models.TextField["str | Combinable", str] = db_models.TextField()
+        shelf: db_models.ForeignKey["models.Shelf | Combinable", models.Shelf] = (
+            db_models.ForeignKey(
+                models.Shelf,
+                related_name="round_trip_composite_books",
+                on_delete=db_models.CASCADE,
+            )
+        )
+
+        class Meta:
+            app_label = "library"
+            managed = False
+            db_table = "live_round_trip_composite_book"
+
+        @override
+        def __str__(self) -> str:
+            return self.title
+
+    return {
+        "parent-link-pk": linked,
+        "independent-child-pk": independent,
+        "composite-pk": RoundTripCompositeBook,
+    }
+
+
+@pytest.fixture
+def round_trip_source_tables(transactional_db: None) -> Generator[dict[str, type[Model]]]:
+    """Give the three native HTTP source shapes real tables for their relation joins."""
+    _ = transactional_db
+    source_models = _round_trip_source_models()
+    with connection.schema_editor() as editor:
+        for model in source_models.values():
+            editor.create_model(model)
+    try:
+        yield source_models
+    finally:
+        with connection.schema_editor() as editor:
+            for model in reversed(tuple(source_models.values())):
+                editor.delete_model(model)
+
+
+def _create_round_trip_row(
+    model: type[Model],
+    title: str,
+    shelf: models.Shelf,
+    key: dict[str, int],
+) -> None:
+    model._default_manager.create(title=title, shelf=shelf, **key)
+
+
+def _round_trip_source_rows(model: type[Model], kind: str) -> None:
+    """Put visible and hidden shelves behind every source key shape."""
+    branch = models.Branch.objects.create(name="round-trip-branch")
+    occupied = models.Shelf.objects.create(branch=branch, code="occupied", topic="open")
+    empty = models.Shelf.objects.create(branch=branch, code="empty", topic="open")
+    hidden = models.Shelf.objects.create(branch=branch, code="hidden", topic="secret")
+    occupied.alt_branches.add(branch)
+    hidden.alt_branches.add(branch)
+    rows: list[tuple[str, models.Shelf, dict[str, int]]] = [
+        ("visible-has", occupied, {"tenant": 1, "sequence": 1}),
+        ("visible-none", empty, {"tenant": 1, "sequence": 2}),
+        ("hidden-first", hidden, {"tenant": 2, "sequence": 1}),
+    ]
+    if kind == "composite-pk":
+        rows.extend(
+            [
+                ("visible-has-peer-tenant", occupied, {"tenant": 1, "sequence": 3}),
+                ("visible-has-peer-sequence", occupied, {"tenant": 3, "sequence": 1}),
+            ],
+        )
+    for index, (title, shelf, composite_key) in enumerate(rows, start=1):
+        key = (
+            composite_key
+            if kind == "composite-pk"
+            else {"id": 10000 + index, "catalog_number": 1000 + index}
+            if kind == "independent-child-pk"
+            else {}
+        )
+        _create_round_trip_row(model, title, shelf, key)
+
+
+class _HasRelatedWhenEmpty(ModelMultipleChoiceFilter):
+    """Leave duplicates visible so a partial composite identity cannot look correct."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        _record(self.field_name, value, qs)
+        if not value:
+            return qs.filter(**{f"{self.field_name}__isnull": False})
+        return super().filter(qs, value)
+
+
+def _round_trip_visible_shelf_type() -> None:
+    class ShelfRows(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("code",)
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.Shelf],
+            info: object,
+        ) -> QuerySet[models.Shelf]:
+            del cls, info
+            return queryset.exclude(topic="secret")
+
+    _ = ShelfRows
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("kind", ["parent-link-pk", "independent-child-pk", "composite-pk"])
+@pytest.mark.parametrize("transport", ["sync", "form", "async"])
+@pytest.mark.parametrize("supplied", [True, False], ids=["empty", "absent"])
+@pytest.mark.parametrize("answer", ["none", "has"])
+def test_a_round_trip_matches_the_declaring_sources_full_identity_over_http(
+    round_trip_source_tables: dict[str, type[Model]],
+    kind: str,
+    transport: str,
+    *,
+    supplied: bool,
+    answer: str,
+) -> None:
+    """An inherited or composite source sees the right visible first relation and no duplicates."""
+    model = round_trip_source_tables[kind]
+    _round_trip_source_rows(model, kind)
+    _round_trip_visible_shelf_type()
+
+    source_filter = type(
+        "RoundTripSourceFilter",
+        (FilterSet,),
+        {
+            "probe": (
+                _NoneRelatedWhenEmpty(
+                    field_name="shelf__alt_branches",
+                    queryset=models.Branch.objects.all(),
+                )
+                if answer == "none"
+                else _HasRelatedWhenEmpty(
+                    field_name="shelf__alt_branches",
+                    queryset=models.Branch.objects.all(),
+                )
+            ),
+            "Meta": type("Meta", (), {"model": model, "fields": ["title"]}),
+        },
+    )
+
+    where: JSONObject = {"probe": []} if supplied else {}
+    schema = _schema(
+        source_filter,
+        model,
+        "title",
+        transport="async" if transport == "async" else "sync",
+        direct=transport == "form",
+    )
+    _CALLS.clear()
+    payload = _post(schema, "title", {"where": where}, transport=transport)
+    expected = (
+        ["hidden-first", "visible-none"]
+        if answer == "none"
+        else ["visible-has"]
+        if kind != "composite-pk"
+        else ["visible-has", "visible-has-peer-sequence", "visible-has-peer-tenant"]
+    )
+    assert _answer(payload) == expected, payload
+    count = 1 if supplied else 2
+    assert [("alt_branches_visible", "QuerySet", model.__name__)] * count == _CALLS
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("kind", ["independent-child-pk", "composite-pk"])
+@pytest.mark.parametrize("mode", ["named", "default-path", "excluded-default"])
+def test_a_round_trip_retains_named_and_default_relation_key_answers_over_http(
+    round_trip_source_tables: dict[str, type[Model]],
+    kind: str,
+    mode: str,
+) -> None:
+    """The identity turn also leaves named choices and the override's own path/exclude intact."""
+    model = round_trip_source_tables[kind]
+    _round_trip_source_rows(model, kind)
+    _round_trip_visible_shelf_type()
+    field_name = "shelf__alt_branches"
+    choice: ModelMultipleChoiceFilter = (
+        _Recorded(field_name=field_name, queryset=models.Branch.objects.all())
+        if mode == "named"
+        else _PkInDefault(
+            field_name=field_name,
+            queryset=models.Branch.objects.all(),
+            default=(models.Branch, "name", "round-trip-branch"),
+            exclude=mode == "excluded-default",
+        )
+    )
+    filterset = type(
+        "RoundTripChoiceFilter",
+        (FilterSet,),
+        {"probe": choice, "Meta": type("Meta", (), {"model": model, "fields": ["title"]})},
+    )
+    values = _pks(models.Branch, "name", "round-trip-branch") if mode == "named" else []
+    schema = _schema(filterset, model, "title")
+    _CALLS.clear()
+    payload = _post(schema, "title", {"where": {"probe": values}})
+    visible = (
+        ["visible-has"]
+        if kind != "composite-pk"
+        else ["visible-has", "visible-has-peer-sequence", "visible-has-peer-tenant"]
+    )
+    expected = ["hidden-first", "visible-none"] if mode == "excluded-default" else visible
+    assert _answer(payload) == expected, payload
+    received_name = field_name if mode == "named" else "alt_branches_visible"
+    received_value = "list" if mode == "named" else "QuerySet"
+    assert [(received_name, received_value, model.__name__)] == _CALLS
