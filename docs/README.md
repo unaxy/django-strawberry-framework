@@ -310,6 +310,8 @@ The integer comparisons (`exact`, `gt`, `gte`, `lt`, `lte`, `range`) truncate a 
 
 Raw form data under the package's `FilterSet` (`FilterSet(data=...)`, `DjangoFilterBackend`, django-filter's `FilterView`) is refused where the GraphQL input is: text the package refuses (a lone surrogate, a NUL) and a value the database cannot bind (on SQLite and MySQL a duration whose microsecond count lies past 64 bits, on every backend a `year` comparison past 9999) are the form's own errors, with the messages the typed input answers, so `is_valid()` is false, `DjangoFilterBackend` answers 400 and a `strict` `FilterView` lists no row. A bare `.qs` read of such a form applies only the leaves that cleaned, as django-filter does for any invalid form (none once text is refused), so call `is_valid()` or read `errors` first.
 
+Such a set scopes its relations as GraphQL does for the same user: every `DjangoType.get_queryset` a walked key, a relation key or a logical arm reaches receives an `info` whose `context.request` is the request the set was built with (DRF's `Request` under `DjangoFilterBackend`), so a hook reading `info.context.request.user` answers for the request's actor. No Strawberry `Info` exists outside a GraphQL execution, so that `info` carries the context only; a set built with no request hands each hook `None`.
+
 ### Ordering with `OrderSet`
 
 ```python

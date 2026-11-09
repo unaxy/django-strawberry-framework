@@ -766,6 +766,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_declared_key_forms_api.py  # Native key filters publish their stored-column scalar and validate raw key bounds over HTTP.
 ├── test_declared_key_primitives_api.py  # Declared key primitives compare the real column stored by scalar and relation-valued keys.
 ├── test_declared_temporal_bindability_api.py  # Declared temporal filters and resolver annotations use the real database's bind boundary.
+├── test_direct_filter_actor_api.py  # A set built outside the GraphQL pipeline scopes its hops as the request's actor sees them.
 ├── test_direct_filter_primitives_api.py  # Ordinary JSON arguments preserve the public primitive's own container contract.
 ├── test_error_policy_api.py      # Live ``/graphql/`` production-error-policy acceptance tests.
 ├── test_explicit_temporal_arguments_api.py  # Consumer calendar arguments reach temporal filtering without a generated filter argument.

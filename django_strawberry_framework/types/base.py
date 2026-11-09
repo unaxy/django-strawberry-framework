@@ -943,7 +943,12 @@ class DjangoType:
         else, so an override declares exactly those two parameters.
         ``info`` is the schema's ``strawberry.Info`` for the resolver that
         runs the hook; on the optimizer's ``Prefetch`` path that is the
-        resolver whose plan reaches this type.
+        resolver whose plan reaches this type. A ``FilterSet`` built outside a
+        GraphQL execution with ``request=`` (``DjangoFilterBackend``,
+        ``FilterView``, a consumer's own call) hands the hooks it reaches an
+        ``info`` carrying only ``context.request``, that request, so
+        ``info.context.request.user`` reads the actor on both paths; one built
+        with no request hands ``None``.
 
         ``queryset`` is a fresh instance of the class that supplied it - for
         every framework-seeded read, the ``QuerySet`` class behind the model's

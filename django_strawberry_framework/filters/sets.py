@@ -2412,6 +2412,52 @@ def _scoped_seed_rows(
     return base_queryset(model_for(scope), using=parent_db)
 
 
+@dataclass
+class _DirectRequestContext:
+    """The ``info.context`` of a set built outside the request pipeline: the set's request.
+
+    Holds the request the way Strawberry's ``StrawberryDjangoContext`` holds the
+    GraphQL request, read as ``.request``, ``["request"]`` or ``.get("request")``,
+    and like it is a plain dataclass, so a hook may store a value on the context
+    (a per-request memo) and read it back on either path. That class itself does
+    not fit: its ``response`` is the GraphQL view's sub-response, merged into the
+    reply after execution, and a set built directly has none; a response nothing
+    merges would drop a hook's writes silently, so ``response`` is ``None`` here.
+    """
+
+    request: object
+    response: None = None
+
+    # Adapted from strawberry.django.context.StrawberryDjangoContext (MIT;
+    # LICENSE.strawberry): item and ``get`` access read the attribute of that name, so a
+    # missing key raises ``AttributeError`` as there.
+    def __getitem__(self, key: str) -> object:
+        """Return the attribute ``key`` (``info.context["request"]``)."""
+        return object_result(getattr, self, key)
+
+    def get(self, key: str) -> object:
+        """Return the attribute ``key`` (``info.context.get("request")``)."""
+        return object_result(getattr, self, key)
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectRequestInfo:
+    """The resolver ``info`` a set built outside the request pipeline hands its type hooks.
+
+    No Strawberry ``Info`` exists outside an execution: Strawberry builds one per
+    resolver call around graphql-core's ``GraphQLResolveInfo``, which only the
+    executor fills (schema, operation, field, path, selection). A set a
+    django-filter view, DRF's ``DjangoFilterBackend`` or a consumer builds with
+    ``request=`` therefore hands every ``DjangoType.get_queryset`` it reaches this
+    value, whose ``context.request`` is that request, so a hook reads the actor as
+    ``info.context.request.user`` on either path (GOAL.md "Trust boundary"). It
+    carries nothing else an ``Info`` does: no schema, field or selection exists
+    without an operation. A set built with no request hands ``None``.
+    """
+
+    context: _DirectRequestContext
+
+
 class _UndeclaredHopSet:
     """The filter-set face a walked leaf's terminal reads over an undeclared hop's rows.
 
@@ -3484,8 +3530,11 @@ class FilterSet(
     # `_logic_depth`: set by `apply_sync` / `apply_async` on the top-level
     # instance and by `_q_for_branch` on each sibling so nested logical
     # branches can re-derive their `RelatedFilter` visibility across the
-    # `.qs` boundary. `None` for instances built outside the apply pipeline
-    # (they carry no related branches to re-derive).
+    # `.qs` boundary. Every type hook a walked leaf, a hop or a logical arm
+    # reaches receives it. A set built outside the pipeline with a request
+    # holds a ``_DirectRequestInfo`` over that request (``__init__``), which its
+    # logical arms' siblings share; one built with no request, and a
+    # projection child (whose hops its owner reads), hold ``None``.
     _apply_info: object = None
 
     # Pre-derived nested-branch visibility map, keyed by ``id(child_input)``.
@@ -3610,6 +3659,11 @@ class FilterSet(
         _ = _active_construction_var.set(None)
         self._form_bindings = None if construction is None else construction.bindings
         pipeline_built = construction is not None
+        if not pipeline_built and request is not None:
+            # Built directly: the type hooks this set's walks, hops and logical arms reach
+            # read the actor off ``info.context.request`` as they do under GraphQL. The
+            # pipeline stashes the resolver's own ``info`` (``_build_stashed_instance``).
+            self._apply_info = _DirectRequestInfo(_DirectRequestContext(request))
         if snapshot is None or not snapshot.deferred_copies or not pipeline_built:
             # basedpyright: typeshed types ``data`` as a ``dict`` or ``QueryDict``; upstream
             # stores the mapping and its form reads it as one. It rejects a ``Mapping``
@@ -7805,23 +7859,19 @@ class FilterSet(
         # framework-added GLOBAL ``distinct()`` is what the eligible branch
         # drops, not consumer state.
         qs = self._apply_flat_leaves(queryset)
-        # ``_logic_depth`` is stashed on instances built by
-        # ``_q_for_branch``; for the top-level instance (constructed by
-        # ``apply_sync`` / ``apply_async``) it is unset and the counter
-        # starts at 0. ``_apply_info`` is stashed the same way so nested
-        # branches can re-derive their ``RelatedFilter`` visibility +
-        # constraints; it is ``None`` for
-        # instances built outside the apply pipeline, which carry no
-        # related branches to re-derive. ``_nested_qs_by_branch_id`` is
-        # populated by ``apply_sync`` / ``apply_async``; when present, every
-        # nested ``child_input`` already carries its derived visibility map
-        # keyed by ``id(child_input)`` so ``_q_for_branch`` skips the derive
-        # (on the async color, one that would raise ``SyncMisuseError`` on an
-        # async-only target ``get_queryset``). The hop visibility map is shared with every
-        # sibling the logic tree builds (one per request), and so is the map of
-        # the siblings the probe built (``_probed_arms``), which ``_q_for_branch``
-        # reuses; a sibling it builds afresh starts from this set's absent-leaf
-        # verdicts.
+        # ``_logic_depth`` is stashed on instances built by ``_q_for_branch``; for the top-level
+        # instance (constructed by ``apply_sync`` / ``apply_async``) it is unset and the counter
+        # starts at 0. ``_apply_info`` is stashed the same way so nested branches can re-derive
+        # their ``RelatedFilter`` visibility + constraints; a set built outside the apply pipeline
+        # holds the ``_DirectRequestInfo`` its ``__init__`` built over its request (``None``
+        # without one), so its arms scope as the request's actor sees them.
+        # ``_nested_qs_by_branch_id`` is populated by ``apply_sync`` / ``apply_async``; when
+        # present, every nested ``child_input`` already carries its derived visibility map keyed by
+        # ``id(child_input)`` so ``_q_for_branch`` skips the derive (on the async color, one that
+        # would raise ``SyncMisuseError`` on an async-only target ``get_queryset``). The hop
+        # visibility map is shared with every sibling the logic tree builds (one per request), and
+        # so is the map of the siblings the probe built (``_probed_arms``), which ``_q_for_branch``
+        # reuses; a sibling it builds afresh starts from this set's absent-leaf verdicts.
         depth = getattr(self, "_logic_depth", 0)
         info = getattr(self, "_apply_info", None)
         nested_map = getattr(self, "_nested_qs_by_branch_id", None)

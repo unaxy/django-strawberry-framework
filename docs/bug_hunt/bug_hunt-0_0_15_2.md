@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 455 done, 117 to do. The CHANGELOG entries filed here moved to
+Progress: 456 done, 117 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2114,6 +2114,22 @@ Progress: 455 done, 117 to do. The CHANGELOG entries filed here moved to
   parameter of
   `examples/fakeshop/test_query/test_filter_declarations_api.py::test_a_copyable_declared_filter_answers_a_real_filtered_request`.
   Docs: spec-027 Decision 6, the 216 plan. CHANGELOGTODO 835
+- [x] 750. A `FilterSet` built outside the apply pipeline with `request=` (DRF's `DjangoFilterBackend`, django-filter's
+  `FilterView`, a consumer's own `FilterSet(data, queryset, request=...)`) now hands every `DjangoType.get_queryset` its
+  walked keys, relation keys, undeclared hops and logical arms reach an `info` whose `context.request` is that request
+  (DRF's `Request` under the backend, the user DRF's authentication attaches): `FilterSet.__init__` stashes
+  `filters/sets.py::_DirectRequestInfo` over `_DirectRequestContext(request)` (a plain dataclass adapted from
+  Strawberry's `StrawberryDjangoContext`, read as `.request`, `["request"]` or `.get("request")`, writable for a hook's
+  memo, `response` `None`, no schema). Staff and permission holders get the rows they get over GraphQL where they were
+  filtered as anonymous, a hook reading `info.context.request.user` no longer raises, and a nested branch inside a
+  logical arm no longer raises `ConfigurationError`; built with no request, each hook still receives `None`. Pipeline
+  instances keep the resolver's `info`; projection children and logical-arm siblings share their root's. Grid: 473 raw
+  and DRF cells moved, each onto its GraphQL twin; no GraphQL, `request=None` or head cell moved; a security probe
+  (rejected and lazy DRF credentials, denying permissions, stale staff sessions, `FilterView`) found no cell wider than
+  its twin. Pinned by `examples/fakeshop/test_query/test_direct_filter_actor_api.py` (DRF and `FilterView` against the
+  `/graphql/` twin, logical arms, context reads and memo, `request=None`, the DRF-authenticated user). Docs: spec-027
+  Decision 8, README, GLOSSARY `FilterSet` and `get_queryset` visibility hook. Unblocks 748. Filed 836. CHANGELOGTODO
+  837
 
 ## Outside review of the fixes
 
@@ -2169,11 +2185,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   landed in `47dd4daa`; the maintainer ruled the per-declaration opt-out `RelatedFilter(flat=False)`. Plan:
   `docs/related-filter-flat-opt-out-plan.md` (v7, reviewed five rounds). Blocked on 748, which lands first.
   Tracked on BACKLOG.md `related_filter_flat_opt_out`, removed when this lands. Moved from Waiting on you
-- [ ] 750. A raw `FilterSet(data=..., request=...)` (`DjangoFilterBackend`) never sets `_apply_info` (only
-  `apply_sync` / `apply_async` do, `_build_stashed_instance`), so every hop and choice hook scopes with `info=None`: a
-  staff request is filtered as anonymous (`CatalogueBookFilter` `shelf=<secret pk>` returns nothing for staff), and a
-  hook reading `info.context.request.user` raises. GOAL "Trust boundary": the actor is the user Django's
-  authentication attached to the request. Blocks 748's raw-head fix. Found probing 748
 - [ ] 751. An own `RelatedFilter` head's raw-form `ModelChoiceField` accepts a hidden pk (it matches, 748) but answers a
   missing pk with "Select a valid choice", so a raw-form client tells hidden rows from missing ones; writes keep them
   indistinguishable on purpose (`utils/write_values.py::decode_visible_relation_ids`). Walking the head (748) does not
@@ -2374,6 +2385,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   against `utils/querysets.py::relation_target_type(root=...)`, so when the two types' strategies differ (`model`
   primary, `type` secondary, key `shelf__books` on a set wired to the secondary) every nonempty value is refused, a
   primary-minted id as "expects BookSecondary", a secondary-minted id as "expects library.book". Found researching 745
+- [ ] 836. (robustness) A plain subclass of a wired `FilterSet` used outside the schema (`class _Plain(BookFilter):
+  pass` in a DRF view) publishes only its class-creation table (13 `base_filters` against `BookFilter`'s 189: the
+  `RelatedFilter` expansion runs only for a set the finalizer binds), so a walked key it is sent (`shelf__topic`) is
+  ignored as an unknown key and the view answers its unfiltered rows; nothing hidden leaks (the rows are the view's
+  own queryset). Found verifying 750
 
 ## To do: holes found re-checking the fixes
 

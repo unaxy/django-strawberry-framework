@@ -2706,7 +2706,7 @@ def test_accepted_globalid_type_names_keep_the_default_spelling_for_an_unpublish
 
 
 def test_filter_schema_is_none_outside_the_apply_pipeline() -> None:
-    """A filterset constructed directly carries no resolver ``info``, so no schema."""
+    """A filterset constructed directly names no schema: no GraphQL execution built it."""
     f = _global_id_filter_with_owner("id", _owner("type"))
     assert _filter_schema(f) is None
     assert _filter_schema(GlobalIDFilter(field_name="id")) is None

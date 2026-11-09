@@ -657,6 +657,7 @@ Module docstring = authoritative description; this = index. Read the docstring b
 | [`test_completion_lifecycle.py`][test-completion-lifecycle] | Async generated-mutation field and list cleanup, nullable survivors, late-error publication, synchronous-client bridges and execution-context isolation. |
 | [`test_declared_key_primitives_api.py`][test-declared-key-primitives-api] | Declared integer and UUID key filters preserve valid matches and refuse incompatible values through real requests; a key primitive naming a `FilteredRelation` alias coerces each key through the alias's target key. |
 | [`test_declared_key_forms_api.py`][test-declared-key-forms-api] | Decimal and UUID primary-key filter inputs publish their stored-column scalar, and raw key forms enforce column cleaning through relation and inheritance keys. |
+| [`test_direct_filter_actor_api.py`][test-direct-filter-actor-api] | A `DjangoFilterBackend` view, a django-filter `FilterView` and a consumer view building the package's `FilterSet` with `request=` scope every walked key, relation key, intermediate model and logical arm as the request's actor sees them, equal to each filter's `/graphql/` answer; hooks read the request off `info.context` three ways and may memoize on it as over GraphQL, a set with no request hands them `None`, and DRF's lazily authenticated user is read through its `Request`. |
 | [`test_direct_filter_primitives_api.py`][test-direct-filter-primitives-api] | Consumer resolvers use public filter primitives with real querysets, forms and independent matching and nonmatching rows. |
 | [`test_filter_apply_compatibility_api.py`][test-filter-apply-compatibility-api] | Consumer apply and constructor overrides retain their supported invocation behavior. |
 | [`test_filter_consumer_contracts_api.py`][test-filter-consumer-contracts-api] | Consumer filter hooks preserve typed return refusals, relation gates and authored row multiplicity. |
@@ -730,6 +731,7 @@ Outside this dir: [`../tests/`][fakeshop-tests] = project-level rows (urls, sett
 [test-declared-key-forms-api]: test_declared_key_forms_api.py
 [test-declared-key-primitives-api]: test_declared_key_primitives_api.py
 [test-declared-temporal-bindability-api]: test_declared_temporal_bindability_api.py
+[test-direct-filter-actor-api]: test_direct_filter_actor_api.py
 [test-direct-filter-primitives-api]: test_direct_filter_primitives_api.py
 [test-error-policy-api]: test_error_policy_api.py
 [test-explicit-temporal-arguments-api]: test_explicit_temporal_arguments_api.py

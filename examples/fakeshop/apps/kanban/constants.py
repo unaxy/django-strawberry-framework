@@ -171,6 +171,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "examples/fakeshop/test_query/test_declared_key_forms_api.py",
     "examples/fakeshop/test_query/test_declared_key_primitives_api.py",
     "examples/fakeshop/test_query/test_declared_temporal_bindability_api.py",
+    "examples/fakeshop/test_query/test_direct_filter_actor_api.py",
     "examples/fakeshop/test_query/test_direct_filter_primitives_api.py",
     "examples/fakeshop/test_query/test_error_policy_api.py",
     "examples/fakeshop/test_query/test_explicit_temporal_arguments_api.py",

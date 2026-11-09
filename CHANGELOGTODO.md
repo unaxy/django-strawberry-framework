@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 203 to do.
+Progress: 0 done, 204 to do.
 
 ## From dry-0_0_15_3
 
@@ -933,6 +933,12 @@ Progress: 0 done, 203 to do.
   raised an unnamed `TypeError` inside the build or on every filtered request; an in-place edit to a copied
   `RelatedFilter` head or a hidden flat copy is refused too, since django-filter's own constructor copies the whole
   published table; a lock-holding declaration the override removes from the published table now builds
+- [ ] 837. CHANGELOG entry for item 750: a `FilterSet` built directly with a request (`DjangoFilterBackend`,
+  django-filter's `FilterView`, or your own `FilterSet(data, queryset, request=...)`) now hands each
+  `DjangoType.get_queryset` its walked keys, relation keys and logical arms reach an `info` whose `context.request` is
+  that request (DRF's `Request` under the backend), so staff and permission holders get the rows they get over GraphQL
+  instead of being filtered as anonymous, a hook reading `info.context.request.user` no longer raises, and neither does
+  a nested branch inside a logical arm; a set built with no request still passes `None`
 
 ## From dry-upstream-0_0_15
 

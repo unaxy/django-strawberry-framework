@@ -2464,7 +2464,8 @@ def _filter_schema(filter_instance: Filter) -> Schema | None:
     child instance (``FilterSet._projection_child``) to the instance that owns
     it, so the GlobalID type-name check validates against the names THIS schema
     published. ``None`` for a filterset built outside the apply pipeline (a
-    direct public construction), where no schema exists to consult.
+    direct public construction), where no schema exists to consult: its
+    ``_apply_info`` is ``None`` or a ``_DirectRequestInfo``, which names none.
     """
     owner = read_attr(filter_instance, "parent", None)
     while owner is not None:
