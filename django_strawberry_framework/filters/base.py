@@ -3538,12 +3538,12 @@ def _filterset_walked_lookup(
     never rewritten: its ``field_name``, ``lookup_expr`` and ``label`` read as declared
     (``filters/sets.py::FilterSet._bound_terminal`` writes the walked pair onto its
     per-request copy alone). The filter's own pair answers for a filterset with no
-    model, a ``RelatedFilter`` (a branch head, never a leaf), a ``ProjectedChildFilter``
-    (its child filter walks in the child set), and a filter holding a ``filter`` of its
-    own (``filters/sets.py::_own_filter``: the ``FilterMethod`` a ``method=`` installs, or
-    a callable stored on the instance, which receives the pair as declared). A class-level
-    ``filter`` override walks, as ``filters/sets.py::FilterSet._flat_leaf_walk`` walks it:
-    it reads its pair off the per-request copy the walk binds.
+    model, a ``ProjectedChildFilter`` (its child filter walks in the child set), and a
+    filter holding a ``filter`` of its own (``filters/sets.py::_own_filter``: the
+    ``FilterMethod`` a ``method=`` installs, or a callable stored on the instance, which
+    receives the pair as declared). A class-level ``filter`` override walks, as
+    ``filters/sets.py::FilterSet._flat_leaf_walk`` walks it: it reads its pair off the
+    per-request copy the walk binds; so does a ``RelatedFilter`` head.
     """
     field_name = truth.text(_declared_field_name(filter_instance))
     lookup_expr = truth.text(filter_instance.lookup_expr)
@@ -3565,13 +3565,13 @@ def _walks_declared_lookup(filter_instance: Filter) -> bool:
     """Whether the path ``filter_instance``'s package reads walk is the one Django walks.
 
     A leaf holding no ``filter`` of its own (``filters/sets.py::_own_filter``), the rule
-    ``filters/sets.py::FilterSet._flat_leaf_walk`` walks by; neither a ``RelatedFilter``
-    nor a ``ProjectedChildFilter`` (``_filterset_walked_lookup``).
+    ``filters/sets.py::FilterSet._flat_leaf_walk`` walks by, a ``RelatedFilter`` head
+    included; never a ``ProjectedChildFilter`` (``_filterset_walked_lookup``).
     """
     from .sets import ProjectedChildFilter, _own_filter  # noqa: PLC0415 - import cycle
 
     return (
-        not isinstance(filter_instance, (ProjectedChildFilter, RelatedFilter))
+        not isinstance(filter_instance, ProjectedChildFilter)
         and _own_filter(filter_instance) is None
     )
 
@@ -3734,6 +3734,12 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
     as a raw ``AttributeError``, or -- for an OrderSet-shaped target --
     silently walks the ORDER family's fields through the filter input
     builder.
+
+    The ``ModelChoiceFilter`` itself is the raw-form head (``FilterSet(data=...)``,
+    ``DjangoFilterBackend``, ``FilterView``; GraphQL names no head): a key the form data
+    names (``shelf=<pk>``) is validated against ``get_queryset``'s rows within those the
+    target type lets the request see and matches through the rows each hop shows, as the
+    relation key does (``filters/sets.py::FilterSet._flat_leaf_walk``).
     """
 
     # ``RelatedSetTargetMixin`` parameterization: the slots the shared

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 459 done, 116 to do. The CHANGELOG entries filed here moved to
+Progress: 461 done, 117 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2172,6 +2172,37 @@ Progress: 459 done, 116 to do. The CHANGELOG entries filed here moved to
   836 the construction publishes. drf-spectacular's `contrib/django_filters.py` reads `filterset_class.base_filters`
   at schema generation, a startup-time configuration read, not a request. The contract question (whether a class-level
   read should publish) is parked as 843
+- [x] 748. A raw-form `RelatedFilter` head (a `FilterSet` built outside the apply pipeline: `FilterSet(data, queryset,
+  request=...)`, DRF's `DjangoFilterBackend`, django-filter's `FilterView`) that the data names, own (`BookFilter.shelf`)
+  or copied (`shelves__books__shelf`), now reads its relation as a walked relation key: `filters/sets.py::_flat_leaf_walk`
+  and `filters/base.py::_walks_declared_lookup` no longer exclude a `RelatedFilter`, so a named head runs through the
+  target type's `get_queryset`, every intermediate hop and the `queryset=` scope of the path above it, and
+  `FilterSet.form` narrows a named head's choices to the last hop's visible rows (`FilterSet._scope_supplied_heads`,
+  lazily on the bound form: one hook per hop, none for a request naming no head; a sliced `queryset=` is left
+  unnarrowed). Under a `null_label` the null value walks as the relation's null test over the rows each relation shows
+  and each declaration's `queryset=` admits (`_head_null_test`); a head overriding `filter` receives its own
+  `null_value` unchanged over its relation joined to those rows (`_KeyMatch.named_rows` to-many,
+  `_head_null_view` / `_LeafChain.null_view` forward) and otherwise follows the overridden relation-key rule. A head
+  whose walk reads a target model with no registered `DjangoType` keeps its declaration's queryset, unwalked (only a
+  set no type serves holds one; 839). `_admitted_rows` intersects a sliced declaration `queryset=` through
+  `pk__in=<slice>.values("pk")`, so a walk or a nested branch (GraphQL or `apply_sync`) through it answers the visible
+  rows the slice holds where it raised `TypeError`. GraphQL names no head and is unchanged. Grid: 44 DRF and 44 raw
+  head cells moved, each onto its walked twin or to `invalid_choice`; no walked, GraphQL, visible or missing cell moved.
+  Narrowings matching the walked key: a set built without `request=` hands a named head's hooks `None` (a strict
+  `info.context` hook raises), an async-only target `get_queryset` raises `SyncMisuseError`, and a head whose
+  `queryset=` is of another model raises `ConfigurationError`. Pinned by
+  `examples/fakeshop/test_query/test_direct_filter_actor_api.py` (own, to-many, M2M and copied heads; DRF, `FilterView`
+  and a consumer-built set x anonymous / staff against the `/graphql/` twin; hook counts) and `tests/filters/test_sets.py`
+  (null sentinel, overriding heads forward and to-many, unregistered target, `method=` head, non-`ModelChoiceField`
+  head, declared `ModelChoiceFilter` override, sliced `queryset=` walks and nested branches). Docs: README raw-form
+  paragraphs, spec-027 Decision 8 `#raw-form-heads` with its Edge case, Test plan, checklist and DoD 30, GLOSSARY
+  `RelatedFilter`, the 216 plan. Fixes 751. Filed 838, 839, 844. CHANGELOGTODO 845
+- [x] 751. A raw-form `RelatedFilter` head answers a key the target type hides with the same "Select a valid choice"
+  as a missing key (`filters/sets.py::FilterSet._scope_supplied_heads` narrows the head's `ModelChoiceField.queryset`
+  to the last hop's visible rows), so a raw-form client no longer tells hidden rows from missing ones. A `form`
+  override that skips `super()` keeps the walk (no leak) but validates over the declaration's queryset. Pinned by the
+  live 751 rows of `examples/fakeshop/test_query/test_direct_filter_actor_api.py` (hidden payload equals missing
+  payload, five heads). Fixed with 748
 
 ## Outside review of the fixes
 
@@ -2212,26 +2243,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 748. A raw-form `RelatedFilter` head (`FilterSet(data=...)`, `DjangoFilterBackend`) skips the visibility and
-  declaration scope every walked key gets. An own head is a `ModelChoiceFilter` over
-  `filters/base.py::RelatedFilter.get_queryset`'s base queryset, not the target type's `get_queryset`, and a copied
-  head (`shelves__books__shelf`) is never walked (`filters/sets.py::FilterSet._flat_leaf_walk` returns `None`). An
-  anonymous raw `BookFilter` `shelf=<secret shelf pk>` returns the book on the shelf `ShelfType.get_queryset` hides,
-  while `shelf__code=<its code>` returns nothing; a raw `BranchFilter` `shelves__books__shelf=<secret shelf pk>`
-  matches through a shelf outside `BranchFilter.shelves`' `queryset=` scope, which `shelves=<pk>` refuses as "Select a
-  valid choice" and `shelves__code` excludes. GraphQL cannot name a head. Not 749's root (749 landed reading the
-  walked path at read time; a head is never walked): `_flat_leaf_walk` must walk own and copied heads as relation-key
-  leaves; needs 750's actor. Found planning 216
 - [ ] 216. A dense `RelatedFilter` graph publishes a flat surface factorial in its size (path-relative expansion over every
   simple path: six sets each related to every other give about 11k flat keys per set, seven about 94k). The bound
   landed in `47dd4daa`; the maintainer ruled the per-declaration opt-out `RelatedFilter(flat=False)`. Plan:
-  `docs/related-filter-flat-opt-out-plan.md` (v7, reviewed five rounds). Blocked on 748, which lands first.
+  `docs/related-filter-flat-opt-out-plan.md` (v7, reviewed five rounds).
   Tracked on BACKLOG.md `related_filter_flat_opt_out`, removed when this lands. Moved from Waiting on you
-- [ ] 751. An own `RelatedFilter` head's raw-form `ModelChoiceField` accepts a hidden pk (it matches, 748) but answers a
-  missing pk with "Select a valid choice", so a raw-form client tells hidden rows from missing ones; writes keep them
-  indistinguishable on purpose (`utils/write_values.py::decode_visible_relation_ids`). Walking the head (748) does not
-  close it: the head's choice queryset (`filters/base.py::RelatedFilter.get_queryset`, `base_queryset`) must answer a
-  hidden pk as it answers a missing one. Found probing 748
 - [ ] 752. A `RelatedOrder` whose target `OrderSet` is keyed on another model than the relation reaches is accepted, and
   `orders/sets.py::OrderSet._scoped_hops` scopes its hop by the wrong type (`set_bound_type(hop.target)`, no
   correlation check), so hidden rows of the real model order visible parents: `BookOrder.shelf =
@@ -2423,12 +2439,27 @@ tracker number are recorded there; open remainders and new defects are filed as 
   against `utils/querysets.py::relation_target_type(root=...)`, so when the two types' strategies differ (`model`
   primary, `type` secondary, key `shelf__books` on a set wired to the secondary) every nonempty value is refused, a
   primary-minted id as "expects BookSecondary", a secondary-minted id as "expects library.book". Found researching 745
+- [ ] 838. (robustness) An unbound or absent `RelatedFilter` head's rendered form field (django-filter's `FilterView`
+  page, DRF's browsable API through `DjangoFilterBackend.to_html`) lists every row of the declaration's queryset as a
+  choice, rows the target type's `get_queryset` hides included, so the rendered page names hidden rows; a bound named
+  head narrows its choices to the visible rows (748). Found fixing 748
+- [ ] 844. (robustness) A walked relation-key null sentinel, a declared `ModelChoiceFilter` /
+  `ModelMultipleChoiceFilter` under `null_label` (forward or to-many, shipped or overriding `filter`) sent its
+  `null_value`, matches nothing, where django-filter answers the relation's null test (`<relation>=None`); a raw head
+  under `null_label` answers it since 748. Probe: `.work/evidence/fix-i748-raw-heads/verify-r2/test_zz_vr2_mc.py`
+  (`[]` at fe4eb38f). Found fixing 748
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 839. Decide: a declared hop whose target model has no registered `DjangoType`. A walked key through it is refused
+  (spec-027 Decision 8, `FilterSet._branch_visibility_seed`'s `ConfigurationError`); since 836 a raw `FilterSet`
+  (`FilterSet(data=...)`, `DjangoFilterBackend`, `FilterView`) carries its walked keys, so a raw walked key over such a
+  hop follows the same rule and a DRF-only project with no `DjangoType` gets a 500 for that key, while own keys and a
+  raw `RelatedFilter` head reading it keep only the declaration's queryset, unwalked (748 kept the shape that worked).
+  Refuse the head too, or let walked keys apply the declaration scope alone? (Found fixing 748)
 - [ ] 820. Decide: which values a choices-reading filter copied flat from a `RelatedFilter` child set validates
   against. Its form field is built once for the parent's copy, so a flat copy validates against the values the
   parent's rows reach, while the nested branch validates against the child's own: `shelfCodeValues: ["D-4"]` (a code

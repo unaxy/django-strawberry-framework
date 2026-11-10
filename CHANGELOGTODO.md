@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 205 to do.
+Progress: 0 done, 206 to do.
 
 ## From dry-0_0_15_3
 
@@ -947,6 +947,15 @@ Progress: 0 done, 205 to do.
   over a relation with no identity) now raises `ConfigurationError` at that construction and every later one, where
   a raw set raised Django's own `FieldError` only on requests naming it; an entry assigned to the class's
   `base_filters` before first use is replaced by the published table (override `get_filters()` instead)
+- [ ] 845. CHANGELOG entry for items 748 and 751: a `RelatedFilter` head named in raw form data (`DjangoFilterBackend`,
+  django-filter's `FilterView`, or your own `FilterSet(data, queryset, request=...)`), such as `shelf=<pk>` or a flat
+  copy such as `shelves__books__shelf=<pk>`, now reads its relation through the target type's `get_queryset` and the
+  `queryset=` scope of the path above it, as the walked key does, and answers a hidden key with the same "Select a
+  valid choice" as a missing one; a `null_label` choice matches a parent with no related row the viewer may see. A
+  `RelatedFilter` whose `queryset=` is sliced now answers the rows the slice holds through a walked key or a nested
+  branch instead of raising `TypeError`. Narrowings, matching the walked key: built with no request, a named head's
+  hooks receive `None`; an async-only target `get_queryset` raises `SyncMisuseError`; a head whose `queryset=` is of
+  another model raises `ConfigurationError`
 
 ## From dry-upstream-0_0_15
 

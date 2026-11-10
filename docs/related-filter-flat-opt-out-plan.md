@@ -1,7 +1,7 @@
 # Item 216 plan v7: a per-declaration opt-out for flat RelatedFilter copies
 
-Status: PLAN v7. HEAD `1462297f` (`main`). Process: `docs/bug_hunt/FIX.md`. **Blocked on tracker item 748,** whose fix
-walks raw-form `RelatedFilter` heads through `FilterSet._flat_leaf_walk`, the walk D2's restored-own-key routing rows
+Status: PLAN v7. HEAD `1462297f` (`main`). Process: `docs/bug_hunt/FIX.md`. Unblocked: tracker item 748 walks
+raw-form `RelatedFilter` heads through `FilterSet._flat_leaf_walk`, the walk D2's restored-own-key routing rows
 describe; R1 re-derives those rows against it. 745 (ruling 6) is the GlobalID audit this plan builds on. 749 landed
 without rewriting the walk: it hands the walk the path Django walks for a leaf
 (`filters/base.py::_filterset_walked_lookup`).
@@ -54,15 +54,18 @@ from v7; the landing commit deletes it.
   - None of them offers a per-declaration flag. This package's surface is its own.
 - **Split out (rulings 6 and 7).** The GlobalID and copy-probe probes are recorded in items 745 and 746. At HEAD the
   GlobalID shape fails only nonempty framework-decoded values; `exact: []` and `exact: null` succeed.
-- **Raw-form heads skip visibility, tracker item 748 (v6 trace, verified 2026-11-03).** A raw-form `RelatedFilter`
-  head, own or copied, is not walked, so it skips the target type's `get_queryset` and the declaration's `queryset=`
-  scope that walked keys get. Probe on the shipped library schema, anonymous request:
-  - `BookFilter` `shelf=<secret shelf pk>` returned the book on the hidden shelf; `shelf__code=<its code>` returned
-    none.
-  - `BranchFilter` `shelves__books__shelf=<secret shelf pk>` (a copied head) matched through a shelf outside
-    `shelves`' `queryset=`; `shelves=<pk>` refused it as "Select a valid choice", and `shelves__code` excluded it.
-  - GraphQL cannot name a head. 216 neither introduces nor widens this: a disabled declaration only withdraws copied
-    heads. D9's raw-form head row uses visible rows only, so it pins nothing 748 changes.
+- **Raw-form heads walk as relation keys (tracker item 748).** A raw-form `RelatedFilter` head, own or copied, walks
+  its path through `FilterSet._flat_leaf_walk` as the relation key does: each hop's target `get_queryset` and each
+  declaration's `queryset=` scope it, and `FilterSet._scope_supplied_heads` validates its key against the visible rows
+  of its last hop's target. On the shipped library schema, anonymous request:
+  - `BookFilter` `shelf=<secret shelf pk>` is refused as "Select a valid choice", as a pk naming no shelf is;
+    `shelf__code=<its code>` returns none.
+  - `BranchFilter` `shelves__books__shelf=<secret shelf pk>` (a copied head) is refused, and a visible shelf outside
+    `shelves`' `queryset=` matches nothing, as `shelves__code` excludes it.
+  - A head whose walk crosses a `RelatedFilter` whose target model has no registered `DjangoType`, a `method=` head
+    and an absent head run as declared.
+  - GraphQL cannot name a head. A disabled declaration only withdraws copied heads, which 216 changes nothing about.
+    D9's raw-form head row uses visible rows only.
 
 ## The defect
 
@@ -117,8 +120,8 @@ from v7; the landing commit deletes it.
   - The gate path still walks the declared hops.
 - **Copied terminal heads survive.** The item 217 extra lap survives unless a disabled declaration sits on the lap,
   in which case the lap is cut.
-- **Copied `RelatedFilter` heads stay as they are:** in the table and the direct form, and out of GraphQL.
-  `_group_filters_by_head` skips `__` heads.
+- **Copied `RelatedFilter` heads stay as they are:** in the table and the direct form, where they walk as relation
+  keys (`FilterSet._flat_leaf_walk`), and out of GraphQL. `_group_filters_by_head` skips `__` heads.
 - **Re-keyed copies keep their provenance** (`PatronFilter.borrowed_title`).
 - **Disabling restores a replaced own key.** When an enabled copy replaces an own key, the copy holds that key.
   Disabling the declaration gives the key back to the own filter, with its complete behavior. This is django-filter
@@ -252,7 +255,7 @@ from v7; the landing commit deletes it.
 | Finalizer GlobalID audit | As 745 lands it (precondition above). |
 | `GeneratedInputArgumentsFactory._ensure_built` | Every non-`None` declaration. |
 | `filters/inputs.py::_build_input_fields` (`_related_of`), input grouping and emission | Unchanged: all declarations; `__` heads skipped. |
-| `_flat_leaf_walk`, `_leaf_chain`, `_bound_terminal`, `_leaf_declaration`, `ChildProjection.holds_in` | Unchanged: routing of supplied keys over declared hops, whatever the flag (D2's restored-own-key routing). |
+| `_flat_leaf_walk`, `_leaf_chain`, `_bound_terminal`, `_leaf_declaration`, `ChildProjection.holds_in` | Unchanged: routing of supplied keys over declared hops, raw-form `RelatedFilter` heads included, whatever the flag (D2's restored-own-key routing). |
 | `walk_declared_relation_path`, gates, projected-leaf walks | All declarations on an active supplied path. |
 | Active-input permission, nested visibility, related-constraint recursion | All active branches, including logical arms. |
 | Lifecycle clearing | All classes. |
@@ -346,7 +349,8 @@ from v7; the landing commit deletes it.
   current builder is `pg`-marked for `SplitArrayWidget`.
   - A raw `reading_list__id` is ignored and both candidate entries return.
   - The copied terminal head: a raw key under an enabled declaration's copied head filters the expected rows, over
-    rows every viewer sees. Hidden-row behavior of heads is item 748's.
+    rows every viewer sees. Hidden-row behavior of heads is item 748's, pinned in
+    `examples/fakeshop/test_query/test_direct_filter_actor_api.py`.
 - **Patron:** both source edges stay enabled. A live `borrowedTitle` query with matching and non-matching rows proves
   the alias executes.
 - **Visibility, gates and async-only hooks.** The ReadingList types provide none of these.

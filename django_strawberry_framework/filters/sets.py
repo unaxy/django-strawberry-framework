@@ -51,6 +51,7 @@ from django.db.models.expressions import BaseExpression
 from django.db.models.query_utils import check_rel_lookup_compatibility
 from django.db.models.sql.query import Query
 from django.db.models.sql.where import WhereNode
+from django.forms import ModelChoiceField
 from django.forms.utils import ErrorDict
 from django.utils.functional import Promise
 from django_filters import (
@@ -303,9 +304,17 @@ if TYPE_CHECKING:
     _VisibilityStep: TypeAlias = "tuple[str, RelatedFilter, object]"
     #: Any forward ``ManyToManyField``, as django-stubs parametrizes it.
     _ManyToManyFieldAny: TypeAlias = models.ManyToManyField[models.Model, models.Model]
+    #: Any ``ModelChoiceField``, its model parameter solved to ``Model``.
+    _ModelChoiceFieldAny: TypeAlias = ModelChoiceField[models.Model]
 else:
     # ``ManyToManyField`` has no ``__class_getitem__`` at runtime: the hint stays the class.
     _ManyToManyFieldAny = models.ManyToManyField
+    # Nor has ``ModelChoiceField``.
+    _ModelChoiceFieldAny = ModelChoiceField
+
+# The model-choice form field class with its model parameter solved, so the real-class
+# check against it answers over a known type.
+_MODEL_CHOICE_FIELD: type[_ModelChoiceFieldAny] = ModelChoiceField
 
 _M = TypeVar("_M", bound=models.Model)
 _EntryT = TypeVar("_EntryT")
@@ -1826,6 +1835,54 @@ def _new_projected(filter_cls: type[Filter]) -> ProjectedChildFilter:
     return object.__new__(_projected_class_for(filter_cls))
 
 
+def _is_choice_rows(value: object) -> TypeIs[models.QuerySet[models.Model]]:
+    """Whether ``value`` is a ``ModelChoiceField``'s queryset, whose rows are model instances.
+
+    django-filter builds a model-choice form field only over the ``QuerySet`` its filter's
+    ``get_queryset`` answers (``QuerySetRequestMixin.field``), never ``None``.
+    """
+    return is_queryset(value)
+
+
+def _head_null_test(head: RelatedFilter, value: object) -> tuple[Filter, object]:
+    """Return the head and value a ``RelatedFilter`` head's walk runs for its cleaned ``value``.
+
+    A value equal to the head's ``null_value`` (django-filter's null sentinel, which its
+    ``ModelChoiceField`` cleans to when the head declares a ``null_label``) is the one
+    ``ChoiceFilter.filter`` answers with ``<relation>__exact=None``, which Django builds as
+    ``<relation>__isnull=True`` (``Query.build_lookup``): the walk runs a copy of the head
+    whose ``lookup_expr`` is ``isnull`` with ``True``, the relation-key null test over the
+    rows each relation shows and each declaration's ``queryset=`` admits, so a parent
+    matches when no such row links it. Any other value runs the head as cleaned, as
+    ``ChoiceFilter.filter`` hands it on. Asked only for a head running shipped code
+    (``_runs_shipped_filter``): a class-level ``filter`` override receives its own null
+    value unchanged over its relation joined only to those rows (``_head_null_view`` on a
+    forward path, ``_KeyMatch.named_rows`` on a to-many one).
+    """
+    if value != read_attr(head, "null_value", None):
+        return head, value
+    test = copy.copy(head)
+    test.lookup_expr = "isnull"
+    return test, True
+
+
+def _head_null_view(leaf: Filter, hops: tuple[RelationHop, ...]) -> _LeafChain | None:
+    """Return the chain a forward head overriding ``filter`` runs for its null value.
+
+    Such a head is sent its ``null_value`` (the sentinel its ``ModelChoiceField`` cleans to
+    under a ``null_label``), which names no row of the relation's target: the override
+    receives it unchanged and runs once, as declared, over the rows of the set declaring it,
+    its ``field_name`` bound to its relation joined only to the rows each relation of
+    ``hops`` shows and each declaration's ``queryset=`` admits (``_LeafChain.view``), as a
+    to-many head's null value runs (``_KeyMatch.named_rows``). ``None`` for every other
+    leaf: a head running shipped code walks its null value as the relation's null test
+    (``_head_null_test``), and any other leaf has no null sentinel of its own.
+    """
+    if not isinstance(leaf, RelatedFilter) or _runs_shipped_filter(leaf):
+        return None
+    return _LeafChain((), leaf, key_hop=hops[-1], view=hops)
+
+
 def _owner_bound_child(child_filterset: type[FilterSet], child_filter: Filter) -> bool:
     """Whether ``child_filter``'s behavior belongs to ``child_filterset``, not to the filter object.
 
@@ -1838,8 +1895,9 @@ def _owner_bound_child(child_filterset: type[FilterSet], child_filter: Filter) -
     the seam the optimizer closes for the same reason); a projected copy
     already runs inside its owner and is re-projected at the next hop. A
     class-level ``filter`` override is the filter object's own behavior, so
-    its copy is rebound. A ``RelatedFilter`` is a branch, never a flat leaf, so
-    it is copied as is.
+    its copy is rebound. A ``RelatedFilter`` is copied as is: the copy is a
+    branch head of the set holding it, which a raw form walks from that set as
+    a relation-key leaf (``FilterSet._flat_leaf_walk``).
     """
     if isinstance(child_filter, RelatedFilter):
         return False
@@ -2016,7 +2074,9 @@ def _admitted_rows(
     the declaration's explicit ``queryset=``; ``child_rows`` of ``None`` admits
     the explicit queryset alone, and with neither the branch admits no
     restriction (``None``). A callable ``queryset=`` is called with ``request``,
-    the filter set's own, as django-filter calls it for a ``ModelChoiceFilter``.
+    the filter set's own, as django-filter calls it for a ``ModelChoiceFilter``. A
+    sliced explicit queryset, which Django refuses to combine, admits the ``child_rows``
+    among the rows the slice holds, read as an ``IN`` subquery of its keys.
     """
     # ``_has_explicit_queryset`` records that ``queryset=`` was passed; without it
     # ``RelatedFilter.get_queryset`` answers the target's default rows instead.
@@ -2053,6 +2113,10 @@ def _admitted_rows(
             "accepted because Django's queryset ``&`` "
             "operator rejects mixed model classes.",
         )
+    if explicit.query.is_sliced:
+        # Django refuses to combine a sliced query (``Query.combine``); it reads one as an
+        # ``IN`` subquery, the rows the slice holds.
+        return child_rows.filter(pk__in=explicit.values("pk"))
     return explicit & child_rows
 
 
@@ -2281,7 +2345,8 @@ class _KeyMatch:
     to that column over the last hop's target rows, positive, whose class's shipped
     comparison (``_shipped_filter_class``) reads any other value. The consumer's
     ``filter`` never runs a second time. A value naming no row runs the leaf on its
-    chain's ``fallback`` instead (``_LeafChain.view`` for a to-many key).
+    chain's ``fallback`` instead (``_LeafChain.view`` for a to-many key); a forward head's
+    null value reads its chain's ``null_view`` before this is asked.
     """
 
     hop: RelationHop
@@ -2303,12 +2368,21 @@ class _KeyMatch:
         (``check_rel_lookup_compatibility``: the target's concrete model, a parent or a
         child of it). Any other value (a raw key, a GlobalID) keeps the rows the shipped
         comparison of the leaf's class keeps on the key column. A value naming no row
-        (an empty or absent model-choice value, an instance of another model, a value
-        the shipped comparison skips, returning ``rows`` by identity, or refuses,
-        ``_SHIPPED_COMPARISON_REFUSALS``) is ``None``: the leaf then runs its chain's
-        ``fallback`` (``_LeafChain.view``: as declared over the rows of the set declaring
-        it, its relation joined only to visible related rows).
+        (a ``RelatedFilter`` head's ``null_value``, the null sentinel its overriding
+        ``filter`` receives unchanged; an empty or absent model-choice value; an instance
+        of another model; a value the shipped comparison skips, returning ``rows`` by
+        identity, or refuses, ``_SHIPPED_COMPARISON_REFUSALS``) is ``None``: the leaf then
+        runs its chain's ``fallback`` (``_LeafChain.view``: as declared over the rows of
+        the set declaring it, its relation joined only to visible related rows).
         """
+        if isinstance(self.terminal, RelatedFilter) and value == read_attr(
+            self.terminal,
+            "null_value",
+            None,
+        ):
+            # A head's null value, which ``ChoiceFilter.filter`` answers with its relation's
+            # null test, names no row of the relation's target.
+            return None
         members = _model_choice_members(value)
         if members is None:
             try:
@@ -2355,7 +2429,9 @@ class _LeafChain:
     own value, default and path answer as unwalked, over visible rows.
     ``owned_rows`` carries each projected child set's constructor restriction into
     the terminal filter and the outward correlation without replacing the shared
-    request-wide target visibility queryset.
+    request-wide target visibility queryset. ``null_view`` is the chain a forward
+    ``RelatedFilter`` head overriding ``filter`` reads for its own ``null_value``
+    (``_head_null_view``): the head as declared, its relation read through ``view``.
     """
 
     hops: tuple[RelationHop, ...]
@@ -2367,6 +2443,7 @@ class _LeafChain:
     fallback: _LeafChain | None = None
     view: tuple[RelationHop, ...] = ()
     owned_rows: tuple[models.QuerySet[models.Model] | None, ...] = ()
+    null_view: _LeafChain | None = None
 
     def decoding_filters(self) -> tuple[Filter, ...]:
         """Return every filter this chain decodes a GlobalID value in, each as it is bound.
@@ -2676,8 +2753,9 @@ def _filter_paths(filterset: type[FilterSet]) -> Iterator[str]:
     (``filters/base.py::_filterset_walked_lookup``), a relation its ``lookup_expr``
     continues across included: that is the path its walk reads.
 
-    A ``RelatedFilter`` (declared, or copied by an expansion) is a branch, not a
-    leaf; ``reject_captured_branches`` reads the declared ones apart.
+    A ``RelatedFilter`` (declared, or copied by an expansion) yields no path:
+    ``reject_captured_branches`` reads the declared ones apart, and a raw form's
+    walk of a head (``FilterSet._flat_leaf_walk``) captures no branch.
     """
     for filter_instance in filterset._filter_table().values():
         if not isinstance(filter_instance, RelatedFilter):
@@ -4223,9 +4301,44 @@ class FilterSet(
             )
             if self.is_bound:
                 self._form = form_class(self.data, prefix=self.form_prefix)
+                self._scope_supplied_heads(self._form)
             else:
                 self._form = form_class(prefix=self.form_prefix)
         return self._form
+
+    def _scope_supplied_heads(self, form: forms.Form) -> None:
+        """Narrow each supplied ``RelatedFilter`` head's choices to the rows the request may see.
+
+        A head the bound data names (``_leaf_absent``) validates its key against its own
+        queryset (``RelatedFilter.get_queryset``: the declaration's ``queryset=``, or the
+        target's base rows) within the rows its relation's target type lets this request
+        see (``_hop_visible_rows`` of the last hop its walk crosses, the hop map entry the
+        walk reads too), so a key naming a hidden row is refused as one naming no row is:
+        Django's ``ModelChoiceField`` answers both ``invalid_choice``. Set on the bound
+        form's own field before it cleans, as a Django form limits a ``ModelChoiceField``'s
+        choices. An absent head, a head that does not walk (``_flat_leaf_walk``: a
+        ``method=`` head, one crossing a hop with no registered target type), a field that
+        is no ``ModelChoiceField``, a declared ``ModelChoiceFilter`` (which keeps its own
+        validation) and every head of a set the request pipeline builds (GraphQL names
+        none) keep the choices django-filter built and run no ``get_queryset``. A sliced
+        queryset, which Django can no longer filter (and whose ``get`` refuses every key), is
+        kept too; the walk still scopes what the head matches, within the rows the slice
+        holds (``_admitted_rows``).
+        """
+        built = require(self.queryset, is_queryset)
+        for name, field in list(form.fields.items()):
+            if not truth.is_instance(field, _MODEL_CHOICE_FIELD):
+                continue
+            filter_instance = self._filter_named(name)
+            if not isinstance(filter_instance, RelatedFilter) or self._leaf_absent(name):
+                continue
+            walk = type(self)._flat_leaf_walk(filter_instance)
+            if walk is None:
+                continue
+            visible = self._hop_visible_rows(walk[0][-1], built.db)
+            choices = require(field.queryset, _is_choice_rows)
+            if not choices.query.is_sliced:
+                field.queryset = choices.filter(pk__in=Subquery(visible.values("pk")))
 
     # ------------------------------------------------------------------
     # Layer 4 - cycle-safe filter expansion (cookbook port).
@@ -6322,11 +6435,11 @@ class FilterSet(
         consumer supplied input for it, nested or flat), so a target that cannot
         be resolved raises ``ConfigurationError`` instead of being skipped:
         skipping would drop the visibility scoping and silently return rows the
-        target type hides.
+        target type hides. The resolution is ``_branch_target``'s.
         """
-        target_type = cls._target_type_for_related_filter(related_filter)
-        child_filterset = related_filter.filterset
-        if target_type is None or child_filterset is None:
+        resolved = cls._branch_target(related_filter)
+        if resolved is None:
+            child_filterset = related_filter.filterset
             child_model = getattr(
                 truth.static_attr(child_filterset, "_meta", None),
                 "model",
@@ -6349,9 +6462,28 @@ class FilterSet(
                 "silently return unfiltered rows. Register a DjangoType for "
                 "the target model or remove the RelatedFilter.",
             )
+        target_type, child_filterset = resolved
         # A branch's child filterset declares ``Meta.model``.
         child_model = require(child_filterset._meta.model, is_model_class)
         return target_type, child_filterset, base_queryset(child_model, using=parent_db)
+
+    @classmethod
+    def _branch_target(
+        cls,
+        related_filter: RelatedFilter,
+    ) -> tuple[type[DjangoType], type[FilterSet]] | None:
+        """Return a branch's target type and child filterset, ``None`` when either is unresolved.
+
+        The target type is ``_target_type_for_related_filter``'s, the child filterset the
+        declaration's own (``RelatedFilter.filterset``). An active branch whose target is
+        unresolved raises (``_branch_visibility_seed``); a ``RelatedFilter`` head whose walk
+        crosses one is not walked (``_flat_leaf_walk``).
+        """
+        target_type = cls._target_type_for_related_filter(related_filter)
+        child_filterset = related_filter.filterset
+        if target_type is None or child_filterset is None:
+            return None
+        return target_type, child_filterset
 
     @classmethod
     def _derive_related_visibility_querysets_sync(
@@ -6873,11 +7005,18 @@ class FilterSet(
         (``UndeclaredHop.scope``), a filter declared on this set holding a ``filter`` of its
         own (``_own_filter``: a consumer ``method=`` or a callable stored on the instance;
         its Python receives this set's queryset and owns its own scoping; GOAL.md "Trust
-        boundary"), a ``RelatedFilter`` (a branch, never a leaf), and a
-        ``ProjectedChildFilter``, whose hop is its projection (``_projection_hop``).
+        boundary"), and a ``ProjectedChildFilter``, whose hop is its projection
+        (``_projection_hop``). A ``RelatedFilter`` head, own or copied by an expansion, is a
+        relation-key leaf on a raw form (``FilterSet(data=...)``, ``DjangoFilterBackend``,
+        ``FilterView``): its value names the related row, so it walks its path as the
+        relation key ``shelf`` or ``shelves__books__shelf`` does; GraphQL names no head. A
+        head whose walk crosses a declared hop with no resolved target (``_branch_target``:
+        no ``DjangoType`` registered for its model, or no child filterset) is ``None`` too:
+        no visibility rule exists there, so the head runs as declared, over its
+        declaration's queryset.
         """
         if (
-            isinstance(filter_instance, (ProjectedChildFilter, RelatedFilter))
+            isinstance(filter_instance, ProjectedChildFilter)
             or _own_filter(filter_instance) is not None
         ):
             return None
@@ -6889,6 +7028,12 @@ class FilterSet(
             undeclared=True,
         )
         if not any(isinstance(hop, DeclaredHop) or hop.scope is not None for hop in hops):
+            return None
+        if isinstance(filter_instance, RelatedFilter) and any(
+            isinstance(hop, DeclaredHop)
+            and cls._branch_target(_filter_declaration(hop)[1]) is None
+            for hop in hops
+        ):
             return None
         return hops, LOOKUP_SEP.join(remainder)
 
@@ -7637,8 +7782,9 @@ class FilterSet(
         relation joined through each hop's visible rows (``_LeafChain.view``,
         ``_relation_view``), or, where a many-to-many on the path names no through key
         (``_names_every_through``), the leaf re-bound to the target key over the visible
-        target rows. Every declared hop's target set resolves: a caller derives (or checks)
-        the hops first.
+        target rows. A forward ``RelatedFilter`` head running consumer code, one hop or more,
+        carries as ``null_view`` the chain its own ``null_value`` reads (``_head_null_view``).
+        Every declared hop's target set resolves: a caller derives (or checks) the hops first.
         """
         if isinstance(filter_instance, ProjectedChildFilter):
             projection = filter_instance._projection
@@ -7708,7 +7854,10 @@ class FilterSet(
         shipped = _runs_shipped_filter(filter_instance)
         to_many = path_traverses_to_many(owner_model, relation)
         if not to_many and (shipped or len(hops) == 1):
-            return cls._folded_key_chain(filter_instance, hops, relation, bind)
+            return replace(
+                cls._folded_key_chain(filter_instance, hops, relation, bind),
+                null_view=_head_null_view(filter_instance, hops),
+            )
         # The relation's last link names the target column Django's relation lookup
         # compares: the target's primary key, or a single non-key ``to_field``. A
         # GlobalID / raw-key leaf marked for a non-pk ``to_field`` carries the pk.
@@ -7750,6 +7899,7 @@ class FilterSet(
             )
             if to_many
             else cls._folded_key_chain(filter_instance, hops, relation, bind),
+            null_view=None if to_many else _head_null_view(filter_instance, hops),
         )
 
     def _relation_view(
@@ -7985,9 +8135,13 @@ class FilterSet(
         asking whether an absent leaf constrains); one whose value names no row
         (``_KeyMatch.named_rows``) reads its ``fallback``: a forward key's leaf comparing
         the stored key it holds, a to-many key's leaf as declared through its relation's
-        visible rows (``_LeafChain.view``).
+        visible rows (``_LeafChain.view``). A forward head overriding ``filter`` sent its own
+        ``null_value`` reads its ``null_view`` (``_head_null_view``), one hop or more.
         Every other chain is returned as it is, naming nothing.
         """
+        null_view = chain.null_view
+        if null_view is not None and value == read_attr(null_view.terminal, "null_value", None):
+            return null_view, None
         match = chain.key_match
         if match is None:
             return chain, None
@@ -8069,6 +8223,18 @@ class FilterSet(
             # Only a compiled lookup can raise it, so the leaf constrains something.
             return True
 
+    def _walks_on_request(self, name: str, filter_instance: Filter) -> bool:
+        """Whether leaf ``name`` takes the branch path (``_apply_relation_leaf``) on this request.
+
+        Every leaf ``_walks_relation_hops`` reads, except a ``RelatedFilter`` head the
+        request left absent (``_leaf_absent``), which runs as declared: its shipped
+        ``filter`` skips the absent value, and GraphQL names no head, so a set the request
+        pipeline builds never walks one.
+        """
+        if isinstance(filter_instance, RelatedFilter) and self._leaf_absent(name):
+            return False
+        return type(self)._walks_relation_hops(filter_instance)
+
     @classmethod
     def _walks_relation_hops(cls, filter_instance: Filter) -> bool:
         """Whether a leaf of this set takes the branch path (``_apply_relation_leaf``).
@@ -8108,9 +8274,7 @@ class FilterSet(
         hops: list[RelationHop] = []
         for name, value in self._cleaned_leaf_items():
             filter_instance = self._filter_named(name)
-            if not type(self)._walks_relation_hops(filter_instance) or not self._leaf_absent(
-                name,
-            ):
+            if not self._walks_on_request(name, filter_instance) or not self._leaf_absent(name):
                 continue
             if self._recorded_verdict(name, value) is not None:
                 continue
@@ -8404,7 +8568,10 @@ class FilterSet(
         hop lets the request see (``_relation_view``), so a default, a queryset or an
         instance it reads, and a path it continues past the relation, answer as
         unwalked over the visible related rows; the rows it keeps need no further
-        reach test, and ``exclude`` negates at the parent as above.
+        reach test, and ``exclude`` negates at the parent as above. A forward
+        ``RelatedFilter`` head overriding ``filter`` sent its own ``null_value`` runs the
+        same way, over the rows each relation shows and each declaration's ``queryset=``
+        admits (``_LeafChain.null_view``).
         """
         if not supplied:
             applies = self._recorded_verdict(name, value)
@@ -8634,11 +8801,17 @@ class FilterSet(
             if not self._leaf_absent(name):
                 _refuse_generated_filter_output(filter_instance, None, type(self))
             value = _held_integer_value(filter_instance, cleaned, queryset)
-            if type(self)._walks_relation_hops(filter_instance):
+            if self._walks_on_request(name, filter_instance):
+                walked, walked_value = (
+                    _head_null_test(filter_instance, value)
+                    if isinstance(filter_instance, RelatedFilter)
+                    and _runs_shipped_filter(filter_instance)
+                    else (filter_instance, value)
+                )
                 queryset = self._apply_relation_leaf(
                     queryset,
-                    filter_instance,
-                    value,
+                    walked,
+                    walked_value,
                     supplied=not self._leaf_absent(name),
                     name=name,
                 )

@@ -73,6 +73,8 @@ from apps.products.models import Category, Item
 from apps.scalars import models as scalar_models
 from asgiref.sync import sync_to_async
 from django import forms
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser
 from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.contrib.contenttypes.models import ContentType
 from django.db import DEFAULT_DB_ALIAS, connection, connections, models
@@ -85,6 +87,7 @@ from django.db.models import Lookup, Q, QuerySet
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django.db.models.functions import Length, Upper
 from django.forms import ModelChoiceField, ModelMultipleChoiceField
+from django.forms.utils import ErrorDict
 from django.http import HttpRequest, QueryDict
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext, isolate_apps, register_lookup
@@ -110,11 +113,17 @@ from django_filters.filterset import FilterSetMetaclass as DjangoFilterMetaclass
 from django_filters.utils import label_for_filter
 from django_filters.widgets import SuffixedMultiWidget
 from graphql import GraphQLError
+from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework import (
+    DjangoConnection,
+    DjangoConnectionField,
+    DjangoSchema,
     DjangoType,
+    ErrorPolicy,
     finalize_django_types,
+    strawberry_config,
 )
 from django_strawberry_framework.exceptions import ConfigurationError, PathResolutionError
 from django_strawberry_framework.filters import (
@@ -185,6 +194,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_list_or_tuple,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.permissions import (
@@ -17512,3 +17522,1135 @@ def test_a_through_key_django_cannot_name_keeps_the_key_column_fallback(
     finally:
         with connection.schema_editor() as editor:
             editor.delete_model(RkSelfPeer)
+
+
+# ---------------------------------------------------------------------------
+# Raw-form RelatedFilter heads: shapes no fakeshop set declares. The live rows (DRF's
+# backend, ``FilterView``, a consumer's set against the ``/graphql/`` twin) are
+# ``examples/fakeshop/test_query/test_direct_filter_actor_api.py``'s.
+# ---------------------------------------------------------------------------
+
+
+def _viewer_is_staff(info: object) -> bool:
+    """Whether the request a hook's ``info`` carries belongs to staff."""
+    request = read_attr(read_attr(info, "context"), "request")
+    return read_attr(read_attr(request, "user"), "is_staff") is True
+
+
+def _declare_hiding_types() -> tuple[type[DjangoType], type[DjangoType]]:
+    """Register types hiding ``topic="secret"`` shelves and books in repair from non-staff."""
+
+    class ShelfType(DjangoType):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("id", "code")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[library_models.Shelf],
+            info: object,
+        ) -> QuerySet[library_models.Shelf]:
+            return queryset if _viewer_is_staff(info) else queryset.exclude(topic="secret")
+
+    class BookType(DjangoType):
+        class Meta:
+            model = library_models.Book
+            fields = ("id", "title")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[library_models.Book],
+            info: object,
+        ) -> QuerySet[library_models.Book]:
+            if _viewer_is_staff(info):
+                return queryset
+            return queryset.exclude(
+                circulation_status=library_models.Book.CirculationStatus.REPAIR,
+            )
+
+    return ShelfType, BookType
+
+
+def _raw_head_answer(
+    filterset_class: type[FilterSet],
+    queryset: QuerySet[django_models.Model],
+    query: dict[str, str],
+    column: str,
+    *,
+    staff: bool,
+) -> list[str] | dict[str, list[str]]:
+    """Build ``filterset_class`` over ``query`` with a request, as a consumer view does.
+
+    Answers the matched rows' ``column``, or each refused field's error codes.
+    """
+    request = HttpRequest()
+    request.user = get_user_model()(username="staff", is_staff=True) if staff else AnonymousUser()
+    data = QueryDict(mutable=True)
+    data.update(query)
+    filterset = filterset_class(data, queryset=queryset, request=request)
+    if not filterset.is_valid():
+        refused = require_instance(filterset.form.errors, ErrorDict).as_data()
+        return {name: [str(error.code) for error in errors] for name, errors in refused.items()}
+    return sorted(filterset.qs.values_list(column, flat=True))
+
+
+def _raw_head_world() -> dict[str, int]:
+    """Branches with an open shelf, only a secret shelf, a shelf holding only a book in repair, none."""
+    home = library_models.Branch.objects.create(name="Home", city="Boston")
+    secret_only = library_models.Branch.objects.create(name="SecretOnly", city="Boston")
+    repair_only = library_models.Branch.objects.create(name="RepairOnly", city="Boston")
+    _ = library_models.Branch.objects.create(name="NoShelves", city="Boston")
+    open_shelf = library_models.Shelf.objects.create(code="S-open", topic="general", branch=home)
+    secret = library_models.Shelf.objects.create(code="S-secret", topic="secret", branch=home)
+    _ = library_models.Shelf.objects.create(
+        code="S-secret-only",
+        topic="secret",
+        branch=secret_only,
+    )
+    repairs = library_models.Shelf.objects.create(
+        code="S-repairs",
+        topic="general",
+        branch=repair_only,
+    )
+    b_open = library_models.Book.objects.create(title="b-open", shelf=open_shelf)
+    b_secret = library_models.Book.objects.create(title="b-secret", shelf=secret)
+    b_repair = library_models.Book.objects.create(
+        title="b-repair",
+        shelf=repairs,
+        circulation_status=library_models.Book.CirculationStatus.REPAIR,
+    )
+    return {
+        "open": require_instance(open_shelf.pk, int),
+        "secret": require_instance(secret.pk, int),
+        "b_open": require_instance(b_open.pk, int),
+        "b_secret": require_instance(b_secret.pk, int),
+        "b_repair": require_instance(b_repair.pk, int),
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("key", "anonymous", "staff"),
+    [
+        pytest.param("shelves", ["NoShelves", "SecretOnly"], ["NoShelves"], id="own-head"),
+        pytest.param(
+            "shelves__books",
+            ["NoShelves", "RepairOnly", "SecretOnly"],
+            ["NoShelves", "SecretOnly"],
+            id="copied-head",
+        ),
+    ],
+)
+def test_a_raw_heads_null_sentinel_matches_a_parent_with_no_visible_related_row(
+    key: str,
+    anonymous: list[str],
+    staff: list[str],
+) -> None:
+    """``<head>=null`` under a ``null_label`` is the relation's null test over the visible rows.
+
+    django-filter's ``ChoiceFilter`` answers its ``null_value`` with ``<relation>__exact=None``
+    (Django's ``isnull``); walked, a parent whose related rows the request may not see matches
+    as one with none does, as the ``isNull: true`` twin does.
+    """
+    _ = _declare_hiding_types()
+
+    class NullBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class NullShelfFilter(FilterSet):
+        books = RelatedFilter(NullBookFilter, field_name="books", null_label="NONE")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class NullBranchFilter(FilterSet):
+        shelves = RelatedFilter(NullShelfFilter, field_name="shelves", null_label="NONE")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    _ = NullBranchFilter.get_filters()
+    _ = _raw_head_world()
+    branches = library_models.Branch.objects.order_by("pk")
+    query = {key: "null"}
+
+    assert _raw_head_answer(NullBranchFilter, branches, query, "name", staff=False) == anonymous
+    assert _raw_head_answer(NullBranchFilter, branches, query, "name", staff=True) == staff
+
+
+@pytest.mark.django_db
+def test_a_raw_head_over_a_hidden_intermediate_shelf_matches_nothing() -> None:
+    """An own head spanning several relations walks each intermediate model's visible rows.
+
+    ``back`` spans ``branch__shelves__books``: a book on a shelf the viewer cannot see links
+    no shelf of the same branch, while one on a visible shelf links every shelf of it.
+    """
+    _ = _declare_hiding_types()
+
+    class BackBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class LoneShelfFilter(FilterSet):
+        back = RelatedFilter(BackBookFilter, field_name="branch__shelves__books")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    pks = _raw_head_world()
+    shelves = library_models.Shelf.objects.order_by("pk")
+    through_hidden = {"back": str(pks["b_secret"])}
+    through_visible = {"back": str(pks["b_open"])}
+    both = ["S-open", "S-secret"]
+
+    assert _raw_head_answer(LoneShelfFilter, shelves, through_hidden, "code", staff=False) == []
+    assert _raw_head_answer(LoneShelfFilter, shelves, through_hidden, "code", staff=True) == both
+    assert _raw_head_answer(LoneShelfFilter, shelves, through_visible, "code", staff=False) == both
+
+
+class _PkRelatedFilter(RelatedFilter):
+    """A ``RelatedFilter`` whose form field reads the related row's key as an integer."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        return forms.IntegerField(label=self.label, required=False)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "head",
+        "value",
+        "anonymous",
+        "staff",
+    ),
+    [
+        pytest.param("shelf", "open", ["b-open"], ["b-open"], id="forward-visible"),
+        pytest.param("shelf", "secret", [], ["b-secret"], id="forward-hidden"),
+        pytest.param("books", "b_repair", [], ["S-repairs"], id="reverse-hidden"),
+    ],
+)
+def test_a_raw_head_whose_field_is_no_model_choice_walks_unscoped_choices(
+    head: str,
+    value: str,
+    anonymous: list[str],
+    staff: list[str],
+) -> None:
+    """A head whose form field reads no queryset is walked, its key never refused for a hidden row."""
+    _ = _declare_hiding_types()
+
+    class PkBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class PkShelfFilter(FilterSet):
+        books = _PkRelatedFilter(PkBookFilter, field_name="books")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class PkShelvedBookFilter(FilterSet):
+        shelf = _PkRelatedFilter(PkShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    pks = _raw_head_world()
+    rows: dict[str, tuple[type[FilterSet], QuerySet[django_models.Model], str]] = {
+        "shelf": (PkShelvedBookFilter, library_models.Book.objects.order_by("pk"), "title"),
+        "books": (PkShelfFilter, library_models.Shelf.objects.order_by("pk"), "code"),
+    }
+    filterset_class, queryset, column = rows[head]
+    query = {head: str(pks[value])}
+
+    assert _raw_head_answer(filterset_class, queryset, query, column, staff=False) == anonymous
+    assert _raw_head_answer(filterset_class, queryset, query, column, staff=True) == staff
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("multiple", [False, True], ids=["single", "multiple"])
+def test_a_declared_model_choice_filter_keeps_its_own_choices(*, multiple: bool) -> None:
+    """A declared ``ModelChoiceFilter`` over a head's relation validates against its own queryset.
+
+    Its walk matches nothing through a hidden row; only a ``RelatedFilter`` head's choices are
+    narrowed to the visible rows.
+    """
+    _ = _declare_hiding_types()
+
+    class AnyShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    every_shelf = library_models.Shelf.objects.all()
+
+    class AnyBookFilter(FilterSet):
+        shelf = RelatedFilter(AnyShelfFilter, field_name="shelf")
+        any_shelf = (
+            ModelMultipleChoiceFilter(field_name="shelf", queryset=every_shelf)
+            if multiple
+            else ModelChoiceFilter(field_name="shelf", queryset=every_shelf)
+        )
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    pks = _raw_head_world()
+    books = library_models.Book.objects.order_by("pk")
+    query = {"any_shelf": str(pks["secret"])}
+
+    assert _raw_head_answer(AnyBookFilter, books, query, "title", staff=False) == []
+    assert _raw_head_answer(AnyBookFilter, books, query, "title", staff=True) == ["b-secret"]
+
+
+@pytest.mark.django_db
+def test_a_raw_method_head_receives_its_choice_unscoped() -> None:
+    """A ``method=`` head owns its scoping: its value is the choice django-filter validated."""
+    _ = _declare_hiding_types()
+    received: list[object] = []
+
+    class MethodShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class MethodBookFilter(FilterSet):
+        shelf = RelatedFilter(MethodShelfFilter, field_name="shelf", method="on_shelf")
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+        def on_shelf(
+            self,
+            queryset: QuerySet[library_models.Book],
+            name: str,
+            value: object,
+        ) -> QuerySet[library_models.Book]:
+            received.append(value)
+            return queryset.filter(**{name: value})
+
+    pks = _raw_head_world()
+    books = library_models.Book.objects.order_by("pk")
+    query = {"shelf": str(pks["secret"])}
+
+    assert _raw_head_answer(MethodBookFilter, books, query, "title", staff=False) == ["b-secret"]
+    assert received == [library_models.Shelf.objects.get(pk=pks["secret"])]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "head",
+    [
+        "own",
+        "copied",
+        "copied-through-an-unregistered-hop",
+        "copied-through-two-unregistered-hops",
+    ],
+)
+def test_a_raw_head_crossing_an_unregistered_target_runs_as_declared(head: str) -> None:
+    """A head whose walk crosses a model no ``DjangoType`` is registered for is not walked.
+
+    No visibility rule exists there, so the head runs over its declaration's queryset; the
+    walked key through the same hop raises, as an active branch over an unregistered target
+    does.
+    """
+
+    class DeskType(DjangoType):
+        class Meta:
+            model = library_models.CirculationDesk
+            fields = ("id", "name")
+
+    assert registry.get(library_models.CirculationDesk) is DeskType
+
+    class DeskFilter(FilterSet):
+        class Meta:
+            model = library_models.CirculationDesk
+            fields = {"name": ["exact"]}
+
+    class ContentTypeFilter(FilterSet):
+        desks = RelatedFilter(DeskFilter, field_name="library_circulation_desks")
+
+        class Meta:
+            model = ContentType
+            fields = {"app_label": ["exact"]}
+
+    class TagFilter(FilterSet):
+        content_type = RelatedFilter(ContentTypeFilter, field_name="content_type")
+
+        class Meta:
+            model = library_models.TaggedItem
+            fields = {"tag": ["exact"]}
+
+    class TaggedBranchFilter(FilterSet):
+        tags = RelatedFilter(TagFilter, field_name="tags")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    _ = TaggedBranchFilter.get_filters()
+    branch_type = ContentType.objects.get_for_model(library_models.Branch)
+    home = library_models.Branch.objects.create(name="Home", city="Boston")
+    shelf = library_models.Shelf.objects.create(code="S-open", topic="general", branch=home)
+    desk = library_models.CirculationDesk.objects.create(
+        name="Front",
+        branch=home,
+        shelf=shelf,
+        content_type=branch_type,
+    )
+    _ = library_models.TaggedItem.objects.create(
+        tag="flagship",
+        content_type=branch_type,
+        object_id=require_instance(home.pk, int),
+    )
+    tags = library_models.TaggedItem.objects.order_by("pk")
+    cases: dict[str, tuple[type[FilterSet], QuerySet[django_models.Model], str, str, int]] = {
+        "own": (
+            TagFilter,
+            tags,
+            "tag",
+            "content_type",
+            require_instance(read_attr(branch_type, "pk"), int),
+        ),
+        "copied": (
+            TaggedBranchFilter,
+            library_models.Branch.objects.order_by("pk"),
+            "name",
+            "tags__content_type",
+            require_instance(read_attr(branch_type, "pk"), int),
+        ),
+        "copied-through-an-unregistered-hop": (
+            TagFilter,
+            tags,
+            "tag",
+            "content_type__desks",
+            require_instance(desk.pk, int),
+        ),
+        "copied-through-two-unregistered-hops": (
+            TaggedBranchFilter,
+            library_models.Branch.objects.order_by("pk"),
+            "name",
+            "tags__content_type__desks",
+            require_instance(desk.pk, int),
+        ),
+    }
+    filterset_class, queryset, column, key, pk = cases[head]
+    expected = ["flagship"] if queryset is tags else ["Home"]
+
+    assert _raw_head_answer(filterset_class, queryset, {key: str(pk)}, column, staff=False) == (
+        expected
+    )
+    with pytest.raises(ConfigurationError, match="no DjangoType is registered"):
+        _ = _raw_head_answer(
+            TagFilter,
+            tags,
+            {"content_type__app_label": "library"},
+            "tag",
+            staff=False,
+        )
+
+
+class _SameTitleRelatedFilter(RelatedFilter):
+    """A to-many head whose ``filter`` matches shelves holding any book titled as the chosen one."""
+
+    @override
+    def filter(
+        self,
+        qs: QuerySet[django_models.Model],
+        value: object,
+    ) -> QuerySet[django_models.Model]:
+        if value in (None, ""):
+            return qs
+        return qs.filter(books__title=read_attr(value, "title")).distinct()
+
+
+class _BranchMatesRelatedFilter(RelatedFilter):
+    """A forward head whose ``filter`` matches books on any shelf of the chosen shelf's branch."""
+
+    @override
+    def filter(
+        self,
+        qs: QuerySet[django_models.Model],
+        value: object,
+    ) -> QuerySet[django_models.Model]:
+        if value in (None, ""):
+            return qs
+        return qs.filter(shelf__branch=read_attr(value, "branch"))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "head",
+        "value",
+        "anonymous",
+        "staff",
+    ),
+    [
+        pytest.param("books", "b_open", ["S-open"], ["S-open"], id="to-many-names-its-row"),
+        pytest.param("books", "b_annex", ["S-annex"], ["S-annex"], id="to-many-other-row"),
+        pytest.param("shelf", "open", ["dup"], ["b-secret", "dup"], id="forward"),
+    ],
+)
+def test_a_raw_head_overriding_filter_follows_the_overridden_relation_key_rule(
+    head: str,
+    value: str,
+    anonymous: list[str],
+    staff: list[str],
+) -> None:
+    """A head overriding ``filter`` runs once as declared and keeps parents reaching its visible row.
+
+    The overridden relation key's rule: its value names the rows it keeps, so a to-many head
+    keeps only the shelves holding the book it names, not every shelf its Python's own path
+    (``books__title``) reaches, and a forward head keeps only books reaching a visible shelf.
+    """
+    _ = _declare_hiding_types()
+
+    class SameBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class SameShelfFilter(FilterSet):
+        books = _SameTitleRelatedFilter(SameBookFilter, field_name="books")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class MatesBookFilter(FilterSet):
+        shelf = _BranchMatesRelatedFilter(SameShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    home = library_models.Branch.objects.create(name="Home", city="Boston")
+    annex = library_models.Branch.objects.create(name="Annex", city="Boston")
+    open_shelf = library_models.Shelf.objects.create(code="S-open", topic="general", branch=home)
+    secret = library_models.Shelf.objects.create(code="S-secret", topic="secret", branch=home)
+    annex_shelf = library_models.Shelf.objects.create(
+        code="S-annex",
+        topic="general",
+        branch=annex,
+    )
+    b_open = library_models.Book.objects.create(title="dup", shelf=open_shelf)
+    _ = library_models.Book.objects.create(title="b-secret", shelf=secret)
+    b_annex = library_models.Book.objects.create(title="dup", shelf=annex_shelf)
+    pks = {
+        "open": require_instance(open_shelf.pk, int),
+        "b_open": require_instance(b_open.pk, int),
+        "b_annex": require_instance(b_annex.pk, int),
+    }
+    rows: dict[str, tuple[type[FilterSet], QuerySet[django_models.Model], str]] = {
+        "books": (SameShelfFilter, library_models.Shelf.objects.order_by("pk"), "code"),
+        "shelf": (MatesBookFilter, library_models.Book.objects.order_by("pk"), "title"),
+    }
+    filterset_class, queryset, column = rows[head]
+    query = {head: str(pks[value])}
+
+    assert _raw_head_answer(filterset_class, queryset, query, column, staff=False) == anonymous
+    assert _raw_head_answer(filterset_class, queryset, query, column, staff=True) == staff
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("head", ["shelf", "books"])
+def test_a_raw_head_over_a_sliced_queryset_refuses_every_key(head: str) -> None:
+    """A head whose ``queryset=`` is sliced keeps it unnarrowed: Django refuses every key there."""
+    _ = _declare_hiding_types()
+
+    class SlicedBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class SlicedShelfFilter(FilterSet):
+        books = RelatedFilter(
+            SlicedBookFilter,
+            field_name="books",
+            queryset=library_models.Book.objects.order_by("pk")[:10],
+        )
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class SlicedShelvedBookFilter(FilterSet):
+        shelf = RelatedFilter(
+            SlicedShelfFilter,
+            field_name="shelf",
+            queryset=library_models.Shelf.objects.order_by("pk")[:10],
+        )
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    pks = _raw_head_world()
+    rows: dict[str, tuple[type[FilterSet], QuerySet[django_models.Model], str, int]] = {
+        "shelf": (
+            SlicedShelvedBookFilter,
+            library_models.Book.objects.order_by("pk"),
+            "title",
+            pks["open"],
+        ),
+        "books": (
+            SlicedShelfFilter,
+            library_models.Shelf.objects.order_by("pk"),
+            "code",
+            pks["b_open"],
+        ),
+    }
+    filterset_class, queryset, column, pk = rows[head]
+
+    assert _raw_head_answer(filterset_class, queryset, {head: str(pk)}, column, staff=True) == {
+        head: ["invalid_choice"],
+    }
+
+
+class _NullAwareRelatedFilter(RelatedFilter):
+    """A head whose ``filter`` answers its own null value with its relation's null test."""
+
+    @override
+    def filter(
+        self,
+        qs: QuerySet[django_models.Model],
+        value: object,
+    ) -> QuerySet[django_models.Model]:
+        if value in (None, ""):
+            return qs
+        field_name = str(self.field_name)
+        if value == read_attr(self, "null_value"):
+            return qs.filter(**{f"{field_name}__isnull": True})
+        return qs.filter(**{field_name: value})
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("key", "viewer", "expected"),
+    [
+        pytest.param("shelves", "anonymous", ["NoShelves", "SecretOnly"], id="own-anonymous"),
+        pytest.param("shelves", "staff", ["NoShelves"], id="own-staff"),
+        pytest.param(
+            "shelves__books",
+            "anonymous",
+            ["NoShelves", "RepairOnly", "SecretOnly"],
+            id="copied-anonymous",
+        ),
+        pytest.param("shelves__books", "staff", ["NoShelves", "SecretOnly"], id="copied-staff"),
+    ],
+)
+def test_a_raw_head_overriding_filter_receives_its_null_value_over_the_visible_join(
+    key: str,
+    viewer: str,
+    expected: list[str],
+) -> None:
+    """An overriding head's null value names no row: its ``filter`` runs as declared on it.
+
+    It receives its own ``null_value`` unchanged, over its relation joined only to the rows
+    the request may see, so a parent whose related rows are all hidden reads as one with none.
+    """
+    _ = _declare_hiding_types()
+
+    class NullAwareBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class NullAwareShelfFilter(FilterSet):
+        books = _NullAwareRelatedFilter(NullAwareBookFilter, field_name="books", null_label="NONE")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class NullAwareBranchFilter(FilterSet):
+        shelves = _NullAwareRelatedFilter(
+            NullAwareShelfFilter,
+            field_name="shelves",
+            null_label="NONE",
+        )
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    _ = NullAwareBranchFilter.get_filters()
+    _ = _raw_head_world()
+    branches = library_models.Branch.objects.order_by("pk")
+
+    assert (
+        _raw_head_answer(
+            NullAwareBranchFilter,
+            branches,
+            {key: "null"},
+            "name",
+            staff=viewer == "staff",
+        )
+        == expected
+    )
+
+
+def _declare_publisher_types() -> None:
+    """Register types hiding publishers named ``Secret...`` from non-staff, and editions."""
+
+    class PublisherType(DjangoType):
+        class Meta:
+            model = library_models.Publisher
+            fields = ("id", "name")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[library_models.Publisher],
+            info: object,
+        ) -> QuerySet[library_models.Publisher]:
+            if _viewer_is_staff(info):
+                return queryset
+            return queryset.exclude(name__startswith="Secret")
+
+    class EditionType(DjangoType):
+        class Meta:
+            model = library_models.Edition
+            fields = ("isbn_13",)
+
+    del PublisherType, EditionType
+
+
+def _forward_head_world() -> dict[str, int]:
+    """Editions with no second publisher (``E-none``), a visible one and a hidden one.
+
+    Each has one printing; the two with a second publisher carry the ``Open`` imprint.
+    """
+    open_house = library_models.Publisher.objects.create(name="Open", house_code="OPN")
+    secret_house = library_models.Publisher.objects.create(name="SecretHouse", house_code="SEC")
+    editions = (
+        library_models.Edition.objects.create(isbn_13="E-none", publisher=open_house),
+        library_models.Edition.objects.create(
+            isbn_13="E-open",
+            imprint="Open",
+            publisher=open_house,
+            publisher_2=open_house,
+        ),
+        library_models.Edition.objects.create(
+            isbn_13="E-secret",
+            imprint="Open",
+            publisher=open_house,
+            publisher_2=secret_house,
+        ),
+    )
+    for run_size, edition in enumerate(editions, start=1):
+        _ = library_models.Printing.objects.create(edition=edition, run_size=run_size)
+    return {
+        "open": require_instance(open_house.pk, int),
+        "secret": require_instance(secret_house.pk, int),
+    }
+
+
+def _forward_head_sets(
+    head: Callable[[type[FilterSet]], RelatedFilter],
+) -> tuple[type[FilterSet], type[FilterSet]]:
+    """Return an ``Edition`` set declaring ``head`` and a ``Printing`` set copying it."""
+
+    class HeadPublisherFilter(FilterSet):
+        class Meta:
+            model = library_models.Publisher
+            fields = {"name": ["exact"]}
+
+    class HeadEditionFilter(FilterSet):
+        publisher_2 = head(HeadPublisherFilter)
+
+        class Meta:
+            model = library_models.Edition
+            fields = {"imprint": ["exact"]}
+
+    class HeadPrintingFilter(FilterSet):
+        edition = RelatedFilter(HeadEditionFilter, field_name="edition")
+
+        class Meta:
+            model = library_models.Printing
+            fields = {"run_size": ["exact"]}
+
+    _ = HeadPrintingFilter.get_filters()
+    return HeadEditionFilter, HeadPrintingFilter
+
+
+def _forward_head_answer(
+    sets: tuple[type[FilterSet], type[FilterSet]],
+    key: str,
+    value: str,
+    *,
+    staff: bool,
+) -> list[str] | dict[str, list[str]]:
+    """Answer ``key=value`` on the ``Edition`` set (own head) or the ``Printing`` set (copied)."""
+    if key == "publisher_2":
+        queryset = library_models.Edition.objects.order_by("pk")
+        return _raw_head_answer(sets[0], queryset, {key: value}, "isbn_13", staff=staff)
+    printings = library_models.Printing.objects.order_by("pk")
+    return _raw_head_answer(sets[1], printings, {key: value}, "edition__isbn_13", staff=staff)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("key", "viewer", "expected"),
+    [
+        pytest.param("publisher_2", "anonymous", ["E-none", "E-secret"], id="own-anonymous"),
+        pytest.param("publisher_2", "staff", ["E-none"], id="own-staff"),
+        pytest.param(
+            "edition__publisher_2",
+            "anonymous",
+            ["E-none", "E-secret"],
+            id="copied-anonymous",
+        ),
+        pytest.param("edition__publisher_2", "staff", ["E-none"], id="copied-staff"),
+    ],
+)
+def test_a_forward_raw_head_overriding_filter_receives_its_null_value_over_the_visible_join(
+    key: str,
+    viewer: str,
+    expected: list[str],
+) -> None:
+    """A forward overriding head's null value names no row, one relation away or two.
+
+    Its ``filter`` receives its own ``null_value`` unchanged, over its relation joined only to
+    the rows the request may see, so an edition whose second publisher is hidden reads as one
+    with none, as a to-many head's null value does.
+    """
+    _declare_publisher_types()
+    sets = _forward_head_sets(
+        lambda target: _NullAwareRelatedFilter(
+            target,
+            field_name="publisher_2",
+            null_label="NONE",
+        ),
+    )
+    _ = _forward_head_world()
+
+    assert _forward_head_answer(sets, key, "null", staff=viewer == "staff") == expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "head",
+        "key",
+        "viewer",
+        "expected",
+    ),
+    [
+        pytest.param("shipped", "publisher_2", "anonymous", ["E-none", "E-secret"], id="own"),
+        pytest.param("shipped", "edition__publisher_2", "staff", ["E-none"], id="copied"),
+        pytest.param(
+            "overriding",
+            "publisher_2",
+            "anonymous",
+            ["E-none", "E-secret"],
+            id="overriding-own",
+        ),
+        pytest.param(
+            "overriding",
+            "edition__publisher_2",
+            "staff",
+            ["E-none"],
+            id="overriding-copied",
+        ),
+    ],
+)
+def test_a_raw_heads_null_value_over_a_sliced_queryset_runs_over_the_visible_join(
+    head: str,
+    key: str,
+    viewer: str,
+    expected: list[str],
+) -> None:
+    """A sliced ``queryset=`` head walks its null value within the rows the slice holds."""
+    _declare_publisher_types()
+    head_class = RelatedFilter if head == "shipped" else _NullAwareRelatedFilter
+    sets = _forward_head_sets(
+        lambda target: head_class(
+            target,
+            field_name="publisher_2",
+            null_label="NONE",
+            queryset=library_models.Publisher.objects.order_by("pk")[:10],
+        ),
+    )
+    _ = _forward_head_world()
+
+    assert _forward_head_answer(sets, key, "null", staff=viewer == "staff") == expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "key",
+        "value",
+        "anonymous",
+        "staff",
+    ),
+    [
+        pytest.param("shelves__books", "b_open", ["Home"], ["Home"], id="copied-head"),
+        pytest.param("shelves__books__title", "b-open", ["Home"], ["Home"], id="walked-book"),
+        pytest.param("shelves__code", "S-open", ["Home"], ["Home"], id="walked-shelf"),
+        pytest.param("shelves__code", "S-secret", [], [], id="walked-outside-slice"),
+    ],
+)
+def test_a_walk_through_a_sliced_declared_hop_keeps_the_rows_the_slice_holds(
+    key: str,
+    value: str,
+    anonymous: list[str],
+    staff: list[str],
+) -> None:
+    """A hop whose declaration's ``queryset=`` is sliced admits its visible rows the slice holds.
+
+    The slice holds the first shelf alone (``S-open``), so a key through the hidden
+    ``S-secret`` matches nothing, staff included.
+    """
+    _ = _declare_hiding_types()
+
+    class SlicedHopBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class SlicedHopShelfFilter(FilterSet):
+        books = RelatedFilter(SlicedHopBookFilter, field_name="books")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class SlicedHopBranchFilter(FilterSet):
+        shelves = RelatedFilter(
+            SlicedHopShelfFilter,
+            field_name="shelves",
+            queryset=library_models.Shelf.objects.order_by("pk")[:1],
+        )
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    _ = SlicedHopBranchFilter.get_filters()
+    pks = _raw_head_world()
+    sent = str(pks[value]) if value in pks else value
+    branches = library_models.Branch.objects.order_by("pk")
+
+    for viewer, expected in (("anonymous", anonymous), ("staff", staff)):
+        assert (
+            _raw_head_answer(
+                SlicedHopBranchFilter,
+                branches,
+                {key: sent},
+                "name",
+                staff=viewer == "staff",
+            )
+            == expected
+        )
+
+
+class _NullAwareModelChoiceFilter(ModelChoiceFilter):
+    """A declared model-choice filter whose ``filter`` answers its null value with a null test."""
+
+    @override
+    def filter(
+        self,
+        qs: QuerySet[django_models.Model],
+        value: object,
+    ) -> QuerySet[django_models.Model]:
+        if value in (None, ""):
+            return qs
+        field_name = str(self.field_name)
+        if value == read_attr(self, "null_value"):
+            return qs.filter(**{f"{field_name}__isnull": True})
+        return qs.filter(**{field_name: value}).distinct()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("null_value", ["null", "0"], ids=["default-null-value", "null-value-0"])
+def test_a_declared_model_choice_override_keeps_its_null_value_routing(null_value: str) -> None:
+    """A declared to-many ``ModelChoiceFilter`` overriding ``filter`` is no head.
+
+    Its null value is read by the shipped comparison of its class, as a declared
+    relation-key leaf's value is, not as a head's value naming no row.
+    """
+    _ = _declare_hiding_types()
+
+    class ChoiceShelfFilter(FilterSet):
+        books_choice = _NullAwareModelChoiceFilter(
+            field_name="books",
+            queryset=library_models.Book.objects.all(),
+            null_label="NONE",
+            null_value=null_value,
+        )
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    home = library_models.Branch.objects.create(name="Home", city="Boston")
+    _ = library_models.Shelf.objects.create(code="S-empty", topic="general", branch=home)
+    repairs = library_models.Shelf.objects.create(code="S-repairs", topic="general", branch=home)
+    open_shelf = library_models.Shelf.objects.create(code="S-open", topic="general", branch=home)
+    _ = library_models.Book.objects.create(
+        title="b-repair",
+        shelf=repairs,
+        circulation_status=library_models.Book.CirculationStatus.REPAIR,
+    )
+    _ = library_models.Book.objects.create(title="b-open", shelf=open_shelf)
+    shelves = library_models.Shelf.objects.order_by("pk")
+
+    assert (
+        _raw_head_answer(
+            ChoiceShelfFilter,
+            shelves,
+            {"books_choice": null_value},
+            "code",
+            staff=False,
+        )
+        == []
+    )
+
+
+class _ImprintRelatedFilter(RelatedFilter):
+    """A forward head whose ``filter`` matches the editions carrying the chosen house's imprint."""
+
+    @override
+    def filter(
+        self,
+        qs: QuerySet[django_models.Model],
+        value: object,
+    ) -> QuerySet[django_models.Model]:
+        if value in (None, ""):
+            return qs
+        return qs.filter(imprint=read_attr(value, "name"))
+
+
+@pytest.mark.django_db
+def test_a_forward_raw_head_overriding_filter_keeps_a_visible_stored_key() -> None:
+    """A forward overriding head one relation away keeps parents whose key reaches a visible row.
+
+    Its ``filter`` runs once as declared over the editions; a kept edition's own second
+    publisher must be one the request may see.
+    """
+    _declare_publisher_types()
+    sets = _forward_head_sets(
+        lambda target: _ImprintRelatedFilter(target, field_name="publisher_2", null_label="NONE"),
+    )
+    pks = _forward_head_world()
+    value = str(pks["open"])
+
+    assert _forward_head_answer(sets, "publisher_2", value, staff=False) == ["E-open"]
+    assert _forward_head_answer(sets, "publisher_2", value, staff=True) == ["E-open", "E-secret"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("entry", ["apply_sync", "graphql"])
+@pytest.mark.parametrize(
+    ("code", "anonymous", "staff"),
+    [
+        pytest.param("S-open", ["Home"], ["Home"], id="inside-visible"),
+        pytest.param("S-secret", [], ["Home"], id="inside-hidden"),
+        pytest.param("S-secret-only", [], [], id="outside-slice"),
+    ],
+)
+def test_a_nested_branch_through_a_sliced_queryset_keeps_the_rows_the_slice_holds(
+    entry: str,
+    code: str,
+    anonymous: list[str],
+    staff: list[str],
+) -> None:
+    """A nested branch whose declaration's ``queryset=`` is sliced admits its visible rows there.
+
+    The slice holds the first two shelves (``S-open`` and the hidden ``S-secret``): a shelf
+    past it matches nothing for any viewer, and one in it only as the viewer sees it.
+    """
+    _ = _declare_hiding_types()
+
+    class NestedSlicedShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class NestedSlicedBranchFilter(FilterSet):
+        shelves = RelatedFilter(
+            NestedSlicedShelfFilter,
+            field_name="shelves",
+            queryset=library_models.Shelf.objects.order_by("pk")[:2],
+        )
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    branch_node = type(
+        "NestedSlicedBranchNode",
+        (DjangoType,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": library_models.Branch,
+                    "fields": ("id", "name"),
+                    "interfaces": (relay.Node,),
+                    "filterset_class": NestedSlicedBranchFilter,
+                },
+            ),
+        },
+    )
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"rows": DjangoConnection[branch_node]},
+                "rows": DjangoConnectionField(branch_node),
+            },
+        ),
+    )
+    finalize_django_types()
+    schema = DjangoSchema(
+        query=query,
+        config=strawberry_config(),
+        error_policy=ErrorPolicy(enabled=False),
+    )
+    _ = _raw_head_world()
+
+    for viewer, expected in (("anonymous", anonymous), ("staff", staff)):
+        request = HttpRequest()
+        request.user = (
+            get_user_model()(username="staff", is_staff=True)
+            if viewer == "staff"
+            else AnonymousUser()
+        )
+        if entry == "apply_sync":
+            rows = NestedSlicedBranchFilter.apply_sync(
+                {"shelves": {"code": code}},
+                library_models.Branch.objects.order_by("pk"),
+                _make_info(request),
+            )
+            assert sorted(rows.values_list("name", flat=True)) == expected
+            continue
+        result = schema.execute_sync(
+            f'{{ rows(filter: {{shelves: {{code: {{exact: "{code}"}}}}}}) '
+            "{ edges { node { name } } } }",
+            context_value=_RequestContext(request),
+        )
+        assert result.errors is None, result.errors
+        assert result.data == {"rows": {"edges": [{"node": {"name": name}} for name in expected]}}
