@@ -123,12 +123,14 @@ class ShelfFilter(FilterSet):
     (``BranchType``) is not a Relay node, so it filters by a list of branch primary keys.
 
     The ``home_branch*`` filters are django-filter's own model-choice filters declared
-    over the ``branch`` foreign key. Each keeps its form validation: a value outside its
-    queryset (every branch but the ``city="restricted"`` ones) answers "Select a valid
-    choice". ``home_branch`` takes one branch pk, ``home_branches`` a list,
-    ``home_branch_named`` one branch ``name`` (its ``to_field_name``),
-    ``home_branch_in`` a list through the ``BaseInFilter`` wrapper,
-    ``home_branches_named`` a list of branch names, and
+    over the ``branch`` foreign key (``home_branches_named`` over its ``name``). Each
+    keeps its form validation: a value outside its queryset (every branch but the
+    ``city="restricted"`` ones) answers "Select a valid choice". ``home_branch`` takes
+    one branch pk, ``home_branches`` a list, ``home_branch_named`` one branch ``name``
+    (its ``to_field_name``), ``home_branch_in`` a list through the ``BaseInFilter`` wrapper,
+    ``home_branches_named`` a list of branch names (``field_name="branch__name"``: a
+    multiple-choice filter compares each value's ``to_field_name`` on its ``field_name``,
+    so that path ends on the ``name`` column), and
     ``home_branch_for_request`` one branch pk typed from the ``branch`` relation,
     since its callable queryset has no model until a request arrives.
 
@@ -161,7 +163,7 @@ class ShelfFilter(FilterSet):
     )
     home_branch_in = ModelChoiceInFilter(field_name="branch", queryset=_unrestricted_branches())
     home_branches_named = ModelMultipleChoiceFilter(
-        field_name="branch",
+        field_name="branch__name",
         queryset=_unrestricted_branches(),
         to_field_name="name",
     )

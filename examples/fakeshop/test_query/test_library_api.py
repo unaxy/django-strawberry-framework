@@ -2996,6 +2996,95 @@ def test_library_declared_model_choice_filter_takes_its_to_field_name_value_over
     _assert_invalid_choice(query, {"name": "Vault"}, "home_branch_named")
 
 
+class _NamedHomeBranchesRow(NamedTuple):
+    """One spelling of ``ShelfFilter.home_branches_named`` and the labels it answers.
+
+    ``filter_input`` holds ``$names``; ``root`` is the list field queried and ``label``
+    the field each row is read by. ``form_key`` is the key a refused name answers under.
+    """
+
+    root: str
+    filter_input: str
+    label: str
+    expected: list[str]
+    form_key: str
+
+
+_NAMED_HOME_BRANCHES_ROWS = {
+    "root": _NamedHomeBranchesRow(
+        root="allLibraryShelves",
+        filter_input="{ homeBranchesNamed: { exact: $names } }",
+        label="code",
+        expected=["N-1", "S-1"],
+        form_key="home_branches_named",
+    ),
+    "root-not": _NamedHomeBranchesRow(
+        root="allLibraryShelves",
+        filter_input="{ not: { homeBranchesNamed: { exact: $names } } }",
+        label="code",
+        expected=["V-1"],
+        form_key="not__home_branches_named",
+    ),
+    "nested": _NamedHomeBranchesRow(
+        root="allLibraryBooks",
+        filter_input="{ shelf: { homeBranchesNamed: { exact: $names } } }",
+        label="title",
+        expected=["N-1 book", "S-1 book"],
+        form_key="shelf__home_branches_named",
+    ),
+    "from-genres": _NamedHomeBranchesRow(
+        root="allLibraryGenres",
+        filter_input="{ books: { shelf: { homeBranchesNamed: { exact: $names } } } }",
+        label="name",
+        expected=["N-1 genre", "S-1 genre"],
+        form_key="books__shelf__home_branches_named",
+    ),
+    "flat-from-genres": _NamedHomeBranchesRow(
+        root="allLibraryGenres",
+        filter_input="{ booksShelfHomeBranchesNamed: { exact: $names } }",
+        label="name",
+        expected=["N-1 genre", "S-1 genre"],
+        form_key="books__shelf__home_branches_named",
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("row", list(_NAMED_HOME_BRANCHES_ROWS))
+def test_library_declared_model_multiple_choice_filter_takes_its_to_field_name_values_over_http(
+    row: str,
+) -> None:
+    """``home_branches_named`` takes a list of branch names, checked against its queryset.
+
+    The filter is django-filter's ``to_field_name`` idiom (``field_name="branch__name"``,
+    ``to_field_name="name"``): its form field looks each name up in the queryset, and the
+    predicate compares the names with the ``name`` column ``field_name`` reaches. A list of
+    permitted names filters in two statements (the form's lookup, then the rows); a list
+    holding the restricted branch's name is the form's "Select a valid choice" after the
+    lookup alone, under the key of the spelling sent.
+    """
+    _seed_shelves_on_home_branches()
+    for shelf in models.Shelf.objects.order_by("code"):
+        book = models.Book.objects.create(title=f"{shelf.code} book", shelf=shelf)
+        book.genres.add(models.Genre.objects.create(name=f"{shelf.code} genre"))
+    case = _NAMED_HOME_BRANCHES_ROWS[row]
+    query = (
+        f"query ($names: [String!]) {{ {case.root}(filter: {case.filter_input}) {{"
+        f" {case.label} }} }}"
+    )
+
+    with CaptureQueriesContext(connection) as captured:
+        _assert_graphql_data(
+            query,
+            {case.root: [{case.label: label} for label in case.expected]},
+            variables={"names": ["North", "South"]},
+        )
+    assert len(captured) == 2, captured.captured_queries
+    with CaptureQueriesContext(connection) as captured:
+        _assert_invalid_choice(query, {"names": ["North", "Vault"]}, case.form_key)
+    assert len(captured) == 1, captured.captured_queries
+
+
 @pytest.mark.django_db
 def test_library_declared_model_choice_filter_with_a_callable_queryset_over_http() -> None:
     """A callable queryset is called with the request, and its rows decide validity."""
@@ -3183,6 +3272,17 @@ _FLAT_HOME_BRANCH_CASES = [
         form_key="shelf__home_branch_named",
     ),
     _FlatHomeBranchCase(
+        field="shelfHomeBranchesNamed",
+        lookup="exact",
+        variable_type="[String!]",
+        column="name",
+        many=True,
+        permitted=("North", "South"),
+        permitted_books=["N-1 book", "S-1 book"],
+        restricted=("North", "Vault"),
+        form_key="shelf__home_branches_named",
+    ),
+    _FlatHomeBranchCase(
         field="shelfHomeBranchIn",
         lookup="in",
         variable_type="[Int!]",
@@ -3226,7 +3326,7 @@ def test_library_flat_expanded_declared_filter_keeps_its_own_validation_over_htt
     """A flat expansion of a child's declared filter binds that filter's own form key.
 
     ``BookFilter`` expands ``shelf = RelatedFilter(ShelfFilter)``, so each
-    ``ShelfFilter.home_branch*`` model-choice filter (``field_name="branch"``) also
+    ``ShelfFilter.home_branch*`` model-choice filter (over the ``branch`` relation) also
     appears flat as ``shelfHomeBranch*``. The flat field binds the expanded copy
     (``shelf__home_branch*``), so the copy's own queryset decides validity: a
     permitted branch filters the books, the restricted one answers "Select a valid

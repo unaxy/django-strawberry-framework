@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 473 done, 122 to do. The CHANGELOG entries filed here moved to
+Progress: 474 done, 122 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2396,6 +2396,15 @@ Progress: 473 done, 122 to do. The CHANGELOG entries filed here moved to
   per-request "invalid order path" error. Pinned by
   `tests/orders/test_finalizer.py::test_related_order_whose_field_name_is_not_a_path_of_relations_is_refused_at_finalize`
   and `::test_a_declaration_two_sets_down_is_audited_from_the_model_the_outer_relation_reached`
+- [x] 869. The fakeshop `ShelfFilter.home_branches_named` declares django-filter's `to_field_name` idiom
+  (`field_name="branch__name"`, `to_field_name="name"`), so root, `not`, nested, flat (`shelfHomeBranchesNamed`) and
+  genres spellings answer the named branches' rows, where every valid name list answered the masked `ValueError`; a
+  restricted or unknown name stays the form's `invalid_choice` under the same key; the leaf walks `branch` as a hop
+  under `BranchType` visibility; the SDL is byte-identical. Pinned by
+  `examples/fakeshop/test_query/test_library_api.py::test_library_declared_model_multiple_choice_filter_takes_its_to_field_name_values_over_http`
+  (root, `not`, nested, genres nested and flat; exact statement counts) and the `shelfHomeBranchesNamed` row of
+  `::test_library_flat_expanded_declared_filter_keeps_its_own_validation_over_http`. Example-only, no CHANGELOG entry.
+  Filed 871
 
 ## Outside review of the fixes
 
@@ -2663,18 +2672,21 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `ConfigurationError` naming the declaration and the filter family rewraps both
   (`tests/orders/test_finalizer.py::test_an_unresolved_target_two_sets_down_raises_its_import_error_at_finalize` pins
   the bare error). Found fixing 752
-- [ ] 869. (fakeshop) The shipped `examples/fakeshop/apps/library/filters.py::ShelfFilter.home_branches_named`
-  (`ModelMultipleChoiceFilter(field_name="branch", to_field_name="name")`, documented as "a list of branch names")
-  answers the masked `ValueError` "Field 'id' expected a number" for every valid name list, on
-  `allLibraryShelves(filter: {homeBranchesNamed: ...})`, nested `shelf: {homeBranchesNamed}`, flat
-  `shelfHomeBranchesNamed` and from genres, as django-filter does for that declaration (819); no live row sends a
-  valid value. django-filter's spelling is `field_name="branch__name"`. Found fact-finding 819
 - [ ] 870. (robustness) A `ModelMultipleChoiceFilter` with a `to_field_name` on a to-many relation key answers by the
   `to_field_name` column walked and by the target key unwalked: `field_name="issues", to_field_name="number"` on a
   `Periodical` set answers `[]` at the root (django-filter's `issues=100` against the Issue pk) and the issues
   numbered 100 / 101 through a flat or raw parent key (`filters/sets.py::_LeafChain.terminal_value` /
   `_relation_key_value` re-read the cleaned instances' keys). One declaration, two answers, the 789 family; a forward
   key (`CardItem.card`, `number`) answers `[]` both ways. Found fact-finding 819
+- [ ] 871. A `ModelMultipleChoiceFilter(field_name="branch__name", to_field_name="name", queryset=<callable>)`
+  (django-filter's `to_field_name` idiom, accepted by stock django-filter) is refused at schema build: "its field_name
+  names no relation on the FilterSet model ... point field_name at a relation"
+  (`filters/inputs.py::_model_choice_identity_annotation` -> `filters/base.py::model_choice_identity_column`), though
+  the column is knowable (`field_name` ends on the `to_field_name` field of the path's last model); the same
+  declaration with a model `queryset=` builds and answers. The remedy, and the README / GLOSSARY "Relation leaves"
+  clause "or of the relation its `field_name` names when `queryset` is a callable", steer the consumer to
+  `field_name="branch"`, which builds and answers the masked `ValueError` on every value (819). GOAL success criterion
+  7. Found researching 869
 ## To do: holes found re-checking the fixes
 
 
