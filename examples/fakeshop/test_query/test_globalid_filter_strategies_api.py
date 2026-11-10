@@ -8,9 +8,13 @@ key, through a ``GenericRelation`` too; one on a ``GenericForeignKey`` is refuse
 its set publishes its filters, served or applied unbound, unless a ``method`` filters it.
 A relation key whose hops re-enter its own set's table takes the id the type registered
 for the relation's target mints, under its published name, whichever type the set or the
-walk's target rows answer for.
+walk's target rows answer for, and so does a consumer leaf ending on the re-entry's
+primary key past an undeclared hop (``shelf__books__id``), served, applied sync or async,
+and on the raw form. An id only a ``get_queryset`` annotation holds compares only over
+rows its type answers for, and is refused over rows another type answers for.
 """
 
+import asyncio
 import functools
 import json
 import logging
@@ -22,8 +26,10 @@ from typing import NamedTuple
 import pytest
 import strawberry
 from apps.library import models
+from asgiref.sync import sync_to_async
 from django.contrib.contenttypes.models import ContentType
-from django.db.models import Model, QuerySet
+from django.db.models import CharField, Model, QuerySet, Value
+from django.db.models.functions import Cast, Concat
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
@@ -37,6 +43,7 @@ from graphql_client import (
     json_list,
     json_object,
     json_str,
+    response_json,
 )
 from strategy_schemas import make_django_type
 from strawberry import relay
@@ -62,14 +69,16 @@ from django_strawberry_framework.filters import (
     RelatedFilter,
 )
 from django_strawberry_framework.registry import registry
+from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import is_queryset, require, require_instance
-from django_strawberry_framework.views import DjangoGraphQLView
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _URL = "/graphql-globalid-strategies/"
+_ASYNC_URL = "/graphql-globalid-strategies-async/"
 
 
 @wraps(DjangoGraphQLView.as_view())
@@ -79,7 +88,17 @@ def _view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
-urlpatterns = [path("graphql-globalid-strategies/", _view)]
+@wraps(AsyncDjangoGraphQLView.as_view())
+async def _async_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [
+    path("graphql-globalid-strategies/", _view),
+    path("graphql-globalid-strategies-async/", _async_view),
+]
 
 
 def _branches() -> None:
@@ -604,6 +623,24 @@ def _hiding(*pks: int) -> "classmethod[DjangoType, ..., QuerySet[Model]]":
     return classmethod(get_queryset)
 
 
+#: The text the keyed worlds' ``node_key`` annotation puts before a row's key.
+_KEY_PREFIX = "k"
+
+
+def _keyed() -> "classmethod[DjangoType, ..., QuerySet[Model]]":
+    """A ``get_queryset`` hook annotating ``node_key`` (``k<pk>``), which no column holds."""
+
+    def get_queryset(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[Model]:
+        return queryset.annotate(node_key=Concat(Value(_KEY_PREFIX), Cast("id", CharField())))
+
+    return classmethod(get_queryset)
+
+
 def _custom_typename() -> "classmethod[DjangoType, ..., str]":
     """Return a consumer ``resolve_typename``, which classifies its type ``custom``."""
 
@@ -1061,6 +1098,111 @@ def _hidden_named_row(rows: _Library) -> _Reentry:
     )
 
 
+def _trailing_pk_leaf(
+    rows: _Library,
+    key: str,
+    *,
+    secondary: object = "type",
+    exclude: bool = False,
+    hop_hook: bool = False,
+) -> _Reentry:
+    """A consumer ``GlobalIDFilter`` on ``key``, ending on a re-entry's primary key.
+
+    ``shelf__books__id`` / ``__pk`` or ``genres__books__id`` on a ``Book`` set wired to a
+    ``secondary`` whose ``get_queryset`` scopes the walk's hops back to ``Book``; with
+    ``hop_hook`` the secondary declares none and a ``Shelf`` type scopes the earlier
+    hop. The id names the target row as the type registered for ``Book`` does, as the
+    unscoped leaf and the bare key's do; with ``exclude`` the filter excludes the rows.
+    """
+    filterset = _declared_set(models.Book, GlobalIDFilter(field_name=key, exclude=exclude))
+    primary, secondary_type = _pair(
+        models.Book,
+        filterset,
+        secondary=secondary,
+        hook=not hop_hook,
+    )
+    extra = (
+        (
+            make_django_type(
+                "ReentryBookShelf",
+                models.Shelf,
+                ("id",),
+                namespace_extra={"get_queryset": _hiding(0)},
+            ),
+        )
+        if hop_hook
+        else ()
+    )
+    books = rows.books
+    named = {
+        saved_pk(books[title])
+        for title in (("bk1", "bk3") if key.startswith("genres") else ("bk1", "bk2"))
+    }
+    every = {saved_pk(book) for book in books.values()}
+    return _Reentry(
+        filterset,
+        secondary_type,
+        (primary, *extra),
+        ("leaf", "exact"),
+        ("leaf", "exact"),
+        "leaf",
+        _gid("library.book", books["bk1"]),
+        sorted(every - named if exclude else named),
+        _gid("ReentryBookSecondary", books["bk1"]),
+        _mismatch("library.book", "ReentryBookSecondary", listed=False),
+        listed=False,
+    )
+
+
+def _patron_trailing_pk_leaf(_rows: _Library) -> _Reentry:
+    """``card__patron__id`` on a ``Patron`` set: a reverse one-to-one, then back forward."""
+    patrons = {patron.name: patron for patron in models.Patron.objects.all()}
+    for name, patron in patrons.items():
+        models.MembershipCard.objects.create(patron=patron, barcode=name)
+    filterset = _declared_set(models.Patron, GlobalIDFilter(field_name="card__patron__id"))
+    primary, secondary = _pair(models.Patron, filterset)
+    return _Reentry(
+        filterset,
+        secondary,
+        (primary, make_django_type("ReentryPatronCard", models.MembershipCard, ("id",))),
+        ("leaf", "exact"),
+        ("leaf", "exact"),
+        "leaf",
+        _gid("library.patron", patrons["p1"]),
+        _pks(patrons["p1"]),
+        _gid("ReentryPatronSecondary", patrons["p1"]),
+        _mismatch("library.patron", "ReentryPatronSecondary", listed=False),
+        listed=False,
+    )
+
+
+def _off_pk_trailing_pk_leaf(rows: _Library) -> _Reentry:
+    """``printings_2__co_publishers__id`` on ``Publisher``: its primary's id is its house code."""
+    filterset = _declared_set(
+        models.Publisher,
+        GlobalIDFilter(field_name="printings_2__co_publishers__id"),
+    )
+    primary, secondary = _pair(models.Publisher, filterset, node_id="house_code")
+    named = rows.publishers["h2"]
+    return _Reentry(
+        filterset,
+        secondary,
+        (
+            primary,
+            make_django_type("ReentryPrinting", models.Printing, ("id",)),
+            make_django_type("ReentryEdition", models.Edition, ("isbn_13",)),
+        ),
+        ("leaf", "exact"),
+        ("leaf", "exact"),
+        "leaf",
+        _gid("library.publisher", named.house_code),
+        _pks(rows.publishers["h1"]),
+        _gid("ReentryPublisherSecondary", named),
+        _mismatch("library.publisher", "ReentryPublisherSecondary", listed=False),
+        listed=False,
+    )
+
+
 _REENTRIES: dict[str, Callable[[_Library], _Reentry]] = {
     "generated-key": functools.partial(_book_key, shape="generated"),
     "declared-key": functools.partial(_book_key, shape="single"),
@@ -1078,6 +1220,31 @@ _REENTRIES: dict[str, Callable[[_Library], _Reentry]] = {
     "callable-secondary": functools.partial(_encode_only_secondary, strategy="callable"),
     "custom-secondary": functools.partial(_encode_only_secondary, strategy="custom"),
     "hidden-named-row": _hidden_named_row,
+    "trailing-id": functools.partial(_trailing_pk_leaf, key="shelf__books__id"),
+    "trailing-pk": functools.partial(_trailing_pk_leaf, key="shelf__books__pk"),
+    "many-to-many-trailing-id": functools.partial(_trailing_pk_leaf, key="genres__books__id"),
+    "to-one-trailing-id": _patron_trailing_pk_leaf,
+    "trailing-id-past-a-scoped-hop": functools.partial(
+        _trailing_pk_leaf,
+        key="shelf__books__id",
+        hop_hook=True,
+    ),
+    "off-key-node-id-trailing-id": _off_pk_trailing_pk_leaf,
+    "callable-secondary-trailing-id": functools.partial(
+        _trailing_pk_leaf,
+        key="shelf__books__id",
+        secondary=_encode_by_name,
+    ),
+    "custom-secondary-trailing-id": functools.partial(
+        _trailing_pk_leaf,
+        key="shelf__books__id",
+        secondary="custom",
+    ),
+    "excluded-trailing-id": functools.partial(
+        _trailing_pk_leaf,
+        key="shelf__books__id",
+        exclude=True,
+    ),
 }
 
 
@@ -1092,11 +1259,23 @@ def _reentry_schema(world: _Reentry) -> DjangoSchema:
     def _applied(info: Info[object, object], where: JSON) -> QuerySet[Model]:
         return world.filterset.apply_sync(where, model._default_manager.order_by("pk"), info)
 
+    async def _applied_async(info: Info[object, object], where: JSON) -> list[Model]:
+        rows = await world.filterset.apply_async(
+            where,
+            model._default_manager.order_by("pk"),
+            info,
+        )
+        return await sync_to_async(list)(rows)
+
     @strawberry.type
     class Query:
         rows = DjangoConnectionField(world.root, resolver=_all_rows)
         applied: QuerySet[Model] = strawberry.field(
             resolver=_applied,
+            graphql_type=StrawberryList(world.root),
+        )
+        applied_async: list[Model] = strawberry.field(
+            resolver=_applied_async,
             graphql_type=StrawberryList(world.root),
         )
 
@@ -1128,6 +1307,26 @@ def _wire_literal(names: tuple[str, ...], value: str | list[str]) -> str:
     return literal
 
 
+async def _async_post(
+    schema: DjangoSchema,
+    query: str,
+    variables: Mapping[str, object],
+) -> JSONObject:
+    """Post ``query`` to the async view serving ``schema`` and return the parsed payload."""
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            result = await AsyncTestClient(path=_ASYNC_URL).query(
+                query,
+                variables,
+                assert_no_errors=False,
+            )
+    finally:
+        _CURRENT["schema"] = None
+    assert result.response.status_code == 200
+    return response_json(result.response)
+
+
 def _reentry_answer(world: _Reentry, global_id: str, driver: str) -> list[int] | str:
     """The pks ``driver`` answers for ``global_id`` in ``world``, or its error message."""
     value = world.value(global_id)
@@ -1149,6 +1348,15 @@ def _reentry_answer(world: _Reentry, global_id: str, driver: str) -> list[int] |
         query = f"{{ rows(filter: {_wire_literal(world.wire, value)}) {{ edges {{ node {{ id }} }} }} }}"
         payload = _post(schema, query)
         path: tuple[str, ...] = ("rows", "edges")
+    elif driver == "apply-async":
+        payload = asyncio.run(
+            _async_post(
+                schema,
+                "query($where: JSON!) { appliedAsync(where: $where) { id } }",
+                {"where": _nested(world.path, value)},
+            ),
+        )
+        path = ("appliedAsync",)
     else:
         payload = _post(
             schema,
@@ -1163,7 +1371,10 @@ def _reentry_answer(world: _Reentry, global_id: str, driver: str) -> list[int] |
         json_str(row, "node", "id") if driver == "live" else json_str(row, "id")
         for row in rows_out
     ]
-    return sorted(int(relay.GlobalID.from_id(node_id).node_id) for node_id in node_ids)
+    return sorted(
+        int(relay.GlobalID.from_id(node_id).node_id.removeprefix(_KEY_PREFIX))
+        for node_id in node_ids
+    )
 
 
 #: The worlds whose answer reads the executing schema's published names, which a raw form lacks.
@@ -1188,7 +1399,10 @@ def test_a_reentry_key_serves_the_id_its_relation_target_type_mints(
     scoping the walk or not, a proxy root's type), the key's id is the one the type
     registered for the relation's target mints, under the name the executing schema
     published for it and in its ``NodeID`` column, as an unscoped key's is: it answers
-    the exact rows reaching the row it names over the visible target rows.
+    the exact rows reaching the row it names over the visible target rows. A leaf
+    ending on the re-entry's primary key (``shelf__books__id``, ``__pk``) names it so
+    too, an encode-only secondary's set included, and excludes those rows under
+    ``exclude=True``.
     """
     world = _REENTRIES[name](_library())
 
@@ -1205,6 +1419,140 @@ def test_a_reentry_key_refuses_an_id_its_relation_target_type_does_not_mint(
     world = _REENTRIES[name](_library())
 
     assert _reentry_answer(world, world.refused, driver) == world.refusal
+
+
+_ASYNC_ROWS = ["trailing-id", "many-to-many-trailing-id"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("name", _ASYNC_ROWS)
+def test_a_reentry_leaf_applied_async_serves_the_id_its_relation_target_type_mints(
+    name: str,
+) -> None:
+    """``apply_async`` names the re-entry's row as the type registered for its relation does."""
+    world = _REENTRIES[name](_library())
+
+    assert _reentry_answer(world, world.accepted, "apply-async") == world.expected
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("name", _ASYNC_ROWS)
+def test_a_reentry_leaf_applied_async_refuses_the_id_its_set_type_mints(name: str) -> None:
+    """``apply_async`` refuses the id the secondary the set is bound to mints."""
+    world = _REENTRIES[name](_library())
+
+    assert _reentry_answer(world, world.refused, "apply-async") == world.refusal
+
+
+def _keyed_leaf(rows: _Library, shape: str) -> _Reentry:
+    """A GlobalID leaf ending on ``Book``'s key, whose primary's ``NodeID`` is ``node_key``.
+
+    ``node_key`` is an annotation the primary's ``get_queryset`` adds, so only rows the
+    primary answers for carry it. ``foreign-*`` shapes walk ``shelf__books__id`` or
+    ``genres__books__id`` on a ``Book`` set wired to a scoping ``type`` secondary, whose
+    rows lack it; ``owned-reentry`` walks ``shelf__books__id`` on a ``Book`` set wired to
+    the primary itself, and ``owned-relation`` ``books__id`` on a ``Shelf`` set, both over
+    rows the primary answers for.
+    """
+    key = {
+        "foreign-reverse-foreign-key": "shelf__books__id",
+        "foreign-many-to-many": "genres__books__id",
+        "owned-reentry": "shelf__books__id",
+        "owned-relation": "books__id",
+    }[shape]
+    model = models.Shelf if shape == "owned-relation" else models.Book
+    filterset = _declared_set(model, GlobalIDFilter(field_name=key))
+    wired = {"filterset_class": filterset, "connection": {"total_count": True}}
+    primary = make_django_type(
+        "ReentryKeyedBook",
+        models.Book,
+        ("id",),
+        meta_extra={
+            "primary": True,
+            "globalid_strategy": "model",
+            **(wired if shape == "owned-reentry" else {}),
+        },
+        namespace_extra={
+            "__annotations__": {"node_key": relay.NodeID[str]},
+            "get_queryset": _keyed(),
+        },
+    )
+    if shape == "owned-reentry":
+        root, types = primary, ()
+    elif shape == "owned-relation":
+        shelf = make_django_type("ReentryKeyedShelf", models.Shelf, ("id",), meta_extra=wired)
+        root, types = shelf, (primary,)
+    else:
+        root = make_django_type(
+            "ReentryKeyedSecondary",
+            models.Book,
+            ("id",),
+            meta_extra={"primary": False, "globalid_strategy": "type", **wired},
+            namespace_extra={"get_queryset": _hiding(0)},
+        )
+        types = (primary,)
+    books = rows.books
+    # A ``foreign-*`` shape answers no rows: the id is refused.
+    expected = (
+        _pks(rows.shelves["s1"])
+        if shape == "owned-relation"
+        else _pks(books["bk1"], books["bk2"])
+        if shape == "owned-reentry"
+        else []
+    )
+    return _Reentry(
+        filterset,
+        root,
+        types,
+        ("leaf", "exact"),
+        ("leaf", "exact"),
+        "leaf",
+        _gid("library.book", f"{_KEY_PREFIX}{saved_pk(books['bk1'])}"),
+        expected,
+        listed=False,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("driver", ["live", "apply-sync", "form"])
+@pytest.mark.parametrize("shape", ["foreign-reverse-foreign-key", "foreign-many-to-many"])
+def test_a_reentry_leaf_refuses_an_id_an_annotation_holds_over_rows_another_type_scopes(
+    shape: str,
+    driver: str,
+) -> None:
+    """The primary's ``node_key`` is not on rows the secondary answers for: a coded refusal.
+
+    The leaf's unscoped twin and the bare key refuse it alike, never compare it on the
+    walk's rows.
+    """
+    world = _keyed_leaf(_library(), shape)
+
+    assert _reentry_answer(world, world.accepted, driver) == (
+        "GlobalID filter target ReentryKeyedBook carries its id in 'node_key', which no "
+        "model column holds, so a filter across a relation cannot compare it."
+    )
+
+
+#: ``applied`` serves the model's own rows, which lack the ``node_key`` the keyed primary's
+#: ``id`` reads, so the set wired to that primary answers live and on the raw form.
+_OWNED_KEYED_ROWS = [
+    pytest.param(shape, driver, id=f"{shape}-{driver}")
+    for shape in ("owned-reentry", "owned-relation")
+    for driver in ("live", "apply-sync", "form")
+    if shape != "owned-reentry" or driver != "apply-sync"
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("shape", "driver"), _OWNED_KEYED_ROWS)
+def test_a_leaf_compares_an_id_an_annotation_holds_over_rows_its_type_scopes(
+    shape: str,
+    driver: str,
+) -> None:
+    """Over rows the primary answers for, its ``node_key`` annotation is compared there."""
+    world = _keyed_leaf(_library(), shape)
+
+    assert _reentry_answer(world, world.accepted, driver) == world.expected
 
 
 def _untyped_walk(rows: _Library, shape: str) -> _Reentry:

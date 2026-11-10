@@ -2315,12 +2315,17 @@ class _GlobalIDTarget:
     minus a trailing scalar primary-key segment (``""`` for the owner's own id).
     ``slot`` is the type's id slot when its GlobalID carries an attribute other
     than the primary key (a consumer ``relay.NodeID[...]`` annotation), ``None``
-    when it carries the primary key.
+    when it carries the primary key. ``foreign_rows`` is whether the rows the filter
+    runs over answer for a type other than ``definition`` (an undeclared hop's face
+    re-entering the table of the type the walking set is bound to), so, as across a
+    relation, an id slot only ``definition``'s own ``get_queryset`` annotates is not
+    on them.
     """
 
     definition: DjangoTypeDefinition
     row_path: str
     slot: _OffPkIdSlot | None
+    foreign_rows: bool = False
 
 
 class _OffPkIdSlot(NamedTuple):
@@ -2356,11 +2361,15 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
 
     Reads the owner of the filter's runtime ``parent``: a filter set instance's
     class's own binding (``utils/permissions.py::set_bound_definition``, which
-    the finalizer's phase 2.5 wires, spec-027 #"Bind the owner."), or the
-    definition an undeclared hop's face carries, and resolves the LIVE
-    ``field_name`` (a leaf ``_expand_related_filter`` rebased resolves its
-    rebased path). Rows no definition answers for resolve from their model once
-    the registry is stable (``registry.is_finalized()``, or ``stable``: the
+    the finalizer's phase 2.5 wires, spec-027 #"Bind the owner."), or, for an
+    undeclared hop's face, the type registered for the face's model
+    (``registry.get``), as the unwalked relation's leaf resolves it
+    (``related_target_for``), whichever type the face's rows answer for (a leaf
+    ending on a re-entry's primary key names the relation's target type, never the
+    type the walking set is bound to; ``foreign_rows`` records that the two differ),
+    and resolves the LIVE ``field_name`` (a leaf ``_expand_related_filter`` rebased
+    resolves its rebased path). Rows no definition answers for resolve from their
+    model once the registry is stable (``registry.is_finalized()``, or ``stable``: the
     finalizer's build-time audit asks once every type is collected and its strategy
     stamped, ``types/finalizer.py::_audit_globalid_filter_strategies``, so the build
     resolves the definition a request resolves): an unbound set instance (a
@@ -2415,8 +2424,14 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     # class's own binding.
     face = truth.instance_dict(parent) or {}
     relation_only = False
+    foreign_rows = False
     if "_owner_definition" in face:
-        owner = optional_instance(face["_owner_definition"], DjangoTypeDefinition)
+        # A face's ids name the type registered for its model, as the unwalked relation's
+        # leaf names them (``related_target_for``), whichever type answers for its rows.
+        rows_definition = optional_instance(face["_owner_definition"], DjangoTypeDefinition)
+        face_meta = require_instance(face["_meta"], FilterSetOptions)
+        owner = registry.get_definition(registry.get(require(face_meta.model, is_model_class)))
+        foreign_rows = owner is not rows_definition
     else:
         owner = set_bound_definition(truth.class_of(parent))
         relation_only = owner is None
@@ -2449,7 +2464,7 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     definition, row_path = resolved
     if relation_only and not row_path:
         return None
-    return _GlobalIDTarget(definition, row_path, _off_pk_id_slot(definition))
+    return _GlobalIDTarget(definition, row_path, _off_pk_id_slot(definition), foreign_rows)
 
 
 def _resolve_globalid_target(
@@ -2766,7 +2781,7 @@ def _decode_and_validate_global_id(
         target is not None
         and target.slot is not None
         and target.slot.field is None
-        and target.row_path
+        and (target.row_path or target.foreign_rows)
     ):
         # A ``relay.NodeID`` over an attribute no model column holds (an annotation the
         # type's ``get_queryset`` adds) is comparable only on that type's own rows.

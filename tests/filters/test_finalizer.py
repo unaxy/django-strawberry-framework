@@ -2364,7 +2364,12 @@ def _desk_world(desk_set: str) -> None:
     _relay_type(Venue, ("id", "name"), name="VenueType")
 
 
-def _scoped_reentry_world(*, callable_primary: bool = False, key: str = "shelf__books") -> None:
+def _scoped_reentry_world(
+    *,
+    callable_primary: bool = False,
+    key: str = "shelf__books",
+    isnull: bool = False,
+) -> None:
     """``key`` re-enters ``Book`` past undeclared hops; a scoping secondary owns the set.
 
     The secondary is ``callable`` and the primary ``model``; with ``callable_primary`` the
@@ -2372,12 +2377,20 @@ def _scoped_reentry_world(*, callable_primary: bool = False, key: str = "shelf__
     the primary its relation reaches twice, in the declared predicate it builds on the
     owner's rows first (``_LeafChain.terminal_value``) and on the target rows, whose face
     answers for the secondary. ``key`` is ``shelf__books`` (a foreign key, then its
-    reverse) or ``genres__books`` (a many-to-many, then its reverse).
+    reverse) or ``genres__books`` (a many-to-many, then its reverse). With ``isnull`` the
+    set declares a ``GlobalIDFilter`` on ``key`` with ``lookup_expr="isnull"`` instead.
     """
     book_filter = type(
         "ReentryBookFilter",
         (FilterSet,),
-        {"Meta": type("Meta", (), {"model": Book, "fields": {key: ["exact"]}})},
+        {
+            **({"leaf": GlobalIDFilter(field_name=key, lookup_expr="isnull")} if isnull else {}),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": Book, "fields": [] if isnull else {key: ["exact"]}},
+            ),
+        },
     )
     _relay_type(
         Book,
@@ -2855,6 +2868,21 @@ def test_phase_2_5_admits_a_reentry_key_decoding_against_the_primary_its_relatio
     the ``model`` primary the relation reaches, so no encode-only type is a target.
     """
     _scoped_reentry_world(key=key)
+
+    finalize_django_types()
+
+
+@pytest.mark.parametrize("key", ["shelf__books", "genres__books"])
+def test_phase_2_5_admits_a_reentry_isnull_key_decoding_against_the_primary_its_relation_reaches(
+    key: str,
+) -> None:
+    """A scoped re-entry key's ``isnull`` leaf names its relation's primary, never its set's type.
+
+    Its terminal runs over the target rows' key on a face answering for the ``callable``
+    ``BookSecondary``; the id it validates is the one the type registered for ``Book``
+    mints, as its unscoped twin's is, so no encode-only type is a target.
+    """
+    _scoped_reentry_world(key=key, isnull=True)
 
     finalize_django_types()
 

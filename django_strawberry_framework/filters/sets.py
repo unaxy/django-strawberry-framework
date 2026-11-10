@@ -2591,10 +2591,13 @@ class _UndeclaredHopSet:
     No filter set owns the rows a relation no ``RelatedFilter`` declares reaches,
     so the copy of a leaf that runs over them (``FilterSet._bound_terminal``) is
     bound to this instead of a child filter set instance: ``_meta.model`` is the
-    hop's model (a raw-key or integer terminal coerces through it),
-    ``_owner_definition`` the definition of the type the rows answer for (a
-    GlobalID terminal validates against it, unless it is a to-many key's copy,
-    which validates what its leaf as declared validates), ``request`` the walking
+    hop's model (a raw-key or integer terminal coerces through it; a GlobalID
+    terminal validates against the type registered for it, as the unwalked
+    relation's leaf does, and a to-many key's copy validates what its leaf as
+    declared validates), ``_owner_definition`` the definition of the type the rows
+    answer for (on a re-entry the type the walking set is bound to, so a GlobalID
+    terminal whose id an annotation of the registered type's ``get_queryset`` holds
+    is refused when another type answers for the rows), ``request`` the walking
     set's and ``_projection_owner`` the walking set itself, whose request info names
     the schema a GlobalID terminal reads type names by (both ``None`` for the build's
     ask, ``FilterSet._globalid_decode_sites``).

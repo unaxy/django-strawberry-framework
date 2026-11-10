@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 210 to do.
+Progress: 0 done, 211 to do.
 
 ## From dry-0_0_15_3
 
@@ -987,6 +987,11 @@ Progress: 0 done, 210 to do.
   nested, flat, under `not` / `and` / `or` and in raw form. A `queryset=` pinned with `.using()` to an alias the
   request does not read is now refused, as Django refuses a subquery across databases, instead of being read on the
   request's alias
+- [ ] 859. CHANGELOG entry for item 849: a flat `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter` declared on a
+  re-entry's primary key (`field_name="shelf__books__id"` or `__pk`) on a filter set whose walk a type's
+  `get_queryset` scopes now accepts the ids the type registered for the relation's target mints, as the `shelfBooks`
+  key and the unscoped spelling do, instead of only the ids of the type the set is bound to. An annotation-held
+  `NodeID` there answers `GLOBALID_UNVALIDATABLE`, and a `callable` or `custom` secondary on such a set now builds
 
 ## From dry-upstream-0_0_15
 

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 466 done, 119 to do. The CHANGELOG entries filed here moved to
+Progress: 467 done, 120 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2290,6 +2290,23 @@ Progress: 466 done, 119 to do. The CHANGELOG entries filed here moved to
   reworded `test_filter_consumer_contracts_api.py::test_related_queryset_requires_the_exact_child_model_only_when_the_branch_is_active`.
   Docs: spec-027 Decision 8 step 4a, raw-form heads, checklist, Edge cases, Test plan and DoD 31. Filed 854, 855.
   CHANGELOGTODO 856
+- [x] 849. A consumer flat `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter` ending on a re-entry's primary key
+  (`shelf__books__id`, `__pk`, `genres__books__id`, `card__patron__id`), on a set whose walk an undeclared hop scopes
+  (a `get_queryset` on the walking set's type or on an earlier hop's type), now decodes against the type registered
+  for the relation's target, as its unscoped twin and the `shelf__books` key do, on live, `apply_sync`, `apply_async`
+  and the raw form. It validated against the walking set's bound secondary, so the scoped and unscoped spellings
+  accepted disjoint ids. `filters/base.py::_globalid_target`'s face branch takes the id authority from `registry.get`
+  of the face's model and keeps the face's `_owner_definition` (the walking set's type) for the rows;
+  `_GlobalIDTarget.foreign_rows` marks that case, and `::_decode_and_validate_global_id` refuses an annotation-held
+  `NodeID` there with `GLOBALID_UNVALIDATABLE`, as the twin does. An encode-only secondary on such a set now builds,
+  and an isnull key over it is admitted. The declared nested spelling (`shelf: {books: {id}}`) and a declared hop's
+  own `id` keep decoding against the child set's bound type (spec-031 Decision 13 restated; spec-027 rows, the
+  `filters/sets.py::_UndeclaredHopSet` docstring and the live README map follow). Grids: 1080 cell groups (3240
+  records) and 240 off-key cells moved, each onto its unscoped twin; 192 build refusals now build; no unscoped, key,
+  nested or `+decl` cell moved. Pinned by `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py` (nine
+  trailing-pk worlds served and refused on three drivers, the annotation refusal, the owned-rows compare,
+  `apply_async`) and
+  `tests/filters/test_finalizer.py::test_phase_2_5_admits_a_reentry_isnull_key_decoding_against_the_primary_its_relation_reaches`
 
 ## Outside review of the fixes
 
@@ -2529,18 +2546,28 @@ tracker number are recorded there; open remainders and new defects are filed as 
   under `null_label` answers it since 748. A to-many `ModelChoiceFilter(null_label=...)` overriding `filter`, sent
   `null` or its `null_value="0"`, answers `[]` at `fe4eb38f`, pinned as unchanged by
   `tests/filters/test_sets.py::test_a_declared_model_choice_override_keeps_its_null_value_routing`. Found fixing 748
-- [ ] 849. (robustness) A consumer `GlobalIDFilter(field_name="shelf__books__id")` (or `__pk`), the trailing-pk
-  spelling of a to-many re-entry key, on a Book set wired to a `type`-strategy secondary still validates against the
-  face's type when a hop is scoped. It accepts only the secondary's id and refuses `library.book`, while its unscoped
-  twin accepts only `library.book`, on all three drivers. So since 833 `shelf__books` and `shelf__books__id` on one
-  scoped set accept disjoint ids for the same rows. spec-031 Decision 13 keeps "a re-entry's own id decodes against
-  the secondary its set is bound to" for the declared nested spelling (`shelf: {books: {id}}`); whether the flat
-  undeclared spelling follows that or its unscoped twin is the first question. Found verifying 833
+- [ ] 851. Eight live rows in `examples/fakeshop/test_query/test_relation_filter_defaults_api.py` fail on main since
+  `93679177` (they pass at `62c68ea7`): `test_forward_placeholder_refuses_its_supplied_raw_form_leaf_over_http`,
+  `test_nested_placeholder_refuses_a_supplied_child_leaf_over_http` (2),
+  `test_raw_form_default_cannot_make_an_unresolved_child_branch_disappear` (2),
+  `test_raw_form_inactive_copy_never_derives_its_unresolved_child_branch` (2) and
+  `test_an_inactive_unresolved_relation_does_not_block_the_parents_own_leaf[forward-placeholder]`. A request through a
+  set whose `RelatedFilter` target is an unresolved placeholder answers a masked `TypeError: expected the type the
+  source guarantees, got NoneType`: `filters/sets.py::FilterSet._prepare_raw_form_binding` ->
+  `::FilterSet._postclean_binding_hops` -> `::FilterSet._necessary_annotation_hop` -> `::FilterSet._leaf_chain` ->
+  `::FilterSet._routed_leaf_chain` -> `::FilterSet._bound_terminal` -> `::_hop_target_set` (`require` on a hop with no
+  target set). Found while the release-prep session researched 818
 - [ ] 852. (robustness) A `required=True` own filter of a served set is not enforced over GraphQL when the request
   omits it: `filter: {}` (or a `filter:` naming only other keys) answers every row, under the package's and
   django-filter's form builders alike, while README says a `required` filter acts on the form of the set that declares
   it, at that set's root, and a directly built set refuses it
   (`tests/filters/test_sets.py::test_a_directly_built_set_takes_required_from_the_keys_owner`). Found fixing 216
+- [ ] 858. (robustness) An annotation-held `NodeID` over rows the id type scopes compares the annotation on the flat
+  trailing-pk spelling while the key spelling refuses with `GLOBALID_UNVALIDATABLE`: `books__id` vs `books` on a Shelf
+  set, `shelf__books__id` vs `shelf__books` on a set wired to the annotated primary. `docs/GLOSSARY.md` `FilterSet`
+  (an annotation-held id "compares only on the rows that hook returns: the type's own `id` key, and a `RelatedFilter`
+  hop ...") omits the flat owned-rows compare, while spec-027's copy of that sentence names the undeclared-hop leaf.
+  Which answer the two spellings share is the first question. Found fixing 849
 
 ## To do: holes found re-checking the fixes
 
