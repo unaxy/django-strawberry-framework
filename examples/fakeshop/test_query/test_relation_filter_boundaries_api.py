@@ -3,9 +3,12 @@
 Each consumer declares its RelatedFilter and applies a
 public JSON argument to an explicit ordered root queryset. Plain output types
 and an unfiltered sibling retain every root; target-type visibility and the
-declaration's queryset constrain only the relation being filtered. Shipped
-filters do not declare these ancestor/descendant target-set mismatches or the
-forward nonnullable Shelf admission boundary.
+declaration's queryset constrain only the relation being filtered. A
+declaration's queryset bounds only the paths whose walk crosses that
+declaration: a dotted key on a set declaring no such branch, reaching the same
+relation, answers for its hops' target types alone. Shipped filters do not
+declare these ancestor/descendant target-set mismatches or the forward
+nonnullable Shelf admission boundary.
 """
 
 from collections.abc import Sequence
@@ -14,9 +17,12 @@ from functools import wraps
 import pytest
 import strawberry
 from apps.library import models
+from apps.products.services import create_users
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AbstractUser
 from django.db import models as django_models
 from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
+from django.test import Client, override_settings
 from django.urls import path
 from django_filters import BooleanFilter, CharFilter
 from graphql_client import JSONObject, RecordCompiledSql, graphql_payload
@@ -451,3 +457,194 @@ def test_declaration_queryset_is_absence_for_a_forward_nonnullable_relation(
     }
     columns = ("shelf_id", "code") if path[0] == "no_shelf" else ("shelf_id", "code", "topic")
     _active_sql(sql, models.Book, (models.Shelf,), columns)
+
+
+_PERMANENT = "permanent collection"
+
+
+def _user_is_staff(info: object) -> bool:
+    """Unwrap ``info.context`` -> request -> user and report ``is_staff``."""
+    context = getattr(info, "context", None)
+    request = getattr(context, "request", None) or context
+    user = getattr(request, "user", None)
+    return isinstance(user, AbstractUser) and user.is_staff
+
+
+def _crossing_schema(*, declares_branch: bool) -> DjangoSchema:
+    class ShelfLeaf(FilterSet):
+        class Meta:
+            model = models.Shelf
+            fields = {"code": ["exact"]}
+
+    class ScopedBranch(FilterSet):
+        shelves = RelatedFilter(
+            ShelfLeaf,
+            field_name="shelves",
+            queryset=models.Shelf.objects.filter(topic=_PERMANENT),
+        )
+
+        class Meta:
+            model = models.Branch
+            fields = {"name": ["exact"]}
+
+    class DeclaringShelfSet(FilterSet):
+        branch = RelatedFilter(ScopedBranch, field_name="branch")
+
+        class Meta:
+            model = models.Shelf
+            fields = {"code": ["exact"], "branch__shelves__topic": ["exact"]}
+
+    class BareShelfSet(FilterSet):
+        class Meta:
+            model = models.Shelf
+            fields = {"code": ["exact"], "branch__shelves__topic": ["exact"]}
+
+    class BranchTarget(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("name",)
+
+    class HidingShelf(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("code",)
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: django_models.QuerySet[models.Shelf],
+            info: strawberry.Info[object, object],
+            **kwargs: object,
+        ) -> django_models.QuerySet[models.Shelf]:
+            return queryset if _user_is_staff(info) else queryset.exclude(topic="secret")
+
+    shelf_set = DeclaringShelfSet if declares_branch else BareShelfSet
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def rows(self, info: strawberry.Info[object, object], where: JSON) -> list[str]:
+            shelves = shelf_set.apply_sync(where, models.Shelf.objects.order_by("pk"), info)
+            return [shelf.code for shelf in shelves]
+
+    return _schema(Query, (BranchTarget, HidingShelf))
+
+
+def _post_codes(schema: DjangoSchema, where: JSONObject, client: Client) -> JSONObject:
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            return graphql_payload(
+                "query($where: JSON!) { rows(where: $where) }",
+                client=client,
+                variables={"where": where},
+                url="/graphql-mti-queryset-boundaries/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "declares_branch",
+        "topic",
+        "anonymous",
+        "staff",
+    ),
+    [
+        (
+            False,
+            _PERMANENT,
+            ["P1", "G1", "X1"],
+            ["P1", "G1", "X1"],
+        ),
+        (
+            False,
+            "general",
+            [
+                "P1",
+                "G1",
+                "X1",
+                "G2",
+            ],
+            [
+                "P1",
+                "G1",
+                "X1",
+                "G2",
+            ],
+        ),
+        (
+            False,
+            "secret",
+            [],
+            [
+                "P1",
+                "G1",
+                "X1",
+                "X2",
+            ],
+        ),
+        (
+            True,
+            _PERMANENT,
+            ["P1", "G1", "X1"],
+            ["P1", "G1", "X1"],
+        ),
+        (
+            True,
+            "general",
+            [],
+            [],
+        ),
+        (
+            True,
+            "secret",
+            [],
+            [],
+        ),
+    ],
+    ids=[
+        "undeclared-permanent",
+        "undeclared-general",
+        "undeclared-secret",
+        "declared-permanent",
+        "declared-general",
+        "declared-secret",
+    ],
+)
+def test_declaration_queryset_bounds_only_a_dotted_key_whose_walk_crosses_it(
+    *,
+    declares_branch: bool,
+    topic: str,
+    anonymous: list[str],
+    staff: list[str],
+) -> None:
+    """``branch__shelves__topic`` is bounded by ``ScopedBranch.shelves`` only through ``branch``.
+
+    On a Shelf set declaring ``branch = RelatedFilter(ScopedBranch)`` the key walks
+    the declared ``shelves`` hop and matches only shelves inside its ``queryset=``.
+    On a Shelf set that declares no ``branch`` the same key crosses no declaration:
+    it matches through a shelf outside that queryset, and only the target type's
+    ``get_queryset`` applies, so a shelf hidden from the anonymous actor never matches.
+    """
+    create_users(1)
+    branch = models.Branch.objects.create(name="Mixed")
+    general = models.Branch.objects.create(name="General only")
+    hidden = models.Branch.objects.create(name="Secret only")
+    for code, topic_value, owner in [
+        ("P1", _PERMANENT, branch),
+        ("G1", "general", branch),
+        ("X1", "secret", branch),
+        ("G2", "general", general),
+        ("X2", "secret", hidden),
+    ]:
+        models.Shelf.objects.create(code=code, topic=topic_value, branch=owner)
+    staff_client = Client()
+    staff_client.force_login(get_user_model().objects.get(username="staff_1"))
+    schema = _crossing_schema(declares_branch=declares_branch)
+    where = _where(("branch__shelves__topic",), topic)
+    for client, expected in ((Client(), anonymous), (staff_client, staff)):
+        assert _post_codes(schema, where, client) == {"data": {"rows": expected}}

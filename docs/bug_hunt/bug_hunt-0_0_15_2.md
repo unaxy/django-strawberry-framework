@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 474 done, 122 to do. The CHANGELOG entries filed here moved to
+Progress: 475 done, 121 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2405,6 +2405,15 @@ Progress: 474 done, 122 to do. The CHANGELOG entries filed here moved to
   (root, `not`, nested, genres nested and flat; exact statement counts) and the `shelfHomeBranchesNamed` row of
   `::test_library_flat_expanded_declared_filter_keeps_its_own_validation_over_http`. Example-only, no CHANGELOG entry.
   Filed 871
+- [x] 753. (docs) A `RelatedFilter`'s `queryset=` bounds exactly the paths whose walk crosses that declaration (its
+  nested branch, flat copies, a `Meta.fields` key or relation-key leaf walking it, a raw head, and a path entering it
+  through an outer declared branch); a dotted key whose walk crosses no declaration of it (another set's
+  `branch__shelves__topic` declaring no `branch`, `alt_shelves__topic`, `alt_shelves__branch__shelves__topic`) answers
+  for its hops' target types' `get_queryset` alone, so rows no route may reach belong in `get_queryset`. Stated in
+  spec-027 Decision 8 (preamble and step 3), its borrowing line, Edge cases, Test plan, Doc updates and DoD 31,
+  docs/README.md and GLOSSARY `FilterSet` (pk 463) and `RelatedFilter` (pk 495); no package change. Pinned by
+  `examples/fakeshop/test_query/test_relation_filter_boundaries_api.py::test_declaration_queryset_bounds_only_a_dotted_key_whose_walk_crosses_it`
+  (both sides, anonymous and staff)
 
 ## Outside review of the fixes
 
@@ -2445,11 +2454,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 753. (docs) A `RelatedFilter`'s `queryset=` bounds only paths through that declaration, not a dotted
-  `Meta.fields` key on another set reaching the same relation (`branch__shelves__topic` on a Shelf set passes
-  `BranchFilter.shelves`' scope; its hops still get target visibility). Answered from AGENTS' defect rule and GOAL's
-  "nested filters can narrow it but cannot escape" (the declaration's own branch): state it in spec-027 Decision 8 and
-  GLOSSARY "Flat fields walking a declared branch". Found probing 748
 - [ ] 754. (docs, fakeshop) A non-null forward edge into a hidden target is a dangling key to the viewer: `isNull: true`
   matches exactly those rows (item 97's null extension, a one-bit oracle on the hidden target) and a non-null output
   field masks the whole list as "An unexpected error occurred." (`types/resolvers.py::_visible_related_object`). GOAL:
