@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 484 done, 120 to do. The CHANGELOG entries filed here moved to
+Progress: 485 done, 119 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -364,14 +364,14 @@ Progress: 484 done, 120 to do. The CHANGELOG entries filed here moved to
 - [x] 171. No tool measuring coverage of a diff's changed lines: not a defect (a tooling wish, no broken contract)
 - [x] 172. START.md's resource-gate probe: not a defect: `pgrep -fl '[p]ytest|[b]asedpyright'` does not match itself and
   the `memory_pressure` reading works, erring conservative
-- [x] 175. spec-050 Decision 9 saying only "a positive offset raises the low mark": not a defect: incomplete, not false
-  (row 21, C19, states the high mark)
+- [x] 175. spec-050 Decision 9 saying only "a positive offset raises the low mark": not a defect: incomplete, not
+  false (row 21, fixed in `4a736809`, states the high mark)
 - [x] 176. Async nested connection under a `DjangoListField` root leaving a coroutine: already fixed: not reproducible
   at `43208c0c` on either schema, optimizer on and off
 - [x] 177. The test clients refusing a nested non-dict `Mapping` in `variables`: not a defect (upstream-matching): the
   variables go through `json.dumps`, which refuses it as upstream test clients do
-- [x] 179. Test strength (the C31 ledger lock row, the C9 gate's `typing.cast` blind spot, a mocked `fcntl.flock` row):
-  not a defect: no contract row; test-quality notes only
+- [x] 179. Test strength (the concurrent ledger lock row of `dfc32247`, the optimizer governance gate's `typing.cast`
+  blind spot of `40a0fb96`, a mocked `fcntl.flock` row): not a defect: no contract row; test-quality notes only
 - [x] 180. Strictness `"raise"` counting a refused-keyset hook-order cursor as malformed: not a defect (intended): the
   page is correct and `test_hook_order_cursor_on_a_refused_keyset_relation_keeps_its_per_parent_page` pins it
 - [x] 182. `scripts/clean_up.py` and the `review_*` generators deleting their folders unlocked: not a defect: each
@@ -2585,43 +2585,24 @@ Progress: 484 done, 120 to do. The CHANGELOG entries filed here moved to
   `::test_nodes_refuses_an_unpublished_id_before_routing_any_read`. Docs: README node paragraph and secondary
   blockquote, GLOSSARY `DjangoNodeField` (pk 458) and `DjangoNodesField` (pk 520), spec-031 Decision 8, spec-032
   (checklist, Error shapes, Decision 5, Edge cases, Test plan, DoD 3). Filed 883, 884. CHANGELOGTODO 885
-
-## Outside review of the fixes
-
-An outside review of the fixes since the hunt, by finding id (C-number). History only: not counted in Progress. Items with a
-tracker number are recorded there; open remainders and new defects are filed as items 146-150.
-
-| Finding | Outcome | Commits |
-|---|---|---|
-| C11. A nested keyset window paged by `get_queryset`'s order but sought and minted by `Meta.cursor_field` | Item 95 | `5197d03d` |
-| C11, reversed. A `.reverse()`d `get_queryset` order paged with forward cursor terms | Item 99 | `b005a7ee` |
-| C8. A relation pk prefix on a GlobalID filter path skipped model validation | Fixed | `d03a7c79` |
-| C45. A nested combinator projecting `.values()` raised a raw SQL error | Fixed | `1bd0f0f4` |
-| C48. The public test clients could not serialize a `Mapping` of variables | Fixed | `d5f0d6f7` |
-| C54. The `RangeFilter` input cache failed on an unhashable filter subclass | Fixed: the cache is gone | `702c6b67` |
-| C57. A renaming `NameConverter` broke type-strategy GlobalID round trips | Item 116 | `e05b2436` |
-| C33. Relay's sync refusal left the async `resolve_node` coroutine unawaited | Fixed | `f35a441c` |
-| C41. `review_plan --changed` omitted deleted modules | Fixed | `96164e29` |
-| C53. `count_queries` compared reports of different executed operations | Fixed | `48ca8bec` |
-| C46. Two `prove_failability.py` runs could both own the tree | Item 119 | `ce338eec` |
-| C3. A run queued during a copy's first sync resynced over the edits made since | Item 139 | `4ed767bb` |
-| C4. `workspace.py release` / `gc` dropped active work after their busy check | Item 140 | `4ed767bb` |
-| C9. A qualified or aliased `DjangoOptimizerExtension` evaded the governance gate | Fixed | `40a0fb96` |
-| C55. A negative definition test passed with its production guard removed | Fixed | `ae18e793` |
-| C31. A concurrent ledger test shared one `Context` across threads | Fixed | `dfc32247` |
-| C40. A reverse one-to-one visibility test lost the planned optimizer path | Fixed | `962c61b9` |
-| C6. Docs: MySQL's ASC `NULL` placement was reversed | Fixed | `f4c9f78a` |
-| C16. Docs: the migration plan mapped the page cap to the raw-list cap | Fixed | `fce3ab31` |
-| C17. Docs: explicit-null update timing promised no earlier DB work | Fixed | `e1b1e202` |
-| C18. Docs: the edges-only rationale claimed an N+1 fetch | Fixed | `fe884e44` |
-| C19. Docs: the offset-only plan left the high mark unchanged | Fixed | `4a736809` |
-| C20. Docs: the limit-only plan promised null on a non-null outer list | Fixed | `affe41dc` |
-| C25. Docs: the live-test README reversed the ruff fix / format order | Fixed | `56ecb877` |
-| C28. Docs: the serializer reverse one-to-one cardinality example was inverted | Fixed | `00bb2482` |
-| C42. The item-diff check omitted new untracked files (now included); staging alone still changes its seal | Partial; remainder item 146 | `acb6c25a` |
-| C24. The KANBAN glossary inliner linked terms inside existing links | Fixed; remainder closed by item 147 | `09d0caa0` |
-| C44. The test-model census conflated same-named classes across scopes (fixed); imports still resolve through one flat map | Partial; remainder item 148 | `f7000986` |
-| C15. An in-place change to the settings `OrderedDict` stays stale | Not a defect: configuration is trusted after construction; only an exact `dict` source is held by reference (other mappings are copied by design, per `conf.py::_normalize_user_settings`), and replacing or overriding the setting reloads (`override_settings` fires `setting_changed`) | none |
+- [x] 883. The root `node` / `nodes` fields now refuse, as `GLOBALID_INVALID` before any query, read routing or
+  consumer hook, an id whose published type the field's annotated return type cannot hold (a bare field annotated with
+  a union, a narrower interface or a plain Strawberry object type; a typed field annotated with another type), asked
+  of the executing schema (`GraphQLSchema.is_sub_type` for an abstract return; an object return holds only itself),
+  hidden and missing rows included, failing the whole `nodes` field. Such a visible row ran the type's queryset and
+  answered graphql-core's or Strawberry's uncoded engine error, a hidden one null. `DjangoSchema` also refuses at
+  construction a typed `DjangoNodeField(T)` / `DjangoNodesField(T)` whose annotation cannot return `T`, or whose `T`
+  it publishes nowhere; a plain `strawberry.Schema` builds it and refuses its ids at request time. New
+  `types/relay.py::node_type_returned_by` / `::require_returned_node` (asked in `relay.py::_require_published` after
+  `require_published_node`), `relay.py::refuse_unreturnable_node_targets` (called from
+  `schema.py::DjangoSchema.__init__`, reading the `NODE_TARGET_MARKER` the typed factories stamp) and
+  `utils/typing.py::field_return_type`. Grid: 31 of 180 cells per mode moved, every one an id outside the annotation,
+  to the coded refusal at 0 queries. README "Node refetch", GLOSSARY `DjangoNodeField` / `DjangoNodesField` /
+  `DjangoSchema` (pk 458, 520, 589), spec-032 (the five homes) and the `relay.py` / `schema.py` docstrings follow.
+  Pinned by `examples/fakeshop/test_query/test_node_refetch_api.py` (unions, the library `Named` interface, one other
+  type, type-name and model-label slots, a union without the primary, whole-field batches, an alias, an uncoercible
+  literal, a plain `strawberry.Schema`) and `tests/test_relay_node_field.py` (the construction refusals and builds,
+  `::test_a_plain_object_annotation_holds_no_relay_type`)
 
 ## To do: found along the way
 
@@ -2828,12 +2809,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   masked over a resolver; `filters/inputs.py::refuse_joinless_relation` judges only a path ending on one. Found
   researching 877
 
-- [ ] 883. (robustness) A bare `DjangoNodeField()` annotated with a union or a narrower interface, and a typed
-  `DjangoNodeField(T)` whose annotation names a different type the schema publishes, hand the engine a row its
-  annotation cannot return: a visible row answers Strawberry's uncoded "The type ... cannot be resolved for the field"
-  / "Expected value of type ..." error after running the type's queryset, outside the documented node outcomes. 757's
-  refusal covers only types the schema publishes nowhere; the predicate here is the field's return type
-  (`GraphQLSchema.is_sub_type`). Found fixing 757
 ## To do: holes found re-checking the fixes
 
 
@@ -3145,14 +3120,16 @@ tracker number are recorded there; open remainders and new defects are filed as 
   time on the error path (same query count and error as before); accept or fix
 - [ ] 200. After item 14, a list with one valid member gives the wrong answer in two grid cells; pin the contract, then fix or
   record it
-- [ ] 201. C57 choices awaiting your ruling: `schema=` stays optional; under a swap converter four cross-schema cells stay wrong
-  (documented); an ambiguous unpublished plain type name now refuses where it was accepted. Accept or change
-- [ ] 202. Failability rows that each kill a mutant with one row only: C3+C4 mutants 4, 5, 7 and 8 (8 only by a 30 s timeout),
-  C57's rebased run at 1 of 10 entries, three precedence mutants graded weakly pinned. Accept or add rows
-- [ ] 203. Fold the implementer notes into START.md: items 14 and 83, C11, C46, C57 and C3+C4 (plan-to-resolver channels key
-  by `resolver_key`, never `to_attr`; a nested window under the async view needs an async `DjangoConnectionField` root; a
-  harness written against a prototype API fails as a `TypeError` that reads as a regression; a subprocess test that signals
-  before its syscall flakes)
+- [ ] 201. Item 116 (`e05b2436`) choices awaiting your ruling: `schema=` stays optional; under a swap converter four
+  cross-schema cells stay wrong (documented); an ambiguous unpublished plain type name now refuses where it was
+  accepted. Accept or change
+- [ ] 202. Failability rows that each kill a mutant with one row only: items 139 and 140 (`4ed767bb`) mutants 4, 5, 7
+  and 8 (8 only by a 30 s timeout), item 116's rebased run at 1 of 10 entries, three precedence mutants graded weakly
+  pinned. Accept or add rows
+- [ ] 203. Fold the implementer notes into START.md: items 14, 83, 95, 116, 119, 139 and 140 (plan-to-resolver
+  channels key by `resolver_key`, never `to_attr`; a nested window under the async view needs an async
+  `DjangoConnectionField` root; a harness written against a prototype API fails as a `TypeError` that reads as a
+  regression; a subprocess test that signals before its syscall flakes)
 - [ ] 204. Dive-3 HIGH (a consumer `Prefetch` hint over a hiding target bypassed its `get_queryset`, fixed as item 13): decide
   disclosure and give SECURITY.md a path for a maintainer-found finding; 0.0.14 is affected (its
   `optimizer/walker.py::_apply_hint` installs the consumer `Prefetch` queryset and marks the relation planned)

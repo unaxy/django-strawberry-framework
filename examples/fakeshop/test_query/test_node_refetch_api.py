@@ -17,7 +17,11 @@ read in the default time zone (including a DST fold or gap wall clock).
 An id naming a Relay type the executing schema does not publish (one another schema
 over the same registry emitted, or a model-label id whose primary type the schema omits)
 is ``GLOBALID_INVALID`` before any query or consumer resolver, sync and async; the typed
-form reports its mismatch first.
+form reports its mismatch first. So is an id for a published type the field's annotation
+cannot hold (a bare field annotated with a union, a narrower interface or one type, a
+union holding a secondary but not the model's primary, a typed field annotated with
+another type under a plain ``strawberry.Schema``), for its visible, hidden and missing
+rows and an uncoercible literal alike, before any key read, read routing or hook.
 
 An ``async def`` consumer ``resolve_node`` / ``resolve_nodes`` or ``get_queryset``
 under the sync view is refused with its sync-misuse message, never a null row or
@@ -30,14 +34,16 @@ import zoneinfo
 from collections.abc import Generator, Iterable, Iterator, Mapping
 from decimal import Decimal
 from functools import wraps
+from types import UnionType
 from typing import TYPE_CHECKING
 
 import django
 import pytest
 import strawberry
+from apps.library.schema import Named
 from apps.products import services
-from apps.products.models import Category
-from asgiref.sync import sync_to_async
+from apps.products.models import Category, Item, Property
+from asgiref.sync import async_to_sync, sync_to_async
 from django.db import connection, models
 from django.db.models import Model, QuerySet
 from django.db.models.functions import Length
@@ -95,7 +101,7 @@ else:
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+_CURRENT: dict[str, strawberry.Schema | None] = {"schema": None}
 
 
 @wraps(DjangoGraphQLView.as_view())
@@ -119,7 +125,7 @@ urlpatterns = [
 
 
 def _post(
-    schema: DjangoSchema,
+    schema: strawberry.Schema,
     query: str,
     *,
     variables: Mapping[str, object] | None = None,
@@ -133,7 +139,7 @@ def _post(
 
 
 async def _post_async(
-    schema: DjangoSchema,
+    schema: strawberry.Schema,
     query: str,
     *,
     variables: Mapping[str, object] | None = None,
@@ -1753,3 +1759,504 @@ def test_nodes_refuses_an_unpublished_id_before_routing_any_read() -> None:
     assert refused_reads == []
     assert served == {"data": {"nodes": [{"__typename": "ShownNode"}]}}, served
     assert "products.Category" in _ROUTED_READS
+
+
+def _unreturnable_refusal(slot: str, field: str, column: int) -> JSONObject:
+    """One ``GLOBALID_INVALID`` entry refusing an id whose type the field's annotation cannot hold."""
+    message = (
+        f"Invalid GlobalID: model label {slot!r} decodes to a Relay-Node DjangoType this "
+        "field does not return"
+        if "." in slot
+        else f"Invalid GlobalID: GraphQL type {slot!r} is not a type this field returns"
+    )
+    return {
+        "message": message,
+        "locations": [{"line": 1, "column": column}],
+        "path": [field],
+        "extensions": {"code": "GLOBALID_INVALID"},
+    }
+
+
+_ONE_NODE = "query ($id: ID!) { node(id: $id) { __typename } }"
+
+
+def _hiding_type(
+    name: str,
+    model: type[Model],
+    calls: list[str],
+    *,
+    interfaces: tuple[type, ...] = (relay.Node,),
+    **meta_extra: object,
+) -> type[DjangoType]:
+    """A primary Relay type whose ``get_queryset`` records its name and hides private rows."""
+
+    def _get_queryset(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[Model]:
+        calls.append(name)
+        return queryset.filter(is_private=False)
+
+    return make_django_type(
+        name,
+        model,
+        ("id", "name"),
+        meta_extra={"interfaces": interfaces, "primary": True, **meta_extra},
+        namespace_extra={"get_queryset": classmethod(_get_queryset)},
+    )
+
+
+def _row_ids(type_cls: type[DjangoType], model: type[Model]) -> dict[str, str]:
+    """Ids of a visible (public), a hidden (private) and a missing ``model`` row of ``type_cls``."""
+    rows = model._default_manager.order_by("pk")
+    visible = rows.filter(is_private=False).first()
+    hidden = rows.filter(is_private=True).first()
+    last = rows.last()
+    assert visible is not None
+    assert hidden is not None
+    assert last is not None
+    return {
+        "visible": global_id_for(type_cls, saved_pk(visible)),
+        "hidden": global_id_for(type_cls, saved_pk(hidden)),
+        "missing": global_id_for(type_cls, saved_pk(last) + 1000),
+    }
+
+
+def _counted_post(
+    schema: strawberry.Schema,
+    query: str,
+    variables: Mapping[str, object],
+) -> tuple[JSONObject, int]:
+    """``_post`` plus the number of statements the request ran."""
+    with CaptureQueriesContext(connection) as captured:
+        payload = _post(schema, query, variables=variables)
+    return payload, len(captured.captured_queries)
+
+
+async def _refetch(
+    executor: str,
+    schema: strawberry.Schema,
+    field: str,
+    gid: str,
+) -> tuple[JSONObject, int | None]:
+    """Refetch ``gid`` through ``node`` or a one-id ``nodes``; statements are counted sync only."""
+    document, variables = (
+        (_ONE_NODE, {"id": gid}) if field == "node" else (_ONE_NODES, {"ids": [gid]})
+    )
+    if executor == "async":
+        return await _post_async(schema, document, variables=variables), None
+    return await sync_to_async(_counted_post)(schema, document, variables)
+
+
+async def _assert_refused_and_held(
+    executor: str,
+    schema: strawberry.Schema,
+    field: str,
+    *,
+    refused: tuple[type[DjangoType], type[Model]],
+    held: tuple[type[DjangoType], type[Model]],
+    calls: list[str],
+) -> None:
+    """Every row of ``refused`` is refused before any statement or hook; ``held``'s visible row answers."""
+    refused_type, refused_model = refused
+    slot = relay.GlobalID.from_id(global_id_for(refused_type, 1)).type_name
+    refused_data: object = {"node": None} if field == "node" else None
+    for row, gid in (await sync_to_async(_row_ids)(refused_type, refused_model)).items():
+        payload, statements = await _refetch(executor, schema, field, gid)
+        expected = _unreturnable_refusal(slot, field, 20 if field == "node" else 24)
+        assert payload == {"data": refused_data, "errors": [expected]}, (row, payload)
+        assert statements in {None, 0}, (row, statements)
+    assert calls == []
+    held_type, held_model = held
+    held_ids = await sync_to_async(_row_ids)(held_type, held_model)
+    payload, statements = await _refetch(executor, schema, field, held_ids["visible"])
+    answer: JSONObject = {"__typename": held_type.__name__}
+    assert payload == {"data": {"node": answer} if field == "node" else {"nodes": [answer]}}
+    assert statements in {None, 1}, statements
+    assert calls == [held_type.__name__]
+
+
+def _annotated(field: str, held: type | UnionType) -> object:
+    """The ``node`` annotation ``held | None``, or the ``nodes`` one ``list[held | None]``."""
+    optional = held | None
+    return optional if field == "node" else list[optional]
+
+
+def _bare(field: str) -> object:
+    """A bare ``DjangoNodeField()`` or ``DjangoNodesField()``."""
+    return DjangoNodeField() if field == "node" else DjangoNodesField()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("field", ["node", "nodes"])
+@pytest.mark.parametrize("executor", ["sync", "async"])
+async def test_bare_node_annotated_with_a_union_refuses_a_type_outside_it(
+    executor: str,
+    field: str,
+) -> None:
+    """A bare field annotated ``CatNode | PropertyNode`` refuses a published ``ItemNode`` id.
+
+    ``types=`` publishes ``ItemNode``, yet its visible, hidden and missing rows are
+    ``GLOBALID_INVALID`` with no statement and no ``ItemNode.get_queryset`` call; a union
+    member's visible row answers through its own hook.
+    """
+    await sync_to_async(services.seed_data)(1)
+    calls: list[str] = []
+    cat = _hiding_type("CatNode", Category, calls)
+    prop = _hiding_type("PropertyNode", Property, calls)
+    item = _hiding_type("ItemNode", Item, calls)
+    schema = _schema_with(
+        field,
+        _annotated(field, cat | prop),
+        _bare(field),
+        extra_types=[item],
+    )
+    await _assert_refused_and_held(
+        executor,
+        schema,
+        field,
+        refused=(item, Item),
+        held=(cat, Category),
+        calls=calls,
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("field", ["node", "nodes"])
+@pytest.mark.parametrize("executor", ["sync", "async"])
+async def test_bare_node_annotated_with_a_narrower_interface_refuses_a_type_outside_it(
+    executor: str,
+    field: str,
+) -> None:
+    """A bare field annotated ``Named`` refuses the id of a published type not implementing it.
+
+    ``CatNode`` implements ``relay.Node`` and ``Named``; ``ItemNode`` only ``relay.Node``.
+    """
+    await sync_to_async(services.seed_data)(1)
+    calls: list[str] = []
+    cat = _hiding_type("CatNode", Category, calls, interfaces=(relay.Node, Named))
+    item = _hiding_type("ItemNode", Item, calls)
+    schema = _schema_with(field, _annotated(field, Named), _bare(field), extra_types=[cat, item])
+    await _assert_refused_and_held(
+        executor,
+        schema,
+        field,
+        refused=(item, Item),
+        held=(cat, Category),
+        calls=calls,
+    )
+
+
+def _refetch_document(field: str, gid: str) -> tuple[str, dict[str, object]]:
+    """The one-id ``node`` or ``nodes`` document and its variables."""
+    return (_ONE_NODE, {"id": gid}) if field == "node" else (_ONE_NODES, {"ids": [gid]})
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_node_annotated_with_one_type_refuses_another_published_types_id(field: str) -> None:
+    """A bare field annotated ``CatNode`` refuses an ``ItemNode`` model-label id, every row.
+
+    A ``CatNode`` id refetches at the statement count the ``relay.Node`` field spends on
+    it, and its hidden row is null.
+    """
+    services.seed_data(1)
+    calls: list[str] = []
+    cat = _hiding_type("CatNode", Category, calls)
+    item = _hiding_type("ItemNode", Item, calls)
+    one_type = _schema_with(field, _annotated(field, cat), _bare(field), extra_types=[item])
+    async_to_sync(_assert_refused_and_held)(
+        "sync",
+        one_type,
+        field,
+        refused=(item, Item),
+        held=(cat, Category),
+        calls=calls,
+    )
+    interface = _schema_with(
+        field,
+        _annotated(field, relay.Node),
+        _bare(field),
+        extra_types=[cat, item],
+    )
+    cat_ids = _row_ids(cat, Category)
+    for schema in (one_type, interface):
+        _, statements = _counted_post(schema, *_refetch_document(field, cat_ids["visible"]))
+        assert statements == 1
+    hidden, statements = _counted_post(one_type, *_refetch_document(field, cat_ids["hidden"]))
+    assert hidden == {"data": {"node": None} if field == "node" else {"nodes": [None]}}, hidden
+    assert statements == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_a_type_name_id_outside_the_annotation_quotes_its_slot(field: str) -> None:
+    """A ``type``-strategy id is refused quoting the GraphQL type name the client sent."""
+    services.seed_data(1)
+    calls: list[str] = []
+    cat = _hiding_type("CatNode", Category, calls)
+    item = _hiding_type("ItemNode", Item, calls, globalid_strategy="type")
+    schema = _schema_with(field, _annotated(field, cat), _bare(field), extra_types=[item])
+    async_to_sync(_assert_refused_and_held)(
+        "sync",
+        schema,
+        field,
+        refused=(item, Item),
+        held=(cat, Category),
+        calls=calls,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("held", ["secondary", "primary"])
+def test_a_union_without_the_primary_refuses_its_model_label_id(held: str) -> None:
+    """A model-label id routes to the model's primary, refused by a union holding only a secondary.
+
+    ``CatSecondary | ItemNode`` refuses the primary ``CatNode``'s model-label id and serves
+    the secondary's own ``type``-strategy id as ``CatSecondary``; ``CatNode | ItemNode``
+    refuses the secondary's id and serves the primary's.
+    """
+    services.seed_data(1)
+    calls: list[str] = []
+    primary = _hiding_type("CatNode", Category, calls)
+    secondary = _hiding_type(
+        "CatSecondary",
+        Category,
+        calls,
+        primary=False,
+        globalid_strategy="type",
+    )
+    item = _hiding_type("ItemNode", Item, calls)
+    held_type, refused_type = (secondary, primary) if held == "secondary" else (primary, secondary)
+    schema = _schema_with(
+        "node",
+        _annotated("node", held_type | item),
+        DjangoNodeField(),
+        extra_types=[refused_type],
+    )
+    async_to_sync(_assert_refused_and_held)(
+        "sync",
+        schema,
+        "node",
+        refused=(refused_type, Category),
+        held=(held_type, Category),
+        calls=calls,
+    )
+
+
+def _dispatch_recording_schema(
+    field: str,
+    calls: list[str],
+) -> tuple[DjangoSchema, type[DjangoType], type[DjangoType], Category]:
+    """``field`` annotated ``ShownNode``; ``OtherNode`` published by ``types=``; both record dispatch."""
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+
+    def _resolve_id_attr(cls: type[DjangoType]) -> str:
+        calls.append(f"{cls.__name__}.resolve_id_attr")
+        return "pk"
+
+    def _resolve_node(
+        cls: type[DjangoType],
+        node_id: str,
+        *,
+        info: strawberry.Info[object, object],
+        required: bool = False,
+    ) -> Category:
+        del node_id, info, required
+        calls.append(f"{cls.__name__}.resolve_node")
+        return row
+
+    def _resolve_nodes(
+        cls: type[DjangoType],
+        *,
+        info: strawberry.Info[object, object],
+        node_ids: Iterable[str],
+        required: bool = False,
+    ) -> list[Category]:
+        del info, required
+        calls.append(f"{cls.__name__}.resolve_nodes")
+        return [row for _ in node_ids]
+
+    namespace = {
+        "resolve_id_attr": classmethod(_resolve_id_attr),
+        "resolve_node": classmethod(_resolve_node),
+        "resolve_nodes": classmethod(_resolve_nodes),
+    }
+    shown = make_django_type(
+        "ShownNode",
+        Category,
+        ("id", "name"),
+        meta_extra={"primary": True, "globalid_strategy": "type"},
+        namespace_extra=namespace,
+    )
+    other = make_django_type(
+        "OtherNode",
+        Category,
+        ("id", "name"),
+        meta_extra={"globalid_strategy": "type"},
+        namespace_extra=namespace,
+    )
+    schema = _schema_with(field, _annotated(field, shown), _bare(field), extra_types=[other])
+    return schema, shown, other, row
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("field", "order"),
+    [("node", "alone"), ("nodes", "held-first"), ("nodes", "refused-first")],
+)
+def test_nodes_refuses_a_batch_holding_an_unreturnable_id_before_any_read(
+    field: str,
+    order: str,
+) -> None:
+    """The refusal precedes the id-slot read, the read routing and dispatch, in either position.
+
+    No ``resolve_id_attr``, ``resolve_node(s)`` or ``DATABASE_ROUTERS`` read runs for a refused
+    request, and a ``nodes`` batch holding the refused id anywhere fails the whole field; the
+    held id alone runs all three.
+    """
+    services.seed_data(1)
+    calls: list[str] = []
+    schema, shown, other, row = _dispatch_recording_schema(field, calls)
+    held_id = global_id_for(shown, saved_pk(row))
+    refused_id = global_id_for(other, saved_pk(row))
+    ids = {"alone": [refused_id], "held-first": [held_id, refused_id]}.get(
+        order,
+        [refused_id, held_id],
+    )
+    document, variables = (
+        (_ONE_NODE, {"id": refused_id}) if field == "node" else (_ONE_NODES, {"ids": ids})
+    )
+    _ROUTED_READS.clear()
+    with override_settings(DATABASE_ROUTERS=[f"{__name__}.{_RecordingRouter.__qualname__}"]):
+        payload = _post(schema, document, variables=variables)
+        refused_reads = list(_ROUTED_READS)
+        document, variables = _refetch_document(field, held_id)
+        served = _post(schema, document, variables=variables)
+    refused_data: object = {"node": None} if field == "node" else None
+    column = 20 if field == "node" else 24
+    assert payload == {
+        "data": refused_data,
+        "errors": [_unreturnable_refusal("OtherNode", field, column)],
+    }, payload
+    assert refused_reads == []
+    answer: JSONObject = {"__typename": "ShownNode"}
+    assert served == {"data": {"node": answer} if field == "node" else {"nodes": [answer]}}, served
+    assert calls == ["ShownNode.resolve_id_attr", f"ShownNode.resolve_{field}"]
+    assert "products.Category" in _ROUTED_READS
+
+
+@pytest.mark.django_db
+def test_an_aliased_node_refuses_at_its_alias() -> None:
+    """The return type is the field definition's, so an aliased ``node`` refuses at the alias."""
+    services.seed_data(1)
+    calls: list[str] = []
+    cat = _hiding_type("CatNode", Category, calls)
+    item = _hiding_type("ItemNode", Item, calls)
+    schema = _schema_with("node", _annotated("node", cat), DjangoNodeField(), extra_types=[item])
+    gid = _row_ids(item, Item)["visible"]
+    payload = _post(
+        schema,
+        "query ($id: ID!) { n: node(id: $id) { __typename } }",
+        variables={"id": gid},
+    )
+    assert payload == {
+        "data": {"n": None},
+        "errors": [_unreturnable_refusal("products.item", "n", 20)],
+    }
+    assert calls == []
+
+
+def _typed_query(field: str, annotation: object, target: type[DjangoType]) -> type[object]:
+    """A ``Query`` whose ``field`` is ``DjangoNodeField(target)`` / ``DjangoNodesField(target)``."""
+    value = DjangoNodeField(target) if field == "node" else DjangoNodesField(target)
+    return strawberry.type(
+        type("Query", (), {"__annotations__": {field: annotation}, field: value}),
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_strawberry_schema_typed_field_annotated_with_another_type_refuses_its_targets_ids(
+    field: str,
+) -> None:
+    """Under a plain ``strawberry.Schema`` a typed field annotated ``ItemNode`` answers only refusals.
+
+    ``DjangoSchema`` refuses ``DjangoNodeField(CatNode)`` annotated ``ItemNode`` at
+    construction; ``strawberry.Schema`` builds it. Each ``CatNode`` row is then
+    ``GLOBALID_INVALID`` with no statement or hook, and an ``ItemNode`` id is the typed
+    mismatch; a ``nodes`` batch holding both fails the whole field at the target's id.
+    """
+    services.seed_data(1)
+    calls: list[str] = []
+    cat = _hiding_type("CatNode", Category, calls)
+    item = _hiding_type("ItemNode", Item, calls)
+    query = _typed_query(field, _annotated(field, item), cat)
+    finalize_django_types()
+    schema = strawberry.Schema(query=query, config=strawberry_config(), types=[cat])
+    column = 20 if field == "node" else 24
+    refused_data: object = {"node": None} if field == "node" else None
+    cat_ids = _row_ids(cat, Category)
+    for row, gid in cat_ids.items():
+        payload, statements = _counted_post(schema, *_refetch_document(field, gid))
+        assert payload == {
+            "data": refused_data,
+            "errors": [_unreturnable_refusal("products.category", field, column)],
+        }, (row, payload)
+        assert statements == 0
+    item_id = _row_ids(item, Item)["visible"]
+    payload, statements = _counted_post(schema, *_refetch_document(field, item_id))
+    assert payload == {
+        "data": refused_data,
+        "errors": [
+            {
+                "message": "Wrong node type: expected a CatNode id, received a ItemNode id.",
+                "locations": [{"line": 1, "column": column}],
+                "path": [field],
+            },
+        ],
+    }, payload
+    assert statements == 0
+    if field == "nodes":
+        batch = _post(schema, _ONE_NODES, variables={"ids": [cat_ids["visible"], item_id]})
+        assert batch == {
+            "data": None,
+            "errors": [_unreturnable_refusal("products.category", "nodes", 24)],
+        }, batch
+    assert calls == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_an_uncoercible_literal_outside_the_annotation_is_refused_not_null(field: str) -> None:
+    """The refusal runs before the key coercion that nulls an uncoercible literal.
+
+    ``products.item:abc`` under a ``CatNode`` annotation is refused; ``products.category:abc``
+    is the documented null.
+    """
+    services.seed_data(1)
+    calls: list[str] = []
+    cat = _hiding_type("CatNode", Category, calls)
+    item = _hiding_type("ItemNode", Item, calls)
+    schema = _schema_with(field, _annotated(field, cat), _bare(field), extra_types=[item])
+    refused, statements = _counted_post(
+        schema,
+        *_refetch_document(field, str(relay.GlobalID("products.item", "abc"))),
+    )
+    column = 20 if field == "node" else 24
+    refused_data: object = {"node": None} if field == "node" else None
+    assert refused == {
+        "data": refused_data,
+        "errors": [_unreturnable_refusal("products.item", field, column)],
+    }, refused
+    assert statements == 0
+    held, statements = _counted_post(
+        schema,
+        *_refetch_document(field, str(relay.GlobalID("products.category", "abc"))),
+    )
+    assert held == {"data": {"node": None} if field == "node" else {"nodes": [None]}}, held
+    assert statements == 0
+    assert calls == []

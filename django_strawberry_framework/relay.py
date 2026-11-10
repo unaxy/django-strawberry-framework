@@ -8,45 +8,50 @@ class-body walk (the ``DjangoListField`` mechanism) and come in two forms:
 - **Bare** - ``node: relay.Node | None = DjangoNodeField()`` /
   ``nodes: list[relay.Node | None] = DjangoNodesField()``: the Relay-spec
   canonical fields; the decoded id may resolve to any Relay-Node-shaped
-  ``DjangoType`` the executing schema publishes.
+  ``DjangoType`` the executing schema publishes and the annotation holds.
 - **Typed** - ``genre: GenreType | None = DjangoNodeField(GenreType)``: the
   target is validated at construction time, and an id that decodes to a
   different type raises a ``GraphQLError`` naming the expected and received
   types as the executing schema published them (Decision 4).
 
 Resolution is **nullable by contract**: dispatch is ``required=False``
-unconditionally, so hidden, missing, and uncoercible-pk ids resolve to
-``null`` (or a positional ``null`` list entry) and the optional annotation
-spelling above is the supported shape (Decision 5). Malformed / undecodable
-ids are the other failure family: every ``ConfigurationError`` from
+unconditionally, so hidden, missing, and uncoercible-pk ids resolve to ``null``
+(or a positional ``null`` list entry) and the optional annotation spelling
+above is the supported shape (Decision 5). Malformed / undecodable ids are the
+other failure family: every ``ConfigurationError`` from
 ``types/relay.py::decode_global_id`` converts to ``GraphQLError("Invalid
 GlobalID: ...", extensions={"code": "GLOBALID_INVALID"})`` at the field
-boundary - decode runs on payload data only, before any query, so nothing
-leaks row existence. A well-formed id naming a Relay type the executing schema
-does not publish (registered, but reached by no root, relation or ``types=``
-entry: an unwired type, or an id another schema over the same registry
-emitted) joins that family: the decoded type is refused with the same code
-before any query (``types/relay.py::require_published_node``), since the
-interface-typed ``node`` cannot return an object type outside its schema.
-Both fields decode under the schema executing the request
-(``utils/typing.py::strawberry_schema_from_info``): a ``type``-strategy id
-carries the name that schema published for its type, whatever ``NameConverter``
-it runs, and resolves through that schema's own type map.
+boundary - decode runs on payload data only, before any query, so nothing leaks
+row existence. A well-formed id naming a Relay type the executing schema does
+not publish (registered, but reached by no root, relation or ``types=`` entry:
+an unwired type, or an id another schema over the same registry emitted) joins
+that family: the decoded type is refused with the same code before any query
+(``types/relay.py::require_published_node``), since the interface-typed
+``node`` cannot return an object type outside its schema. So does an id for a
+published type the field's annotated return type does not hold (a bare field
+annotated with a union or a narrower interface, a typed field annotated with
+another type): the return type is asked of the executing schema
+(``types/relay.py::require_returned_node``), and a hidden or missing row of
+such a type is refused like a visible one. Both fields decode under the schema
+executing the request (``utils/typing.py::strawberry_schema_from_info``): a
+``type``-strategy id carries the name that schema published for its type,
+whatever ``NameConverter`` it runs, and resolves through that schema's own type
+map.
 
 Type source: the field's schema type comes from the consumer's class-body
 annotation at the assignment site, exactly as spelled above - both factories'
-resolvers carry an ``Any`` return annotation, so there is no framework-side fallback. Omitting the
-annotation (``node = DjangoNodeField()``) surfaces at ``strawberry.Schema(...)``
-build as graphql-core's ``TypeError: Query fields cannot be resolved.
-Unexpected type 'typing.Any'`` - that message means "annotate the assignment".
-The typed form does NOT cross-validate the annotation against ``target_type``
-(the factory cannot see its assignment site): a mismatched pairing like
-``genre: AuthorType | None = DjangoNodeField(GenreType)`` builds a schema, and
-its queries fail only at runtime: an id of any type but ``GenreType`` gets the
-wrong-node-type ``GraphQLError``, and a ``GenreType`` id is refused as
-``GLOBALID_INVALID`` when the schema publishes ``GenreType`` nowhere; where it
-does publish it, the engine refuses a visible ``GenreType`` row as a value of
-the annotated type.
+resolvers carry an ``Any`` return annotation, so there is no framework-side
+fallback. Omitting the annotation (``node = DjangoNodeField()``) surfaces at
+``strawberry.Schema(...)`` build as graphql-core's ``TypeError: Query fields
+cannot be resolved. Unexpected type 'typing.Any'`` - that message means
+"annotate the assignment". The factory cannot see its assignment site, so the
+typed form's annotation is checked against ``target_type`` once the schema is
+built: ``DjangoSchema`` refuses a pairing like ``genre: AuthorType | None =
+DjangoNodeField(GenreType)``, and a target the schema publishes nowhere, with a
+``ConfigurationError`` naming the field (``refuse_unreturnable_node_targets``).
+A plain ``strawberry.Schema`` builds it, and its queries answer only refusals:
+an id of any type but ``GenreType`` gets the wrong-node-type ``GraphQLError``
+and a ``GenreType`` id is ``GLOBALID_INVALID``, before any query.
 
 The encode/decode internals stay in ``types/relay.py`` (spec-031 Decision 11
 reserved this top-level module for the root fields).
@@ -79,17 +84,24 @@ from typing import (
 import strawberry
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
-from graphql import GraphQLError
+from graphql import GraphQLError, get_named_type, is_object_type
 from strawberry.schema import Schema
+from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types import Info
 
 from .exceptions import ConfigurationError
 from .list_field import _validate_relay_djangotype_target
 from .registry import register_subsystem_clear
 from .resource_policy import check_deadline
-from .types.relay import decode_global_id, published_node_type_name, require_published_node
+from .types.relay import (
+    decode_global_id,
+    node_type_returned_by,
+    published_node_type_name,
+    require_published_node,
+    require_returned_node,
+)
 from .utils import truth
-from .utils._narrowing import require_instance
+from .utils._narrowing import optional_instance, read_attr, require_instance
 from .utils._queryset_private import model_row_peers, set_model_row_peers
 from .utils.directives import validated_field_directives
 from .utils.errors import GLOBALID_INVALID_ERROR_CODE, coded_error_extensions
@@ -102,12 +114,18 @@ from .utils.querysets import (
     model_for,
     reject_async_in_sync_context,
 )
-from .utils.typing import strawberry_schema_from_info
+from .utils.typing import (
+    field_return_type,
+    graphql_fields,
+    graphql_type_of,
+    strawberry_schema_from_info,
+)
 from .utils.write_transaction import current_write_pipeline
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterable, Mapping, Sequence, Sized
 
+    from graphql import GraphQLField
     from strawberry import relay
     from typing_extensions import TypeIs
 
@@ -130,6 +148,69 @@ __all__ = ("DjangoNodeField", "DjangoNodesField")
 # call; only emptiness is load-bearing, the factory-name entries aid debugging.
 _node_fields_declared: list[str] = []
 register_subsystem_clear(_node_fields_declared.clear, owner="relay.node_fields")
+
+
+class _NodeTarget(NamedTuple):
+    """What a typed node field's resolver is stamped with (``NODE_TARGET_MARKER``)."""
+
+    factory: str
+    target: type[DjangoType]
+
+
+# Stamped on a typed ``DjangoNodeField`` / ``DjangoNodesField`` resolver: the factory
+# cannot see its assignment site, so ``refuse_unreturnable_node_targets`` reads the
+# target back through the built field (the ``MUTATION_CLASS_MARKER`` precedent).
+NODE_TARGET_MARKER = "_dsf_node_target"
+
+
+def refuse_unreturnable_node_targets(schema: Schema) -> None:
+    """Refuse a typed node field whose published return type cannot return its target.
+
+    ``DjangoSchema`` asks this once it is built: ``genre: AuthorType | None =
+    DjangoNodeField(GenreType)`` answers only refusals (a ``GenreType`` id cannot
+    complete as an ``AuthorType``, any other id is the wrong-node-type error), so
+    it is a configuration error, reported at construction. The return type is
+    asked of the built schema (``types/relay.py::node_type_returned_by``); a
+    target the schema does not publish is returned by no field, and is refused
+    as such.
+
+    Raises:
+        ConfigurationError: a typed node field's target is unpublished, or its
+            annotation cannot return the target.
+
+    """
+    for type_name, named in schema._schema.type_map.items():
+        if not is_object_type(named):
+            continue
+        for field_name, field in graphql_fields(named).items():
+            marked = _typed_node_target(field)
+            if marked is None:
+                continue
+            field_type = graphql_type_of(field)
+            published = published_node_type_name(schema, marked.target)
+            if published is None:
+                target_name = marked.target.__django_strawberry_definition__.graphql_type_name
+                raise ConfigurationError(
+                    f"{type_name}.{field_name}: {marked.factory}({target_name}) targets a type "
+                    "this schema does not publish; reach it from a root or relation field, "
+                    "or list it in the schema's types=.",
+                )
+            if not node_type_returned_by(schema, field_type, published):
+                raise ConfigurationError(
+                    f"{type_name}.{field_name}: {marked.factory}({published}) returns "
+                    f"{get_named_type(field_type).name}, which cannot return a {published} "
+                    f"row; annotate the field with {published}, or an interface or union "
+                    f"{published} belongs to.",
+                )
+
+
+def _typed_node_target(field: GraphQLField) -> _NodeTarget | None:
+    """Return the ``_NodeTarget`` a built field's resolver carries, else ``None``."""
+    extensions: Mapping[str, object] = field.extensions
+    backref = extensions.get(GraphQLCoreConverter.DEFINITION_BACKREF)
+    wrapped = read_attr(read_attr(backref, "base_resolver", None), "wrapped_func", None)
+    return optional_instance(read_attr(wrapped, NODE_TARGET_MARKER, None), _NodeTarget)
+
 
 _SYNC_RESOLVER_RECOURSE = (
     "DjangoNodeField and DjangoNodesField execute resolve_node(s) synchronously "
@@ -181,21 +262,30 @@ def _globalid_invalid(exc: ConfigurationError) -> GraphQLError:
     )
 
 
-def _require_published(resolved: type[_RelayDjangoType], gid: str, schema: Schema) -> None:
-    """Refuse, as ``GLOBALID_INVALID``, a decoded type the executing schema does not publish.
+def _require_published(
+    resolved: type[_RelayDjangoType],
+    gid: str,
+    schema: Schema,
+    info: Info[object, object],
+) -> None:
+    """Refuse, as ``GLOBALID_INVALID``, a decoded type this field cannot return.
 
     Runs after ``_check_typed_match`` and before the id-slot coercion (so no
     consumer ``resolve_id_attr`` or ``DATABASE_ROUTERS`` read routing) and any
-    query: an id for a Relay type registered in the process but published by no
-    root, relation or ``types=`` entry of this schema (an unwired type, or an id
-    minted by another schema over the same registry) names no type this schema
-    can return, so it is refused as an id naming no type is, never resolved
-    through that type's queryset (``types/relay.py::require_published_node``).
-    A typed field's own target is published by its annotation, so the refusal
-    reaches the typed form only through a target its annotation does not name.
+    query, in two steps. An id for a Relay type registered in the process but
+    published by no root, relation or ``types=`` entry of this schema (an
+    unwired type, or an id minted by another schema over the same registry)
+    names no type this schema can return, so it is refused as an id naming no
+    type is (``types/relay.py::require_published_node``). An id for a published
+    type the field's annotated return type does not hold (a union or narrower
+    interface on the bare form, an annotation naming another type on the typed
+    form) is refused the same way (``types/relay.py::require_returned_node``):
+    neither is resolved through that type's queryset, so a hidden or missing row
+    of such a type is refused like a visible one.
     """
     try:
-        require_published_node(schema, resolved, gid)
+        published = require_published_node(schema, resolved, gid)
+        require_returned_node(schema, field_return_type(info), published, gid)
     except ConfigurationError as exc:
         raise _globalid_invalid(exc) from exc
 
@@ -750,11 +840,12 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
     """Build the root ``node(id: ID!)`` Relay refetch field.
 
     Bare form (``target_type=None``) resolves any Relay-Node-shaped
-    ``DjangoType`` the executing schema publishes; the typed form pins one
-    target and rejects mismatched ids with a ``GraphQLError``. See the module
-    docstring for the full contract (nullable-by-contract dispatch, the
-    ``GLOBALID_INVALID`` boundary, an unpublished type's id, and the bare-field
-    ``strawberry.Schema(types=[...])`` engine note).
+    ``DjangoType`` the executing schema publishes and the annotation holds; the
+    typed form pins one target and rejects mismatched ids with a
+    ``GraphQLError``. See the module docstring for the full contract
+    (nullable-by-contract dispatch, the ``GLOBALID_INVALID`` boundary, the id of
+    an unpublished type or of one the annotation does not hold, and the
+    bare-field ``strawberry.Schema(types=[...])`` engine note).
 
     The declared return type is the value the field resolves to, not the object
     returned: at run time this returns a ``StrawberryField``. The overloads state
@@ -793,7 +884,7 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
         # Everything below runs OUTSIDE the decode try/except so a dispatch-time
         # ``SyncMisuseError`` surfaces as itself (see ``_decode_or_graphql_error``).
         _check_typed_match(pinned, resolved, schema)
-        _require_published(resolved, id_, schema)
+        _require_published(resolved, id_, schema, info)
         if (
             _coerce_pk_or_none(resolved, node_id, alias=lookup_read_alias(model_for(resolved)))
             is None
@@ -822,6 +913,8 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
             return _await_and_stamp(resolved, result)
         return _stamp_node_type(resolved, result)
 
+    if pinned is not None:
+        setattr(_resolve, NODE_TARGET_MARKER, _NodeTarget("DjangoNodeField", pinned))
     # Strawberry reads the resolver's return annotation when the assignment carries none,
     # and ``Any`` is what keeps the module docstring's "Unexpected type 'typing.Any'" build
     # error for an unannotated assignment.
@@ -867,13 +960,13 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
 
     Input order is preserved; positional ``null`` is reserved for
     well-formed-but-invisible/missing/uncoercible ids; a malformed id, an id
-    naming a type the executing schema does not publish (or a wrong-type id
-    under the typed form) ANYWHERE fails the WHOLE field - the ``[Node]!``
-    non-null nulls the enclosing ``data`` (Decision 5). Every id decodes before
-    any type check, so a malformed id answers ahead of an earlier unpublished
-    or wrong-type one. Duplicate ids resolve per position, and resolution is
-    batched per distinct decoded type (one ``resolve_nodes`` call each -
-    Decision 4).
+    naming a type the executing schema does not publish or the annotated item
+    type does not hold (or a wrong-type id under the typed form) ANYWHERE fails
+    the WHOLE field - the ``[Node]!`` non-null nulls the enclosing ``data``
+    (Decision 5). Every id decodes before any type check, so a malformed id
+    answers ahead of an earlier unpublished, unreturnable or wrong-type one.
+    Duplicate ids resolve per position, and resolution is batched per distinct
+    decoded type (one ``resolve_nodes`` call each - Decision 4).
 
     Consumer ``resolve_nodes`` override contract: this field calls the
     ``resolve_nodes`` *classmethod* (preserving consumer overrides), then
@@ -917,7 +1010,7 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
         decoded = [_decode_or_graphql_error(raw_id, schema) for raw_id in ids]
         for raw_id, (resolved, _) in zip(ids, decoded, strict=True):
             _check_typed_match(pinned, resolved, schema)
-            _require_published(resolved, raw_id, schema)
+            _require_published(resolved, raw_id, schema, info)
         # Group coercible ids by decoded type - insertion-ordered, ids in input
         # order with duplicates preserved; uncoercible positions are reserved
         # null holes that never poison the batch ``pk__in``. Each group carries
@@ -986,6 +1079,8 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
             )
         return _interleave(positions, per_type)
 
+    if pinned is not None:
+        setattr(_resolve, NODE_TARGET_MARKER, _NodeTarget("DjangoNodesField", pinned))
     # Strawberry reads the resolver's return annotation when the assignment carries none,
     # and ``Any`` is what keeps the module docstring's "Unexpected type 'typing.Any'" build
     # error for an unannotated assignment.

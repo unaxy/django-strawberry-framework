@@ -110,6 +110,7 @@ from .extensions.error_policy import (
 from .extensions.operation_state import DjangoExtensionsRunner, _OperationModeMarker
 from .extensions.resource_policy import AdmissionGuard, DjangoResourcePolicyExtension
 from .mutations.fields import MUTATION_CLASS_MARKER
+from .relay import refuse_unreturnable_node_targets
 from .resource_policy import _PACKAGE_RESOURCE_POLICY, ResourcePolicy, resolve_resource_policy
 from .utils import truth
 from .utils._narrowing import is_mapping, mapping_get
@@ -874,6 +875,14 @@ class DjangoSchema(strawberry.Schema):
     schema's, so ``foo_bar`` beside ``fooBar`` is refused under the default
     ``auto_camel_case=True`` and served as two fields under
     ``auto_camel_case=False``.
+
+    **A typed node field that cannot return its target is refused.**
+    ``DjangoNodeField(GenreType)`` / ``DjangoNodesField(GenreType)`` whose published
+    return type cannot hold ``GenreType``, or whose target this schema does not
+    publish, raises ``ConfigurationError`` naming the field
+    (``relay.py::refuse_unreturnable_node_targets``): such a field answers only
+    refusals. A plain ``strawberry.Schema`` builds it and refuses the target's ids
+    at request time.
     """
 
     def __init__(
@@ -952,6 +961,7 @@ class DjangoSchema(strawberry.Schema):
                 raise
             raise restated from exc
         _refuse_field_name_collisions(self)
+        refuse_unreturnable_node_targets(self)
 
     @property
     @override

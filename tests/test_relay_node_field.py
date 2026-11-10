@@ -6,32 +6,35 @@ refetch) and ``examples/fakeshop/test_query/test_node_refetch_api.py`` (consumer
 type-name routing, shared rows and lazy proxies, custom NodeID columns,
 alternate primary-key spellings and override return contracts).
 
-This module owns construction/finalize refusal, class cache and private decoder
-status, stamp identity, original_error exception classes, helper return shapes
-and public-export identity. The private stamping tests inspect the original ORM
-row's cast attribute directly; the required-node test inspects the original
-model exception hidden by the GraphQL error envelope. Refetch over key shapes no
-fakeshop model carries (an unhashable comma-list key, a decimal key SQLite stores
-as a float, naive datetime keys in the default time zone) runs over HTTP on
-function-local models in ``test_node_refetch_api.py``, as do the sync-misuse
-messages whose exception classes stay here. The NodeID over a queryset annotation
-refetches live on ``SeriesType``
+This module owns construction/finalize refusal (``DjangoSchema``'s check of a
+typed field's annotation against its target included), class cache and private
+decoder status, stamp identity, original_error exception classes, helper return
+shapes and public-export identity. The private stamping tests inspect the
+original ORM row's cast attribute directly; the required-node test inspects the
+original model exception hidden by the GraphQL error envelope. Refetch over key
+shapes no fakeshop model carries (an unhashable comma-list key, a decimal key
+SQLite stores as a float, naive datetime keys in the default time zone) runs
+over HTTP on function-local models in ``test_node_refetch_api.py``, as do the
+sync-misuse messages whose exception classes stay here. The NodeID over a
+queryset annotation refetches live on ``SeriesType``
 (``test_library_api.py::test_library_series_node_refetches_by_its_annotated_handle``).
 Fakeshop ships no ``type+model`` secondary, so the hook a ``type+model``
-type-name id reads (its named type's, where the emitted model-label id reads
-the primary's) is pinned here on function-local types.
+type-name id reads (its named type's, where the emitted model-label id reads the
+primary's) is pinned here on function-local types.
 """
 
 import re
 from collections.abc import Awaitable, Callable, Iterable, Iterator
+from types import UnionType
 
 import pytest
 import strawberry
 from apps.products import services
-from apps.products.models import Category
+from apps.products.models import Category, Item
 from asgiref.sync import sync_to_async
-from django.db import DEFAULT_DB_ALIAS
+from django.db import DEFAULT_DB_ALIAS, connection
 from django.db.models import Model, QuerySet
+from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject
 from strategy_schemas import make_django_type
 from strawberry import relay
@@ -90,12 +93,13 @@ def _make_node_type(
     *,
     model: type[Model] = Category,
     strategy: str | None = None,
+    interfaces: tuple[type, ...] = (relay.Node,),
 ) -> type[DjangoType]:
     """Build a Relay-Node-shaped ``DjangoType`` over ``model`` for a test."""
     meta_attrs = {
         "model": model,
         "fields": ("id", "name"),
-        "interfaces": (relay.Node,),
+        "interfaces": interfaces,
         "name": name,
     }
     if strategy is not None:
@@ -529,6 +533,195 @@ def test_node_field_without_node_types_raises_at_finalize() -> None:
     _make_node_type("CategoryNode")
     DjangoNodesField()
     finalize_django_types()
+
+
+# ---------------------------------------------------------------------------
+# DjangoSchema construction check of a typed field's annotation
+# ---------------------------------------------------------------------------
+
+
+@strawberry.interface
+class Labelled:
+    """A narrower interface than ``relay.Node`` that ``CatNode`` implements."""
+
+    name: str
+
+
+def _node_query(
+    field: str,
+    annotation: object,
+    value: object,
+    *,
+    nested: bool = False,
+) -> type[object]:
+    """A ``Query`` holding ``field``, or a ``Query.viewer: Viewer`` whose ``Viewer`` holds it."""
+    namespace: dict[str, object] = {"__annotations__": {field: annotation}, field: value}
+    if not nested:
+        return strawberry.type(type("Query", (), namespace))
+    viewer = strawberry.type(type("Viewer", (), namespace))
+    root: dict[str, object] = {"__annotations__": {"viewer": viewer | None}, "viewer": None}
+    return strawberry.type(
+        type("Query", (), root),
+    )
+
+
+def _optional(field: str, held: type | UnionType) -> object:
+    """``held | None`` for ``node``, ``list[held | None]`` for ``nodes``."""
+    optional = held | None
+    return optional if field == "node" else list[optional]
+
+
+def _typed(field: str, target: type[DjangoType]) -> object:
+    """``DjangoNodeField(target)`` or ``DjangoNodesField(target)``."""
+    return DjangoNodeField(target) if field == "node" else DjangoNodesField(target)
+
+
+_FACTORY = {"node": "DjangoNodeField", "nodes": "DjangoNodesField"}
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["root", "nested"])
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_djangoschema_refuses_a_typed_field_annotated_with_a_type_that_cannot_hold_its_target(
+    field: str,
+    *,
+    nested: bool,
+) -> None:
+    """``DjangoNodeField(CatNode)`` annotated ``ItemNode`` is refused naming the field, at any depth."""
+    cat = _make_node_type("CatNode")
+    item = _make_node_type("ItemNode", model=Item)
+    query = _node_query(field, _optional(field, item), _typed(field, cat), nested=nested)
+    finalize_django_types()
+    owner = "Viewer" if nested else "Query"
+    message = (
+        f"{owner}.{field}: {_FACTORY[field]}(CatNode) returns ItemNode, which cannot return a "
+        "CatNode row; annotate the field with CatNode, or an interface or union CatNode "
+        "belongs to."
+    )
+    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
+        DjangoSchema(query=query, config=strawberry_config(), types=[cat])
+
+
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_djangoschema_refuses_a_typed_field_whose_target_it_does_not_publish(field: str) -> None:
+    """A ``relay.Node`` annotation does not publish the target, so the typed field is refused."""
+    cat = _make_node_type("CatNode")
+    item = _make_node_type("ItemNode", model=Item)
+    query = _node_query(field, _optional(field, relay.Node), _typed(field, cat))
+    finalize_django_types()
+    message = (
+        f"Query.{field}: {_FACTORY[field]}(CatNode) targets a type this schema does not "
+        "publish; reach it from a root or relation field, or list it in the schema's types=."
+    )
+    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
+        DjangoSchema(query=query, config=strawberry_config(), types=[item])
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        "node",
+        "union",
+        "target",
+        "interface",
+    ],
+)
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_djangoschema_builds_typed_fields_annotated_with_a_holding_type(
+    field: str,
+    annotation: str,
+) -> None:
+    """``relay.Node``, a union holding the target, the target and its narrower interface build."""
+    cat = _make_node_type("CatNode", interfaces=(relay.Node, Labelled))
+    item = _make_node_type("ItemNode", model=Item)
+    held = {
+        "node": relay.Node,
+        "union": cat | item,
+        "target": cat,
+        "interface": Labelled,
+    }
+    query = _node_query(field, _optional(field, held[annotation]), _typed(field, cat))
+    finalize_django_types()
+    schema = DjangoSchema(query=query, config=strawberry_config(), types=[cat, item])
+    assert schema.get_type_by_name("CatNode") is not None
+
+
+@pytest.mark.parametrize("annotation", ["union", "interface"])
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_djangoschema_builds_bare_fields_annotated_with_a_restriction(
+    field: str,
+    annotation: str,
+) -> None:
+    """A bare field restricted to a union or narrower interface is no configuration error."""
+    cat = _make_node_type("CatNode", interfaces=(relay.Node, Labelled))
+    item = _make_node_type("ItemNode", model=Item)
+    held = {"union": cat | item, "interface": Labelled}
+    bare = DjangoNodeField() if field == "node" else DjangoNodesField()
+    query = _node_query(field, _optional(field, held[annotation]), bare)
+    finalize_django_types()
+    schema = DjangoSchema(query=query, config=strawberry_config(), types=[cat, item])
+    assert schema.get_type_by_name("CatNode") is not None
+
+
+@strawberry.type
+class Plain:
+    """A Strawberry object type no ``DjangoType`` declares, so it carries no ``is_type_of``."""
+
+    name: str
+
+
+@pytest.mark.django_db
+def test_a_plain_object_annotation_holds_no_relay_type() -> None:
+    """An object return holds only itself, though the engine would complete any row as it.
+
+    A bare ``node: Plain | None`` refuses a ``CatNode`` id with no statement rather than
+    serving the row with ``__typename: "Plain"``; ``DjangoSchema`` refuses
+    ``DjangoNodeField(CatNode)`` annotated ``Plain`` at construction.
+    """
+    services.seed_data(1)
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    cat = _make_node_type("CatNode")
+    bare = _node_query("node", Plain | None, DjangoNodeField())
+    typed = _node_query("node", Plain | None, DjangoNodeField(cat))
+    finalize_django_types()
+    schema = strawberry.Schema(query=bare, config=strawberry_config(), types=[cat])
+    with CaptureQueriesContext(connection) as captured:
+        result = schema.execute_sync(
+            "query ($id: ID!) { node(id: $id) { __typename } }",
+            variable_values={"id": global_id_for(cat, saved_pk(row))},
+        )
+    assert result.data == {"node": None}
+    assert result.errors is not None
+    refusal = (
+        "Invalid GlobalID: model label 'products.category' decodes to a Relay-Node "
+        "DjangoType this field does not return"
+    )
+    assert [(error.message, error.extensions) for error in result.errors] == [
+        (refusal, {"code": "GLOBALID_INVALID"}),
+    ]
+    assert captured.captured_queries == []
+    message = (
+        "Query.node: DjangoNodeField(CatNode) returns Plain, which cannot return a CatNode "
+        "row; annotate the field with CatNode, or an interface or union CatNode belongs to."
+    )
+    with pytest.raises(ConfigurationError, match=f"^{re.escape(message)}$"):
+        DjangoSchema(query=typed, config=strawberry_config(), types=[cat])
+
+
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_strawberry_schema_builds_a_typed_field_that_djangoschema_refuses(field: str) -> None:
+    """The construction check is ``DjangoSchema``'s; a plain ``strawberry.Schema`` builds the field."""
+    cat = _make_node_type("CatNode")
+    item = _make_node_type("ItemNode", model=Item)
+    query = _node_query(field, _optional(field, item), _typed(field, cat))
+    finalize_django_types()
+    schema = strawberry.Schema(query=query, config=strawberry_config(), types=[cat])
+    assert schema.get_type_by_name("CatNode") is not None
+    with pytest.raises(
+        ConfigurationError,
+        match=r"returns ItemNode, which cannot return a CatNode row",
+    ):
+        DjangoSchema(query=query, config=strawberry_config(), types=[cat])
 
 
 @pytest.mark.django_db

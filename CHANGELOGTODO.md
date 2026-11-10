@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 220 to do.
+Progress: 0 done, 221 to do.
 
 ## From dry-0_0_15_3
 
@@ -1053,6 +1053,11 @@ Progress: 0 done, 220 to do.
   `resolve_id_attr` or `DATABASE_ROUTERS` read routing), where they ran that type's queryset and answered graphql-core's
   uncoded "Abstract type 'Node' must resolve to an Object type at runtime" error for a visible row, or `null`. Such an
   id anywhere in `nodes` fails the whole field; the typed form still reports its wrong-node-type mismatch first
+- [ ] 904. CHANGELOG entry for item 883: `node` / `nodes` annotated with a union, a narrower interface or another type
+  now refuse an id of a type outside the annotation with `GLOBALID_INVALID` before any query, instead of an uncoded
+  engine error after the type's queryset ran (or null for a hidden row); `DjangoSchema` refuses at construction a
+  typed `DjangoNodeField(T)` / `DjangoNodesField(T)` whose annotation cannot return `T` or whose `T` it does not
+  publish
 
 ## From dry-upstream-0_0_15
 

@@ -39,7 +39,7 @@ import operator
 from typing import TYPE_CHECKING, Any, Final, TypeGuard, TypeVar, get_args, get_origin
 
 from asgiref.sync import iscoroutinefunction
-from graphql import GraphQLList, GraphQLNonNull
+from graphql import GraphQLList, GraphQLNonNull, is_type
 from strawberry.schema import Schema
 from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types.base import StrawberryContainer, StrawberryList
@@ -48,7 +48,7 @@ from typing_extensions import Never
 from django_strawberry_framework.exceptions import ConfigurationError
 
 from . import truth
-from ._narrowing import optional_instance, read_attr
+from ._narrowing import optional_instance, read_attr, require
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
@@ -130,6 +130,7 @@ __all__ = (
     "MAX_TYPE_WRAPPER_DEPTH",
     "MISSING_ATTRIBUTE",
     "call_forwarded",
+    "field_return_type",
     "graphql_fields",
     "graphql_input_fields",
     "graphql_type_of",
@@ -470,6 +471,19 @@ def return_type_of(info: "GraphQLResolveInfo[object]") -> "GraphQLType":
     # basedpyright: graphql-core's GraphQLOutputType union lists the bare generic GraphQLList,
     # so the attribute reads as partially Unknown
     return info.return_type  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+
+
+def field_return_type(info: "Info[object, object]") -> "GraphQLType":
+    """Return the resolving field's return type as the executing schema published it.
+
+    Strawberry's ``Info`` carries the graphql-core resolve info at ``_raw_info``
+    (the read ``published_argument`` makes; Strawberry builds it as its own
+    ``GraphQLResolveInfo``-shaped tuple, so it is read by attribute, not by
+    class), whose ``return_type`` is the field definition's type: an alias in
+    the document changes nothing. Required: every resolver Strawberry calls
+    carries one.
+    """
+    return require(read_attr(read_attr(info, "_raw_info"), "return_type"), is_type)
 
 
 def inline_fragment_type_condition(node: "InlineFragmentNode") -> "NamedTypeNode | None":

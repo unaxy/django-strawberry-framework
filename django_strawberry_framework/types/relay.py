@@ -34,6 +34,7 @@ from weakref import WeakKeyDictionary
 
 from django.apps import apps
 from django.db import models
+from graphql import GraphQLObjectType, get_named_type, is_abstract_type
 from strawberry import relay
 from strawberry.relay.exceptions import NodeIDAnnotationError
 from strawberry.types.base import StrawberryObjectDefinition
@@ -72,6 +73,7 @@ from django_strawberry_framework.utils.typing import object_result
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from graphql import GraphQLType
     from strawberry.schema import Schema
     from strawberry.types import Info
     from strawberry.utils.await_maybe import AwaitableOrValue
@@ -722,8 +724,8 @@ def _unpublished_name_refusal(name: str) -> ConfigurationError:
     )
 
 
-def require_published_node(schema: Schema, type_cls: type[object], gid: str) -> None:
-    """Refuse a decoded ``type_cls`` that ``schema`` publishes no Relay-Node object type for.
+def require_published_node(schema: Schema, type_cls: type[object], gid: str) -> str:
+    """Return the name ``schema`` publishes ``type_cls`` under, refusing an unpublished type.
 
     ``decode_global_id`` resolves an id naming a Relay type ``schema`` does not
     publish as it would with no schema, the fallback the write and filter
@@ -733,19 +735,73 @@ def require_published_node(schema: Schema, type_cls: type[object], gid: str) -> 
     only the slot the client sent: a type-name slot reads exactly as a default
     spelling this schema publishes under another name, a model-label slot names
     the label. ``gid`` is the id ``decode_global_id`` already accepted, so its
-    parse cannot fail here.
+    parse cannot fail here. The returned name is the one
+    ``require_returned_node`` asks the field's return type about.
 
     Raises:
         ConfigurationError: ``schema`` publishes no object type for ``type_cls``.
 
     """
-    if published_node_type_name(schema, type_cls) is not None:
-        return
+    published = published_node_type_name(schema, type_cls)
+    if published is not None:
+        return published
     type_name = relay.GlobalID.from_id(gid).type_name
     if "." not in type_name:
         raise _unpublished_name_refusal(type_name)
     raise ConfigurationError(
         f"model label {type_name!r} decodes to no Relay-Node DjangoType published in this schema",
+    )
+
+
+def node_type_returned_by(schema: Schema, field_type: GraphQLType, published_name: str) -> bool:
+    """Return whether a ``field_type`` field can return the type published as ``published_name``.
+
+    ``published_name`` names an object type ``schema`` publishes. Unwrapped of
+    its list and non-null wrappers, an object return holds only that object
+    type, where the engine would complete any row for a type with no
+    ``is_type_of``; an abstract return (``relay.Node``, a narrower interface, a
+    union) holds the object types ``GraphQLSchema.is_sub_type`` names, asked of
+    ``schema``'s graphql-core schema as graphql-core's own
+    ``ensure_valid_runtime_type`` asks it when a row completes.
+    """
+    returned = get_named_type(field_type)
+    if returned.name == published_name:
+        return True
+    graphql_schema = schema._schema
+    node = require_instance(graphql_schema.get_type(published_name), GraphQLObjectType)
+    return is_abstract_type(returned) and graphql_schema.is_sub_type(returned, node)
+
+
+def require_returned_node(
+    schema: Schema,
+    field_type: GraphQLType,
+    published_name: str,
+    gid: str,
+) -> None:
+    """Refuse a published node type a field returning ``field_type`` cannot return.
+
+    ``published_name`` is the object type ``require_published_node`` found for
+    the decoded type in ``schema``; ``field_type`` is the resolving field's
+    return type as ``schema`` published it (``node_type_returned_by`` asks
+    whether it holds the type). A row of any other type would run the type's
+    queryset and then complete as graphql-core's uncoded "Expected value of
+    type" or "must resolve to an Object type at runtime" error, as Strawberry's
+    union "cannot be resolved for the field", or, under an object type with no
+    ``is_type_of``, as that type with the wrong ``__typename``. The refusal
+    quotes only the slot the client sent, as ``require_published_node``'s does.
+
+    Raises:
+        ConfigurationError: ``field_type`` cannot hold the type published as
+            ``published_name``.
+
+    """
+    if node_type_returned_by(schema, field_type, published_name):
+        return
+    type_name = relay.GlobalID.from_id(gid).type_name
+    if "." not in type_name:
+        raise ConfigurationError(f"GraphQL type {type_name!r} is not a type this field returns")
+    raise ConfigurationError(
+        f"model label {type_name!r} decodes to a Relay-Node DjangoType this field does not return",
     )
 
 
@@ -973,7 +1029,8 @@ def decode_global_id(
       converts the uniform ``ConfigurationError`` below into a ``GraphQLError``
       carrying the ``GLOBALID_INVALID`` extensions code, and which then refuse,
       with the same code, a decoded type the executing schema does not publish
-      (``require_published_node``);
+      (``require_published_node``) or the field does not return
+      (``require_returned_node``);
     - the write-side typed-id primitive
       ``django_strawberry_framework/relay.py::decode_model_global_id``, shared by
       the mutation flavors and the relation ``<field>_id`` decode;
