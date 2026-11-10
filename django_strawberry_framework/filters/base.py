@@ -44,6 +44,7 @@ from django.core.exceptions import FieldError, ValidationError
 from django.core.files.uploadedfile import UploadedFile
 from django.db import connections, models
 from django.db.models.constants import LOOKUP_SEP
+from django.db.models.fields.json import HasKeys as JSONHasKeys
 from django.db.models.lookups import Transform
 from django.db.models.options import Options
 from django.db.models.sql import Query
@@ -67,7 +68,7 @@ from django_filters import (
     NumberFilter,
 )
 from django_filters import constants as _filter_constants
-from django_filters.fields import BaseCSVField, ChoiceField
+from django_filters.fields import BaseCSVField, BaseRangeField, ChoiceField
 from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
 from django_filters.filters import RangeFilter as DjangoFilterRangeFilter
 from django_filters.filterset import BaseFilterSet, FilterSetOptions
@@ -106,7 +107,11 @@ from django_strawberry_framework.types.relay import (
     published_node_type_name,
 )
 from django_strawberry_framework.utils import truth
-from django_strawberry_framework.utils._array_field import array_leaf_field, is_array_in_lookup
+from django_strawberry_framework.utils._array_field import (
+    array_element_field,
+    array_leaf_field,
+    is_array_in_lookup,
+)
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     is_concrete_field,
@@ -125,6 +130,7 @@ from django_strawberry_framework.utils.errors import (
     coded_error_extensions,
     held_past_integer_range,
 )
+from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.querysets import (
     _names_to_path,
@@ -720,7 +726,8 @@ class _LookupOperand(NamedTuple):
     no lookup of the filter's, a path the walk refuses, which a set publishes only past a
     name the related model lacks or under a consumer ``filter`` override,
     ``refuse_unresolvable_lookup``): ``filters/inputs.py`` asks it whether the value is
-    prepared through the column (Django's ``FieldGetDbPrepValueMixin``).
+    prepared through the column (Django's ``FieldGetDbPrepValueMixin``), and
+    ``refuse_listless_lookup`` whether it takes the list a ``ListFilter`` applies.
     ``node_types`` are the classes the predicate holds past the column, each transform's then
     the lookup's (``utils/relations.py::_LookupWalk.node_types``), a reverse relation key's
     too (the relation delegates its lookup registry to its forward field), empty where no walk
@@ -1401,7 +1408,9 @@ class _ElementField(Field):
     with no output field, a relation compared on more than one column or on none, a
     crossing pair on a filter holding a ``filter`` of its own, a ``method=`` filter on a
     relation, a column django-filter builds no filter for), passes through as sent for the
-    filter to judge.
+    filter to judge. Under a lookup that is Django's ``Range`` (``bounds``) a non-empty list
+    of other than two members is the field's error, django-filter's ``BaseRangeField`` rule,
+    message and code (``invalid_values``); an empty list keeps the filter's meaning.
 
     Raw form data reads as the generated ``in`` reads it (``_MembershipCSVWidget``, rendered
     as a text input): ``?name=a,b`` is ``["a", "b"]``, an empty ``?name=`` applies no
@@ -1423,6 +1432,7 @@ class _ElementField(Field):
         self.element_field: Field | None = element_field
         self.element_nests: bool = element_nests
         self.members_are_arrays: bool = members_are_arrays
+        self.bounds: bool = False
 
     @override
     def to_python(self, value: object) -> object:
@@ -1433,6 +1443,21 @@ class _ElementField(Field):
         if self.members_are_arrays:
             return [self._cleaned(element_field, _array_value(member)) for member in value]
         return self._cleaned(element_field, value)
+
+    @override
+    def validate(self, value: object) -> None:
+        """Refuse a non-empty list of other than two bounds when the lookup is a ``range``.
+
+        django-filter's ``BaseRangeField.clean`` rule, message and code: Django's ``Range``
+        reads exactly two members, so one would raise an ``IndexError`` and three a
+        ``TypeError`` past the form. An empty list keeps the filter's own meaning.
+        """
+        super().validate(value)
+        if self.bounds and is_list_or_tuple(value) and value and len(value) != _RANGE_BOUNDS:
+            raise ValidationError(
+                BaseRangeField.default_error_messages["invalid_values"],
+                code="invalid_values",
+            )
 
     def _cleaned(
         self,
@@ -1472,9 +1497,11 @@ class _ElementCleanedFilter(_ColumnCleanedFilter):
     def _hand_column_field(self, field: Field, /) -> None:
         """Fill only a missing comparison cleaner on an owned ``_ElementField``."""
         if isinstance(field, _ElementField) and field.element_field is None:
+            lookup = _bound_lookup_operand(self).lookup
             field.element_field = _column_form_field(self, element=True)
             field.element_nests = array_leaf_field(_bound_value_field(self))[1] > 1
-            field.members_are_arrays = is_array_in_lookup(_bound_lookup_operand(self).lookup)
+            field.members_are_arrays = is_array_in_lookup(lookup)
+            field.bounds = truth.is_subclass(lookup, models.lookups.Range)
 
 
 class ArrayFilterMethod(_EmptyListAwareFilterMethod):
@@ -1525,6 +1552,10 @@ class ArrayFilter(_ElementCleanedFilter):
     ask as ``ListFilter``'s is, raw drivers included. Raw form data (``DjangoFilterBackend``,
     a ``QueryDict``) reads ``?name=a,b`` as ``["a", "b"]`` and an empty ``?name=`` as no
     constraint (``_MembershipCSVWidget``); only a list or tuple is an explicit ``[]``.
+    Its lookup takes the list as ``ListFilter``'s does (``refuse_listless_lookup``): over an
+    ``ArrayField`` column the input build admits ``exact``, ``contains``, ``contained_by``
+    and ``overlap``; a transform's output that is no array (``len``, an index) is refused
+    with any lookup comparing one value.
     """
 
     # basedpyright: the stub declares ``Filter.method`` a plain attribute, not the property it is
@@ -1899,6 +1930,7 @@ def install_comparison_cleaner(owned: Field, target: Field) -> bool:
         owned.element_field = target.element_field
         owned.element_nests = target.element_nests
         owned.members_are_arrays = target.members_are_arrays
+        owned.bounds = target.bounds
         return True
     if isinstance(owned, RangeField) and isinstance(target, RangeField):
         if owned.bound_field is not None:
@@ -2035,6 +2067,15 @@ class ListFilterMethod(_EmptyListAwareFilterMethod):
 
 class ListFilter(_ElementCleanedFilter):
     """Filter that accepts a list-shaped input (e.g. `__in` lookups).
+
+    Its lookup takes the list: ``in``, ``range`` (exactly two bounds, else the form's
+    ``invalid_values`` error), a transform ending in either (``year__in``), ``has_keys`` /
+    ``has_any_keys``, a ``JSONField``'s, ``RangeField``'s or ``CompositePrimaryKey``'s own
+    comparisons, or anything over an ``ArrayField`` the input build admits; a column whose
+    field class is project or third-party code is not judged. A set publishing one whose
+    Django lookup compares one value (django-filter's default ``exact``, ``gte``,
+    ``icontains``, ``isnull``, ``year``) refuses it (``refuse_listless_lookup``); a
+    ``method=`` filter receives the list whatever its ``lookup_expr``.
 
     Same contract as `graphene_django/filter/filters/list_filter.py::ListFilter`:
     an empty list short-circuits to `qs.none()` (or a new queryset over every
@@ -3614,6 +3655,100 @@ def refuse_unresolvable_lookup(
         f"{related_key}), register a project lookup at startup (Field.register_lookup in "
         "AppConfig.ready), or read the value in `method=`.",
     ) from refusal
+
+
+#: ``django.contrib.postgres.lookups.HasKeys`` (``HStoreField``'s ``has_keys``, and through
+#: ``HasAnyKeys`` its ``has_any_keys``), or ``None`` without a PostgreSQL driver.
+_PG_HAS_KEYS_CLS = import_attr_if_importable("django.contrib.postgres.lookups", "HasKeys")
+
+#: ``django.contrib.postgres.fields.RangeField``, whose ``get_prep_value`` reads a two-member
+#: list as one range, or ``None`` without a PostgreSQL driver.
+_PG_RANGE_FIELD_CLS = import_attr_if_importable("django.contrib.postgres.fields", "RangeField")
+
+
+def _takes_list(lookup: type[models.lookups.Lookup], field: ModelField) -> bool:
+    """Whether Django's own ``lookup`` applies a list over ``field`` as the list it is.
+
+    Asked of Django first: a lookup whose ``get_db_prep_lookup_value_is_iterable`` is true
+    (``FieldGetDbPrepValueIterableMixin``: ``in``, ``range``, a transform's or a relation's,
+    read off the class's real MRO, ``utils/truth.py::mro_attr``) prepares each member as a
+    value of the field. No Django seam marks the rest, so they are named: ``has_keys`` /
+    ``has_any_keys`` (``JSONField``'s ``HasKeys``, ``HStoreField``'s) read each member as a
+    key, and a lookup Django prepares through the field (``_django_prepares``: ``exact``,
+    ``contains``, a comparison) takes the list as one value where a list is one, a
+    ``JSONField``'s (a JSON array), a ``RangeField``'s (two bounds) or a
+    ``CompositePrimaryKey``'s (one member per column: ``TupleExact``, ``TupleGreaterThan``).
+    Everywhere else a list is no value of the field.
+    """
+    if truth.mro_attr(lookup, "get_db_prep_lookup_value_is_iterable") is True:
+        return True
+    if truth.is_subclass(lookup, JSONHasKeys) or (
+        truth.is_type(_PG_HAS_KEYS_CLS) and truth.is_subclass(lookup, _PG_HAS_KEYS_CLS)
+    ):
+        return True
+    return _django_prepares(lookup) and (
+        truth.is_instance(field, models.JSONField)
+        or truth.is_instance(field, models.CompositePrimaryKey)
+        or (truth.is_type(_PG_RANGE_FIELD_CLS) and truth.is_instance(field, _PG_RANGE_FIELD_CLS))
+    )
+
+
+def refuse_listless_lookup(
+    filterset_cls: type[BaseFilterSet],
+    filter_name: str,
+    filter_instance: Filter,
+) -> None:
+    """Refuse a ``ListFilter`` / ``ArrayFilter`` whose lookup applies one value, never a list.
+
+    Both publish a list and hand the whole list to their lookup, so the lookup must take
+    one (``_takes_list``), as ``in`` and ``range`` do; one comparing a single value
+    (django-filter's default ``exact``, ``gte``, ``icontains``, ``isnull``, a transform
+    ending in one: ``year``, an ``ArrayField``'s ``len`` or index) would stringify the list,
+    fail to prepare it, or match nothing. The lookup is the one Django's query resolves
+    past the transforms (``_filterset_lookup_operand``).
+    ``filters/sets.py::FilterSet._publish_filters`` asks this of every leaf a set publishes
+    whose ``filter`` is shipped code, right after ``refuse_unresolvable_lookup``: a set a
+    type serves refuses the filter when the schema builds, an unserved set at its first
+    use (its first construction, or the package's first read of its table) and at every
+    construction after until it is fixed. A ``Meta.filter_overrides`` selection building a
+    ``ListFilter`` for a column's ``exact`` or ``gte`` is refused alike. Over a relation
+    the refusal spells the related column past it (``_related_column_hint``), the column a
+    list of keys is typed by.
+
+    Not judged: a lookup no walk resolves (a ``method=`` filter, whose method receives the
+    list; a path only the queryset holds), a lookup a project registers (its class is not
+    Django's: a served set refuses it when it seals its leaves), a column whose field class
+    is project or third-party code (it owns how it prepares a value, a list stored as text
+    included), a value of an ``ArrayField`` column, whose lookups the input build admits by
+    name (``filters/inputs.py::_array_element_column``), and a stock django-filter
+    ``FilterSet``, which publishes through no package table.
+    """
+    if not truth.is_instance(filter_instance, _ElementCleanedFilter):
+        return
+    operand = _filterset_lookup_operand(filterset_cls, filter_instance)
+    lookup, field = operand.lookup, operand.field
+    if (
+        lookup is None
+        or field is None
+        or truth.module(lookup).partition(".")[0] != "django"
+        or truth.module(truth.class_of(field)).partition(".")[0] != "django"
+        or array_element_field(field) is not None
+        or _takes_list(lookup, field)
+    ):
+        return
+    field_name = truth.text(_declared_field_name(filter_instance))
+    lookup_expr = truth.text(filter_instance.lookup_expr)
+    related_key = _related_column_hint(field, field_name)
+    raise ConfigurationError(
+        f"FilterSet {truth.qualname(filterset_cls)}: {truth.kind(filter_instance)} "
+        f"{filter_name!r} has field_name {field_name!r} and lookup_expr {lookup_expr!r}, "
+        f"but the lookup it applies, Django's {truth.qualname(lookup)} "
+        f"({truth.render(truth.mro_attr(lookup, 'lookup_name'))}), compares one value, and "
+        "the filter publishes and applies a list. Declare lookup_expr 'in' (any member "
+        "matches) or 'range' (two bounds), or a transform ending in either ('year__in')"
+        f"{related_key}; read the list in `method=`; or, for a Meta.filter_overrides "
+        "selection, list only those lookups for the column in Meta.fields.",
+    )
 
 
 def _filterset_walked_lookup(

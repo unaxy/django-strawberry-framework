@@ -812,6 +812,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_library_shapes_api.py    # Live GraphQL HTTP tests for the library relation shapes the optimizer plans specially.
 ├── test_list_field_api.py        # Live sync-HTTP contract for ``DjangoListField`` arguments.
 ├── test_list_field_async_api.py  # Live async-HTTP contract for ``DjangoListField`` arguments.
+├── test_list_filter_range_bounds_api.py  # A ``ListFilter`` declared with ``range`` applies exactly two bounds; any other count is refused.
 ├── test_model_mutation_flows_api.py  # Live HTTP tests for model-mutation identities, relation decoding and write-error names.
 ├── test_mti_composite_relations_api.py  # Native HTTP relation verdicts needing MTI-forward-M2M or composite-key parents.
 ├── test_multi_db.py              # Live GraphQL HTTP tests for sharded resolver isolation and multi-database debug capture.

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 212 to do.
+Progress: 0 done, 213 to do.
 
 ## From dry-0_0_15_3
 
@@ -997,6 +997,14 @@ Progress: 0 done, 212 to do.
   the same statement, instead of refusing every value with `GLOBALID_UNVALIDATABLE`; an id of another type now answers
   the type mismatch. A key over rows another type scopes, and one whose class overrides `filter`, still answer
   `GLOBALID_UNVALIDATABLE`
+- [ ] 865. CHANGELOG entry for item 716 (and 740): a declared `ListFilter` / `ArrayFilter` whose lookup compares one
+  value (django-filter's default `exact`, `gte`, `icontains`, `isnull`, a `year` transform, an array's `len` or index,
+  a `Meta.filter_overrides` `ListFilter` for `exact` / `gte`) now raises `ConfigurationError` when its `FilterSet`
+  publishes (schema build, or first use of a set no connection serves), naming the Django lookup, instead of answering
+  wrong rows or a masked error per request; declare `lookup_expr="in"` / `"range"` / `"<transform>__in"`, or read
+  the list in `method=`. `has_keys` / `has_any_keys`, `JSONField`, `RangeField` and `CompositePrimaryKey`
+  comparisons, `ArrayField` whole-array lookups and project field classes are unaffected. A `range` `ListFilter` now
+  takes exactly two values: one or three answer `FILTER_INVALID` with code `invalid_values`
 
 ## From dry-upstream-0_0_15
 

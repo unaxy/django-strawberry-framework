@@ -6091,7 +6091,7 @@ def _expanded_set(base: type[FilterSet]) -> type[FilterSet]:
 
     class FinesEmailPatronFilter(base):
         fines = RangeFilter(field_name="lifetime_fines_cents", lookup_expr="range")
-        emails = ListFilter(field_name="email")
+        emails = ListFilter(field_name="email", lookup_expr="in")
         picks = MultipleChoiceFilter(field_name="email", choices=[("a@x.test", "a@x.test")])
         name = CharFilter(field_name="name")
 

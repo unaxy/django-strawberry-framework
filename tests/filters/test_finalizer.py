@@ -49,6 +49,7 @@ from collections.abc import Callable, Generator, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, NoReturn
 
+import django_filters
 import pytest
 import strawberry
 from apps.kanban.models import Actor, Card, CardItem, CardPathLink
@@ -79,6 +80,7 @@ from django.core.exceptions import FieldError
 from django.db import connection
 from django.db.models import (
     BigIntegerField,
+    CharField,
     DateTimeField,
     F,
     ForeignKey,
@@ -92,9 +94,9 @@ from django.db.models import (
 from django.db.models import Field as ModelFieldClass
 from django.db.models.functions import Abs, ExtractHour
 from django.db.models.lookups import GreaterThan, IStartsWith
-from django.http import HttpRequest
+from django.http import HttpRequest, QueryDict
 from django.test import override_settings
-from django.test.utils import CaptureQueriesContext, register_lookup
+from django.test.utils import CaptureQueriesContext, isolate_apps, register_lookup
 from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy
 from django_filters import (
@@ -127,6 +129,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.exceptions import ConfigurationError, LookupValidationError
 from django_strawberry_framework.filters import (
+    ArrayFilter,
     FilterInput,
     FilterSet,
     GlobalIDFilter,
@@ -160,6 +163,7 @@ from django_strawberry_framework.utils import querysets as querysets_module
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_dict,
+    is_list_or_tuple,
     is_queryset,
     is_str,
     read_attr,
@@ -169,6 +173,7 @@ from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.typing import object_result
 from tests._cleaned_filter_sets import cleaned_specimen
 from tests._idioms import json_at, json_list, saved_pk
+from tests._relation_fixtures import RpCompositeParent
 from tests._subprocess import run_in_fresh_process
 
 
@@ -5276,6 +5281,518 @@ def test_a_lookup_registered_after_a_set_publishes_is_not_seen_by_the_next_set()
         "lookup_expr 'exact', but Django resolves no transform or lookup 'magnitude' on "
         "ScalarSpecimen.signed_big (BigIntegerField)",
     )
+
+
+@dataclass(frozen=True)
+class _ListlessCase:
+    """A declared list filter whose Django lookup compares one value, and what its refusal names."""
+
+    declare: Callable[[], Filter]
+    kind: str
+    field_name: str
+    lookup_expr: str
+    lookup: str
+    lookup_name: str
+    related: str = ""
+    """The relation's related column spelled past it, which the refusal names; ``""`` for none."""
+
+
+_LISTLESS_LEAVES: dict[str, _ListlessCase] = {
+    "text-default-exact": _ListlessCase(
+        lambda: ListFilter(field_name="label"),
+        "ListFilter",
+        "label",
+        "exact",
+        "Exact",
+        "exact",
+    ),
+    "integer-gte": _ListlessCase(
+        lambda: ListFilter(field_name="signed_big", lookup_expr="gte"),
+        "ListFilter",
+        "signed_big",
+        "gte",
+        "IntegerGreaterThanOrEqual",
+        "gte",
+    ),
+    "decimal-icontains": _ListlessCase(
+        lambda: ListFilter(field_name="price", lookup_expr="icontains"),
+        "ListFilter",
+        "price",
+        "icontains",
+        "IContains",
+        "icontains",
+    ),
+    "date-year-transform": _ListlessCase(
+        lambda: ListFilter(field_name="occurred_on", lookup_expr="year"),
+        "ListFilter",
+        "occurred_on",
+        "year",
+        "YearExact",
+        "exact",
+    ),
+    "datetime-isnull": _ListlessCase(
+        lambda: ListFilter(field_name="occurred_at", lookup_expr="isnull"),
+        "ListFilter",
+        "occurred_at",
+        "isnull",
+        "IsNull",
+        "isnull",
+    ),
+    "json-icontains": _ListlessCase(
+        lambda: ListFilter(field_name="payload", lookup_expr="icontains"),
+        "ListFilter",
+        "payload",
+        "icontains",
+        "JSONIContains",
+        "icontains",
+    ),
+    "relation-default-exact": _ListlessCase(
+        lambda: ListFilter(field_name="parent"),
+        "ListFilter",
+        "parent",
+        "exact",
+        "RelatedExact",
+        "exact",
+        "parent__id",
+    ),
+    "array-filter-text-startswith": _ListlessCase(
+        lambda: ArrayFilter(field_name="label", lookup_expr="startswith"),
+        "ArrayFilter",
+        "label",
+        "startswith",
+        "StartsWith",
+        "startswith",
+    ),
+    "array-filter-uuid-default-exact": _ListlessCase(
+        lambda: ArrayFilter(field_name="external_id"),
+        "ArrayFilter",
+        "external_id",
+        "exact",
+        "Exact",
+        "exact",
+    ),
+}
+
+
+def _listless_refusal(case: _ListlessCase, name: str = "SpecimenFilter") -> str:
+    """The refusal of the leaf ``probe`` ``case`` declares on the set ``name``."""
+    related_key = (
+        f" (a relation's related column is named past it: field_name {case.related!r})"
+        if case.related
+        else ""
+    )
+    return (
+        f"FilterSet {name}: {case.kind} 'probe' has field_name {case.field_name!r} and "
+        f"lookup_expr {case.lookup_expr!r}, but the lookup it applies, Django's {case.lookup} "
+        f"({case.lookup_name!r}), compares one value, and the filter publishes and applies a "
+        "list. Declare lookup_expr 'in' (any member matches) or 'range' (two bounds), or a "
+        f"transform ending in either ('year__in'){related_key}; read the list in `method=`; "
+        "or, for a Meta.filter_overrides selection, list only those lookups for the column in "
+        "Meta.fields."
+    )
+
+
+#: Where a set publishes its leaves: a served set when the schema builds, an unserved one at
+#: its first use.
+_LISTLESS_SERVINGS: dict[str, Callable[[type[FilterSet]], None]] = {
+    "root-connection": _build_at_root,
+    "unserved-filter-input": _build_unserved_filter_input,
+    "apply-sync-first-use": _apply_unbound,
+}
+
+
+@pytest.mark.parametrize(
+    ("case", "serve"),
+    [
+        pytest.param(
+            _LISTLESS_LEAVES[case_id],
+            _LISTLESS_SERVINGS[serving],
+            id=f"{case_id}-{serving}",
+        )
+        for case_id in _LISTLESS_LEAVES
+        for serving in _LISTLESS_SERVINGS
+    ],
+)
+def test_a_declared_list_filter_whose_lookup_compares_one_value_is_refused(
+    case: _ListlessCase,
+    serve: Callable[[type[FilterSet]], None],
+) -> None:
+    """A ``ListFilter`` / ``ArrayFilter`` applies its list through its lookup, which must take one.
+
+    django-filter's default ``exact``, a comparison, a text pattern, ``isnull`` and a
+    transform ending in one compare a single value, so the set refuses the leaf when it
+    publishes: a served set when the schema builds, an unbound one at its first use. The
+    refusal names the set, the filter class and name, its ``field_name`` and ``lookup_expr``,
+    and the Django lookup it applies; over a relation it spells the related column past it.
+    """
+    filterset_cls = _specimen_set([], {"probe": case.declare()})
+    with pytest.raises(ConfigurationError) as exc_info:
+        serve(filterset_cls)
+    assert str(exc_info.value) == _listless_refusal(case)
+
+
+def test_a_listless_leaf_is_refused_at_every_use_until_fixed() -> None:
+    """Nothing is kept: an unserved set refuses the leaf at its first use and again at the next."""
+    filterset_cls = _specimen_set([], {"probe": _LISTLESS_LEAVES["text-default-exact"].declare()})
+    for _attempt in range(2):
+        with pytest.raises(ConfigurationError) as exc_info:
+            _ = filterset_cls.get_filters()
+        assert str(exc_info.value) == _listless_refusal(_LISTLESS_LEAVES["text-default-exact"])
+
+
+class _ListTextField(TextField[object, object]):
+    """A project column storing a list as comma-joined text in ``get_prep_value``."""
+
+    @override
+    def get_prep_value(self, value: object) -> object:
+        if is_list_or_tuple(value):
+            return ",".join(str(member) for member in value)
+        return object_result(super().get_prep_value, value)
+
+
+class _ListDbTextField(TextField[object, object]):
+    """A project column storing a list as comma-joined text in ``get_db_prep_value`` only."""
+
+    @override
+    def get_db_prep_value(
+        self,
+        value: object,
+        connection: BaseDatabaseWrapper,
+        prepared: bool = False,
+    ) -> object:
+        if is_list_or_tuple(value):
+            return ",".join(str(member) for member in value)
+        return object_result(super().get_db_prep_value, value, connection, prepared)
+
+
+class _ListCharField(CharField[object, object]):
+    """A project column reading a list as comma-joined text in ``to_python``.
+
+    Django's ``CharField.get_prep_value`` runs ``to_python``, so an ``exact`` list compares
+    the joined text.
+    """
+
+    @override
+    def to_python(self, value: object) -> object:
+        if is_list_or_tuple(value):
+            return ",".join(str(member) for member in value)
+        return object_result(super().to_python, value)
+
+
+def _read_filters(filterset_cls: type[FilterSet]) -> None:
+    """The package's first read of an unbound set's table."""
+    _ = filterset_cls.get_filters()
+
+
+#: Where a set taking its list publishes: served at the root, or read unbound.
+_ADMITTED_SERVINGS: dict[str, Callable[[type[FilterSet]], None]] = {
+    "root-connection": _build_at_root,
+    "get-filters": _read_filters,
+}
+
+
+@pytest.mark.parametrize("serve", list(_ADMITTED_SERVINGS.values()), ids=list(_ADMITTED_SERVINGS))
+@pytest.mark.parametrize(
+    "declare",
+    [
+        pytest.param(lambda: ListFilter(field_name="label", lookup_expr="in"), id="text-in"),
+        pytest.param(
+            lambda: ListFilter(field_name="signed_big", lookup_expr="range"),
+            id="integer-range",
+        ),
+        pytest.param(
+            lambda: ListFilter(field_name="occurred_on", lookup_expr="year__in"),
+            id="year-in",
+        ),
+        pytest.param(
+            lambda: ListFilter(field_name="occurred_at", lookup_expr="date__in"),
+            id="date-in",
+        ),
+        pytest.param(
+            lambda: ListFilter(field_name="parent__id", lookup_expr="in"),
+            id="related-key-in",
+        ),
+        pytest.param(
+            lambda: ArrayFilter(field_name="price", lookup_expr="in"),
+            id="array-filter-in",
+        ),
+        pytest.param(lambda: ListFilter(field_name="payload"), id="json-default-exact"),
+        pytest.param(
+            lambda: ListFilter(field_name="payload", lookup_expr="contains"),
+            id="json-contains",
+        ),
+        pytest.param(lambda: ListFilter(field_name="payload", lookup_expr="gte"), id="json-gte"),
+        pytest.param(
+            lambda: ListFilter(field_name="payload", lookup_expr="has_keys"),
+            id="json-has-keys",
+        ),
+        pytest.param(
+            lambda: ListFilter(field_name="payload", lookup_expr="has_any_keys"),
+            id="json-has-any-keys",
+        ),
+    ],
+)
+def test_a_declared_list_filter_whose_lookup_takes_the_list_builds(
+    declare: Callable[[], Filter],
+    serve: Callable[[type[FilterSet]], None],
+) -> None:
+    """A lookup taking the list builds, served at the root or read unbound.
+
+    ``in``, ``range``, a transform ending in either, a related key's ``in``, a ``JSONField``'s
+    own comparisons (the list is one JSON array) and ``has_keys`` / ``has_any_keys`` (each
+    member a key) take it.
+    """
+    filterset_cls = _specimen_set([], {"probe": declare()})
+    serve(filterset_cls)
+    assert "probe" in filterset_cls.get_filters()
+
+
+def test_a_relations_own_in_builds_on_an_unserved_set() -> None:
+    """A relation's ``in`` (``RelatedIn``) takes the list; only GraphQL cannot type its keys."""
+    filterset_cls = _specimen_set([], {"probe": ListFilter(field_name="parent", lookup_expr="in")})
+    assert "probe" in filterset_cls.get_filters()
+
+
+def test_a_method_list_filter_receives_the_list_whatever_its_lookup() -> None:
+    """A ``method=`` filter applies no lookup of its own: its default ``exact`` builds."""
+
+    class MethodSpecimenFilter(FilterSet):
+        probe = ListFilter(field_name="label", method="filter_among")
+
+        class Meta:
+            model = ScalarSpecimen
+            fields = ()
+
+        def filter_among(
+            self,
+            queryset: QuerySet[ScalarSpecimen],
+            name: str,
+            value: object,
+        ) -> QuerySet[ScalarSpecimen]:
+            del name
+            return queryset.filter(label__in=value)
+
+    _build_at_root(MethodSpecimenFilter)
+    assert "probe" in MethodSpecimenFilter.get_filters()
+
+
+#: Where an unserved set publishes without a schema serving it through a connection.
+_UNSERVED_PUBLISHERS: dict[str, Callable[[type[FilterSet]], None]] = {
+    "get-filters": _read_filters,
+    "unserved-filter-input": _build_unserved_filter_input,
+}
+
+
+@pytest.mark.parametrize(
+    "publish",
+    list(_UNSERVED_PUBLISHERS.values()),
+    ids=list(_UNSERVED_PUBLISHERS),
+)
+def test_a_project_lookup_a_list_filter_applies_is_not_judged_on_an_unserved_set(
+    publish: Callable[[type[FilterSet]], None],
+) -> None:
+    """A lookup the project registers owns what its value means: an unserved set builds it."""
+    with register_lookup(BigIntegerField, _NotEqual):
+        filterset_cls = _specimen_set(
+            [],
+            {"probe": ListFilter(field_name="signed_big", lookup_expr="ne")},
+        )
+        publish(filterset_cls)
+        assert "probe" in filterset_cls.get_filters()
+
+
+@isolate_apps("apps.scalars")
+@pytest.mark.parametrize(
+    "column",
+    [
+        pytest.param(_ListTextField, id="get-prep-value"),
+        pytest.param(_ListDbTextField, id="get-db-prep-value"),
+    ],
+)
+@pytest.mark.parametrize(
+    "publish",
+    list(_UNSERVED_PUBLISHERS.values()),
+    ids=list(_UNSERVED_PUBLISHERS),
+)
+def test_a_project_field_class_is_not_judged(
+    column: Callable[[], ModelFieldClass[object, object]],
+    publish: Callable[[type[FilterSet]], None],
+) -> None:
+    """A column whose field class is project code owns how it prepares a list: it builds."""
+
+    class ListTextSpecimen(Model):
+        tags = column()
+
+        class Meta:
+            app_label = "scalars"
+
+    filterset_cls = _specimen_set(
+        [],
+        {"probe": ListFilter(field_name="tags")},
+        model=ListTextSpecimen,
+    )
+    publish(filterset_cls)
+    assert "probe" in filterset_cls.get_filters()
+
+
+@pytest.mark.django_db(transaction=True)
+@isolate_apps("apps.scalars")
+def test_a_project_field_class_preparing_a_list_in_to_python_answers_over_graphql() -> None:
+    """Served at the root, an ``exact`` list over such a column answers the row holding it."""
+
+    class CsvSpecimen(Model):
+        label = _ListCharField(max_length=50)
+
+        class Meta:
+            app_label = "scalars"
+
+    with connection.schema_editor() as editor:
+        editor.create_model(CsvSpecimen)
+    try:
+        _ = CsvSpecimen.objects.create(label="a,b")
+        _ = CsvSpecimen.objects.create(label="c")
+        schema = _served_schema(
+            _specimen_set([], {"tags": ListFilter(field_name="label")}, model=CsvSpecimen),
+            CsvSpecimen,
+        )
+        data = _post(
+            schema,
+            '{ rows(filter: {tags: {exact: ["a", "b"]}}) { edges { node { label } } } }',
+        )
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(CsvSpecimen)
+
+    assert _labels(data) == ["a,b"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("lookup_expr", "value", "expected"),
+    [
+        pytest.param("exact", "1,X", [(1, "X")], id="exact"),
+        pytest.param("gt", "1,X", [(1, "Y"), (2, "A")], id="gt"),
+    ],
+)
+def test_a_composite_primary_key_takes_the_list_as_one_value(
+    lookup_expr: str,
+    value: str,
+    expected: list[tuple[int, str]],
+) -> None:
+    """A ``CompositePrimaryKey``'s ``exact`` / ``gt`` compare a list as one value per column."""
+    with connection.schema_editor() as editor:
+        editor.create_model(RpCompositeParent)
+    try:
+        for tenant_id, code in ((1, "X"), (1, "Y"), (2, "A")):
+            _ = RpCompositeParent.objects.create(tenant_id=tenant_id, code=code, label=code)
+        filterset_cls = _specimen_set(
+            [],
+            {"probe": ListFilter(field_name="pk", lookup_expr=lookup_expr)},
+            model=RpCompositeParent,
+        )
+        filterset = filterset_cls(
+            data=QueryDict(f"probe={value}"),
+            queryset=RpCompositeParent.objects.all(),
+        )
+        assert filterset.is_valid(), filterset.errors
+        rows = sorted(filterset.qs.values_list("tenant_id", "code"))
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(RpCompositeParent)
+
+    assert rows == expected
+
+
+def test_a_composite_primary_keys_null_test_is_refused() -> None:
+    """``isnull`` takes one flag, never a list, over a ``CompositePrimaryKey`` too."""
+    filterset_cls = _specimen_set(
+        [],
+        {"probe": ListFilter(field_name="pk", lookup_expr="isnull")},
+        model=RpCompositeParent,
+    )
+    case = _ListlessCase(ListFilter, "ListFilter", "pk", "isnull", "TupleIsNull", "isnull")
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = filterset_cls.get_filters()
+    assert str(exc_info.value) == _listless_refusal(case)
+
+
+@pytest.mark.pg
+@isolate_apps("apps.scalars")
+@pytest.mark.parametrize(
+    ("field_name", "lookup_expr"),
+    [
+        pytest.param("attrs", "has_keys", id="hstore-has-keys"),
+        pytest.param("attrs", "has_any_keys", id="hstore-has-any-keys"),
+        pytest.param("span", "exact", id="range-field-exact"),
+    ],
+)
+def test_a_list_filter_over_a_postgres_column_taking_the_list_builds(
+    field_name: str,
+    lookup_expr: str,
+) -> None:
+    """``HStoreField``'s ``has_keys`` reads each member as a key; a ``RangeField`` two bounds.
+
+    The set is unserved (no input types a range column), so it publishes at its first use.
+    """
+    from django.contrib.postgres.fields import (  # noqa: PLC0415 - needs a PostgreSQL driver
+        HStoreField,
+        IntegerRangeField,
+    )
+
+    class PostgresSpecimen(Model):
+        attrs = HStoreField(default=dict)
+        span = IntegerRangeField(null=True)
+
+        class Meta:
+            app_label = "scalars"
+
+    filterset_cls = _specimen_set(
+        [],
+        {"probe": ListFilter(field_name=field_name, lookup_expr=lookup_expr)},
+        model=PostgresSpecimen,
+    )
+    assert "probe" in filterset_cls.get_filters()
+
+
+def test_a_stock_django_filter_parent_is_never_asked() -> None:
+    """A stock django-filter ``FilterSet`` publishes through no package table: never refused."""
+    meta = type("Meta", (), {"model": ScalarSpecimen, "fields": []})
+    stock = type(
+        "StockSpecimenFilter",
+        (django_filters.FilterSet,),
+        {"probe": ListFilter(field_name="label"), "Meta": meta},
+    )
+    assert "probe" in stock.get_filters()
+
+
+@pytest.mark.parametrize("serve", list(_LISTLESS_SERVINGS.values()), ids=list(_LISTLESS_SERVINGS))
+@pytest.mark.parametrize("lookup_expr", ["exact", "gte"])
+def test_a_filter_overrides_list_filter_for_a_listless_lookup_is_refused(
+    serve: Callable[[type[FilterSet]], None],
+    lookup_expr: str,
+) -> None:
+    """``Meta.filter_overrides`` building a ``ListFilter`` for ``exact`` / ``gte`` is refused.
+
+    ``in`` and ``range`` route to the generated membership and range filters; the override's
+    ``ListFilter`` serves every other lookup ``Meta.fields`` lists for the column.
+    """
+    filterset_cls = _specimen_set(
+        {"signed_big": ["in", lookup_expr]},
+        meta={"filter_overrides": {BigIntegerField: {"filter_class": ListFilter}}},
+    )
+    name = "signed_big" if lookup_expr == "exact" else f"signed_big__{lookup_expr}"
+    lookup = "IntegerFieldExact" if lookup_expr == "exact" else "IntegerGreaterThanOrEqual"
+    with pytest.raises(ConfigurationError) as exc_info:
+        serve(filterset_cls)
+    case = _ListlessCase(
+        ListFilter,
+        "ListFilter",
+        "signed_big",
+        lookup_expr,
+        lookup,
+        lookup_expr,
+    )
+    assert str(exc_info.value) == _listless_refusal(case).replace("'probe'", repr(name))
 
 
 def _twice(queryset: QuerySet[Model]) -> QuerySet[Model]:

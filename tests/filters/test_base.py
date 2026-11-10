@@ -884,24 +884,28 @@ def test_declared_list_over_a_relation_cleans_each_element_as_its_key_column(
 
 
 @pytest.mark.parametrize(
-    ("model", "filter_instance"),
+    ("parent", "model", "filter_instance"),
     [
         pytest.param(
+            FilterSet,
             models.ShelfLabel,
             ListFilter(field_name="shelf", lookup_expr="in"),
             id="multi-column-relation",
         ),
         pytest.param(
+            FilterSet,
             models.ShelfLabel,
             ArrayFilter(field_name="shelf", lookup_expr="in"),
             id="array-multi-column-relation",
         ),
         pytest.param(
+            django_filters.FilterSet,
             models.ShelfLabel,
             ListFilter(field_name="shelf", lookup_expr="exact"),
             id="multi-column-relation-exact",
         ),
         pytest.param(
+            FilterSet,
             models.TaggedItem,
             ListFilter(field_name="content_object", lookup_expr="in"),
             id="generic-foreign-key",
@@ -909,15 +913,17 @@ def test_declared_list_over_a_relation_cleans_each_element_as_its_key_column(
     ],
 )
 def test_declared_list_over_a_relation_no_one_column_holds_cleans_no_element(
+    parent: type[django_filters.FilterSet | FilterSet],
     model: type[Model],
     filter_instance: ListFilter | ArrayFilter,
 ) -> None:
     """A relation compared on several columns or on none cleans nothing.
 
     No one column holds a value of a multi-column ``ForeignObject`` or a
-    ``GenericForeignKey``.
+    ``GenericForeignKey``. A stock django-filter parent publishes through no package table,
+    so its ``exact`` list is never refused for its lookup and still cleans nothing.
     """
-    filterset = _declared_set(FilterSet, model, f=filter_instance)(
+    filterset = _declared_set(parent, model, f=filter_instance)(
         data={},
         queryset=model._default_manager.none(),
     )

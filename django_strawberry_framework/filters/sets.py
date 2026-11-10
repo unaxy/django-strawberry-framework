@@ -231,6 +231,7 @@ from .base import (
     install_comparison_cleaner,
     membership_in_filter_class,
     refuse_identityless_relation,
+    refuse_listless_lookup,
     refuse_unresolvable_lookup,
 )
 from .form_binding import (
@@ -4093,6 +4094,7 @@ class FilterSet(
                 element_nests=depth > 1,
                 members_are_arrays=is_array_in_lookup(operand.lookup),
             )
+            target.bounds = truth.is_subclass(operand.lookup, models.lookups.Range)
         elif isinstance(owned, RangeField):
             target = RangeField(bound_field=field)
         else:
@@ -4515,7 +4517,9 @@ class FilterSet(
         on a relation no row identity is compared on
         (``filters/base.py::refuse_identityless_relation``) and a leaf running a shipped
         ``filter`` (``_runs_shipped_filter``) whose ``field_name`` and ``lookup_expr``
-        Django resolves on no queryset (``filters/base.py::refuse_unresolvable_lookup``).
+        Django resolves on no queryset (``filters/base.py::refuse_unresolvable_lookup``)
+        or, on a ``ListFilter`` / ``ArrayFilter``, whose lookup compares one value where the
+        filter applies a list (``filters/base.py::refuse_listless_lookup``).
         A read of the set's table while it publishes answers the table being published.
         """
         table = OrderedDict(cls._reshape(expansion))
@@ -4526,6 +4530,7 @@ class FilterSet(
                 refuse_identityless_relation(cls, filter_name, filter_instance)
                 if _runs_shipped_filter(filter_instance):
                     refuse_unresolvable_lookup(cls, filter_name, filter_instance)
+                    refuse_listless_lookup(cls, filter_name, filter_instance)
         model = cls._meta.model
         candidates: dict[str, CandidateFilterMetadata] = {}
         if model is not None:

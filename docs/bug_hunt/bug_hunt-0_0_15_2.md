@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 468 done, 120 to do. The CHANGELOG entries filed here moved to
+Progress: 470 done, 121 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2327,6 +2327,33 @@ Progress: 468 done, 120 to do. The CHANGELOG entries filed here moved to
   `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py` (the keyed worlds' key shapes, compare,
   refuse, wrong type, coded refusal, `apply_async`) and `examples/fakeshop/test_query/test_library_api.py` (the
   `series` key rows, `::test_library_series_key_runs_the_statement_its_hop_twin_runs`)
+- [x] 716. A package `ListFilter` / `ArrayFilter` whose Django lookup compares one value is refused when its set
+  publishes, naming that lookup: django-filter's default `exact`, `gte`, `iexact`, `icontains`, `startswith`,
+  `isnull`, a transform ending in one (`year`, `date`), an `ArrayField`'s `len` or index (item 740) and a
+  `Meta.filter_overrides` `ListFilter` for `exact` / `gte`, where it built, published `[<scalar>!]` and answered wrong
+  rows, a masked `TypeError` / `ValidationError` or `FILTER_INVALID` (80 of 146 grid cells, none correct).
+  `filters/sets.py::FilterSet._publish_filters` asks `filters/base.py::refuse_listless_lookup` after
+  `refuse_unresolvable_lookup` under the same guard: a served set at schema build, an unserved one at first use; over
+  a relation the message names the related column (`parent__id`). `filters/base.py::_takes_list` admits Django's
+  `get_db_prep_lookup_value_is_iterable` (`in`, `range`, transforms ending in either), `has_keys` /
+  `has_any_keys`, and a `JSONField`'s, `RangeField`'s or `CompositePrimaryKey`'s comparisons (a list is one value
+  there); `method=` filters, `filter` overrides, project lookup and field classes, `ArrayField` columns (left to the
+  input gate) and stock django-filter parents are not judged. A `range` list of other than two members is the form's
+  `invalid_values` error "Range query expects two values." (`_ElementField.validate`, adapted from django-filter's
+  `BaseRangeField`), so `FILTER_INVALID` where one or three members raised a masked `IndexError` / `TypeError`,
+  including a flat copy over a child `get_queryset` annotation (`FilterSet._install_source_comparison`,
+  `install_comparison_cleaner`). Pinned by `tests/filters/test_finalizer.py::test_a_declared_list_filter_whose_lookup_compares_one_value_is_refused`
+  and its siblings (admitted served and unserved, `filter_overrides`, project field class, composite key, stock
+  parent), `tests/filters/test_inputs.py::test_a_list_filter_over_an_arrays_count_or_element_compared_by_one_value_is_refused`
+  and `examples/fakeshop/test_query/test_list_filter_range_bounds_api.py`. Docs: spec-027 (Decision 4 row and
+  paragraph, Edge cases, the `RangeFilter` "no declaration is refused" sentence narrowed to `RangeFilter`, Test plan,
+  checklist, DoD 23), docs/README.md, GLOSSARY `FilterSet` (pk 463) and `ConfigurationError` (pk 444). Filed 862,
+  863, 864. CHANGELOGTODO 865
+- [x] 740. Fixed with 716: `ArrayFilter` / `ListFilter` over an `ArrayField`'s `len` or index compared by one value
+  (`lookup_expr="len"`, `field_name="ints__len"`, `field_name="ints__0"`) is refused when its set publishes;
+  `ints__len__in` and `ints__0__in` build. Pinned by
+  `tests/filters/test_inputs.py::test_a_list_filter_over_an_arrays_count_or_element_compared_by_one_value_is_refused`
+  and `::test_a_list_filter_over_an_arrays_count_element_or_whole_array_taking_the_list_builds`
 
 ## Outside review of the fixes
 
@@ -2588,6 +2615,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   an id an annotation of the target type's `get_queryset` holds, while its relation key compares the annotation on the
   type's rows. GLOSSARY `FilterSet` says such a key compares "as a leaf ending on the type's primary key (`books__id`)
   does". Found fixing 858
+- [ ] 862. (robustness) The `ArrayField` input gate (`filters/inputs.py::_array_element_column` /
+  `_array_column_refusal`) runs only at input build, so on a set no connection serves a `ListFilter` / `ArrayFilter`
+  with `iexact` / `icontains` / `startswith` / `regex` / `isnull` over an `ArrayField` (and a CSV, choice or scalar
+  filter over one) builds and fails per request. Found fixing 716
+- [ ] 863. (robustness) A `ListFilter` / `ArrayFilter` whose path ends on an annotation or a `FilteredRelation`
+  alias resolves no lookup when its set publishes, so `filters/base.py::refuse_listless_lookup` does not judge it and
+  a scalar lookup (`exact`) there fails per request; a request-time check through `_bound_lookup_operand` would reach
+  it. Found fixing 716
+- [ ] 864. (robustness) The `ArrayField` input gate judges a `method=` filter over an array by its key name: a
+  `method=` `ListFilter` with `lookup_expr="in"` over an `ArrayField` is refused, though the method reads the list and
+  applies no lookup. Found fixing 716
 ## To do: holes found re-checking the fixes
 
 
@@ -2970,29 +3008,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `test_routers.py`, `tests/utils/test_directives.py`, `test_errors.py`, `test_input_values.py` and
   `tests/mutations/test_write_transaction.py`. No defect rides on it (a refactor of private helpers and test idioms): do
   it now, outside a DRY cycle, or leave it to the next DRY cycle?
-- [ ] 716. A package `ListFilter` declared with a lookup that takes no list (django-filter's default `exact`, or
-  `gte` / `iexact` / `icontains` / `startswith`) builds, publishes `[<scalar>!]` under that lookup's key, and hands
-  the whole list to it: text answers no rows (`gte` every row), an integer or relation key a masked `TypeError`, a
-  decimal or temporal column `FILTER_INVALID` "Enter a value the database can represent.", a one-element `range` a
-  masked `IndexError` (three elements a `TypeError`). Options: (a) default `ListFilter`'s `lookup_expr` to `in` (the
-  published leaf `exact` becomes `in`; ten package rows and one live set rely on the default today, none applying a
-  list through it); (b) refuse at class or schema build a lookup that cannot take a list, allowing `in`, `range`,
-  transforms ending in either, `ArrayField` `exact` / `contains` / `contained_by` / `overlap`, `has_keys` /
-  `has_any_keys` and every `method=` filter; Django flags only `in` and `range`
-  (`get_db_prep_lookup_value_is_iterable`), so the rest is a named list, and the existing `ArrayField` refusal's
-  four-name list (`filters/inputs.py::_ARRAY_ELEMENT_LIST_LOOKUPS`) already refuses `gt`, which consumes an array on
-  PostgreSQL; a consumer-registered lookup or transform (any class that is not Django's own) is refused at schema
-  build on a set a connection serves and runs on a set the project applies from its own resolver; (c) keep the
-  declaration and apply a list as membership whatever the lookup, as 316's (c) does for two bounds. A `range`
-  `ListFilter` checking its length is part of (b) or (c). Declared django-filter CSV classes stay as django-filter
-  runs them (507, 516). 316 and this row are one decision: a list- or range-shaped package filter declared with a
-  scalar lookup
-- [ ] 740. `ArrayFilter(field_name="ints", lookup_expr="len")`, `ArrayFilter(field_name="ints__len")` and
-  `ArrayFilter(field_name="ints__0")` over an `ArrayField(IntegerField())` build and publish `[Int!]`, though the
-  transform's output is one integer; applying `[2]` raises a masked `TypeError` ("Field 'ints' expected a number but
-  got [Decimal('1')]", `filters/base.py`) and a scalar value is refused by
-  `filters/inputs.py::_require_list_container`. `ListFilter(field_name="ints__len", lookup_expr="in")` serves. The
-  array-transform counterpart of 716, decided with it (options (a) to (c)). Found fact-finding 656
 - [ ] 722. Decide whether a `RangeFilter` whose `field_name` is a relation should continue to its key column. Since
   527 a lone bound under a non-range `lookup_expr` (`gte`, `exact`) is cleaned as the key column, but an overflowing
   bound still binds raw through Django's related lookups (`OverflowError`, a 500); continuing to the key column would

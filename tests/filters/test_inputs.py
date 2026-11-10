@@ -4015,6 +4015,94 @@ def test_an_overridden_array_columns_all_lookups_are_refused_at_the_first_it_can
     )
 
 
+#: A list filter over an array's element count or one element: a transform whose output is no
+#: array, compared by one value.
+_ARRAY_SCALAR_TRANSFORMS = [
+    pytest.param("ints", "len", id="len-lookup"),
+    pytest.param("ints__len", "exact", id="len-path"),
+    pytest.param("ints", "0", id="index-lookup"),
+    pytest.param("ints__0", "exact", id="index-path"),
+]
+
+
+def _array_scalar_refusal(
+    set_name: str,
+    filter_class: type[Filter],
+    field_name: str,
+    lookup_expr: str,
+) -> str:
+    return (
+        f"FilterSet {set_name}: {filter_class.__name__} 'arr' has field_name "
+        f"{field_name!r} and lookup_expr {lookup_expr!r}, but the lookup it applies, Django's "
+        "IntegerFieldExact ('exact'), compares one value, and the filter publishes and applies "
+        "a list. Declare lookup_expr 'in' (any member matches) or 'range' (two bounds), or a "
+        "transform ending in either ('year__in'); read the list in `method=`; or, for a "
+        "Meta.filter_overrides selection, list only those lookups for the column in Meta.fields."
+    )
+
+
+def _declared_array(filter_class: type[Filter], field_name: str, lookup_expr: str) -> Filter:
+    if lookup_expr == "exact":
+        return filter_class(field_name=field_name)
+    return filter_class(field_name=field_name, lookup_expr=lookup_expr)
+
+
+@pytest.mark.parametrize("filter_class", _ARRAY_FILTER_CLASSES)
+@pytest.mark.parametrize(("field_name", "lookup_expr"), _ARRAY_SCALAR_TRANSFORMS)
+@pytest.mark.parametrize("served", [True, False], ids=["served", "unserved"])
+def test_a_list_filter_over_an_arrays_count_or_element_compared_by_one_value_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_class: type[Filter],
+    field_name: str,
+    lookup_expr: str,
+    served: bool,  # noqa: FBT001
+) -> None:
+    """``len`` and an index read one integer of the array, so their ``exact`` takes no list.
+
+    The leaf publishes ``[Int!]`` and would hand the whole list to the integer comparison, so
+    the set refuses it when it publishes: a served set when the schema builds, an unserved
+    one at its first use.
+    """
+    patch_array_field(monkeypatch)
+    declared = _declared_array(filter_class, field_name, lookup_expr)
+    if served:
+        _ = _serve_array_filter(declared, exposed=False)
+        refusal = _build_refusal()
+        set_name = "_serve_array_filter.<locals>.ArraySpecimenFilter"
+    else:
+        meta = type("Meta", (), {"model": _ArraySpecimen, "fields": []})
+        unserved = type("ArraySpecimenFilter", (FilterSet,), {"arr": declared, "Meta": meta})
+        with pytest.raises(ConfigurationError) as excinfo:
+            _ = unserved.get_filters()
+        refusal = str(excinfo.value)
+        set_name = "ArraySpecimenFilter"
+
+    assert refusal == _array_scalar_refusal(set_name, filter_class, field_name, lookup_expr)
+
+
+@pytest.mark.parametrize("filter_class", _ARRAY_FILTER_CLASSES)
+@pytest.mark.parametrize(
+    ("field_name", "lookup_expr", "element"),
+    [
+        pytest.param("ints", "len__in", int, id="len-in"),
+        pytest.param("ints__0", "in", int, id="index-in"),
+        pytest.param("ints", "exact", int, id="whole-array-exact"),
+    ],
+)
+def test_a_list_filter_over_an_arrays_count_element_or_whole_array_taking_the_list_builds(
+    monkeypatch: pytest.MonkeyPatch,
+    filter_class: type[Filter],
+    field_name: str,
+    lookup_expr: str,
+    element: type,
+) -> None:
+    """A count's or an element's ``in`` takes the list, and the whole array's ``exact`` one array."""
+    patch_array_field(monkeypatch)
+    declared = _declared_array(filter_class, field_name, lookup_expr)
+
+    assert _served_arr_element(_serve_array_filter(declared, exposed=False)) is element
+
+
 _WHOLE_ARRAY_LISTED = {
     "exact": (list[int], type(None)),
     "contains": (list[int], type(None)),
