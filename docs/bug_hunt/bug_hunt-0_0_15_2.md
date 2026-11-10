@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 467 done, 120 to do. The CHANGELOG entries filed here moved to
+Progress: 468 done, 120 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2307,6 +2307,26 @@ Progress: 467 done, 120 to do. The CHANGELOG entries filed here moved to
   trailing-pk worlds served and refused on three drivers, the annotation refusal, the owned-rows compare,
   `apply_async`) and
   `tests/filters/test_finalizer.py::test_phase_2_5_admits_a_reentry_isnull_key_decoding_against_the_primary_its_relation_reaches`
+- [x] 858. A `GlobalID` relation key into a type whose `relay.NodeID` is an attribute its own `get_queryset` annotates
+  (`books`, `book`, `genres`, `shelf__books`, fakeshop `Printing.series`; declared or generated, forward or to-many)
+  now compares that id over the rows the type answers for, as its trailing-pk spelling (`books__id`) and a
+  `RelatedFilter` hop's `id` (`inSeriesId`) do, in the same single statement (byte-equal SQL), on live, `apply_sync`,
+  `apply_async` and the raw form; a well-formed id of another type answers the type mismatch. It refused every value
+  `GLOBALID_UNVALIDATABLE` because the key's routing compiled the declared leaf on the walking set's own rows: the
+  to-many pre-build (`filters/sets.py::_LeafChain.terminal_value`) and the forward fold
+  (`FilterSet._folded_key_chain`). `FilterSet._routed_leaf_chain` now routes such a key as its trailing-pk twin
+  (`filters/base.py::_compares_target_annotation`, 833's key-leaf marker, no pre-build, no fold), and the key copy's
+  `foreign_rows` reads `filters/base.py::_rows_definition` (the face's rows type, else the set's binding, else the
+  model's primary), so a key over rows another type scopes still refuses, as its flat twin does; a key whose class
+  overrides `filter` keeps running as declared and refuses. The error message is unchanged. GLOSSARY `FilterSet` (pk
+  463), docs/README.md, spec-027 (the annotation-held rule, the non-pk-id bullet, the walked-key rule, the test plan),
+  the fakeshop `Series` / `Printing` docstrings and the live README map are restated. Grids: 552 of 4890, 87 of 408
+  and 20 of 60 cells moved, each a key spelling onto its flat twin (16 of them forward / one-to-one multi-key `[]`
+  cells going from 0 to 1 statement, as their twins and the to-many keys run); no flat, hop, plain-pk, foreign-rows,
+  override or column-held `NodeID` cell moved. Pinned by
+  `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py` (the keyed worlds' key shapes, compare,
+  refuse, wrong type, coded refusal, `apply_async`) and `examples/fakeshop/test_query/test_library_api.py` (the
+  `series` key rows, `::test_library_series_key_runs_the_statement_its_hop_twin_runs`)
 
 ## Outside review of the fixes
 
@@ -2562,13 +2582,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   django-filter's form builders alike, while README says a `required` filter acts on the form of the set that declares
   it, at that set's root, and a directly built set refuses it
   (`tests/filters/test_sets.py::test_a_directly_built_set_takes_required_from_the_keys_owner`). Found fixing 216
-- [ ] 858. (robustness) An annotation-held `NodeID` over rows the id type scopes compares the annotation on the flat
-  trailing-pk spelling while the key spelling refuses with `GLOBALID_UNVALIDATABLE`: `books__id` vs `books` on a Shelf
-  set, `shelf__books__id` vs `shelf__books` on a set wired to the annotated primary. `docs/GLOSSARY.md` `FilterSet`
-  (an annotation-held id "compares only on the rows that hook returns: the type's own `id` key, and a `RelatedFilter`
-  hop ...") omits the flat owned-rows compare, while spec-027's copy of that sentence names the undeclared-hop leaf.
-  Which answer the two spellings share is the first question. Found fixing 849
-
+- [ ] 860. (robustness) A flat `GlobalID` leaf ending on the target's primary key past a declared `RelatedFilter` hop
+  into a filter set no type wires (`books__id` with `books = RelatedFilter(UnboundBookFilter, ...)`, `flat=False` and
+  `queryset=` alike) falls to the node-id-only path and answers `GLOBALID_INVALID` ("not a valid Book key value") for
+  an id an annotation of the target type's `get_queryset` holds, while its relation key compares the annotation on the
+  type's rows. GLOSSARY `FilterSet` says such a key compares "as a leaf ending on the type's primary key (`books__id`)
+  does". Found fixing 858
 ## To do: holes found re-checking the fixes
 
 
@@ -2798,6 +2817,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `tests/test_relay_node_field.py::test_decode_model_global_id_passes_raw_value_for_non_field_node_id`), so a relation
   write naming such a type stores whichever row's pk equals the id's text, while the filter side now refuses that slot
   across a relation (`GLOBALID_UNVALIDATABLE`). Refuse it on writes too, or keep the pass-through? Found landing 290
+  - Premise changed by 858: the filter side now compares such an id across a relation on the rows the type's
+    `get_queryset` returns (refusing only over rows another type scopes, or in a key whose class overrides
+    `filter`); regrade before working this.
 - [ ] 281. A `GenericForeignKey` written beside its carriers: a serializer with writable `content_object` and writable
   `object_id` / `content_type` builds, and a request pairing a visible object's id with another row's `objectId` stores
   that row (a writable `object_id` alone is already a raw write); post-save attestation covers single-column FK /

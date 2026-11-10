@@ -418,15 +418,16 @@ def _relation_view_of(filter_instance: Filter) -> _RelationView | None:
     return optional_instance(getattr(filter_instance, _RELATION_VIEW_ATTR, None), _RelationView)
 
 
-# A copy of a to-many relation-key filter re-bound to the target's key over the target rows
-# (``filters/sets.py::FilterSet._routed_leaf_chain``) carries the leaf as declared: a GlobalID
+# A copy of a relation-key filter re-bound to the target's key over the target rows
+# (``filters/sets.py::FilterSet._routed_leaf_chain``: a to-many key, or a GlobalID key whose
+# target's id an annotation holds, forward or to-many) carries the leaf as declared: a GlobalID
 # value names the type registered for the relation's target, so the copy resolves its target
 # as that leaf does, whichever type the face it is bound to answers for.
 _KEY_LEAF_ATTR = "_dst_key_leaf"
 
 
 def _key_leaf_of(filter_instance: Filter) -> Filter | None:
-    """Return the leaf as declared a to-many key's re-bound copy carries, else ``None``."""
+    """Return the leaf as declared a relation key's re-bound copy carries, else ``None``."""
     return optional_instance(getattr(filter_instance, _KEY_LEAF_ATTR, None), Filter)
 
 
@@ -2317,9 +2318,10 @@ class _GlobalIDTarget:
     than the primary key (a consumer ``relay.NodeID[...]`` annotation), ``None``
     when it carries the primary key. ``foreign_rows`` is whether the rows the filter
     runs over answer for a type other than ``definition`` (an undeclared hop's face
-    re-entering the table of the type the walking set is bound to), so, as across a
-    relation, an id slot only ``definition``'s own ``get_queryset`` annotates is not
-    on them.
+    re-entering the table of the type the walking set is bound to, or a relation key's
+    re-bound copy over a face or set whose rows another type scopes, ``_rows_definition``),
+    so, as across a relation, an id slot only ``definition``'s own ``get_queryset``
+    annotates is not on them.
     """
 
     definition: DjangoTypeDefinition
@@ -2379,11 +2381,12 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     keeps the upstream scalar shape, so it is never validated as that primary's
     GlobalID); an unbound set over a model no type exposes, and an undeclared hop's
     face into one, walk from that model (``_resolve_globalid_target``'s
-    ``start_model``). A to-many relation key's copy re-bound to the target's key
-    over the target rows (``_key_leaf_of``) resolves the definition and id slot its
-    leaf as declared resolves, with an empty row path (the copy compares those rows'
-    own columns), whichever type the face it is bound to answers for, so both decodes
-    of one key name one type. Two routing branches:
+    ``start_model``). A relation key's copy re-bound to the target's key over the
+    target rows (``_key_leaf_of``) resolves the definition and id slot its leaf as
+    declared resolves, with an empty row path (the copy compares those rows' own
+    columns), whichever type the face it is bound to answers for, so both decodes of
+    one key name one type; its rows are foreign when a type other than that definition
+    answers for them (``_rows_definition``). Two routing branches:
 
     1. **Own-PK branch.** When ``filter_instance.field_name`` matches the
        owning model's PK name (``_meta.pk.name`` or ``"pk"``) and that PK is
@@ -2417,7 +2420,16 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     key_leaf = _key_leaf_of(filter_instance)
     if key_leaf is not None:
         declared = _globalid_target(key_leaf, stable=stable)
-        return None if declared is None else replace(declared, row_path="")
+        if declared is None:
+            return None
+        # The copy compares the rows its face answers for: another type's rows carry no
+        # annotation only ``declared.definition``'s ``get_queryset`` adds.
+        rows_definition = _rows_definition(getattr(filter_instance, "parent", None))
+        return replace(
+            declared,
+            row_path="",
+            foreign_rows=rows_definition is not declared.definition,
+        )
     parent: object = getattr(filter_instance, "parent", None)
     # An undeclared hop's face (``filters/sets.py::_UndeclaredHopSet``) carries the
     # definition its rows answer for on itself; a filter set instance answers for its
@@ -2428,10 +2440,9 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     if "_owner_definition" in face:
         # A face's ids name the type registered for its model, as the unwalked relation's
         # leaf names them (``related_target_for``), whichever type answers for its rows.
-        rows_definition = optional_instance(face["_owner_definition"], DjangoTypeDefinition)
         face_meta = require_instance(face["_meta"], FilterSetOptions)
         owner = registry.get_definition(registry.get(require(face_meta.model, is_model_class)))
-        foreign_rows = owner is not rows_definition
+        foreign_rows = owner is not _rows_definition(parent)
     else:
         owner = set_bound_definition(truth.class_of(parent))
         relation_only = owner is None
@@ -2465,6 +2476,33 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     if relation_only and not row_path:
         return None
     return _GlobalIDTarget(definition, row_path, _off_pk_id_slot(definition), foreign_rows)
+
+
+def _rows_definition(parent: object) -> DjangoTypeDefinition | None:
+    """Return the definition of the type whose ``get_queryset`` scoped the rows ``parent`` filters.
+
+    An undeclared hop's face carries it (``_owner_definition``); a filter set instance's
+    rows answer for its class's binding, else for its model's registry primary, the type
+    ``FilterSet._target_type_for_related_filter`` scopes an unbound branch by.
+    """
+    face = truth.instance_dict(parent) or {}
+    if "_owner_definition" in face:
+        return optional_instance(face["_owner_definition"], DjangoTypeDefinition)
+    bound = set_bound_definition(truth.class_of(parent))
+    if bound is not None:
+        return bound
+    meta = require_instance(truth.static_attr(parent, "_meta", None), FilterSetOptions)
+    return registry.get_definition(registry.get(require(meta.model, is_model_class)))
+
+
+def _compares_target_annotation(filter_instance: Filter) -> bool:
+    """Whether a GlobalID ``filter_instance``'s target carries its id in an annotation.
+
+    A ``relay.NodeID`` over an attribute no model column holds (``_OffPkIdSlot.field``
+    is ``None``) exists only on the rows the target type's ``get_queryset`` returns.
+    """
+    target = _globalid_target(filter_instance, stable=True)
+    return target is not None and target.slot is not None and target.slot.field is None
 
 
 def _resolve_globalid_target(

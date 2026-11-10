@@ -21,17 +21,19 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import wraps
-from typing import NamedTuple
+from typing import NamedTuple, TypeVar
 
 import pytest
 import strawberry
 from apps.library import models
 from asgiref.sync import sync_to_async
 from django.contrib.contenttypes.models import ContentType
+from django.db import connection
 from django.db.models import CharField, Model, QuerySet, Value
 from django.db.models.functions import Cast, Concat
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django_filters import Filter
 from graphql import GraphQLError
@@ -76,6 +78,7 @@ from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGrap
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
+_M = TypeVar("_M", bound=Model)
 _CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
 _URL = "/graphql-globalid-strategies/"
 _ASYNC_URL = "/graphql-globalid-strategies-async/"
@@ -1444,45 +1447,133 @@ def test_a_reentry_leaf_applied_async_refuses_the_id_its_set_type_mints(name: st
     assert _reentry_answer(world, world.refused, "apply-async") == world.refusal
 
 
+class _OverridingGlobalIDFilter(GlobalIDFilter):
+    """A consumer ``filter`` override that answers as the package's GlobalID filter does."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        return super().filter(qs, value)
+
+
+#: Each keyed shape's walking model and leaf path: a ``*-key`` shape spells the relation
+#: key, the others a leaf ending on ``Book``'s key.
+_KEYED_PATHS: dict[str, tuple[type[Model], str]] = {
+    "foreign-reverse-foreign-key": (models.Book, "shelf__books__id"),
+    "foreign-many-to-many": (models.Book, "genres__books__id"),
+    "foreign-reverse-foreign-key-key": (models.Book, "shelf__books"),
+    "foreign-many-to-many-key": (models.Book, "genres__books"),
+    "foreign-declared-hop-key": (models.Shelf, "books"),
+    "foreign-declared-last-hop-key": (models.Book, "shelf__books"),
+    "owned-reentry": (models.Book, "shelf__books__id"),
+    "owned-relation": (models.Shelf, "books__id"),
+    "owned-reentry-key": (models.Book, "shelf__books"),
+    "owned-relation-key": (models.Shelf, "books"),
+    "owned-forward-key": (models.Loan, "book"),
+    "owned-unbound-hop-key": (models.Shelf, "books"),
+    "owned-unbound-forward-hop-key": (models.Loan, "book"),
+    "override-relation-key": (models.Shelf, "books"),
+    "override-forward-key": (models.Loan, "book"),
+}
+
+
+def _keyed_set(shape: str) -> tuple[type[FilterSet], tuple[type[DjangoType], ...]]:
+    """The walking set of a keyed ``shape``, and the types its declared hops read.
+
+    A ``*-hop-key`` shape declares its relation as a ``RelatedFilter`` hop into a ``Book``
+    set that no type wires, or (``foreign-*``) that a scoping ``type`` secondary wires.
+    The declared last hop walks a declared ``shelf`` hop, then its ``books`` hop back
+    into the walking set.
+    """
+    model, key = _KEYED_PATHS[shape]
+    leaf_filter = (_OverridingGlobalIDFilter if shape.startswith("override-") else GlobalIDFilter)(
+        field_name=key,
+    )
+    if shape == "foreign-declared-last-hop-key":
+
+        class KeyedShelfFilter(FilterSet):
+            books = RelatedFilter(lambda: KeyedBookFilter, field_name="books")
+
+            class Meta:
+                model = models.Shelf
+                fields = []
+
+        class KeyedBookFilter(FilterSet):
+            shelf = RelatedFilter(KeyedShelfFilter, field_name="shelf")
+            leaf = leaf_filter
+
+            class Meta:
+                model = models.Book
+                fields = []
+
+        return KeyedBookFilter, (make_django_type("ReentryKeyedShelf", models.Shelf, ("id",)),)
+    if not shape.endswith("-hop-key"):
+        return _declared_set(model, leaf_filter), ()
+    child = type(
+        "KeyedHopBookFilter",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": models.Book, "fields": []})},
+    )
+    hop_types = (
+        (
+            make_django_type(
+                "ReentryKeyedHopBook",
+                models.Book,
+                ("id",),
+                meta_extra={
+                    "primary": False,
+                    "globalid_strategy": "type",
+                    "filterset_class": child,
+                },
+                namespace_extra={"get_queryset": _hiding(0)},
+            ),
+        )
+        if shape.startswith("foreign-")
+        else ()
+    )
+    filterset = type(
+        "ReentryFilter",
+        (FilterSet,),
+        {
+            "hop": RelatedFilter(child, field_name=key),
+            "leaf": leaf_filter,
+            "Meta": type("Meta", (), {"model": model, "fields": []}),
+        },
+    )
+    return filterset, hop_types
+
+
 def _keyed_leaf(rows: _Library, shape: str) -> _Reentry:
-    """A GlobalID leaf ending on ``Book``'s key, whose primary's ``NodeID`` is ``node_key``.
+    """A GlobalID leaf or relation key into ``Book``, whose primary's ``NodeID`` is ``node_key``.
 
     ``node_key`` is an annotation the primary's ``get_queryset`` adds, so only rows the
-    primary answers for carry it. ``foreign-*`` shapes walk ``shelf__books__id`` or
-    ``genres__books__id`` on a ``Book`` set wired to a scoping ``type`` secondary, whose
-    rows lack it; ``owned-reentry`` walks ``shelf__books__id`` on a ``Book`` set wired to
-    the primary itself, and ``owned-relation`` ``books__id`` on a ``Shelf`` set, both over
-    rows the primary answers for.
+    primary answers for carry it. ``foreign-*`` shapes walk ``shelf__books`` or
+    ``genres__books`` (the key, or its leaf ending on ``__id``) on a ``Book`` set wired to
+    a scoping ``type`` secondary, whose rows lack it, the declared last hop back into
+    that set, or ``books`` on a ``Shelf`` set through a declared hop into a set another
+    secondary wires. ``owned-reentry*`` walks ``shelf__books`` on a ``Book`` set wired to
+    the primary itself, ``owned-relation*`` ``books`` on a ``Shelf`` set and
+    ``owned-forward-key`` ``book`` on a ``Loan`` set, all over rows the primary answers
+    for, as do the ``owned-unbound-*`` keys through a declared hop into a set no type
+    wires. An ``override-*`` key's class overrides ``filter``. ``refused`` names
+    ``bk1``'s handle as a ``library.shelf`` id.
     """
-    key = {
-        "foreign-reverse-foreign-key": "shelf__books__id",
-        "foreign-many-to-many": "genres__books__id",
-        "owned-reentry": "shelf__books__id",
-        "owned-relation": "books__id",
-    }[shape]
-    model = models.Shelf if shape == "owned-relation" else models.Book
-    filterset = _declared_set(model, GlobalIDFilter(field_name=key))
+    model, _key = _KEYED_PATHS[shape]
+    filterset, hop_types = _keyed_set(shape)
     wired = {"filterset_class": filterset, "connection": {"total_count": True}}
+    reentry = shape.startswith("owned-reentry")
     primary = make_django_type(
         "ReentryKeyedBook",
         models.Book,
         ("id",),
-        meta_extra={
-            "primary": True,
-            "globalid_strategy": "model",
-            **(wired if shape == "owned-reentry" else {}),
-        },
+        meta_extra={"primary": True, "globalid_strategy": "model", **(wired if reentry else {})},
         namespace_extra={
             "__annotations__": {"node_key": relay.NodeID[str]},
             "get_queryset": _keyed(),
         },
     )
-    if shape == "owned-reentry":
-        root, types = primary, ()
-    elif shape == "owned-relation":
-        shelf = make_django_type("ReentryKeyedShelf", models.Shelf, ("id",), meta_extra=wired)
-        root, types = shelf, (primary,)
-    else:
+    if reentry:
+        root, types = primary, hop_types
+    elif model is models.Book:
         root = make_django_type(
             "ReentryKeyedSecondary",
             models.Book,
@@ -1490,16 +1581,22 @@ def _keyed_leaf(rows: _Library, shape: str) -> _Reentry:
             meta_extra={"primary": False, "globalid_strategy": "type", **wired},
             namespace_extra={"get_queryset": _hiding(0)},
         )
-        types = (primary,)
+        types = (primary, *hop_types)
+    else:
+        root = make_django_type(f"ReentryKeyed{model.__name__}", model, ("id",), meta_extra=wired)
+        types = (primary, *hop_types)
     books = rows.books
-    # A ``foreign-*`` shape answers no rows: the id is refused.
+    # A ``foreign-*`` or ``override-*`` shape answers no rows: the id is refused.
     expected = (
-        _pks(rows.shelves["s1"])
-        if shape == "owned-relation"
+        []
+        if shape.startswith(("foreign-", "override-"))
         else _pks(books["bk1"], books["bk2"])
-        if shape == "owned-reentry"
-        else []
+        if reentry
+        else _pks(rows.loans["l1"], rows.loans["l2"])
+        if model is models.Loan
+        else _pks(rows.shelves["s1"])
     )
+    handle = f"{_KEY_PREFIX}{saved_pk(books['bk1'])}"
     return _Reentry(
         filterset,
         root,
@@ -1507,39 +1604,78 @@ def _keyed_leaf(rows: _Library, shape: str) -> _Reentry:
         ("leaf", "exact"),
         ("leaf", "exact"),
         "leaf",
-        _gid("library.book", f"{_KEY_PREFIX}{saved_pk(books['bk1'])}"),
+        _gid("library.book", handle),
         expected,
+        _gid("library.shelf", handle),
+        _mismatch("library.book", "library.shelf", listed=False),
         listed=False,
     )
 
 
+#: The coded refusal of ``node_key`` over rows its type does not answer for.
+_KEYED_REFUSAL = (
+    "GlobalID filter target ReentryKeyedBook carries its id in 'node_key', which no "
+    "model column holds, so a filter across a relation cannot compare it."
+)
+_REFUSED_KEYED = [
+    *(shape for shape in _KEYED_PATHS if shape.startswith("foreign-")),
+    "override-relation-key",
+    "override-forward-key",
+]
+
+
+def _keyed_answer(world: _Reentry, global_id: str, driver: str) -> tuple[list[int] | str, int]:
+    """``_reentry_answer`` and the number of statements the request ran."""
+    with CaptureQueriesContext(connection) as captured:
+        answer = _reentry_answer(world, global_id, driver)
+    return answer, len(captured.captured_queries)
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("driver", ["live", "apply-sync", "form"])
-@pytest.mark.parametrize("shape", ["foreign-reverse-foreign-key", "foreign-many-to-many"])
+@pytest.mark.parametrize("shape", _REFUSED_KEYED)
 def test_a_reentry_leaf_refuses_an_id_an_annotation_holds_over_rows_another_type_scopes(
     shape: str,
     driver: str,
 ) -> None:
-    """The primary's ``node_key`` is not on rows the secondary answers for: a coded refusal.
+    """The primary's ``node_key`` is not on rows a secondary answers for: a coded refusal.
 
-    The leaf's unscoped twin and the bare key refuse it alike, never compare it on the
-    walk's rows.
+    The leaf ending on the key and the bare key refuse it alike, through undeclared or
+    declared hops, before any statement runs, never comparing it on the walk's rows. A
+    key whose class overrides ``filter`` runs as declared across the relation, on the
+    walking set's own rows, which the primary's hook never touched, and refuses it too.
     """
     world = _keyed_leaf(_library(), shape)
 
-    assert _reentry_answer(world, world.accepted, driver) == (
-        "GlobalID filter target ReentryKeyedBook carries its id in 'node_key', which no "
-        "model column holds, so a filter across a relation cannot compare it."
+    assert _keyed_answer(world, world.accepted, driver) == (_KEYED_REFUSAL, 0)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", ["foreign-reverse-foreign-key-key", "override-relation-key"])
+def test_an_annotation_id_refused_over_another_types_rows_is_coded_unvalidatable(
+    shape: str,
+) -> None:
+    """The refusal of ``node_key`` carries ``GLOBALID_UNVALIDATABLE`` on the wire."""
+    world = _keyed_leaf(_library(), shape)
+    literal = _wire_literal(world.wire, world.value(world.accepted))
+
+    payload = _post(
+        _reentry_schema(world),
+        f"{{ rows(filter: {literal}) {{ edges {{ node {{ id }} }} }} }}",
     )
+
+    assert json_str(payload, "errors", 0, "message") == _KEYED_REFUSAL
+    assert json_at(payload, "errors", 0, "extensions", "code") == "GLOBALID_UNVALIDATABLE"
 
 
 #: ``applied`` serves the model's own rows, which lack the ``node_key`` the keyed primary's
 #: ``id`` reads, so the set wired to that primary answers live and on the raw form.
 _OWNED_KEYED_ROWS = [
     pytest.param(shape, driver, id=f"{shape}-{driver}")
-    for shape in ("owned-reentry", "owned-relation")
+    for shape in _KEYED_PATHS
+    if shape.startswith("owned-")
     for driver in ("live", "apply-sync", "form")
-    if shape != "owned-reentry" or driver != "apply-sync"
+    if not shape.startswith("owned-reentry") or driver != "apply-sync"
 ]
 
 
@@ -1549,10 +1685,43 @@ def test_a_leaf_compares_an_id_an_annotation_holds_over_rows_its_type_scopes(
     shape: str,
     driver: str,
 ) -> None:
-    """Over rows the primary answers for, its ``node_key`` annotation is compared there."""
+    """Over rows the primary answers for, its ``node_key`` annotation is compared there.
+
+    The relation key compares it as its leaf ending on the key does, forward or to-many,
+    through undeclared hops or a declared hop into a set no type wires, in one statement.
+    """
     world = _keyed_leaf(_library(), shape)
 
-    assert _reentry_answer(world, world.accepted, driver) == world.expected
+    assert _keyed_answer(world, world.accepted, driver) == (world.expected, 1)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("shape", "driver"), _OWNED_KEYED_ROWS)
+def test_a_leaf_over_rows_an_annotation_id_type_scopes_refuses_another_types_id(
+    shape: str,
+    driver: str,
+) -> None:
+    """An id of another type is a type mismatch, on the key as on its leaf ending on the key."""
+    world = _keyed_leaf(_library(), shape)
+
+    assert _keyed_answer(world, world.refused, driver) == (world.refusal, 0)
+
+
+_ASYNC_KEYED = ["owned-relation-key", "foreign-reverse-foreign-key-key"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("shape", _ASYNC_KEYED)
+def test_a_relation_key_applied_async_compares_an_annotation_id_only_over_its_types_rows(
+    shape: str,
+) -> None:
+    """``apply_async`` compares ``node_key`` over the primary's rows and refuses it elsewhere."""
+    rows = _library()
+    world = _keyed_leaf(rows, shape)
+
+    assert _reentry_answer(world, world.accepted, "apply-async") == (
+        _pks(rows.shelves["s1"]) if shape.startswith("owned-") else _KEYED_REFUSAL
+    )
 
 
 def _untyped_walk(rows: _Library, shape: str) -> _Reentry:

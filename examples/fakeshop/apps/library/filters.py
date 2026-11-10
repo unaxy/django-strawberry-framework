@@ -411,9 +411,9 @@ class PrintingFilter(FilterSet):
     ``publisher_2``, ``licensor`` (a key stored by the publisher's name),
     ``co_publishers`` and the two-hop ``edition__printings__co_publishers`` take
     a ``PublisherType`` id, which carries the house code; ``series`` takes a
-    ``SeriesType`` id, whose handle no column holds, and refuses it.
-    ``in_series`` hops into ``SeriesFilter``, which compares the handle on the
-    series rows ``SeriesType.get_queryset`` annotates, flat (``inSeriesId``,
+    ``SeriesType`` id, whose handle no column holds, and compares it on the series
+    rows ``SeriesType.get_queryset`` annotates, as ``in_series`` does: that hop
+    into ``SeriesFilter`` compares the handle there, flat (``inSeriesId``,
     ``inSeriesHandle``) and nested alike. ``edition__imprint`` adds the set's own
     ``istartswith`` to the ``editionImprint`` head beside the ``exact`` and
     ``icontains`` copies ``edition`` expands from ``EditionFilter.imprint``, so

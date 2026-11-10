@@ -216,6 +216,7 @@ from .base import (
     _bound_value_field,
     _ColumnCleanedFilter,
     _compared_columns,
+    _compares_target_annotation,
     _declared_field_name,
     _django_prepares,
     _ElementField,
@@ -2405,7 +2406,10 @@ class _LeafChain:
     rows those are. ``key_hop`` is the last hop of a forward relation key leaf,
     which ``terminal`` compares on the rows that hold the key: a row it matches
     must also reach a visible row of ``key_hop``. ``to_many_key`` is how a to-many
-    relation key leaf was re-read against the target key column (``_ToManyKey``).
+    relation key leaf was re-read against the target key column (``_ToManyKey``). A
+    GlobalID relation key whose target's id an annotation holds carries neither: its
+    ``terminal`` is the key re-bound to the target's primary key, as its trailing-pk
+    twin's is.
     A relation-key leaf running consumer code walks no hop: ``terminal`` is the leaf
     as declared, and a row it matches must reach, through the visible rows of each
     hop of ``key_via``, a visible row of ``key_hop`` its value names (``key_match``);
@@ -2593,11 +2597,12 @@ class _UndeclaredHopSet:
     bound to this instead of a child filter set instance: ``_meta.model`` is the
     hop's model (a raw-key or integer terminal coerces through it; a GlobalID
     terminal validates against the type registered for it, as the unwalked
-    relation's leaf does, and a to-many key's copy validates what its leaf as
+    relation's leaf does, and a relation key's copy validates what its leaf as
     declared validates), ``_owner_definition`` the definition of the type the rows
     answer for (on a re-entry the type the walking set is bound to, so a GlobalID
-    terminal whose id an annotation of the registered type's ``get_queryset`` holds
-    is refused when another type answers for the rows), ``request`` the walking
+    terminal or key copy whose id an annotation of the registered type's
+    ``get_queryset`` holds is refused when another type answers for the rows, and
+    compared on them otherwise), ``request`` the walking
     set's and ``_projection_owner`` the walking set itself, whose request info names
     the schema a GlobalID terminal reads type names by (both ``None`` for the build's
     ask, ``FilterSet._globalid_decode_sites``).
@@ -7777,40 +7782,41 @@ class FilterSet(
     def _leaf_chain(self, filter_instance: Filter) -> _LeafChain | None:
         """Return how an active leaf of this set reads the related rows, ``None`` for a leaf walking no hop.
 
-        A ``ProjectedChildFilter`` reads its projection's hop, then whatever its
-        child filter reads in the child set (its own hops, or none: the child
-        filter itself runs over the hop's visible rows). A walked leaf reads its
-        walk's hops (``_flat_leaf_walk``, declared and undeclared) and runs, as
-        a filter of the last hop's target set (or of the face an undeclared
-        hop's rows offer, ``_UndeclaredHopSet``), over the path left on that
-        target. A relation-key
-        leaf compares the last hop's key, re-read so the comparison sees only
-        rows the hop shows: an ``isnull`` leaf tests the target's primary key
-        (a visible row's key is never ``NULL``, so only "no visible related row"
-        matches ``True``); a leaf on a forward relation path keeps comparing the
-        stored key on the rows that hold it and requires the key to reach a
-        visible row (``_LeafChain.key_hop``); a leaf on a to-many path compares
-        the target rows' own key column, the column Django's relation lookup
-        compares (``_relation_key_value`` reads model-choice values there), once
-        Django builds the leaf's predicate as declared (``_LeafChain.terminal_value``),
-        so the column answers only the lookups and values the relation accepts.
-        A relation-key leaf running consumer code (``_runs_shipped_filter``: a
-        class-level ``filter`` override) on a to-many path, or on a forward path
-        two or more hops long, runs once as declared (its own ``field_name``, the
-        value its form cleaned, the rows of this set) when its value names rows of
-        the relation's target, and a row it keeps must reach, through each hop's
-        visible rows, a visible last-hop row its value names
-        (``_LeafChain.key_match``), compared on the column Django's relation
-        lookup compares; its chain carries, as ``fallback``, the chain a value naming
-        no row runs (``FilterSet._request_chain``): on a forward path the leaf
-        comparing the stored key it holds (``_folded_key_chain``), on a to-many path
-        the leaf as declared over the rows of this set, its ``field_name`` bound to its
-        relation joined through each hop's visible rows (``_LeafChain.view``,
-        ``_relation_view``), or, where a many-to-many on the path names no through key
-        (``_names_every_through``), the leaf re-bound to the target key over the visible
-        target rows. A forward ``RelatedFilter`` head running consumer code, one hop or more,
-        carries as ``null_view`` the chain its own ``null_value`` reads (``_head_null_view``).
-        Every declared hop's target set resolves: a caller derives (or checks) the hops first.
+        A ``ProjectedChildFilter`` reads its projection's hop, then whatever its child filter
+        reads in the child set (its own hops, or none: the child filter itself runs over the
+        hop's visible rows). A walked leaf reads its walk's hops (``_flat_leaf_walk``,
+        declared and undeclared) and runs, as a filter of the last hop's target set (or of the
+        face an undeclared hop's rows offer, ``_UndeclaredHopSet``), over the path left on
+        that target. A relation-key leaf compares the last hop's key, re-read so the
+        comparison sees only rows the hop shows: an ``isnull`` leaf tests the target's primary
+        key (a visible row's key is never ``NULL``, so only "no visible related row" matches
+        ``True``); a GlobalID leaf decoding its value as shipped (``_decodes_before_binding``)
+        whose target's id an annotation of the target type's ``get_queryset`` holds
+        (``filters/base.py::_compares_target_annotation``) runs as its trailing-pk twin does,
+        forward or to-many: re-bound to the target's primary key over the last hop's visible
+        rows, which carry the annotation, with no predicate built first and no stored key
+        compared; any other leaf on a forward relation path keeps comparing the stored key on
+        the rows that hold it and requires the key to reach a visible row
+        (``_LeafChain.key_hop``); a leaf on a to-many path compares the target rows' own key
+        column, the column Django's relation lookup compares (``_relation_key_value`` reads
+        model-choice values there), once Django builds the leaf's predicate as declared
+        (``_LeafChain.terminal_value``), so the column answers only the lookups and values the
+        relation accepts. A relation-key leaf running consumer code (``_runs_shipped_filter``:
+        a class-level ``filter`` override) on a to-many path, or on a forward path two or more
+        hops long, runs once as declared (its own ``field_name``, the value its form cleaned,
+        the rows of this set) when its value names rows of the relation's target, and a row it
+        keeps must reach, through each hop's visible rows, a visible last-hop row its value
+        names (``_LeafChain.key_match``), compared on the column Django's relation lookup
+        compares; its chain carries, as ``fallback``, the chain a value naming no row runs
+        (``FilterSet._request_chain``): on a forward path the leaf comparing the stored key it
+        holds (``_folded_key_chain``), on a to-many path the leaf as declared over the rows of
+        this set, its ``field_name`` bound to its relation joined through each hop's visible
+        rows (``_LeafChain.view``, ``_relation_view``), or, where a many-to-many on the path
+        names no through key (``_names_every_through``), the leaf re-bound to the target key
+        over the visible target rows. A forward ``RelatedFilter`` head running consumer code,
+        one hop or more, carries as ``null_view`` the chain its own ``null_value`` reads
+        (``_head_null_view``). Every declared hop's target set resolves: a caller derives (or
+        checks) the hops first.
         """
         if isinstance(filter_instance, ProjectedChildFilter):
             projection = filter_instance._projection
@@ -7857,7 +7863,9 @@ class FilterSet(
         The routing of ``_leaf_chain`` past a projected copy: ``bind`` is
         ``_bound_terminal`` on a request, and the build-time ask
         (``_globalid_decode_sites``) binds each terminal to a face no ``__init__`` ran on,
-        so the build reads the routing a request runs.
+        so the build reads the routing a request runs. A GlobalID key whose target's id an
+        annotation holds routes before the fold and the to-many pre-build: both read the
+        relation on the walking set's own rows, which no target hook annotated.
         """
         walk = cls._flat_leaf_walk(filter_instance)
         if walk is None:
@@ -7875,6 +7883,16 @@ class FilterSet(
                 hops,
                 bind(filter_instance, last, target_pk.name),
             )
+        if _decodes_before_binding(filter_instance) and _compares_target_annotation(
+            filter_instance,
+        ):
+            # An id an annotation of the target type's ``get_queryset`` holds is on the
+            # visible target rows only: the key compares it there, as its trailing-pk twin
+            # does, whichever direction the relation runs.
+            terminal = bind(filter_instance, last, target_pk.name)
+            setattr(terminal, _GLOBALID_RELATION_PK_ATTR, False)
+            setattr(terminal, _KEY_LEAF_ATTR, filter_instance)
+            return _LeafChain(hops, terminal)
         owner_model = _hop_source_model(hops, len(hops) - 1)
         relation = _hop_relation(last)
         shipped = _runs_shipped_filter(filter_instance)
@@ -8190,33 +8208,32 @@ class FilterSet(
         terminal (``_leaf_chain``) runs with the value it would receive over the
         rows of the model it was written for, unscoped: the last hop target's base
         rows, or, when the chain walks no hop (a relation-key leaf on one forward
-        hop, or one running consumer code), the rows this set was built over
+        hop, other than a GlobalID key into an id an annotation holds, or one
+        running consumer code), the rows this set was built over
         (``self.queryset``, ``_chain_base``), a to-many key's leaf reading its
         relation there through Django's own joins (``_LeafChain.view``, every
-        ``_relation_view`` alias unconditioned), never the rows the leaves
-        before it left, so the answer
-        is the same whenever it is asked, on ``apply_sync`` and ``apply_async``
-        alike (``_probe_absent_relation_leaves``). A pipeline asks it before the
-        ``.qs`` read, on the request's root set and on each logical arm's sibling
-        for a leaf the set holding the arm did not answer for the value it cleaned
-        to there, every arm built over the rows the root set was built over
-        (``_probe_logic_arms``); a leaf that cleaned to the same value reads the
-        answer (``_absent_leaf_verdicts``: a verdict is per (leaf, cleaned value)),
-        so a filter reading queryset state never sees the rows an arm's own
-        constraints left. An inactive absent leaf runs no
+        ``_relation_view`` alias unconditioned), never the rows the leaves before
+        it left, so the answer is the same whenever it is asked, on ``apply_sync``
+        and ``apply_async`` alike (``_probe_absent_relation_leaves``). A pipeline
+        asks it before the ``.qs`` read, on the request's root set and on each
+        logical arm's sibling for a leaf the set holding the arm did not answer for
+        the value it cleaned to there, every arm built over the rows the root set
+        was built over (``_probe_logic_arms``); a leaf that cleaned to the same
+        value reads the answer (``_absent_leaf_verdicts``: a verdict is per (leaf,
+        cleaned value)), so a filter reading queryset state never sees the rows an
+        arm's own constraints left. An inactive absent leaf runs no
         ``get_queryset`` and an active one is never evaluated against a model its
-        path does not resolve on (a child set on a multi-table-inheritance
-        subclass of the relation's target). A walk reaching a hop whose target
-        set does not resolve has no chain; the filter it runs
-        (``_projected_terminal``: a projected copy's child filter, never the
-        copy's own ``filter``, which would come back here) runs over the rows this
-        set was built over, or for a projected copy over its child model's base
-        rows, and an active one raises when ``_apply_relation_leaf`` derives the
-        hop. A
-        terminal raising ``FieldError`` over the unscoped rows compiled a lookup
-        those rows cannot resolve (a column the target type's ``get_queryset``
-        annotates), so it is active; an identity-returning filter compiles no
-        lookup and cannot raise it.
+        path does not resolve on (a child set on a multi-table-inheritance subclass
+        of the relation's target). A walk reaching a hop whose target set does not
+        resolve has no chain; the filter it runs (``_projected_terminal``: a
+        projected copy's child filter, never the copy's own ``filter``, which would
+        come back here) runs over the rows this set was built over, or for a
+        projected copy over its child model's base rows, and an active one raises
+        when ``_apply_relation_leaf`` derives the hop. A terminal raising
+        ``FieldError`` over the unscoped rows compiled a lookup those rows cannot
+        resolve (a column the target type's ``get_queryset`` annotates), so it is
+        active; an identity-returning filter compiles no lookup and cannot raise
+        it.
         """
         built = require(self.queryset, is_queryset)
         if any(

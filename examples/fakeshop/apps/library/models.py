@@ -615,8 +615,8 @@ class Printing(models.Model):
     ``co_publishers`` point into ``PublisherType``, whose id is the house code,
     and the relation keys ``PrintingFilter`` declares on them compare that code.
     ``series`` points into ``SeriesType``, whose id no column holds, so its
-    relation key refuses that id while a hop into ``SeriesFilter`` compares it
-    on the series rows the type reads.
+    relation key and a hop into ``SeriesFilter`` compare that id on the series
+    rows the type reads.
     """
 
     # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.

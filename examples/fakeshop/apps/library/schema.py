@@ -709,10 +709,10 @@ class SeriesType(DjangoType):
 
     ``handle: relay.NodeID[str]`` names an annotation, not a column, so the
     GlobalID a client receives is comparable only on series rows this type
-    reads: ``allLibrarySeriesConnection(filter: {id: ...})``, and a printing's
+    reads: ``allLibrarySeriesConnection(filter: {id: ...})``, a printing's
     ``inSeries`` hop into ``SeriesFilter`` (flat or nested), whose rows come from
-    this hook. A printing's ``series`` key compares the id across the relation,
-    on rows the hook never touched, and refuses it as unvalidatable.
+    this hook, and a printing's ``series`` key, which compares the id on those
+    rows as ``inSeriesId`` does.
     """
 
     handle: relay.NodeID[str]

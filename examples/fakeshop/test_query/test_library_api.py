@@ -4725,8 +4725,8 @@ def test_library_series_node_refetches_by_its_annotated_handle() -> None:
 
 
 #: A printing's ``inSeries`` hop into ``SeriesFilter``, flat and nested, over the
-#: series id (``exact`` and ``in``) and the declared ``handle`` filter; ``VALUE`` stands
-#: for the literal.
+#: series id (``exact`` and ``in``) and the declared ``handle`` filter, and its ``series``
+#: key; ``VALUE`` stands for the literal.
 _SERIES_HOP_FILTERS = {
     "flat-id-exact": "{inSeriesId: {exact: VALUE}}",
     "nested-id-exact": "{inSeries: {id: {exact: VALUE}}}",
@@ -4734,6 +4734,8 @@ _SERIES_HOP_FILTERS = {
     "nested-id-in": "{inSeries: {id: {in: [VALUE]}}}",
     "flat-handle": "{inSeriesHandle: {exact: VALUE}}",
     "nested-handle": "{inSeries: {handle: {exact: VALUE}}}",
+    "key-exact": "{series: {exact: VALUE}}",
+    "key-in": "{series: {in: [VALUE]}}",
 }
 
 
@@ -4750,7 +4752,8 @@ def test_library_series_hop_compares_the_handle_on_the_rows_its_type_reads(
     The hop's rows are the series ``SeriesType.get_queryset`` annotates, so the
     emitted id and the handle itself return the printing under that series, while
     an id carrying the series' primary key and the bare title match nothing. The
-    flat spelling answers as the nested one, in the same one statement.
+    flat spelling answers as the nested one, in the same one statement, and so does
+    the ``series`` key, which compares the handle on those rows too.
     """
     emitted = _series_ids()
     night_pk = pk_of(models.Series.objects.get(title="Night Shade"))
@@ -4812,43 +4815,114 @@ def test_library_series_hop_handle_is_gated_as_its_nested_spelling(
     assert captured.captured_queries == []
 
 
+#: Where a printing's ``series`` key is read beside its ``inSeriesId`` twin: under a ``not``
+#: arm of the printings root, and in the publishers' ``printings2Connection`` window.
+_SERIES_KEY_ROOTS = {
+    "not": ("printings", "{not: {SPELLING: {exact: GID}}}"),
+    "window": ("window", "{SPELLING: {exact: GID}}"),
+}
+
+
+def _series_key_document(arm: str, spelling: str, global_id: str) -> str:
+    root, argument = _SERIES_KEY_ROOTS[arm]
+    argument = argument.replace("SPELLING", spelling).replace("GID", json.dumps(global_id))
+    return "query { " + _HOUSE_ROOTS[root].replace("FILTER", argument) + " }"
+
+
 @pytest.mark.django_db
+@pytest.mark.parametrize("spelling", ["series", "inSeriesId"])
 @pytest.mark.parametrize(
-    ("root", "argument"),
+    ("arm", "data", "statements"),
     [
-        ("printings", "{series: {exact: GID}}"),
-        ("printings", "{series: {in: [GID]}}"),
-        ("printings", "{not: {series: {exact: GID}}}"),
-        ("window", "{series: {exact: GID}}"),
+        ("not", {"allLibraryPrintingsConnection": {"edges": [{"node": {"runSize": 200}}]}}, 1),
+        (
+            "window",
+            {
+                "allLibraryPublishersConnection": {
+                    "edges": [
+                        {
+                            "node": {
+                                "name": "Gollancz",
+                                "printings2Connection": {"edges": [{"node": {"runSize": 100}}]},
+                            },
+                        },
+                    ],
+                },
+            },
+            2,
+        ),
     ],
 )
-def test_library_series_key_refuses_an_id_no_column_holds(root: str, argument: str) -> None:
-    """A printing's ``series`` key cannot compare a handle no ``Series`` column holds.
+def test_library_series_key_compares_the_handle_as_its_hop_twin_does(
+    spelling: str,
+    arm: str,
+    data: JSONObject,
+    statements: int,
+) -> None:
+    """A printing's ``series`` key compares the handle on the rows ``SeriesType`` reads.
 
-    The handle exists only on the rows ``SeriesType.get_queryset`` annotates, so a
-    filter reaching series rows across a relation answers ``GLOBALID_UNVALIDATABLE``,
-    naming the list position on ``in``, before the filtered statement runs.
+    Under ``not`` it keeps the printing of the other series, and in the publishers'
+    ``printings2Connection`` window it keeps the printing under the named series, as
+    ``inSeriesId`` does, in the same statements.
     """
     emitted = _series_ids()
+    with CaptureQueriesContext(connection) as captured:
+        answer = _assert_graphql_success(
+            _series_key_document(arm, spelling, emitted["Night Shade"]),
+        )
+    assert answer == data
+    assert len(captured.captured_queries) == statements
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("spelling", ["series", "inSeriesId"])
+@pytest.mark.parametrize(
+    ("argument", "suffix"),
+    [("{exact: GID}", ""), ("{in: [GID]}", " at index 0")],
+)
+def test_library_series_key_refuses_another_types_id_as_its_hop_twin_does(
+    spelling: str,
+    argument: str,
+    suffix: str,
+) -> None:
+    """A ``PublisherType`` id is a type mismatch on the ``series`` key as on ``inSeriesId``."""
+    _series_ids()
+    global_id = global_id_for(library_schema.PublisherType, "HOUSE-G")
     document = (
         "query { "
-        + _HOUSE_ROOTS[root].replace(
+        + _HOUSE_ROOTS["printings"].replace(
             "FILTER",
-            argument.replace("GID", json.dumps(emitted["Night Shade"])),
+            "{" + spelling + ": " + argument.replace("GID", json.dumps(global_id)) + "}",
         )
         + " }"
     )
     with CaptureQueriesContext(connection) as captured:
         payload = _graphql_payload(document)
-    error = json_object(payload, "errors", 0)
-    assert json_at(error, "extensions", "code") == "GLOBALID_UNVALIDATABLE", payload
-    suffix = " at index 0." if "[GID]" in argument else "."
-    assert json_str(error, "message") == (
-        "GlobalID filter target SeriesType carries its id in 'handle', which no model column "
-        f"holds, so a filter across a relation cannot compare it{suffix}"
+    assert json_str(payload, "errors", 0, "message") == (
+        f"GlobalID type mismatch: filter expects library.series but received library.publisher{suffix}"
     )
-    # The window's publishers are read before their nested filter rejects the id.
-    assert len(captured.captured_queries) == (1 if root == "window" else 0)
+    assert captured.captured_queries == []
+
+
+@pytest.mark.django_db
+def test_library_series_key_runs_the_statement_its_hop_twin_runs() -> None:
+    """The ``series`` key's one statement is ``inSeriesId``'s, byte for byte.
+
+    Both compare the handle in an ``EXISTS`` over the series rows
+    ``SeriesType.get_queryset`` annotates.
+    """
+    emitted = _series_ids()
+    statements: list[str] = []
+    for spelling in ("series", "inSeriesId"):
+        argument = "{" + spelling + ": {exact: " + json.dumps(emitted["Night Shade"]) + "}}"
+        with CaptureQueriesContext(connection) as captured:
+            _ = _assert_graphql_success(
+                "query { " + _HOUSE_ROOTS["printings"].replace("FILTER", argument) + " }",
+            )
+        assert len(captured.captured_queries) == 1
+        statements.append(captured.captured_queries[0]["sql"])
+    assert statements[0] == statements[1]
+    assert "SER-Night Shade" in statements[0]
 
 
 @pytest.mark.django_db

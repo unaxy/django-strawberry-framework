@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 211 to do.
+Progress: 0 done, 212 to do.
 
 ## From dry-0_0_15_3
 
@@ -437,9 +437,8 @@ Progress: 0 done, 211 to do.
   non-primary-key column compares that column on the type's own `id` key and through every relation (forward,
   `to_field`, to-many), so the id the server emits matches its row and an id no row carries matches nothing; a node id
   that column cannot hold answers `GLOBALID_INVALID` ("... not a valid <Model> id value"); a `relay.NodeID` over a
-  `get_queryset` annotation compares on the type's own rows and through a `RelatedFilter` hop, and a relation key into
-  that type answers `GLOBALID_UNVALIDATABLE`. A flat leaf through a `RelatedFilter` onto a filter over a target-type
-  annotation no longer fails with an unexpected error
+  `get_queryset` annotation compares on the type's own rows and through a `RelatedFilter` hop. A flat leaf through a
+  `RelatedFilter` onto a filter over a target-type annotation no longer fails with an unexpected error
 - [ ] 317. CHANGELOG entry for item 269: a `Filter` subclass that stores its own `filter` on the instance now works
   reached through a `RelatedFilter` (flat, projected and nested) and beside one, runs inside its own filter set, and is
   never negated by the package under `exclude=True`; a GlobalID filter holding its own `filter` refuses unstorable text
@@ -992,6 +991,12 @@ Progress: 0 done, 211 to do.
   `get_queryset` scopes now accepts the ids the type registered for the relation's target mints, as the `shelfBooks`
   key and the unscoped spelling do, instead of only the ids of the type the set is bound to. An annotation-held
   `NodeID` there answers `GLOBALID_UNVALIDATABLE`, and a `callable` or `custom` secondary on such a set now builds
+- [ ] 861. CHANGELOG entry for item 858: a `GlobalID` relation key into a type whose `relay.NodeID` is an annotation
+  its `get_queryset` adds (`series`, `books`, `shelfBooks`; forward or to-many, declared or generated) now compares
+  that id over the rows the type answers for, as its trailing-pk spelling (`books__id`) and an `inSeriesId` hop do, in
+  the same statement, instead of refusing every value with `GLOBALID_UNVALIDATABLE`; an id of another type now answers
+  the type mismatch. A key over rows another type scopes, and one whose class overrides `filter`, still answer
+  `GLOBALID_UNVALIDATABLE`
 
 ## From dry-upstream-0_0_15
 
