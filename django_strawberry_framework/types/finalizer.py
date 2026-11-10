@@ -1630,8 +1630,8 @@ class _SidecarBindingSpec(Generic[_SetT]):
     The ordered subpass skeleton (``_bind_sidecar_sets``) is shared
     by FilterSet and OrderSet; this carries the family
     differences. ``expand`` runs Layer-4 expansion for one set;
-    ``post_expand_audit`` runs the optional filter-only audits of the
-    published tables (``None`` for orders).
+    ``post_expand_audit`` runs the family's audits of every expanded set
+    (``_audit_filterset_subpass_2_5``, ``_audit_related_order_targets``).
     """
 
     read_set: Callable[[DjangoTypeDefinition], _SetT | None]
@@ -1646,7 +1646,7 @@ class _SidecarBindingSpec(Generic[_SetT]):
     materialize: Callable[[str, type[object]], None]
     format_orphans: Callable[[list[_SetT]], str]
     expand: Callable[[_SetT], None]
-    post_expand_audit: Callable[[list[_SetT]], None] | None
+    post_expand_audit: Callable[[list[_SetT]], None]
 
 
 def _expand_filterset(filterset_cls: type[FilterSet]) -> None:
@@ -1676,6 +1676,48 @@ def _expand_orderset(orderset_cls: type[OrderSet]) -> None:
     )
     for related in related_orders.values():
         _ = related.orderset
+
+
+def _audit_related_order_targets(wired: list[type[OrderSet]]) -> None:
+    """Orders subpass 2.5: every ``RelatedOrder`` a wired set reaches is a relation its target scopes.
+
+    The walk starts at each wired set with the model of each type serving it (the
+    model its paths resolve against, spec-028 Decision 8) and crosses every
+    declaration, transitively, with the model that declaration's relation reached:
+    ``orders/sets.py::_require_order_relation_path`` refuses a ``field_name`` that is
+    not a path of relations, and ``orders/sets.py::_require_scoped_order_target`` a
+    target bound to a type whose rows the hop cannot read as the reached model's.
+    ``OrderSet._scoped_hops`` asks the same at every apply, for an order applied
+    directly to a queryset or a target bound after this pass. A ``None`` target
+    expands nothing; cyclic declarations end at a ``(set, model)`` already walked.
+    """
+    from django_strawberry_framework.orders.base import RelatedOrder  # noqa: PLC0415 - binds only a subsystem the consumer imported
+    from django_strawberry_framework.orders.sets import (  # noqa: PLC0415 - binds only a subsystem the consumer imported
+        _require_order_relation_path,
+        _require_scoped_order_target,
+    )
+
+    pending: list[tuple[type[OrderSet], type[models.Model]]] = [
+        (set_cls, definition.model)
+        for _type_cls, definition in registry.iter_definitions()
+        if (set_cls := definition.orderset_class) is not None and truth.is_among(set_cls, wired)
+    ]
+    seen = set(pending)
+    while pending:
+        orderset_cls, model = pending.pop()
+        # The metaclass stores ``related_orders`` from ``collect_related_declarations``.
+        related_orders = declaration_map(
+            truth.static_attr(orderset_cls, "related_orders", {}),
+            RelatedOrder,
+        )
+        for name, related in related_orders.items():
+            relation = str(related.field_name or name)
+            reached = _require_order_relation_path(orderset_cls, name, relation, model)
+            target = related.orderset
+            _ = _require_scoped_order_target(orderset_cls, name, relation, reached, target)
+            if target is not None and (target, reached) not in seen:
+                seen.add((target, reached))
+                pending.append((target, reached))
 
 
 def _audit_unregistered_related_filter_targets(wired: list[type[FilterSet]]) -> None:
@@ -1730,8 +1772,8 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
        offending set, ``from exc`` preserving ``__cause__``. Any other
        exception is consumer behaviour (a ``get_filters`` / ``get_fields``
        override, a lazy factory) and propagates unchanged.
-    2.5. (Optional) ``spec.post_expand_audit`` -- the filter-only audits of
-       every published table (``_audit_filterset_subpass_2_5``).
+    2.5. ``spec.post_expand_audit`` -- the family's audits of every expanded
+       set (``_audit_filterset_subpass_2_5``, ``_audit_related_order_targets``).
     3. Orphan validation: helper-referenced sets not wired to any DjangoType
        raise via ``spec.format_orphans``. Runs BEFORE materialization so a
        failure leaves no half-materialized input classes in the namespace.
@@ -1766,9 +1808,8 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
                 f"{spec.related_noun} target. {truth.text(exc)}",
             ) from exc
 
-    # Subpass 2.5 (filter-only today): the audits of the published tables.
-    if spec.post_expand_audit is not None:
-        spec.post_expand_audit(wired)
+    # Subpass 2.5: the family's audits of every expanded set.
+    spec.post_expand_audit(wired)
 
     # Subpass 3: orphan validation against the helper-tracked set. Runs BEFORE
     # materialization so a failure here doesn't leave half-materialized input
@@ -1809,6 +1850,10 @@ def _bind_ordersets() -> None:
     ``LazyRelatedClassMixin.resolve_lazy_class`` is rewrapped as
     ``ConfigurationError`` with ``__cause__`` preserving the
     original. Any other exception propagates unchanged.
+
+    Subpass 2.5 -- ``_audit_related_order_targets``: every
+    ``RelatedOrder`` a wired set reaches names a path of relations and a
+    target its hop can scope by.
 
     Subpass 3 -- orphan validation. Compares the OrderSets passed to
     ``order_input_type(...)`` (per Decision 11) against the set of
@@ -1851,7 +1896,7 @@ def _bind_ordersets() -> None:
                 meta_key="orderset_class",
             ),
             expand=_expand_orderset,
-            post_expand_audit=None,
+            post_expand_audit=_audit_related_order_targets,
         ),
     )
 

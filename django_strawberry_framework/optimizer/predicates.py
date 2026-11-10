@@ -34,8 +34,12 @@ test reuses the join the value is read through instead of re-walking the path
 from the outer row. A value read from a relation's own carrier columns needs
 no join, so for a relation keyed by columns other than the related pk the test
 correlates on the carrier / target pairs instead and never adds the join that
-would drop a row whose carriers match nothing. Its exact type is
-``utils/querysets.py::VisibleRowExists``.
+would drop a row whose carriers match nothing; rows lacking a target column
+are matched to the related row those carriers name inside the subquery
+instead. Its exact type is
+``utils/querysets.py::VisibleRowExists``. ``correlates_joined_rows`` answers
+which models' rows that primary-key test reads as the joined rows, as
+``correlates_related_rows`` answers it for ``related_rows_exist``.
 
 Implementation invariant: the INNER queryset built here is correlated with
 ``OuterRef`` and compiles inside the outer statement - it must never execute
@@ -76,6 +80,7 @@ from django_strawberry_framework.utils.relations import (
     is_model_class,
     is_source_carried_relation_kind,
     m2m_through_link_fields,
+    non_pk_forward_link,
     relation_bool,
     relation_kind,
     relation_link,
@@ -89,7 +94,6 @@ if TYPE_CHECKING:
     from django.db import models
     from django.db.models import QuerySet
 
-    from django_strawberry_framework.utils.relations import RelationLink
     from django_strawberry_framework.utils.typing import ConcreteField, ForeignKeyField, ModelField
 
 _M = TypeVar("_M", bound="models.Model")
@@ -516,7 +520,7 @@ def _carries(rows_model: type[models.Model], field: ModelField) -> bool:
 def visible_row_exists(
     rows: QuerySet[models.Model],
     joined_path: str,
-    link: RelationLink | None = None,
+    relation: object = None,
 ) -> VisibleRowExists:
     """Return ``EXISTS`` "the row the outer query reaches through ``joined_path`` is one of ``rows``".
 
@@ -526,28 +530,68 @@ def visible_row_exists(
     aggregate the test reads the same joined row the aggregate does. ``rows``
     keep any ``DISTINCT`` inside the subquery, where it changes no answer.
 
-    ``link`` is the link of the relation ``joined_path`` ends on when the value
-    is read from that relation's own carrier columns and the relation is keyed
-    by columns other than the related pk
-    (``utils/relations.py::non_pk_forward_link``).
-    The test then correlates each target column to its carrier on the row
-    before the relation instead: ``<relation>__pk`` would add an inner join the
-    value never needed, and that join drops a row whose carriers match no
-    related row, where the plain value keeps it. Such a row fails the test, so
-    its value reads as a missing related row's.
+    ``relation`` is the relation ``joined_path`` ends on when the value is read
+    from that relation's own carrier columns. When it is keyed by columns other
+    than the related pk (``utils/relations.py::non_pk_forward_link``) the test
+    correlates each target column to its carrier on the row before the relation
+    instead: ``<relation>__pk`` would add an inner join the value never needed,
+    and that join drops a row whose carriers match no related row, where the
+    plain value keeps it. Such a row fails the test, so its value reads as a
+    missing related row's. Rows of a model that does not carry every target
+    column (``_carries``: a multi-table-inheritance ancestor of a related model
+    keyed by a column it declares below them) cannot be correlated to the
+    carriers directly; their test keeps the rows whose key is the key of the
+    related row the carriers name, read from the related model's base manager
+    inside the subquery, so it adds no join either. The related model, not the
+    model declaring a target column: a ``ForeignObject`` whose ``to_fields`` name
+    a column an intermediate parent declares reaches only the child's rows, and
+    a code only an intermediate row holds names no related row.
     """
+    link = None if relation is None else non_pk_forward_link(relation)
     if link is None:
         return VisibleRowExists(rows.filter(pk=OuterRef(f"{joined_path}{LOOKUP_SEP}pk")))
     head, _sep, _tail = joined_path.rpartition(LOOKUP_SEP)
     prefix = f"{head}{LOOKUP_SEP}" if head else ""
-    return VisibleRowExists(
-        rows.filter(
-            **{
-                target.name: OuterRef(f"{prefix}{carrier.name}")
-                for carrier, target in zip(link.carriers, link.targets, strict=True)
-            },
-        ),
-    )
+    pairs = list(zip(link.carriers, link.targets, strict=True))
+    if all(_carries(rows.model, target) for _carrier, target in pairs):
+        return VisibleRowExists(
+            rows.filter(
+                **{target.name: OuterRef(f"{prefix}{carrier.name}") for carrier, target in pairs},
+            ),
+        )
+    related = require(read_attr(relation, "related_model", None), is_model_class)
+    keys = related._base_manager.filter(
+        **{
+            target.name: OuterRef(OuterRef(f"{prefix}{carrier.name}")) for carrier, target in pairs
+        },
+    ).values("pk")
+    return VisibleRowExists(rows.filter(pk__in=keys))
+
+
+def correlates_joined_rows(
+    joined_model: type[models.Model],
+    rows_model: type[models.Model],
+) -> bool:
+    """Return whether ``visible_row_exists`` reads ``rows_model`` rows as joined ``joined_model`` rows.
+
+    The test keeps the given rows whose primary key equals the joined row's
+    (``<joined path>__pk``). The joined row is a row of ``joined_model``'s table
+    the outer query's own join reached, so it exists, whatever direction the
+    relation runs and whether its key is constrained. Rows of ``rows_model``
+    answer for it when both hold:
+
+    - ``rows_model`` shares its rows with ``joined_model``: one concrete model, a
+      proxy, or a multi-table-inheritance ancestor or descendant. A sibling
+      descendant, or an unrelated model, numbers different rows.
+    - both keys are stored in one column (``_stored_column``, following parent
+      links), so the equality compares one row's key with itself; a descendant
+      keyed on a column of its own does not.
+    """
+    rows = require(rows_model._meta.concrete_model, is_model_class)
+    joined = require(joined_model._meta.concrete_model, is_model_class)
+    if not (issubclass(rows, joined) or issubclass(joined, rows)):
+        return False
+    return _stored_column(rows_model._meta.pk) is _stored_column(joined_model._meta.pk)
 
 
 def visible_value(field_path: str, tests: Sequence[VisibleRowExists]) -> Case:

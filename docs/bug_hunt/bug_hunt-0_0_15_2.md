@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 471 done, 122 to do. The CHANGELOG entries filed here moved to
+Progress: 473 done, 122 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2366,6 +2366,36 @@ Progress: 471 done, 122 to do. The CHANGELOG entries filed here moved to
   on every channel. django-filter 25.2 to 26.2 ship the same `filters.py`. Graphene-django and
   django-graphene-filters do not handle `to_field_name`. The shipped fakeshop `ShelfFilter.home_branches_named`
   declares the failing shape (filed as 869)
+- [x] 752. A `RelatedOrder` whose target `OrderSet` is bound to a type of a model its relation does not reach is
+  refused with a `ConfigurationError` naming the owner, the declaration, its `field_name`, the reached model and the
+  bound type, where `orders/sets.py::OrderSet._scoped_hops` scoped the hop by that type (a plain wrong type let rows
+  the real type hides order visible parents; a hiding one read every term as missing). `types/finalizer.py::
+  _audit_related_order_targets`, now the orders subpass-2.5 `post_expand_audit` (made required), walks from each
+  wired set's type model through every declaration transitively; `OrderSet._scoped_hops` refuses the same at apply for
+  a set a resolver applies directly or a `.orderset` reassigned after finalize. Both read
+  `orders/sets.py::_require_scoped_order_target` over the new `optimizer/predicates.py::correlates_joined_rows` (the
+  joined rows' model, a proxy, or a multi-table-inheritance parent or child keyed by the same stored column), compared
+  on the bound type's model; unbound and `None` targets keep falling back to the relation's own type. The filter
+  side's `correlates_related_rows` is not shared: it refuses an ancestor set across a reverse one-to-one, which the
+  order test (the joined row's key) answers correctly. `optimizer/predicates.py::visible_row_exists` now takes the
+  relation: rows whose model lacks a `to_field` target column (an MTI parent of the related model) match the related
+  row the carriers name inside the subquery, from the related model's base manager, where the term raised `FieldError`
+  per request; no row drops, an unconstrained key naming no row included. Grid: 39 of 87 cells moved, every one a
+  mismatched or deliberate shape; no correlated cell moved; SDL unchanged. Pinned by
+  `tests/orders/test_finalizer.py::test_related_order_whose_target_type_the_hop_cannot_scope_by_is_refused_at_finalize`,
+  `::test_related_order_whose_target_type_shares_the_reached_rows_finalizes`,
+  `::test_apply_refuses_a_target_reassigned_after_finalize_to_an_unscopable_set`,
+  `tests/orders/test_sets.py::test_a_hop_scoped_by_an_ancestor_lacking_the_to_field_hides_through_the_related_row`,
+  `::test_a_hop_through_an_inherited_to_field_reads_only_rows_of_the_related_model` and
+  `examples/fakeshop/test_query/test_order_target_scope_api.py`. Docs: spec-028 (Decision 6 subpass 2.5, Decision 8
+  step 4, Error shapes, Edge cases, checklist, Test plan, DoD 10) and its rationale, spec-060, docs/README.md, GLOSSARY
+  `RelatedOrder` (pk 496). Filed 866, 867. CHANGELOGTODO 868
+- [x] 777. Fixed with 752: a wired set's `RelatedOrder` whose `field_name` is not a path of relations (a column, a
+  missing name, a segment past a column, or such a declaration two sets down) is refused when types finalize
+  (`orders/sets.py::_require_order_relation_path`, in the subpass-2.5 audit); a set applied directly keeps the
+  per-request "invalid order path" error. Pinned by
+  `tests/orders/test_finalizer.py::test_related_order_whose_field_name_is_not_a_path_of_relations_is_refused_at_finalize`
+  and `::test_a_declaration_two_sets_down_is_audited_from_the_model_the_outer_relation_reached`
 
 ## Outside review of the fixes
 
@@ -2406,13 +2436,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 752. A `RelatedOrder` whose target `OrderSet` is keyed on another model than the relation reaches is accepted, and
-  `orders/sets.py::OrderSet._scoped_hops` scopes its hop by the wrong type (`set_bound_type(hop.target)`, no
-  correlation check), so hidden rows of the real model order visible parents: `BookOrder.shelf =
-  RelatedOrder(DeskProfileOrder, field_name="shelf")` gives anonymous `orderBy: [{shelf: {code: ASC}}]` staff's order,
-  exposing a secret shelf's code. The filter side refuses the same declaration at build (item 34,
-  `_require_relation_path` / `_require_correlated_target` over `optimizer/predicates.py::correlates_related_rows`);
-  `OrderSet.get_fields` runs only `reject_captured_branches`. Found probing 748
 - [ ] 753. (docs) A `RelatedFilter`'s `queryset=` bounds only paths through that declaration, not a dotted
   `Meta.fields` key on another set reaching the same relation (`branch__shelves__topic` on a Shelf set passes
   `BranchFilter.shelves`' scope; its hops still get target visibility). Answered from AGENTS' defect rule and GOAL's
@@ -2493,11 +2516,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   moves pinned behaviour. A plain `AllValuesMultipleFilter(lookup_expr="year")` is the same class: it publishes the
   transform's `[Int!]` while its choices are the column's dates (`invalid_choice` for every year; from 733). Found
   fixing 708
-- [ ] 777. (robustness) A wired `OrderSet` (with or without `Meta.model`) declaring
-  `RelatedOrder(<set>, field_name=<no such relation>)` builds and publishes its order input, and every `orderBy:` term
-  through that branch is refused per request ("invalid order path"), where the filter side refuses a `RelatedFilter`
-  whose `field_name` reaches no relation at build; spec-028 defers order path validation to apply time. GOAL: the build
-  accepts what every request refuses. Found researching 714
 - [ ] 779. A `NumberFilter(field_name="parent__twice")` past an undeclared hop whose target type's `get_queryset`
   annotates `twice` answers a masked `AttributeError: 'IntegerField' object has no attribute 'model'`
   (`filters/sets.py::_held_integer_value` -> `_queryset_integer_column` -> `utils/relations.py::_walk_lookup_expr`
@@ -2634,6 +2652,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 864. (robustness) The `ArrayField` input gate judges a `method=` filter over an array by its key name: a
   `method=` `ListFilter` with `lookup_expr="in"` over an `ArrayField` is refused, though the method reads the list and
   applies no lookup. Found fixing 716
+- [ ] 866. An order term ending on a `to_field` column under a declared hop (`[{kiosk_rel: {kiosk_code:
+  ASC}}]`, path `kiosk__kiosk_code`) whose target set is bound to a hiding type of the related model drops a row whose
+  non-null `db_constraint=False` key names no row, for every actor, where Django's `order_by("kiosk__kiosk_code")`
+  trims the join and keeps it (spec-028 Decision 8 step 4: a test never removes a row the plain term keeps). The
+  visibility test joins through `<relation>__pk`; passing the relation when the term's column is its target column
+  would correlate on the carriers. Found verifying 752
+- [ ] 867. (robustness) A wired `OrderSet` whose `RelatedOrder` two sets down names a lazy target that cannot import
+  raises a bare `ImportError` at `finalize_django_types()`, where a direct unresolved target is rewrapped as a
+  `ConfigurationError` naming the declaration and the filter family rewraps both
+  (`tests/orders/test_finalizer.py::test_an_unresolved_target_two_sets_down_raises_its_import_error_at_finalize` pins
+  the bare error). Found fixing 752
 - [ ] 869. (fakeshop) The shipped `examples/fakeshop/apps/library/filters.py::ShelfFilter.home_branches_named`
   (`ModelMultipleChoiceFilter(field_name="branch", to_field_name="name")`, documented as "a list of branch names")
   answers the masked `ValueError` "Field 'id' expected a number" for every valid name list, on

@@ -399,7 +399,8 @@ of the first foundation card.
     "the row an outer join already reached is one of these rows",
     correlated on that joined row's `pk`, or for a path ending on a
     relation keyed by columns other than the related pk on the link's carrier / target
-    pairs, which adds no join (its exact type,
+    pairs, or for rows lacking a target column on the related row those carriers name,
+    which adds no join (its exact type,
     `utils/querysets.py::VisibleRowExists`, is admitted by the visibility
     seal by identity); `optimizer/predicates.py::visible_value` reads a
     field path as `NULL` wherever any such test fails

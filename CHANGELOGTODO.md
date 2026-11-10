@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 213 to do.
+Progress: 0 done, 214 to do.
 
 ## From dry-0_0_15_3
 
@@ -1005,6 +1005,14 @@ Progress: 0 done, 213 to do.
   the list in `method=`. `has_keys` / `has_any_keys`, `JSONField`, `RangeField` and `CompositePrimaryKey`
   comparisons, `ArrayField` whole-array lookups and project field classes are unaffected. A `range` `ListFilter` now
   takes exactly two values: one or three answer `FILTER_INVALID` with code `invalid_values`
+- [ ] 868. CHANGELOG entry for items 752 and 777: a `RelatedOrder` whose target `OrderSet` is bound to a type of a
+  model its relation does not reach (other than a proxy, or a multi-table-inheritance parent or child keyed by the
+  same column), or whose `field_name` is not a path of relations, now raises `ConfigurationError` at
+  `finalize_django_types()` for every declaration a wired order set reaches, and the target check also runs when a
+  resolver applies an unwired set directly. A mismatched target scoped the hop by the wrong type's rows: a related row
+  the real type hides could still order its parent, or every term read as missing. An order term ending on a
+  `to_field` key whose target set is bound to a multi-table-inheritance parent lacking that column now orders by
+  visibility instead of raising `FieldError` on every request
 
 ## From dry-upstream-0_0_15
 

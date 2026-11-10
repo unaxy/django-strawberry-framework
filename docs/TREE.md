@@ -822,6 +822,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_node_refetch_api.py      # Native HTTP Relay refetch contracts requiring consumer declarations.
 ├── test_optimizer_auto_api.py    # Live ``/graphql/`` coverage for routed nested-fetch strategy selection.
 ├── test_order_apply_arguments_api.py  # Unbound consumer ordering uses the queryset model to preserve one row per root.
+├── test_order_target_scope_api.py  # A declared order hop is scoped by its target set's bound type only where its rows are the reached rows.
 ├── test_postgres_array_filter_bindability_api.py  # Real PostgreSQL array filter inputs are refused or applied through native HTTP consumers.
 ├── test_products_api.py          # Live GraphQL HTTP tests for products reads, mutations, permissions, optimization, and request parsing.
 ├── test_products_visibility_api.py  # Live GraphQL proof that generated relations enforce target visibility themselves.

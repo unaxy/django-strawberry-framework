@@ -46,7 +46,11 @@ from django.db.models.constants import LOOKUP_SEP
 from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError, PathResolutionError
-from django_strawberry_framework.optimizer.predicates import visible_row_exists, visible_value
+from django_strawberry_framework.optimizer.predicates import (
+    correlates_joined_rows,
+    visible_row_exists,
+    visible_value,
+)
 from django_strawberry_framework.sets_mixins import (
     ActiveInputPermissionAttrs,
     ActiveInputPermissionMixin,
@@ -87,7 +91,6 @@ from django_strawberry_framework.utils.relations import (
     classify_path,
     is_model_class,
     leading_relation_hops,
-    non_pk_forward_link,
     order_column_paths,
 )
 from django_strawberry_framework.utils.relations import (
@@ -112,6 +115,7 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
+    from django_strawberry_framework.utils.permissions import DeclaredHop
 
 _NormalizedTerms = tuple[tuple[str, "Ordering | None"], ...]
 _M = TypeVar("_M", bound=models.Model)
@@ -381,6 +385,68 @@ def _classify_declared_path(model: object, field_path: str) -> None:
     if not is_model_class(model):
         raise PathResolutionError(model, field_path, field_path.split(LOOKUP_SEP, maxsplit=1)[0])
     _ = classify_path(model, field_path)
+
+
+def _require_scoped_order_target(
+    owner: type[object],
+    declared_attr: str,
+    relation: str,
+    reached: type[models.Model],
+    target: type[object] | None,
+) -> type[DjangoType] | None:
+    """Return the type ``target`` is bound to, refusing one whose model the hop cannot scope by.
+
+    A declared hop orders by the rows of the type its target set is bound to
+    (``OrderSet._scoped_hops``), tested against the row the hop's join reached by
+    primary key (``optimizer/predicates.py::visible_row_exists``), so that type's
+    model must be one whose rows that test reads as rows of ``reached``
+    (``optimizer/predicates.py::correlates_joined_rows``): ``reached``'s concrete
+    model, a proxy, or a multi-table-inheritance parent or child keyed by the same
+    column. Any other model's rows decide which joined rows read as hidden, so a
+    row the reached model's own type hides orders its parent. An unbound target
+    (or ``None``) answers for nothing: the hop reads the relation's own type.
+    """
+    scope = set_bound_type(target)
+    if scope is None:
+        return None
+    scope_model = model_for(scope)
+    if correlates_joined_rows(reached, scope_model):
+        return scope
+    raise ConfigurationError(
+        f"OrderSet {truth.qualname(owner)}: RelatedOrder {declared_attr!r} has field_name "
+        f"{relation!r}, which reaches {truth.qualname(reached)}, but its target OrderSet "
+        f"{truth.qualname(target)} is bound to {truth.qualname(scope)}, whose model is "
+        f"{truth.qualname(scope_model)}. A RelatedOrder's target OrderSet must be bound to a "
+        f"type of {truth.qualname(reached)}, a proxy of it, or a multi-table-inheritance "
+        "parent or child of it keyed by the same column.",
+    )
+
+
+def _require_order_relation_path(
+    owner: type[object],
+    declared_attr: str,
+    relation: str,
+    model: type[models.Model],
+) -> type[models.Model]:
+    """Return the model ``relation`` reaches from ``model``, refusing a path that is not all relations.
+
+    A ``RelatedOrder``'s target terms are read across every segment of its
+    ``field_name``, so each must be a relation Django can join
+    (``utils/relations.py::leading_relation_hops``): a column, a name ``model``
+    does not carry, or a ``GenericForeignKey`` is a declaration error. ``model``
+    is the model the path resolves against: the type the walking set serves, or
+    the model an outer declaration reached.
+    """
+    hops = leading_relation_hops(model, relation)
+    segments = relation.split(LOOKUP_SEP)
+    if len(hops) < len(segments):
+        raise ConfigurationError(
+            f"OrderSet {truth.qualname(owner)}: RelatedOrder {declared_attr!r} has field_name "
+            f"{relation!r}, but {segments[len(hops)]!r} is not a relation of the model the "
+            f"path has reached from {truth.qualname(model)}. A RelatedOrder's field_name must "
+            "name a path of relations.",
+        )
+    return hops[-1].target_model
 
 
 #: The ``Meta`` keys an ``OrderSet`` reads (``OrderSet._expand_meta_fields``); a class
@@ -918,13 +984,18 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         and child do not) reading the type that set is bound to. A relation
         whose type keeps the identity ``get_queryset``, or whose model no type
         registers, hides nothing and is left out, so a path crossing only such
-        relations orders by its plain column.
+        relations orders by its plain column. A declared relation whose target
+        set is bound to a type of a model its test cannot read as the rows the
+        join reached raises ``ConfigurationError``
+        (``_require_scoped_order_target``); finalize refuses the same
+        declaration on every set a wired set reaches, so this answers for an
+        order a caller applies directly.
 
         The joined path of a hop is what ``visible_row_exists`` correlates to.
         For the hop a path ends on, ``_resolve_order_expressions`` also passes the
-        link of a relation keyed by columns other than the related pk
-        (``utils/relations.py::non_pk_forward_link``), so that test reads
-        the carriers the value is read from rather than joining the relation.
+        relation, so for one keyed by columns other than the related pk
+        (``utils/relations.py::non_pk_forward_link``) that test reads the
+        carriers the value is read from rather than joining the relation.
         """
         joins = leading_relation_hops(model, field_path)
         if not joins:
@@ -936,23 +1007,35 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             target_attr=cls._permission.target_attr,
         )
         # The set each join is walked from (its re-entry root) and, for the join a
-        # declaration ends on, the type that declaration's target set is bound to.
+        # declaration ends on, that declaration, whose target set's bound type the
+        # join answers for when ``_require_scoped_order_target`` accepts it.
         root = set_bound_type(cls)
         roots: dict[int, type[DjangoType] | None] = {}
-        owners: dict[int, type[DjangoType] | None] = {}
+        ends: dict[int, tuple[DeclaredHop, str]] = {}
         start = 0
         for hop in declared:
-            relation: object = getattr(hop.related_obj, "field_name", None) or hop.declared_attr
-            end = start + len(str(relation).split(LOOKUP_SEP))
+            relation = str(getattr(hop.related_obj, "field_name", None) or hop.declared_attr)
+            end = start + len(relation.split(LOOKUP_SEP))
             roots.update(dict.fromkeys(range(start, end), root))
-            root = None if hop.target is None else set_bound_type(hop.target)
-            owners[end - 1] = root
+            root = set_bound_type(hop.target)
+            ends[end - 1] = (hop, relation)
             start = end
-        types = [
-            owners.get(position)
-            or relation_target_type(join.target_model, root=roots.get(position, root))
-            for position, join in enumerate(joins)
-        ]
+        types: list[type[DjangoType] | None] = []
+        for position, join in enumerate(joins):
+            ending = ends.get(position)
+            scope = None
+            if ending is not None:
+                hop, relation = ending
+                scope = _require_scoped_order_target(
+                    hop.owner,
+                    hop.declared_attr,
+                    relation,
+                    join.target_model,
+                    hop.target,
+                )
+            types.append(
+                scope or relation_target_type(join.target_model, root=roots.get(position, root)),
+            )
         segments = field_path.split(LOOKUP_SEP)
         reached = model
         joined: list[str] = []
@@ -986,7 +1069,11 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         pk (a ``to_field`` key, a ``ForeignObject`` onto other columns) the
         value is the carriers, so its own test correlates on the link's carrier
         / target pairs instead of joining the relation, and a row whose carriers
-        match no related row stays and reads as missing.
+        match no related row stays and reads as missing. Rows of a scoping type
+        whose model lacks a target column (a multi-table-inheritance parent of a
+        model keyed by a ``to_field`` the child declares) are matched to the
+        related row the carriers name inside the test's own subquery
+        (``visible_row_exists``), so they join nothing either.
 
         A path ending on a forward ``ForeignObject`` that is not a
         ``ForeignKey`` names a relation held in carrier columns rather than a
@@ -1042,12 +1129,11 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             flat_orders,
             model=model,
         ):
-            link = non_pk_forward_link(terminal)
             tests = [
                 visible_row_exists(
                     visible_rows(scope),
                     joined,
-                    link if joined == field_path else None,
+                    terminal if joined == field_path else None,
                 )
                 for joined, scope in cls._scoped_hops(model, field_path)
             ]

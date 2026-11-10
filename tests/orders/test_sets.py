@@ -24,12 +24,13 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from functools import partial
 from types import SimpleNamespace
-from typing import NoReturn, SupportsIndex, TypeVar, overload
+from typing import TYPE_CHECKING, NoReturn, SupportsIndex, TypeAlias, TypeVar, overload
 
 import pytest
 from apps.library.models import (
     Book,
     Branch,
+    DeskProfile,
     Genre,
     Patron,
     PatronProfile,
@@ -38,9 +39,10 @@ from apps.library.models import (
     TaggedItem,
 )
 from django.contrib.auth.models import AnonymousUser, User
-from django.db import connection
+from django.db import connection, models
 from django.db.models import F, Min, Model, QuerySet
 from django.http import HttpRequest
+from django.test.utils import CaptureQueriesContext
 from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy
 from graphql import GraphQLError
@@ -85,9 +87,19 @@ from tests._idioms import (
     run_capturing,
     str_subclass_name,
 )
-from tests._relation_fixtures import RpGenericTag, generic_fixture_rows
+from tests._relation_fixtures import RpGenericTag, generic_fixture_rows, relation_fixture_tables
+
+if TYPE_CHECKING:
+    from django.db.models.expressions import Combinable
 
 _M = TypeVar("_M", bound=Model)
+
+if TYPE_CHECKING:
+    # Each field's descriptor types as django-stubs declares them (set type, get type), spelled
+    # out because the checker runs without the django-stubs mypy plugin that would infer them.
+    _FK: TypeAlias = models.ForeignKey[_M | Combinable, _M]
+    _NullFK: TypeAlias = models.ForeignKey[_M | Combinable | None, _M | None]
+    _Text: TypeAlias = models.TextField[str | Combinable, str]
 
 
 # ---------------------------------------------------------------------------
@@ -3429,3 +3441,449 @@ def test_orders_over_a_visible_reverse_generic_relation_order_by_the_one_holder(
         )
         assert titled == list(rows.order_by("holder__title").values_list("name", flat=True))
         assert titled.index("t2") < titled.index("t1")
+
+
+# ---------------------------------------------------------------------------
+# Related-row visibility: a declared hop's target must be one its test can scope by
+# ---------------------------------------------------------------------------
+
+
+def _set_named(
+    name: str,
+    model: type[Model],
+    fields: list[str],
+    **related: RelatedOrder,
+) -> type[OrderSet]:
+    """Declare an ``OrderSet`` named ``name`` in this module, so its qualified name is ``name``."""
+    return type(
+        name,
+        (OrderSet,),
+        {
+            **related,
+            "Meta": type("Meta", (), {"model": model, "fields": fields}),
+            "__module__": __name__,
+        },
+    )
+
+
+_DESK_PROFILE_REFUSAL = (
+    "OrderSet BookOrder: RelatedOrder 'shelf' has field_name 'shelf', which reaches Shelf, but "
+    "its target OrderSet DeskOrder is bound to DeskType, whose model is DeskProfile. A "
+    "RelatedOrder's target OrderSet must be bound to a type of Shelf, a proxy of it, or a "
+    "multi-table-inheritance parent or child of it keyed by the same column."
+)
+
+
+@pytest.mark.usefixtures("isolate_global_registry")
+def test_apply_refuses_a_declared_hop_whose_unwired_owner_names_an_unscopable_target() -> None:
+    """An owner no finalize audits refuses its mismatched target when a term crosses it."""
+    desk_type = _plain_type(DeskProfile, "DeskType")
+    desk_order = _set_named("DeskOrder", DeskProfile, ["code"])
+    desk_order._owner_definition = desk_type.__django_strawberry_definition__
+    book_order = _set_named(
+        "BookOrder",
+        Book,
+        ["title"],
+        shelf=RelatedOrder(desk_order, field_name="shelf"),
+    )
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        book_order.apply_sync({"shelf": {"code": Ordering.ASC}}, Book.objects.all(), _make_info())
+    assert str(exc_info.value) == _DESK_PROFILE_REFUSAL
+
+
+class _OsUnmanagedModel(models.Model):
+    """The abstract base whose ``Meta`` the multi-table child below subclasses.
+
+    No fakeshop model has a foreign key onto a column only a multi-table child
+    declares, so these models stand in for it; ``managed = False`` and the tests
+    create the tables (``relation_fixture_tables``).
+    """
+
+    class Meta:
+        abstract = True
+        app_label = "products"
+        managed = False
+
+
+class _OsDesk(_OsUnmanagedModel):
+    """The multi-table parent: it lacks ``kiosk_code``."""
+
+    name: _Text = models.TextField()
+
+
+class _OsKioskDesk(_OsDesk):
+    """A multi-table child declaring its own unique ``kiosk_code``."""
+
+    kiosk_code: _Text = models.TextField(unique=True)
+
+    class Meta(_OsUnmanagedModel.Meta):
+        pass
+
+
+class _OsLamp(_OsUnmanagedModel):
+    """A lamp keyed to kiosk desks by the child's ``kiosk_code``: required, nullable, unconstrained."""
+
+    title: _Text = models.TextField()
+    # DO_NOTHING, not CASCADE: outside the tests that create it the table does not
+    # exist, so a cascade would make a delete of the target query a missing table.
+    kiosk: _FK[_OsKioskDesk] = models.ForeignKey(
+        _OsKioskDesk,
+        on_delete=models.DO_NOTHING,
+        to_field="kiosk_code",
+        related_name="+",
+    )
+    spare_kiosk: _NullFK[_OsKioskDesk] = models.ForeignKey(
+        _OsKioskDesk,
+        on_delete=models.DO_NOTHING,
+        to_field="kiosk_code",
+        null=True,
+        related_name="+",
+    )
+    # No constraint: the stored code may name no kiosk desk at all.
+    loose_kiosk: _FK[_OsKioskDesk] = models.ForeignKey(
+        _OsKioskDesk,
+        on_delete=models.DO_NOTHING,
+        to_field="kiosk_code",
+        db_constraint=False,
+        related_name="+",
+    )
+
+
+_STAFF_INFO = _make_info()
+_ANONYMOUS_INFO = _make_info(user_is_anonymous=True)
+
+
+def _override_lamp_order(desk_order: type[OrderSet], key: str) -> type[OrderSet]:
+    """A lamp set whose ``get_flat_orders`` override orders by the ``key`` relation itself."""
+
+    class OverrideLampOrder(OrderSet):
+        kiosk = RelatedOrder(desk_order, field_name="kiosk")
+        loose_kiosk = RelatedOrder(desk_order, field_name="loose_kiosk")
+
+        class Meta:
+            model = _OsLamp
+            fields = ["title"]
+
+        @classmethod
+        @override
+        def get_flat_orders(
+            cls,
+            order_data: list[tuple[str, Ordering | None]],
+            prefix: str = "",
+        ) -> list[tuple[str, Ordering | None]]:
+            return [(key, Ordering.ASC_NULLS_LAST), ("title", Ordering.ASC)]
+
+    return OverrideLampOrder
+
+
+def _lamp_orders() -> dict[str, tuple[type[OrderSet], object]]:
+    """The lamp sets ordering through a desk set bound to a parent type hiding ``"hidden"``.
+
+    The type's rows hide the desk named ``"hidden"`` from every ``info`` but
+    ``_STAFF_INFO``. Each set crosses ``kiosk``, ``spare_kiosk`` or
+    ``loose_kiosk``, whose key is the child's ``kiosk_code``, a column the
+    parent's rows do not carry. Every order ends on ``title``, so lamps whose
+    value reads as missing keep one order.
+    """
+
+    def get_queryset(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[Model]:
+        return queryset if info is _STAFF_INFO else queryset.exclude(name="hidden")
+
+    desk_type = type(
+        "HidingDeskType",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": _OsDesk, "fields": ("id", "name")}),
+            "get_queryset": classmethod(get_queryset),
+        },
+    )
+    desk_order = _set_named("DeskOrder", _OsDesk, ["name"])
+    desk_order._owner_definition = desk_type.__django_strawberry_definition__
+    column_order = _set_named(
+        "LampOrder",
+        _OsLamp,
+        [
+            "kiosk",
+            "spare_kiosk",
+            "loose_kiosk",
+            "title",
+        ],
+        kiosk_rel=RelatedOrder(desk_order, field_name="kiosk"),
+        spare_rel=RelatedOrder(desk_order, field_name="spare_kiosk"),
+        loose_rel=RelatedOrder(desk_order, field_name="loose_kiosk"),
+    )
+    by_title = {"title": Ordering.ASC}
+    return {
+        "column-term-ending-on-the-relation": (
+            column_order,
+            [{"kiosk": Ordering.ASC_NULLS_LAST}, by_title],
+        ),
+        "override-ending-on-the-relation": (_override_lamp_order(desk_order, "kiosk"), [by_title]),
+        "nullable-column-term-ending-on-the-relation": (
+            column_order,
+            [{"spare_kiosk": Ordering.ASC_NULLS_LAST}, by_title],
+        ),
+        "unconstrained-column-term-ending-on-the-relation": (
+            column_order,
+            [{"loose_kiosk": Ordering.ASC_NULLS_LAST}, by_title],
+        ),
+        "unconstrained-override-ending-on-the-relation": (
+            _override_lamp_order(desk_order, "loose_kiosk"),
+            [by_title],
+        ),
+        "column-under-the-relation": (
+            column_order,
+            [{"kiosk_rel": {"name": Ordering.ASC_NULLS_LAST}}, by_title],
+        ),
+    }
+
+
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("shape", "staff", "anonymous"),
+    [
+        ("column-term-ending-on-the-relation", "L2 L1 L3 L4 L5", "L2 L3 L4 L5 L1"),
+        ("override-ending-on-the-relation", "L2 L1 L3 L4 L5", "L2 L3 L4 L5 L1"),
+        ("nullable-column-term-ending-on-the-relation", "L2 L1 L3 L4 L5", "L2 L3 L1 L4 L5"),
+        ("unconstrained-column-term-ending-on-the-relation", "L2 L1 L3 L4 L5", "L2 L3 L4 L1 L5"),
+        ("unconstrained-override-ending-on-the-relation", "L2 L1 L3 L4 L5", "L2 L3 L4 L1 L5"),
+        ("column-under-the-relation", "L1 L3 L4 L5 L2", "L3 L4 L5 L2 L1"),
+    ],
+)
+def test_a_hop_scoped_by_an_ancestor_lacking_the_to_field_hides_through_the_related_row(
+    shape: str,
+    staff: str,
+    anonymous: str,
+) -> None:
+    """A parent's rows answer for the child row a ``to_field`` key names, and drop no lamp.
+
+    A term ending on ``kiosk`` reads the lamp's own ``kiosk_code`` carrier; the
+    parent's rows carry no ``kiosk_code`` to correlate it with, so the test keeps
+    the parent rows whose key is that of the kiosk desk the carrier names, read
+    inside its own subquery: the outer query joins nothing. The hidden desk's
+    lamp reads as a lamp with no desk for the anonymous actor; a lamp whose
+    nullable key is empty, and one whose unconstrained key names no desk
+    (``L5``), stay listed and read as one for everyone. A term under the relation
+    reads through its join, as before. One statement per apply.
+    """
+    lamp_order, order_input = _lamp_orders()[shape]
+    with relation_fixture_tables(connection, (_OsDesk, _OsKioskDesk, _OsLamp)):
+        kiosks = {
+            code: _OsKioskDesk.objects.create(name=name, kiosk_code=code)
+            for name, code in (("hidden", "b"), ("z", "a"), ("y", "c"))
+        }
+        for title, code, spare, loose in (
+            (
+                "L1",
+                "b",
+                "b",
+                "b",
+            ),
+            (
+                "L2",
+                "a",
+                "a",
+                "a",
+            ),
+            (
+                "L3",
+                "c",
+                "c",
+                "c",
+            ),
+            (
+                "L4",
+                "c",
+                None,
+                "c",
+            ),
+            (
+                "L5",
+                "c",
+                None,
+                "zz",
+            ),
+        ):
+            _ = _OsLamp.objects.create(
+                title=title,
+                kiosk=kiosks[code],
+                spare_kiosk=None if spare is None else kiosks[spare],
+                loose_kiosk_id=loose,
+            )
+        for info, expected in ((_STAFF_INFO, staff), (_ANONYMOUS_INFO, anonymous)):
+            with CaptureQueriesContext(connection) as captured:
+                ordered = lamp_order.apply_sync(order_input, _OsLamp.objects.all(), info)
+                titles = list(ordered.values_list("title", flat=True))
+            assert (titles, len(captured.captured_queries)) == (expected.split(), 1)
+
+
+class _OsTier(_OsUnmanagedModel):
+    """The root of a three-level multi-table-inheritance line: it lacks ``code``."""
+
+    name: _Text = models.TextField()
+
+
+class _OsTierMidMeta(_OsUnmanagedModel.Meta):
+    """The ``Meta`` of ``_OsTierMid``, kept here so its child's ``Meta`` can subclass it.
+
+    Django pops a concrete model's ``Meta``, so the grandchild cannot reach it
+    through ``_OsTierMid``.
+    """
+
+
+class _OsTierMid(_OsTier):
+    """The intermediate parent declaring the unique ``code`` its child inherits."""
+
+    code: _Text = models.TextField(unique=True)
+
+    Meta = _OsTierMidMeta
+
+
+class _OsTierLeaf(_OsTierMid):
+    """The grandchild a lamp's ``ForeignObject`` reaches through the inherited ``code``."""
+
+    class Meta(_OsTierMidMeta):
+        pass
+
+
+class _OsTierLamp(_OsUnmanagedModel):
+    """A lamp keyed to a leaf by ``code``, a column the intermediate parent declares.
+
+    A ``ForeignObject``: Django refuses a ``ForeignKey`` whose ``to_field`` the
+    target only inherits, so no constraint holds the stored code either.
+    """
+
+    title: _Text = models.TextField()
+    leaf_code: _Text = models.TextField()
+    leaf: models.ForeignObject[_OsTierLeaf, _OsTierLeaf] = models.ForeignObject(
+        _OsTierLeaf,
+        on_delete=models.DO_NOTHING,
+        from_fields=["leaf_code"],
+        to_fields=["code"],
+        related_name="+",
+    )
+
+
+def _tier_lamp_orders() -> dict[str, type[OrderSet]]:
+    """The tier-lamp sets ordering by ``leaf`` through a set bound to a root type hiding ``"hidden"``."""
+
+    def get_queryset(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[Model]:
+        return queryset if info is _STAFF_INFO else queryset.exclude(name="hidden")
+
+    tier_type = type(
+        "HidingTierType",
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": _OsTier, "fields": ("id", "name")}),
+            "get_queryset": classmethod(get_queryset),
+        },
+    )
+    tier_order = _set_named("TierOrder", _OsTier, ["name"])
+    tier_order._owner_definition = tier_type.__django_strawberry_definition__
+
+    class OverrideTierLampOrder(OrderSet):
+        leaf = RelatedOrder(tier_order, field_name="leaf")
+
+        class Meta:
+            model = _OsTierLamp
+            fields = ["title"]
+
+        @classmethod
+        @override
+        def get_flat_orders(
+            cls,
+            order_data: list[tuple[str, Ordering | None]],
+            prefix: str = "",
+        ) -> list[tuple[str, Ordering | None]]:
+            return [("leaf", Ordering.ASC_NULLS_LAST), ("title", Ordering.ASC)]
+
+    return {
+        "column-term-ending-on-the-relation": _set_named(
+            "TierLampOrder",
+            _OsTierLamp,
+            ["leaf", "title"],
+            leaf_rel=RelatedOrder(tier_order, field_name="leaf"),
+        ),
+        "override-ending-on-the-relation": OverrideTierLampOrder,
+    }
+
+
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "shape",
+    ["column-term-ending-on-the-relation", "override-ending-on-the-relation"],
+)
+def test_a_hop_through_an_inherited_to_field_reads_only_rows_of_the_related_model(
+    shape: str,
+) -> None:
+    """A code only an intermediate parent's row holds names no related row, so it reads as missing.
+
+    ``_OsTierLamp.leaf`` reaches ``_OsTierLeaf`` by ``code``, which ``_OsTierMid``
+    declares; the root type's rows carry no ``code``, so the test matches the
+    related row the carriers name. It reads that row from the related model
+    (``_OsTierLeaf``), not the model declaring the column: ``L2``'s code belongs
+    to a ``_OsTierMid`` row no leaf extends, and orders as a lamp with no leaf,
+    as ``L3``'s unknown code does. ``L4``'s leaf is hidden from the anonymous
+    actor. One statement per apply.
+    """
+    lamp_order = _tier_lamp_orders()[shape]
+    tables = (
+        _OsTier,
+        _OsTierMid,
+        _OsTierLeaf,
+        _OsTierLamp,
+    )
+    with relation_fixture_tables(connection, tables):
+        _ = _OsTierLeaf.objects.create(name="g", code="m")
+        _ = _OsTierLeaf.objects.create(name="hidden", code="b")
+        _ = _OsTierMid.objects.create(name="mid-only", code="a")
+        for title, code in (
+            ("L1", "m"),
+            ("L2", "a"),
+            ("L3", "zz"),
+            ("L4", "b"),
+        ):
+            _ = _OsTierLamp.objects.create(title=title, leaf_code=code)
+        for info, expected in (
+            (
+                _STAFF_INFO,
+                [
+                    "L4",
+                    "L1",
+                    "L2",
+                    "L3",
+                ],
+            ),
+            (
+                _ANONYMOUS_INFO,
+                [
+                    "L1",
+                    "L2",
+                    "L3",
+                    "L4",
+                ],
+            ),
+        ):
+            with CaptureQueriesContext(connection) as captured:
+                ordered = lamp_order.apply_sync(
+                    [{"title": Ordering.ASC}]
+                    if shape == "override-ending-on-the-relation"
+                    else [{"leaf": Ordering.ASC_NULLS_LAST}, {"title": Ordering.ASC}],
+                    _OsTierLamp.objects.all(),
+                    info,
+                )
+                titles = list(ordered.values_list("title", flat=True))
+            assert (titles, len(captured.captured_queries)) == (expected, 1)

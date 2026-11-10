@@ -33,18 +33,34 @@ from __future__ import annotations
 import sys
 from collections import OrderedDict
 from collections.abc import Iterator
-from typing import NoReturn
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, NoReturn, TypeAlias, TypeVar
 
 import pytest
-from apps.library.models import Book, Branch, Genre, LendingDesk, ProxyBranch, Shelf, Venue
+from apps.library.models import (
+    Book,
+    Branch,
+    DeskProfile,
+    Genre,
+    KioskFault,
+    LendingDesk,
+    ProxyBranch,
+    RepairTicket,
+    SelfServeDesk,
+    Shelf,
+    Venue,
+)
+from django.contrib.auth.models import AnonymousUser
 from django.db import models
 from django.db.models import QuerySet
+from django.http import HttpRequest
 from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.orders import (
+    Ordering,
     OrderInput,
     OrderSet,
     RelatedOrder,
@@ -64,6 +80,17 @@ from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import definition_raises
+
+if TYPE_CHECKING:
+    from django.db.models.expressions import Combinable
+
+_M = TypeVar("_M", bound=models.Model)
+
+if TYPE_CHECKING:
+    # Each field's descriptor types as django-stubs declares them (set type, get type), spelled
+    # out because the checker runs without the django-stubs mypy plugin that would infer them.
+    _FK: TypeAlias = models.ForeignKey[_M | Combinable, _M]
+    _Text: TypeAlias = models.TextField[str | Combinable, str]
 
 
 @pytest.fixture(autouse=True)
@@ -1062,3 +1089,475 @@ def test_phase_2_5_runs_under_relay_node_interface() -> None:
     assert issubclass(BookType, relay.Node)
     inputs_module = sys.modules[INPUTS_MODULE_PATH]
     assert hasattr(inputs_module, "BookOrderInputType")
+
+
+# ---------------------------------------------------------------------------
+# Subpass 2.5 -- every RelatedOrder a wired set reaches names a path of
+# relations and a target its hop can scope by
+# ---------------------------------------------------------------------------
+
+
+class _OtUnmanagedModel(models.Model):
+    """The abstract base whose ``Meta`` the multi-table children below subclass.
+
+    Fakeshop's ``Venue`` line has no sibling children and no child keyed on a
+    column of its own, so these models stand in for those shapes. ``managed =
+    False``: the audit reads model metadata and no table.
+    """
+
+    class Meta:
+        abstract = True
+        app_label = "products"
+        managed = False
+
+
+class _OtRoot(_OtUnmanagedModel):
+    """Root of a multi-table-inheritance line with two sibling children."""
+
+    name: _Text = models.TextField()
+
+
+class _OtLeft(_OtRoot):
+    """A child keyed by its parent link (its key is ``_OtRoot.id``), with a unique ``tag`` of its own."""
+
+    tag: _Text = models.TextField(unique=True)
+
+    class Meta(_OtUnmanagedModel.Meta):
+        pass
+
+
+class _OtRight(_OtRoot):
+    """The sibling of ``_OtLeft``, keyed by its own parent link onto the same column."""
+
+    class Meta(_OtUnmanagedModel.Meta):
+        pass
+
+
+class _OtOwnKey(_OtRoot):
+    """A child keyed on its own ``code``, so its parent link is not its primary key."""
+
+    code: _Text = models.TextField(primary_key=True)
+
+    class Meta(_OtUnmanagedModel.Meta):
+        pass
+
+
+class _OtHolder(_OtUnmanagedModel):
+    """Relations onto each member of the ``_OtRoot`` line."""
+
+    # DO_NOTHING, not CASCADE: these unmanaged models have no table, so a cascade would
+    # make a delete of the target query a missing table.
+    left: _FK[_OtLeft] = models.ForeignKey(
+        _OtLeft,
+        on_delete=models.DO_NOTHING,
+        related_name="+",
+    )
+    tagged: _FK[_OtLeft] = models.ForeignKey(
+        _OtLeft,
+        on_delete=models.DO_NOTHING,
+        to_field="tag",
+        related_name="+",
+    )
+    loose_left: _FK[_OtLeft] = models.ForeignKey(
+        _OtLeft,
+        on_delete=models.DO_NOTHING,
+        db_constraint=False,
+        related_name="+",
+    )
+    lefts: models.ManyToManyField[_OtLeft, models.Model] = models.ManyToManyField(
+        _OtLeft,
+        related_name="+",
+    )
+    root: _FK[_OtRoot] = models.ForeignKey(
+        _OtRoot,
+        on_delete=models.DO_NOTHING,
+        related_name="+",
+    )
+    own: _FK[_OtOwnKey] = models.ForeignKey(
+        _OtOwnKey,
+        on_delete=models.DO_NOTHING,
+        related_name="+",
+    )
+
+
+def _column(model: type[models.Model]) -> str:
+    """Return the name of ``model``'s first concrete column that is not a relation."""
+    return next(field.name for field in model._meta.concrete_fields if not field.is_relation)
+
+
+def _serving_type(
+    model: type[models.Model],
+    name: str,
+    orderset: type[OrderSet] | None = None,
+    *,
+    primary: bool = True,
+) -> type[DjangoType]:
+    """Register a type for ``model`` exposing one column, wired to ``orderset`` when given."""
+    meta: dict[str, object] = {"model": model, "fields": (_column(model),), "primary": primary}
+    if orderset is not None:
+        meta["orderset_class"] = orderset
+    return type(name, (DjangoType,), {"Meta": type("Meta", (), meta)})
+
+
+def _order_set(
+    name: str,
+    model: type[models.Model] | None,
+    fields: list[str],
+    **related: RelatedOrder,
+) -> type[OrderSet]:
+    """Declare an ``OrderSet`` named ``name`` (``Meta.model`` omitted when ``model`` is ``None``)."""
+    meta: dict[str, object] = {"fields": fields}
+    if model is not None:
+        meta["model"] = model
+    return type(
+        name,
+        (OrderSet,),
+        {**related, "Meta": type("Meta", (), meta), "__module__": __name__},
+    )
+
+
+def _finalize_wired_declaration(
+    owner_model: type[models.Model],
+    field_name: str,
+    set_model: type[models.Model] | None,
+    type_model: type[models.Model] | None,
+) -> None:
+    """Wire ``OwnerOrder.rel = RelatedOrder(TargetOrder, field_name=...)`` and finalize.
+
+    ``TargetOrder`` declares ``set_model`` (no ``Meta.model`` when ``None``) and is
+    bound to ``TargetType``, a type of ``type_model``, or to no type when that is
+    ``None``. ``OwnerOrder`` is the ``orderset_class`` of a type of ``owner_model``.
+    """
+    column_model = set_model or type_model or owner_model
+    target = _order_set("TargetOrder", set_model, [_column(column_model)])
+    owner = _order_set(
+        "OwnerOrder",
+        owner_model,
+        [_column(owner_model)],
+        rel=RelatedOrder(target, field_name=field_name),
+    )
+    _ = _serving_type(owner_model, "OwnerType", owner)
+    if type_model is not None:
+        _ = _serving_type(type_model, "TargetType", target, primary=type_model is not owner_model)
+    finalize_django_types()
+
+
+def _scope_refusal(field_name: str, reached: str, model: str) -> str:
+    """The refusal of ``OwnerOrder.rel``, whose target is bound to ``TargetType`` of ``model``."""
+    return (
+        f"OrderSet OwnerOrder: RelatedOrder 'rel' has field_name '{field_name}', which reaches "
+        f"{reached}, but its target OrderSet TargetOrder is bound to TargetType, whose model is "
+        f"{model}. A RelatedOrder's target OrderSet must be bound to a type of {reached}, a "
+        "proxy of it, or a multi-table-inheritance parent or child of it keyed by the same "
+        "column."
+    )
+
+
+def _path_refusal(
+    owner: str,
+    attr: str,
+    field_name: str,
+    segment: str,
+    model: str,
+) -> str:
+    """The refusal of a ``RelatedOrder`` whose ``field_name`` leaves the relations at ``segment``."""
+    return (
+        f"OrderSet {owner}: RelatedOrder '{attr}' has field_name '{field_name}', but "
+        f"'{segment}' is not a relation of the model the path has reached from {model}. A "
+        "RelatedOrder's field_name must name a path of relations."
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "owner_model",
+        "field_name",
+        "set_model",
+        "type_model",
+        "reached",
+    ),
+    [
+        (
+            Book,
+            "shelf",
+            DeskProfile,
+            DeskProfile,
+            "Shelf",
+        ),
+        (
+            Shelf,
+            "books",
+            Genre,
+            Genre,
+            "Book",
+        ),
+        (
+            Book,
+            "genres",
+            Shelf,
+            Shelf,
+            "Genre",
+        ),
+        (
+            Book,
+            "shelf__branch",
+            Shelf,
+            Shelf,
+            "Branch",
+        ),
+        (
+            Book,
+            "shelf",
+            None,
+            DeskProfile,
+            "Shelf",
+        ),
+        (
+            _OtHolder,
+            "left",
+            _OtRight,
+            _OtRight,
+            "_OtLeft",
+        ),
+        (
+            _OtHolder,
+            "lefts",
+            _OtRight,
+            _OtRight,
+            "_OtLeft",
+        ),
+        (
+            _OtHolder,
+            "left",
+            _OtRoot,
+            _OtRight,
+            "_OtLeft",
+        ),
+        (
+            _OtHolder,
+            "root",
+            _OtOwnKey,
+            _OtOwnKey,
+            "_OtRoot",
+        ),
+        (
+            _OtHolder,
+            "own",
+            _OtRoot,
+            _OtRoot,
+            "_OtOwnKey",
+        ),
+    ],
+    ids=[
+        "unrelated-forward-foreign-key",
+        "unrelated-reverse-foreign-key",
+        "unrelated-many-to-many",
+        "multi-hop-target-on-the-intermediate-model",
+        "model-less-target-served-by-an-unrelated-type",
+        "mti-sibling-across-a-foreign-key",
+        "mti-sibling-across-a-many-to-many",
+        "ancestor-set-bound-to-a-sibling-type",
+        "descendant-keyed-on-its-own-column",
+        "ancestor-of-a-descendant-keyed-on-its-own-column",
+    ],
+)
+def test_related_order_whose_target_type_the_hop_cannot_scope_by_is_refused_at_finalize(
+    owner_model: type[models.Model],
+    field_name: str,
+    set_model: type[models.Model] | None,
+    type_model: type[models.Model],
+    reached: str,
+) -> None:
+    """A target bound to a type whose rows are not the reached model's rows fails finalize.
+
+    The compared model is the bound type's (``set_bound_type``), not the set's
+    ``Meta.model``: a model-less set served by an unrelated type, and a set declaring
+    the reached model's ancestor while bound to a sibling's type, are refused too.
+    """
+    with pytest.raises(ConfigurationError) as exc_info:
+        _finalize_wired_declaration(owner_model, field_name, set_model, type_model)
+    assert str(exc_info.value) == _scope_refusal(field_name, reached, truth.qualname(type_model))
+
+
+@pytest.mark.parametrize(
+    ("owner_model", "field_name", "set_model"),
+    [
+        (Book, "shelf", Shelf),
+        (Shelf, "branch", ProxyBranch),
+        (RepairTicket, "venue", LendingDesk),
+        (RepairTicket, "venue", SelfServeDesk),
+        (KioskFault, "kiosk", Venue),
+        (KioskFault, "kiosk", LendingDesk),
+        (Venue, "lendingdesk", Venue),
+        (LendingDesk, "selfservedesk", LendingDesk),
+        (_OtHolder, "tagged", _OtRoot),
+        (_OtHolder, "loose_left", _OtRoot),
+    ],
+    ids=[
+        "the-reached-model",
+        "a-proxy-of-the-reached-model",
+        "mti-child-across-a-forward-foreign-key",
+        "mti-grandchild-across-a-forward-foreign-key",
+        "mti-grandparent-across-a-forward-foreign-key",
+        "mti-parent-across-a-forward-foreign-key",
+        "mti-parent-across-a-reverse-one-to-one",
+        "mti-parent-across-a-reverse-one-to-one-one-level-down",
+        "mti-parent-lacking-the-to-field-column",
+        "mti-parent-across-an-unconstrained-foreign-key",
+    ],
+)
+def test_related_order_whose_target_type_shares_the_reached_rows_finalizes(
+    owner_model: type[models.Model],
+    field_name: str,
+    set_model: type[models.Model],
+) -> None:
+    """A target bound to a type of the reached model, a proxy, or an MTI relative keyed alike binds.
+
+    The hop's test keeps the scope rows whose key equals the joined row's, so an
+    ancestor answers across a reverse one-to-one as across a forward key, across a
+    ``to_field`` key onto a column only the child declares, and across a key no
+    constraint holds: rows the filter side's link-column rule refuses.
+    """
+    _finalize_wired_declaration(owner_model, field_name, set_model, set_model)
+    assert hasattr(sys.modules[INPUTS_MODULE_PATH], "OwnerOrderInputType")
+
+
+@pytest.mark.parametrize(
+    ("owner_model", "field_name", "set_model"),
+    [(Book, "shelf", DeskProfile), (Shelf, "books", Genre)],
+    ids=["forward-foreign-key", "reverse-foreign-key"],
+)
+def test_related_order_whose_target_is_bound_to_no_type_finalizes(
+    owner_model: type[models.Model],
+    field_name: str,
+    set_model: type[models.Model],
+) -> None:
+    """An unbound target names no scope (the hop reads the relation's own type), so it binds."""
+    _finalize_wired_declaration(owner_model, field_name, set_model, None)
+    assert hasattr(sys.modules[INPUTS_MODULE_PATH], "OwnerOrderInputType")
+
+
+def test_related_order_with_no_target_finalizes() -> None:
+    """``RelatedOrder(None)`` expands nothing and scopes nothing."""
+    owner = _order_set("OwnerOrder", Book, ["title"], rel=RelatedOrder(None, field_name="shelf"))
+    _ = _serving_type(Book, "OwnerType", owner)
+    finalize_django_types()
+    assert hasattr(sys.modules[INPUTS_MODULE_PATH], "OwnerOrderInputType")
+
+
+def test_related_order_cycle_ends_at_a_walked_set_and_model() -> None:
+    """``BookOrder.shelf`` <-> ``ShelfOrder.books`` binds; the walk stops at a pair it has seen."""
+
+    class ShelfOrder(OrderSet):
+        books = RelatedOrder(None, field_name="books")
+
+        class Meta:
+            model = Shelf
+            fields = ["code"]
+
+    class BookOrder(OrderSet):
+        shelf = RelatedOrder(ShelfOrder, field_name="shelf")
+
+        class Meta:
+            model = Book
+            fields = ["title"]
+
+    ShelfOrder.related_orders["books"].orderset = BookOrder
+    _ = _serving_type(Book, "BookType", BookOrder)
+    _ = _serving_type(Shelf, "ShelfType")
+    finalize_django_types()
+    assert ShelfOrder.related_orders["books"].orderset is BookOrder
+    assert hasattr(sys.modules[INPUTS_MODULE_PATH], "BookOrderInputType")
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["title", "nope", "shelf__code"],
+    ids=["a-column", "a-name-the-model-lacks", "a-column-past-a-relation"],
+)
+def test_related_order_whose_field_name_is_not_a_path_of_relations_is_refused_at_finalize(
+    field_name: str,
+) -> None:
+    """A wired set's ``RelatedOrder`` over a column or a missing name fails finalize."""
+    segment = field_name.rsplit("__", 1)[-1]
+    with pytest.raises(ConfigurationError) as exc_info:
+        _finalize_wired_declaration(Book, field_name, Shelf, None)
+    assert str(exc_info.value) == _path_refusal("OwnerOrder", "rel", field_name, segment, "Book")
+
+
+@pytest.mark.parametrize(
+    ("leaf_field_name", "expected"),
+    [
+        (
+            "branch",
+            (
+                "OrderSet MiddleOrder: RelatedOrder 'leaf' has field_name 'branch', which reaches "
+                "Branch, but its target OrderSet TargetOrder is bound to TargetType, whose model "
+                "is DeskProfile. A RelatedOrder's target OrderSet must be bound to a type of "
+                "Branch, a proxy of it, or a multi-table-inheritance parent or child of it keyed "
+                "by the same column."
+            ),
+        ),
+        ("code", _path_refusal("MiddleOrder", "leaf", "code", "code", "Shelf")),
+    ],
+    ids=["a-target-bound-to-an-unrelated-type", "a-field-name-naming-a-column"],
+)
+def test_a_declaration_two_sets_down_is_audited_from_the_model_the_outer_relation_reached(
+    leaf_field_name: str,
+    expected: str,
+) -> None:
+    """The audit walks from each wired set through every target, transitively.
+
+    ``MiddleOrder`` is wired to no type: its declaration resolves against ``Shelf``,
+    the model ``OwnerOrder.mid`` reached.
+    """
+    target = _order_set("TargetOrder", DeskProfile, ["code"])
+    middle = _order_set(
+        "MiddleOrder",
+        Shelf,
+        ["code"],
+        leaf=RelatedOrder(target, field_name=leaf_field_name),
+    )
+    owner = _order_set("OwnerOrder", Book, ["title"], mid=RelatedOrder(middle, field_name="shelf"))
+    _ = _serving_type(Book, "OwnerType", owner)
+    _ = _serving_type(DeskProfile, "TargetType", target)
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    assert str(exc_info.value) == expected
+
+
+def test_an_unresolved_target_two_sets_down_raises_its_import_error_at_finalize() -> None:
+    """A lazy target of a set no type is wired to raises the resolver's ``ImportError`` unchanged."""
+    middle = _order_set(
+        "MiddleOrder",
+        Shelf,
+        ["code"],
+        leaf=RelatedOrder("NoSuchBranchOrder", field_name="branch"),
+    )
+    owner = _order_set("OwnerOrder", Book, ["title"], mid=RelatedOrder(middle, field_name="shelf"))
+    _ = _serving_type(Book, "OwnerType", owner)
+    with pytest.raises(ImportError) as exc_info:
+        finalize_django_types()
+    assert type(exc_info.value) is ImportError
+    assert str(exc_info.value) == (
+        f'Module "{__name__}" does not define a "NoSuchBranchOrder" attribute/class'
+    )
+
+
+def test_apply_refuses_a_target_reassigned_after_finalize_to_an_unscopable_set() -> None:
+    """A ``.orderset`` swapped after the finalize audit is refused at the next apply."""
+    target = _order_set("ShelfOrder", Shelf, ["code"])
+    other = _order_set("TargetOrder", DeskProfile, ["code"])
+    owner = _order_set("OwnerOrder", Book, ["title"], rel=RelatedOrder(target, field_name="shelf"))
+    _ = _serving_type(Book, "OwnerType", owner)
+    _ = _serving_type(Shelf, "ShelfType", target)
+    _ = _serving_type(DeskProfile, "TargetType", other)
+    finalize_django_types()
+    owner.related_orders["rel"].orderset = other
+    request = HttpRequest()
+    request.user = AnonymousUser()
+    info = SimpleNamespace(context=SimpleNamespace(request=request))
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = owner.apply_sync({"rel": {"code": Ordering.ASC}}, Book.objects.all(), info)
+    assert str(exc_info.value) == _scope_refusal("shelf", "Shelf", "DeskProfile")
