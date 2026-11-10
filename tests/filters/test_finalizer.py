@@ -30,6 +30,11 @@ Covers:
   resolves on some queryset (a name past a relation, a range applied as a relation's
   bounds) build; a raw set declaring such a to-many key leaf is refused at its first
   construction, as at the package's first read, whether or not a hop is walked.
+- A model-choice filter with no queryset (none passed, a ``Meta.filter_overrides``
+  selection without ``extra``) is refused when its set publishes, under every serving
+  shape, while consumer code that can give one per request (a ``get_queryset`` or ``field``
+  override, a form field ``__init__``, a ``get_filters()`` edit, a set ``__init__``,
+  ``get_form_class`` or ``form``) builds.
 
 Bound and unbound filtersets answering requests live in ``test_query/``.
 ``test_filter_declarations_api.py`` owns copyable callable and widget controls
@@ -74,6 +79,7 @@ from apps.library.models import (
     Venue,
 )
 from apps.scalars.models import NullableScalarSpecimen, ScalarSpecimen
+from django import forms
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import caches
 from django.core.exceptions import FieldError
@@ -107,7 +113,8 @@ from django_filters import (
     ModelMultipleChoiceFilter,
     NumberFilter,
 )
-from django_filters.filters import BaseRangeFilter
+from django_filters.fields import ChoiceField as ChoiceFormField
+from django_filters.filters import BaseRangeFilter, QuerySetRequestMixin
 from django_filters.filters import RangeFilter as DjangoFilterRangeFilter
 from strawberry import relay
 from typing_extensions import override
@@ -168,6 +175,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_str,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.permissions import set_bound_definition
 from django_strawberry_framework.utils.typing import object_result
@@ -5639,6 +5647,546 @@ def test_a_method_list_filter_receives_the_list_whatever_its_lookup() -> None:
 
     _build_at_root(MethodSpecimenFilter)
     assert "probe" in MethodSpecimenFilter.get_filters()
+
+
+def _specimen_rows() -> QuerySet[ScalarSpecimen]:
+    return ScalarSpecimen._default_manager.all()
+
+
+class _GetQuerysetChoice(ModelChoiceFilter):
+    """A ``ModelChoiceFilter`` whose rows ``get_queryset`` answers for each request."""
+
+    @override
+    def get_queryset(self, request: object) -> QuerySet[ScalarSpecimen]:
+        return _specimen_rows()
+
+
+class _GetQuerysetMultipleChoice(ModelMultipleChoiceFilter):
+    """A ``ModelMultipleChoiceFilter`` whose rows ``get_queryset`` answers for each request."""
+
+    @override
+    def get_queryset(self, request: object) -> QuerySet[ScalarSpecimen]:
+        return _specimen_rows()
+
+
+class _FieldChoice(ModelChoiceFilter):
+    """A ``ModelChoiceFilter`` setting its queryset when its form field is first built."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        self.queryset = _specimen_rows()
+        return super().field
+
+
+class _FieldMultipleChoice(ModelMultipleChoiceFilter):
+    """A ``ModelMultipleChoiceFilter`` setting its queryset when its form field is first built."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        self.queryset = _specimen_rows()
+        return super().field
+
+
+class _InitQuerysetChoice(ModelChoiceFilter):
+    """A ``ModelChoiceFilter`` whose own ``__init__`` assigns its ``queryset`` after django-filter's."""
+
+    def __init__(self, *, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        self.queryset = _specimen_rows()
+
+
+class _InitQuerysetMultipleChoice(ModelMultipleChoiceFilter):
+    """A ``ModelMultipleChoiceFilter`` whose own ``__init__`` assigns its ``queryset``."""
+
+    def __init__(self, *, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        self.queryset = _specimen_rows()
+
+
+class _InitExtraChoice(ModelChoiceFilter):
+    """A ``ModelChoiceFilter`` whose own ``__init__`` puts a queryset in its ``extra``."""
+
+    def __init__(self, *, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        self.extra["queryset"] = _specimen_rows()
+
+
+class _InitExtraMultipleChoice(ModelMultipleChoiceFilter):
+    """A ``ModelMultipleChoiceFilter`` whose own ``__init__`` puts a queryset in its ``extra``."""
+
+    def __init__(self, *, field_name: str) -> None:
+        super().__init__(field_name=field_name)
+        self.extra["queryset"] = _specimen_rows()
+
+
+class _OwnFieldChoice(ModelChoiceFilter):
+    """A ``ModelChoiceFilter`` whose ``field`` builds its own form field over its rows."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        return forms.ModelChoiceField(queryset=_specimen_rows(), required=False)
+
+
+class _OwnFieldMultipleChoice(ModelMultipleChoiceFilter):
+    """A ``ModelMultipleChoiceFilter`` whose ``field`` builds its own form field over its rows."""
+
+    @property
+    @override
+    def field(self) -> forms.Field:
+        return forms.ModelMultipleChoiceField(queryset=_specimen_rows(), required=False)
+
+
+class _SpecimenChoiceField(forms.ModelChoiceField[ScalarSpecimen]):
+    """A model-choice form field whose own ``__init__`` supplies its queryset."""
+
+    def __init__(
+        self,
+        *,
+        label: str | None,
+        empty_label: str,
+        required: bool,
+    ) -> None:
+        super().__init__(
+            queryset=_specimen_rows(),
+            label=label,
+            empty_label=empty_label,
+            required=required,
+        )
+
+
+class _SpecimenMultipleChoiceField(forms.ModelMultipleChoiceField[ScalarSpecimen]):
+    """A multiple model-choice form field whose own ``__init__`` supplies its queryset."""
+
+    def __init__(self, *, label: str | None, required: bool) -> None:
+        super().__init__(queryset=_specimen_rows(), label=label, required=required)
+
+
+class _InheritedSpecimenChoiceField(_SpecimenChoiceField):
+    """A model-choice form field inheriting a project base's queryset-supplying ``__init__``."""
+
+
+class _InheritedSpecimenMultipleChoiceField(_SpecimenMultipleChoiceField):
+    """A multiple model-choice form field inheriting a project base's ``__init__``."""
+
+
+class _PlainSpecimenChoiceField(forms.ModelChoiceField[ScalarSpecimen]):
+    """A model-choice form field of the project's own with no ``__init__``: it takes no rows."""
+
+
+class _PlainSpecimenMultipleChoiceField(forms.ModelMultipleChoiceField[ScalarSpecimen]):
+    """A multiple model-choice form field of the project's own with no ``__init__``."""
+
+
+def _is_model_choice_filter_class(value: object) -> TypeIs[type[ModelChoiceFilter]]:
+    return isinstance(value, type) and issubclass(value, ModelChoiceFilter)
+
+
+def _is_model_multiple_choice_filter_class(
+    value: object,
+) -> TypeIs[type[ModelMultipleChoiceFilter]]:
+    return isinstance(value, type) and issubclass(value, ModelMultipleChoiceFilter)
+
+
+def _choice_over(field_class: type[forms.Field]) -> ModelChoiceFilter:
+    """A ``ModelChoiceFilter`` on ``parent`` building its form field from ``field_class``."""
+    filter_class = type("FieldClassChoice", (ModelChoiceFilter,), {"field_class": field_class})
+    return require(filter_class, _is_model_choice_filter_class)(field_name="parent")
+
+
+def _multiple_choice_over(field_class: type[forms.Field]) -> ModelMultipleChoiceFilter:
+    """A ``ModelMultipleChoiceFilter`` on ``children`` building its form field from ``field_class``."""
+    filter_class = type(
+        "FieldClassMultipleChoice",
+        (ModelMultipleChoiceFilter,),
+        {"field_class": field_class},
+    )
+    return require(filter_class, _is_model_multiple_choice_filter_class)(field_name="children")
+
+
+def _override_rows(_field: object) -> dict[str, object]:
+    return {"queryset": _specimen_rows()}
+
+
+def _override_set(
+    filter_class: type[Filter],
+    *,
+    extra: bool,
+    lookup: str = "exact",
+) -> type[FilterSet]:
+    """A set generating ``parent``'s ``lookup`` through a ``Meta.filter_overrides`` entry."""
+    entry: dict[str, object] = {"filter_class": filter_class}
+    if extra:
+        entry["extra"] = _override_rows
+    return _specimen_set({"parent": [lookup]}, meta={"filter_overrides": {ForeignKey: entry}})
+
+
+def _querysetless_refusal(kind: str, name: str, field_name: str) -> str:
+    """The refusal of the model-choice filter ``name`` with no queryset on ``SpecimenFilter``."""
+    return (
+        f"FilterSet SpecimenFilter: {kind} {name!r} has field_name {field_name!r} and no "
+        "queryset, so the model-choice form field it builds has no rows to look a value up "
+        "in, and every request building the set's form would fail. Pass queryset= (a model "
+        "queryset, or a callable taking the request), override the filter's "
+        "get_queryset(request), or give a Meta.filter_overrides entry an `extra` returning "
+        '{"queryset": ...}.'
+    )
+
+
+#: (the set, the refused filter's class name, its name and its ``field_name``)
+_QUERYSETLESS_CHOICES: dict[str, tuple[Callable[[], type[FilterSet]], str, str, str]] = {
+    "forward-key": (
+        lambda: _specimen_set([], {"probe": ModelChoiceFilter(field_name="parent")}),
+        "ModelChoiceFilter",
+        "probe",
+        "parent",
+    ),
+    "reverse-many": (
+        lambda: _specimen_set([], {"probe": ModelMultipleChoiceFilter(field_name="children")}),
+        "ModelMultipleChoiceFilter",
+        "probe",
+        "children",
+    ),
+    "csv-in-wrapper": (
+        lambda: _override_set(ModelChoiceFilter, extra=False, lookup="in"),
+        "ModelChoiceInFilter",
+        "parent__in",
+        "parent",
+    ),
+    "column-path": (
+        lambda: _specimen_set([], {"probe": ModelChoiceFilter(field_name="label")}),
+        "ModelChoiceFilter",
+        "probe",
+        "label",
+    ),
+    "field-class-without-init": (
+        lambda: _specimen_set([], {"probe": _choice_over(_PlainSpecimenChoiceField)}),
+        "FieldClassChoice",
+        "probe",
+        "parent",
+    ),
+    "multiple-field-class-without-init": (
+        lambda: _specimen_set(
+            [],
+            {"probe": _multiple_choice_over(_PlainSpecimenMultipleChoiceField)},
+        ),
+        "FieldClassMultipleChoice",
+        "probe",
+        "children",
+    ),
+    "filter-overrides-without-extra": (
+        lambda: _override_set(ModelChoiceFilter, extra=False),
+        "ModelChoiceFilter",
+        "parent",
+        "parent",
+    ),
+    "multiple-filter-overrides-without-extra": (
+        lambda: _override_set(ModelMultipleChoiceFilter, extra=False),
+        "ModelMultipleChoiceFilter",
+        "parent",
+        "parent",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("case", "serve"),
+    [
+        pytest.param(
+            _QUERYSETLESS_CHOICES[case_id],
+            _LISTLESS_SERVINGS[serving],
+            id=f"{case_id}-{serving}",
+        )
+        for case_id in _QUERYSETLESS_CHOICES
+        for serving in _LISTLESS_SERVINGS
+    ],
+)
+def test_a_model_choice_filter_with_no_queryset_is_refused_when_its_set_publishes(
+    case: tuple[Callable[[], type[FilterSet]], str, str, str],
+    serve: Callable[[type[FilterSet]], None],
+) -> None:
+    """A model-choice filter nothing can give a queryset is refused before any request builds it.
+
+    django-filter's ``QuerySetRequestMixin.field`` builds Django's model-choice form field
+    with the queryset ``get_queryset`` answers, and with neither ``queryset=`` passed nor a
+    ``queryset`` key in its ``extra`` there is none: the field cannot be built. So the set
+    refuses the filter when it publishes, a served set when the schema builds and an unbound
+    one at its first use, whatever its path names: a relation, a column, or one a
+    ``Meta.filter_overrides`` entry without ``extra`` selects.
+    """
+    build, kind, name, field_name = case
+    with pytest.raises(ConfigurationError) as exc_info:
+        serve(build())
+    assert str(exc_info.value) == _querysetless_refusal(kind, name, field_name)
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        pytest.param(lambda: ModelChoiceFilter(field_name="content_object"), id="choice"),
+        pytest.param(
+            lambda: ModelMultipleChoiceFilter(field_name="content_object"),
+            id="multiple-choice",
+        ),
+    ],
+)
+def test_a_model_choice_filter_with_no_queryset_on_a_generic_key_takes_the_generic_key_refusal(
+    probe: Callable[[], Filter],
+) -> None:
+    """Both refusals reach it; the ``GenericForeignKey`` one answers, asked first."""
+    declared = probe()
+    filterset_cls = _specimen_set(["tag"], {"probe": declared}, model=TaggedItem)
+    with pytest.raises(ConfigurationError) as exc_info:
+        _build_at_root(filterset_cls)
+    assert str(exc_info.value) == (
+        f"FilterSet SpecimenFilter: {type(declared).__name__} 'probe' has field_name "
+        "'content_object', which names TaggedItem.content_object, a GenericForeignKey: Django "
+        "filters no queryset through it, so no related row's identity can be compared on it. "
+        "Filter through the GenericRelation that reverses it on the related model, or on the "
+        "content type and object id columns it reads."
+    )
+
+
+@pytest.mark.parametrize("serve", list(_ADMITTED_SERVINGS.values()), ids=list(_ADMITTED_SERVINGS))
+@pytest.mark.parametrize(
+    "probe",
+    [
+        pytest.param(lambda: ModelChoiceFilter(field_name="parent", queryset=None), id="choice"),
+        pytest.param(
+            lambda: ModelMultipleChoiceFilter(field_name="children", queryset=None),
+            id="multiple-choice",
+        ),
+    ],
+)
+def test_an_explicit_none_queryset_is_a_passed_value_and_is_not_judged(
+    probe: Callable[[], Filter],
+    serve: Callable[[type[FilterSet]], None],
+) -> None:
+    """``queryset=None`` reaches the form field as passed: it builds, so the set publishes it."""
+    filterset_cls = _specimen_set([], {"probe": probe()})
+    serve(filterset_cls)
+    assert "probe" in filterset_cls.get_filters()
+    assert "probe" in filterset_cls(data={}, queryset=_specimen_rows()).form.fields
+
+
+class _InitSuppliedSet(FilterSet):
+    """A set whose ``__init__`` gives its ``probe`` filter the rows each request reads."""
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        queryset: QuerySet[Model] | None = None,
+        *,
+        request: HttpRequest | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data, queryset, request=request, prefix=prefix)
+        require_instance(self.filters["probe"], QuerySetRequestMixin).queryset = _specimen_rows()
+
+
+class _FormClassSuppliedSet(FilterSet):
+    """A set whose ``get_form_class`` gives its ``probe`` filter its rows first."""
+
+    @override
+    def get_form_class(self) -> type[forms.Form]:
+        require_instance(self.filters["probe"], QuerySetRequestMixin).queryset = _specimen_rows()
+        return super().get_form_class()
+
+
+class _FormSuppliedSet(FilterSet):
+    """A set whose ``form`` gives its ``probe`` filter its rows first."""
+
+    @property
+    @override
+    def form(self) -> forms.Form:
+        require_instance(self.filters["probe"], QuerySetRequestMixin).queryset = _specimen_rows()
+        return super().form
+
+
+class _ProbeForm(forms.Form):
+    """A form of the project's own, holding ``probe``'s rows itself."""
+
+    probe = forms.ModelChoiceField(queryset=ScalarSpecimen._default_manager.all(), required=False)
+
+
+class _OwnFormClassSet(FilterSet):
+    """A set whose ``get_form_class`` answers a form class of its own."""
+
+    @override
+    def get_form_class(self) -> type[forms.Form]:
+        return _ProbeForm
+
+
+class _OwnFormSet(FilterSet):
+    """A set whose ``form`` builds a form of its own over the set's data."""
+
+    @property
+    @override
+    def form(self) -> forms.Form:
+        return _ProbeForm(self.data)
+
+
+class _QuerysetAssigningSet(FilterSet):
+    """A set whose ``get_filters`` assigns its ``probe`` filter's ``queryset`` after construction."""
+
+    @classmethod
+    @override
+    def get_filters(cls) -> OrderedDict[str, Filter]:
+        filters = super().get_filters()
+        if "probe" in filters:
+            require_instance(filters["probe"], QuerySetRequestMixin).queryset = _specimen_rows()
+        return filters
+
+
+class _ExtraEditingSet(FilterSet):
+    """A set whose ``get_filters`` puts a queryset in its ``probe`` filter's ``extra``."""
+
+    @classmethod
+    @override
+    def get_filters(cls) -> OrderedDict[str, Filter]:
+        filters = super().get_filters()
+        if "probe" in filters:
+            filters["probe"].extra["queryset"] = _specimen_rows()
+        return filters
+
+
+def _supplied_by_set(base: type[FilterSet]) -> Callable[[Filter], type[FilterSet]]:
+    def build(probe: Filter) -> type[FilterSet]:
+        meta_class = type("Meta", (), {"model": ScalarSpecimen, "fields": []})
+        filterset_cls = type("SpecimenFilter", (base,), {"probe": probe, "Meta": meta_class})
+        return require(filterset_cls, _is_filterset_class)
+
+    return build
+
+
+def _declared_on_specimen(probe: Filter) -> type[FilterSet]:
+    return _specimen_set([], {"probe": probe})
+
+
+#: (the set holding ``probe`` and the two filters it holds: a model choice, a multiple one)
+_SUPPLIED_CHOICES: dict[
+    str,
+    tuple[Callable[[Filter], type[FilterSet]], Callable[[], Filter], Callable[[], Filter]],
+] = {
+    "queryset-given": (
+        _declared_on_specimen,
+        lambda: ModelChoiceFilter(field_name="parent", queryset=_specimen_rows()),
+        lambda: ModelMultipleChoiceFilter(field_name="children", queryset=_specimen_rows()),
+    ),
+    "filter-get-queryset": (
+        _declared_on_specimen,
+        lambda: _GetQuerysetChoice(field_name="parent"),
+        lambda: _GetQuerysetMultipleChoice(field_name="children"),
+    ),
+    "filter-field": (
+        _declared_on_specimen,
+        lambda: _FieldChoice(field_name="parent"),
+        lambda: _FieldMultipleChoice(field_name="children"),
+    ),
+    "form-field-init": (
+        _declared_on_specimen,
+        lambda: _choice_over(_SpecimenChoiceField),
+        lambda: _multiple_choice_over(_SpecimenMultipleChoiceField),
+    ),
+    "form-field-not-model-choice": (
+        _declared_on_specimen,
+        lambda: _choice_over(ChoiceFormField),
+        lambda: _multiple_choice_over(forms.MultipleChoiceField),
+    ),
+    "filter-init-assigns-queryset": (
+        _declared_on_specimen,
+        lambda: _InitQuerysetChoice(field_name="parent"),
+        lambda: _InitQuerysetMultipleChoice(field_name="children"),
+    ),
+    "filter-init-edits-extra": (
+        _declared_on_specimen,
+        lambda: _InitExtraChoice(field_name="parent"),
+        lambda: _InitExtraMultipleChoice(field_name="children"),
+    ),
+    "filter-field-builds-its-own": (
+        _declared_on_specimen,
+        lambda: _OwnFieldChoice(field_name="parent"),
+        lambda: _OwnFieldMultipleChoice(field_name="children"),
+    ),
+    "form-field-inherited-init": (
+        _declared_on_specimen,
+        lambda: _choice_over(_InheritedSpecimenChoiceField),
+        lambda: _multiple_choice_over(_InheritedSpecimenMultipleChoiceField),
+    ),
+    "set-get-form-class-own-form": (
+        _supplied_by_set(_OwnFormClassSet),
+        lambda: ModelChoiceFilter(field_name="parent"),
+        lambda: ModelMultipleChoiceFilter(field_name="children"),
+    ),
+    "set-form-own-form": (
+        _supplied_by_set(_OwnFormSet),
+        lambda: ModelChoiceFilter(field_name="parent"),
+        lambda: ModelMultipleChoiceFilter(field_name="children"),
+    ),
+    "set-init": (
+        _supplied_by_set(_InitSuppliedSet),
+        lambda: ModelChoiceFilter(field_name="parent"),
+        lambda: ModelMultipleChoiceFilter(field_name="children"),
+    ),
+    "set-get-form-class": (
+        _supplied_by_set(_FormClassSuppliedSet),
+        lambda: ModelChoiceFilter(field_name="parent"),
+        lambda: ModelMultipleChoiceFilter(field_name="children"),
+    ),
+    "get-filters-assigns-queryset": (
+        _supplied_by_set(_QuerysetAssigningSet),
+        lambda: ModelChoiceFilter(field_name="parent"),
+        lambda: ModelMultipleChoiceFilter(field_name="children"),
+    ),
+    "get-filters-edits-extra": (
+        _supplied_by_set(_ExtraEditingSet),
+        lambda: ModelChoiceFilter(field_name="parent"),
+        lambda: ModelMultipleChoiceFilter(field_name="children"),
+    ),
+    "set-form": (
+        _supplied_by_set(_FormSuppliedSet),
+        lambda: ModelChoiceFilter(field_name="parent"),
+        lambda: ModelMultipleChoiceFilter(field_name="children"),
+    ),
+}
+
+
+@pytest.mark.parametrize("serve", list(_ADMITTED_SERVINGS.values()), ids=list(_ADMITTED_SERVINGS))
+@pytest.mark.parametrize("multiple", [False, True], ids=["choice", "multiple-choice"])
+@pytest.mark.parametrize("case_id", list(_SUPPLIED_CHOICES))
+def test_a_model_choice_filter_consumer_code_can_give_a_queryset_builds(
+    case_id: str,
+    serve: Callable[[type[FilterSet]], None],
+    *,
+    multiple: bool,
+) -> None:
+    """Consumer code on the form-build path can supply the queryset: the set publishes it.
+
+    A filter overriding ``get_queryset`` or ``field``, a form field class whose own
+    ``__init__`` runs before Django's (or that is no model-choice field), and a set
+    overriding ``__init__``, ``get_form_class`` or ``form`` are trusted: each builds served
+    at the root or read unbound, and an instance's form cleans.
+    """
+    build, choice, multiple_choice = _SUPPLIED_CHOICES[case_id]
+    filterset_cls = build(multiple_choice() if multiple else choice())
+    serve(filterset_cls)
+    assert "probe" in filterset_cls.get_filters()
+    assert filterset_cls(data={}, queryset=_specimen_rows()).is_valid()
+
+
+@pytest.mark.parametrize("filter_class", [ModelChoiceFilter, ModelMultipleChoiceFilter])
+@pytest.mark.parametrize("serve", list(_ADMITTED_SERVINGS.values()), ids=list(_ADMITTED_SERVINGS))
+def test_a_filter_overrides_entry_whose_extra_gives_a_queryset_builds(
+    filter_class: type[Filter],
+    serve: Callable[[type[FilterSet]], None],
+) -> None:
+    """A ``Meta.filter_overrides`` entry whose ``extra`` returns a queryset builds."""
+    filterset_cls = _override_set(filter_class, extra=True)
+    serve(filterset_cls)
+    assert "parent" in filterset_cls.get_filters()
+    assert filterset_cls(data={}, queryset=_specimen_rows()).is_valid()
 
 
 #: Where an unserved set publishes without a schema serving it through a connection.

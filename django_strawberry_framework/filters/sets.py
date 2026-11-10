@@ -233,6 +233,7 @@ from .base import (
     membership_in_filter_class,
     refuse_identityless_relation,
     refuse_listless_lookup,
+    refuse_querysetless_choice,
     refuse_unresolvable_lookup,
 )
 from .form_binding import (
@@ -4540,16 +4541,29 @@ class FilterSet(
         ``filter`` (``_runs_shipped_filter``) whose ``field_name`` and ``lookup_expr``
         Django resolves on no queryset (``filters/base.py::refuse_unresolvable_lookup``)
         or, on a ``ListFilter`` / ``ArrayFilter``, whose lookup compares one value where the
-        filter applies a list (``filters/base.py::refuse_listless_lookup``).
-        A read of the set's table while it publishes answers the table being published.
+        filter applies a list (``filters/base.py::refuse_listless_lookup``), and a
+        model-choice filter with no queryset (``filters/base.py::refuse_querysetless_choice``)
+        unless the set overrides ``__init__``, ``get_form_class`` or ``form``, where its own
+        code can supply one per request. A read of the set's table while it publishes answers
+        the table being published.
         """
         table = OrderedDict(cls._reshape(expansion))
+        # A set whose instances edit their filters or build their own form can supply a
+        # model-choice queryset per request: trusted, not judged.
+        builds_own_form = cls._customizes_instances() or truth.overrides(
+            cls,
+            FilterSet,
+            "get_form_class",
+            "form",
+        )
         for filter_name, filter_instance in table.items():
             cls._reject_foreign_projection(filter_name, filter_instance)
             # An expanded copy is its declaring set's filter, refused when that set published.
             if _expansion_record(filter_instance) is None:
                 shipped = _runs_shipped_filter(filter_instance)
                 refuse_identityless_relation(cls, filter_name, filter_instance, shipped=shipped)
+                if not builds_own_form:
+                    refuse_querysetless_choice(cls, filter_name, filter_instance)
                 if shipped:
                     refuse_unresolvable_lookup(cls, filter_name, filter_instance)
                     refuse_listless_lookup(cls, filter_name, filter_instance)

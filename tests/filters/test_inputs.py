@@ -1622,6 +1622,18 @@ class _CustomizingFilterSet(FilterSet):
         super().__init__(data, queryset, request=request, prefix=prefix)
 
 
+class _PerRequestCodeChoice(django_filters.ModelChoiceFilter):
+    """A ``ModelChoiceFilter`` with no ``queryset=``: ``get_queryset`` answers each request's rows.
+
+    Its set publishes it (the override can supply the queryset), so a ``field_name`` naming
+    no relation is refused when its input builds.
+    """
+
+    @override
+    def get_queryset(self, request: object) -> QuerySet[library_models.Shelf]:
+        return library_models.Shelf._default_manager.all()
+
+
 @dataclass(frozen=True)
 class _LeafRefusalCase:
     """One schema-build refusal a child set's ``leaf`` reaches, expanded or served directly.
@@ -1629,13 +1641,16 @@ class _LeafRefusalCase:
     ``expanded`` is the message's subject for a ``RelatedFilter`` copy of ``leaf`` (projected
     or rebound) and ``direct`` for ``leaf`` on the set the schema serves, formatted with the
     sets' names (``child``, ``parent``) and the ``repr`` of the child set's own ``leaf``
-    (``declared``); ``rest`` follows either subject.
+    (``declared``) and its class name (``kind``); ``rest`` follows either subject.
+    ``plain_child`` declares the leaf instead on a child set overriding nothing, which
+    publishes only a filter consumer code can give a queryset.
     """
 
     declare: Callable[[], Filter]
     expanded: str
     direct: str
     rest: str
+    plain_child: Callable[[], Filter] | None = None
 
 
 _LEAF_REFUSAL_CASES = {
@@ -1656,10 +1671,11 @@ _LEAF_REFUSAL_CASES = {
     ),
     "model-choice": _LeafRefusalCase(
         lambda: django_filters.ModelChoiceFilter(field_name="code"),
-        "{child}.leaf: ModelChoiceFilter on 'code' (reached through {parent}.shelf)",
-        "{child}: ModelChoiceFilter on 'code'",
+        "{child}.leaf: {kind} on 'code' (reached through {parent}.shelf)",
+        "{child}: {kind} on 'code'",
         " has no queryset and its field_name names no relation on the FilterSet model, so "
         "there is no column to type its input from. Pass a model queryset.",
+        plain_child=lambda: _PerRequestCodeChoice(field_name="code"),
     ),
     "choice": _LeafRefusalCase(
         lambda: ChoiceFilter(field_name="topic", choices=[("a", "A")]),
@@ -1723,6 +1739,13 @@ _LEAF_REFUSAL_CASES = {
         "a list value, ...) or on a `Filter` subclass declaring `field_class` at class level.",
     ),
 }
+
+
+def _declare_leaf(case: _LeafRefusalCase, base: type[FilterSet]) -> Filter:
+    """``case``'s leaf as a child set on ``base`` declares it."""
+    if base is FilterSet and case.plain_child is not None:
+        return case.plain_child()
+    return case.declare()
 
 
 def _shelf_leaf_set(declared: Filter, base: type[FilterSet]) -> type[FilterSet]:
@@ -1796,7 +1819,7 @@ def test_an_expanded_child_leaf_is_refused_under_its_declaration(
     reached through, never the copy.
     """
     case = _LEAF_REFUSAL_CASES[site]
-    declared = case.declare()
+    declared = _declare_leaf(case, base)
     child = _shelf_leaf_set(declared, base)
     parent = _book_shelf_set(child, FilterSet)
     _serve_model(library_models.Shelf, None)
@@ -1807,8 +1830,48 @@ def test_an_expanded_child_leaf_is_refused_under_its_declaration(
         child=child.__name__,
         parent=parent.__name__,
         declared=repr(declared),
+        kind=type(declared).__name__,
     )
     assert _build_refusal() == subject + case.rest
+
+
+@pytest.mark.parametrize("field_name", ["branch", "code"], ids=["relation", "column"])
+def test_an_expanded_child_model_choice_with_no_queryset_is_refused_when_its_set_publishes(
+    field_name: str,
+) -> None:
+    """A child set's model-choice filter with no queryset is refused naming the child set.
+
+    The parent's ``RelatedFilter`` publishes the child set first, which refuses the leaf
+    before any input builds: nothing on the form-build path could supply the queryset, on
+    a relation path or a column one alike.
+    """
+    child = _shelf_leaf_set(django_filters.ModelChoiceFilter(field_name=field_name), FilterSet)
+    parent = _book_shelf_set(child, FilterSet)
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, parent)
+
+    assert _build_refusal() == (
+        f"FilterSet {child.__qualname__}: ModelChoiceFilter 'leaf' has field_name "
+        f"{field_name!r} and no queryset, so the model-choice form field it builds has no rows "
+        "to look a value up in, and every request building the set's form would fail. Pass "
+        "queryset= (a model queryset, or a callable taking the request), override the "
+        "filter's get_queryset(request), or give a Meta.filter_overrides entry an `extra` "
+        'returning {"queryset": ...}.'
+    )
+
+
+def test_an_expanded_child_set_overriding_init_keeps_its_querysetless_model_choice() -> None:
+    """A child set overriding ``__init__`` can supply the queryset per request: it builds."""
+    child = _shelf_leaf_set(
+        django_filters.ModelChoiceFilter(field_name="branch"),
+        _CustomizingFilterSet,
+    )
+    parent = _book_shelf_set(child, FilterSet)
+    _serve_model(library_models.Shelf, None)
+    _serve_model(library_models.Book, parent)
+
+    finalize_django_types()
+    assert "shelf__leaf" in parent.get_filters()
 
 
 @pytest.mark.parametrize("site", list(_LEAF_REFUSAL_CASES))
@@ -1823,7 +1886,11 @@ def test_a_leaf_on_the_set_it_is_served_from_is_refused_under_its_own_name(site:
     child = _shelf_leaf_set(declared, _CustomizingFilterSet)
     _serve_model(library_models.Shelf, child)
 
-    subject = case.direct.format(child=child.__name__, declared=repr(declared))
+    subject = case.direct.format(
+        child=child.__name__,
+        declared=repr(declared),
+        kind=type(declared).__name__,
+    )
     assert _build_refusal() == subject + case.rest
 
 
@@ -1914,7 +1981,7 @@ def test_a_get_filters_override_keeps_an_expanded_leaf_refused_under_its_declara
     reached through, never the parent set and the flat ``field_name``.
     """
     case = _LEAF_REFUSAL_CASES[site]
-    declared = case.declare()
+    declared = _declare_leaf(case, base)
     child = _shelf_leaf_set(declared, base)
     parent = _deep_copying(_book_shelf_set(child, FilterSet), rekey=rekey)
     _serve_model(library_models.Shelf, None)
@@ -1925,6 +1992,7 @@ def test_a_get_filters_override_keeps_an_expanded_leaf_refused_under_its_declara
         child=child.__name__,
         parent=parent.__name__,
         declared=repr(declared),
+        kind=type(declared).__name__,
     )
     assert _build_refusal() == subject + case.rest
 

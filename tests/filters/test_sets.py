@@ -5740,12 +5740,18 @@ def test_direct_m2m_relation_override_on_relay_target_is_honored() -> None:
     class CustomRelationFilter(django_filters.ModelMultipleChoiceFilter):
         pass
 
+    def _override_extra(_f: object) -> dict[str, object]:
+        return {"queryset": library_models.Genre._default_manager.all()}
+
     class BookFilter(FilterSet):
         class Meta:
             model = library_models.Book
             fields = {"genres": ["exact"]}
             filter_overrides = {
-                django_models.ManyToManyField: {"filter_class": CustomRelationFilter},
+                django_models.ManyToManyField: {
+                    "filter_class": CustomRelationFilter,
+                    "extra": _override_extra,
+                },
             }
 
     leaf = BookFilter.get_filters()["genres"]
@@ -5773,12 +5779,18 @@ def test_direct_forward_fk_relation_override_on_relay_target_is_honored() -> Non
     class CustomFKFilter(django_filters.ModelChoiceFilter):
         pass
 
+    def _override_extra(_f: object) -> dict[str, object]:
+        return {"queryset": library_models.Shelf._default_manager.all()}
+
     class BookFilter(FilterSet):
         class Meta:
             model = library_models.Book
             fields = {"shelf": ["exact"]}
             filter_overrides = {
-                django_models.ForeignKey: {"filter_class": CustomFKFilter},
+                django_models.ForeignKey: {
+                    "filter_class": CustomFKFilter,
+                    "extra": _override_extra,
+                },
             }
 
     leaf = BookFilter.get_filters()["shelf"]
@@ -5862,12 +5874,18 @@ def test_related_filter_expansion_preserves_child_relation_override() -> None:
     class CustomRelationFilter(django_filters.ModelMultipleChoiceFilter):
         pass
 
+    def _override_extra(_f: object) -> dict[str, object]:
+        return {"queryset": library_models.Genre._default_manager.all()}
+
     class ChildBookFilter(FilterSet):
         class Meta:
             model = library_models.Book
             fields = {"genres": ["exact"]}
             filter_overrides = {
-                django_models.ManyToManyField: {"filter_class": CustomRelationFilter},
+                django_models.ManyToManyField: {
+                    "filter_class": CustomRelationFilter,
+                    "extra": _override_extra,
+                },
             }
 
     class LoanParentFilter(FilterSet):

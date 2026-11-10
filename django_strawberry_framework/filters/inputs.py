@@ -2047,7 +2047,9 @@ def _refuse_widget_reading_other_keys(
     ``QuerySetRequestMixin``) whose ``queryset`` is callable or unset, as
     ``filters/base.py::model_choice_model`` reads it: a callable one is called
     with the request, which the schema build has none of, and an unset one builds no field
-    (the model-choice arm names that refusal).
+    (its set refuses it when it publishes, ``filters/base.py::refuse_querysetless_choice``,
+    unless consumer code supplies one per request, and the model-choice arm refuses one
+    whose ``field_name`` names no relation).
     """
     if truth.is_instance(filter_instance, QuerySetRequestMixin):
         queryset = read_attr(filter_instance, "queryset", None)

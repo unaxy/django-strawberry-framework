@@ -26,7 +26,8 @@ its filter table at its first construction, under a consumer's own call, DRF's
 ``DjangoFilterBackend`` and django-filter's ``FilterView`` alike: a walked key one or two hops
 deep answers ``BookFilter``'s rows as each viewer sees them, and a declaration Django answers
 no request for (a ``range`` over a relation, a GlobalID or model-choice filter over a
-``GenericForeignKey``) is refused at every construction.
+``GenericForeignKey``, a model-choice filter with no queryset, declared or selected by
+``Meta.filter_overrides``) is refused at every construction.
 """
 
 import contextlib
@@ -55,6 +56,7 @@ from django.db.models import (
     F,
     Field,
     FilteredRelation,
+    ForeignKey,
     IntegerField,
     Lookup,
     Model,
@@ -248,6 +250,25 @@ class _ModelMultipleChoicePastKeySet(FilterSet):
         fields = ("name",)
 
 
+class _QuerysetlessChoiceSet(FilterSet):
+    """A ``ModelChoiceFilter`` with no ``queryset=``: its form field has no rows to look in."""
+
+    branch_is = django_filters.ModelChoiceFilter(field_name="branch")
+
+    class Meta:
+        model = library_models.Shelf
+        fields = ("code",)
+
+
+class _QuerysetlessOverrideSet(FilterSet):
+    """A ``Meta.filter_overrides`` entry selecting a ``ModelChoiceFilter`` with no ``extra``."""
+
+    class Meta:
+        model = library_models.Shelf
+        fields = {"branch": ["exact"]}
+        filter_overrides = {ForeignKey: {"filter_class": django_filters.ModelChoiceFilter}}
+
+
 #: The raw sets the driver routes build, by route name.
 _RAW_SETS: dict[str, type[FilterSet]] = {
     "book-filter": BookFilter,
@@ -262,6 +283,8 @@ _RAW_SETS: dict[str, type[FilterSet]] = {
     "global-id-over-a-generic-key": _GlobalIDOverGenericSet,
     "model-choice-over-a-generic-key": _ModelChoiceOverGenericSet,
     "model-multiple-choice-past-a-key-onto-a-generic-key": _ModelMultipleChoicePastKeySet,
+    "model-choice-with-no-queryset": _QuerysetlessChoiceSet,
+    "filter-override-with-no-queryset": _QuerysetlessOverrideSet,
 }
 
 
@@ -2566,6 +2589,22 @@ _REFUSED_SETS = {
         "field_name 'desk__content_object', which names CirculationDesk.content_object, a "
         "GenericForeignKey: Django filters no queryset through it, so no related row's "
         "identity can be compared on it."
+    ),
+    "model-choice-with-no-queryset": (
+        "FilterSet _QuerysetlessChoiceSet: ModelChoiceFilter 'branch_is' has field_name 'branch' "
+        "and no queryset, so the model-choice form field it builds has no rows to look a value "
+        "up in, and every request building the set's form would fail. Pass queryset= (a model "
+        "queryset, or a callable taking the request), override the filter's "
+        "get_queryset(request), or give a Meta.filter_overrides entry an `extra` returning "
+        '{"queryset": ...}.'
+    ),
+    "filter-override-with-no-queryset": (
+        "FilterSet _QuerysetlessOverrideSet: ModelChoiceFilter 'branch' has field_name 'branch' "
+        "and no queryset, so the model-choice form field it builds has no rows to look a value "
+        "up in, and every request building the set's form would fail. Pass queryset= (a model "
+        "queryset, or a callable taking the request), override the filter's "
+        "get_queryset(request), or give a Meta.filter_overrides entry an `extra` returning "
+        '{"queryset": ...}.'
     ),
 }
 

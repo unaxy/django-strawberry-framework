@@ -38,6 +38,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, replace
 from functools import cache
+from itertools import takewhile
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
 from django.core.exceptions import FieldError, ValidationError
@@ -50,6 +51,7 @@ from django.db.models.sql import Query
 from django.forms import (
     CharField,
     Field,
+    ModelChoiceField,
     MultipleChoiceField,
     MultiWidget,
     SelectMultiple,
@@ -69,7 +71,12 @@ from django_filters import (
 )
 from django_filters import constants as _filter_constants
 from django_filters.fields import BaseCSVField, BaseRangeField, ChoiceField
-from django_filters.filters import BaseInFilter, BaseRangeFilter, FilterMethod
+from django_filters.filters import (
+    BaseInFilter,
+    BaseRangeFilter,
+    FilterMethod,
+    QuerySetRequestMixin,
+)
 from django_filters.filters import RangeFilter as DjangoFilterRangeFilter
 from django_filters.filterset import BaseFilterSet, FilterSetOptions
 from django_filters.utils import get_field_parts, get_model_field
@@ -3620,6 +3627,78 @@ def refuse_identityless_relation(
         "it, so no related row's identity can be compared on it. Filter through the "
         "GenericRelation that reverses it on the related model, or on the content type and "
         "object id columns it reads.",
+    )
+
+
+#: The packages whose form-field code the queryset ask trusts: Django's, django-filter's and
+#: this one's.
+_SHIPPED_FORM_PACKAGES = frozenset({"django", "django_filters", __name__.partition(".")[0]})
+
+
+def _field_needs_a_queryset(field_class: object) -> bool:
+    """Whether building ``field_class`` runs Django's ``ModelChoiceField.__init__`` with no queryset.
+
+    Django's ``ModelChoiceField`` (and ``ModelMultipleChoiceField``, its subclass) takes its
+    ``queryset`` as a required argument. Every ``__init__`` its real MRO defines before
+    Django's one (``utils/truth.py::mro``, read through each class's own namespace) is
+    shipped code that forwards the keyword arguments it is given (django-filter's
+    ``ChoiceIteratorMixin`` and ``BaseCSVField``), so a filter supplying no queryset builds
+    the field without one. A consumer ``__init__`` before it can supply one, and is trusted.
+    """
+    if not truth.is_subclass(field_class, ModelChoiceField):
+        return False
+    before = takewhile(lambda klass: klass is not ModelChoiceField, truth.mro(field_class))
+    return all(
+        truth.module(truth.stored_function(init)).partition(".")[0] in _SHIPPED_FORM_PACKAGES
+        for klass in before
+        if (init := truth.class_dict(klass).get("__init__")) is not None
+    )
+
+
+def refuse_querysetless_choice(
+    filterset_cls: type[BaseFilterSet],
+    filter_name: str,
+    filter_instance: Filter,
+) -> None:
+    """Refuse a model-choice filter that can never build its form field: it has no queryset.
+
+    django-filter's ``QuerySetRequestMixin.field`` passes the queryset ``get_queryset``
+    answers to the form field, and its ``get_queryset`` answers the ``queryset=`` value (a
+    callable called with the request). With no ``queryset=`` passed and no ``queryset`` key
+    in ``extra`` (a ``Meta.filter_overrides`` entry's ``extra``), the form field is built
+    without the queryset Django's ``ModelChoiceField`` requires: it raises ``TypeError`` on
+    every request that builds the set's form. A ``queryset`` key in ``extra`` is a passed
+    value, whatever it holds, and is not judged. Consumer code that can supply the queryset
+    per request is trusted and not judged: a filter class overriding ``get_queryset`` or
+    ``field`` (``utils/truth.py::overrides``; the package's ``RelatedFilter`` derives its
+    target's), a form field class whose own ``__init__`` runs first
+    (``_field_needs_a_queryset``), and a set overriding ``__init__``, ``get_form_class`` or
+    ``form`` (the caller's ask, ``filters/sets.py::FilterSet._publish_filters``). A set a
+    type serves refuses it when the schema builds, an unserved set at its first use, as
+    ``refuse_identityless_relation``.
+    """
+    if not truth.is_instance(filter_instance, QuerySetRequestMixin):
+        return
+    if (
+        read_attr(filter_instance, "queryset", None) is not None
+        or "queryset" in dict_of(filter_instance.extra)
+        or truth.overrides(
+            truth.class_of(filter_instance),
+            QuerySetRequestMixin,
+            "get_queryset",
+            "field",
+        )
+        or not _field_needs_a_queryset(read_attr(filter_instance, "field_class", None))
+    ):
+        return
+    raise ConfigurationError(
+        f"FilterSet {truth.qualname(filterset_cls)}: {truth.kind(filter_instance)} "
+        f"{filter_name!r} has field_name {truth.text(_declared_field_name(filter_instance))!r} "
+        "and no queryset, so the model-choice form field it builds has no rows to look a "
+        "value up in, and every request building the set's form would fail. "
+        "Pass queryset= (a model queryset, or a callable taking the request), override the "
+        "filter's get_queryset(request), or give a Meta.filter_overrides entry an `extra` "
+        'returning {"queryset": ...}.',
     )
 
 

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 481 done, 119 to do. The CHANGELOG entries filed here moved to
+Progress: 482 done, 119 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2520,6 +2520,29 @@ Progress: 481 done, 119 to do. The CHANGELOG entries filed here moved to
   (`::test_a_model_choice_filter_on_a_generic_foreign_key_is_refused_when_the_schema_builds`, the unserved first-use,
   consumer-code, `GenericRelation` and served-annotation rows) and
   `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_set_declaring_a_refused_filter_is_refused_at_its_first_construction`
+- [x] 756. A model-choice filter (`ModelChoiceFilter`, `ModelMultipleChoiceFilter`, a CSV wrapper, or one a
+  `Meta.filter_overrides` entry without an `extra` queryset selects) given no queryset is refused with a
+  `ConfigurationError` naming the set, the filter and its `field_name` when its set publishes (schema build for a
+  served set, every construction or first package read for an unserved one), where a served set typed and published
+  its input and every request raised Django's `TypeError` building the form. `filters/base.py::
+  refuse_querysetless_choice` (with `::_field_needs_a_queryset`), asked by `filters/sets.py::FilterSet._publish_filters`
+  right after `refuse_identityless_relation` (whose `GenericForeignKey` refusal, item 875, answers first), judges only
+  an absent queryset (no attribute, no `extra` key) and trusts consumer code that can supply one per request: a filter
+  `get_queryset` / `field` override, a form field class running its own `__init__` before Django's (read by MRO, not
+  run: building the field at publish cannot tell a missing queryset from any other `TypeError` and runs consumer code),
+  and a set overriding `__init__`, `get_form_class` or `form`. An explicit `queryset=None` keeps its behaviour (filed
+  879); 871's input-build arm stays for exempt shapes on non-relation paths. Grid: 230 of 665 cells moved, all in the
+  19 unset shapes; no working or stock cell moved; SDL unchanged. Pinned by
+  `tests/filters/test_finalizer.py::test_a_model_choice_filter_with_no_queryset_is_refused_when_its_set_publishes`,
+  `::test_a_model_choice_filter_consumer_code_can_give_a_queryset_builds`,
+  `::test_a_filter_overrides_entry_whose_extra_gives_a_queryset_builds`,
+  `::test_an_explicit_none_queryset_is_a_passed_value_and_is_not_judged`,
+  `::test_a_model_choice_filter_with_no_queryset_on_a_generic_key_takes_the_generic_key_refusal`,
+  `tests/filters/test_inputs.py::test_an_expanded_child_model_choice_with_no_queryset_is_refused_when_its_set_publishes`,
+  `::test_an_expanded_child_set_overriding_init_keeps_its_querysetless_model_choice` and the
+  `examples/fakeshop/test_query/test_raw_filter_forms_api.py` `_REFUSED_SETS` rows (three raw drivers). Docs: spec-027
+  (Decision 4 model-choice row, checklist, Edge cases, Test plan, DoD 32), docs/README.md, GLOSSARY `ConfigurationError`
+  (pk 444) and `FilterSet` (pk 463). Filed 879. CHANGELOGTODO 880
 
 ## Outside review of the fixes
 
@@ -2560,9 +2583,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 756. (robustness) A consumer `ModelChoiceFilter` with no `queryset=` (or one `Meta.filter_overrides` selects) is
-  accepted at declaration and raises `TypeError: ModelChoiceField.__init__() missing 1 required positional argument:
-  'queryset'` on the request that builds its form; GOAL: configuration is validated at construction. Found probing 748
 - [ ] 757. Under `FAKESHOP_TEST_BOUND_SETS`, `node(id:)` for a type-strategy Relay secondary over Shelf
   (`BindingPlainShelfType:1`, `BindingHidingShelfType:1`) fails for a visible row, anonymous and staff, with "Abstract
   type 'Node' must resolve to an Object type at runtime for field 'Query.node'"; the Book secondaries resolve. Reported
@@ -2766,6 +2786,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   edge case on a field no `SCALAR_MAP` entry covers and GLOSSARY say an unserved set refuses it at the `apply_sync`
   request. Found researching 875
 
+- [ ] 879. (robustness) A model-choice filter declared with an explicit `queryset=None` builds its form (its set's
+  other keys answer), then a request supplying it raises a bare `AttributeError` at clean (`'NoneType' object has no
+  attribute 'model'`; a `ModelMultipleChoiceFilter` raises it cleaning an empty value too), masked over GraphQL, where
+  the absent-queryset shape is refused when its set publishes (756). Stock django-filter fails the same way. Found
+  verifying 756
 ## To do: holes found re-checking the fixes
 
 

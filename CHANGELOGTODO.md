@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 217 to do.
+Progress: 0 done, 218 to do.
 
 ## From dry-0_0_15_3
 
@@ -1034,6 +1034,12 @@ Progress: 0 done, 217 to do.
   answering every request with Django's `FieldError`; a callable or unset `queryset` on such a path is refused in the
   same words. A `method=` filter, a class-level `filter` override and a filter through a `GenericRelation` are
   unchanged
+- [ ] 880. CHANGELOG entry for item 756: a `ModelChoiceFilter` / `ModelMultipleChoiceFilter` given no queryset (none
+  passed, or a `Meta.filter_overrides` entry with no `extra` returning one) is now refused with `ConfigurationError`
+  when its `FilterSet` publishes (at schema build, or at first use for a set no type serves), naming the set, the filter
+  and its `field_name`, instead of every request raising Django's `TypeError`. A filter overriding `get_queryset` or
+  `field`, a form field class whose own `__init__` supplies the queryset, and a set overriding `__init__`,
+  `get_form_class` or `form` are not judged
 
 ## From dry-upstream-0_0_15
 
