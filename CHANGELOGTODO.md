@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 221 to do.
+Progress: 0 done, 222 to do.
 
 ## From dry-0_0_15_3
 
@@ -1058,6 +1058,14 @@ Progress: 0 done, 221 to do.
   engine error after the type's queryset ran (or null for a hidden row); `DjangoSchema` refuses at construction a
   typed `DjangoNodeField(T)` / `DjangoNodesField(T)` whose annotation cannot return `T` or whose `T` it does not
   publish
+- [ ] 905. CHANGELOG entry for item 792: a declared filter whose path starts at a `FilteredRelation` alias
+  (`vshelf__code`, `ListFilter("vshelf", lookup_expr="in")`) now answers over the rows each relation the alias joins
+  lets the viewer see, the alias's condition included, instead of matching through rows the target type's
+  `get_queryset` hides; the alias may sit on a type's `get_queryset`, the queryset handed to the set or the set's own
+  `filter_queryset`. A condition reading an annotation over a table a filter on the alias joins again (a relation it
+  crosses, the alias it starts at, a join Django numbers) is refused with `ConfigurationError` unless every step there
+  is a forward key, and so is a `FilteredRelation` whose `relation_name` names no relation, which Django accepts.
+  Under `apply_async`, an alias only `filter_queryset` adds raises `SyncMisuseError` at an async-only target hook
 
 ## From dry-upstream-0_0_15
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, TypeAlias, overload
 
 from django.apps import apps
@@ -597,12 +598,21 @@ class UndeclaredHop:
     hop), reaching ``model``, whose rows answer for ``target_type``
     (``utils/querysets.py::relation_target_type``; ``None`` when no type is
     registered for it).
+
+    A hop over a ``FilteredRelation`` alias the walked queryset holds (``alias``, a
+    path's first segment, the one place Django reads one) crosses the model relations
+    the alias joins: ``declared_attr`` is that ``relation_name``, an alias it starts at
+    read as its own relation, so it may span several segments, and ``via`` holds one
+    hop per relation it crosses before its last, each ``declared_attr`` the path to
+    that relation's rows as a query holding the alias spells it.
     """
 
     owner: type[object] | None
     declared_attr: str
     model: type[models.Model]
     target_type: type[DjangoType] | None
+    alias: str | None = None
+    via: tuple[UndeclaredHop, ...] = ()
 
     @property
     def scope(self) -> type[DjangoType] | None:
@@ -621,6 +631,9 @@ class UndeclaredHop:
 #: One relation a flat source path walks through: a declared branch, or a relation none declares.
 RelationHop: TypeAlias = DeclaredHop | UndeclaredHop
 
+#: No ``FilteredRelation`` alias (``walk_declared_relation_path``'s default ``aliases``).
+_NO_ALIASES: Mapping[str, str] = MappingProxyType({})
+
 
 @overload
 def walk_declared_relation_path(
@@ -630,6 +643,7 @@ def walk_declared_relation_path(
     related_attr: str,
     target_attr: str,
     undeclared: Literal[False] = False,
+    aliases: Mapping[str, str] = ...,
 ) -> tuple[tuple[DeclaredHop, ...], tuple[str, ...]]: ...
 
 
@@ -641,6 +655,7 @@ def walk_declared_relation_path(
     related_attr: str,
     target_attr: str,
     undeclared: bool,
+    aliases: Mapping[str, str] = ...,
 ) -> tuple[tuple[RelationHop, ...], tuple[str, ...]]: ...
 
 
@@ -651,6 +666,7 @@ def walk_declared_relation_path(
     related_attr: str,
     target_attr: str,
     undeclared: bool = False,
+    aliases: Mapping[str, str] = _NO_ALIASES,
 ) -> tuple[tuple[RelationHop, ...], tuple[str, ...]]:
     """Read a flat ``source_path`` as the declared branch chain it spells, plus the rest.
 
@@ -686,8 +702,12 @@ def walk_declared_relation_path(
     answers for the type that set is bound to
     (``utils/querysets.py::relation_target_type``): same table is the same
     ``_meta.concrete_model``, so a proxy and its concrete model share one, while
-    a multi-table-inheritance parent and child do not. The gates read the
-    declared walk alone: an undeclared hop has no branch gate.
+    a multi-table-inheritance parent and child do not. A path whose first segment
+    is a ``FilteredRelation`` alias of the queryset walked (``aliases``: each alias to
+    its ``relation_name``, as ``Query._filtered_relations`` holds them) walks that
+    alias first, as one undeclared hop over the relations it joins
+    (``UndeclaredHop.alias``), then on from its target. The gates read the declared
+    walk alone: an undeclared hop has no branch gate.
     """
     segments = tuple(source_path.split(LOOKUP_SEP))
     hops: list[RelationHop] = []
@@ -715,7 +735,7 @@ def walk_declared_relation_path(
             return tuple(hops), segments[index:]
         current_cls = resolved
     if undeclared:
-        index = _walk_undeclared_hops(current_cls, segments, index, hops)
+        index = _walk_undeclared_hops(current_cls, segments, index, hops, aliases)
     return tuple(hops), segments[index:]
 
 
@@ -756,6 +776,7 @@ def _walk_undeclared_hops(
     segments: tuple[str, ...],
     index: int,
     hops: list[RelationHop],
+    aliases: Mapping[str, str],
 ) -> int:
     """Append an undeclared hop for each relation segment from ``index`` on; return where it stopped.
 
@@ -774,6 +795,10 @@ def _walk_undeclared_hops(
         return index
     root = set_bound_type(set_cls)
     owner: type[object] | None = set_cls
+    if index == 0 and segments and segments[0] in aliases:
+        alias_hop = _alias_hop(set_cls, model, segments[0], aliases, root)
+        hops.append(alias_hop)
+        owner, model, index = None, alias_hop.model, 1
     for hop in leading_relation_hops(model, LOOKUP_SEP.join(segments[index:])):
         name = model._meta.pk.name if hop.segment == "pk" else hop.segment
         target_type = relation_target_type(hop.target_model, root=root)
@@ -781,6 +806,66 @@ def _walk_undeclared_hops(
         owner, model = None, hop.target_model
         index += 1
     return index
+
+
+def _alias_spelling(alias: str, aliases: Mapping[str, str]) -> tuple[list[str], list[str]]:
+    """Return the model relations ``alias`` joins and the path to each as a query holding it spells it.
+
+    Django reads an alias only as a path's first name, so an alias's ``relation_name``
+    may start at an alias defined before it, read as that alias's own relations; the
+    last spelling is ``alias`` itself.
+    """
+    first, *more = aliases[alias].split(LOOKUP_SEP)
+    if first in aliases and first != alias:
+        relations, spelled = _alias_spelling(first, aliases)
+    else:
+        relations, spelled = [first], [first]
+    for segment in more:
+        relations.append(segment)
+        spelled.append(f"{spelled[-1]}{LOOKUP_SEP}{segment}")
+    spelled[-1] = alias
+    return relations, spelled
+
+
+def _alias_hop(
+    set_cls: type[object],
+    model: type[models.Model],
+    alias: str,
+    aliases: Mapping[str, str],
+    root: type[DjangoType] | None,
+) -> UndeclaredHop:
+    """Return the undeclared hop over ``alias``, reading the relations it joins from ``model``.
+
+    Django joins an alias only over a path of relations (``Query.add_filtered_relation``
+    resolves its ``relation_name``), so every one classifies; one that does not is refused
+    rather than walked unscoped.
+    """
+    relations, spelled = _alias_spelling(alias, aliases)
+    relation = LOOKUP_SEP.join(relations)
+    crossed = leading_relation_hops(model, relation)
+    if len(crossed) != len(relations):
+        raise ConfigurationError(
+            f"FilteredRelation alias {alias!r} joins {relation!r}, which is not a path of "
+            f"relations of {truth.qualname(model)} a filter can scope.",
+        )
+    via = tuple(
+        UndeclaredHop(
+            None,
+            path,
+            hop.target_model,
+            relation_target_type(hop.target_model, root=root),
+        )
+        for path, hop in zip(spelled[:-1], crossed[:-1], strict=True)
+    )
+    target = crossed[-1].target_model
+    return UndeclaredHop(
+        set_cls,
+        relation,
+        target,
+        relation_target_type(target, root=root),
+        alias=alias,
+        via=via,
+    )
 
 
 def relation_path_gates(

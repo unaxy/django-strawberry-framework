@@ -87,7 +87,9 @@ from django_strawberry_framework.optimizer.predicates import (
     attach_exists,
     correlated_inner_root,
     correlates_related_rows,
+    refuse_rebound_annotations,
     related_rows_exist,
+    resolving_filtered_relations,
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import (
@@ -280,6 +282,25 @@ _FILTER_ASYNC_RECOURSE = (
 
 #: The empty absent-leaf verdict map (``FilterSet._absent_leaf_verdicts``).
 _NO_VERDICTS: Mapping[str, tuple[object, bool]] = MappingProxyType({})
+
+#: No ``FilteredRelation`` alias for a flat leaf's path to start at (``_query_aliases``).
+_NO_ALIASES: Mapping[str, str] = MappingProxyType({})
+
+
+def _query_aliases(queryset: models.QuerySet[models.Model, object]) -> Mapping[str, str]:
+    """Return each ``FilteredRelation`` alias ``queryset`` holds, to its ``relation_name``.
+
+    The aliases a flat leaf's path may start at (``FilterSet._flat_leaf_walk``), read from
+    ``Query._filtered_relations``, the dict Django resolves a path's first name against
+    (``Query.names_to_path``).
+    """
+    filtered = require(read_attr(queryset.query, "_filtered_relations", None), is_dict)
+    return {
+        str(alias): require_instance(relation, FilteredRelation).relation_name
+        for alias, relation in filtered.items()
+    }
+
+
 _NO_FLAT_NAMES: frozenset[str] = frozenset()
 
 if TYPE_CHECKING:
@@ -2269,6 +2290,9 @@ def _names_every_through(model: type[models.Model], hops: tuple[RelationHop, ...
     or not, both of whose through keys share one hidden name).
     """
     for hop in hops:
+        if isinstance(hop, UndeclaredHop) and hop.alias is not None:
+            # A view joins the model relations; the alias's own join holds its condition.
+            return False
         for segment in _hop_relation(hop).split(LOOKUP_SEP):
             field = model._meta.get_field(segment)
             if field.many_to_many and _through_link(model, field) is None:
@@ -2470,7 +2494,11 @@ class _LeafChain:
             return (self.terminal,)
         return (self.terminal, self.to_many_key.declared)
 
-    def terminal_value(self, value: object, using: str) -> object:
+    def terminal_value(
+        self,
+        value: object,
+        source: models.QuerySet[models.Model, object],
+    ) -> object:
         """Return the ``terminal`` value: ``value``, or the target key for a to-many key leaf.
 
         A to-many key leaf whose ``filter`` is shipped code (``_runs_shipped_filter``, the
@@ -2494,9 +2522,23 @@ class _LeafChain:
             return _relation_key_value(value, self.to_many_key.attname)
         # On the request's alias: a shipped filter may read it while building (a GlobalID
         # filter coerces its decoded key per the alias's backend, ``alias=qs.db``).
-        _ = declared.filter(
-            base_queryset(require(read_attr(declared, "model"), is_model_class), using=using),
-            value,
+        # Over rows resolving the ``FilteredRelation`` aliases of ``source``, the rows the
+        # leaf runs over, so a path starting at one resolves as there.
+        _ = refuse_rebound_annotations(
+            require(
+                declared.filter(
+                    resolving_filtered_relations(
+                        base_queryset(
+                            require(read_attr(declared, "model"), is_model_class),
+                            using=source.db,
+                        ),
+                        source,
+                    ),
+                    value,
+                ),
+                is_queryset,
+            ),
+            source,
         )
         return _relation_key_value(value, self.to_many_key.attname)
 
@@ -6792,6 +6834,7 @@ class FilterSet(
         _depth: int = 0,
         _branch_path: str = "",
         flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        aliases: Mapping[str, str] = _NO_ALIASES,
     ) -> dict[int, dict[str, models.QuerySet[models.Model]]]:
         """Pre-walk logical branches and derive each branch's visibility map.
 
@@ -6842,6 +6885,7 @@ class FilterSet(
                 info,
                 flat_hop_visibility,
                 parent_db=parent_db,
+                aliases=aliases,
             )
         return result
 
@@ -7065,6 +7109,7 @@ class FilterSet(
     def _flat_leaf_walk(
         cls,
         filter_instance: Filter,
+        aliases: Mapping[str, str] = _NO_ALIASES,
     ) -> tuple[tuple[RelationHop, ...], str] | None:
         """Return the hops a flat leaf's ORM path walks and the path left on the last target.
 
@@ -7089,7 +7134,10 @@ class FilterSet(
         head whose walk crosses a declared hop with no resolved target (``_branch_target``:
         no ``DjangoType`` registered for its model, or no child filterset) is ``None`` too:
         no visibility rule exists there, so the head runs as declared, over its
-        declaration's queryset.
+        declaration's queryset. A path starting at a ``FilteredRelation`` alias of the
+        queryset the leaf runs over (``aliases``, ``_query_aliases``) walks the alias as a
+        hop over the relations it joins (``UndeclaredHop.alias``), its rows the alias's
+        condition and the target type's visibility both admit (``_reaches_hop``).
         """
         if (
             isinstance(filter_instance, ProjectedChildFilter)
@@ -7102,8 +7150,14 @@ class FilterSet(
             related_attr=cls._permission.traversal.related_attr,
             target_attr=cls._permission.target_attr,
             undeclared=True,
+            aliases=aliases,
         )
-        if not any(isinstance(hop, DeclaredHop) or hop.scope is not None for hop in hops):
+        if not any(
+            isinstance(hop, DeclaredHop)
+            or hop.scope is not None
+            or any(via.scope is not None for via in hop.via)
+            for hop in hops
+        ):
             return None
         if isinstance(filter_instance, RelatedFilter) and any(
             isinstance(hop, DeclaredHop)
@@ -7126,7 +7180,11 @@ class FilterSet(
         )
 
     @classmethod
-    def _visibility_hops(cls, filter_instance: Filter) -> tuple[RelationHop, ...]:
+    def _visibility_hops(
+        cls,
+        filter_instance: Filter,
+        aliases: Mapping[str, str] = _NO_ALIASES,
+    ) -> tuple[RelationHop, ...]:
         """Return every declared hop whose target visibility an active ``filter_instance`` reads.
 
         A walked leaf reads its walk's hops (``_flat_leaf_walk``); a
@@ -7142,7 +7200,7 @@ class FilterSet(
                 cls._projection_hop(projection),
                 *child_cls._visibility_hops(_projection_child_filter(projection)),
             )
-        walk = cls._flat_leaf_walk(filter_instance)
+        walk = cls._flat_leaf_walk(filter_instance, aliases)
         return () if walk is None else walk[0]
 
     @classmethod
@@ -7159,7 +7217,11 @@ class FilterSet(
             for hop in cls._visibility_hops(filter_instance)
         )
 
-    def _necessary_annotation_hop(self, filter_instance: Filter) -> RelationHop | None:
+    def _necessary_annotation_hop(
+        self,
+        filter_instance: Filter,
+        aliases: Mapping[str, str] | None = None,
+    ) -> RelationHop | None:
         """Find the final scoped owner when the actual comparison output is unresolved.
 
         A leaf walking an unresolved declared hop (``_walks_unresolved_hop``) has no chain to
@@ -7169,7 +7231,7 @@ class FilterSet(
             return None
         if type(self)._walks_unresolved_hop(filter_instance):
             return None
-        chain = self._leaf_chain(filter_instance)
+        chain = self._leaf_chain(filter_instance, aliases)
         if chain is None or not chain.hops or not _runs_shipped_filter(chain.terminal):
             return None
         hop = chain.hops[-1]
@@ -7482,6 +7544,7 @@ class FilterSet(
         into: dict[tuple[object, str | None], models.QuerySet[models.Model]],
         *,
         parent_db: str | None,
+        aliases: Mapping[str, str] = _NO_ALIASES,
     ) -> None:
         """Preawait ordinary resolved hops a supplied flat leaf walks.
 
@@ -7506,7 +7569,7 @@ class FilterSet(
         """
         eager: list[RelationHop] = []
         for _name, filter_instance in cls._named_leaf_filters(input_value):
-            hops = cls._visibility_hops(filter_instance)
+            hops = cls._visibility_hops(filter_instance, aliases)
             terminal = filter_instance
             terminal_owner = cls
             while isinstance(terminal, ProjectedChildFilter):
@@ -7518,7 +7581,10 @@ class FilterSet(
                 and _runs_shipped_filter(terminal)
                 and not cls._walks_unresolved_hop(filter_instance)
             ):
-                walk = terminal_owner._flat_leaf_walk(terminal)
+                walk = terminal_owner._flat_leaf_walk(
+                    terminal,
+                    aliases if terminal_owner is cls else _NO_ALIASES,
+                )
                 field_path, lookup = _filterset_walked_lookup(terminal_owner, terminal)
                 remainder = field_path if walk is None else walk[1]
                 if (
@@ -7567,6 +7633,8 @@ class FilterSet(
         """
         for hop in hops:
             if isinstance(hop, UndeclaredHop):
+                for via in hop.via:
+                    await cls._await_scoped_rows(via.scope, info, into, parent_db)
                 await cls._await_scoped_rows(hop.scope, info, into, parent_db)
                 continue
             owner, related_filter = _filter_declaration(hop)
@@ -7848,7 +7916,11 @@ class FilterSet(
         chain = cls._routed_leaf_chain(declared, bind)
         return (declared,) if chain is None else chain.decoding_filters()
 
-    def _leaf_chain(self, filter_instance: Filter) -> _LeafChain | None:
+    def _leaf_chain(
+        self,
+        filter_instance: Filter,
+        aliases: Mapping[str, str] | None = None,
+    ) -> _LeafChain | None:
         """Return how an active leaf of this set reads the related rows, ``None`` for a leaf walking no hop.
 
         A ``ProjectedChildFilter`` reads its projection's hop, then whatever its child filter
@@ -7919,13 +7991,22 @@ class FilterSet(
                     owned_rows=(owned_rows, *fallback.owned_rows),
                 ),
             )
-        return type(self)._routed_leaf_chain(filter_instance, self._bound_terminal)
+        return type(self)._routed_leaf_chain(
+            filter_instance,
+            self._bound_terminal,
+            self._leaf_aliases(aliases),
+        )
+
+    def _leaf_aliases(self, aliases: Mapping[str, str] | None) -> Mapping[str, str]:
+        """Return ``aliases``, or when ``None`` the ``FilteredRelation`` aliases of the set's own queryset."""
+        return _query_aliases(require(self.queryset, is_queryset)) if aliases is None else aliases
 
     @classmethod
     def _routed_leaf_chain(
         cls,
         filter_instance: Filter,
         bind: Callable[[Filter, RelationHop, str], Filter],
+        aliases: Mapping[str, str] = _NO_ALIASES,
     ) -> _LeafChain | None:
         """Return the chain a walked leaf of this set runs, each terminal bound by ``bind``.
 
@@ -7941,7 +8022,7 @@ class FilterSet(
         the relation's target, as the relation's key does, unless it stands for that set's
         own key (``_stands_for_own_key``: a flat copy of the set's own declaration).
         """
-        walk = cls._flat_leaf_walk(filter_instance)
+        walk = cls._flat_leaf_walk(filter_instance, aliases)
         if walk is None:
             return None
         hops, target_path = walk
@@ -8218,11 +8299,93 @@ class FilterSet(
         undeclared hop admits ``rows`` as they are.
         """
         if isinstance(hop, UndeclaredHop):
+            if hop.alias is not None:
+                return self._reaches_alias(outer, hop, rows)
             return _reaches_related(outer, hop.declared_attr, rows)
         owner, related_filter = _filter_declaration(hop)
         admitted = _admitted_rows(owner, hop.declared_attr, related_filter, rows, self.request)
         via = owner._via_rows(related_filter, self._apply_info, self._hop_visibility(), outer.db)
         return _reaches_related(outer, _declared_field_name(related_filter), admitted, via)
+
+    def _reaches_alias(
+        self,
+        outer: models.QuerySet[_M],
+        hop: UndeclaredHop,
+        rows: models.QuerySet[models.Model],
+    ) -> Exists:
+        """Return ``EXISTS`` "the ``outer`` row reaches a row of ``rows`` through the alias ``hop`` crosses".
+
+        Read over the ``outer`` row again (``correlated_inner_root``, which resolves the
+        ``FilteredRelation`` aliases ``outer`` holds), so Django joins the alias with its
+        own condition: the row the alias joins is one of ``rows``, and each relation it
+        crosses before that (``UndeclaredHop.via``) joins a row its target type lets the
+        request see, in one ``filter`` call, so each names the join the alias crosses.
+        """
+        conditions: dict[str, object] = {f"{hop.alias}{LOOKUP_SEP}in": rows}
+        for via in hop.via:
+            if via.scope is not None:
+                conditions[f"{via.declared_attr}{LOOKUP_SEP}in"] = self._hop_visible_rows(
+                    via,
+                    outer.db,
+                )
+        return Exists(
+            refuse_rebound_annotations(correlated_inner_root(outer).filter(**conditions), outer),
+        )
+
+    def _reaches_none(
+        self,
+        outer: models.QuerySet[_M],
+        hop: RelationHop,
+        visible: models.QuerySet[models.Model],
+    ) -> Q:
+        """Return "the ``outer`` row reaches no row of ``visible`` across ``hop``", as Django reads ``NULL``.
+
+        The ``isnull=True`` null extension of a walked leaf (``_apply_relation_leaf``). Across
+        a ``FilteredRelation`` alias, Django's own join decides which rows read the alias as
+        ``NULL`` (an outer join of a relation it may null-extend; an inner join of a non-null
+        forward key drops a row whose related row the alias's condition leaves out): a row
+        reads it as Django does, or as ``NULL`` when every row its alias joins is hidden.
+        """
+        if not (isinstance(hop, UndeclaredHop) and hop.alias is not None):
+            return ~Q(self._reaches_hop(outer, hop, visible))
+        return self._alias_nulls(outer, hop) | (
+            Q(self._alias_rows_exist(outer, hop)) & ~Q(self._reaches_alias(outer, hop, visible))
+        )
+
+    def _alias_joins(self, outer: models.QuerySet[_M], hop: RelationHop) -> Q:
+        """Return "Django's own join of the alias ``hop`` crosses keeps the ``outer`` row", else ``Q()``.
+
+        A negated walked leaf keeps only such a row, as Django's exclude across the alias
+        does: an inner join of a non-null forward key drops a row whose related row the
+        alias's condition leaves out, whatever else the query reads.
+        """
+        if not (isinstance(hop, UndeclaredHop) and hop.alias is not None):
+            return Q()
+        return self._alias_nulls(outer, hop) | Q(self._alias_rows_exist(outer, hop))
+
+    @staticmethod
+    def _alias_nulls(outer: models.QuerySet[_M], hop: UndeclaredHop) -> Q:
+        """Return "Django reads the alias ``hop`` crosses as ``NULL`` on the ``outer`` row"."""
+        return Q(
+            Exists(
+                refuse_rebound_annotations(
+                    correlated_inner_root(outer).filter(
+                        **{f"{hop.alias}{LOOKUP_SEP}isnull": True},
+                    ),
+                    outer,
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _alias_rows_exist(outer: models.QuerySet[_M], hop: UndeclaredHop) -> Exists:
+        """Return "the alias ``hop`` crosses joins some row to the ``outer`` row", every row read."""
+        return Exists(
+            refuse_rebound_annotations(
+                correlated_inner_root(outer).filter(**{f"{hop.alias}{LOOKUP_SEP}isnull": False}),
+                outer,
+            ),
+        )
 
     def _reaches_key(
         self,
@@ -8281,7 +8444,12 @@ class FilterSet(
             return require_instance(chain.fallback, _LeafChain), None
         return chain, named
 
-    def _absent_leaf_applies(self, filter_instance: Filter, value: object) -> bool:
+    def _absent_leaf_applies(
+        self,
+        filter_instance: Filter,
+        value: object,
+        aliases: Mapping[str, str] | None = None,
+    ) -> bool:
         """Whether a leaf the request left absent constrains anything for the ``value`` it cleaned to.
 
         A filter that returns its input BY IDENTITY applied no constraint
@@ -8335,7 +8503,7 @@ class FilterSet(
         # A caller passes only a leaf ``_flat_leaf_walk`` reads or a ``ProjectedChildFilter``,
         # which always carries its projection hop.
         chain, _named = self._request_chain(
-            require_instance(self._leaf_chain(filter_instance), _LeafChain),
+            require_instance(self._leaf_chain(filter_instance, aliases), _LeafChain),
             value,
             lambda hop, using: base_queryset(_hop_model(hop), using=using),
             built.db,
@@ -8345,12 +8513,17 @@ class FilterSet(
         if chain.view:
             rows, terminal = self._relation_view(chain.view, terminal, rows, None)
         try:
-            return terminal.filter(rows, chain.terminal_value(value, built.db)) is not rows
+            return terminal.filter(rows, chain.terminal_value(value, built)) is not rows
         except FieldError:
             # Only a compiled lookup can raise it, so the leaf constrains something.
             return True
 
-    def _walks_on_request(self, name: str, filter_instance: Filter) -> bool:
+    def _walks_on_request(
+        self,
+        name: str,
+        filter_instance: Filter,
+        aliases: Mapping[str, str] | None = None,
+    ) -> bool:
         """Whether leaf ``name`` takes the branch path (``_apply_relation_leaf``) on this request.
 
         Every leaf ``_walks_relation_hops`` reads, except a ``RelatedFilter`` head the
@@ -8360,10 +8533,14 @@ class FilterSet(
         """
         if isinstance(filter_instance, RelatedFilter) and self._leaf_absent(name):
             return False
-        return type(self)._walks_relation_hops(filter_instance)
+        return type(self)._walks_relation_hops(filter_instance, self._leaf_aliases(aliases))
 
     @classmethod
-    def _walks_relation_hops(cls, filter_instance: Filter) -> bool:
+    def _walks_relation_hops(
+        cls,
+        filter_instance: Filter,
+        aliases: Mapping[str, str] = _NO_ALIASES,
+    ) -> bool:
         """Whether a leaf of this set takes the branch path (``_apply_relation_leaf``).
 
         A leaf whose walk reads visibility (``_flat_leaf_walk``) and a
@@ -8371,7 +8548,7 @@ class FilterSet(
         """
         return (
             isinstance(filter_instance, ProjectedChildFilter)
-            or cls._flat_leaf_walk(filter_instance) is not None
+            or cls._flat_leaf_walk(filter_instance, aliases) is not None
         )
 
     def _probe_absent_relation_leaves(self) -> tuple[RelationHop, ...]:
@@ -8408,7 +8585,9 @@ class FilterSet(
             applies = self._absent_leaf_applies(filter_instance, value)
             verdicts[name] = (value, applies)
             if applies:
-                hops.extend(type(self)._visibility_hops(filter_instance))
+                hops.extend(
+                    type(self)._visibility_hops(filter_instance, self._leaf_aliases(None)),
+                )
         self._absent_leaf_verdicts = verdicts
         return tuple(hops)
 
@@ -8700,10 +8879,11 @@ class FilterSet(
         same way, over the rows each relation shows and each declaration's ``queryset=``
         admits (``_LeafChain.null_view``).
         """
+        aliases = _query_aliases(queryset)
         if not supplied:
             applies = self._recorded_verdict(name, value)
             if applies is None:
-                applies = self._absent_leaf_applies(filter_instance, value)
+                applies = self._absent_leaf_applies(filter_instance, value, aliases)
             if not applies:
                 return queryset
         using = queryset.db
@@ -8714,15 +8894,15 @@ class FilterSet(
             supplied
             and value in forms.Field.empty_values
             and _runs_shipped_filter(filter_instance)
-            and self._necessary_annotation_hop(filter_instance) is not None
-            and not self._absent_leaf_applies(filter_instance, value)
+            and self._necessary_annotation_hop(filter_instance, aliases) is not None
+            and not self._absent_leaf_applies(filter_instance, value, aliases)
         ):
             return queryset
         # (``_branch_visibility_seed``).
-        for hop in type(self)._visibility_hops(filter_instance):
+        for hop in type(self)._visibility_hops(filter_instance, aliases):
             _ = self._hop_visible_rows(hop, using)
         chain, named = self._request_chain(
-            require_instance(self._leaf_chain(filter_instance), _LeafChain),
+            require_instance(self._leaf_chain(filter_instance, aliases), _LeafChain),
             value,
             self._hop_visible_rows,
             using,
@@ -8732,7 +8912,7 @@ class FilterSet(
         if negate:
             terminal = copy.copy(terminal)
             terminal.exclude = False
-        value = chain.terminal_value(value, using)
+        value = chain.terminal_value(value, queryset)
         null_extends = (
             terminal.method is None and terminal.lookup_expr == "isnull" and value is True
         )
@@ -8747,12 +8927,17 @@ class FilterSet(
                         inner_root,
                         using,
                     )
-                inner = self._filter_child_rows(terminal, inner_root, value)
+                inner = refuse_rebound_annotations(
+                    self._filter_child_rows(terminal, inner_root, value),
+                    queryset,
+                )
                 if inner is inner_root:
                     return queryset
                 if not chain.view:
                     inner = inner.filter(self._reaches_key(inner, chain, key_hop, named, using))
-                return queryset.filter(~Exists(inner))
+                return queryset.filter(
+                    ~Exists(inner) & self._alias_joins(queryset, (*chain.key_via, key_hop)[0]),
+                )
             # The parent's own rows: the filter's original invocation, consumer
             # ``distinct`` included, as for a leaf walking no hop.
             source = queryset
@@ -8785,10 +8970,12 @@ class FilterSet(
             outer = visible[index - 1] if index else queryset
             condition = Q(self._reaches_hop(outer, chain.hops[index], rows))
             if null_extends:
-                condition |= ~Q(self._reaches_hop(outer, chain.hops[index], visible[index]))
+                condition |= self._reaches_none(outer, chain.hops[index], visible[index])
             if index:
                 rows = outer.filter(condition)
-        return queryset.filter(~condition if negate else condition)
+        return queryset.filter(
+            ~condition & self._alias_joins(queryset, chain.hops[0]) if negate else condition,
+        )
 
     def _leaf_absent(self, name: str) -> bool:
         """Whether the request's data carries no key the form field of leaf ``name`` reads.
@@ -8928,7 +9115,7 @@ class FilterSet(
             if not self._leaf_absent(name):
                 _refuse_generated_filter_output(filter_instance, None, type(self))
             value = _held_integer_value(filter_instance, cleaned, queryset)
-            if self._walks_on_request(name, filter_instance):
+            if self._walks_on_request(name, filter_instance, _query_aliases(queryset)):
                 walked, walked_value = (
                     _head_null_test(filter_instance, value)
                     if isinstance(filter_instance, RelatedFilter)
@@ -9666,7 +9853,12 @@ class FilterSet(
                hop map every later step reads (``_await_declared_hop_rows``).
             2. Await, via ``_derive_flat_hop_visibility_async``, ordinary
                resolved declared hops a top-level flat relation leaf names,
-               into the request-wide hop map.
+               into the request-wide hop map. A leaf whose path starts at a
+               ``FilteredRelation`` alias of ``queryset`` (``_query_aliases``)
+               awaits the alias hop and each relation it crosses; an alias only
+               a ``filter_queryset`` override adds is not on ``queryset``, so its
+               hops derive at the ``.qs`` read, where a target type whose
+               ``get_queryset`` is async-only raises ``SyncMisuseError``.
             3. Pre-walk every ``and`` / ``or`` / ``not`` arm via
                ``_collect_nested_visibility_querysets_async`` so nested
                branches whose target type's ``get_queryset`` is async-only
@@ -9706,6 +9898,7 @@ class FilterSet(
         """
         cls._assert_logic_depth(_depth)
         flat_hop_visibility = {} if _hop_visibility is None else _hop_visibility
+        aliases = _query_aliases(queryset)
         child_qs_by_branch = await cls._derive_related_visibility_querysets_async(
             input_value,
             info,
@@ -9719,6 +9912,7 @@ class FilterSet(
             info,
             flat_hop_visibility,
             parent_db=queryset.db,
+            aliases=aliases,
         )
         nested_qs_by_branch_id = await cls._collect_nested_visibility_querysets_async(
             input_value,
@@ -9727,6 +9921,7 @@ class FilterSet(
             _depth=_depth,
             _branch_path=_branch_path,
             flat_hop_visibility=flat_hop_visibility,
+            aliases=aliases,
         )
 
         def constrained_stage() -> tuple[

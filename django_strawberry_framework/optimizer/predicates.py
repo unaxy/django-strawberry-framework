@@ -62,18 +62,23 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar, cast
 
 from django.core.exceptions import FieldDoesNotExist
-from django.db.models import Case, Exists, F, ForeignKey, OuterRef, Q, When
+from django.db.models import Case, Exists, F, FilteredRelation, ForeignKey, OuterRef, Q, When
 from django.db.models.constants import LOOKUP_SEP
+from django.db.models.expressions import Col
+from django.db.models.fields.reverse_related import ForeignObjectRel
+from django.db.models.sql.datastructures import Join
 
 from django_strawberry_framework.exceptions import ConfigurationError, OptimizerError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     is_concrete_field,
+    is_dict,
     is_str,
     list_of,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.querysets import VisibleRowExists
 from django_strawberry_framework.utils.relations import (
@@ -88,7 +93,7 @@ from django_strawberry_framework.utils.relations import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from django.contrib.contenttypes.fields import GenericRelation
     from django.db import models
@@ -97,6 +102,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.typing import ConcreteField, ForeignKeyField, ModelField
 
 _M = TypeVar("_M", bound="models.Model")
+_RowT = TypeVar("_RowT")
 
 _RESERVED_ALIAS_PREFIX = "_dst_predicate_"
 
@@ -122,7 +128,127 @@ def correlated_inner_root(queryset: QuerySet[_M]) -> QuerySet[_M]:
       link's own columns.
     """
     model = queryset.model
-    return model._base_manager.using(queryset.db).filter(pk=OuterRef("pk"))
+    return resolving_filtered_relations(
+        model._base_manager.using(queryset.db).filter(pk=OuterRef("pk")),
+        queryset,
+    )
+
+
+def resolving_filtered_relations(
+    rows: QuerySet[_M],
+    source: QuerySet[models.Model, object],
+) -> QuerySet[_M]:
+    """Return a copy of ``rows`` resolving every ``FilteredRelation`` alias ``source`` holds.
+
+    A filter written against ``source`` may start its path at one of its aliases; over the
+    copy it joins the alias as over ``source``, its condition included, an ``F()`` naming
+    one of ``source``'s annotations too: the copy holds each annotation ``rows`` lacks,
+    unselected.
+    """
+    # Adapted from django/db/models/sql/query.py::Query.split_exclude (BSD; LICENSE.django):
+    # Django's own subquery for an exclude across a relation resolves the outer query's
+    # aliases by handing it the outer ``_filtered_relations``. Beyond it, the outer
+    # annotations are handed over too, so a condition reading one resolves, where
+    # ``split_exclude`` raises ``FieldError``: the copy is correlated to the outer row's
+    # pk, so a per-row annotation reads that row's value.
+    rows = rows.all()
+    query = rows.query
+    state = truth.instance_state(query)
+    state["_filtered_relations"] = {
+        **require(state.get("_filtered_relations"), is_dict),
+        **require(read_attr(source.query, "_filtered_relations", None), is_dict),
+    }
+    own = require(state.get("annotations"), is_dict)
+    selected = list(query.annotation_select)
+    outer = require(source.query.annotations, is_dict)
+    state["annotations"] = {**outer, **own}
+    _ = query.set_annotation_mask(selected)
+    return rows
+
+
+def refuse_rebound_annotations(
+    rows: QuerySet[_M, _RowT],
+    source: QuerySet[models.Model, object],
+) -> QuerySet[_M, _RowT]:
+    """Return ``rows`` (a ``resolving_filtered_relations`` copy, filtered), refusing a rebound annotation.
+
+    A handed-over annotation reads the outer query's table aliases, and Django renames the
+    copy's own joins, the annotations it holds included, when it nests the copy: an
+    annotation an alias's condition reads that names a table alias the copy's filter
+    joined itself (``Query.alias_map``) would read the copy's row there, not the outer
+    row's, so the alias is refused with ``ConfigurationError``, unless that join is the
+    outer's own row there (``_same_forward_chain``). Each base table is its query's own
+    row: the outer row itself, correlated by its pk, and, over rows no pk correlates
+    (``_LeafChain.terminal_value``'s build, never executed), rows nothing reads.
+    """
+    filtered = require(read_attr(source.query, "_filtered_relations", None), is_dict)
+    annotations = require(source.query.annotations, is_dict)
+    # The base table's alias is its table's name; never ``Query.base_table``, a cached
+    # property whose read before the query joins anything caches ``None``.
+    base = source.model._meta.db_table
+    joined = {str(name) for name in rows.query.alias_map} - {base, rows.model._meta.db_table}
+    for alias, relation in filtered.items():
+        filtered_relation = require_instance(relation, FilteredRelation)
+        for name in sorted(_condition_names(filtered_relation.condition)):
+            annotation = annotations.get(name)
+            if annotation is None:
+                continue
+            for table in sorted(_read_tables(annotation) & joined):
+                if _same_forward_chain(source.query.alias_map, rows.query.alias_map, table, base):
+                    continue
+                raise ConfigurationError(
+                    f"FilteredRelation alias {alias!r} reads annotation {name!r}, which reads "
+                    f"{table!r}; a filter over the alias joins {table!r} again to reach "
+                    f"{filtered_relation.relation_name!r}, which would rebind the annotation "
+                    "to that join, so no filter can scope the alias.",
+                )
+    return rows
+
+
+def _same_forward_chain(
+    outer: Mapping[str, object],
+    inner: Mapping[str, object],
+    alias: str,
+    base: str,
+) -> bool:
+    """Whether table alias ``alias`` joins the same row in both queries, the outer's own row.
+
+    Walked up each join's ``parent_alias`` to the base: every step is the same ``Join``
+    (Django's own equality, its ``identity``: table, parent alias, join field and
+    ``FilteredRelation``, whatever its join type) over a forward many-to-one or
+    one-to-one key, so from the pk-correlated base row each step reaches one row, the one
+    the outer reached.
+    """
+    while alias != base:
+        join = outer.get(alias)
+        if not truth.is_instance(join, Join) or join != inner.get(alias):
+            return False
+        field = read_attr(join, "join_field")
+        if truth.is_instance(field, ForeignObjectRel) or not (
+            read_attr(field, "many_to_one", None) is True
+            or read_attr(field, "one_to_one", None) is True
+        ):
+            return False
+        alias = require(read_attr(join, "parent_alias"), is_str)
+    return True
+
+
+def _condition_names(condition: Q) -> set[str]:
+    """Return the first name of each ``F()`` ``condition`` reads."""
+    return {
+        require(read_attr(node, "name"), is_str).split(LOOKUP_SEP)[0]
+        for node in list_of(call_method(condition, "flatten"))
+        if truth.is_instance(node, F)
+    }
+
+
+def _read_tables(expression: object) -> set[str]:
+    """Return the table alias of each column ``expression`` reads."""
+    return {
+        require_instance(read_attr(node, "alias"), str)
+        for node in list_of(call_method(expression, "flatten"))
+        if truth.is_instance(node, Col)
+    }
 
 
 def _effective_alias_names(queryset: QuerySet[models.Model]) -> set[str]:

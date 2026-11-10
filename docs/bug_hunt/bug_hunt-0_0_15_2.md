@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 485 done, 119 to do. The CHANGELOG entries filed here moved to
+Progress: 486 done, 119 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2603,6 +2603,33 @@ Progress: 485 done, 119 to do. The CHANGELOG entries filed here moved to
   type, type-name and model-label slots, a union without the primary, whole-field batches, an alias, an uncoercible
   literal, a plain `strawberry.Schema`) and `tests/test_relay_node_field.py` (the construction refusals and builds,
   `::test_a_plain_object_annotation_holds_no_relay_type`)
+- [x] 792. A declared filter whose path starts at a `FilteredRelation` alias of the queryset the set filters
+  (`CharFilter("vshelf__code")`, `ListFilter("vshelf", lookup_expr="in")`, reverse, many-to-many, past the alias, an
+  alias over several relations or over another alias; added by a type's `get_queryset`, the queryset handed to the set
+  or a `filter_queryset` override) now reads the visibility of each relation the alias joins, its condition read by
+  Django's own join of the alias, on GraphQL, `apply_sync`, `apply_async` and raw forms, where the anonymous viewer
+  matched through rows the target type's `get_queryset` hides. `filters/sets.py::_query_aliases` reads
+  `Query._filtered_relations` off the queryset the leaves run over; `utils/permissions.py::_walk_undeclared_hops`
+  walks the alias as one `UndeclaredHop` (`alias`, `via`), and `::_alias_hop` refuses an alias joining no relation
+  path with `ConfigurationError`; `filters/sets.py::FilterSet._reaches_alias` reaches rows over
+  `optimizer/predicates.py::correlated_inner_root`, which hands the inner root the outer aliases and annotations
+  (`::resolving_filtered_relations`, adapted from Django's `Query.split_exclude`); `isnull=True` and `exclude` keep
+  Django's INNER-join answer (`_reaches_none`, `_alias_joins`). An annotation a condition reads over a table alias the
+  filter's own joins also define (read off Django's `Query.alias_map`: a relation the alias crosses, the alias it
+  starts at, a join Django numbers, a many-to-many through table) is refused with `ConfigurationError` naming the
+  alias, the annotation and the table alias (`optimizer/predicates.py::refuse_rebound_annotations`), unless every step
+  from the base is the same `Join` over a forward key (`::_same_forward_chain`). Under `apply_async` an alias only
+  `filter_queryset` adds is not awaited, so an async-only target hook raises `SyncMisuseError`. Grid: anonymous leaks
+  1256 to 0 and inverse 180 to 0 of 1548 alias cells; real-relation, staff and no-hidden-rows cells and statement
+  counts unchanged. README, spec-027 (Decision 8 step 3, Slice 4a, Edge cases, Test plan, DoD 33) and GLOSSARY
+  `FilterSet` (pk 463) follow. Pinned by `examples/fakeshop/test_query/test_filter_apply_arguments_api.py`
+  (`::test_a_flat_path_starting_at_a_filtered_relation_alias_reads_each_relations_visibility`,
+  `::test_an_alias_only_filter_queryset_adds_is_not_awaited_before_an_async_only_hook`,
+  `::test_a_filtered_relation_alias_joining_no_relation_is_refused_when_a_leaf_walks_it`,
+  `::test_an_absent_alias_key_whose_filter_reads_its_path_answers_over_the_visible_rows`,
+  `::test_an_alias_condition_reading_an_annotation_its_joins_would_rebind_is_refused`) and
+  `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_key_over_a_filtered_relation_alias_reads_the_shelfs_visibility`.
+  Filed 906. CHANGELOGTODO 905
 
 ## To do: found along the way
 
@@ -2687,12 +2714,6 @@ Progress: 485 done, 119 to do. The CHANGELOG entries filed here moved to
   unwalked answers (`ScalarSpecimen.children` naming two children: walked `[]`, unwalked `['p1']`): each AND is re-read
   on the target key column over a single target row (`filters/sets.py::FilterSet._leaf_chain`,
   `_LeafChain.terminal_value`). One declaration, two answers (GOAL "Trust boundary"). Found researching 784
-- [ ] 792. A declared filter whose path crosses a `FilteredRelation` alias (`ListFilter("vshelf", lookup_expr="in")`,
-  `CharFilter("vshelf__code")`, fakeshop's `par__occurred_at`) reads no visibility on the alias hop: a shelf
-  `ShelfType.get_queryset` hides still matches for anon through `vshelf`, on GraphQL, `apply_sync` and raw forms
-  (README: a flat path "answers as Django would if every row the target type's `get_queryset` hides ... did not exist").
-  Its values are cleaned over the set's queryset (804). Needs the hop walk to treat the alias's relation as a walked hop
-  over the applied queryset's `_filtered_relations`. Split from 721
 - [ ] 795. (robustness) A consumer `filter` override on a flat leaf a hop walks, on a forward relation key or a path
   into a target column, that returns a new queryset when it constrains nothing (`return qs.distinct()` or `qs.all()` on
   an empty value) reads as constraining, so supplied empty or left out it keeps only the parents that reach a visible
@@ -2808,6 +2829,10 @@ Progress: 485 done, 119 to do. The CHANGELOG entries filed here moved to
   `String` from no field) and fails every request carrying a value with Django's `FieldError` (`Query.names_to_path`),
   masked over a resolver; `filters/inputs.py::refuse_joinless_relation` judges only a path ending on one. Found
   researching 877
+- [ ] 906. (robustness) A `GlobalIDFilter` whose `field_name` names a `FilteredRelation` alias (`field_name="vshelf"`)
+  is not judged when its set publishes: the build-time GlobalID checks (`filters/sets.py::_globalid_decode_sites`)
+  cannot see an alias, which only the queryset holds, so its key checks no type name against the alias's target and an
+  encode-only target over the alias is refused per request instead of at build. Found fixing 792
 
 ## To do: holes found re-checking the fixes
 

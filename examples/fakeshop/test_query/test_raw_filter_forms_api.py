@@ -30,6 +30,8 @@ null-test filter over a ``GenericForeignKey``, a model-choice filter with no que
 or selected by ``Meta.filter_overrides``) is refused at every construction, while a filter on
 the content type key beside a ``GenericForeignKey`` or on the ``GenericRelation`` reversing it
 answers its rows.
+A raw key starting at a ``FilteredRelation`` alias the set's ``filter_queryset`` adds reads
+the visibility of the shelf the alias joins and of the branch past it, under every driver.
 """
 
 import contextlib
@@ -338,11 +340,27 @@ class _QuerysetlessOverrideSet(FilterSet):
         filter_overrides = {ForeignKey: {"filter_class": django_filters.ModelChoiceFilter}}
 
 
+class _AliasedShelfBookSet(FilterSet):
+    """Book filters over a ``FilteredRelation`` alias the set's own ``filter_queryset`` adds."""
+
+    shelf_code = CharFilter(field_name="vshelf__code")
+    shelf_branch = CharFilter(field_name="vshelf__branch__name")
+
+    class Meta:
+        model = library_models.Book
+        fields = ("title",)
+
+    @override
+    def filter_queryset(self, queryset: QuerySet[Model]) -> QuerySet[Model]:
+        return super().filter_queryset(queryset.alias(vshelf=FilteredRelation("shelf")))
+
+
 #: The raw sets the driver routes build, by route name.
 _RAW_SETS: dict[str, type[FilterSet]] = {
     "book-filter": BookFilter,
     "plain-subclass": _PlainBookFilter,
     "unserved": _UnservedBookSet,
+    "aliased-shelf": _AliasedShelfBookSet,
     "unserved-flat-off": _UnservedFlatOffBookSet,
     "reading-list-entry-filter": ReadingListEntryFilter,
     "reading-list-filter": ReadingListFilter,
@@ -2639,6 +2657,48 @@ def test_a_raw_set_no_type_names_answers_a_walked_key_as_book_filter(
 
     assert _raw_set_ids(client, driver, name, query) == expected
     assert _raw_set_ids(client, driver, "book-filter", query) == expected
+
+
+#: (raw key over the alias and value, the titles each viewer's request answers)
+_ALIASED_KEYS: dict[str, tuple[dict[str, str], list[str], list[str]]] = {
+    "alias-column-on-a-hidden-shelf": ({"shelf_code": "S-secret"}, [], ["b-secret"]),
+    "past-the-alias-on-a-hidden-branch": ({"shelf_branch": "Vault"}, [], ["b-vault"]),
+    "past-the-alias-through-a-hidden-shelf": (
+        {"shelf_branch": "Home"},
+        ["b-open"],
+        ["b-open", "b-secret"],
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("viewer", ["anonymous", "staff"])
+@pytest.mark.parametrize("key", sorted(_ALIASED_KEYS))
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_key_over_a_filtered_relation_alias_reads_the_shelfs_visibility(
+    driver: str,
+    key: str,
+    viewer: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A raw key starting at an alias the set's ``filter_queryset`` adds walks the alias as a hop.
+
+    ``vshelf`` joins ``Book.shelf``: under a consumer's own construction, DRF's
+    ``DjangoFilterBackend`` and django-filter's ``FilterView``, the anonymous viewer never
+    matches a book through the secret shelf or the restricted branch past it, and staff read
+    every row, in one statement.
+    """
+    create_users(1)
+    _register_hiding_types()
+    books = _shelved_world()
+    client = _raw_set_client(viewer)
+    query, anonymous, staff = _ALIASED_KEYS[key]
+    recorded = record_compiled_sql(library_models.Book._meta.db_table)
+
+    assert _raw_set_ids(client, driver, "aliased-shelf", query) == [
+        books[title] for title in (staff if viewer == "staff" else anonymous)
+    ]
+    assert len(recorded) == 1, recorded
 
 
 #: (the set, the refusal its first construction raises)

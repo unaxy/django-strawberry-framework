@@ -17,15 +17,23 @@ logical domain succeeds; only missing package inner parsers prepare before clean
 Raw ``.qs`` keeps safe sibling filtering on the same form when native errors suppress
 uncached bind-only hooks. Permission gates precede annotation parser and bind preparation;
 each owner is cached.
+A leaf whose path starts at a ``FilteredRelation`` alias of the queryset the set filters, handed
+to it or added by its ``filter_queryset``, walks the alias as a hop over the relations it joins
+and reads each relation's visibility, its condition held by Django's own join; an alias only
+``filter_queryset`` adds is not awaited before an async-only hook, which raises, and one joining
+no relation is refused. A condition may read the queryset's annotations, but one reading a table
+the alias's own joins would rebind is refused; a to-many alias key whose ``filter`` override
+reads its own path, supplied or absent, answers over the visible rows.
 """
 
 import asyncio
+import copy
 import datetime
 import logging
 import os
 from collections.abc import Awaitable, Callable, Mapping
-from functools import wraps
-from typing import TYPE_CHECKING, Annotated, ClassVar, NoReturn
+from functools import partial, wraps
+from typing import TYPE_CHECKING, Annotated, ClassVar, NamedTuple, NoReturn
 
 import pytest
 import strawberry
@@ -55,6 +63,7 @@ from django_filters import (
     CharFilter,
     DateTimeFilter,
     DurationFilter,
+    Filter,
     ModelMultipleChoiceFilter,
     MultipleChoiceFilter,
     NumberFilter,
@@ -93,6 +102,7 @@ from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._cleaned_filter_sets import cleaned_specimen
+from tests._idioms import saved_pk
 
 if TYPE_CHECKING:
     from django_strawberry_framework import DjangoType
@@ -7453,3 +7463,851 @@ def test_async_resolved_relation_leaf_awaits_its_actual_terminal_owner(scenario:
         "data": {"rows": [] if scenario == "key-membership" else [{"name": "empty"}]},
     }, payload
     assert calls == ["default"]
+
+
+def _alias_hook(hide: Mapping[str, object], *, awaited: bool = False) -> object:
+    """A ``get_queryset`` hiding the rows ``hide`` matches from every viewer but staff."""
+
+    def visible(queryset: QuerySet[Model], info: object) -> QuerySet[Model]:
+        user = read_attr(read_attr(read_attr(info, "context"), "request"), "user", None)
+        return queryset if read_attr(user, "is_staff", None) is True else queryset.exclude(**hide)
+
+    def get_queryset(
+        cls: type[object],
+        queryset: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        del cls
+        return visible(queryset, info)
+
+    async def aget_queryset(
+        cls: type[object],
+        queryset: QuerySet[Model],
+        info: object,
+    ) -> QuerySet[Model]:
+        del cls
+        return visible(queryset, info)
+
+    return classmethod(aget_queryset if awaited else get_queryset)
+
+
+def _alias_targets(*, awaited_shelf: bool = False) -> tuple["type[DjangoType]", ...]:
+    """Types hiding a secret shelf, a restricted branch, a book in repair and a hidden genre."""
+    return tuple(
+        make_django_type(
+            name,
+            model,
+            (column,),
+            node=False,
+            meta_extra={"primary": True},
+            namespace_extra={
+                "get_queryset": _alias_hook(hide, awaited=awaited_shelf and model is models.Shelf),
+            },
+        )
+        for name, model, column, hide in (
+            (
+                "AliasShelfTarget",
+                models.Shelf,
+                "code",
+                {"topic": "secret"},
+            ),
+            (
+                "AliasBranchTarget",
+                models.Branch,
+                "name",
+                {"city": "restricted"},
+            ),
+            (
+                "AliasBookTarget",
+                models.Book,
+                "title",
+                {"circulation_status": "repair"},
+            ),
+            (
+                "AliasGenreTarget",
+                models.Genre,
+                "name",
+                {"name": "hidden"},
+            ),
+        )
+    )
+
+
+def _alias_world() -> dict[str, int]:
+    """Shelves ``A-1`` (open), ``B-2`` (secret, tier 3), ``C-3`` (restricted branch) and a book on each.
+
+    ``bk3`` is in repair; ``bk1`` is in the open genre, ``bk2`` in the hidden one, ``bk3`` in
+    both. Each book's ``subtitle`` names a shelf topic: ``bk1`` and ``bk2`` their own shelf's.
+    ``A-1`` and ``B-2`` each hold a circulation desk, a model no type here exposes, and one
+    patron borrows each book (``loan-bk1``, ...).
+    """
+    open_branch = models.Branch.objects.create(name="b-open", city="x")
+    restricted = models.Branch.objects.create(name="b-restr", city="restricted")
+    shelves = {
+        code: models.Shelf.objects.create(branch=branch, code=code, topic=topic, tier=tier)
+        for code, branch, topic, tier in (
+            (
+                "A-1",
+                open_branch,
+                "open",
+                1,
+            ),
+            (
+                "B-2",
+                open_branch,
+                "secret",
+                3,
+            ),
+            (
+                "C-3",
+                restricted,
+                "open",
+                2,
+            ),
+        )
+    }
+    for code in ("A-1", "B-2"):
+        models.CirculationDesk.objects.create(
+            name=f"desk-{code}",
+            branch=open_branch,
+            shelf=shelves[code],
+        )
+    open_genre = models.Genre.objects.create(name="open")
+    hidden_genre = models.Genre.objects.create(name="hidden")
+    books = {
+        title: models.Book.objects.create(
+            shelf=shelves[code],
+            title=title,
+            subtitle=subtitle,
+            circulation_status=status,
+        )
+        for title, code, subtitle, status in (
+            (
+                "bk1",
+                "A-1",
+                "open",
+                "available",
+            ),
+            (
+                "bk2",
+                "B-2",
+                "secret",
+                "available",
+            ),
+            (
+                "bk3",
+                "C-3",
+                "x",
+                "repair",
+            ),
+        )
+    }
+    patron = models.Patron.objects.create(name="reader")
+    for title in ("bk1", "bk2", "bk3"):
+        models.Loan.objects.create(book=books[title], patron=patron, note=f"loan-{title}")
+    books["bk1"].genres.set([open_genre])
+    books["bk2"].genres.set([hidden_genre])
+    books["bk3"].genres.set([open_genre, hidden_genre])
+    return {
+        **{code: saved_pk(shelf) for code, shelf in shelves.items()},
+        **{title: saved_pk(book) for title, book in books.items()},
+    }
+
+
+class _OverridingAliasKey(ListFilter):
+    """A list filter overriding ``filter``, so a to-many key runs it as declared."""
+
+    @override
+    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+        return super().filter(qs, value)
+
+
+class _JoinedAliasKey(ListFilter):
+    """A list filter overriding ``filter`` to keep the rows its path joins, whatever its value."""
+
+    @override
+    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+        del value
+        return qs.filter(**{f"{self.field_name}__isnull": False}).distinct()
+
+
+def _aliased(
+    **relations: django_models.FilteredRelation,
+) -> Callable[[QuerySet[Model]], QuerySet[Model]]:
+    """Return a queryset hook adding a copy of each of ``relations`` as an alias, in order.
+
+    Django's ``Query.add_filtered_relation`` rewrites the instance it is handed, so each
+    queryset gets its own.
+    """
+
+    def alias(rows: QuerySet[Model]) -> QuerySet[Model]:
+        return rows.alias(
+            **{name: copy.deepcopy(relation) for name, relation in relations.items()},
+        )
+
+    return alias
+
+
+def _shelf_reading(
+    condition: django_models.Q,
+    **annotations: django_models.Expression | django_models.F | django_models.Subquery,
+) -> Callable[[QuerySet[Model]], QuerySet[Model]]:
+    """Return a hook annotating ``annotations``, then aliasing ``vshelf`` under ``condition``.
+
+    A ``vs0`` alias of the shelf is added first, so an annotation may read it.
+    """
+
+    def alias(rows: QuerySet[Model]) -> QuerySet[Model]:
+        return (
+            rows.alias(vs0=django_models.FilteredRelation("shelf"))
+            .annotate(**copy.deepcopy(annotations))
+            .alias(vshelf=django_models.FilteredRelation("shelf", condition=condition))
+        )
+
+    return alias
+
+
+def _book_branch_reading_its_shelf(rows: QuerySet[Model]) -> QuerySet[Model]:
+    """Alias each book's shelf's branch under a condition reading its shelf's topic."""
+    return rows.annotate(want=django_models.F("shelf__topic")).alias(
+        vb=django_models.FilteredRelation(
+            "shelf__branch",
+            condition=~django_models.Q(shelf__branch__city=django_models.F("want")),
+        ),
+    )
+
+
+def _loan_branch_reading_its_shelf(rows: QuerySet[Model]) -> QuerySet[Model]:
+    """Alias each loan's book's shelf's branch under a condition reading the shelf's topic."""
+    return rows.annotate(want=django_models.F("book__shelf__topic")).alias(
+        vb=django_models.FilteredRelation(
+            "book__shelf__branch",
+            condition=~django_models.Q(book__shelf__branch__city=django_models.F("want")),
+        ),
+    )
+
+
+def _first_genre() -> django_models.Subquery:
+    return django_models.Subquery(
+        models.Genre.objects.filter(books=django_models.OuterRef("pk"))
+        .order_by("name")
+        .values("name")[:1],
+    )
+
+
+def _shelf(condition: django_models.Q | None = None) -> django_models.FilteredRelation:
+    if condition is None:
+        return django_models.FilteredRelation("shelf")
+    return django_models.FilteredRelation("shelf", condition=condition)
+
+
+_TIER_TWO = django_models.Q(shelf__tier__gte=2)
+_OWN_TOPIC = django_models.Q(shelf__topic=django_models.F("subtitle"))
+
+
+class _InRows(NamedTuple):
+    """An ``in`` value naming world rows by label, read as their keys."""
+
+    labels: tuple[str, ...]
+
+
+class _AliasCase(NamedTuple):
+    """A leaf over an alias, its JSON value, and the rows each viewer reads."""
+
+    model: type[Model]
+    alias: Callable[[QuerySet[Model]], QuerySet[Model]]
+    leaf: Callable[[], Filter]
+    value: object
+    anonymous: list[str]
+    staff: list[str]
+
+
+_ALIAS_CASES: dict[str, _AliasCase] = {
+    "forward-column": _AliasCase(
+        models.Book,
+        _aliased(vshelf=_shelf()),
+        partial(CharFilter, field_name="vshelf__code"),
+        "B-2",
+        [],
+        ["bk2"],
+    ),
+    "forward-key": _AliasCase(
+        models.Book,
+        _aliased(vshelf=_shelf()),
+        partial(ListFilter, field_name="vshelf", lookup_expr="in"),
+        _InRows(("B-2",)),
+        [],
+        ["bk2"],
+    ),
+    "reverse-column": _AliasCase(
+        models.Shelf,
+        _aliased(vbooks=django_models.FilteredRelation("books")),
+        partial(CharFilter, field_name="vbooks__title"),
+        "bk3",
+        [],
+        ["C-3"],
+    ),
+    "reverse-key": _AliasCase(
+        models.Shelf,
+        _aliased(vbooks=django_models.FilteredRelation("books")),
+        partial(ListFilter, field_name="vbooks", lookup_expr="in"),
+        _InRows(("bk3",)),
+        [],
+        ["C-3"],
+    ),
+    "many-to-many-column": _AliasCase(
+        models.Book,
+        _aliased(vgenres=django_models.FilteredRelation("genres")),
+        partial(CharFilter, field_name="vgenres__name"),
+        "hidden",
+        [],
+        ["bk2", "bk3"],
+    ),
+    "past-the-alias": _AliasCase(
+        models.Book,
+        _aliased(vshelf=_shelf()),
+        partial(CharFilter, field_name="vshelf__branch__name"),
+        "b-restr",
+        [],
+        ["bk3"],
+    ),
+    "alias-of-two-relations": _AliasCase(
+        models.Book,
+        _aliased(vbranch=django_models.FilteredRelation("shelf__branch")),
+        partial(CharFilter, field_name="vbranch__name"),
+        "b-open",
+        ["bk1"],
+        ["bk1", "bk2"],
+    ),
+    "alias-into-a-model-no-type-exposes": _AliasCase(
+        models.Book,
+        _aliased(vdesk=django_models.FilteredRelation("shelf__circulation_desk")),
+        partial(CharFilter, field_name="vdesk__name"),
+        "desk-B-2",
+        [],
+        ["bk2"],
+    ),
+    "alias-over-an-alias": _AliasCase(
+        models.Book,
+        _aliased(
+            vshelf=_shelf(_TIER_TWO),
+            vbranch=django_models.FilteredRelation("vshelf__branch"),
+        ),
+        partial(CharFilter, field_name="vbranch__name"),
+        "b-open",
+        [],
+        ["bk2"],
+    ),
+    "condition-reading-the-row": _AliasCase(
+        models.Book,
+        _aliased(vshelf=_shelf(_OWN_TOPIC)),
+        partial(CharFilter, field_name="vshelf__code"),
+        "B-2",
+        [],
+        ["bk2"],
+    ),
+    "condition-reading-a-value-annotation": _AliasCase(
+        models.Book,
+        _shelf_reading(
+            django_models.Q(shelf__code=django_models.F("want")),
+            want=django_models.Value("B-2"),
+        ),
+        partial(CharFilter, field_name="vshelf__code"),
+        "B-2",
+        [],
+        ["bk2"],
+    ),
+    "condition-reading-a-joined-annotation": _AliasCase(
+        models.Book,
+        _shelf_reading(
+            django_models.Q(shelf__code=django_models.F("want")),
+            want=django_models.F("shelf__code"),
+        ),
+        partial(CharFilter, field_name="vshelf__code"),
+        "B-2",
+        [],
+        ["bk2"],
+    ),
+    "condition-reading-a-to-many-annotation": _AliasCase(
+        models.Book,
+        _shelf_reading(
+            ~django_models.Q(shelf__topic=django_models.F("want")),
+            want=django_models.F("genres__name"),
+        ),
+        partial(CharFilter, field_name="vshelf__code"),
+        "B-2",
+        [],
+        ["bk2"],
+    ),
+    "condition-reading-a-subquery-annotation": _AliasCase(
+        models.Book,
+        _shelf_reading(
+            ~django_models.Q(shelf__topic=django_models.F("want")),
+            want=_first_genre(),
+        ),
+        partial(CharFilter, field_name="vshelf__code"),
+        "B-2",
+        [],
+        ["bk2"],
+    ),
+    "condition-reading-an-annotation-over-another-alias": _AliasCase(
+        models.Book,
+        _shelf_reading(
+            django_models.Q(shelf__code=django_models.F("want")),
+            want=django_models.F("vs0__code"),
+        ),
+        partial(CharFilter, field_name="vshelf__code"),
+        "B-2",
+        [],
+        ["bk2"],
+    ),
+    "forward-chain-reading-a-joined-annotation": _AliasCase(
+        models.Book,
+        _book_branch_reading_its_shelf,
+        partial(CharFilter, field_name="vb__name"),
+        "b-open",
+        ["bk1"],
+        ["bk1", "bk2"],
+    ),
+    "two-step-forward-chain-reading-a-joined-annotation": _AliasCase(
+        models.Loan,
+        _loan_branch_reading_its_shelf,
+        partial(CharFilter, field_name="vb__name"),
+        "b-open",
+        ["loan-bk1"],
+        ["loan-bk1", "loan-bk2"],
+    ),
+    "null-alias": _AliasCase(
+        models.Book,
+        _aliased(vshelf=_shelf(_OWN_TOPIC)),
+        partial(BooleanFilter, field_name="vshelf", lookup_expr="isnull"),
+        value=True,
+        anonymous=["bk2"],
+        staff=[],
+    ),
+    "non-null-alias": _AliasCase(
+        models.Book,
+        _aliased(vshelf=_shelf(_OWN_TOPIC)),
+        partial(BooleanFilter, field_name="vshelf", lookup_expr="isnull"),
+        value=False,
+        anonymous=["bk1"],
+        staff=["bk1", "bk2"],
+    ),
+    "excluded-column": _AliasCase(
+        models.Book,
+        _aliased(vshelf=_shelf()),
+        partial(CharFilter, field_name="vshelf__code", exclude=True),
+        "B-2",
+        ["bk1", "bk2", "bk3"],
+        ["bk1", "bk3"],
+    ),
+    "excluded-key": _AliasCase(
+        models.Book,
+        _aliased(vshelf=_shelf()),
+        partial(ListFilter, field_name="vshelf", lookup_expr="in", exclude=True),
+        _InRows(("B-2",)),
+        ["bk1", "bk2", "bk3"],
+        ["bk1", "bk3"],
+    ),
+    "excluded-key-past-a-condition": _AliasCase(
+        models.Book,
+        _aliased(vshelf=_shelf(_TIER_TWO)),
+        partial(ListFilter, field_name="vshelf", lookup_expr="in", exclude=True),
+        _InRows(("B-2",)),
+        ["bk2", "bk3"],
+        ["bk3"],
+    ),
+    "overriding-to-many-key": _AliasCase(
+        models.Shelf,
+        _aliased(vbooks=django_models.FilteredRelation("books")),
+        partial(_OverridingAliasKey, field_name="vbooks", lookup_expr="in"),
+        _InRows(("bk3",)),
+        [],
+        ["C-3"],
+    ),
+    "overriding-to-many-key-past-a-condition": _AliasCase(
+        models.Shelf,
+        _aliased(
+            vbooks=django_models.FilteredRelation(
+                "books",
+                condition=django_models.Q(books__title="bk1"),
+            ),
+        ),
+        partial(_OverridingAliasKey, field_name="vbooks", lookup_expr="in"),
+        _InRows(("bk2",)),
+        [],
+        [],
+    ),
+    "overriding-to-many-key-naming-no-row": _AliasCase(
+        models.Shelf,
+        _aliased(
+            vbooks=django_models.FilteredRelation(
+                "books",
+                condition=django_models.Q(books__title="bk1"),
+            ),
+        ),
+        partial(_OverridingAliasKey, field_name="vbooks", lookup_expr="in"),
+        {"in_": [999999]},
+        [],
+        [],
+    ),
+    "overriding-to-many-key-reading-its-path": _AliasCase(
+        models.Shelf,
+        _aliased(
+            vbooks=django_models.FilteredRelation(
+                "books",
+                condition=django_models.Q(books__title="bk1"),
+            ),
+        ),
+        partial(_JoinedAliasKey, field_name="vbooks", lookup_expr="in"),
+        {"in_": []},
+        ["A-1"],
+        ["A-1"],
+    ),
+    "overriding-to-many-key-reading-its-path-to-a-hidden-row": _AliasCase(
+        models.Shelf,
+        _aliased(
+            vbooks=django_models.FilteredRelation(
+                "books",
+                condition=django_models.Q(books__title="bk3"),
+            ),
+        ),
+        partial(_JoinedAliasKey, field_name="vbooks", lookup_expr="in"),
+        {"in_": []},
+        [],
+        ["C-3"],
+    ),
+    "overriding-many-to-many-key-reading-its-path": _AliasCase(
+        models.Genre,
+        _aliased(
+            vbooks=django_models.FilteredRelation(
+                "books",
+                condition=django_models.Q(books__title__in=["bk2", "bk3"]),
+            ),
+        ),
+        partial(_JoinedAliasKey, field_name="vbooks", lookup_expr="in"),
+        {"in_": []},
+        ["hidden"],
+        ["open", "hidden"],
+    ),
+}
+
+
+def _alias_value(value: object, world: Mapping[str, int]) -> object:
+    if isinstance(value, _InRows):
+        return {"in_": [world[label] for label in value.labels]}
+    return value
+
+
+def _alias_set(case: _AliasCase, *, placed_by_set: bool) -> type[FilterSet]:
+    """A set declaring ``case``'s leaf; with ``placed_by_set`` its ``filter_queryset`` adds the alias."""
+    meta = type("Meta", (), {"model": case.model, "fields": []})
+    namespace: dict[str, object] = {"leaf": case.leaf(), "Meta": meta}
+    if placed_by_set:
+
+        def filter_queryset(self: FilterSet, queryset: QuerySet[Model]) -> QuerySet[Model]:
+            return FilterSet.filter_queryset(self, case.alias(queryset))
+
+        namespace["filter_queryset"] = filter_queryset
+    return type("AliasCriteria", (FilterSet,), namespace)
+
+
+def _alias_client(transport: str, viewer: str) -> Client | AsyncClient:
+    client = AsyncClient() if transport == "async" else Client()
+    if viewer == "staff":
+        client.force_login(User.objects.get(username="staff_1"))
+    return client
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("viewer", ["anonymous", "staff"])
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("placement", ["handed-queryset", "filter-queryset"])
+@pytest.mark.parametrize("case", sorted(_ALIAS_CASES))
+def test_a_flat_path_starting_at_a_filtered_relation_alias_reads_each_relations_visibility(
+    case: str,
+    placement: str,
+    transport: str,
+    viewer: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A leaf over a ``FilteredRelation`` alias answers as Django does over the rows each type shows.
+
+    The alias walks as a hop over the relations it joins, forward, reverse, many-to-many, past
+    the alias, over two relations and over another alias, its condition (an ``F()`` reading the
+    book included) holding through Django's own join: the anonymous viewer never matches through
+    a secret shelf, a restricted branch, a book in repair or a hidden genre, and reads an alias
+    whose joined shelf is hidden as ``NULL``, while Django's ``INNER`` join of a non-null forward
+    key drops a book whose shelf the condition leaves out under ``isNull`` and ``exclude`` alike.
+    Staff read Django's literal rows. The alias is on the queryset handed to the set or added by
+    the set's ``filter_queryset``, under ``apply_sync`` and ``apply_async``, in one statement.
+    """
+    create_users(1)
+    selected = _ALIAS_CASES[case]
+    world = _alias_world()
+    columns: dict[type[Model], str] = {
+        models.Book: "title",
+        models.Shelf: "code",
+        models.Loan: "note",
+    }
+    column = columns.get(selected.model, "name")
+    schema = _schema(
+        _alias_set(selected, placed_by_set=placement == "filter-queryset"),
+        selected.model,
+        transport=transport,
+        fields=(column,),
+        targets=_alias_targets(),
+        annotated=selected.alias if placement == "handed-queryset" else None,
+    )
+    client = _alias_client(transport, viewer)
+    recorded = record_compiled_sql("library_")
+    payload = _post(
+        schema,
+        {"leaf": _alias_value(selected.value, world)},
+        transport=transport,
+        selection=column,
+        client=client,
+    )
+    expected = selected.staff if viewer == "staff" else selected.anonymous
+    assert payload == {"data": {"rows": [{column: row} for row in expected]}}, payload
+    assert len(recorded) == 1, recorded
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("placement", ["handed-queryset", "filter-queryset"])
+@pytest.mark.parametrize(
+    ("case", "rows"),
+    [("forward-column", []), ("alias-of-two-relations", ["bk1"])],
+)
+def test_an_alias_only_filter_queryset_adds_is_not_awaited_before_an_async_only_hook(
+    case: str,
+    rows: list[str],
+    placement: str,
+) -> None:
+    """``apply_async`` awaits an async-only target hook for an alias on the queryset it is handed.
+
+    The shelf hook is async-only, for the shelf the alias joins and for the shelf an alias of
+    two relations passes through. An alias the set's ``filter_queryset`` adds exists only once
+    the set filters, after every hook the handed queryset names was awaited, so the async-only
+    shelf hook it reaches raises ``SyncMisuseError`` rather than reading the shelf unscoped.
+    """
+    create_users(1)
+    selected = _ALIAS_CASES[case]
+    _alias_world()
+    schema = _schema(
+        _alias_set(selected, placed_by_set=placement == "filter-queryset"),
+        models.Book,
+        transport="async",
+        fields=("title",),
+        targets=_alias_targets(awaited_shelf=True),
+        annotated=selected.alias if placement == "handed-queryset" else None,
+    )
+    payload = _post(schema, {"leaf": selected.value}, transport="async", selection="title")
+    if placement == "handed-queryset":
+        assert payload == {"data": {"rows": [{"title": title} for title in rows]}}, payload
+    else:
+        _refused(
+            payload,
+            (
+                "AliasShelfTarget.get_queryset returned a coroutine in a sync resolver context. "
+                "A related filter reads its target type's get_queryset; await "
+                "FilterSet.apply_async from an async resolver (a connection field does under "
+                "await schema.execute() or the async view) instead, or redefine get_queryset "
+                "as a sync method."
+            ),
+        )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_a_filtered_relation_alias_joining_no_relation_is_refused_when_a_leaf_walks_it(
+    transport: str,
+) -> None:
+    """An alias whose ``relation_name`` names a column, which Django accepts, scopes no hop.
+
+    A leaf starting at it is refused naming the alias and the path it joins, rather than
+    compiled over rows no type was asked about.
+    """
+    create_users(1)
+    _alias_world()
+    selected = _AliasCase(
+        models.Book,
+        _aliased(vtitle=django_models.FilteredRelation("title")),
+        partial(CharFilter, field_name="vtitle"),
+        "bk1",
+        [],
+        [],
+    )
+    schema = _schema(
+        _alias_set(selected, placed_by_set=False),
+        models.Book,
+        transport=transport,
+        fields=("title",),
+        targets=_alias_targets(),
+        annotated=selected.alias,
+    )
+    _refused(
+        _post(schema, {"leaf": "bk1"}, transport=transport, selection="title"),
+        (
+            "FilteredRelation alias 'vtitle' joins 'title', which is not a path of relations "
+            "of Book a filter can scope."
+        ),
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("viewer", ["anonymous", "staff"])
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("placement", ["handed-queryset", "filter-queryset"])
+def test_an_absent_alias_key_whose_filter_reads_its_path_answers_over_the_visible_rows(
+    placement: str,
+    transport: str,
+    viewer: str,
+) -> None:
+    """A to-many alias key overriding ``filter`` acts though the request names no key.
+
+    Its override keeps the shelves its path joins, whatever its value, so asked whether it
+    constrains it does, over the set's own rows too (where an alias ``filter_queryset`` adds
+    is not yet joined), and it answers over the alias's books its type lets the viewer see.
+    """
+    create_users(1)
+    selected = _ALIAS_CASES["overriding-to-many-key-reading-its-path-to-a-hidden-row"]
+    _alias_world()
+    schema = _schema(
+        _alias_set(selected, placed_by_set=placement == "filter-queryset"),
+        models.Shelf,
+        transport=transport,
+        fields=("code",),
+        targets=_alias_targets(),
+        annotated=selected.alias if placement == "handed-queryset" else None,
+    )
+    payload = _post(
+        schema,
+        {},
+        transport=transport,
+        selection="code",
+        client=_alias_client(transport, viewer),
+    )
+    expected = selected.staff if viewer == "staff" else selected.anonymous
+    assert payload == {"data": {"rows": [{"code": row} for row in expected]}}, payload
+
+
+def _genre_shelf_reading_its_book(rows: QuerySet[Model]) -> QuerySet[Model]:
+    """Alias each genre's books' shelf under a condition reading a book column annotation."""
+    return rows.annotate(want=django_models.F("books__title")).alias(
+        vb=django_models.FilteredRelation(
+            "books__shelf",
+            condition=django_models.Q(books__shelf__code=django_models.F("want")),
+        ),
+    )
+
+
+def _branch_books_reading_their_shelf(rows: QuerySet[Model]) -> QuerySet[Model]:
+    """Alias each branch's shelves, then their books under a condition reading the shelf alias."""
+    return (
+        rows.alias(vs=django_models.FilteredRelation("shelves"))
+        .annotate(want=django_models.F("vs__code"))
+        .alias(
+            vbk=django_models.FilteredRelation(
+                "vs__books",
+                condition=django_models.Q(vs__books__subtitle=django_models.F("want")),
+            ),
+        )
+    )
+
+
+def _book_genres_reading_a_numbered_join(rows: QuerySet[Model]) -> QuerySet[Model]:
+    """Alias the genres of a book's shelf-mates under a condition reading a shelf-mate's title."""
+    return rows.annotate(want=django_models.F("shelf__books__title")).alias(
+        vg=django_models.FilteredRelation(
+            "shelf__books__genres",
+            condition=django_models.Q(shelf__books__genres__name=django_models.F("want")),
+        ),
+    )
+
+
+class _ReboundCase(NamedTuple):
+    """An alias whose condition reads an annotation the filter's own joins would rebind."""
+
+    model: type[Model]
+    alias: Callable[[QuerySet[Model]], QuerySet[Model]]
+    leaf: str
+    column: str
+    message: str
+
+
+_REBOUND_CASES: dict[str, _ReboundCase] = {
+    "a-table-the-relations-cross": _ReboundCase(
+        models.Genre,
+        _genre_shelf_reading_its_book,
+        "vb__code",
+        "name",
+        (
+            "FilteredRelation alias 'vb' reads annotation 'want', which reads 'library_book'; a "
+            "filter over the alias joins 'library_book' again to reach 'books__shelf', which "
+            "would rebind the annotation to that join, so no filter can scope the alias."
+        ),
+    ),
+    "the-alias-it-starts-at": _ReboundCase(
+        models.Branch,
+        _branch_books_reading_their_shelf,
+        "vbk__title",
+        "name",
+        (
+            "FilteredRelation alias 'vbk' reads annotation 'want', which reads 'vs'; a filter "
+            "over the alias joins 'vs' again to reach 'vs__books', which would rebind the "
+            "annotation to that join, so no filter can scope the alias."
+        ),
+    ),
+    "a-numbered-join": _ReboundCase(
+        models.Book,
+        _book_genres_reading_a_numbered_join,
+        "vg__name",
+        "title",
+        (
+            "FilteredRelation alias 'vg' reads annotation 'want', which reads 'T3'; a filter "
+            "over the alias joins 'T3' again to reach 'shelf__books__genres', which would "
+            "rebind the annotation to that join, so no filter can scope the alias."
+        ),
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("case", sorted(_REBOUND_CASES))
+def test_an_alias_condition_reading_an_annotation_its_joins_would_rebind_is_refused(
+    case: str,
+    transport: str,
+) -> None:
+    """An alias whose condition reads an annotation over a table alias its filter joins again.
+
+    Django renames the filter's own joins when it nests them, the annotation's included, so
+    the annotation would read the filter's row of that table: the leaf is refused naming the
+    alias, the annotation and the table alias, never answered over another row's value.
+    """
+    create_users(1)
+    _alias_world()
+    selected = _REBOUND_CASES[case]
+    schema = _schema(
+        _alias_set(
+            _AliasCase(
+                selected.model,
+                selected.alias,
+                partial(CharFilter, field_name=selected.leaf),
+                "bk2",
+                [],
+                [],
+            ),
+            placed_by_set=False,
+        ),
+        selected.model,
+        transport=transport,
+        fields=(selected.column,),
+        targets=_alias_targets(),
+        annotated=selected.alias,
+    )
+    _refused(
+        _post(schema, {"leaf": "bk2"}, transport=transport, selection=selected.column),
+        selected.message,
+    )
