@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 458 done, 116 to do. The CHANGELOG entries filed here moved to
+Progress: 459 done, 116 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2166,6 +2166,12 @@ Progress: 458 done, 116 to do. The CHANGELOG entries filed here moved to
   `::test_a_construction_racing_a_sets_first_build_copies_the_surface_the_build_publishes` and
   `::test_a_sets_constructions_publish_its_table_once`. Docs: README `FilterSet`, GLOSSARY `FilterSet`, spec-027
   Decisions 4 and 8. Filed 841. CHANGELOGTODO 842
+- [x] 841. Not a defect (AGENTS defect rule, GOAL "Trust boundary"): no contract row covers a third-party schema
+  generator, and no wire input reaches it. The README's raw-driver promise names `FilterSet(data, queryset,
+  request=...)`, DRF's `DjangoFilterBackend` and django-filter's `FilterView`. All three construct the set, and since
+  836 the construction publishes. drf-spectacular's `contrib/django_filters.py` reads `filterset_class.base_filters`
+  at schema generation, a startup-time configuration read, not a request. The contract question (whether a class-level
+  read should publish) is parked as 843
 
 ## Outside review of the fixes
 
@@ -2417,10 +2423,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   against `utils/querysets.py::relation_target_type(root=...)`, so when the two types' strategies differ (`model`
   primary, `type` secondary, key `shelf__books` on a set wired to the secondary) every nonempty value is refused, a
   primary-minted id as "expects BookSecondary", a secondary-minted id as "expects library.book". Found researching 745
-- [ ] 841. (robustness) drf-spectacular's `contrib/django_filters.py` reads `filterset_class.base_filters` without
-  constructing the set, so the OpenAPI parameters it generates for a `FilterSet` no `DjangoType` names list the
-  class-creation table (no walked keys) until the set's first construction publishes it (836), and the published table
-  after; `FilterSet.__init__` is the one first-use seam the package owns. Found fixing 836
 
 ## To do: holes found re-checking the fixes
 
@@ -2881,6 +2883,16 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `int(1)` (Django's `IntegerField.get_prep_value` truncates), nested `[["1.5"]]` and `[[1.5]]` bind `Decimal("1.5")`,
   which PostgreSQL's numeric-to-integer cast rounds to 2 (a JSON `1.5` already reached that cast nested before 692).
   Against 685's drop rule for a fractional integer `in` member. Unwired `apply_sync` / raw form only. Found fixing 692
+- [ ] 843. Decide: should reading a `FilterSet`'s class-level `base_filters` publish the set, so a tool that reads the
+  table without constructing it sees the published surface? drf-spectacular's `contrib/django_filters.py` does this
+  when it generates OpenAPI parameters. Before the set's first construction, a set no `DjangoType` names answers that
+  read with django-filter's class-creation table (no walked keys); after it, with the published table. The options:
+  (a) a lazy class-level `base_filters` (a data descriptor on `FilterSetMetaclass` that routes django-filter's
+  metaclass write and `_publish_filters` to a private slot, and a non-data descriptor for instance reads, so the
+  instance shadow keeps working), which covers every reader but replaces django-filter's plain class attribute; (b)
+  document that such a set publishes at its first construction and that a project calls `MySet.get_filters()` at
+  startup (`AppConfig.ready`) to publish it earlier; (c) leave it as is. No rule settles a contract for readers
+  outside the three drivers the README names. (Found fixing 836)
 
 ## Hunt not finished in t3
 
