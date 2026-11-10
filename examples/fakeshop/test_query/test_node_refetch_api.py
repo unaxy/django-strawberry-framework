@@ -14,6 +14,11 @@ same public refetch fields, as do a comma-list key whose Python value is an
 unhashable list, a decimal key SQLite stores as a float, and naive datetime keys
 read in the default time zone (including a DST fold or gap wall clock).
 
+An id naming a Relay type the executing schema does not publish (one another schema
+over the same registry emitted, or a model-label id whose primary type the schema omits)
+is ``GLOBALID_INVALID`` before any query or consumer resolver, sync and async; the typed
+form reports its mismatch first.
+
 An ``async def`` consumer ``resolve_node`` / ``resolve_nodes`` or ``get_queryset``
 under the sync view is refused with its sync-misuse message, never a null row or
 an invalid-id error; the exception classes stay in ``tests/test_relay_node_field.py``.
@@ -64,6 +69,7 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
+from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import is_exact_list, read_attr
@@ -1416,3 +1422,334 @@ def test_sync_refetch_reports_an_async_get_queryset_as_misuse_not_an_invalid_id(
         "the Relay node default from an async resolver, or redefine get_queryset as a sync method."
     )
     assert error.get("extensions") is None, error
+
+
+def _unpublished_refusal(slot: str, field: str, column: int) -> JSONObject:
+    """One ``GLOBALID_INVALID`` entry refusing an id whose slot names no type the schema publishes."""
+    message = (
+        f"Invalid GlobalID: model label {slot!r} decodes to no Relay-Node DjangoType "
+        "published in this schema"
+        if "." in slot
+        else f"Invalid GlobalID: No Relay-Node DjangoType is published as GraphQL type "
+        f"{slot!r} in this schema"
+    )
+    return {
+        "message": message,
+        "locations": [{"line": 1, "column": column}],
+        "path": [field],
+        "extensions": {"code": "GLOBALID_INVALID"},
+    }
+
+
+_TWO_NODES = "query ($id: ID!, $bad: ID!) { node(id: $id) { __typename } bad: node(id: $bad) { __typename } }"
+_ONE_NODES = "query ($ids: [ID!]!) { nodes(ids: $ids) { __typename } }"
+
+
+def _two_schemas_over_one_registry(
+    row: Category,
+    calls: list[str | list[str]],
+) -> tuple[DjangoSchema, DjangoSchema]:
+    """Schema A publishes ``ShownNode``; schema B publishes ``OtherNode``, whose resolvers record calls.
+
+    Both types are registered and finalized in one registry, so A's decode resolves
+    B's type-name id to ``OtherNode``, a type A publishes nowhere.
+    """
+    shown = _category_type("ShownNode", primary=True, globalid_strategy="type")
+
+    def _resolve_node(
+        _cls: type[DjangoType],
+        node_id: str,
+        *,
+        info: strawberry.Info[object, object],
+        required: bool = False,
+    ) -> Category:
+        del info, required
+        calls.append(node_id)
+        return row
+
+    def _resolve_nodes(
+        _cls: type[DjangoType],
+        *,
+        info: strawberry.Info[object, object],
+        node_ids: Iterable[str],
+        required: bool = False,
+    ) -> list[Category]:
+        del info, required
+        ids = list(node_ids)
+        calls.append(ids)
+        return [row for _ in ids]
+
+    other = make_django_type(
+        "OtherNode",
+        Category,
+        ("id", "name"),
+        meta_extra={"globalid_strategy": "type"},
+        namespace_extra={
+            "resolve_node": classmethod(_resolve_node),
+            "resolve_nodes": classmethod(_resolve_nodes),
+        },
+    )
+
+    def _query(emitted: type[DjangoType]) -> type[object]:
+        @strawberry.type
+        class Query:
+            node: relay.Node | None = DjangoNodeField()
+            nodes: list[relay.Node | None] = DjangoNodesField()
+            emitted_row: Category = strawberry.field(graphql_type=emitted, resolver=lambda: row)
+
+        return Query
+
+    finalize_django_types()
+    return (
+        DjangoSchema(query=_query(shown), config=strawberry_config(), types=[shown]),
+        DjangoSchema(query=_query(other), config=strawberry_config(), types=[other]),
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("field", ["node", "nodes"])
+@pytest.mark.parametrize("executor", ["sync", "async"])
+async def test_an_id_another_schema_emitted_is_refused_before_any_resolver_runs(
+    executor: str,
+    field: str,
+) -> None:
+    """Schema B's id posted to schema A is ``GLOBALID_INVALID``; no ``OtherNode`` resolver runs.
+
+    ``node`` refuses the id and its uncoercible spelling alike; ``nodes`` refuses a batch
+    holding it beside A's own id as a whole field. B itself serves the id through the
+    recording overrides, so an empty record on A means A never dispatched.
+    """
+    await sync_to_async(services.seed_data)(1)
+    row = await Category.objects.order_by("pk").afirst()
+    assert row is not None
+    calls: list[str | list[str]] = []
+    schema_a, schema_b = _two_schemas_over_one_registry(row, calls)
+    post = _post_async if executor == "async" else sync_to_async(_post)
+    emitted = await post(schema_b, "{ emittedRow { id } }")
+    other_id = json_str(emitted, "data", "emittedRow", "id")
+    assert relay.GlobalID.from_id(other_id).type_name == "OtherNode"
+    shown_id = json_str(await post(schema_a, "{ emittedRow { id } }"), "data", "emittedRow", "id")
+    if field == "node":
+        variables: dict[str, object] = {
+            "id": other_id,
+            "bad": str(relay.GlobalID("OtherNode", "abc")),
+        }
+        payload = await post(schema_a, _TWO_NODES, variables=variables)
+        expected: JSONObject = {
+            "data": {"node": None, "bad": None},
+            "errors": [
+                _unpublished_refusal("OtherNode", "node", 31),
+                _unpublished_refusal("OtherNode", "bad", 60),
+            ],
+        }
+    else:
+        variables = {"ids": [shown_id, other_id]}
+        payload = await post(schema_a, _ONE_NODES, variables=variables)
+        expected = {"data": None, "errors": [_unpublished_refusal("OtherNode", "nodes", 24)]}
+    assert payload == expected, payload
+    assert calls == []
+    served = await post(schema_b, _ONE_NODES, variables={"ids": [other_id]})
+    assert served == {"data": {"nodes": [{"__typename": "OtherNode"}]}}, served
+    assert calls == [[str(saved_pk(row))]]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_a_model_label_id_decoding_to_an_unpublished_primary_is_refused(field: str) -> None:
+    """A model-label id resolves to the model's primary type, refused when the schema omits it.
+
+    The published ``SecondaryNode`` shares the primary's model-label spelling, so its own
+    emitted id, and an uncoercible id under the same label, decode to the unpublished
+    ``PrimaryNode`` and name no type ``node`` can return; the label route never picks a
+    published secondary.
+    """
+    services.seed_data(1)
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    primary = _category_type("PrimaryNode", primary=True)
+    secondary = _category_type("SecondaryNode")
+
+    @strawberry.type
+    class Query:
+        node: relay.Node | None = DjangoNodeField()
+        nodes: list[relay.Node | None] = DjangoNodesField()
+        emitted_row: Category = strawberry.field(graphql_type=secondary, resolver=lambda: row)
+
+    finalize_django_types()
+    assert registry.get(Category) is primary
+    schema = DjangoSchema(query=Query, config=strawberry_config(), types=[secondary])
+    gid = json_str(_post(schema, "{ emittedRow { id } }"), "data", "emittedRow", "id")
+    assert relay.GlobalID.from_id(gid).type_name == "products.category"
+    if field == "node":
+        uncoercible = str(relay.GlobalID("products.category", "abc"))
+        payload = _post(schema, _TWO_NODES, variables={"id": gid, "bad": uncoercible})
+        expected: JSONObject = {
+            "data": {"node": None, "bad": None},
+            "errors": [
+                _unpublished_refusal("products.category", "node", 31),
+                _unpublished_refusal("products.category", "bad", 60),
+            ],
+        }
+    else:
+        payload = _post(schema, _ONE_NODES, variables={"ids": [gid]})
+        expected = {
+            "data": None,
+            "errors": [_unpublished_refusal("products.category", "nodes", 24)],
+        }
+    assert payload == expected, payload
+
+
+@pytest.mark.django_db
+def test_a_malformed_id_in_a_batch_is_reported_before_an_unpublished_one() -> None:
+    """Every id decodes before any published-type check, so the malformed one answers."""
+    services.seed_data(1)
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    calls: list[str | list[str]] = []
+    schema_a, schema_b = _two_schemas_over_one_registry(row, calls)
+    other_id = json_str(_post(schema_b, "{ emittedRow { id } }"), "data", "emittedRow", "id")
+    payload = _post(schema_a, _ONE_NODES, variables={"ids": [other_id, "!!!"]})
+    assert payload == {
+        "data": None,
+        "errors": [
+            {
+                "message": (
+                    "Invalid GlobalID: decode_global_id: '!!!' is not a valid GlobalID "
+                    "(malformed base64 or not a 'type_name:node_id' shape)."
+                ),
+                "locations": [{"line": 1, "column": 24}],
+                "path": ["nodes"],
+                "extensions": {"code": "GLOBALID_INVALID"},
+            },
+        ],
+    }, payload
+    assert calls == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("field", ["node", "nodes"])
+def test_typed_refetch_reports_an_unpublished_types_id_as_a_mismatch(field: str) -> None:
+    """The typed form checks its target before publication, so the id reads as a mismatch.
+
+    ``OtherNode`` is registered but published by no root of this schema; its id is not
+    the typed field's target, so the wrong-node-type text names it by its own spelling.
+    """
+    services.seed_data(1)
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    shown = _category_type("ShownNode", primary=True, globalid_strategy="type")
+    other = _category_type("OtherNode", globalid_strategy="type")
+    if field == "node":
+        schema = _schema_with("shown", shown | None, DjangoNodeField(shown))
+        document = "query ($id: ID!) { shown(id: $id) { name } }"
+        variables: dict[str, object] = {"id": global_id_for(other, saved_pk(row))}
+        data: object = {"shown": None}
+        column = 20
+    else:
+        schema = _schema_with("shown", list[shown | None], DjangoNodesField(shown))
+        document = "query ($ids: [ID!]!) { shown(ids: $ids) { name } }"
+        variables = {"ids": [global_id_for(other, saved_pk(row))]}
+        data = None
+        column = 24
+    payload = _post(schema, document, variables=variables)
+    assert payload == {
+        "data": data,
+        "errors": [
+            {
+                "message": "Wrong node type: expected a ShownNode id, received a OtherNode id.",
+                "locations": [{"line": 1, "column": column}],
+                "path": ["shown"],
+            },
+        ],
+    }, payload
+
+
+_ROUTED_READS: list[str] = []
+
+
+class _RecordingRouter:
+    """A ``DATABASE_ROUTERS`` entry recording each model it is asked to route a read for."""
+
+    def db_for_read(self, model: type[Model], **_hints: object) -> None:
+        _ROUTED_READS.append(model._meta.label)
+
+
+def _id_attr_recording_schema(
+    calls: list[str],
+) -> tuple[DjangoSchema, type[DjangoType], type[DjangoType]]:
+    """``nodes`` publishing ``ShownNode`` but not ``OtherNode``; both record ``resolve_id_attr``."""
+
+    def _resolve_id_attr(cls: type[DjangoType]) -> str:
+        calls.append(cls.__name__)
+        return "pk"
+
+    namespace = {"resolve_id_attr": classmethod(_resolve_id_attr)}
+    shown = make_django_type(
+        "ShownNode",
+        Category,
+        ("id", "name"),
+        meta_extra={"primary": True, "globalid_strategy": "type"},
+        namespace_extra=namespace,
+    )
+    other = make_django_type(
+        "OtherNode",
+        Category,
+        ("id", "name"),
+        meta_extra={"globalid_strategy": "type"},
+        namespace_extra=namespace,
+    )
+    schema = _schema_with(
+        "nodes",
+        list[relay.Node | None],
+        DjangoNodesField(),
+        extra_types=[shown],
+    )
+    return schema, shown, other
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("order", ["published-first", "unpublished-first"])
+def test_nodes_refuses_an_unpublished_id_before_reading_any_id_slot(order: str) -> None:
+    """The refusal precedes the batch's id-slot coercion, so no consumer ``resolve_id_attr`` runs.
+
+    Either position of the unpublished id refuses the whole field with neither type's
+    ``resolve_id_attr`` called; a served batch of the published id alone does call it.
+    """
+    services.seed_data(1)
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    calls: list[str] = []
+    schema, shown, other = _id_attr_recording_schema(calls)
+    ids = [global_id_for(shown, saved_pk(row)), global_id_for(other, saved_pk(row))]
+    if order == "unpublished-first":
+        ids.reverse()
+    calls.clear()
+    payload = _post(schema, _ONE_NODES, variables={"ids": ids})
+    assert payload == {"data": None, "errors": [_unpublished_refusal("OtherNode", "nodes", 24)]}
+    assert calls == []
+    served = _post(schema, _ONE_NODES, variables={"ids": [global_id_for(shown, saved_pk(row))]})
+    assert served == {"data": {"nodes": [{"__typename": "ShownNode"}]}}, served
+    assert "ShownNode" in calls
+    assert "OtherNode" not in calls
+
+
+@pytest.mark.django_db
+def test_nodes_refuses_an_unpublished_id_before_routing_any_read() -> None:
+    """The refusal precedes the batch's read-alias lookup, so no ``DATABASE_ROUTERS`` call runs.
+
+    A served batch of the published id routes its ``Category`` read through the same router.
+    """
+    services.seed_data(1)
+    row = Category.objects.order_by("pk").first()
+    assert row is not None
+    schema, shown, other = _id_attr_recording_schema([])
+    ids = [global_id_for(shown, saved_pk(row)), global_id_for(other, saved_pk(row))]
+    _ROUTED_READS.clear()
+    with override_settings(DATABASE_ROUTERS=[f"{__name__}.{_RecordingRouter.__qualname__}"]):
+        payload = _post(schema, _ONE_NODES, variables={"ids": ids})
+        refused_reads = list(_ROUTED_READS)
+        served = _post(schema, _ONE_NODES, variables={"ids": ids[:1]})
+    assert payload == {"data": None, "errors": [_unpublished_refusal("OtherNode", "nodes", 24)]}
+    assert refused_reads == []
+    assert served == {"data": {"nodes": [{"__typename": "ShownNode"}]}}, served
+    assert "products.Category" in _ROUTED_READS

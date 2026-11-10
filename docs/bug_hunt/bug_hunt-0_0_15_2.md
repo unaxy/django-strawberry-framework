@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 483 done, 119 to do. The CHANGELOG entries filed here moved to
+Progress: 484 done, 120 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2564,6 +2564,27 @@ Progress: 483 done, 119 to do. The CHANGELOG entries filed here moved to
   `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py` and `tests/filters/test_sets.py`
   (`::test_a_column_filter_on_a_relation_django_joins_publishes`,
   `::test_an_exact_list_on_a_generic_foreign_key_is_refused_for_the_relation`)
+- [x] 757. The root `node` / `nodes` fields now refuse a well-formed id naming a Relay type the executing schema does
+  not publish (a registered type no root, relation or `types=` entry reaches; an id another schema over the same
+  registry minted; a model-label id whose model's primary the schema omits) with `GLOBALID_INVALID`, before any query,
+  consumer `resolve_node` / `resolve_nodes`, `resolve_id_attr` or `DATABASE_ROUTERS` read routing, where they ran that
+  type's queryset and answered graphql-core's uncoded "Abstract type 'Node' must resolve to an Object type at runtime"
+  error for a visible row and `null` otherwise. Such an id anywhere in `nodes` fails the whole field (spec-032 Decision
+  5); the typed form still reports its wrong-node-type mismatch first. `relay.py::_require_published` over the new
+  public `types/relay.py::require_published_node` (one message source with `node_definition_for_published_name`), run
+  after `_check_typed_match` in both resolvers; the resolvers read the executing schema as required
+  (`relay.py::_executing_schema`). The decode fallback stays for mutations, filters, the typed mismatch message and the
+  public helpers (spec-031 Decision 8). Reproduced live on the `FAKESHOP_TEST_BOUND_SETS` Shelf secondaries; grid 94 of
+  223 rows moved, every one an unpublished id. Pinned by
+  `examples/fakeshop/test_query/test_library_api.py::test_node_refuses_a_registered_relay_type_the_shipped_schema_does_not_publish`,
+  `::test_nodes_with_an_unpublished_relay_type_id_fails_the_whole_field`, its async twin,
+  `test_globalid_naming_api.py::test_bare_node_refuses_an_unpublished_types_id_before_any_query` (+ `nodes`, typed),
+  and `test_node_refetch_api.py::test_an_id_another_schema_emitted_is_refused_before_any_resolver_runs`,
+  `::test_a_model_label_id_decoding_to_an_unpublished_primary_is_refused`,
+  `::test_nodes_refuses_an_unpublished_id_before_reading_any_id_slot`,
+  `::test_nodes_refuses_an_unpublished_id_before_routing_any_read`. Docs: README node paragraph and secondary
+  blockquote, GLOSSARY `DjangoNodeField` (pk 458) and `DjangoNodesField` (pk 520), spec-031 Decision 8, spec-032
+  (checklist, Error shapes, Decision 5, Edge cases, Test plan, DoD 3). Filed 883, 884. CHANGELOGTODO 885
 
 ## Outside review of the fixes
 
@@ -2604,11 +2625,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 757. Under `FAKESHOP_TEST_BOUND_SETS`, `node(id:)` for a type-strategy Relay secondary over Shelf
-  (`BindingPlainShelfType:1`, `BindingHidingShelfType:1`) fails for a visible row, anonymous and staff, with "Abstract
-  type 'Node' must resolve to an Object type at runtime for field 'Query.node'"; the Book secondaries resolve. Reported
-  by a probe, not yet reproduced on main; not a defect until reproduced through a public-API shape outside the
-  test-only override. Found probing 748
 - [ ] 68. A model's default manager hides rows from declared filter hops but not from undeclared filter hops or
   ordering. Answered 2026-11-03 from AGENTS and GOAL: a filtered default manager is not declared visibility (GOAL:
   visibility is a model rule or a type's `get_queryset`; a project manager is trusted code), and Django reads no
@@ -2812,6 +2828,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   masked over a resolver; `filters/inputs.py::refuse_joinless_relation` judges only a path ending on one. Found
   researching 877
 
+- [ ] 883. (robustness) A bare `DjangoNodeField()` annotated with a union or a narrower interface, and a typed
+  `DjangoNodeField(T)` whose annotation names a different type the schema publishes, hand the engine a row its
+  annotation cannot return: a visible row answers Strawberry's uncoded "The type ... cannot be resolved for the field"
+  / "Expected value of type ..." error after running the type's queryset, outside the documented node outcomes. 757's
+  refusal covers only types the schema publishes nowhere; the predicate here is the field's return type
+  (`GraphQLSchema.is_sub_type`). Found fixing 757
 ## To do: holes found re-checking the fixes
 
 
@@ -3304,6 +3326,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `tests/filters/test_base.py::test_resolve_globalid_target_walks_a_relation_primary_key`. Grids: 30200 MTI cells
   (5076 move under (a), all consumer flat leaves), 9058 one-to-one and plain cells (1152 move, 0 plain). Found
   verifying 860
+- [ ] 884. Decide: under a schema that publishes only a secondary over a model (its primary unpublished), a
+  model-label id (`products.category:<pk>`, which a model-strategy secondary itself emits) is refused by `node` /
+  `nodes` as `GLOBALID_INVALID` (757; before, the engine's abstract-type error). Should a model-label id instead route
+  to the one Relay type the executing schema publishes over its model, so a secondary-only schema can refetch the ids it
+  emits? That changes the model-label decode contract (README secondary blockquote, spec-031) for mutations and filters
+  too, and is ambiguous with several published secondaries. Found fixing 757
 
 ## Hunt not finished in t3
 

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 219 to do.
+Progress: 0 done, 220 to do.
 
 ## From dry-0_0_15_3
 
@@ -1046,6 +1046,13 @@ Progress: 0 done, 219 to do.
   raw construction, `DjangoFilterBackend` and `FilterView` included) instead of failing every request with Django's
   `FieldError`, and a served `isnull` one is refused at schema build. A `method=` filter and a `filter` override are
   unchanged
+- [ ] 885. CHANGELOG entry for item 757: root `node(id:)` / `nodes(ids:)` now refuse an id naming a Relay type the
+  executing schema does not publish (a registered type no root, relation or `types=` entry reaches, an id another
+  schema over the same registry emitted, or a model-label id whose model's primary the schema omits) with
+  `GLOBALID_INVALID`, before any query or consumer `resolve_node` / `resolve_nodes` (and before any consumer
+  `resolve_id_attr` or `DATABASE_ROUTERS` read routing), where they ran that type's queryset and answered graphql-core's
+  uncoded "Abstract type 'Node' must resolve to an Object type at runtime" error for a visible row, or `null`. Such an
+  id anywhere in `nodes` fails the whole field; the typed form still reports its wrong-node-type mismatch first
 
 ## From dry-upstream-0_0_15
 

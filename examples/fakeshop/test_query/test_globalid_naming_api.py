@@ -19,7 +19,8 @@ schemas over the products models cover what the composed one cannot: the
 ``Meta.globalid_strategy = "type"`` spelling with a converted name equal to another
 real type's own name (the id resolves to the type the schema publishes under that
 name, never the other one; a registered Relay type the schema does not publish
-keeps its own spelling), and a ``type`` child of a concrete ``model``-strategy
+keeps its own spelling in the typed mismatch message, and the bare ``node`` / ``nodes``
+refuse its id as ``GLOBALID_INVALID``), and a ``type`` child of a concrete ``model``-strategy
 Relay parent, whose shadowing closure emits the published name like every other
 ``type`` type.
 """
@@ -734,6 +735,7 @@ def collision_schema() -> Iterator[DjangoSchema]:
     @strawberry.type
     class Query:
         node: relay.Node | None = DjangoNodeField()
+        nodes: list[relay.Node | None] = DjangoNodesField()
         item: ApiCategoryNode | None = DjangoNodeField(ApiCategoryNode)
         items: list[ApiCategoryNode | None] = DjangoNodesField(ApiCategoryNode)
         categories: DjangoConnection[CategoryNode] = DjangoConnectionField(CategoryNode)
@@ -818,6 +820,90 @@ def test_typed_mismatch_names_an_unpublished_type_by_its_own_spelling() -> None:
     assert [json_at(error, "message") for error in json_list(payload, "errors")] == [
         "Wrong node type: expected a ApiApiCategoryNode id, received a PropertyNode id.",
     ]
+
+
+def _unpublished_property_error(field: str, column: int) -> JSONObject:
+    """The ``GLOBALID_INVALID`` entry refusing ``PropertyNode:<pk>`` under ``collision_schema``."""
+    return {
+        "message": (
+            "Invalid GlobalID: No Relay-Node DjangoType is published as GraphQL type "
+            "'PropertyNode' in this schema"
+        ),
+        "locations": [{"line": 1, "column": column}],
+        "path": [field],
+        "extensions": {"code": "GLOBALID_INVALID"},
+    }
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("collision_schema")
+def test_bare_node_refuses_an_unpublished_types_id_before_any_query() -> None:
+    """``node(id: "PropertyNode:<pk>")`` names no type this schema can return: ``GLOBALID_INVALID``.
+
+    The id decodes to the registered ``PropertyNode`` (the typed field above names it), but
+    no root publishes it, so the bare field refuses it before the property table is read
+    rather than handing the engine a row of a type outside the schema.
+    """
+    seed_data(1)
+    prop = models.Property.objects.earliest("pk")
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = _payload(
+            "query($id: ID!) { node(id: $id) { __typename } }",
+            {"id": _gid("PropertyNode", prop.pk)},
+        )
+
+    assert payload == {"data": {"node": None}, "errors": [_unpublished_property_error("node", 19)]}
+    assert _table_queries(captured, "products_property") == []
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("collision_schema")
+def test_bare_nodes_refuses_a_batch_holding_an_unpublished_types_id() -> None:
+    """A published category id beside the unpublished property id fails the whole ``nodes`` field."""
+    seed_data(1)
+    category = models.Category.objects.earliest("pk")
+    prop = models.Property.objects.earliest("pk")
+
+    with CaptureQueriesContext(connection) as captured:
+        payload = _payload(
+            "query($ids: [ID!]!) { nodes(ids: $ids) { __typename } }",
+            {"ids": [_published_id("CategoryNode", category.pk), _gid("PropertyNode", prop.pk)]},
+        )
+
+    assert payload == {"data": None, "errors": [_unpublished_property_error("nodes", 23)]}
+    assert _table_queries(captured, "products_category") == []
+    assert _table_queries(captured, "products_property") == []
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("collision_schema")
+def test_typed_nodes_names_an_unpublished_type_as_a_mismatch_first() -> None:
+    """The typed ``items(ids:)`` batch checks the target before publication: a mismatch message.
+
+    ``PropertyNode`` is not the field's target, so the wrong-node-type text names it by
+    its own spelling, as the single typed field does.
+    """
+    seed_data(1)
+    prop = models.Property.objects.earliest("pk")
+
+    payload = _payload(
+        "query($ids: [ID!]!) { items(ids: $ids) { name } }",
+        {"ids": [_gid("PropertyNode", prop.pk)]},
+    )
+
+    assert payload == {
+        "data": None,
+        "errors": [
+            {
+                "message": (
+                    "Wrong node type: expected a ApiApiCategoryNode id, received a PropertyNode id."
+                ),
+                "locations": [{"line": 1, "column": 23}],
+                "path": ["items"],
+            },
+        ],
+    }
 
 
 class _PropertyAsCategory(NameConverter):

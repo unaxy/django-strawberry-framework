@@ -29517,6 +29517,109 @@ async def test_async_a_type_strategy_secondary_refetches_through_its_own_get_que
     assert payload == _secondary_refetch_payload(field, staff=False), payload
 
 
+_UNPUBLISHED_SHELF_TYPES = ("BindingPlainShelfType", "BindingHidingShelfType")
+_UNPUBLISHED_NODE_DOCUMENT = "query($id: ID!) { node(id: $id) { __typename } }"
+_UNPUBLISHED_NODES_DOCUMENT = "query($ids: [ID!]!) { nodes(ids: $ids) { __typename } }"
+
+
+def _unpublished_shelf_refusal(type_name: str, field: str) -> JSONValue:
+    """The whole payload refusing a ``type_name`` id: ``node`` nulls itself, ``nodes`` the data."""
+    error: JSONValue = {
+        "message": (
+            f"Invalid GlobalID: No Relay-Node DjangoType is published as GraphQL type "
+            f"{type_name!r} in this schema"
+        ),
+        "locations": [{"line": 1, "column": 19 if field == "node" else 23}],
+        "path": [field],
+        "extensions": {"code": "GLOBALID_INVALID"},
+    }
+    return {"data": {"node": None} if field == "node" else None, "errors": [error]}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("row", ["visible", "secret", "missing"])
+@pytest.mark.parametrize("type_name", _UNPUBLISHED_SHELF_TYPES)
+def test_node_refuses_a_registered_relay_type_the_shipped_schema_does_not_publish(
+    project_schema_override: Callable[[], None],
+    type_name: str,
+    row: str,
+) -> None:
+    """An id naming a Relay secondary no root reaches is ``GLOBALID_INVALID``, before any query.
+
+    The opt-in Shelf secondaries are registered and finalized but published by no
+    root, relation or ``types=`` entry of the shipped schema. Their type-name id
+    names no type ``node`` can return, so a visible, a hidden (``topic="secret"``,
+    which the hiding secondary's hook excludes) and a missing row all answer the
+    one refusal, and no ``library_shelf`` statement runs.
+    """
+    branch = models.Branch.objects.create(name="Unpublished", city="Boston")
+    pks = {
+        "visible": pk_of(models.Shelf.objects.create(branch=branch, code="V", topic="open")),
+        "secret": pk_of(models.Shelf.objects.create(branch=branch, code="S", topic="secret")),
+        "missing": 999_999,
+    }
+    with override_settings(FAKESHOP_TEST_BOUND_SETS=True):
+        project_schema_override()
+        with CaptureQueriesContext(connection) as captured:
+            payload = response_json(
+                _post_graphql(
+                    _UNPUBLISHED_NODE_DOCUMENT,
+                    variables={"id": str(relay.GlobalID(type_name, str(pks[row])))},
+                ),
+            )
+    assert payload == _unpublished_shelf_refusal(type_name, "node"), payload
+    shelf_sql = [q["sql"] for q in captured.captured_queries if "library_shelf" in q["sql"]]
+    assert shelf_sql == [], shelf_sql
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("type_name", _UNPUBLISHED_SHELF_TYPES)
+def test_nodes_with_an_unpublished_relay_type_id_fails_the_whole_field(
+    project_schema_override: Callable[[], None],
+    type_name: str,
+) -> None:
+    """A batch holding one unpublished type's id beside a served book id fails the whole field.
+
+    The refusal runs before grouping, so neither the shelf nor the book table is read.
+    """
+    branch = models.Branch.objects.create(name="Unpublished", city="Boston")
+    shelf = models.Shelf.objects.create(branch=branch, code="V", topic="open")
+    book = models.Book.objects.create(title="Kindred", shelf=shelf)
+    with override_settings(FAKESHOP_TEST_BOUND_SETS=True):
+        project_schema_override()
+        ids = [
+            str(relay.GlobalID(type_name, str(pk_of(shelf)))),
+            global_id_for(library_schema.BookType, pk_of(book)),
+        ]
+        with CaptureQueriesContext(connection) as captured:
+            payload = response_json(
+                _post_graphql(_UNPUBLISHED_NODES_DOCUMENT, variables={"ids": ids}),
+            )
+    assert payload == _unpublished_shelf_refusal(type_name, "nodes"), payload
+    library_sql = [q["sql"] for q in captured.captured_queries if '"library_' in q["sql"]]
+    assert library_sql == [], library_sql
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("field", ["node", "nodes"])
+async def test_async_root_refetch_refuses_a_registered_relay_type_the_schema_does_not_publish(
+    project_schema_override: Callable[[], None],
+    field: str,
+) -> None:
+    """The ``/graphql-async/`` twin: the refusal precedes the async dispatch of either root field."""
+    branch = await models.Branch.objects.acreate(name="Unpublished", city="Boston")
+    shelf = await models.Shelf.objects.acreate(branch=branch, code="V", topic="open")
+    gid = str(relay.GlobalID("BindingHidingShelfType", str(pk_of(shelf))))
+    with override_settings(FAKESHOP_TEST_BOUND_SETS=True):
+        project_schema_override()
+        payload = (
+            await _post_async_shipped(_UNPUBLISHED_NODE_DOCUMENT, variables={"id": gid})
+            if field == "node"
+            else await _post_async_shipped(_UNPUBLISHED_NODES_DOCUMENT, variables={"ids": [gid]})
+        )
+    assert payload == _unpublished_shelf_refusal("BindingHidingShelfType", field), payload
+
+
 def _published_filter_override_schema(shape: str, *, customize: bool) -> DjangoSchema:
     """Rung 3: consumer publication rewrites vary per declaration, so no one shipped set can own them.
 

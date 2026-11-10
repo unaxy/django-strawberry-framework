@@ -7,8 +7,8 @@ class-body walk (the ``DjangoListField`` mechanism) and come in two forms:
 
 - **Bare** - ``node: relay.Node | None = DjangoNodeField()`` /
   ``nodes: list[relay.Node | None] = DjangoNodesField()``: the Relay-spec
-  canonical fields; the decoded id may resolve to any registered
-  Relay-Node-shaped ``DjangoType``.
+  canonical fields; the decoded id may resolve to any Relay-Node-shaped
+  ``DjangoType`` the executing schema publishes.
 - **Typed** - ``genre: GenreType | None = DjangoNodeField(GenreType)``: the
   target is validated at construction time, and an id that decodes to a
   different type raises a ``GraphQLError`` naming the expected and received
@@ -22,7 +22,13 @@ ids are the other failure family: every ``ConfigurationError`` from
 ``types/relay.py::decode_global_id`` converts to ``GraphQLError("Invalid
 GlobalID: ...", extensions={"code": "GLOBALID_INVALID"})`` at the field
 boundary - decode runs on payload data only, before any query, so nothing
-leaks row existence. Both fields decode under the schema executing the request
+leaks row existence. A well-formed id naming a Relay type the executing schema
+does not publish (registered, but reached by no root, relation or ``types=``
+entry: an unwired type, or an id another schema over the same registry
+emitted) joins that family: the decoded type is refused with the same code
+before any query (``types/relay.py::require_published_node``), since the
+interface-typed ``node`` cannot return an object type outside its schema.
+Both fields decode under the schema executing the request
 (``utils/typing.py::strawberry_schema_from_info``): a ``type``-strategy id
 carries the name that schema published for its type, whatever ``NameConverter``
 it runs, and resolves through that schema's own type map.
@@ -36,8 +42,11 @@ Unexpected type 'typing.Any'`` - that message means "annotate the assignment".
 The typed form does NOT cross-validate the annotation against ``target_type``
 (the factory cannot see its assignment site): a mismatched pairing like
 ``genre: AuthorType | None = DjangoNodeField(GenreType)`` builds a schema, and
-every query then rejects ids at runtime with the wrong-node-type
-``GraphQLError`` - loud, but late.
+its queries fail only at runtime: an id of any type but ``GenreType`` gets the
+wrong-node-type ``GraphQLError``, and a ``GenreType`` id is refused as
+``GLOBALID_INVALID`` when the schema publishes ``GenreType`` nowhere; where it
+does publish it, the engine refuses a visible ``GenreType`` row as a value of
+the annotated type.
 
 The encode/decode internals stay in ``types/relay.py`` (spec-031 Decision 11
 reserved this top-level module for the root fields).
@@ -45,8 +54,8 @@ reserved this top-level module for the root fields).
 Engine note (spec-032 Edge cases): Strawberry only registers schema types it
 can reach. A schema whose *only* root field is the interface-typed bare
 ``node`` must pass its concrete types explicitly via
-``strawberry.Schema(types=[...])`` or expose them through other fields - this
-is engine behavior, not package-fixable.
+``strawberry.Schema(types=[...])`` or expose them through other fields; an id
+for a type it does not reach is ``GLOBALID_INVALID``.
 """
 
 from __future__ import annotations
@@ -71,14 +80,16 @@ import strawberry
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from graphql import GraphQLError
+from strawberry.schema import Schema
 from strawberry.types import Info
 
 from .exceptions import ConfigurationError
 from .list_field import _validate_relay_djangotype_target
 from .registry import register_subsystem_clear
 from .resource_policy import check_deadline
-from .types.relay import decode_global_id, published_node_type_name
+from .types.relay import decode_global_id, published_node_type_name, require_published_node
 from .utils import truth
+from .utils._narrowing import require_instance
 from .utils._queryset_private import model_row_peers, set_model_row_peers
 from .utils.directives import validated_field_directives
 from .utils.errors import GLOBALID_INVALID_ERROR_CODE, coded_error_extensions
@@ -98,7 +109,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterable, Mapping, Sequence, Sized
 
     from strawberry import relay
-    from strawberry.schema import Schema
     from typing_extensions import TypeIs
 
     from .types.base import DjangoType
@@ -128,10 +138,17 @@ _SYNC_RESOLVER_RECOURSE = (
 )
 
 
-def _decode_or_graphql_error(
-    gid: str,
-    schema: Schema | None,
-) -> tuple[type[_RelayDjangoType], str]:
+def _executing_schema(info: Info[object, object]) -> Schema:
+    """Return the Strawberry schema executing the refetch ``info`` belongs to.
+
+    Strawberry hands every resolver an ``Info`` naming its schema, so the read
+    is required: the decode, the typed-form message and the published-type
+    refusal all answer for that schema's names and type map.
+    """
+    return require_instance(strawberry_schema_from_info(info), Schema)
+
+
+def _decode_or_graphql_error(gid: str, schema: Schema) -> tuple[type[_RelayDjangoType], str]:
     """Decode ``gid`` under ``schema``, converting ``ConfigurationError`` to the wire error.
 
     ``schema`` is the executing Strawberry schema (``strawberry_schema_from_info``),
@@ -153,10 +170,34 @@ def _decode_or_graphql_error(
     try:
         return decode_global_id(gid, schema=schema)
     except ConfigurationError as exc:
-        raise GraphQLError(
-            f"Invalid GlobalID: {exc}",
-            extensions=coded_error_extensions(GLOBALID_INVALID_ERROR_CODE),
-        ) from exc
+        raise _globalid_invalid(exc) from exc
+
+
+def _globalid_invalid(exc: ConfigurationError) -> GraphQLError:
+    """Return the ``GLOBALID_INVALID`` wire error for a refused id."""
+    return GraphQLError(
+        f"Invalid GlobalID: {exc}",
+        extensions=coded_error_extensions(GLOBALID_INVALID_ERROR_CODE),
+    )
+
+
+def _require_published(resolved: type[_RelayDjangoType], gid: str, schema: Schema) -> None:
+    """Refuse, as ``GLOBALID_INVALID``, a decoded type the executing schema does not publish.
+
+    Runs after ``_check_typed_match`` and before the id-slot coercion (so no
+    consumer ``resolve_id_attr`` or ``DATABASE_ROUTERS`` read routing) and any
+    query: an id for a Relay type registered in the process but published by no
+    root, relation or ``types=`` entry of this schema (an unwired type, or an id
+    minted by another schema over the same registry) names no type this schema
+    can return, so it is refused as an id naming no type is, never resolved
+    through that type's queryset (``types/relay.py::require_published_node``).
+    A typed field's own target is published by its annotation, so the refusal
+    reaches the typed form only through a target its annotation does not name.
+    """
+    try:
+        require_published_node(schema, resolved, gid)
+    except ConfigurationError as exc:
+        raise _globalid_invalid(exc) from exc
 
 
 def _node_id_slot(
@@ -239,7 +280,7 @@ def _coerce_pk_or_none(
 def _check_typed_match(
     target_type: type[DjangoType] | None,
     resolved: type[_RelayDjangoType],
-    schema: Schema | None,
+    schema: Schema,
 ) -> None:
     """Raise the typed-form mismatch ``GraphQLError``; no-op for the bare form.
 
@@ -260,14 +301,14 @@ def _check_typed_match(
     )
 
 
-def _client_type_name(type_cls: type[DjangoType], schema: Schema | None) -> str:
+def _client_type_name(type_cls: type[DjangoType], schema: Schema) -> str:
     """Return the name a client of ``schema`` sees for ``type_cls`` (its ``__typename``).
 
-    The schema-published name when ``schema`` is known and publishes the type;
-    otherwise the definition's ``graphql_type_name`` (the default converter's
-    spelling). Error-path only.
+    The schema-published name when ``schema`` publishes the type; otherwise the
+    definition's ``graphql_type_name`` (the default converter's spelling).
+    Error-path only.
     """
-    published = None if schema is None else published_node_type_name(schema, type_cls)
+    published = published_node_type_name(schema, type_cls)
     if published is not None:
         return published
     return type_cls.__django_strawberry_definition__.graphql_type_name
@@ -708,11 +749,12 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
 ) -> object:
     """Build the root ``node(id: ID!)`` Relay refetch field.
 
-    Bare form (``target_type=None``) resolves any registered Relay-Node-shaped
-    ``DjangoType``; the typed form pins one target and rejects mismatched ids
-    with a ``GraphQLError``. See the module docstring for the full contract
-    (nullable-by-contract dispatch, the ``GLOBALID_INVALID`` boundary, and the
-    bare-field ``strawberry.Schema(types=[...])`` engine note).
+    Bare form (``target_type=None``) resolves any Relay-Node-shaped
+    ``DjangoType`` the executing schema publishes; the typed form pins one
+    target and rejects mismatched ids with a ``GraphQLError``. See the module
+    docstring for the full contract (nullable-by-contract dispatch, the
+    ``GLOBALID_INVALID`` boundary, an unpublished type's id, and the bare-field
+    ``strawberry.Schema(types=[...])`` engine note).
 
     The declared return type is the value the field resolves to, not the object
     returned: at run time this returns a ``StrawberryField``. The overloads state
@@ -746,11 +788,12 @@ def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - co
         # visibility-scoped query, and the decode is the step that makes one
         # inevitable.
         check_deadline(info)
-        schema = strawberry_schema_from_info(info)
+        schema = _executing_schema(info)
         resolved, node_id = _decode_or_graphql_error(id_, schema)
         # Everything below runs OUTSIDE the decode try/except so a dispatch-time
         # ``SyncMisuseError`` surfaces as itself (see ``_decode_or_graphql_error``).
         _check_typed_match(pinned, resolved, schema)
+        _require_published(resolved, id_, schema)
         if (
             _coerce_pk_or_none(resolved, node_id, alias=lookup_read_alias(model_for(resolved)))
             is None
@@ -823,11 +866,14 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
     ``nodes: list[relay.Node | None] = DjangoNodesField()`` type-checks.
 
     Input order is preserved; positional ``null`` is reserved for
-    well-formed-but-invisible/missing/uncoercible ids; a malformed id (or a
-    wrong-type id under the typed form) ANYWHERE fails the WHOLE field - the
-    ``[Node]!`` non-null nulls the enclosing ``data`` (Decision 5). Duplicate
-    ids resolve per position, and resolution is batched per distinct decoded
-    type (one ``resolve_nodes`` call each - Decision 4).
+    well-formed-but-invisible/missing/uncoercible ids; a malformed id, an id
+    naming a type the executing schema does not publish (or a wrong-type id
+    under the typed form) ANYWHERE fails the WHOLE field - the ``[Node]!``
+    non-null nulls the enclosing ``data`` (Decision 5). Every id decodes before
+    any type check, so a malformed id answers ahead of an earlier unpublished
+    or wrong-type one. Duplicate ids resolve per position, and resolution is
+    batched per distinct decoded type (one ``resolve_nodes`` call each -
+    Decision 4).
 
     Consumer ``resolve_nodes`` override contract: this field calls the
     ``resolve_nodes`` *classmethod* (preserving consumer overrides), then
@@ -867,10 +913,11 @@ def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - c
         check_deadline(info)
         # Decode every id BEFORE any query - a malformed id anywhere fails the
         # whole field (Decision 5 "Batch decode failures fail the whole field").
-        schema = strawberry_schema_from_info(info)
+        schema = _executing_schema(info)
         decoded = [_decode_or_graphql_error(raw_id, schema) for raw_id in ids]
-        for resolved, _ in decoded:
+        for raw_id, (resolved, _) in zip(ids, decoded, strict=True):
             _check_typed_match(pinned, resolved, schema)
+            _require_published(resolved, raw_id, schema)
         # Group coercible ids by decoded type - insertion-ordered, ids in input
         # order with duplicates preserved; uncoercible positions are reserved
         # null holes that never poison the batch ``pk__in``. Each group carries

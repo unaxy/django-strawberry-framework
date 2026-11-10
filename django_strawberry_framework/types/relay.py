@@ -678,7 +678,9 @@ def node_definition_for_published_name(schema: Schema, name: str) -> DjangoTypeD
     names: an id for a Relay type this schema does not expose (minted by another
     schema, or by ``testing/relay.py::global_id_for``) decodes as it would with
     no schema, while the default spelling of a type this schema publishes under
-    another name stays rejected, since no id of this schema carries it.
+    another name stays rejected, since no id of this schema carries it. The
+    write and filter decodes keep that fallback; the root ``node`` / ``nodes``
+    fields then refuse the decoded type (``require_published_node``).
 
     Two registered Relay-Node types sharing one ``graphql_type_name`` are not
     ambiguous here when the schema publishes the name for one of them: the
@@ -699,9 +701,7 @@ def node_definition_for_published_name(schema: Schema, name: str) -> DjangoTypeD
         definition = registry.definition_for_graphql_name(name)
         if published_node_type_name(schema, definition.origin) is None:
             return definition
-        raise ConfigurationError(
-            f"No Relay-Node DjangoType is published as GraphQL type {name!r} in this schema",
-        )
+        raise _unpublished_name_refusal(name)
     if (
         isinstance(published, StrawberryObjectDefinition)
         and (definition := _registered_node_definition(published.origin)) is not None
@@ -712,6 +712,40 @@ def node_definition_for_published_name(schema: Schema, name: str) -> DjangoTypeD
     # reads exactly as the schema-less decode reports it.
     raise ConfigurationError(
         f"No registered Relay-Node DjangoType has GraphQL type name {name!r}",
+    )
+
+
+def _unpublished_name_refusal(name: str) -> ConfigurationError:
+    """Return the refusal for a type-name slot ``name`` this schema publishes no Relay type under."""
+    return ConfigurationError(
+        f"No Relay-Node DjangoType is published as GraphQL type {name!r} in this schema",
+    )
+
+
+def require_published_node(schema: Schema, type_cls: type[object], gid: str) -> None:
+    """Refuse a decoded ``type_cls`` that ``schema`` publishes no Relay-Node object type for.
+
+    ``decode_global_id`` resolves an id naming a Relay type ``schema`` does not
+    publish as it would with no schema, the fallback the write and filter
+    decodes keep (``node_definition_for_published_name``); a refetch field
+    returning such a row hands the engine an object type outside the schema,
+    which the interface-typed root ``node`` cannot resolve. The refusal quotes
+    only the slot the client sent: a type-name slot reads exactly as a default
+    spelling this schema publishes under another name, a model-label slot names
+    the label. ``gid`` is the id ``decode_global_id`` already accepted, so its
+    parse cannot fail here.
+
+    Raises:
+        ConfigurationError: ``schema`` publishes no object type for ``type_cls``.
+
+    """
+    if published_node_type_name(schema, type_cls) is not None:
+        return
+    type_name = relay.GlobalID.from_id(gid).type_name
+    if "." not in type_name:
+        raise _unpublished_name_refusal(type_name)
+    raise ConfigurationError(
+        f"model label {type_name!r} decodes to no Relay-Node DjangoType published in this schema",
     )
 
 
@@ -937,7 +971,9 @@ def decode_global_id(
     - the root ``node(id:)`` / ``nodes(ids:)`` fields, through
       ``django_strawberry_framework/relay.py::_decode_or_graphql_error``, which
       converts the uniform ``ConfigurationError`` below into a ``GraphQLError``
-      carrying the ``GLOBALID_INVALID`` extensions code;
+      carrying the ``GLOBALID_INVALID`` extensions code, and which then refuse,
+      with the same code, a decoded type the executing schema does not publish
+      (``require_published_node``);
     - the write-side typed-id primitive
       ``django_strawberry_framework/relay.py::decode_model_global_id``, shared by
       the mutation flavors and the relation ``<field>_id`` decode;
