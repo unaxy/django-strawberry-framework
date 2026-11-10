@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 470 done, 121 to do. The CHANGELOG entries filed here moved to
+Progress: 471 done, 122 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2354,6 +2354,18 @@ Progress: 470 done, 121 to do. The CHANGELOG entries filed here moved to
   `ints__len__in` and `ints__0__in` build. Pinned by
   `tests/filters/test_inputs.py::test_a_list_filter_over_an_arrays_count_or_element_compared_by_one_value_is_refused`
   and `::test_a_list_filter_over_an_arrays_count_element_or_whole_array_taking_the_list_builds`
+- [x] 819. Not a defect (AGENTS defect rule, upstream parity): django-filter itself raises the same `ValueError`
+  for `ModelMultipleChoiceFilter(field_name="branch", to_field_name="name")`. Its
+  `MultipleChoiceFilter.get_filter_predicate` builds `{field_name: getattr(value, to_field_name)}` (`branch="South"`),
+  which Django compares against the relation's target key; `to_field_name` picks the column the form cleans by, not
+  the one the predicate compares. A stock `django_filters.FilterSet` and the package's root, nested, flat, `not` /
+  `or` / `and` and raw spellings all raise it (masked over GraphQL), so the walked spellings add nothing. Repro grid:
+  1554 cells (9 relations x model-choice, CSV model-choice and model-multiple-choice x every `to_field_name` x 8
+  channels) against stock on SQLite, 2 mismatches (filed as 870); `ModelChoiceFilter` compares the cleaned instance
+  and matches everywhere; `field_name="branch__name"` with `to_field_name="name"` (the django-filter idiom) answers
+  on every channel. django-filter 25.2 to 26.2 ship the same `filters.py`. Graphene-django and
+  django-graphene-filters do not handle `to_field_name`. The shipped fakeshop `ShelfFilter.home_branches_named`
+  declares the failing shape (filed as 869)
 
 ## Outside review of the fixes
 
@@ -2539,10 +2551,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `FilterSet(...).qs`), where the same pin from a target type's `get_queryset` gets a typed `ConfigurationError`
   naming the alias (`utils/querysets.py`). A primary/replica router with `queryset=Model.objects.using("default")`
   while reads route to a replica reaches it. Found researching 818
-- [ ] 819. (robustness) A `ModelMultipleChoiceFilter(field_name="branch", to_field_name="name",
-  queryset=Branch.objects.all())` on a set walked flat or nested from a parent answers a masked `ValueError` ("Field
-  'id' expected a number but got ...") for a value naming a branch by its `name`, where django-filter matches the
-  `to_field_name` column. Found verifying 734
 - [ ] 822. (robustness) `AllValuesMultipleFilter` inside a CSV wrapper (`class X(BaseInFilter,
   AllValuesMultipleFilter)`, declared, on a text column) builds and answers `FILTER_INVALID` `invalid_list` ("Enter a
   list of values.") for every value: its form field is built per request, so the build-time no-value ask
@@ -2626,6 +2634,18 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 864. (robustness) The `ArrayField` input gate judges a `method=` filter over an array by its key name: a
   `method=` `ListFilter` with `lookup_expr="in"` over an `ArrayField` is refused, though the method reads the list and
   applies no lookup. Found fixing 716
+- [ ] 869. (fakeshop) The shipped `examples/fakeshop/apps/library/filters.py::ShelfFilter.home_branches_named`
+  (`ModelMultipleChoiceFilter(field_name="branch", to_field_name="name")`, documented as "a list of branch names")
+  answers the masked `ValueError` "Field 'id' expected a number" for every valid name list, on
+  `allLibraryShelves(filter: {homeBranchesNamed: ...})`, nested `shelf: {homeBranchesNamed}`, flat
+  `shelfHomeBranchesNamed` and from genres, as django-filter does for that declaration (819); no live row sends a
+  valid value. django-filter's spelling is `field_name="branch__name"`. Found fact-finding 819
+- [ ] 870. (robustness) A `ModelMultipleChoiceFilter` with a `to_field_name` on a to-many relation key answers by the
+  `to_field_name` column walked and by the target key unwalked: `field_name="issues", to_field_name="number"` on a
+  `Periodical` set answers `[]` at the root (django-filter's `issues=100` against the Issue pk) and the issues
+  numbered 100 / 101 through a flat or raw parent key (`filters/sets.py::_LeafChain.terminal_value` /
+  `_relation_key_value` re-read the cleaned instances' keys). One declaration, two answers, the 789 family; a forward
+  key (`CardItem.card`, `number`) answers `[]` both ways. Found fact-finding 819
 ## To do: holes found re-checking the fixes
 
 
