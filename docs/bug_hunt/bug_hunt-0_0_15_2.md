@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 476 done, 120 to do. The CHANGELOG entries filed here moved to
+Progress: 477 done, 121 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2433,6 +2433,28 @@ Progress: 476 done, 120 to do. The CHANGELOG entries filed here moved to
   `::test_uncascaded_book_on_a_hidden_shelf_serves_its_shelf_to_staff` and
   `test_library_inheritance_api.py::test_shelf_label_on_a_hidden_shelf_reads_its_shelf_as_missing_for_anonymous` /
   `::test_shelf_label_on_a_hidden_shelf_serves_its_shelf_to_staff`
+- [x] 860. A `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter` declared as a leaf ending on a relation target's
+  primary key (`books__id`, `__pk`, at any depth), past a declared `RelatedFilter` hop into a filter set no type wires
+  (plain, `flat=False`, `queryset=`, an unwired subclass of a wired set), or declared on such a set past its own
+  unwired hop, now validates against the type registered for the relation's target and compares the column or
+  annotation that type's id carries, as its relation key, its undeclared twin and its wired-hop twin do, on live,
+  `apply_sync`, `apply_async` and the raw form. The routing rebased it onto the unbound child as `id`, so
+  `filters/base.py::_globalid_target` read it as that set's own key and decoded node-id-only: no type check (a
+  wrong-type id matched rows), `GLOBALID_INVALID` for every id a column or annotation `NodeID` carries, a right-type
+  id holding the row's pk digits accepted, and an encode-only target behind the hop built.
+  `filters/sets.py::FilterSet._routed_leaf_chain` now marks such a pk-tail terminal with 833's key-leaf marker unless
+  it stands for the child set's own key (`::_stands_for_own_key`, read off the leaf's declaration), so it resolves as
+  declared; the unbound set's own key, nested or as a hop's flat copy, keeps the node-id-only reading (dry-0_0_15_3
+  item 50), and a hop into a set a secondary type wires is unchanged (filed as a question). spec-031 Decision 13 (all
+  homes), spec-027 (the unbound sentence, the annotation-held list, Decision 6 subpass 3, Decision 8 step 3, the test
+  plan), the docstrings and the live README map are restated. Grids: 5124 of 57696, 2196 of 21168 and 1008 of 13464
+  cells moved, all in the unwired flat family, each onto its twin; no key, nested, hop-copy, undeclared or wired cell
+  moved. Pinned by `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py` (the unbound-hop keyed
+  shapes, `apply_async`, the secondary-wired rows),
+  `examples/fakeshop/test_query/test_library_api.py::test_an_unwired_target_filterset_runs_a_leaf_ending_on_its_key_as_the_relation_type`
+  / `::test_an_unwired_target_filterset_refuses_a_wrong_type_id_on_a_leaf_ending_on_its_key` and
+  `tests/filters/test_finalizer.py` (the encode-only refusal,
+  `::test_phase_2_5_admits_a_key_of_the_hop_target_set_decoding_against_that_set`)
 
 ## Outside review of the fixes
 
@@ -2660,12 +2682,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   django-filter's form builders alike, while README says a `required` filter acts on the form of the set that declares
   it, at that set's root, and a directly built set refuses it
   (`tests/filters/test_sets.py::test_a_directly_built_set_takes_required_from_the_keys_owner`). Found fixing 216
-- [ ] 860. (robustness) A flat `GlobalID` leaf ending on the target's primary key past a declared `RelatedFilter` hop
-  into a filter set no type wires (`books__id` with `books = RelatedFilter(UnboundBookFilter, ...)`, `flat=False` and
-  `queryset=` alike) falls to the node-id-only path and answers `GLOBALID_INVALID` ("not a valid Book key value") for
-  an id an annotation of the target type's `get_queryset` holds, while its relation key compares the annotation on the
-  type's rows. GLOSSARY `FilterSet` says such a key compares "as a leaf ending on the type's primary key (`books__id`)
-  does". Found fixing 858
 - [ ] 862. (robustness) The `ArrayField` input gate (`filters/inputs.py::_array_element_column` /
   `_array_column_refusal`) runs only at input build, so on a set no connection serves a `ListFilter` / `ArrayFilter`
   with `iexact` / `icontains` / `startswith` / `regex` / `isnull` over an `ArrayField` (and a CSV, choice or scalar
@@ -2703,6 +2719,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   clause "or of the relation its `field_name` names when `queryset` is a callable", steer the consumer to
   `field_name="branch"`, which builds and answers the masked `ValueError` on every value (819). GOAL success criterion
   7. Found researching 869
+- [ ] 874. (robustness) On a multi-table-inheritance child target whose type is registered only for the child
+  (`KioskFault.kiosk` to `SelfServeDesk`, pk `lendingdesk_ptr`), a `GlobalIDFilter` on the trailing-pk spelling
+  (`kiosk__pk`, `kiosk__id` or `kiosk__lendingdesk_ptr`), undeclared or past an unwired declared hop, validates no
+  type: a `library.venue` id carrying the desk's pk matches the row, while the key `kiosk` refuses it ("expects
+  library.selfservedesk"). That breaks the key / trailing-pk twin parity of 833 and 849. Found verifying 860 (the
+  `mti` / `mti-twin` cells of its verifier probe)
+
 ## To do: holes found re-checking the fixes
 
 
@@ -3156,6 +3179,20 @@ tracker number are recorded there; open remainders and new defects are filed as 
   own with a `ConfigurationError` (pinned by `test_filter_consumer_contracts_api.py::
   test_related_queryset_requires_the_exact_child_model_only_when_the_branch_is_active` [active-proxy]). Admitting
   them widens a pinned refusal. Found researching 818
+- [ ] 872. Decide: a consumer `GlobalIDFilter` ending on the target's primary key past a declared `RelatedFilter` hop
+  into a filter set a SECONDARY type wires (`bid = GlobalIDFilter(field_name="books__id")` with `books =
+  RelatedFilter(BookChild)`, `BookChild` wired by the secondary `BookS`, primary `BookP`) validates against `BookS`,
+  the hop set's binding: it accepts `BookS` ids and refuses `BookP`, while its relation key `books` and its undeclared
+  twin validate against `BookP` (on an annotation-held id both answer `GLOBALID_UNVALIDATABLE`). spec-031 Decision 13
+  sends "a flat copy of a declared hop's own id" to the hop set's secondary; GLOSSARY `FilterSet` says the key
+  compares "as a leaf ending on the type's primary key (`books__id`) does". (a) The parent's leaf follows the
+  relation's registered type, as the key does (one authority per declaration; narrows: a `BookS` id is refused); (b)
+  keep: a leaf past a declared hop follows that hop set's binding, as its nested spelling does (the GLOSSARY sentence
+  is restated). Pinned as (b) today by
+  `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py::test_a_leaf_past_a_hop_into_a_secondary_wired_set_decodes_against_that_secondary`
+  and `tests/filters/test_finalizer.py::test_phase_2_5_admits_a_key_of_the_hop_target_set_decoding_against_that_set`
+  [secondary-wired-key]; 860's routing marker applies under (a) by dropping its unwired-set condition. Found
+  researching 860
 
 ## Hunt not finished in t3
 

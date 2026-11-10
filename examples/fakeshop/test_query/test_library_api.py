@@ -7470,7 +7470,8 @@ def _unwired_target_holder_schema(*, subclass_target: bool) -> strawberry.Schema
     ``Branch``'s type. The ``shelf`` branch of the ``Book`` filter set and order set
     targets a set no type wires: an unwired subclass of the bound set
     (``subclass_target``), or an unrelated unwired set over ``Shelf`` declaring the same
-    filters and fields. ``books`` is a connection, ``bookList`` a list.
+    filters and fields; the ``Book`` filter set's own ``shelf_is`` (``shelf__id``) walks
+    that hop onto the shelf's key. ``books`` is a connection, ``bookList`` a list.
     """
 
     class HolderUnwiredBackBookFilter(FilterSet):
@@ -7560,6 +7561,7 @@ def _unwired_target_holder_schema(*, subclass_target: bool) -> strawberry.Schema
 
     class HolderUnwiredBookFilter(FilterSet):
         shelf = RelatedFilter(target_filter, field_name="shelf")
+        shelf_is = GlobalIDFilter(field_name="shelf__id")
 
         class Meta:
             model = models.Book
@@ -7616,6 +7618,8 @@ def _seed_unwired_target_filter_rows() -> dict[str, object]:
     models.Book.objects.create(title="on-seen", shelf=seen)
     return {
         "seen": seen.pk,
+        "seen_id": relay.to_base64(models.Shelf._meta.label_lower, seen.pk),
+        "hidden_id": relay.to_base64(models.Shelf._meta.label_lower, hidden.pk),
         "branch_id": relay.to_base64(models.Branch._meta.label_lower, branch.pk),
         "shelf_named_branch_id": relay.to_base64(models.Shelf._meta.label_lower, branch.pk),
         "branch_named_seen_id": relay.to_base64(models.Branch._meta.label_lower, seen.pk),
@@ -7697,6 +7701,70 @@ def test_an_unwired_target_filterset_refuses_a_wrong_type_relation_globalid(
     assert payload.get("data") is None, payload
     assert json_str(payload, "errors", 0, "message") == (
         "GlobalID type mismatch: filter expects library.branch but received library.shelf"
+    )
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("book_input", "titles"),
+    [
+        pytest.param('{shelfIs: {exact: "%(seen_id)s"}}', ["on-seen"], id="leaf-seen-shelf"),
+        pytest.param('{shelfIs: {exact: "%(hidden_id)s"}}', [], id="leaf-secret-shelf"),
+        pytest.param(
+            '{shelfGid: {exact: "%(branch_named_seen_id)s"}}',
+            ["on-seen"],
+            id="own-key-flat-copy-node-id-only",
+        ),
+    ],
+)
+@pytest.mark.parametrize("subclass_target", _UNWIRED_TARGET_FLAVORS)
+def test_an_unwired_target_filterset_runs_a_leaf_ending_on_its_key_as_the_relation_type(
+    *,
+    subclass_target: bool,
+    book_input: str,
+    titles: list[str],
+) -> None:
+    """A leaf walking the hop into an unwired set onto its key names a row of ``Shelf``'s type.
+
+    ``shelf_is`` (``shelf__id``) runs over the hop's rows, which the primary scopes (a
+    secret shelf is not seen), and its id names a shelf as the type registered for
+    ``Shelf`` mints it, as the relation's key does: the unwired set has no type of its
+    own. The flat copy ``shelf_gid`` of the set's own ``gid`` stays that set's own key,
+    read as the node id whatever type the id names.
+    """
+    ids = _seed_unwired_target_filter_rows()
+    response = _post_holder(
+        _unwired_target_holder_schema(subclass_target=subclass_target),
+        f"{{ books(filter: {book_input % ids}) {{ edges {{ node {{ title }} }} }} }}",
+    )
+
+    payload = response_json(response)
+    assert "errors" not in payload, payload
+    assert json_at(payload, "data", "books", "edges") == [
+        {"node": {"title": title}} for title in titles
+    ]
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize("subclass_target", _UNWIRED_TARGET_FLAVORS)
+def test_an_unwired_target_filterset_refuses_a_wrong_type_id_on_a_leaf_ending_on_its_key(
+    *,
+    subclass_target: bool,
+) -> None:
+    """A ``library.branch`` id carrying a shelf's key is a type mismatch on ``shelf_is``."""
+    ids = _seed_unwired_target_filter_rows()
+    response = _post_holder(
+        _unwired_target_holder_schema(subclass_target=subclass_target),
+        f'{{ books(filter: {{shelfIs: {{exact: "{ids["branch_named_seen_id"]}"}}}}) '
+        "{ edges { node { title } } } }",
+    )
+
+    payload = response_json(response)
+    assert payload.get("data") is None, payload
+    assert json_str(payload, "errors", 0, "message") == (
+        "GlobalID type mismatch: filter expects library.shelf but received library.branch"
     )
 
 

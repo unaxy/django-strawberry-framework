@@ -2494,13 +2494,19 @@ def _unwired_hop_world(
     _relay_type(Book, ("id", "title", "shelf"), name="BookType", filterset_class=BookFilter)
 
 
-def _walked_own_leaf_world(*, shelf_id: bool = False, flat: bool = True) -> None:
+def _walked_own_leaf_world(
+    *,
+    shelf_id: bool = False,
+    flat: bool = True,
+    wired: bool = True,
+) -> None:
     """An own ``BookFilter`` leaf walks the declared ``shelf`` hop and decodes in ``ShelfFilter``.
 
     ``branch_is`` (``shelf__branch``) reaches a ``callable`` ``Branch`` type past an
     unwired ``ShelfFilter``; with ``shelf_id``, ``shelf_is`` (``shelf__id``) reaches the
-    shelf's own key, in a ``ShelfFilter`` wired to a ``callable`` ``Shelf`` type. ``flat``
-    is the walked declaration's.
+    shelf's key on the ``callable`` ``Shelf`` type, in a ``ShelfFilter`` that type wires,
+    or with ``wired`` false one no type wires, where the leaf names a row of the type
+    registered for ``Shelf``. ``flat`` is the walked declaration's.
     """
 
     class ShelfFilter(FilterSet):
@@ -2532,7 +2538,7 @@ def _walked_own_leaf_world(*, shelf_id: bool = False, flat: bool = True) -> None
         Shelf,
         ("id", "code", "branch"),
         name="ShelfType",
-        filterset_class=ShelfFilter if shelf_id else None,
+        filterset_class=ShelfFilter if shelf_id and wired else None,
         strategy=_encode_by_name if shelf_id else None,
     )
     _relay_type(Book, ("id", "title", "shelf"), name="BookType", filterset_class=book_filter)
@@ -2642,6 +2648,12 @@ def _behind_shelf_books_world(
             "filterset BookFilter declares GlobalID filter 'branch_is'",
             "BranchType",
             id="own-leaf-over-the-declared-hop",
+        ),
+        pytest.param(
+            functools.partial(_walked_own_leaf_world, shelf_id=True, wired=False),
+            "filterset BookFilter declares GlobalID filter 'shelf_is'",
+            "ShelfType",
+            id="own-leaf-over-the-declared-hop-onto-the-unwired-target-key",
         ),
     ],
 )
@@ -2770,6 +2782,12 @@ def _encode_only_refusal(head: str, type_name: str) -> str:
             "ShelfType",
             id="own-leaf-walking-a-declared-hop-onto-the-wired-target-key",
         ),
+        pytest.param(
+            functools.partial(_walked_own_leaf_world, shelf_id=True, wired=False),
+            "filterset BookFilter declares GlobalID filter 'shelf_is'",
+            "ShelfType",
+            id="own-leaf-walking-a-declared-hop-onto-the-unwired-target-key",
+        ),
     ],
 )
 def test_phase_2_5_refuses_a_globalid_leaf_a_request_decodes_against_an_encode_only_type(
@@ -2781,12 +2799,14 @@ def test_phase_2_5_refuses_a_globalid_leaf_a_request_decodes_against_an_encode_o
 
     A ``RelatedFilter`` into a set no type wires runs its leaves bound to that set (its
     model's registry primary), an own leaf walking a declared hop decodes in the hop's
-    target set, a to-many key whose undeclared hops re-enter the owner's table decodes
-    against the primary its relation reaches, and a leaf both a nested branch and a flat
-    copy serve is named by its declaration, as its wired declaring set's own ahead of a
-    wired sibling's flat copy. Each would build and answer ``GLOBALID_UNVALIDATABLE`` for
-    every nonempty value. The ``null`` and ``[]`` values such a leaf answers without
-    decoding go with it: no schema holding the leaf builds, so no request reaches either.
+    target set (onto the key of a set no type wires: as the type registered for the
+    relation's target, as the relation's key does), a to-many key whose undeclared hops
+    re-enter the owner's table decodes against the primary its relation reaches, and a leaf
+    both a nested branch and a flat copy serve is named by its declaration, as its wired
+    declaring set's own ahead of a wired sibling's flat copy. Each would build and answer
+    ``GLOBALID_UNVALIDATABLE`` for every nonempty value. The ``null`` and ``[]`` values such
+    a leaf answers without decoding go with it: no schema holding the leaf builds, so no
+    request reaches either.
     """
     world()
 
@@ -2952,6 +2972,51 @@ def test_phase_2_5_admits_a_declared_reentry_decoding_against_the_bound_secondar
         strategy="type",
     )
     _relay_type(Shelf, ("id", "code"), name="ShelfType")
+
+    finalize_django_types()
+
+
+@pytest.mark.parametrize("shape", ["unwired-own-key", "secondary-wired-key"])
+def test_phase_2_5_admits_a_key_of_the_hop_target_set_decoding_against_that_set(
+    shape: str,
+) -> None:
+    """A key the hop's target set reads as its own builds behind a ``callable`` primary.
+
+    ``unwired-own-key``: a ``gid`` (``id``) the unwired ``ShelfFilter`` declares is its own
+    key, nested and as the flat copy ``shelf_gid`` alike: it keeps the upstream scalar
+    reading (node id only), so the ``callable`` ``ShelfType`` is no target of it.
+    ``secondary-wired-key``: ``shelf_is`` (``shelf__id``) past the declared ``shelf`` hop
+    into a ``ShelfFilter`` the ``type`` secondary ``ShelfSecondary`` wires decodes against
+    that secondary, never the ``callable`` primary.
+    """
+    unwired = shape == "unwired-own-key"
+    shelf_filter = type(
+        "ShelfFilter",
+        (FilterSet,),
+        {
+            **({"gid": GlobalIDFilter(field_name="id")} if unwired else {}),
+            "Meta": type("Meta", (), {"model": Shelf, "fields": {"code": ["exact"]}}),
+        },
+    )
+    book_filter = type(
+        "BookFilter",
+        (FilterSet,),
+        {
+            "shelf": RelatedFilter(shelf_filter, field_name="shelf"),
+            **({} if unwired else {"shelf_is": GlobalIDFilter(field_name="shelf__id")}),
+            "Meta": type("Meta", (), {"model": Book, "fields": {"title": ["exact"]}}),
+        },
+    )
+    _relay_type(Shelf, ("id", "code"), name="ShelfType", primary=True, strategy=_encode_by_name)
+    if not unwired:
+        _relay_type(
+            Shelf,
+            ("id", "code"),
+            name="ShelfSecondary",
+            filterset_class=shelf_filter,
+            strategy="type",
+        )
+    _relay_type(Book, ("id", "title", "shelf"), name="BookType", filterset_class=book_filter)
 
     finalize_django_types()
 

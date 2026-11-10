@@ -426,14 +426,20 @@ def _relation_view_of(filter_instance: Filter) -> _RelationView | None:
 
 # A copy of a relation-key filter re-bound to the target's key over the target rows
 # (``filters/sets.py::FilterSet._routed_leaf_chain``: a to-many key, or a GlobalID key whose
-# target's id an annotation holds, forward or to-many) carries the leaf as declared: a GlobalID
-# value names the type registered for the relation's target, so the copy resolves its target
-# as that leaf does, whichever type the face it is bound to answers for.
+# target's id an annotation holds, forward or to-many), and a copy of a leaf ending on the
+# target's primary key past a declared hop into a set no type wires, carries the leaf as
+# declared: a GlobalID value names the type registered for the relation's target, so the copy
+# resolves its target as that leaf does, whichever type the face or set it is bound to answers
+# for.
 _KEY_LEAF_ATTR = "_dst_key_leaf"
 
 
 def _key_leaf_of(filter_instance: Filter) -> Filter | None:
-    """Return the leaf as declared a relation key's re-bound copy carries, else ``None``."""
+    """Return the leaf as declared a copy marked ``_KEY_LEAF_ATTR`` carries, else ``None``.
+
+    The copy is a relation key's re-bound to the target's key, or a leaf's ending on the
+    target's primary key past a declared hop into a set no type wires.
+    """
     return optional_instance(getattr(filter_instance, _KEY_LEAF_ATTR, None), Filter)
 
 
@@ -2359,10 +2365,10 @@ class _GlobalIDTarget:
     than the primary key (a consumer ``relay.NodeID[...]`` annotation), ``None``
     when it carries the primary key. ``foreign_rows`` is whether the rows the filter
     runs over answer for a type other than ``definition`` (an undeclared hop's face
-    re-entering the table of the type the walking set is bound to, or a relation key's
-    re-bound copy over a face or set whose rows another type scopes, ``_rows_definition``),
-    so, as across a relation, an id slot only ``definition``'s own ``get_queryset``
-    annotates is not on them.
+    re-entering the table of the type the walking set is bound to, or a copy carrying its
+    leaf as declared, ``_key_leaf_of``, over a face or set whose rows another type scopes,
+    ``_rows_definition``), so, as across a relation, an id slot only ``definition``'s own
+    ``get_queryset`` annotates is not on them.
     """
 
     definition: DjangoTypeDefinition
@@ -2418,16 +2424,18 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     resolves the definition a request resolves): an unbound set instance (a
     ``RelatedFilter`` target no ``DjangoType`` wires, a subclass of a wired set
     included) from its model's registry primary (``registry.get``), the type its
-    relation leaves are generated from, for the relation branch only (its own key
-    keeps the upstream scalar shape, so it is never validated as that primary's
-    GlobalID); an unbound set over a model no type exposes, and an undeclared hop's
-    face into one, walk from that model (``_resolve_globalid_target``'s
-    ``start_model``). A relation key's copy re-bound to the target's key over the
-    target rows (``_key_leaf_of``) resolves the definition and id slot its leaf as
-    declared resolves, with an empty row path (the copy compares those rows' own
-    columns), whichever type the face it is bound to answers for, so both decodes of
-    one key name one type; its rows are foreign when a type other than that definition
-    answers for them (``_rows_definition``). Two routing branches:
+    relation leaves are generated from, for the relation branch only (its own key,
+    nested or as a hop's flat copy of it, keeps the upstream scalar shape, so it is
+    never validated as that primary's GlobalID); an unbound set over a model no type
+    exposes, and an undeclared hop's face into one, walk from that model
+    (``_resolve_globalid_target``'s ``start_model``). A relation key's copy re-bound to
+    the target's key over the target rows, and a copy of a leaf another set declares
+    ending on the target's primary key past a declared hop into a set no type wires
+    (``_key_leaf_of``, both), resolves the definition and id slot its leaf as declared
+    resolves, with an empty row path (the copy compares those rows' own columns),
+    whichever type the face or set it is bound to answers for, so every decode of one
+    relation names one type; its rows are foreign when a type other than that
+    definition answers for them (``_rows_definition``). Two routing branches:
 
     1. **Own-PK branch.** When ``filter_instance.field_name`` matches the
        owning model's PK name (``_meta.pk.name`` or ``"pk"``) and that PK is
@@ -2448,7 +2456,8 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     off-pk id slot ``_off_pk_id_slot`` reads), resolved once per ``filter()``
     call and threaded through every element of a list. Returns ``None`` when
     nothing resolves a definition (no ``parent`` or no model, an unbound set
-    before the registry is stable), for an unbound set's own key, or when
+    before the registry is stable), for an unbound set's own key (never a leaf
+    another set declares that a declared hop carries onto it), or when
     the lookup cannot resolve a target; the filter then decodes the GlobalID
     without type-name validation
     (the node-id-only fallback, spec-031 Decision 13; a relation's node id is still

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 214 to do.
+Progress: 0 done, 215 to do.
 
 ## From dry-0_0_15_3
 
@@ -1013,6 +1013,14 @@ Progress: 0 done, 214 to do.
   the real type hides could still order its parent, or every term read as missing. An order term ending on a
   `to_field` key whose target set is bound to a multi-table-inheritance parent lacking that column now orders by
   visibility instead of raising `FieldError` on every request
+- [ ] 873. CHANGELOG entry for item 860: a `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter` declared as a leaf ending
+  on a relation target's primary key (`books__id`, `__pk`), past a declared `RelatedFilter` hop into a filter set no
+  `DjangoType` wires, now validates against the type registered for the relation's target and compares the column or
+  annotation that type's id carries, as the relation key does, instead of reading the node id alone. An id of another
+  type is a type mismatch where it matched rows, an id a column or annotation `NodeID` carries matches where it
+  answered `GLOBALID_INVALID`, a right-type id holding the row's primary-key digits over such an id matches nothing,
+  and a `callable` / `custom` target behind such a hop is refused at `finalize_django_types()`. A filter set's own
+  key, and a hop's flat copy of it, keep reading the node id alone
 
 ## From dry-upstream-0_0_15
 

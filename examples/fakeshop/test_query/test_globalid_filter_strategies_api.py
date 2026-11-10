@@ -11,7 +11,10 @@ for the relation's target mints, under its published name, whichever type the se
 walk's target rows answer for, and so does a consumer leaf ending on the re-entry's
 primary key past an undeclared hop (``shelf__books__id``), served, applied sync or async,
 and on the raw form. An id only a ``get_queryset`` annotation holds compares only over
-rows its type answers for, and is refused over rows another type answers for.
+rows its type answers for, and is refused over rows another type answers for. A leaf
+ending on a relation target's key past a declared hop into a set no type wires names a
+row as the type registered for the target does; past a hop into a set a secondary wires,
+as that secondary.
 """
 
 import asyncio
@@ -1456,7 +1459,8 @@ class _OverridingGlobalIDFilter(GlobalIDFilter):
 
 
 #: Each keyed shape's walking model and leaf path: a ``*-key`` shape spells the relation
-#: key, the others a leaf ending on ``Book``'s key.
+#: key, the others a leaf ending on ``Book``'s key (``__id``, or ``__pk`` for a ``*-pk``
+#: shape).
 _KEYED_PATHS: dict[str, tuple[type[Model], str]] = {
     "foreign-reverse-foreign-key": (models.Book, "shelf__books__id"),
     "foreign-many-to-many": (models.Book, "genres__books__id"),
@@ -1471,6 +1475,10 @@ _KEYED_PATHS: dict[str, tuple[type[Model], str]] = {
     "owned-forward-key": (models.Loan, "book"),
     "owned-unbound-hop-key": (models.Shelf, "books"),
     "owned-unbound-forward-hop-key": (models.Loan, "book"),
+    "owned-unbound-hop": (models.Shelf, "books__id"),
+    "owned-unbound-hop-pk": (models.Shelf, "books__pk"),
+    "owned-unbound-forward-hop": (models.Loan, "book__id"),
+    "owned-unbound-forward-hop-pk": (models.Loan, "book__pk"),
     "override-relation-key": (models.Shelf, "books"),
     "override-forward-key": (models.Loan, "book"),
 }
@@ -1479,10 +1487,10 @@ _KEYED_PATHS: dict[str, tuple[type[Model], str]] = {
 def _keyed_set(shape: str) -> tuple[type[FilterSet], tuple[type[DjangoType], ...]]:
     """The walking set of a keyed ``shape``, and the types its declared hops read.
 
-    A ``*-hop-key`` shape declares its relation as a ``RelatedFilter`` hop into a ``Book``
-    set that no type wires, or (``foreign-*``) that a scoping ``type`` secondary wires.
-    The declared last hop walks a declared ``shelf`` hop, then its ``books`` hop back
-    into the walking set.
+    A ``*-hop*`` shape declares its relation as a ``RelatedFilter`` hop into a ``Book``
+    set that no type wires, or (``foreign-*``) that a scoping ``type`` secondary wires; a
+    leaf ending on ``Book``'s key walks that hop. The declared last hop walks a declared
+    ``shelf`` hop, then its ``books`` hop back into the walking set.
     """
     model, key = _KEYED_PATHS[shape]
     leaf_filter = (_OverridingGlobalIDFilter if shape.startswith("override-") else GlobalIDFilter)(
@@ -1506,7 +1514,7 @@ def _keyed_set(shape: str) -> tuple[type[FilterSet], tuple[type[DjangoType], ...
                 fields = []
 
         return KeyedBookFilter, (make_django_type("ReentryKeyedShelf", models.Shelf, ("id",)),)
-    if not shape.endswith("-hop-key"):
+    if "-hop" not in shape:
         return _declared_set(model, leaf_filter), ()
     child = type(
         "KeyedHopBookFilter",
@@ -1534,7 +1542,7 @@ def _keyed_set(shape: str) -> tuple[type[FilterSet], tuple[type[DjangoType], ...
         "ReentryFilter",
         (FilterSet,),
         {
-            "hop": RelatedFilter(child, field_name=key),
+            "hop": RelatedFilter(child, field_name=key.removesuffix("__id").removesuffix("__pk")),
             "leaf": leaf_filter,
             "Meta": type("Meta", (), {"model": model, "fields": []}),
         },
@@ -1553,8 +1561,8 @@ def _keyed_leaf(rows: _Library, shape: str) -> _Reentry:
     secondary wires. ``owned-reentry*`` walks ``shelf__books`` on a ``Book`` set wired to
     the primary itself, ``owned-relation*`` ``books`` on a ``Shelf`` set and
     ``owned-forward-key`` ``book`` on a ``Loan`` set, all over rows the primary answers
-    for, as do the ``owned-unbound-*`` keys through a declared hop into a set no type
-    wires. An ``override-*`` key's class overrides ``filter``. ``refused`` names
+    for, as do the ``owned-unbound-*`` keys and leaves through a declared hop into a set no
+    type wires. An ``override-*`` key's class overrides ``filter``. ``refused`` names
     ``bk1``'s handle as a ``library.shelf`` id.
     """
     model, _key = _KEYED_PATHS[shape]
@@ -1688,7 +1696,9 @@ def test_a_leaf_compares_an_id_an_annotation_holds_over_rows_its_type_scopes(
     """Over rows the primary answers for, its ``node_key`` annotation is compared there.
 
     The relation key compares it as its leaf ending on the key does, forward or to-many,
-    through undeclared hops or a declared hop into a set no type wires, in one statement.
+    through undeclared hops or a declared hop into a set no type wires (where the leaf,
+    ``__id`` or ``__pk``, names a row of the type registered for ``Book``, as the key
+    does, never the unwired set's own scalar key), in one statement.
     """
     world = _keyed_leaf(_library(), shape)
 
@@ -1707,7 +1717,7 @@ def test_a_leaf_over_rows_an_annotation_id_type_scopes_refuses_another_types_id(
     assert _keyed_answer(world, world.refused, driver) == (world.refusal, 0)
 
 
-_ASYNC_KEYED = ["owned-relation-key", "foreign-reverse-foreign-key-key"]
+_ASYNC_KEYED = ["owned-relation-key", "owned-unbound-hop", "foreign-reverse-foreign-key-key"]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1715,13 +1725,99 @@ _ASYNC_KEYED = ["owned-relation-key", "foreign-reverse-foreign-key-key"]
 def test_a_relation_key_applied_async_compares_an_annotation_id_only_over_its_types_rows(
     shape: str,
 ) -> None:
-    """``apply_async`` compares ``node_key`` over the primary's rows and refuses it elsewhere."""
+    """``apply_async`` compares ``node_key`` over the primary's rows and refuses it elsewhere.
+
+    So does a leaf ending on ``Book``'s key past a declared hop into a set no type wires.
+    """
     rows = _library()
     world = _keyed_leaf(rows, shape)
 
     assert _reentry_answer(world, world.accepted, "apply-async") == (
         _pks(rows.shelves["s1"]) if shape.startswith("owned-") else _KEYED_REFUSAL
     )
+
+
+def _secondary_hop_leaf(rows: _Library, shape: str) -> _Reentry:
+    """A leaf ending on ``Book``'s key past a declared hop into a set a ``type`` secondary wires.
+
+    ``books__id`` on a ``Shelf`` set (``reverse-foreign-key``) or ``book__id`` on a ``Loan``
+    set (``forward``) walks its declared hop into ``SecondaryHopBookFilter``, which the
+    secondary ``SecondaryHopBook`` wires beside the primary ``SecondaryHopBookPrimary``:
+    the leaf decodes against the secondary that set is bound to, while the relation's key
+    validates against the primary, so the secondary's id names ``bk1`` and the primary's
+    is a type mismatch.
+    """
+    model, key = (
+        (models.Shelf, "books__id")
+        if shape == "reverse-foreign-key"
+        else (models.Loan, "book__id")
+    )
+    child = type(
+        "SecondaryHopBookFilter",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": models.Book, "fields": []})},
+    )
+    filterset = type(
+        "ReentryFilter",
+        (FilterSet,),
+        {
+            "hop": RelatedFilter(child, field_name=key.removesuffix("__id")),
+            "leaf": GlobalIDFilter(field_name=key),
+            "Meta": type("Meta", (), {"model": model, "fields": []}),
+        },
+    )
+    primary = make_django_type(
+        "SecondaryHopBookPrimary",
+        models.Book,
+        ("id",),
+        meta_extra={"primary": True, "globalid_strategy": "type"},
+    )
+    secondary = make_django_type(
+        "SecondaryHopBook",
+        models.Book,
+        ("id",),
+        meta_extra={"primary": False, "globalid_strategy": "type", "filterset_class": child},
+    )
+    root = make_django_type(
+        f"SecondaryHop{model.__name__}",
+        model,
+        ("id",),
+        meta_extra={"filterset_class": filterset, "connection": {"total_count": True}},
+    )
+    book = rows.books["bk1"]
+    return _Reentry(
+        filterset,
+        root,
+        (primary, secondary),
+        ("leaf", "exact"),
+        ("leaf", "exact"),
+        "leaf",
+        _gid("SecondaryHopBook", book),
+        _pks(rows.loans["l1"], rows.loans["l2"])
+        if model is models.Loan
+        else _pks(rows.shelves["s1"]),
+        _gid("SecondaryHopBookPrimary", book),
+        _mismatch("SecondaryHopBook", "SecondaryHopBookPrimary", listed=False),
+        listed=False,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("driver", ["live", "apply-sync", "form"])
+@pytest.mark.parametrize("shape", ["reverse-foreign-key", "forward"])
+def test_a_leaf_past_a_hop_into_a_secondary_wired_set_decodes_against_that_secondary(
+    shape: str,
+    driver: str,
+) -> None:
+    """The secondary the hop's set is bound to names the leaf's row; the primary's id is refused.
+
+    Only a hop into a set no type wires reads the leaf as the type registered for the
+    relation's target.
+    """
+    world = _secondary_hop_leaf(_library(), shape)
+
+    assert _reentry_answer(world, world.accepted, driver) == world.expected
+    assert _reentry_answer(world, world.refused, driver) == world.refusal
 
 
 def _untyped_walk(rows: _Library, shape: str) -> _Reentry:

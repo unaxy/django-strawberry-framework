@@ -161,6 +161,7 @@ from django_strawberry_framework.utils.permissions import (
     RelationHop,
     UndeclaredHop,
     relation_path_gates,
+    set_bound_definition,
     set_bound_type,
     walk_declared_relation_path,
 )
@@ -2007,6 +2008,18 @@ def _leaf_declaration(
         attribute = f"{truth.name(owner)}.{projection.name}"
         current = _projection_child_filter(projection)
     return _LeafDeclaration(current, attribute, tuple(through), owner)
+
+
+def _stands_for_own_key(set_cls: type[FilterSet], filter_instance: Filter) -> bool:
+    """Whether ``filter_instance``, a leaf of ``set_cls``, stands for its declaring set's own key.
+
+    The declaration it answers for (``_leaf_declaration``: an expanded copy's child filter on
+    the set that declares it, any other leaf itself) walks no relation on that set's model:
+    its path, as Django walks it, is one segment (a leaf ending on a primary key: that key).
+    """
+    declaration = _leaf_declaration(filter_instance, set_cls)
+    declaring = require(declaration.filterset, _is_filterset_class)
+    return LOOKUP_SEP not in _filterset_walked_lookup(declaring, declaration.declared)[0]
 
 
 def _restrict_to_related(
@@ -7870,19 +7883,34 @@ class FilterSet(
         (``_globalid_decode_sites``) binds each terminal to a face no ``__init__`` ran on,
         so the build reads the routing a request runs. A GlobalID key whose target's id an
         annotation holds routes before the fold and the to-many pre-build: both read the
-        relation on the walking set's own rows, which no target hook annotated.
+        relation on the walking set's own rows, which no target hook annotated. A leaf
+        ending on the target's primary key past a declared hop into a set no type wires
+        (``set_bound_definition`` reads none) carries its leaf as declared
+        (``filters/base.py::_key_leaf_of``), so it names a row of the type registered for
+        the relation's target, as the relation's key does, unless it stands for that set's
+        own key (``_stands_for_own_key``: a flat copy of the set's own declaration).
         """
         walk = cls._flat_leaf_walk(filter_instance)
         if walk is None:
             return None
         hops, target_path = walk
         last = hops[-1]
-        if target_path:
-            return _LeafChain(
-                hops,
-                bind(filter_instance, last, target_path),
-            )
         target_pk = _hop_model(last)._meta.pk
+        if target_path:
+            terminal = bind(filter_instance, last, target_path)
+            if (
+                target_path in {target_pk.name, "pk"}
+                and isinstance(last, DeclaredHop)
+                and set_bound_definition(_hop_target_set(last)) is None
+                and not _stands_for_own_key(cls, filter_instance)
+            ):
+                # A leaf walking a relation onto the target's primary key names a row of the
+                # relation's target as the relation's key does: a set no type wires has no
+                # type of its own to read the bare key against, so the leaf resolves as its
+                # declaring set declares it. A copy of the target set's own key keeps that
+                # set's reading.
+                setattr(terminal, _KEY_LEAF_ATTR, filter_instance)
+            return _LeafChain(hops, terminal)
         if _filterset_walked_lookup(cls, filter_instance)[1] == "isnull":
             return _LeafChain(
                 hops,
