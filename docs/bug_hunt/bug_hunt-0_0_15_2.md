@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 482 done, 119 to do. The CHANGELOG entries filed here moved to
+Progress: 483 done, 119 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2543,6 +2543,27 @@ Progress: 482 done, 119 to do. The CHANGELOG entries filed here moved to
   `examples/fakeshop/test_query/test_raw_filter_forms_api.py` `_REFUSED_SETS` rows (three raw drivers). Docs: spec-027
   (Decision 4 model-choice row, checklist, Edge cases, Test plan, DoD 32), docs/README.md, GLOSSARY `ConfigurationError`
   (pk 444) and `FilterSet` (pk 463). Filed 879. CHANGELOGTODO 880
+- [x] 877. A filter running shipped code whose `field_name` ends on a `GenericForeignKey` (on the set's model or past
+  a relation, whatever its class or lookup: `CharFilter`, `NumberFilter`, `BooleanFilter` and its `isnull`, typed,
+  list, CSV, range, choice, `LookupChoiceFilter`, a generated `Meta.fields` key) is now refused when its set publishes
+  its filters, in the served input build's words naming the set that declares it: at schema build for a served set, at
+  first use for a set no type serves (a raw `FilterSet(data=...)`, `DjangoFilterBackend`, `FilterView` and
+  `apply_sync` included). Unserved, such a filter built and failed every request carrying a value with Django's
+  `FieldError` (masked over a resolver), and a served `isnull` one built and failed alike. New
+  `filters/inputs.py::refuse_joinless_relation`, asked under `_runs_shipped_filter` in
+  `filters/sets.py::FilterSet._publish_filters`; a `method=` filter and a class-level `filter` override keep filtering
+  as they choose, and the content type / object id columns and a `GenericRelation` build. Served choice-family filters
+  on a GFK now carry the GFK text, and a `RelatedFilter` route names its own set. The spec-027 / GLOSSARY sentence
+  about an unserved set's `apply_sync` refusal is restated to its true scope (an object sent to a scalar, typed or
+  `method=` leaf; a list, CSV, range or multiple-choice leaf rejects it as no list or range). spec-027 (the
+  `SCALAR_MAP` edge case, the Decision 4 catch-all and list rows, the declared-predicate paragraph, the checklist, the
+  raw-set edge case, the DoD, the test plan), GLOSSARY `FilterSet` (pk 463) and the live README map follow. Grids: 608
+  of 3027 rows moved, all on the four GFK shapes. Pinned by
+  `examples/fakeshop/test_query/test_raw_filter_forms_api.py` (four new refused sets,
+  `::test_a_raw_set_filtering_the_columns_beside_a_generic_key_answers_their_rows`), the GFK block of
+  `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py` and `tests/filters/test_sets.py`
+  (`::test_a_column_filter_on_a_relation_django_joins_publishes`,
+  `::test_an_exact_list_on_a_generic_foreign_key_is_refused_for_the_relation`)
 
 ## Outside review of the fixes
 
@@ -2780,17 +2801,17 @@ tracker number are recorded there; open remainders and new defects are filed as 
   numbered 100 / 101 through a flat or raw parent key (`filters/sets.py::_LeafChain.terminal_value` /
   `_relation_key_value` re-read the cleaned instances' keys). One declaration, two answers, the 789 family; a forward
   key (`CardItem.card`, `number`) answers `[]` both ways. Found fact-finding 819
-- [ ] 877. (robustness) An unserved set's column-typed shipped filter (`CharFilter`, `NumberFilter`) on a
-  `GenericForeignKey` builds and fails every raw-form, `.qs` and `apply_sync` request with Django's `FieldError`,
-  while a served set refuses it at the input build (`filters/inputs.py::_unscalared_field_refusal`) and spec-027's
-  edge case on a field no `SCALAR_MAP` entry covers and GLOSSARY say an unserved set refuses it at the `apply_sync`
-  request. Found researching 875
-
 - [ ] 879. (robustness) A model-choice filter declared with an explicit `queryset=None` builds its form (its set's
   other keys answer), then a request supplying it raises a bare `AttributeError` at clean (`'NoneType' object has no
   attribute 'model'`; a `ModelMultipleChoiceFilter` raises it cleaning an empty value too), masked over GraphQL, where
   the absent-queryset shape is refused when its set publishes (756). Stock django-filter fails the same way. Found
   verifying 756
+- [ ] 881. (robustness) A shipped filter whose `field_name` continues past a `GenericForeignKey`
+  (`CharFilter(field_name="content_object__name")`) builds on a served and an unserved set alike (the input types it
+  `String` from no field) and fails every request carrying a value with Django's `FieldError` (`Query.names_to_path`),
+  masked over a resolver; `filters/inputs.py::refuse_joinless_relation` judges only a path ending on one. Found
+  researching 877
+
 ## To do: holes found re-checking the fixes
 
 

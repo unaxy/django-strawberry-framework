@@ -415,6 +415,31 @@ def _scalar_from_model_field(
     return scalar_for_field(model_field)
 
 
+def refuse_joinless_relation(filterset_cls: type[FilterSet], filter_instance: Filter) -> None:
+    """Refuse a leaf whose ``field_name`` path ends on a relation Django builds no join for.
+
+    A ``GenericForeignKey`` (a content type and an object id, no one target model) has no
+    column a value compares on (``filters/base.py::_compared_columns`` answers none), and
+    Django refuses every queryset filter through it with ``FieldError`` whatever the lookup
+    (``Query.names_to_path``), so the filter could answer no request carrying a value.
+    ``filters/sets.py::FilterSet._publish_filters`` asks this of every leaf a set publishes
+    whose ``filter`` is shipped code (``filters/sets.py::_runs_shipped_filter``: never a
+    ``method=`` filter or a class-level ``filter`` override, which filter as they choose),
+    after ``filters/base.py::refuse_identityless_relation`` refuses a GlobalID or model-choice
+    filter there: a set a type serves refuses it when the schema builds, an unserved set at
+    its first use (its first construction, ``FilterSet.__init__``, or the package's first
+    read of its table) and at every construction after until it is fixed. The refusal is the
+    one the set's input build gives the leaf (``_unscalared_field_refusal``), naming the
+    filter as the set declaring it holds it. The relation's content type and object id
+    columns, and a ``GenericRelation`` reversing it, are joined as any relation is and are
+    not refused.
+    """
+    field = _filterset_model_field(filterset_cls, filter_instance)
+    if field is None or _compared_columns(filter_instance, field):
+        return
+    raise _unscalared_field_refusal(filter_instance, field, filterset_cls)
+
+
 def _unscalared_field_refusal(
     filter_instance: Filter,
     model_field: ModelField,

@@ -25,9 +25,11 @@ A set no type names (a plain subclass of ``BookFilter``, a set of the test's own
 its filter table at its first construction, under a consumer's own call, DRF's
 ``DjangoFilterBackend`` and django-filter's ``FilterView`` alike: a walked key one or two hops
 deep answers ``BookFilter``'s rows as each viewer sees them, and a declaration Django answers
-no request for (a ``range`` over a relation, a GlobalID or model-choice filter over a
-``GenericForeignKey``, a model-choice filter with no queryset, declared or selected by
-``Meta.filter_overrides``) is refused at every construction.
+no request for (a ``range`` over a relation, a GlobalID, model-choice, column-typed, choice or
+null-test filter over a ``GenericForeignKey``, a model-choice filter with no queryset, declared
+or selected by ``Meta.filter_overrides``) is refused at every construction, while a filter on
+the content type key beside a ``GenericForeignKey`` or on the ``GenericRelation`` reversing it
+answers its rows.
 """
 
 import contextlib
@@ -46,6 +48,7 @@ from apps.products.services import create_users
 from apps.scalars import models
 from django import forms
 from django.contrib.auth import get_user_model
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import FieldError
 from django.db import connection
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -250,6 +253,72 @@ class _ModelMultipleChoicePastKeySet(FilterSet):
         fields = ("name",)
 
 
+class _CharOverGenericSet(FilterSet):
+    """A ``CharFilter`` over a ``GenericForeignKey``: no column holds a value it compares."""
+
+    content_object = django_filters.CharFilter(field_name="content_object")
+
+    class Meta:
+        model = library_models.TaggedItem
+        fields = ("tag",)
+
+
+class _NullTestOverGenericSet(FilterSet):
+    """An ``isnull`` test over a ``GenericForeignKey``, which Django filters no queryset through."""
+
+    content_object = django_filters.BooleanFilter(
+        field_name="content_object",
+        lookup_expr="isnull",
+    )
+
+    class Meta:
+        model = library_models.CirculationDesk
+        fields = ("name",)
+
+
+class _RangePastKeyOntoGenericSet(FilterSet):
+    """A ``range`` past a key onto the desk's ``GenericForeignKey``."""
+
+    desk_object = RangeFilter(field_name="desk__content_object")
+
+    class Meta:
+        model = library_models.DeskShift
+        fields = ("name",)
+
+
+class _ChoicePastKeyOntoGenericSet(FilterSet):
+    """A ``ChoiceFilter`` past a key onto the desk's ``GenericForeignKey``."""
+
+    desk_object = django_filters.ChoiceFilter(
+        choices=[("a", "a")],
+        field_name="desk__content_object",
+    )
+
+    class Meta:
+        model = library_models.DeskShift
+        fields = ("name",)
+
+
+class _ContentTypeColumnSet(FilterSet):
+    """A ``NumberFilter`` on the content type key a ``GenericForeignKey`` reads: a column."""
+
+    kind = django_filters.NumberFilter(field_name="content_type")
+
+    class Meta:
+        model = library_models.TaggedItem
+        fields = ("tag",)
+
+
+class _GenericRelationSet(FilterSet):
+    """A ``NumberFilter`` on the ``GenericRelation`` reversing a ``GenericForeignKey``."""
+
+    tagged = django_filters.NumberFilter(field_name="tags")
+
+    class Meta:
+        model = library_models.Branch
+        fields = ("name",)
+
+
 class _QuerysetlessChoiceSet(FilterSet):
     """A ``ModelChoiceFilter`` with no ``queryset=``: its form field has no rows to look in."""
 
@@ -283,6 +352,12 @@ _RAW_SETS: dict[str, type[FilterSet]] = {
     "global-id-over-a-generic-key": _GlobalIDOverGenericSet,
     "model-choice-over-a-generic-key": _ModelChoiceOverGenericSet,
     "model-multiple-choice-past-a-key-onto-a-generic-key": _ModelMultipleChoicePastKeySet,
+    "char-over-a-generic-key": _CharOverGenericSet,
+    "null-test-over-a-generic-key": _NullTestOverGenericSet,
+    "range-past-a-key-onto-a-generic-key": _RangePastKeyOntoGenericSet,
+    "choice-past-a-key-onto-a-generic-key": _ChoicePastKeyOntoGenericSet,
+    "content-type-column": _ContentTypeColumnSet,
+    "generic-relation": _GenericRelationSet,
     "model-choice-with-no-queryset": _QuerysetlessChoiceSet,
     "filter-override-with-no-queryset": _QuerysetlessOverrideSet,
 }
@@ -2590,6 +2665,26 @@ _REFUSED_SETS = {
         "GenericForeignKey: Django filters no queryset through it, so no related row's "
         "identity can be compared on it."
     ),
+    "char-over-a-generic-key": (
+        "_CharOverGenericSet: CharFilter on 'content_object' reads TaggedItem.content_object, a "
+        "GenericForeignKey: Django filters no queryset through it, so no input can carry its "
+        "value"
+    ),
+    "null-test-over-a-generic-key": (
+        "_NullTestOverGenericSet: BooleanFilter on 'content_object' reads "
+        "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
+        "through it, so no input can carry its value"
+    ),
+    "range-past-a-key-onto-a-generic-key": (
+        "_RangePastKeyOntoGenericSet: RangeFilter on 'desk__content_object' reads "
+        "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
+        "through it, so no input can carry its value"
+    ),
+    "choice-past-a-key-onto-a-generic-key": (
+        "_ChoicePastKeyOntoGenericSet: ChoiceFilter on 'desk__content_object' reads "
+        "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
+        "through it, so no input can carry its value"
+    ),
     "model-choice-with-no-queryset": (
         "FilterSet _QuerysetlessChoiceSet: ModelChoiceFilter 'branch_is' has field_name 'branch' "
         "and no queryset, so the model-choice form field it builds has no rows to look a value "
@@ -2629,6 +2724,54 @@ def test_a_raw_set_declaring_a_refused_filter_is_refused_at_its_first_constructi
             _ = _raw_set_ids(client, driver, name, {})
         assert str(refused.value).startswith(_REFUSED_SETS[name])
     assert _RAW_SETS[name]._expansion_snapshot() is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_set_filtering_the_columns_beside_a_generic_key_answers_their_rows(
+    driver: str,
+) -> None:
+    """The content type key a ``GenericForeignKey`` reads and its ``GenericRelation`` filter rows.
+
+    Only a leaf ending on the ``GenericForeignKey`` itself is refused when its set
+    publishes: a column-typed filter on the content type key, and one on the
+    ``GenericRelation`` reversing the relation on the tagged model, are joined as any
+    relation is and answer their rows on every driver.
+    """
+    create_users(1)
+    branch = library_models.Branch.objects.create(name="tagged-branch")
+    other = library_models.Branch.objects.create(name="untagged-branch")
+    desk = library_models.CirculationDesk.objects.create(
+        name="tagged-desk",
+        branch=branch,
+        shelf=library_models.Shelf.objects.create(code="s-tagged", branch=branch),
+    )
+    branch_type = ContentType.objects.get_for_model(library_models.Branch)
+    desk_type = ContentType.objects.get_for_model(library_models.CirculationDesk)
+    on_branch = library_models.TaggedItem.objects.create(
+        tag="b",
+        content_type=branch_type,
+        object_id=saved_pk(branch),
+    )
+    on_desk = library_models.TaggedItem.objects.create(
+        tag="d",
+        content_type=desk_type,
+        object_id=saved_pk(desk),
+    )
+    client = _raw_set_client("anonymous")
+
+    by_kind = {"kind": str(saved_pk(branch_type))}
+    assert _raw_set_ids(client, driver, "content-type-column", by_kind) == [saved_pk(on_branch)]
+    by_desk_kind = {"kind": str(saved_pk(desk_type))}
+    assert _raw_set_ids(client, driver, "content-type-column", by_desk_kind) == [
+        saved_pk(on_desk),
+    ]
+    by_tag = {"tagged": str(saved_pk(on_branch))}
+    assert _raw_set_ids(client, driver, "generic-relation", by_tag) == [saved_pk(branch)]
+    assert _raw_set_ids(client, driver, "generic-relation", {}) == [
+        saved_pk(branch),
+        saved_pk(other),
+    ]
 
 
 #: (raw key and value, the titles each viewer's request answers, by set)

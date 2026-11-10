@@ -905,7 +905,7 @@ def test_declared_list_over_a_relation_cleans_each_element_as_its_key_column(
             id="multi-column-relation-exact",
         ),
         pytest.param(
-            FilterSet,
+            django_filters.FilterSet,
             models.TaggedItem,
             ListFilter(field_name="content_object", lookup_expr="in"),
             id="generic-foreign-key",
@@ -921,7 +921,9 @@ def test_declared_list_over_a_relation_no_one_column_holds_cleans_no_element(
 
     No one column holds a value of a multi-column ``ForeignObject`` or a
     ``GenericForeignKey``. A stock django-filter parent publishes through no package table,
-    so its ``exact`` list is never refused for its lookup and still cleans nothing.
+    so its ``exact`` list is never refused for its lookup, nor its list over a
+    ``GenericForeignKey`` (the package's set refuses that one when it publishes), and each
+    still cleans nothing.
     """
     filterset = _declared_set(parent, model, f=filter_instance)(
         data={},

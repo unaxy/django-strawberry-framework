@@ -3362,8 +3362,8 @@ def _compared_columns(filter_instance: Filter, field: ModelField) -> tuple[Concr
     No column for a relation Django builds no join for (a ``GenericForeignKey``, whose
     target is no one model): no value compares on it, so a set holding a GlobalID or
     model-choice filter on one refuses it when it publishes
-    (``refuse_identityless_relation``); a raw-key leaf on one is refused by its input
-    build, or matches no row unserved.
+    (``refuse_identityless_relation``), and any other leaf running shipped code there
+    (``filters/inputs.py::refuse_joinless_relation``).
     """
     marked = bool(getattr(filter_instance, _GLOBALID_RELATION_PK_ATTR, False))
     if isinstance(field, models.ForeignKey) or not field.is_relation:

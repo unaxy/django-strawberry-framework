@@ -9,7 +9,10 @@ its set publishes its filters, served or applied unbound, unless a ``method`` fi
 So is a model-choice filter on one, whatever its ``queryset``, unless a ``method`` or a
 ``filter`` override of its own filters it; through a ``GenericRelation`` it keeps the
 tagged rows, and on a name only the type's queryset holds (a ``FilteredRelation`` alias,
-a text annotation) it serves rows.
+a text annotation) it serves rows. So is any other filter running shipped code on one (a
+column-typed, choice or null-test filter, a ``RelatedFilter`` child's naming the child),
+while a ``method`` or a ``filter`` override of its own answers rows unserved and, served,
+is refused by the input build no scalar types.
 A relation key whose hops re-enter its own set's table takes the id the type registered
 for the relation's target mints, under its published name, whichever type the set or the
 walk's target rows answer for, and so does a consumer leaf ending on the re-entry's
@@ -44,7 +47,15 @@ from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from django_filters import Filter, ModelChoiceFilter, ModelMultipleChoiceFilter
+from django_filters import (
+    BooleanFilter,
+    CharFilter,
+    ChoiceFilter,
+    Filter,
+    ModelChoiceFilter,
+    ModelMultipleChoiceFilter,
+    NumberFilter,
+)
 from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
@@ -1043,6 +1054,211 @@ def test_a_model_choice_filter_through_a_generic_relation_keeps_the_tagged_rows(
 
     expected = [saved_pk(target), saved_pk(sibling)] if listed else [saved_pk(target)]
     assert _node_pks(payload, "branches") == expected, payload
+
+
+class _ObjectIdNumberFilter(NumberFilter):
+    """A ``filter`` override keeping the tags whose object id is the number sent."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        if value is None:
+            return qs
+        return qs.filter(object_id=value)
+
+
+def _column_generic_set(leaf: Filter) -> type[FilterSet]:
+    """A ``TaggedItem`` set whose column-typed ``leaf`` names the ``GenericForeignKey``."""
+
+    class ColumnGenericSet(FilterSet):
+        tagged = leaf
+
+        class Meta:
+            model = models.TaggedItem
+            fields = []
+
+        def by_object(
+            self,
+            queryset: QuerySet[models.TaggedItem],
+            name: str,
+            value: object,
+        ) -> QuerySet[models.TaggedItem]:
+            del name
+            return queryset.filter(object_id=value)
+
+    return ColumnGenericSet
+
+
+_COLUMN_GENERIC_SUBJECT = (
+    "ColumnGenericSet: {kind} on 'content_object' reads "
+    "TaggedItem.content_object, a GenericForeignKey: Django filters no queryset through it, so "
+    "no input can carry its value"
+)
+
+
+#: Each column-typed leaf on the ``GenericForeignKey`` consumer code filters.
+_CONSUMER_GENERIC_COLUMNS: dict[str, Callable[[], Filter]] = {
+    "number-method": lambda: NumberFilter(field_name="content_object", method="by_object"),
+    "number-filter-override": lambda: _ObjectIdNumberFilter(field_name="content_object"),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", sorted(_CONSUMER_GENERIC_COLUMNS))
+def test_an_unserved_column_filter_on_a_generic_foreign_key_filters_through_consumer_code(
+    name: str,
+) -> None:
+    """A ``method`` or a ``filter`` override filters as it chooses: unserved, it answers rows.
+
+    Neither runs the shipped comparison through the relation its ``field_name`` names,
+    so publishing the set leaves it to its own code: these keep the tags whose object id
+    is the number sent.
+    """
+    target = models.Branch.objects.create(name="Target", city="Boston")
+    sibling = models.Branch.objects.create(name="Sibling", city="Boston")
+    tags = [
+        saved_pk(models.TaggedItem.objects.create(content_object=branch, tag=branch.name.lower()))
+        for branch in (target, sibling)
+    ]
+    schema = _tagged_item_schema(
+        _column_generic_set(_CONSUMER_GENERIC_COLUMNS[name]()),
+        served=False,
+    )
+
+    payload = _post(
+        schema,
+        "query($where: JSON!) { tags(where: $where) { id } }",
+        {"where": {"tagged": saved_pk(sibling)}},
+    )
+
+    assert _node_pks(payload, "tags") == tags[1:], payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", sorted(_CONSUMER_GENERIC_COLUMNS))
+def test_a_served_column_filter_on_a_generic_foreign_key_is_refused_by_its_input_build(
+    name: str,
+) -> None:
+    """Served, consumer code still needs an input its value travels in: none types it.
+
+    The set publishes the leaf (its own code filters it), and the input build refuses it,
+    since no scalar types a ``GenericForeignKey``.
+    """
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = _tagged_item_schema(
+            _column_generic_set(_CONSUMER_GENERIC_COLUMNS[name]()),
+            served=True,
+        )
+
+    kind = "NumberFilter" if name == "number-method" else "_ObjectIdNumberFilter"
+    expected = _COLUMN_GENERIC_SUBJECT.format(kind=kind)
+    assert str(exc_info.value).startswith(expected), exc_info
+
+
+def _desk_route_parent() -> type[FilterSet]:
+    """A ``Branch`` set reaching a desk set's ``CharFilter`` on its ``GenericForeignKey``."""
+
+    class DeskGenericChild(FilterSet):
+        held = CharFilter(field_name="content_object")
+
+        class Meta:
+            model = models.CirculationDesk
+            fields = []
+
+    class DeskRouteParent(FilterSet):
+        circulation_desks = RelatedFilter(DeskGenericChild, field_name="circulation_desks")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+
+    return DeskRouteParent
+
+
+#: Each shipped leaf ending on a ``GenericForeignKey`` a served set publishes, and the
+#: words its refusal starts with.
+_SERVED_GENERIC_COLUMNS: dict[str, tuple[Callable[[], type[FilterSet]], str]] = {
+    "choice": (
+        lambda: _column_generic_set(
+            ChoiceFilter(choices=[("a", "a")], field_name="content_object"),
+        ),
+        _COLUMN_GENERIC_SUBJECT.format(kind="ChoiceFilter"),
+    ),
+    "null-test": (
+        lambda: _column_generic_set(
+            BooleanFilter(field_name="content_object", lookup_expr="isnull"),
+        ),
+        _COLUMN_GENERIC_SUBJECT.format(kind="BooleanFilter"),
+    ),
+    "related-filter-route": (
+        _desk_route_parent,
+        (
+            "DeskGenericChild: CharFilter on 'content_object' reads "
+            "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
+            "through it, so no input can carry its value"
+        ),
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", sorted(_SERVED_GENERIC_COLUMNS))
+def test_a_shipped_filter_on_a_generic_foreign_key_is_refused_when_the_schema_builds(
+    name: str,
+) -> None:
+    """Whatever its class or lookup, a shipped leaf on a ``GenericForeignKey`` is refused.
+
+    Django filters no queryset through one, so a choice filter or a null test there would
+    answer every request with Django's ``FieldError``: the set refuses it when it
+    publishes, naming the set that declares it (a ``RelatedFilter`` child's leaf names the
+    child, with no route).
+    """
+    build, expected = _SERVED_GENERIC_COLUMNS[name]
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = _served_schema(build())
+
+    assert str(exc_info.value).startswith(expected), exc_info
+    assert "(reached through" not in str(exc_info.value), exc_info
+
+
+@pytest.mark.django_db
+def test_an_unserved_column_filter_on_a_generic_foreign_key_is_refused_at_first_use(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Applied unbound, the set publishes at its first use: the input build's refusal, logged.
+
+    The request answers the masked error and the server log carries the
+    ``ConfigurationError``, never a ``FieldError`` from the query.
+    """
+    branch = models.Branch.objects.create(name="Target", city="Boston")
+    _ = models.TaggedItem.objects.create(content_object=branch, tag="t")
+    schema = _tagged_item_schema(
+        _column_generic_set(CharFilter(field_name="content_object")),
+        served=False,
+    )
+    unfiltered = _post(schema, "{ tags { tag } }")
+    assert unfiltered == {"data": {"tags": [{"tag": "t"}]}}, unfiltered
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+
+    payload = _post(
+        schema,
+        "query($where: JSON!) { tags(where: $where) { tag } }",
+        {"where": {"tagged": "x"}},
+    )
+
+    assert payload["data"] is None, payload
+    assert json_at(payload, "errors", 0, "message") == "An unexpected error occurred.", payload
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert len(records) == 1, caplog.records
+    exc_info = records[0].exc_info
+    assert exc_info is not None
+    assert type(exc_info[1]) is ConfigurationError, exc_info[1]
+    expected = _COLUMN_GENERIC_SUBJECT.format(kind="CharFilter")
+    assert str(exc_info[1]).startswith(expected), exc_info[1]
 
 
 def _annotated_desks(

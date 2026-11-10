@@ -9225,6 +9225,14 @@ def test_another_sets_filter_for_lookup_during_generation_reads_as_a_direct_call
     assert all(answer is GlobalIDFilter for answer in asked)
 
 
+_GENERIC_KEY_REFUSAL = (
+    "{subject} on 'content_object' reads TaggedItem.content_object, a GenericForeignKey: Django "
+    "filters no queryset through it, so no input can carry its value; filter through the "
+    "GenericRelation that reverses it on the related model, or on the content type and object "
+    "id columns it reads."
+)
+
+
 def test_generic_foreign_key_key_is_refused_by_path() -> None:
     """A ``GenericForeignKey`` key (no ``related_model``) is refused naming its path."""
 
@@ -9237,8 +9245,66 @@ def test_generic_foreign_key_key_is_refused_by_path() -> None:
         _ = TaggedItemFilter.get_filters()
         return TaggedItemFilter
 
-    with pytest.raises(ConfigurationError, match="content_object"):
+    with pytest.raises(ConfigurationError) as refused:
         declare()
+    assert str(refused.value) == _GENERIC_KEY_REFUSAL.format(
+        subject="TaggedItemFilter: RelationPkFilter",
+    )
+
+
+@pytest.mark.parametrize("filter_class", [ListFilter, ArrayFilter])
+def test_an_exact_list_on_a_generic_foreign_key_is_refused_for_the_relation(
+    filter_class: type[ListFilter | ArrayFilter],
+) -> None:
+    """A leaf on a ``GenericForeignKey`` is refused for the relation before its lookup is judged.
+
+    The ``exact`` list would be refused for comparing one value where it applies a list,
+    yet no lookup of it can answer a request through the relation, so the refusal names
+    the relation.
+    """
+
+    class ListExactGenericSet(FilterSet):
+        f = filter_class(field_name="content_object", lookup_expr="exact")
+
+        class Meta:
+            model = library_models.TaggedItem
+            fields = []
+
+    with pytest.raises(ConfigurationError) as refused:
+        _ = ListExactGenericSet.get_filters()
+    assert str(refused.value) == _GENERIC_KEY_REFUSAL.format(
+        subject=f"ListExactGenericSet: {filter_class.__name__}",
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "field_name"),
+    [
+        pytest.param(library_models.TaggedItem, "content_type", id="content-type-key"),
+        pytest.param(library_models.Branch, "tags", id="generic-relation"),
+        pytest.param(library_models.Shelf, "branch", id="forward-key"),
+    ],
+)
+def test_a_column_filter_on_a_relation_django_joins_publishes(
+    model: type[models.Model],
+    field_name: str,
+) -> None:
+    """Only a relation Django builds no join for is refused when an unserved set publishes.
+
+    The content type key a ``GenericForeignKey`` reads, the ``GenericRelation`` reversing
+    one and a forward key each compare a column, so a ``NumberFilter`` on one publishes.
+    """
+    target = model
+    leaf = django_filters.NumberFilter(field_name=field_name)
+
+    class JoinedRelationSet(FilterSet):
+        f = leaf
+
+        class Meta:
+            model = target
+            fields = []
+
+    assert list(JoinedRelationSet.get_filters()) == ["f"]
 
 
 def test_dotted_relation_key_targets_its_own_relation_not_a_root_relation_of_the_leaf_name() -> (

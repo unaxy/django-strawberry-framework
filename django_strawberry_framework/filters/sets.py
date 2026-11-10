@@ -260,6 +260,7 @@ from .inputs import (
     leaf_gate_path,
     normalize_input_value,
     publishes_json_value,
+    refuse_joinless_relation,
 )
 
 # Python-attr tokens of the logical operator keys (``and_`` / ``or_`` / ``not_``),
@@ -4538,14 +4539,16 @@ class FilterSet(
         refused first (``_reject_foreign_projection``), and so are a GlobalID or
         model-choice filter on a relation no row identity is compared on
         (``filters/base.py::refuse_identityless_relation``) and a leaf running a shipped
-        ``filter`` (``_runs_shipped_filter``) whose ``field_name`` and ``lookup_expr``
-        Django resolves on no queryset (``filters/base.py::refuse_unresolvable_lookup``)
-        or, on a ``ListFilter`` / ``ArrayFilter``, whose lookup compares one value where the
-        filter applies a list (``filters/base.py::refuse_listless_lookup``), and a
-        model-choice filter with no queryset (``filters/base.py::refuse_querysetless_choice``)
-        unless the set overrides ``__init__``, ``get_form_class`` or ``form``, where its own
-        code can supply one per request. A read of the set's table while it publishes answers
-        the table being published.
+        ``filter`` (``_runs_shipped_filter``) whose ``field_name`` ends on a relation
+        Django builds no join for (``filters/inputs.py::refuse_joinless_relation``), whose
+        ``field_name`` and ``lookup_expr`` Django resolves on no queryset
+        (``filters/base.py::refuse_unresolvable_lookup``) or, on a ``ListFilter`` /
+        ``ArrayFilter``, whose lookup compares one value where the filter applies a list
+        (``filters/base.py::refuse_listless_lookup``), and a model-choice filter with no
+        queryset (``filters/base.py::refuse_querysetless_choice``) unless the set overrides
+        ``__init__``, ``get_form_class`` or ``form``, where its own code can supply one per
+        request. A read of the set's table while it publishes answers the table being
+        published.
         """
         table = OrderedDict(cls._reshape(expansion))
         # A set whose instances edit their filters or build their own form can supply a
@@ -4565,6 +4568,7 @@ class FilterSet(
                 if not builds_own_form:
                     refuse_querysetless_choice(cls, filter_name, filter_instance)
                 if shipped:
+                    refuse_joinless_relation(cls, filter_instance)
                     refuse_unresolvable_lookup(cls, filter_name, filter_instance)
                     refuse_listless_lookup(cls, filter_name, filter_instance)
         model = cls._meta.model
