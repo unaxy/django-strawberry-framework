@@ -2401,19 +2401,38 @@ def _unwired_hop_world(
     init: bool = False,
     wired: bool = False,
     callable_branch: bool = True,
+    flat: bool = True,
+    method: bool = False,
 ) -> None:
     """``BookFilter.shelf`` targets an unwired ``ShelfFilter`` publishing a ``callable`` ``branch``.
 
     With ``init`` the shelf set overrides ``__init__``, so ``BookFilter`` holds only a
     projected copy of ``branch`` and the leaf is reached only through the nested branch;
     with ``wired`` ``ShelfType`` wires the shelf set too; without ``callable_branch`` the
-    ``Branch`` type keeps the default strategy.
+    ``Branch`` type keeps the default strategy. ``flat`` is ``BookFilter.shelf``'s; with
+    ``method`` the shelf set's ``branch`` is a ``method=`` decoder.
     """
 
     class ShelfFilter(FilterSet):
         class Meta:
             model = Shelf
             fields = {"code": ["exact"], "branch": ["exact"]}
+
+    class MethodShelfFilter(FilterSet):
+        branch = GlobalIDFilter(field_name="branch", method="decode")
+
+        def decode(
+            self,
+            queryset: QuerySet[Shelf],
+            name: str,
+            value: object,
+        ) -> QuerySet[Shelf]:
+            del name, value
+            return queryset
+
+        class Meta:
+            model = Shelf
+            fields = {"code": ["exact"]}
 
     class InitShelfFilter(FilterSet):
         @override
@@ -2432,7 +2451,11 @@ def _unwired_hop_world(
             fields = {"code": ["exact"], "branch": ["exact"]}
 
     class BookFilter(FilterSet):
-        shelf = RelatedFilter(InitShelfFilter if init else ShelfFilter, field_name="shelf")
+        shelf = RelatedFilter(
+            InitShelfFilter if init else MethodShelfFilter if method else ShelfFilter,
+            field_name="shelf",
+            flat=flat,
+        )
 
         class Meta:
             model = Book
@@ -2453,12 +2476,13 @@ def _unwired_hop_world(
     _relay_type(Book, ("id", "title", "shelf"), name="BookType", filterset_class=BookFilter)
 
 
-def _walked_own_leaf_world(*, shelf_id: bool = False) -> None:
+def _walked_own_leaf_world(*, shelf_id: bool = False, flat: bool = True) -> None:
     """An own ``BookFilter`` leaf walks the declared ``shelf`` hop and decodes in ``ShelfFilter``.
 
     ``branch_is`` (``shelf__branch``) reaches a ``callable`` ``Branch`` type past an
     unwired ``ShelfFilter``; with ``shelf_id``, ``shelf_is`` (``shelf__id``) reaches the
-    shelf's own key, in a ``ShelfFilter`` wired to a ``callable`` ``Shelf`` type.
+    shelf's own key, in a ``ShelfFilter`` wired to a ``callable`` ``Shelf`` type. ``flat``
+    is the walked declaration's.
     """
 
     class ShelfFilter(FilterSet):
@@ -2475,7 +2499,7 @@ def _walked_own_leaf_world(*, shelf_id: bool = False) -> None:
         "BookFilter",
         (FilterSet,),
         {
-            "shelf": RelatedFilter(ShelfFilter, field_name="shelf"),
+            "shelf": RelatedFilter(ShelfFilter, field_name="shelf", flat=flat),
             **leaf,
             "Meta": type("Meta", (), {"model": Book, "fields": {"title": ["exact"]}}),
         },
@@ -2512,6 +2536,123 @@ def _scoped_hop_world() -> None:
     _relay_type(Branch, ("id", "name"), name="BranchType", strategy=_encode_by_name)
     _relay_type(Shelf, ("id", "code"), name="ShelfType", hook=True)
     _relay_type(Book, ("id", "title"), name="BookType", filterset_class=BookFilter)
+
+
+def _behind_shelf_books_world(
+    book_fields: dict[str, list[str]],
+    book_set: str,
+    *,
+    flat: bool,
+) -> None:
+    """A wired ``ShelfFilter.books`` (``flat``) reaching an unwired book set holding ``book_fields``.
+
+    ``"shelf__branch"`` walks the undeclared ``shelf`` hop a scoping ``ShelfType`` reads
+    into a ``callable`` ``Branch``; ``"shelf__books"`` re-enters ``Book`` past it, onto a
+    ``callable`` primary.
+    """
+    book_filter = type(
+        book_set,
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": Book, "fields": book_fields})},
+    )
+    shelf_filter = type(
+        "ShelfFilter",
+        (FilterSet,),
+        {
+            "books": RelatedFilter(book_filter, field_name="books", flat=flat),
+            "Meta": type("Meta", (), {"model": Shelf, "fields": {"code": ["exact"]}}),
+        },
+    )
+    if "shelf__branch" in book_fields:
+        _relay_type(Branch, ("id", "name"), name="BranchType", strategy=_encode_by_name)
+        _relay_type(Book, ("id", "title"), name="BookType")
+    else:
+        _relay_type(
+            Book,
+            ("id", "title"),
+            name="BookPrimary",
+            primary=True,
+            strategy=_encode_by_name,
+        )
+    _relay_type(Shelf, ("id", "code"), name="ShelfType", hook=True, filterset_class=shelf_filter)
+
+
+@pytest.mark.parametrize("flat", [True, False])
+@pytest.mark.parametrize(
+    ("world", "head", "type_name"),
+    [
+        pytest.param(
+            _unwired_hop_world,
+            "filterset _unwired_hop_world.<locals>.BookFilter serves GlobalID filter "
+            "'shelf__branch' (ShelfFilter.branch, reached through RelatedFilter "
+            "BookFilter.shelf)",
+            "BranchType",
+            id="declared-hop",
+        ),
+        pytest.param(
+            functools.partial(_unwired_hop_world, init=True),
+            "filterset _unwired_hop_world.<locals>.BookFilter serves GlobalID filter "
+            "'shelf__branch' (InitShelfFilter.branch, reached through RelatedFilter "
+            "BookFilter.shelf)",
+            "BranchType",
+            id="declared-hop-init-override",
+        ),
+        pytest.param(
+            functools.partial(
+                _behind_shelf_books_world,
+                {"title": ["exact"], "shelf__branch": ["exact"]},
+                "BookFilter",
+            ),
+            "filterset ShelfFilter serves GlobalID filter 'books__shelf__branch' "
+            "(BookFilter.shelf__branch, reached through RelatedFilter ShelfFilter.books)",
+            "BranchType",
+            id="scoped-undeclared-hop",
+        ),
+        pytest.param(
+            functools.partial(
+                _behind_shelf_books_world,
+                {"shelf__books": ["exact"]},
+                "ReentryBookFilter",
+            ),
+            "filterset ShelfFilter serves GlobalID filter 'books__shelf__books' "
+            "(ReentryBookFilter.shelf__books, reached through RelatedFilter ShelfFilter.books)",
+            "BookPrimary",
+            id="undeclared-reentry",
+        ),
+        pytest.param(
+            _walked_own_leaf_world,
+            "filterset BookFilter declares GlobalID filter 'branch_is'",
+            "BranchType",
+            id="own-leaf-over-the-declared-hop",
+        ),
+    ],
+)
+def test_phase_2_5_refuses_a_globalid_leaf_behind_a_flat_false_declaration_alike(
+    world: Callable[..., None],
+    head: str,
+    type_name: str,
+    *,
+    flat: bool,
+) -> None:
+    """A ``flat=False`` declaration keeps its target served, so the audit refuses alike.
+
+    The published table keeps the declared head, which the audit's reach follows
+    whatever the flag; each leaf is resolved where a request decodes it.
+    """
+    world(flat=flat)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+
+    assert str(exc_info.value) == _encode_only_refusal(head, type_name)
+
+
+@pytest.mark.parametrize("flat", [True, False])
+def test_phase_2_5_admits_a_method_decoder_behind_either_flat(*, flat: bool) -> None:
+    """A ``method=`` GlobalID leaf in the hop's target set builds under both flags."""
+    _unwired_hop_world(flat=flat, method=True)
+
+    finalize_django_types()
 
 
 def _encode_only_refusal(head: str, type_name: str) -> str:
@@ -3044,20 +3185,24 @@ def test_finalize_refuses_a_generated_filter_a_deep_copy_refuses() -> None:
     assert str(exc_info.value) == _copy_refusal(where, "CharFilter", cause, has_method=False)
 
 
-def test_finalize_refuses_a_related_child_filter_a_deep_copy_refuses() -> None:
-    """A ``RelatedFilter`` child set no type serves is refused by its expansion copy.
+@pytest.mark.parametrize("flat", [True, False])
+def test_finalize_refuses_a_related_child_filter_a_deep_copy_refuses(*, flat: bool) -> None:
+    """A ``RelatedFilter`` child set no type serves is refused, its declaration flat or not.
 
-    The child set is reached only through the served set's ``RelatedFilter``,
-    whose expansion copies its filters during subpass 2, before the subpass-2.5
-    audit asks the child's own table: the expansion copy refuses the filter naming
-    the child set, its attribute and the ``RelatedFilter`` it was reached through.
+    The child set is reached only through the served set's ``RelatedFilter``. An
+    enabled declaration's expansion copies its filters during subpass 2, before the
+    subpass-2.5 audit asks the child's own table: the expansion copy refuses the
+    filter naming the child set, its attribute and the ``RelatedFilter`` it was
+    reached through (by qualified name). A ``flat=False`` declaration copies
+    nothing, and the audit, following the published head, refuses the same filter
+    naming the path by set name.
     """
     shelf_filter = _shelf_filter(
         CharFilter(field_name="code", method=_InstanceLockHolder().code_is),
     )
 
     class BookFilter(FilterSet):
-        shelf = RelatedFilter(shelf_filter, field_name="shelf")
+        shelf = RelatedFilter(shelf_filter, field_name="shelf", flat=flat)
 
         class Meta:
             model = Book
@@ -3080,8 +3225,232 @@ def test_finalize_refuses_a_related_child_filter_a_deep_copy_refuses() -> None:
     with pytest.raises(ConfigurationError) as exc_info:
         finalize_django_types()
     cause = exc_info.value.__cause__
-    where = f"ShelfFilter.code_is (reached through RelatedFilter {BookFilter.__qualname__}.shelf)"
+    via = f"{BookFilter.__qualname__}.shelf" if flat else "BookFilter.shelf"
+    where = f"ShelfFilter.code_is (reached through RelatedFilter {via})"
     assert str(exc_info.value) == _copy_refusal(where, "CharFilter", cause, has_method=True)
+
+
+def _locked_set(
+    name: str,
+    model: type[Model],
+    fields: dict[str, list[str]],
+    namespace: dict[str, object],
+    *,
+    lock: str | None = None,
+    lock_field: str = "code",
+) -> type[FilterSet]:
+    """A filter set ``name``; ``lock`` adds a lock-holding ``locked`` filter as its own or by override."""
+    body = dict(namespace)
+    body["Meta"] = type("Meta", (), {"model": model, "fields": fields})
+    if lock == "own":
+        body["locked"] = CharFilter(field_name=lock_field, method=_InstanceLockHolder().code_is)
+    built: list[type[FilterSet]] = []
+    if lock == "override":
+
+        def get_filters(cls: type[FilterSet]) -> OrderedDict[str, Filter]:
+            # The metaclass reads the table while the class is being built.
+            filters = super(built[0] if built else cls, cls).get_filters()
+            filters["locked"] = CharFilter(
+                field_name=lock_field,
+                method=_InstanceLockHolder().code_is,
+            )
+            return filters
+
+        body["get_filters"] = classmethod(get_filters)
+    built.append(require(type(name, (FilterSet,), body), _is_filterset_class))
+    return built[0]
+
+
+def _plain_relay_free_type(
+    model: type[Model],
+    fields: tuple[str, ...],
+    name: str,
+    fs: object = None,
+) -> None:
+    meta: dict[str, object] = {"model": model, "fields": fields}
+    if fs is not None:
+        meta["filterset_class"] = fs
+    type(name, (DjangoType,), {"Meta": type("Meta", (), meta)})
+
+
+def _lock_refusal(where: str, cause: BaseException | None) -> str:
+    return _copy_refusal(where, "CharFilter", cause, has_method=True)
+
+
+@pytest.mark.parametrize("lock", ["own", "override"])
+@pytest.mark.parametrize(
+    "disabled",
+    [
+        "none",
+        "book.shelf",
+        "shelf.books",
+        "both",
+    ],
+)
+def test_finalize_refuses_a_lock_on_the_unwired_side_of_a_cycle_whichever_edge_is_flat_false(
+    disabled: str,
+    lock: str,
+) -> None:
+    """A wired book set and an unwired shelf set in one cycle: the shelf's lock is refused.
+
+    Its own entry or one its ``get_filters()`` override adds: the expansion copy or
+    the audit refuses it, naming the declaration it is reached through, under every
+    choice of disabled edge.
+    """
+    holder: dict[str, type[FilterSet]] = {}
+    shelf = _locked_set(
+        "ShelfFilter",
+        Shelf,
+        {"topic": ["exact"]},
+        {
+            "books": RelatedFilter(
+                lambda: holder["book"],
+                field_name="books",
+                flat=disabled not in {"shelf.books", "both"},
+            ),
+        },
+        lock=lock,
+    )
+    holder["book"] = _locked_set(
+        "BookFilter",
+        Book,
+        {"title": ["exact"]},
+        {
+            "shelf": RelatedFilter(
+                shelf,
+                field_name="shelf",
+                flat=disabled not in {"book.shelf", "both"},
+            ),
+        },
+    )
+    _plain_relay_free_type(Shelf, ("id", "code"), "ShelfType")
+    _plain_relay_free_type(Book, ("id", "title"), "BookType", holder["book"])
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    where = "ShelfFilter.locked (reached through RelatedFilter BookFilter.shelf)"
+    assert str(exc_info.value) == _lock_refusal(where, exc_info.value.__cause__)
+
+
+@pytest.mark.parametrize("lock", ["own", "override"])
+@pytest.mark.parametrize("flat", [True, False])
+def test_finalize_refuses_a_lock_two_declarations_deep_naming_the_path(
+    lock: str,
+    *,
+    flat: bool,
+) -> None:
+    """Wired branch set, enabled into shelf, shelf into a locked book set: refused naming its path.
+
+    An enabled inner declaration's expansion copy names that one declaration; behind
+    ``flat=False`` the audit names the whole path from the served set.
+    """
+    book = _locked_set("BookFilter", Book, {"title": ["exact"]}, {}, lock=lock, lock_field="title")
+    shelf = _locked_set(
+        "ShelfFilter",
+        Shelf,
+        {"code": ["exact"]},
+        {"books": RelatedFilter(book, field_name="books", flat=flat)},
+    )
+    branch = _locked_set(
+        "BranchFilter",
+        Branch,
+        {"name": ["exact"]},
+        {"shelves": RelatedFilter(shelf, field_name="shelves")},
+    )
+    _plain_relay_free_type(Book, ("id", "title"), "BookType")
+    _plain_relay_free_type(Shelf, ("id", "code"), "ShelfType")
+    _plain_relay_free_type(Branch, ("id", "name"), "BranchType", branch)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    via = "ShelfFilter.books" if flat else "BranchFilter.shelves, then ShelfFilter.books"
+    where = f"BookFilter.locked (reached through RelatedFilter {via})"
+    assert str(exc_info.value) == _lock_refusal(where, exc_info.value.__cause__)
+
+
+@pytest.mark.parametrize("flat", [True, False])
+def test_a_flat_false_declaration_with_an_uncorrelated_target_still_fails_its_build(
+    *,
+    flat: bool,
+) -> None:
+    """A disabled declaration is still validated: a target keyed on another model is refused."""
+    wrong = _locked_set("BranchFilterAsShelf", Branch, {"name": ["exact"]}, {})
+    book = _locked_set(
+        "BookFilter",
+        Book,
+        {"title": ["exact"]},
+        {"shelf": RelatedFilter(wrong, field_name="shelf", flat=flat)},
+    )
+    _plain_relay_free_type(Branch, ("id", "name"), "BranchType")
+    _plain_relay_free_type(Shelf, ("id", "code"), "ShelfType")
+    _plain_relay_free_type(Book, ("id", "title"), "BookType", book)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    assert str(exc_info.value).startswith(
+        "FilterSet BookFilter: RelatedFilter 'shelf' has field_name 'shelf', which reaches "
+        "Shelf, but its target FilterSet BranchFilterAsShelf is keyed on Branch.",
+    )
+
+
+@pytest.mark.parametrize("flat", [True, False])
+def test_a_flat_false_declaration_over_no_relation_still_fails_its_build(*, flat: bool) -> None:
+    """A disabled declaration whose ``field_name`` names a column, not a relation, is refused."""
+    shelf = _locked_set("ShelfFilter", Shelf, {"code": ["exact"]}, {})
+    book = _locked_set(
+        "BookFilter",
+        Book,
+        {"title": ["exact"]},
+        {"shelf": RelatedFilter(shelf, field_name="title", flat=flat)},
+    )
+    _plain_relay_free_type(Shelf, ("id", "code"), "ShelfType")
+    _plain_relay_free_type(Book, ("id", "title"), "BookType", book)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        finalize_django_types()
+    assert str(exc_info.value) == (
+        "FilterSet BookFilter: RelatedFilter 'shelf' has field_name 'title', but 'title' is not "
+        "a relation of the model the path has reached from Book. A RelatedFilter's field_name "
+        "must name a path of relations."
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("typed", [False, True], ids=["no-types", "types"])
+@pytest.mark.parametrize("flat", [True, False])
+def test_an_unserved_set_into_a_locked_target_by_flat(*, flat: bool, typed: bool) -> None:
+    """An unwired book set whose ``shelf`` targets a lock-holding shelf set, constructed directly.
+
+    Enabled, the expansion copy refuses the lock at the parent's first construction
+    and at every later one. Disabled, the parent constructs and filters, and the
+    target raises django-filter's own ``TypeError`` at its own construction, as any
+    set the schema does not serve does.
+    """
+    if typed:
+        _plain_relay_free_type(Shelf, ("id", "code"), "ShelfType")
+        _plain_relay_free_type(Book, ("id", "title"), "BookType")
+    branch_row = Branch.objects.create(name="Unserved")
+    shelf_row = Shelf.objects.create(code="U-1", branch=branch_row)
+    book_row = Book.objects.create(title="Kept", shelf=shelf_row)
+    shelf = _locked_set("ShelfFilter", Shelf, {"topic": ["exact"]}, {}, lock="own")
+    book = _locked_set(
+        "BookFilter",
+        Book,
+        {"title": ["exact"]},
+        {"shelf": RelatedFilter(shelf, field_name="shelf", flat=flat)},
+    )
+    for data in ({"title": "Kept"}, {"shelf": str(shelf_row.pk)}, {"title": "Kept"}):
+        if flat:
+            with pytest.raises(ConfigurationError) as exc_info:
+                _ = book(data=data, queryset=Book.objects.all())
+            where = "ShelfFilter.locked (reached through RelatedFilter BookFilter.shelf)"
+            assert str(exc_info.value) == _lock_refusal(where, exc_info.value.__cause__)
+        else:
+            instance = book(data=data, queryset=Book.objects.all())
+            assert sorted(instance.filters) == ["shelf", "title"]
+            assert list(instance.qs) == [book_row]
+    with pytest.raises(TypeError, match=r"cannot pickle '_thread\.lock' object"):
+        _ = shelf(data={"topic": "x"}, queryset=Shelf.objects.all())
 
 
 _Reshape = Callable[[OrderedDict[str, Filter]], None]

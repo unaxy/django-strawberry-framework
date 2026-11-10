@@ -3,8 +3,8 @@
 Status: PLAN v1, **unreviewed**: the next step is an adversarial review. Written at `8d47f31f`; R1 re-pins every
 citation at its own base. Closes tracker item 729 ("To do: found along the way"). Q1 and Q2 are maintainer rulings; the
 rest is not yet approved. Process: `docs/bug_hunt/FIX.md` phases 3 to 9. Independent of item 216 (the `flat=False`
-opt-out, `docs/related-filter-flat-opt-out-plan.md`), but both edit `filters/inputs.py::_build_input_fields`.
-Recommended order: 216 lands first.
+opt-out, landed; its plan is `git show 771c299f:docs/related-filter-flat-opt-out-plan.md`); R1 re-pins every
+`filters/inputs.py::_build_input_fields` citation against it.
 
 ## The problem
 

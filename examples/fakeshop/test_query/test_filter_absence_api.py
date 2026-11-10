@@ -14,13 +14,15 @@ import pytest
 import strawberry
 from apps.library import models as library_models
 from django import forms
+from django.db import connection
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django_filters import BooleanFilter, CharFilter, ChoiceFilter, Filter, ModelChoiceFilter
 from django_filters.filterset import BaseFilterSet
-from graphql_client import JSONObject, graphql_payload, json_object
+from graphql_client import JSONObject, graphql_payload, json_list, json_object
 from strawberry import relay
 from strawberry.scalars import JSON
 from strawberry.types import Info
@@ -124,8 +126,18 @@ def _absence_declaration(behavior: str) -> Filter:
     return declarations[behavior]
 
 
-def _absence_schema(behavior: str, form_builder: str) -> DjangoSchema:
-    """Publish one consumer declaration and choose the parent's real form-building seam."""
+def _absence_schema(
+    behavior: str,
+    form_builder: str,
+    *,
+    flat: bool = True,
+    own: Mapping[str, object] | None = None,
+) -> DjangoSchema:
+    """Publish one consumer declaration and choose the parent's real form-building seam.
+
+    ``flat`` is the parent's ``issues`` declaration's; ``own`` adds the parent's own
+    filters (and methods), a key an enabled copy would replace included.
+    """
 
     class AbsenceIssueFilter(FilterSet):
         open_only = _absence_declaration(behavior)
@@ -134,18 +146,21 @@ def _absence_schema(behavior: str, form_builder: str) -> DjangoSchema:
             model = library_models.Issue
             fields = {"title": ["exact"]}
 
-    class AbsencePeriodicalFilter(FilterSet):
-        issues = RelatedFilter(AbsenceIssueFilter, field_name="issues")
+    def get_form_class(self: FilterSet) -> type[forms.Form]:
+        return BaseFilterSet.get_form_class(self)
 
-        class Meta:
-            model = library_models.Periodical
-            fields = {"name": ["exact"]}
-
-        if form_builder == "django-filter":
-
-            @override
-            def get_form_class(self) -> type[forms.Form]:
-                return BaseFilterSet.get_form_class(self)
+    namespace: dict[str, object] = {
+        "issues": RelatedFilter(AbsenceIssueFilter, field_name="issues", flat=flat),
+        "Meta": type(
+            "Meta",
+            (),
+            {"model": library_models.Periodical, "fields": {"name": ["exact"]}},
+        ),
+        **(own or {}),
+    }
+    if form_builder == "django-filter":
+        namespace["get_form_class"] = get_form_class
+    AbsencePeriodicalFilter = type("AbsencePeriodicalFilter", (FilterSet,), namespace)  # noqa: N806
 
     class AbsenceIssueType(DjangoType):
         class Meta:
@@ -184,6 +199,21 @@ def _seed_periodicals() -> None:
     library_models.Issue.objects.create(periodical=closed, number=1, title="A", embargoed=True)
     open_ = library_models.Periodical.objects.create(name="Open Review")
     library_models.Issue.objects.create(periodical=open_, number=1, title="B", embargoed=False)
+
+
+def _seed_three_parents(*, two_matching: bool = False) -> None:
+    """``_seed_periodicals`` plus a childless parent; ``two_matching`` adds two issues titled C."""
+    _seed_periodicals()
+    library_models.Periodical.objects.create(name="Empty Review")
+    if two_matching:
+        double = library_models.Periodical.objects.create(name="Double Review")
+        for number in (1, 2):
+            library_models.Issue.objects.create(
+                periodical=double,
+                number=number,
+                title="C",
+                embargoed=True,
+            )
 
 
 _PERIODICALS = """
@@ -617,3 +647,181 @@ def test_a_child_default_belongs_to_the_form_on_which_the_sibling_is_read_over_h
             "allPeriodicals": [{"name": name} for name in ("Closed Review", "Open Review")],
         },
     }, result
+
+
+def _exclude_titled(
+    _filterset: FilterSet,
+    queryset: QuerySet[library_models.Periodical],
+    _name: str,
+    value: object,
+) -> QuerySet[library_models.Periodical]:
+    """An own ``method=`` selecting the parents holding no issue titled ``value``."""
+    return queryset.exclude(issues__title=value)
+
+
+# The parent's own filter on a key the enabled ``issues`` copy would replace.
+_RESTORED_OWN: dict[str, Mapping[str, object]] = {
+    "ordinary": {"issues__title": CharFilter(field_name="issues__title")},
+    "checkbox": {
+        "issues__open_only": BooleanFilter(
+            field_name="issues__embargoed",
+            widget=forms.CheckboxInput,
+        ),
+    },
+    "disabled-initial": {
+        "issues__open_only": BooleanFilter(
+            field_name="issues__embargoed",
+            disabled=True,
+            initial=False,
+        ),
+    },
+    "method": {
+        "issues__title": CharFilter(field_name="issues__title", method="exclude_titled"),
+        "exclude_titled": _exclude_titled,
+    },
+    "exclude": {"issues__title": CharFilter(field_name="issues__title", exclude=True)},
+    "iexact": {"issues__title": CharFilter(field_name="issues__title", lookup_expr="iexact")},
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "own",
+        "filter_input",
+        "flat_names",
+        "own_names",
+    ),
+    [
+        pytest.param(
+            "ordinary",
+            {"issuesTitle": {"exact": "A"}},
+            ["Closed Review"],
+            ["Closed Review"],
+            id="ordinary",
+        ),
+        pytest.param(
+            "checkbox",
+            {},
+            ["Closed Review", "Open Review", "Empty Review"],
+            ["Open Review"],
+            id="checkbox-omitted",
+        ),
+        pytest.param(
+            "checkbox",
+            {"issuesOpenOnly": {"exact": True}},
+            ["Closed Review"],
+            ["Closed Review"],
+            id="checkbox-true",
+        ),
+        pytest.param(
+            "disabled-initial",
+            {},
+            ["Closed Review", "Open Review", "Empty Review"],
+            ["Open Review"],
+            id="disabled-initial-omitted",
+        ),
+        pytest.param(
+            "method",
+            {"issuesTitle": {"exact": "A"}},
+            ["Closed Review"],
+            ["Open Review", "Empty Review"],
+            id="method",
+        ),
+        pytest.param(
+            "exclude",
+            {"issuesTitle": {"exact": "A"}},
+            ["Closed Review"],
+            ["Open Review", "Empty Review"],
+            id="exclude",
+        ),
+    ],
+)
+@pytest.mark.parametrize("flat", [True, False])
+def test_a_flat_false_declaration_restores_the_parents_own_key_over_http(
+    own: str,
+    filter_input: JSONObject,
+    flat_names: list[str],
+    own_names: list[str],
+    *,
+    flat: bool,
+) -> None:
+    """An enabled copy holds the own key; ``flat=False`` gives it back to the own filter, whole.
+
+    The checkbox's omitted ``False``, a disabled field's ``initial``, an own
+    ``method=`` and ``exclude`` act only once the declaration copies nothing; a
+    supplied checkbox value and an ordinary own filter match alike under both
+    flags.
+    """
+    _seed_three_parents()
+    schema = _absence_schema("checkbox", "package", flat=flat, own=_RESTORED_OWN[own])
+    result = _post(schema, _PERIODICALS, {"filter": filter_input})
+    names = flat_names if flat else own_names
+    assert result == {"data": {"periodicals": _connection(names)}}, result
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("flat", "filter_input", "names"),
+    [
+        (True, {"issuesTitle": {"exact": "a"}}, []),
+        (True, {"issuesTitle": {"exact": "A"}}, ["Closed Review"]),
+        (False, {"issuesTitle": {"iExact": "a"}}, ["Closed Review"]),
+    ],
+)
+def test_a_restored_own_key_keeps_its_lookup_expr_over_http(
+    filter_input: JSONObject,
+    names: list[str],
+    *,
+    flat: bool,
+) -> None:
+    """The copy publishes the child's ``exact``; the restored own key its own ``iexact``."""
+    _seed_three_parents()
+    schema = _absence_schema("checkbox", "package", flat=flat, own=_RESTORED_OWN["iexact"])
+    result = _post(schema, _PERIODICALS, {"filter": filter_input})
+    assert result == {"data": {"periodicals": _connection(names)}}, result
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("flat", [True, False])
+def test_a_restored_ordinary_own_key_keeps_membership_multiplicity_and_one_statement_over_http(
+    *,
+    flat: bool,
+) -> None:
+    """One parent through two matching issues is returned once, in one SQL statement, either flag."""
+    _seed_three_parents(two_matching=True)
+    schema = _absence_schema("checkbox", "package", flat=flat, own=_RESTORED_OWN["ordinary"])
+    with CaptureQueriesContext(connection) as queries:
+        result = _post(schema, _PERIODICALS, {"filter": {"issuesTitle": {"exact": "C"}}})
+    assert result == {"data": {"periodicals": _connection(["Double Review"])}}, result
+    assert len(queries.captured_queries) == 1, queries.captured_queries
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("flat", "published"), [(True, False), (False, True)])
+def test_hide_flat_filters_hides_the_copy_and_shows_the_restored_own_key_over_http(
+    *,
+    flat: bool,
+    published: bool,
+) -> None:
+    """Under ``HIDE_FLAT_FILTERS`` the copy's key is hidden; the restored own key is shown."""
+    _seed_three_parents()
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"HIDE_FLAT_FILTERS": True}):
+        schema = _absence_schema("checkbox", "package", flat=flat, own=_RESTORED_OWN["ordinary"])
+    result = _post(
+        schema,
+        """
+        query {
+          __type(name: "AbsencePeriodicalFilterInputType") {
+            inputFields {
+              name
+            }
+          }
+        }
+        """,
+        {},
+    )
+    fields = json_list(result, "data", "__type", "inputFields")
+    names = {json_object(field)["name"] for field in fields}
+    assert ("issuesTitle" in names) is published
+    assert "issuesOpenOnly" not in names

@@ -407,11 +407,21 @@ def _hide_repair(
     return queryset.exclude(circulation_status=models.Book.CirculationStatus.REPAIR)
 
 
-def _own_world() -> tuple[
+_OwnWorld = tuple[
     dict[str, django_models.Model],
     dict[type[django_models.Model], type[FilterSet]],
     tuple[type[DjangoType], ...],
-]:
+]
+
+
+def _own_world(*, flat: bool | None = None, fired: list[str] | None = None) -> _OwnWorld:
+    """The owned-callable world; with ``flat`` the shelf parent restores an own key.
+
+    That parent declares ``books`` with ``flat`` beside its own callable
+    ``books__titled`` (the key the enabled copy of ``BookChild.titled`` replaces),
+    and its ``check_books_permission`` gate records into ``fired``.
+    """
+
     class PatronChild(FilterSet):
         email = _OwnCharFilter("email")
 
@@ -443,6 +453,21 @@ def _own_world() -> tuple[
         class Meta:
             model = models.Shelf
             fields = []
+
+    def check_books_permission(_self: FilterSet, _request: object) -> None:
+        if fired is not None:
+            fired.append("books")
+
+    restoring_shelf_parent = type(
+        "RestoringShelfParent",
+        (FilterSet,),
+        {
+            "books": RelatedFilter(BookChild, flat=flat is not False),
+            "books__titled": _OwnCharFilter("books__title"),
+            "check_books_permission": check_books_permission,
+            "Meta": type("Meta", (), {"model": models.Shelf, "fields": []}),
+        },
+    )
 
     class GenreParent(FilterSet):
         books = RelatedFilter(BookChild)
@@ -516,7 +541,7 @@ def _own_world() -> tuple[
         rows,
         {
             models.Loan: LoanParent,
-            models.Shelf: ShelfParent,
+            models.Shelf: ShelfParent if flat is None else restoring_shelf_parent,
             models.Genre: GenreParent,
             models.Book: PlainBookRoot,
         },
@@ -643,6 +668,44 @@ def test_own_callable_keeps_its_owner_exclusion_and_null_extension_on_each_execu
         transport=transport,
     )
     assert payload == _expected(row_type, [(rows[key], name) for key, name in expected])
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("flat", "expected", "gates"),
+    [
+        (True, [("open-shelf", "open")], ["books"]),
+        (False, [("open-shelf", "open"), ("hidden-shelf", "hidden")], []),
+    ],
+)
+def test_a_restored_own_callable_runs_on_the_parent_with_no_relation_gate_or_target_visibility(
+    expected: list[tuple[str, str]],
+    gates: list[str],
+    transport: str,
+    *,
+    flat: bool,
+) -> None:
+    """``flat=False`` hands the own key back to the parent's own callable, which no hop walks.
+
+    Enabled, the copy of ``BookChild.titled`` holds ``books__titled``: it walks
+    ``books`` under the book type's visibility (the repair-status book is hidden)
+    and fires ``check_books_permission``. Disabled, the parent's own callable runs
+    on the shelf rows with no relation gate and no target visibility, as any own
+    callable does, so the hidden book's shelf matches.
+    """
+    fired: list[str] = []
+    rows, filters, targets = _own_world(flat=flat, fired=fired)
+    schema, row_type = _holder(models.Shelf, "code", filters[models.Shelf], targets=targets)
+    payload = _post(
+        schema,
+        _document(schema, "code"),
+        _where(schema, ("books_titled", "exact"), "x"),
+        transport=transport,
+    )
+    assert payload == _expected(row_type, [(rows[key], name) for key, name in expected])
+    assert fired == gates
 
 
 @pytest.mark.django_db

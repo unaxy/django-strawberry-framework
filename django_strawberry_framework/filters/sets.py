@@ -3496,8 +3496,9 @@ def _hop_target_set(hop: DeclaredHop) -> type[FilterSet]:
 def _reachable_filtersets(filterset: type[FilterSet], scope: _ExpansionScope) -> frozenset[int]:
     """Return the ids of ``filterset`` and every filter set its ``RelatedFilter`` declarations reach.
 
-    Follows each set's own ``related_filters``, transitively, as
-    ``FilterSet._expand_along`` does, skipping the ``None`` placeholder. A set
+    Follows each set's own ``related_filters``, transitively, skipping the
+    ``None`` placeholder; it follows every declaration, ``flat=False`` included,
+    which ``FilterSet._expand_along`` validates but does not copy. A set
     declaring no ``Meta.model`` is refused as a target
     (``_require_correlated_target``) before it is expanded. Ids, so the
     membership tests never consult a consumer metaclass ``__eq__``; each set's
@@ -4393,11 +4394,18 @@ class FilterSet(
         package runs ``cls.get_filters()`` over a given surface
         (``_reshape``), this method answers that surface.
 
+        A declaration marked ``RelatedFilter(flat=False)`` copies nothing: the
+        path stops at it, its target's own filters (explicit ``Meta.fields``
+        traversals included) still reach the sets before it through enabled
+        declarations, and an own key an enabled copy would replace stays the
+        own filter.
+
         The surface grows with the number of paths, factorially in a dense
         graph of mutually related sets, so the walk stops with a
         ``ConfigurationError`` at the first path whose flat filters pass
         ``MAX_FLAT_FILTERS`` (``_flat_filter_limit``), naming this set, the
-        declaration being expanded and the path.
+        declaration being expanded and the path. The budget is net key growth
+        per expansion call, counted in ``_expand_along``.
         """
         reshaping = _reshape_var.get()
         if reshaping is not None and reshaping[0] is cls:
@@ -4649,10 +4657,20 @@ class FilterSet(
         ``path`` is the chain of filter sets expanding from the root, this set
         last. Each declaration is checked (``_require_relation_path`` /
         ``_require_correlated_target``) and its target's filters along ``path``
-        copied on under the declaration's name (``_expand_related_filter``). The
-        result depends on this set and the sets on ``path`` alone; an inner path's
-        result reaches its parent through ``_filters_along``, which keeps it in
-        ``scope``. A path whose flat filters pass ``scope.limit`` raises.
+        copied on under the declaration's name (``_expand_related_filter``),
+        unless the declaration is ``flat=False``, which is checked and copies
+        nothing. The result depends on this set and the sets on ``path`` alone;
+        an inner path's result reaches its parent through ``_filters_along``,
+        which keeps it in ``scope``.
+
+        ``MAX_FLAT_FILTERS`` (``scope.limit``) bounds this call's net key
+        growth: the keys the copies add beyond this set's own population, so a
+        copy replacing an own key adds none and a copied ``RelatedFilter`` head
+        counts. A ``get_filters()`` override's additions on this set are outside
+        it (the count is taken before the override runs); a parent counts them
+        only when it copies them. Each set is checked on its own, a target
+        behind a ``flat=False`` declaration included. Past the limit it raises,
+        after the contribution that crossed it is built.
         """
         filters = cls._unexpanded_filters()
         if cls._meta.model is None:
@@ -4666,6 +4684,8 @@ class FilterSet(
         for filter_name, f in declarations.items():
             _require_relation_path(cls, filter_name, f)
             _require_correlated_target(cls, filter_name, f)
+            if not f.flat:
+                continue
             filters.update(_expand_related_filter(filter_name, f, path, scope))
             # A path's flat filters are all copied onto every set before it, so
             # the root publishes at least as many as any path below it: the walk
@@ -4676,9 +4696,10 @@ class FilterSet(
                 raise ConfigurationError(
                     f"FilterSet {truth.qualname(root)}: its RelatedFilter expansion publishes "
                     f"more than {scope.limit} flat filters, crossed expanding "
-                    f"{truth.qualname(cls)}.{filter_name} along {trail}. Raise "
-                    "DJANGO_STRAWBERRY_FRAMEWORK['MAX_FLAT_FILTERS'], or declare fewer "
-                    "RelatedFilter edges in the cycle.",
+                    f"{truth.qualname(cls)}.{filter_name} along {trail}. Mark "
+                    f"{truth.qualname(cls)}'s RelatedFilter declarations flat=False, or raise "
+                    "DJANGO_STRAWBERRY_FRAMEWORK['MAX_FLAT_FILTERS']; a target behind a "
+                    "flat=False declaration still builds on its own.",
                 )
         return filters
 

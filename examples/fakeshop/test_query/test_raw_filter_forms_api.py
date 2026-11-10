@@ -40,7 +40,7 @@ import django_filters
 import pytest
 import strawberry
 from apps.library import models as library_models
-from apps.library.filters import BookFilter
+from apps.library.filters import BookFilter, ReadingListEntryFilter, ReadingListFilter
 from apps.products.services import create_users
 from apps.scalars import models
 from django import forms
@@ -66,6 +66,7 @@ from django.http import HttpRequest, HttpResponseBase, JsonResponse, QueryDict
 from django.test import Client, override_settings
 from django.test.utils import register_lookup
 from django.urls import path
+from django_filters import CharFilter
 from django_filters.filterset import BaseFilterSet
 from django_filters.rest_framework import DjangoFilterBackend
 from django_filters.views import FilterView
@@ -161,6 +162,46 @@ class _UnservedBookSet(FilterSet):
         fields = {"title": ["exact"]}
 
 
+class _UnservedFlatOffBookSet(FilterSet):
+    """A set no type names whose ``shelf`` is ``flat=False``, beside its own ``iexact`` topic key.
+
+    The enabled twin (``_UnservedBookSet``) copies ``shelf__topic`` (``exact``) and
+    ``shelf__branch__city``; this set copies neither, so its own ``shelf__topic`` holds
+    the key and walks ``shelf`` as the request's actor sees it.
+    """
+
+    shelf = RelatedFilter(_UnservedShelfSet, field_name="shelf", flat=False)
+    shelf__topic = CharFilter(field_name="shelf__topic", lookup_expr="iexact")
+
+    class Meta:
+        model = library_models.Book
+        fields = {"title": ["exact"]}
+
+
+class _RangeIssueChild(FilterSet):
+    """An ``Issue`` set whose django-filter ``RangeWidget`` reads ``number_min`` / ``number_max``."""
+
+    number = django_filters.RangeFilter(field_name="number")
+
+    class Meta:
+        model = library_models.Issue
+        fields = {"title": ["exact"]}
+
+
+def _range_own_parent(*, flat: bool) -> type[FilterSet]:
+    """A ``Periodical`` set with its own ``issues__number`` range beside ``issues`` (``flat``)."""
+
+    class RangeOwnPeriodicalSet(FilterSet):
+        issues = RelatedFilter(_RangeIssueChild, field_name="issues", flat=flat)
+        issues__number = django_filters.RangeFilter(field_name="issues__number")
+
+        class Meta:
+            model = library_models.Periodical
+            fields = {"name": ["exact"]}
+
+    return RangeOwnPeriodicalSet
+
+
 class _RangeOverRelationSet(FilterSet):
     """A ``range`` over a relation: Django registers no ``range`` lookup on one."""
 
@@ -186,6 +227,11 @@ _RAW_SETS: dict[str, type[FilterSet]] = {
     "book-filter": BookFilter,
     "plain-subclass": _PlainBookFilter,
     "unserved": _UnservedBookSet,
+    "unserved-flat-off": _UnservedFlatOffBookSet,
+    "reading-list-entry-filter": ReadingListEntryFilter,
+    "reading-list-filter": ReadingListFilter,
+    "range-own-flat-on": _range_own_parent(flat=True),
+    "range-own-flat-off": _range_own_parent(flat=False),
     "range-over-a-relation": _RangeOverRelationSet,
     "global-id-over-a-generic-key": _GlobalIDOverGenericSet,
 }
@@ -2504,3 +2550,172 @@ def test_a_raw_set_declaring_a_refused_filter_is_refused_at_its_first_constructi
             _ = _raw_set_ids(client, driver, name, {})
         assert str(refused.value).startswith(_REFUSED_SETS[name])
     assert _RAW_SETS[name]._expansion_snapshot() is None
+
+
+#: (raw key and value, the titles each viewer's request answers, by set)
+_FLAT_OFF_KEYS: dict[str, tuple[dict[str, str], dict[str, tuple[list[str], list[str]]]]] = {
+    "withdrawn-copy-is-ignored": (
+        {"shelf__branch__city": "Boston"},
+        {
+            "unserved": (["b-open"], ["b-open", "b-secret"]),
+            "unserved-flat-off": (
+                ["b-open", "b-secret", "b-vault"],
+                ["b-open", "b-secret", "b-vault"],
+            ),
+        },
+    ),
+    "restored-own-key-keeps-its-lookup-and-hop": (
+        {"shelf__topic": "SECRET"},
+        {"unserved": ([], []), "unserved-flat-off": ([], ["b-secret"])},
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("viewer", ["anonymous", "staff"])
+@pytest.mark.parametrize("key", sorted(_FLAT_OFF_KEYS))
+@pytest.mark.parametrize("name", ["unserved", "unserved-flat-off"])
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_set_ignores_a_flat_false_copy_and_restores_its_own_key(
+    driver: str,
+    name: str,
+    key: str,
+    viewer: str,
+) -> None:
+    """On a set no type names, a ``flat=False`` declaration's generated key is ignored.
+
+    django-filter ignores a key no filter registers, so the view's rows return; the
+    set's own ``iexact`` key an enabled copy would replace holds it again and walks
+    ``shelf`` as the actor sees it. The enabled twin answers both keys through its
+    copies. Every driver alike.
+    """
+    create_users(1)
+    _register_hiding_types()
+    books = _shelved_world()
+    client = _raw_set_client(viewer)
+    query, by_set = _FLAT_OFF_KEYS[key]
+    anonymous, staff = by_set[name]
+    expected = [books[title] for title in (staff if viewer == "staff" else anonymous)]
+
+    assert _raw_set_ids(client, driver, name, query) == expected
+
+
+def _reading_lists() -> dict[str, int]:
+    """Classics holds Beloved and Middlemarch; Anthology holds Kindred. Pks by title."""
+    classics = library_models.ReadingList.objects.create(title="Classics")
+    anthology = library_models.ReadingList.objects.create(title="Anthology")
+    rows: dict[str, int] = {"Classics": saved_pk(classics), "Anthology": saved_pk(anthology)}
+    for title, reading_list in (
+        ("Beloved", classics),
+        ("Middlemarch", classics),
+        ("Kindred", anthology),
+    ):
+        entry = library_models.ReadingListEntry.objects.create(
+            reading_list=reading_list,
+            title=title,
+        )
+        rows[title] = saved_pk(entry)
+    return rows
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+@pytest.mark.parametrize(
+    (
+        "name",
+        "key",
+        "value",
+        "titles",
+    ),
+    [
+        pytest.param(
+            "reading-list-entry-filter",
+            "reading_list__id",
+            "Anthology",
+            ["Beloved", "Middlemarch", "Kindred"],
+            id="disabled-copy-key-ignored",
+        ),
+        pytest.param(
+            "reading-list-entry-filter",
+            "reading_list",
+            "Anthology",
+            ["Kindred"],
+            id="disabled-declarations-own-head",
+        ),
+        pytest.param(
+            "reading-list-filter",
+            "entries__reading_list",
+            "Classics",
+            ["Classics"],
+            id="enabled-copied-terminal-head",
+        ),
+        pytest.param(
+            "reading-list-filter",
+            "entries__title",
+            "Kindred",
+            ["Anthology"],
+            id="enabled-copy",
+        ),
+    ],
+)
+def test_the_shipped_reading_list_cycle_answers_raw_form_keys(
+    driver: str,
+    name: str,
+    key: str,
+    value: str,
+    titles: list[str],
+) -> None:
+    """A raw key only the disabled copy registers is ignored; the head and enabled copies filter.
+
+    Every row is one every viewer sees.
+    """
+    create_users(1)
+    for model in (library_models.ReadingList, library_models.ReadingListEntry):
+        meta = {"model": model, "fields": ("id", "title")}
+        type(f"Raw{model.__name__}Type", (DjangoType,), {"Meta": type("Meta", (), meta)})
+    finalize_django_types()
+    rows = _reading_lists()
+    client = _raw_set_client("anonymous")
+    sent = str(rows[value]) if key != "entries__title" else value
+    assert _raw_set_ids(client, driver, name, {key: sent}) == [rows[title] for title in titles]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+@pytest.mark.parametrize("name", ["range-own-flat-on", "range-own-flat-off"])
+@pytest.mark.parametrize(
+    ("query", "names"),
+    [
+        pytest.param(
+            {"issues__number_min": "2", "issues__number_max": "2"},
+            ["Second"],
+            id="suffixed-keys-bind",
+        ),
+        pytest.param({"issues__number": "2"}, ["First", "Second", "Empty"], id="bare-key-ignored"),
+    ],
+)
+def test_a_multi_key_range_widget_binds_its_suffixed_keys_whoever_holds_the_key(
+    driver: str,
+    name: str,
+    query: dict[str, str],
+    names: list[str],
+) -> None:
+    """The key ``issues__number`` is a ``RangeWidget`` whether the copy or the own filter holds it.
+
+    Enabled, the child's range copy holds it; ``flat=False``, the parent's own range.
+    Either way only ``issues__number_min`` / ``_max`` bind, and a bare
+    ``issues__number`` names no widget key, so django-filter ignores it.
+    """
+    create_users(1)
+    for model in (library_models.Periodical, library_models.Issue):
+        meta = {"model": model, "fields": ("id",)}
+        type(f"Range{model.__name__}Type", (DjangoType,), {"Meta": type("Meta", (), meta)})
+    finalize_django_types()
+    rows: dict[str, int] = {}
+    for title, number in (("First", 1), ("Second", 2), ("Empty", None)):
+        periodical = library_models.Periodical.objects.create(name=title)
+        rows[title] = saved_pk(periodical)
+        if number is not None:
+            library_models.Issue.objects.create(periodical=periodical, number=number, title=title)
+    client = _raw_set_client("anonymous")
+    assert _raw_set_ids(client, driver, name, query) == [rows[title] for title in names]

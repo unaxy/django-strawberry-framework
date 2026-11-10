@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 208 to do.
+Progress: 0 done, 209 to do.
 
 ## From dry-0_0_15_3
 
@@ -973,6 +973,12 @@ Progress: 0 done, 208 to do.
   through a type's `get_queryset` or a `RelatedFilter` into a set bound to the secondary. A walked `GlobalID` filter
   also reads type names as the executing schema publishes them under a renaming `NameConverter`. A `callable` or
   `custom` secondary on such a set now builds
+- [ ] 853. CHANGELOG entry for item 216: a filter set's `RelatedFilter` expansion is capped by
+  `DJANGO_STRAWBERRY_FRAMEWORK["MAX_FLAT_FILTERS"]` (default `10_000`, a non-negative int, no off switch; it counts each
+  set's net flat-key growth and fails the build with a `ConfigurationError` naming the set, the declaration and the
+  path), and `RelatedFilter(..., flat=False)` keeps a declaration's nested branch while copying none of its target's
+  filters flat; clients regenerate their schema, a form-data key only the copy registered is ignored, and an own key
+  the copy would replace is the set's own filter again, with its own behaviour
 
 ## From dry-upstream-0_0_15
 

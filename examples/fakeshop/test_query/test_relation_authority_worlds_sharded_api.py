@@ -71,7 +71,7 @@ def _seed_alias(alias: str, *, matching_member: bool) -> None:
     models.Book.genres.through.objects.using(alias).create(book_id=hidden_book.pk, genre_id=2)
 
 
-def _schema(*, declared: bool, seen: list[str]) -> DjangoSchema:
+def _schema(*, declared: bool, seen: list[str], flat: bool = True) -> DjangoSchema:
     class BookTarget(DjangoType):
         class Meta:
             model = models.Book
@@ -98,7 +98,7 @@ def _schema(*, declared: bool, seen: list[str]) -> DjangoSchema:
 
     class GenreParent(FilterSet):
         if declared:
-            visible_books = RelatedFilter(BookChild, field_name="books")
+            visible_books = RelatedFilter(BookChild, field_name="books", flat=flat)
         without_title = CharFilter(field_name="books__title", exclude=True)
 
         class Meta:
@@ -195,3 +195,32 @@ def test_walked_filter_scopes_and_correlates_on_its_root_database(
     assert len(filtered) == 1, roots
     assert '"library_book"' in filtered[0], filtered
     assert '"library_book_genres"' in filtered[0], filtered
+
+
+@pytest.mark.django_db(databases=["default", "shard_b"])
+def test_a_nested_branch_across_a_flat_false_declaration_reads_the_root_database() -> None:
+    """A ``flat=False`` declaration's nested branch scopes and correlates on shard_b.
+
+    The declaration copies nothing flat, so only its branch reaches Book: it passes
+    shard_b to the hook and reads no default row.
+    """
+    _seed_alias("default", matching_member=False)
+    _seed_alias("shard_b", matching_member=True)
+    seen: list[str] = []
+    schema = _schema(declared=True, seen=seen, flat=False)
+    _CURRENT["schema"] = schema
+    try:
+        with (
+            override_settings(ROOT_URLCONF=__name__),
+            CaptureQueriesContext(connections["default"]) as default_queries,
+        ):
+            payload = graphql_payload(
+                "query($where: JSON!) { rows(where: $where) { name } }",
+                variables={"where": {"visible_books": {"title": "x"}}},
+                url="/graphql-relation-worlds-sharded/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+    assert payload == {"data": {"rows": [{"name": "matching"}]}}, payload
+    assert seen == ["shard_b"]
+    assert not any('"library_' in query["sql"] for query in default_queries), list(default_queries)

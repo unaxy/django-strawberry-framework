@@ -2461,6 +2461,69 @@ def test_related_filter_rejects_lookups_kwarg() -> None:
     )
 
 
+def _construct(
+    factory: Callable[..., RelatedFilter],
+    *args: object,
+    **kwargs: object,
+) -> RelatedFilter:
+    """Call ``factory`` with arguments its signature types otherwise (the hostile input under test)."""
+    return factory(*args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("target", "flat", "rendered"),
+    [
+        ("ShelfFilter", 0, "int 0"),
+        ("ShelfFilter", 1, "int 1"),
+        ("ShelfFilter", "x", "str 'x'"),
+        ("ShelfFilter", None, "NoneType None"),
+        (None, "x", "str 'x'"),
+    ],
+    ids=[
+        "zero",
+        "one",
+        "str",
+        "none",
+        "placeholder",
+    ],
+)
+def test_related_filter_flat_must_be_a_bool(
+    target: str | None,
+    flat: object,
+    rendered: str,
+) -> None:
+    """Anything but an exact ``bool`` ``flat`` is refused at declaration, the placeholder included."""
+    with pytest.raises(ConfigurationError) as exc_info:
+        _construct(RelatedFilter, target, flat=flat)
+    assert str(exc_info.value) == f"RelatedFilter flat must be a bool; got {rendered}."
+
+
+@pytest.mark.parametrize("flat", [True, False])
+def test_related_filter_flat_is_kept_and_never_reaches_extra(*, flat: bool) -> None:
+    """``flat`` is stored on the declaration, not forwarded into django-filter's ``extra``."""
+    rel = RelatedFilter("ShelfFilter", field_name="shelves", flat=flat)
+    assert rel.flat is flat
+    assert "flat" not in rel.extra
+    assert copy.deepcopy(rel).flat is flat
+
+
+def test_related_filter_flat_defaults_true_and_a_positional_extra_stays_django_filters() -> None:
+    """A positional argument after the target is django-filter's ``field_name``, never ``flat``."""
+    rel = RelatedFilter("ShelfFilter", "shelves")
+    assert rel.flat is True
+    assert rel.field_name == "shelves"
+
+
+@pytest.mark.parametrize("target", ["ShelfFilter", None], ids=["bound", "placeholder"])
+def test_related_filter_flat_is_read_only(target: str | None) -> None:
+    """``flat`` has no setter: a flip after the build would leave the expansion stale."""
+    rel = RelatedFilter(target, flat=False)
+    name = "flat"
+    with pytest.raises(AttributeError):
+        setattr(rel, name, True)
+    assert rel.flat is False
+
+
 def test_related_filter_filterset_setter_substitutes_target() -> None:
     """The `filterset` setter swaps the resolved target class in place."""
     rel = RelatedFilter("ShelfFilter")

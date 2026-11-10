@@ -232,6 +232,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "examples/fakeshop/test_query/test_raw_filter_forms_api.py",
     "examples/fakeshop/test_query/test_raw_relation_filter_arguments_api.py",
     "examples/fakeshop/test_query/test_raw_relation_key_forms_api.py",
+    "examples/fakeshop/test_query/test_related_filter_flat_api.py",
     "examples/fakeshop/test_query/test_relation_authority_worlds_api.py",
     "examples/fakeshop/test_query/test_relation_authority_worlds_sharded_api.py",
     "examples/fakeshop/test_query/test_relation_connection_introspection_api.py",

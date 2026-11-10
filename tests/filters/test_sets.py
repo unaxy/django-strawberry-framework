@@ -564,6 +564,117 @@ def test_filterset_metaclass_none_removal_survives_diamond_inheritance() -> None
     assert "shelves" in BaseFilter.related_filters
 
 
+def _flat_shelf_filter() -> type[FilterSet]:
+    class FlatShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    return FlatShelfFilter
+
+
+@pytest.mark.parametrize(("base_flat", "redeclared_flat"), [(True, False), (False, True)])
+def test_a_redeclared_related_filter_carries_its_own_flat(
+    *,
+    base_flat: bool,
+    redeclared_flat: bool,
+) -> None:
+    """A subclass redeclaring the attribute uses the new declaration's ``flat``; the base keeps its own."""
+    shelf = _flat_shelf_filter()
+
+    class BaseBranchFilter(FilterSet):
+        shelves = RelatedFilter(shelf, field_name="shelves", flat=base_flat)
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    class RedeclaredBranchFilter(BaseBranchFilter):
+        shelves = RelatedFilter(shelf, field_name="shelves", flat=redeclared_flat)
+
+    assert list(BaseBranchFilter.get_filters()) == (
+        ["name", "shelves", "shelves__code"] if base_flat else ["name", "shelves"]
+    )
+    assert list(RedeclaredBranchFilter.get_filters()) == (
+        ["name", "shelves", "shelves__code"] if redeclared_flat else ["name", "shelves"]
+    )
+
+
+@pytest.mark.parametrize(("first_flat", "second_flat"), [(True, False), (False, True)])
+def test_a_mixed_flat_diamond_takes_the_first_bases_declaration(
+    *,
+    first_flat: bool,
+    second_flat: bool,
+) -> None:
+    """In a diamond whose bases declare one attribute with different ``flat``, the first base wins."""
+    shelf = _flat_shelf_filter()
+
+    class RootFilter(FilterSet):
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    class FirstFilter(RootFilter):
+        shelves = RelatedFilter(shelf, field_name="shelves", flat=first_flat)
+
+    class SecondFilter(RootFilter):
+        shelves = RelatedFilter(shelf, field_name="shelves", flat=second_flat)
+
+    class CombinedFilter(FirstFilter, SecondFilter):
+        pass
+
+    first = FirstFilter.related_filters["shelves"]
+    assert CombinedFilter.related_filters["shelves"] is first
+    assert CombinedFilter.declared_filters["shelves"] is first
+    assert CombinedFilter.related_filters["shelves"].flat is first_flat
+    assert list(CombinedFilter.get_filters()) == (
+        ["name", "shelves", "shelves__code"] if first_flat else ["name", "shelves"]
+    )
+
+
+def test_a_borrowed_related_filter_keeps_its_flat() -> None:
+    """A declaration assigned from another set keeps ``flat=False`` through the metaclass's copy."""
+    shelf = _flat_shelf_filter()
+
+    class DonorBranchFilter(FilterSet):
+        shelves = RelatedFilter(shelf, field_name="shelves", flat=False)
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    class BorrowerBranchFilter(FilterSet):
+        shelves = DonorBranchFilter.declared_filters["shelves"]
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"city": ["exact"]}
+
+    assert BorrowerBranchFilter.related_filters["shelves"].flat is False
+    assert list(BorrowerBranchFilter.get_filters()) == ["city", "shelves"]
+
+
+@pytest.mark.parametrize("flat", [True, False])
+def test_a_placeholder_bound_by_redeclaration_takes_the_new_flat(*, flat: bool) -> None:
+    """``RelatedFilter(None)`` expands nothing; a subclass binding a target by redeclaring sets ``flat``."""
+    shelf = _flat_shelf_filter()
+
+    class PlaceholderBranchFilter(FilterSet):
+        shelves = RelatedFilter(None, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    class BoundBranchFilter(PlaceholderBranchFilter):
+        shelves = RelatedFilter(shelf, field_name="shelves", flat=flat)
+
+    assert list(PlaceholderBranchFilter.get_filters()) == ["name", "shelves"]
+    assert list(BoundBranchFilter.get_filters()) == (
+        ["name", "shelves", "shelves__code"] if flat else ["name", "shelves"]
+    )
+
+
 def test_filterset_metaclass_aliases_filter_fields_to_fields() -> None:
     class ShelfFilter(FilterSet):
         class Meta:
@@ -689,29 +800,45 @@ def test_filterset_get_filters_does_not_cache_when_string_filterset_remains() ->
     assert BranchFilter.__dict__.get("_expanded_filters") is None
 
 
-def _desk_ring(base: type[FilterSet] = FilterSet) -> dict[str, type[FilterSet]]:
+def _desk_ring(
+    base: type[FilterSet] = FilterSet,
+    disabled: Collection[str] = (),
+) -> dict[str, type[FilterSet]]:
     """Three filter sets in one ``RelatedFilter`` cycle: branch -> desk -> shelf -> branch.
 
     Each target is a factory, so the cycle closes over sets declared later in this scope.
-    Every set subclasses ``base``.
+    Every set subclasses ``base``; the declaration of each set named in ``disabled`` is
+    ``flat=False``.
     """
 
     class RingBranchFilter(base):
-        desks = RelatedFilter(lambda: RingDeskFilter, field_name="circulation_desks")
+        desks = RelatedFilter(
+            lambda: RingDeskFilter,
+            field_name="circulation_desks",
+            flat="branch" not in disabled,
+        )
 
         class Meta:
             model = library_models.Branch
             fields = {"name": ["exact"], "city": ["exact"]}
 
     class RingDeskFilter(base):
-        shelf = RelatedFilter(lambda: RingShelfFilter, field_name="shelf")
+        shelf = RelatedFilter(
+            lambda: RingShelfFilter,
+            field_name="shelf",
+            flat="desk" not in disabled,
+        )
 
         class Meta:
             model = library_models.CirculationDesk
             fields = {"name": ["exact"]}
 
     class RingShelfFilter(base):
-        branch = RelatedFilter(lambda: RingBranchFilter, field_name="branch")
+        branch = RelatedFilter(
+            lambda: RingBranchFilter,
+            field_name="branch",
+            flat="shelf" not in disabled,
+        )
 
         class Meta:
             model = library_models.Shelf
@@ -1667,9 +1794,10 @@ def _flat_limit_message(
     """The ``ConfigurationError`` a set's expansion raises past ``MAX_FLAT_FILTERS``."""
     return (
         f"FilterSet {root.__qualname__}: its RelatedFilter expansion publishes more than "
-        f"{limit} flat filters, crossed expanding {crossing} along {trail}. Raise "
-        "DJANGO_STRAWBERRY_FRAMEWORK['MAX_FLAT_FILTERS'], or declare fewer RelatedFilter "
-        "edges in the cycle."
+        f"{limit} flat filters, crossed expanding {crossing} along {trail}. Mark "
+        f"{crossing.rsplit('.', 1)[0]}'s RelatedFilter declarations flat=False, or raise "
+        "DJANGO_STRAWBERRY_FRAMEWORK['MAX_FLAT_FILTERS']; a target behind a flat=False "
+        "declaration still builds on its own."
     )
 
 
@@ -1720,6 +1848,299 @@ def test_a_set_whose_expansion_passes_max_flat_filters_fails_its_build(
     # A failed build publishes nothing; the set builds once the limit admits it.
     assert ring["branch"].__dict__.get("_expanded_filters") is None
     assert set(ring["branch"].get_filters()) == _DESK_RING_FILTERS["branch"]
+
+
+# Each ring with one set's declaration ``flat=False``: the path stops at that
+# declaration, whose head stays the set's own filter.
+_DESK_RING_DISABLED_FILTERS = {
+    "branch": {
+        "branch": {"name", "city", "desks"},
+        "desk": {
+            "name",
+            "shelf",
+            "shelf__code",
+            "shelf__topic",
+            "shelf__branch",
+            "shelf__branch__name",
+            "shelf__branch__city",
+            "shelf__branch__desks",
+        },
+        "shelf": {
+            "code",
+            "topic",
+            "branch",
+            "branch__name",
+            "branch__city",
+            "branch__desks",
+        },
+    },
+    "desk": {
+        "branch": {
+            "name",
+            "city",
+            "desks",
+            "desks__name",
+            "desks__shelf",
+        },
+        "desk": {"name", "shelf"},
+        "shelf": {
+            "code",
+            "topic",
+            "branch",
+            "branch__name",
+            "branch__city",
+            "branch__desks",
+            "branch__desks__name",
+            "branch__desks__shelf",
+        },
+    },
+    "shelf": {
+        "branch": {
+            "name",
+            "city",
+            "desks",
+            "desks__name",
+            "desks__shelf",
+            "desks__shelf__code",
+            "desks__shelf__topic",
+            "desks__shelf__branch",
+        },
+        "desk": {
+            "name",
+            "shelf",
+            "shelf__code",
+            "shelf__topic",
+            "shelf__branch",
+        },
+        "shelf": {"code", "topic", "branch"},
+    },
+}
+
+
+@pytest.mark.parametrize("first", ["branch", "desk", "shelf"])
+@pytest.mark.parametrize("disabled", sorted(_DESK_RING_DISABLED_FILTERS))
+def test_a_flat_false_ring_edge_copies_nothing_whichever_set_expands_first(
+    disabled: str,
+    first: str,
+) -> None:
+    """A ``flat=False`` declaration cuts every path through it; each surface is order-free."""
+    ring = _desk_ring(disabled=(disabled,))
+    ring[first].get_filters()
+
+    assert {name: set(fs.get_filters()) for name, fs in ring.items()} == (
+        _DESK_RING_DISABLED_FILTERS[disabled]
+    )
+
+
+@pytest.mark.parametrize("first", ["branch", "desk", "shelf"])
+@pytest.mark.parametrize("disabled", ["desk", "shelf"])
+def test_flat_false_brings_a_ring_past_max_flat_filters_under_it(
+    disabled: str,
+    first: str,
+) -> None:
+    """At ``MAX_FLAT_FILTERS = 5`` the ring is refused; one disabled edge admits every set."""
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"MAX_FLAT_FILTERS": 5}):
+        with pytest.raises(ConfigurationError):
+            _desk_ring()[first].get_filters()
+        ring = _desk_ring(disabled=(disabled,))
+        ring[first].get_filters()
+        surfaces = {name: set(fs.get_filters()) for name, fs in ring.items()}
+
+    assert surfaces == _DESK_RING_DISABLED_FILTERS[disabled]
+
+
+@pytest.mark.parametrize("first", ["branch", "desk", "shelf"])
+def test_a_retained_target_behind_flat_false_is_capped_on_its_own(first: str) -> None:
+    """A target behind a disabled declaration still builds, and is capped, on its own.
+
+    With the branch's only declaration ``flat=False`` the branch copies nothing,
+    yet the desk it retains publishes six flat filters: past ``MAX_FLAT_FILTERS =
+    5``, every set's build fails naming the desk as root, whichever set builds
+    first, and nothing is published until the limit admits it.
+    """
+    ring = _desk_ring(disabled=("branch",))
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"MAX_FLAT_FILTERS": 5}):
+        order = [first, *(name for name in ring if name != first)]
+        for name in order:
+            with pytest.raises(ConfigurationError) as excinfo:
+                ring[name].get_filters()
+            assert str(excinfo.value) == _flat_limit_message(
+                ring["desk"],
+                f"{ring['desk'].__qualname__}.shelf",
+                ring["desk"].__qualname__,
+                5,
+            )
+    assert all(fs.__dict__.get("_expanded_filters") is None for fs in ring.values())
+    assert {name: set(fs.get_filters()) for name, fs in ring.items()} == (
+        _DESK_RING_DISABLED_FILTERS["branch"]
+    )
+
+
+def _code_topic_shelf_filter() -> type[FilterSet]:
+    class CapShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"], "topic": ["exact"]}
+
+    return CapShelfFilter
+
+
+@pytest.mark.parametrize(("limit", "admitted"), [(1, True), (0, False)])
+def test_a_copy_replacing_an_own_key_adds_nothing_to_max_flat_filters(
+    *,
+    limit: int,
+    admitted: bool,
+) -> None:
+    """The budget is net key growth: a copy taking an own key's name adds none.
+
+    The branch's own ``shelves__code`` is replaced by the copy; only
+    ``shelves__topic`` is new, so one flat filter is admitted at a limit of one.
+    """
+    shelf = _code_topic_shelf_filter()
+
+    class ReplacingBranchFilter(FilterSet):
+        shelves = RelatedFilter(shelf, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"], "shelves__code": ["exact"]}
+
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"MAX_FLAT_FILTERS": limit}):
+        if admitted:
+            assert set(ReplacingBranchFilter.get_filters()) == {
+                "name",
+                "shelves__code",
+                "shelves",
+                "shelves__topic",
+            }
+            return
+        with pytest.raises(ConfigurationError) as excinfo:
+            ReplacingBranchFilter.get_filters()
+    name = ReplacingBranchFilter.__qualname__
+    assert str(excinfo.value) == _flat_limit_message(
+        ReplacingBranchFilter,
+        f"{name}.shelves",
+        name,
+        limit,
+    )
+
+
+@pytest.mark.parametrize(("limit", "admitted"), [(2, True), (1, False)])
+def test_a_copied_related_filter_head_counts_toward_max_flat_filters(
+    *,
+    limit: int,
+    admitted: bool,
+) -> None:
+    """A copied ``RelatedFilter`` head is a flat filter: it counts, though no GraphQL field names it.
+
+    The shelf's ``books`` is ``flat=False``, so the branch copies ``shelves__code``
+    and the head ``shelves__books``: two flat filters.
+    """
+
+    class HeadBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class HeadShelfFilter(FilterSet):
+        books = RelatedFilter(HeadBookFilter, field_name="books", flat=False)
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class HeadBranchFilter(FilterSet):
+        shelves = RelatedFilter(HeadShelfFilter, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"MAX_FLAT_FILTERS": limit}):
+        if admitted:
+            assert set(HeadBranchFilter.get_filters()) == {
+                "name",
+                "shelves",
+                "shelves__code",
+                "shelves__books",
+            }
+            return
+        with pytest.raises(ConfigurationError) as excinfo:
+            HeadBranchFilter.get_filters()
+    name = HeadBranchFilter.__qualname__
+    assert str(excinfo.value) == _flat_limit_message(
+        HeadBranchFilter,
+        f"{name}.shelves",
+        name,
+        limit,
+    )
+
+
+@pytest.mark.parametrize(
+    ("limit", "desks_flat", "admitted"),
+    [(3, True, True), (2, True, False), (2, False, True)],
+)
+def test_an_acyclic_fan_out_is_capped_across_its_declarations(
+    *,
+    limit: int,
+    desks_flat: bool,
+    admitted: bool,
+) -> None:
+    """Sibling declarations share one set's budget; disabling one brings the fan-out under it."""
+    shelf = _code_topic_shelf_filter()
+
+    class FanDeskFilter(FilterSet):
+        class Meta:
+            model = library_models.CirculationDesk
+            fields = {"name": ["exact"]}
+
+    class FanBranchFilter(FilterSet):
+        shelves = RelatedFilter(shelf, field_name="shelves")
+        desks = RelatedFilter(FanDeskFilter, field_name="circulation_desks", flat=desks_flat)
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    expected = {
+        "name",
+        "shelves",
+        "desks",
+        "shelves__code",
+        "shelves__topic",
+    }
+    if desks_flat:
+        expected.add("desks__name")
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"MAX_FLAT_FILTERS": limit}):
+        if admitted:
+            assert set(FanBranchFilter.get_filters()) == expected
+            return
+        with pytest.raises(ConfigurationError) as excinfo:
+            FanBranchFilter.get_filters()
+    name = FanBranchFilter.__qualname__
+    assert str(excinfo.value) == _flat_limit_message(FanBranchFilter, f"{name}.desks", name, limit)
+
+
+def test_a_get_filters_override_adding_keys_on_the_set_itself_is_outside_max_flat_filters() -> (
+    None
+):
+    """The count is taken before a ``get_filters()`` override runs, so its own additions pass ``0``."""
+
+    class OverrideShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = super().get_filters()
+            filters["first_extra"] = CharFilter(field_name="topic")
+            filters["second_extra"] = CharFilter(field_name="topic", lookup_expr="icontains")
+            return filters
+
+    with override_settings(DJANGO_STRAWBERRY_FRAMEWORK={"MAX_FLAT_FILTERS": 0}):
+        assert list(OverrideShelfFilter.get_filters()) == ["code", "first_extra", "second_extra"]
 
 
 def test_max_flat_filters_zero_admits_a_set_that_publishes_no_flat_filter() -> None:
@@ -1774,57 +2195,106 @@ def test_max_flat_filters_must_be_a_non_negative_int(value: object, rendered: st
     )
 
 
-def _dense_library_filtersets() -> dict[str, type[FilterSet]]:
+def _dense_library_filtersets(disabled: Collection[str] = ()) -> dict[str, type[FilterSet]]:
     """Six library filter sets, each declaring a ``RelatedFilter`` over every relation between them.
 
     Several cycles share sets (``shelf`` <-> ``desk``, ``branch`` -> ``shelf`` and
     ``branch`` -> ``desk``), so one set is reached along many paths through the same
-    sets in different orders.
+    sets in different orders. Each ``set.attribute`` named in ``disabled`` is
+    declared ``flat=False``.
     """
 
     class DenseBranchFilter(FilterSet):
-        shelves = RelatedFilter(lambda: DenseShelfFilter, field_name="shelves")
-        desks = RelatedFilter(lambda: DenseDeskFilter, field_name="circulation_desks")
+        shelves = RelatedFilter(
+            lambda: DenseShelfFilter,
+            field_name="shelves",
+            flat="branch.shelves" not in disabled,
+        )
+        desks = RelatedFilter(
+            lambda: DenseDeskFilter,
+            field_name="circulation_desks",
+            flat="branch.desks" not in disabled,
+        )
 
         class Meta:
             model = library_models.Branch
             fields = {"name": ["exact"]}
 
     class DenseShelfFilter(FilterSet):
-        branch = RelatedFilter(lambda: DenseBranchFilter, field_name="branch")
-        books = RelatedFilter(lambda: DenseBookFilter, field_name="books")
-        desk = RelatedFilter(lambda: DenseDeskFilter, field_name="circulation_desk")
+        branch = RelatedFilter(
+            lambda: DenseBranchFilter,
+            field_name="branch",
+            flat="shelf.branch" not in disabled,
+        )
+        books = RelatedFilter(
+            lambda: DenseBookFilter,
+            field_name="books",
+            flat="shelf.books" not in disabled,
+        )
+        desk = RelatedFilter(
+            lambda: DenseDeskFilter,
+            field_name="circulation_desk",
+            flat="shelf.desk" not in disabled,
+        )
 
         class Meta:
             model = library_models.Shelf
             fields = {"code": ["exact"]}
 
     class DenseDeskFilter(FilterSet):
-        branch = RelatedFilter(lambda: DenseBranchFilter, field_name="branch")
-        shelf = RelatedFilter(lambda: DenseShelfFilter, field_name="shelf")
+        branch = RelatedFilter(
+            lambda: DenseBranchFilter,
+            field_name="branch",
+            flat="desk.branch" not in disabled,
+        )
+        shelf = RelatedFilter(
+            lambda: DenseShelfFilter,
+            field_name="shelf",
+            flat="desk.shelf" not in disabled,
+        )
 
         class Meta:
             model = library_models.CirculationDesk
             fields = {"name": ["exact"]}
 
     class DenseBookFilter(FilterSet):
-        shelf = RelatedFilter(lambda: DenseShelfFilter, field_name="shelf")
-        loans = RelatedFilter(lambda: DenseLoanFilter, field_name="loans")
+        shelf = RelatedFilter(
+            lambda: DenseShelfFilter,
+            field_name="shelf",
+            flat="book.shelf" not in disabled,
+        )
+        loans = RelatedFilter(
+            lambda: DenseLoanFilter,
+            field_name="loans",
+            flat="book.loans" not in disabled,
+        )
 
         class Meta:
             model = library_models.Book
             fields = {"title": ["exact"]}
 
     class DenseLoanFilter(FilterSet):
-        book = RelatedFilter(lambda: DenseBookFilter, field_name="book")
-        patron = RelatedFilter(lambda: DensePatronFilter, field_name="patron")
+        book = RelatedFilter(
+            lambda: DenseBookFilter,
+            field_name="book",
+            flat="loan.book" not in disabled,
+        )
+        patron = RelatedFilter(
+            lambda: DensePatronFilter,
+            field_name="patron",
+            flat="loan.patron" not in disabled,
+        )
 
         class Meta:
             model = library_models.Loan
             fields = {"note": ["exact"]}
 
     class DensePatronFilter(FilterSet):
-        loans = RelatedFilter(lambda: DenseLoanFilter, field_name="loans")
+        loans = RelatedFilter(
+            lambda: DenseLoanFilter,
+            field_name="loans",
+            flat="patron.loans" not in disabled,
+        )
 
         class Meta:
             model = library_models.Patron
@@ -1844,8 +2314,9 @@ def _path_walk(filterset: type[FilterSet], path: tuple[type[FilterSet], ...] = (
     """The flat surface by the cycle rule alone, walking every path afresh.
 
     Each declaration copies its target's names along the path; a target already on
-    the path contributes its own names unexpanded. A name copied twice keeps its
-    first position, as ``dict.update`` does.
+    the path contributes its own names unexpanded, and a ``flat=False`` declaration
+    copies nothing. A name copied twice keeps its first position, as ``dict.update``
+    does.
     """
     path = (*path, filterset)
     names = dict.fromkeys(filterset._unexpanded_filters())
@@ -1853,6 +2324,8 @@ def _path_walk(filterset: type[FilterSet], path: tuple[type[FilterSet], ...] = (
     assert is_dict(declarations)
     for declaration_name, declaration in declarations.items():
         assert isinstance(declaration, RelatedFilter)
+        if not declaration.flat:
+            continue
         target = declaration.filterset
         assert target is not None
         child = (
@@ -1899,6 +2372,185 @@ def test_a_dense_related_filter_graph_publishes_the_fresh_path_walk_whichever_se
         "loan": 55,
         "patron": 54,
     }
+
+
+# Every edge back toward the branch end of the graph, disabled.
+_DENSE_REVERSE_EDGES = (
+    "shelf.branch",
+    "desk.branch",
+    "desk.shelf",
+    "book.shelf",
+    "loan.book",
+)
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        "branch",
+        "shelf",
+        "desk",
+        "book",
+        "loan",
+        "patron",
+    ],
+)
+def test_a_dense_graph_with_flat_false_reverse_edges_publishes_the_fresh_path_walk(
+    first: str,
+) -> None:
+    """With the reverse edges ``flat=False``, every surface is still the fresh path walk.
+
+    The walk copies nothing through a disabled declaration; whichever set builds
+    first, each set publishes what that walk yields.
+    """
+    dense = _dense_library_filtersets(_DENSE_REVERSE_EDGES)
+    _ = dense[first].get_filters()
+
+    surfaces = {name: list(fs.get_filters()) for name, fs in dense.items()}
+    assert surfaces == {name: _path_walk(fs) for name, fs in dense.items()}
+    assert not any(name.startswith("branch__") for name in surfaces["shelf"])
+    assert not any(name.startswith("shelf__") for name in surfaces["desk"])
+
+
+@pytest.mark.parametrize("first", ["parent", "subclass"])
+def test_a_dense_subclass_entry_publishes_its_own_path_walk(first: str) -> None:
+    """A subclass of a dense set walks its own path, the extra lap through its parent included."""
+    dense = _dense_library_filtersets(("desk.branch",))
+
+    class SubShelfFilter(dense["shelf"]):
+        pass
+
+    if first == "subclass":
+        _ = SubShelfFilter.get_filters()
+    assert list(SubShelfFilter.get_filters()) == _path_walk(SubShelfFilter)
+    assert list(dense["shelf"].get_filters()) == _path_walk(dense["shelf"])
+
+
+def _shelf_book_pair(disabled: str) -> tuple[type[FilterSet], type[FilterSet]]:
+    """A two-set ``RelatedFilter`` cycle, shelf <-> book; ``disabled`` names the ``flat=False`` edge."""
+
+    class PairShelfFilter(FilterSet):
+        books = RelatedFilter(
+            lambda: PairBookFilter,
+            field_name="books",
+            flat=disabled != "shelf.books",
+        )
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class PairBookFilter(FilterSet):
+        shelf = RelatedFilter(PairShelfFilter, field_name="shelf", flat=disabled != "book.shelf")
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    return PairShelfFilter, PairBookFilter
+
+
+@pytest.mark.parametrize(
+    ("disabled", "parent", "extra"),
+    [
+        (
+            "none",
+            {
+                "code",
+                "books",
+                "books__title",
+                "books__shelf",
+                "books__shelf__code",
+                "books__shelf__books",
+            },
+            {"books__shelf__books__title", "books__shelf__books__shelf"},
+        ),
+        (
+            "book.shelf",
+            {
+                "code",
+                "books",
+                "books__title",
+                "books__shelf",
+            },
+            set[str](),
+        ),
+        ("shelf.books", {"code", "books"}, set[str]()),
+    ],
+)
+def test_a_subclass_entry_takes_an_extra_lap_unless_a_flat_false_edge_cuts_it(
+    disabled: str,
+    parent: set[str],
+    extra: set[str],
+) -> None:
+    """A subclass entering a cycle laps once more through its parent; a disabled lap edge cuts it.
+
+    The subclass is not on the path when the walk reaches its parent, so the
+    parent expands once more under it. With either edge of the cycle
+    ``flat=False`` the lap copies nothing.
+    """
+    shelf, _book = _shelf_book_pair(disabled)
+
+    class SubPairShelfFilter(shelf):
+        pass
+
+    assert set(shelf.get_filters()) == parent
+    assert set(SubPairShelfFilter.get_filters()) == parent | extra
+
+
+@pytest.mark.parametrize(
+    ("books_flat", "expected"),
+    [
+        (
+            True,
+            {
+                "name",
+                "shelves",
+                "shelves__code",
+                "shelves__books__title",
+                "shelves__books",
+                "shelves__books__title__icontains",
+            },
+        ),
+        (
+            False,
+            {
+                "name",
+                "shelves",
+                "shelves__code",
+                "shelves__books__title",
+                "shelves__books",
+            },
+        ),
+    ],
+)
+def test_an_own_traversal_across_a_flat_false_declaration_is_still_copied(
+    *,
+    books_flat: bool,
+    expected: set[str],
+) -> None:
+    """A target's own ``Meta.fields`` traversal across its disabled declaration still reaches the parent."""
+
+    class TraversalBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact", "icontains"]}
+
+    class TraversalShelfFilter(FilterSet):
+        books = RelatedFilter(TraversalBookFilter, field_name="books", flat=books_flat)
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"], "books__title": ["exact"]}
+
+    class TraversalBranchFilter(FilterSet):
+        shelves = RelatedFilter(TraversalShelfFilter, field_name="shelves")
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    assert set(TraversalBranchFilter.get_filters()) == expected
 
 
 _FS = TypeVar("_FS", bound=FilterSet)
@@ -2367,8 +3019,16 @@ class _SettlingFilterSet(FilterSet):
         assert self.filters
 
 
-def _required_child_branch_filter(base: type[FilterSet], method: str | None) -> type[FilterSet]:
-    """A ``Branch`` filter set on ``base`` expanding ``shelves`` over a child with a required leaf."""
+def _required_child_branch_filter(
+    base: type[FilterSet],
+    method: str | None,
+    *,
+    flat: bool = True,
+) -> type[FilterSet]:
+    """A ``Branch`` filter set on ``base`` expanding ``shelves`` over a child with a required leaf.
+
+    ``flat`` is the ``shelves`` declaration's.
+    """
 
     class RequiredCodeShelfFilter(FilterSet):
         code_required = CharFilter(field_name="code", required=True, method=method)
@@ -2386,7 +3046,7 @@ def _required_child_branch_filter(base: type[FilterSet], method: str | None) -> 
             fields = {"topic": ["exact"]}
 
     class RequiredChildBranchFilter(base):
-        shelves = RelatedFilter(RequiredCodeShelfFilter, field_name="shelves")
+        shelves = RelatedFilter(RequiredCodeShelfFilter, field_name="shelves", flat=flat)
 
         class Meta:
             model = library_models.Branch
@@ -2395,21 +3055,78 @@ def _required_child_branch_filter(base: type[FilterSet], method: str | None) -> 
     return RequiredChildBranchFilter
 
 
+@pytest.mark.parametrize("flat", [True, False])
 @pytest.mark.parametrize("parent_init", ["inherited", "reads-filters"])
 @pytest.mark.parametrize("method", [None, "filter_code"], ids=["rebound", "projected"])
 def test_a_required_child_leaf_is_recorded_as_a_deferred_parent_copy(
     method: str | None,
     parent_init: str,
+    *,
+    flat: bool,
 ) -> None:
     """The expansion snapshot defers a required child leaf for both parent declaration shapes.
 
     The live publication tests exercise form ownership over HTTP. This row retains the private
-    deferred-copy metadata instead of repeating its payloads.
+    deferred-copy metadata instead of repeating its payloads. A ``flat=False``
+    declaration copies nothing, so the parent neither holds nor defers the leaf.
     """
     base = _SettlingFilterSet if parent_init == "reads-filters" else FilterSet
-    parent = _required_child_branch_filter(base, method)
-    parent.get_filters()
-    assert "shelves__code_required" in _snapshot(parent).deferred_copies
+    parent = _required_child_branch_filter(base, method, flat=flat)
+    table = parent.get_filters()
+    if flat:
+        assert "shelves__code_required" in _snapshot(parent).deferred_copies
+    else:
+        assert list(table) == ["name", "shelves"]
+        assert _snapshot(parent).deferred_copies == frozenset()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("flat", "own_required", "errors"),
+    [
+        (True, False, {"shelf__topic_required": ["This field is required."]}),
+        (True, True, {"shelf__topic_required": ["This field is required."]}),
+        (False, False, {}),
+        (False, True, {"shelf__topic_required": ["This field is required."]}),
+    ],
+)
+def test_a_directly_built_set_takes_required_from_the_keys_owner(
+    errors: dict[str, list[str]],
+    *,
+    flat: bool,
+    own_required: bool,
+) -> None:
+    """Built directly, a key's ``required`` is its owner's: the copy's, or the restored own filter's.
+
+    An enabled declaration copies the child's required leaf over the own key; a
+    ``flat=False`` one leaves the parent's own filter, required or not.
+    """
+
+    class RequiredTopicShelfFilter(FilterSet):
+        topic_required = CharFilter(field_name="topic", required=True)
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    parent = type(
+        "RequiredTopicBookFilter",
+        (FilterSet,),
+        {
+            "shelf": RelatedFilter(RequiredTopicShelfFilter, field_name="shelf", flat=flat),
+            "shelf__topic_required": CharFilter(field_name="shelf__topic", required=own_required),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": library_models.Book, "fields": {"title": ["exact"]}},
+            ),
+        },
+    )
+    instance = parent(data={}, queryset=library_models.Book.objects.all())
+    assert instance.is_valid() is (not errors)
+    assert {
+        name: [str(m) for m in messages] for name, messages in instance.errors.items()
+    } == errors
 
 
 class _OpenIssuesOnlyFilter(CharFilter):
@@ -2481,14 +3198,19 @@ def _issue_filter_whose_absence_filters(shape: str) -> type[FilterSet]:
 
 def _absence_periodical_filter(
     issue_filter: type[FilterSet],
+    *,
+    flat: bool = True,
     **namespace: object,
 ) -> type[FilterSet]:
-    """A ``Periodical`` filter set expanding ``issues`` over ``issue_filter``, plus ``namespace``."""
+    """A ``Periodical`` filter set expanding ``issues`` over ``issue_filter``, plus ``namespace``.
+
+    ``flat`` is the ``issues`` declaration's.
+    """
     return type(
         "AbsencePeriodicalFilter",
         (FilterSet,),
         {
-            "issues": RelatedFilter(issue_filter, field_name="issues"),
+            "issues": RelatedFilter(issue_filter, field_name="issues", flat=flat),
             "Meta": type(
                 "Meta",
                 (),
@@ -2523,6 +3245,41 @@ def test_a_child_absence_leaf_is_deferred_on_the_parent(shape: str) -> None:
     _register_plain_types(library_models.Issue)
     parent.get_filters()
     assert "issues__open_only" in _snapshot(parent).deferred_copies
+
+
+@pytest.mark.parametrize("shape", _ABSENCE_SHAPES)
+@pytest.mark.parametrize("flat", [True, False])
+def test_an_own_key_a_flat_copy_would_replace_is_the_own_filter_under_flat_false(
+    shape: str,
+    *,
+    flat: bool,
+) -> None:
+    """An enabled copy takes an own key's name and is deferred; a disabled one leaves the own filter.
+
+    The parent declares its own ``issues__open_only``; the child's absence leaf
+    copies onto that key only when the declaration is enabled.
+    """
+    own = CharFilter(field_name="issues__number")
+    child = _issue_filter_whose_absence_filters(shape)
+    parent = _absence_periodical_filter(
+        child,
+        flat=flat,
+        issues__open_only=own,
+    )
+    _register_plain_types(library_models.Issue)
+    table = parent.get_filters()
+    restored = table["issues__open_only"]
+    if flat:
+        assert _snapshot(parent).deferred_copies == frozenset(
+            {"issues__title", "issues__open_only"},
+        )
+        assert restored is not own
+        assert type(restored) is type(child.declared_filters["open_only"])
+        assert restored.field_name == f"issues__{child.declared_filters['open_only'].field_name}"
+    else:
+        assert list(table) == ["name", "issues__open_only", "issues"]
+        assert _snapshot(parent).deferred_copies == frozenset()
+        assert restored is own
 
 
 @pytest.mark.parametrize(

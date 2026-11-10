@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 464 done, 118 to do. The CHANGELOG entries filed here moved to
+Progress: 465 done, 118 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2253,6 +2253,26 @@ Progress: 464 done, 118 to do. The CHANGELOG entries filed here moved to
   form), and
   `tests/filters/test_finalizer.py::test_phase_2_5_admits_a_reentry_key_decoding_against_the_primary_its_relation_reaches`.
   Docs: spec-031 Decision 13, spec-027. Filed 849. CHANGELOGTODO 850
+- [x] 216. `RelatedFilter(..., flat=False)` (keyword-only, an exact `bool` checked at construction, read-only through
+  `filters/base.py::RelatedFilter.flat`) keeps a declaration's nested branch while copying none of its target's filters
+  flat: `filters/sets.py::FilterSet._expand_along` skips the copy after the relation and correlation checks, so the
+  target still builds, publishes and is audited (746's copy audit and 745's GlobalID audit reach it through the
+  published head), its own traversals stay, a copied terminal head survives, and an own key the copy would replace is
+  the set's own filter again with its own behaviour (omitted value, `required` on a form that holds it, `lookup_expr`,
+  `exclude`, widget, the HIDE direction; an own `method=` runs on the parent ungated). Raw form data naming a withdrawn
+  key is ignored, as django-filter ignores any unknown key. `MAX_FLAT_FILTERS` is documented as net key growth per
+  expansion call (own population excluded, a replacing copy zero, a copied head counted, override additions on the set
+  itself excluded), and its message names `flat=False` as the first remedy. `_reachable_filtersets` keeps following
+  every declaration: restricting it to flat edges made refusals depend on build order (7 of 20 ring cells), against
+  spec-027's cycle edge case. Fakeshop: `ReadingListEntryFilter.reading_list` is `flat=False` beside an enabled
+  `ReadingListFilter.entries` and an own `reading_list__title` traversal. Pinned by
+  `examples/fakeshop/test_query/test_related_filter_flat_api.py`, the `flat` rows of `test_filter_absence_api.py`,
+  `test_filter_publication_api.py`, `test_projected_owned_filters_api.py`, `test_raw_filter_forms_api.py` and
+  `test_relation_authority_worlds_sharded_api.py`, and `tests/filters/test_base.py`, `test_sets.py` (the 217 lap
+  characterization, ring and dense surfaces in every build order, cap accounting) and `test_finalizer.py` (deep copy,
+  cycles, GlobalID under both flags). Docs: spec-027 Decision 3 Layer 4 and its other homes, spec-028 Layer 4, README,
+  `conf.py`, GLOSSARY `FilterSet` and `RelatedFilter`. The plan file is deleted (last at `771c299f`); BACKLOG
+  `related_filter_flat_opt_out` becomes `related_filter_copy_once`. Filed 852. CHANGELOGTODO 853
 
 ## Outside review of the fixes
 
@@ -2293,11 +2313,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 216. A dense `RelatedFilter` graph publishes a flat surface factorial in its size (path-relative expansion over every
-  simple path: six sets each related to every other give about 11k flat keys per set, seven about 94k). The bound
-  landed in `47dd4daa`; the maintainer ruled the per-declaration opt-out `RelatedFilter(flat=False)`. Plan:
-  `docs/related-filter-flat-opt-out-plan.md` (v7, reviewed five rounds).
-  Tracked on BACKLOG.md `related_filter_flat_opt_out`, removed when this lands. Moved from Waiting on you
 - [ ] 752. A `RelatedOrder` whose target `OrderSet` is keyed on another model than the relation reaches is accepted, and
   `orders/sets.py::OrderSet._scoped_hops` scopes its hop by the wrong type (`set_bound_type(hop.target)`, no
   correlation check), so hidden rows of the real model order visible parents: `BookOrder.shelf =
@@ -2495,8 +2510,9 @@ tracker number are recorded there; open remainders and new defects are filed as 
 - [ ] 844. (robustness) A walked relation-key null sentinel, a declared `ModelChoiceFilter` /
   `ModelMultipleChoiceFilter` under `null_label` (forward or to-many, shipped or overriding `filter`) sent its
   `null_value`, matches nothing, where django-filter answers the relation's null test (`<relation>=None`); a raw head
-  under `null_label` answers it since 748. Probe: `.work/evidence/fix-i748-raw-heads/verify-r2/test_zz_vr2_mc.py`
-  (`[]` at fe4eb38f). Found fixing 748
+  under `null_label` answers it since 748. A to-many `ModelChoiceFilter(null_label=...)` overriding `filter`, sent
+  `null` or its `null_value="0"`, answers `[]` at `fe4eb38f`, pinned as unchanged by
+  `tests/filters/test_sets.py::test_a_declared_model_choice_override_keeps_its_null_value_routing`. Found fixing 748
 - [ ] 849. (robustness) A consumer `GlobalIDFilter(field_name="shelf__books__id")` (or `__pk`), the trailing-pk
   spelling of a to-many re-entry key, on a Book set wired to a `type`-strategy secondary still validates against the
   face's type when a hop is scoped. It accepts only the secondary's id and refuses `library.book`, while its unscoped
@@ -2504,6 +2520,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   scoped set accept disjoint ids for the same rows. spec-031 Decision 13 keeps "a re-entry's own id decodes against
   the secondary its set is bound to" for the declared nested spelling (`shelf: {books: {id}}`); whether the flat
   undeclared spelling follows that or its unscoped twin is the first question. Found verifying 833
+- [ ] 852. (robustness) A `required=True` own filter of a served set is not enforced over GraphQL when the request
+  omits it: `filter: {}` (or a `filter:` naming only other keys) answers every row, under the package's and
+  django-filter's form builders alike, while README says a `required` filter acts on the form of the set that declares
+  it, at that set's root, and a directly built set refuses it
+  (`tests/filters/test_sets.py::test_a_directly_built_set_takes_required_from_the_keys_owner`). Found fixing 216
 
 ## To do: holes found re-checking the fixes
 

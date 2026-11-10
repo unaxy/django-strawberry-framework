@@ -3781,6 +3781,25 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
     names (``shelf=<pk>``) is validated against ``get_queryset``'s rows within those the
     target type lets the request see and matches through the rows each hop shows, as the
     relation key does (``filters/sets.py::FilterSet._flat_leaf_walk``).
+
+    ``flat=False`` (keyword-only, an exact ``bool``, read-only through ``flat``)
+    withdraws the declaration's flat copies: the parent's expansion
+    (``filters/sets.py::FilterSet._expand_along``) still validates the
+    declaration and copies nothing through it. A flat key and its nested branch
+    differ in meaning (a flat key matches a parent through any one related row,
+    a branch through one row meeting every condition), so it removes a
+    capability, and clients regenerate their schema. What stays: the nested
+    branch, the raw-form head, the target's own build and cap, and the parent's
+    own filters, explicit ``Meta.fields`` traversals across the relation
+    included. A form-data key only the copy registered is ignored, as
+    django-filter ignores any unregistered key. An own key an enabled copy
+    would replace is the own filter again, with its full behavior: its value
+    when omitted (a checkbox's ``False``), ``required``, ``lookup_expr``,
+    ``exclude``, its widget, and a shown field under ``HIDE_FLAT_FILTERS``; an
+    own ``method=`` runs on the parent queryset with no relation gate and no
+    target visibility, as any own ``method=`` does. A ``get_filters()`` override
+    reading a copied key finds it absent once the declaration it came from is
+    disabled.
     """
 
     # ``RelatedSetTargetMixin`` parameterization: the slots the shared
@@ -3796,9 +3815,15 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
         self,
         filterset: _FilterSetTarget,
         *args: object,
+        flat: bool = True,
         **kwargs: object,
     ) -> None:
         """Bind the target `filterset` and record explicit-queryset intent.
+
+        ``flat`` is keyword-only, so a positional extra stays django-filter's;
+        anything but an exact ``bool`` raises ``ConfigurationError``, the
+        placeholder ``RelatedFilter(None)`` included. It is stored before the
+        upstream constructor runs, so it never reaches ``Filter.extra``.
 
         Rejects `lookups=` with `TypeError` before delegating to
         `ModelChoiceFilter.__init__`: the lookups a related branch exposes
@@ -3813,11 +3838,21 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
                 "`RelatedFilter` does not accept `lookups=`; declare the lookups on the "
                 "target FilterSet's `Meta.fields`.",
             )
+        if not truth.is_exact(flat, bool):
+            raise ConfigurationError(
+                f"RelatedFilter flat must be a bool; got {truth.describe(flat)}.",
+            )
+        self._flat: bool = flat
         self._has_explicit_queryset: bool = kwargs.get("queryset") is not None
         # basedpyright: the kwargs are forwarded verbatim and ``ModelChoiceFilter.__init__`` owns
         # their validation; it rejects ``object`` kwargs for the ``str | None`` params
         super().__init__(*args, **kwargs)  # pyright: ignore[reportArgumentType]
         self._filterset: _FilterSetTarget = filterset
+
+    @property
+    def flat(self) -> bool:
+        """Whether the parent's expansion copies this declaration's target filters flat."""
+        return self._flat
 
     def bind_filterset(self, filterset: type[FilterSet]) -> None:
         """Bind the owning `FilterSet` once; subsequent calls are no-ops.

@@ -546,7 +546,13 @@ class ConsignmentFilter(FilterSet):
 
 
 class ReadingListFilter(FilterSet):
-    """Reading-list filterset bound to ``ReadingListType`` at finalize phase 2.5."""
+    """Reading-list filterset bound to ``ReadingListType`` at finalize phase 2.5.
+
+    ``entries`` is the enabled half of the reading-list cycle: its target's
+    filters are copied flat (``entriesTitle``, ``entriesReadingListTitle``).
+    """
+
+    entries = RelatedFilter("ReadingListEntryFilter", field_name="entries")
 
     class Meta:
         model = models.ReadingList
@@ -554,11 +560,22 @@ class ReadingListFilter(FilterSet):
 
 
 class ReadingListEntryFilter(FilterSet):
-    """Reading-list-entry filterset bound to ``ReadingListEntryType`` at finalize phase 2.5."""
+    """Reading-list-entry filterset bound to ``ReadingListEntryType`` at finalize phase 2.5.
+
+    ``reading_list`` is declared ``flat=False``: it publishes the nested
+    ``readingList`` branch and copies nothing flat, so ``readingListTitle`` is
+    this set's own ``Meta.fields`` traversal (``exact`` only).
+    """
+
+    reading_list = RelatedFilter(ReadingListFilter, field_name="reading_list", flat=False)
 
     class Meta:
         model = models.ReadingListEntry
-        fields = {"id": ["exact", "in"], "title": ["exact", "icontains"]}
+        fields = {
+            "id": ["exact", "in"],
+            "title": ["exact", "icontains"],
+            "reading_list__title": ["exact"],
+        }
 
 
 class VenueFilter(FilterSet):

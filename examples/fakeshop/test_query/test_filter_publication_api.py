@@ -11,8 +11,9 @@ bag, a filter beside an order root, a model input beside a form or serializer in
 serve a schema of their own, two mounts side by side in one process.
 """
 
+import asyncio
 from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import TYPE_CHECKING, Annotated
@@ -35,6 +36,7 @@ from graphql_client import (
     json_list,
     json_object,
     json_str,
+    response_json,
 )
 from strategy_schemas import make_django_type
 from strawberry.scalars import JSON
@@ -59,7 +61,8 @@ from django_strawberry_framework.filters import (
     filter_input_type,
 )
 from django_strawberry_framework.orders import OrderSet
-from django_strawberry_framework.views import DjangoGraphQLView
+from django_strawberry_framework.testing import AsyncTestClient
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import ModelSerializerBase, canonical_order, scrambled
 
 if TYPE_CHECKING:
@@ -90,21 +93,46 @@ def _pair_view(side: str) -> Callable[[HttpRequest], HttpResponseBase]:
     return view
 
 
+@wraps(AsyncDjangoGraphQLView.as_view())
+async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
+
+
 urlpatterns = [
     path("graphql-filter-publication/", _graphql_view),
+    path("graphql-filter-publication-async/", _async_graphql_view),
     path("graphql-clash/first/", _pair_view("first")),
     path("graphql-clash/second/", _pair_view("second")),
 ]
+
+
+async def _async_post(document: str, variables: Mapping[str, object] | None) -> JSONObject:
+    result = await AsyncTestClient().query(
+        document,
+        variables,
+        assert_no_errors=False,
+        url="/graphql-filter-publication-async/",
+    )
+    assert result.response.status_code == 200
+    return response_json(result.response)
 
 
 def _post(
     schema: DjangoSchema | strawberry.Schema,
     document: str,
     where: JSONObject | None = None,
+    *,
+    transport: str = "sync",
 ) -> JSONObject:
     _CURRENT["schema"] = schema
     try:
         with override_settings(ROOT_URLCONF=__name__):
+            if transport == "async":
+                return asyncio.run(
+                    _async_post(document, {"where": where} if where is not None else None),
+                )
             return graphql_payload(
                 document,
                 variables={"where": where} if where is not None else None,
@@ -172,33 +200,57 @@ def _published_field(
     return strawberry.field(resolver=resolve, graphql_type=list[output])
 
 
-def _ring() -> dict[str, type[FilterSet]]:
+def _ring(
+    disabled: Collection[str] = (),
+    fired: list[str] | None = None,
+) -> dict[str, type[FilterSet]]:
+    """The branch -> desk -> shelf -> branch cycle; each set named in ``disabled`` is ``flat=False``.
+
+    The shelf set's ``check_branch_permission`` gate records into ``fired``.
+    """
+
     class RingBranchFilter(FilterSet):
-        desks = RelatedFilter(lambda: RingDeskFilter, field_name="circulation_desks")
+        desks = RelatedFilter(
+            lambda: RingDeskFilter,
+            field_name="circulation_desks",
+            flat="branch" not in disabled,
+        )
 
         class Meta:
             model = models.Branch
             fields = {"name": ["exact"], "city": ["exact"]}
 
     class RingDeskFilter(FilterSet):
-        shelf = RelatedFilter(lambda: RingShelfFilter, field_name="shelf")
+        shelf = RelatedFilter(
+            lambda: RingShelfFilter,
+            field_name="shelf",
+            flat="desk" not in disabled,
+        )
 
         class Meta:
             model = models.CirculationDesk
             fields = {"name": ["exact"]}
 
     class RingShelfFilter(FilterSet):
-        branch = RelatedFilter(lambda: RingBranchFilter, field_name="branch")
+        branch = RelatedFilter(
+            lambda: RingBranchFilter,
+            field_name="branch",
+            flat="shelf" not in disabled,
+        )
 
         class Meta:
             model = models.Shelf
             fields = {"code": ["exact"], "topic": ["exact"]}
 
+        def check_branch_permission(self, _request: object) -> None:
+            if fired is not None:
+                fired.append("branch")
+
     return {"branch": RingBranchFilter, "desk": RingDeskFilter, "shelf": RingShelfFilter}
 
 
-def _ring_schema(first: str) -> DjangoSchema:
-    sets = _ring()
+def _ring_schema(first: str, disabled: Collection[str] = ()) -> DjangoSchema:
+    sets = _ring(disabled)
     root_models = {"branch": models.Branch, "desk": models.CirculationDesk, "shelf": models.Shelf}
     outputs = {
         name: make_django_type(
@@ -294,6 +346,185 @@ def test_a_cycle_publishes_its_complete_input_surface_in_each_type_registration_
         name: {json_object(field)["name"] for field in json_list(data[name], "inputFields")}
         for name in expected
     } == expected, payload
+
+
+_RING_COMMON = {"and", "or", "not"}
+
+# The published input of each ring set with one set's declaration ``flat=False``:
+# the declaration's nested branch stays, and no path copies through it.
+_FLAT_FALSE_RING_INPUTS = {
+    "branch": {
+        "branch": {"name", "city", "desks"},
+        "desk": {
+            "name",
+            "shelf",
+            "shelfCode",
+            "shelfTopic",
+            "shelfBranchName",
+            "shelfBranchCity",
+        },
+        "shelf": {
+            "code",
+            "topic",
+            "branch",
+            "branchName",
+            "branchCity",
+        },
+    },
+    "desk": {
+        "branch": {
+            "name",
+            "city",
+            "desks",
+            "desksName",
+        },
+        "desk": {"name", "shelf"},
+        "shelf": {
+            "code",
+            "topic",
+            "branch",
+            "branchName",
+            "branchCity",
+            "branchDesksName",
+        },
+    },
+    "shelf": {
+        "branch": {
+            "name",
+            "city",
+            "desks",
+            "desksName",
+            "desksShelfCode",
+            "desksShelfTopic",
+        },
+        "desk": {
+            "name",
+            "shelf",
+            "shelfCode",
+            "shelfTopic",
+        },
+        "shelf": {"code", "topic", "branch"},
+    },
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("disabled", sorted(_FLAT_FALSE_RING_INPUTS))
+@pytest.mark.parametrize("first", ["branch", "desk", "shelf"])
+def test_a_flat_false_ring_edge_publishes_no_copy_in_each_type_registration_order(
+    first: str,
+    disabled: str,
+) -> None:
+    """Disabling one ring declaration withdraws every flat key through it, whichever type registers first."""
+    payload = _post(
+        _ring_schema(first, (disabled,)),
+        """
+        {
+          branch: __type(name: "RingBranchFilterInputType") { inputFields { name } }
+          desk: __type(name: "RingDeskFilterInputType") { inputFields { name } }
+          shelf: __type(name: "RingShelfFilterInputType") { inputFields { name } }
+        }
+        """,
+    )
+    assert "errors" not in payload, payload
+    data = json_object(payload["data"])
+    expected = {
+        name: names | _RING_COMMON for name, names in _FLAT_FALSE_RING_INPUTS[disabled].items()
+    }
+    assert {
+        name: {json_object(field)["name"] for field in json_list(data[name], "inputFields")}
+        for name in expected
+    } == expected, payload
+
+
+def _hide_kyiv(
+    _cls: type[DjangoType],
+    queryset: QuerySet[models.Branch],
+    _info: object,
+    **_kwargs: object,
+) -> QuerySet[models.Branch]:
+    return queryset.exclude(city="Kyiv")
+
+
+async def _hide_kyiv_async(
+    _cls: type[DjangoType],
+    queryset: QuerySet[models.Branch],
+    _info: object,
+    **_kwargs: object,
+) -> QuerySet[models.Branch]:
+    return queryset.exclude(city="Kyiv")
+
+
+def _gated_ring_schema(
+    transport: str,
+    disabled: Collection[str],
+    fired: list[str],
+) -> DjangoSchema:
+    """The ring's shelf set over a JSON argument; the branch type hides Kyiv (async-only on async)."""
+    sets = _ring(disabled, fired)
+    shelf_set = sets["shelf"]
+    hook = _hide_kyiv_async if transport == "async" else _hide_kyiv
+    branch = make_django_type(
+        "GatedRingBranch",
+        models.Branch,
+        ("name",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(hook)},
+    )
+    desk = make_django_type("GatedRingDesk", models.CirculationDesk, ("name",), node=False)
+    shelf = make_django_type("GatedRingShelf", models.Shelf, ("code",), node=False)
+    finalize_django_types()
+
+    def resolve_sync(info: strawberry.Info[object, object], where: JSON) -> QuerySet[Model]:
+        return shelf_set.apply_sync(where, models.Shelf.objects.order_by("code"), info)
+
+    async def resolve_async(info: strawberry.Info[object, object], where: JSON) -> list[Model]:
+        rows = await shelf_set.apply_async(where, models.Shelf.objects.order_by("code"), info)
+        return [row async for row in rows]
+
+    resolver = resolve_async if transport == "async" else resolve_sync
+
+    @strawberry.type
+    class Query:
+        rows: object = strawberry.field(resolver=resolver, graphql_type=list[shelf])
+
+    return DjangoSchema(query=Query, types=[branch, desk], config=strawberry_config())
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("disabled", [(), ("shelf",)], ids=["enabled", "flat-false"])
+@pytest.mark.parametrize(
+    ("name", "codes"),
+    [("North", ["N-1"]), ("East", [])],
+    ids=["visible-branch", "hidden-branch"],
+)
+def test_a_nested_branch_across_a_flat_false_declaration_keeps_visibility_and_gates(
+    name: str,
+    codes: list[str],
+    disabled: tuple[str, ...],
+    transport: str,
+) -> None:
+    """A ``flat=False`` declaration's nested branch reads its target's visibility and fires its gate.
+
+    The branch type hides the Kyiv branch (through an async-only hook on the async
+    transport), so the East shelf never matches; the shelf set's
+    ``check_branch_permission`` fires once, enabled or disabled.
+    """
+    north = models.Branch.objects.create(name="North", city="Oslo")
+    east = models.Branch.objects.create(name="East", city="Kyiv")
+    models.Shelf.objects.create(branch=north, code="N-1", topic="maps")
+    models.Shelf.objects.create(branch=east, code="E-1", topic="art")
+    fired: list[str] = []
+    schema = _gated_ring_schema(transport, disabled, fired)
+    payload = _post(
+        schema,
+        "query($where: JSON!) { rows(where: $where) { code } }",
+        {"branch": {"name": name}},
+        transport=transport,
+    )
+    assert payload == {"data": {"rows": [{"code": code} for code in codes]}}, payload
+    assert fired == ["branch"]
 
 
 def _cycle_override(shape: str, *, customize: bool) -> type[FilterSet]:

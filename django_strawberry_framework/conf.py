@@ -117,7 +117,7 @@ TESTING_ENDPOINT_KEY = "TESTING_ENDPOINT"
 # arguments; neither those arguments nor its ``filter`` input ever carry the
 # expanded copies, so publishing them is this package's own surface. Hiding them
 # changes only the schema: the expansion (and ``MAX_FLAT_FILTERS``) still runs,
-# since a form-data client can still send a flat key.
+# since a form-data client can still send a flat key on an enabled declaration.
 HIDE_FLAT_FILTERS_KEY = "HIDE_FLAT_FILTERS"
 
 # The most flat filters one ``FilterSet``'s ``RelatedFilter`` expansion may
@@ -126,9 +126,10 @@ HIDE_FLAT_FILTERS_KEY = "HIDE_FLAT_FILTERS"
 # the path that crossed it, and the walk stops there. The expansion follows
 # every path of ``RelatedFilter`` declarations until it returns to a set already
 # on it, so a dense graph of mutually related sets grows factorially in its
-# size. A non-negative ``int`` (validated by
-# ``filters/sets.py::_flat_filter_limit``); there is no spelling that disables
-# it. Defaults to ``10_000``.
+# size; a declaration marked ``RelatedFilter(flat=False)`` copies nothing,
+# which is the remedy short of raising the limit. A non-negative ``int``
+# (validated by ``filters/sets.py::_flat_filter_limit``); there is no spelling
+# that disables it. Defaults to ``10_000``.
 MAX_FLAT_FILTERS_KEY = "MAX_FLAT_FILTERS"
 
 # Schema-wide default GlobalID type-name-slot strategy for Relay-Node-shaped

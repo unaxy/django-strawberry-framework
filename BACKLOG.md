@@ -473,28 +473,15 @@ The four drift failure modes this exists to prevent, each observed in the audite
 
 ---
 
-### `related_filter_flat_opt_out`
+### `related_filter_copy_once`
 
-**Realistic**: 8/10 — One keyword on `RelatedFilter` and one skip in the path-relative expansion walk; the nested filter input already reaches every path the flag would drop.
+**Realistic**: 5/10 — Copy each target's path-relative contribution once per build and share it across paths, instead of rebuilding it per path.
 
-**Impact**: 5/10 — Lets a dense `RelatedFilter` graph stay under the flat-filter cap without raising it, and trims the published input surface relation by relation instead of all at once.
+**Impact**: 4/10 — The build cost of a dense `RelatedFilter` graph. `_reachable_filtersets` with disabled reverse edges measured 2^N-1 expansion calls against N, a median of 41 vs 22 ms (N=7), 659 vs 304 ms (N=10) and 3.87 vs 1.55 s (N=12), about 2.2x, bounded by `MAX_FLAT_FILTERS` and below the all-enabled graph. Unverified, recipe not retained.
 
-**Difficulty**: 3/10 — A prototype exists: the expansion and the reachable-set walk follow only flat edges, and the cap's error message names the declaration to mark.
+**Difficulty**: 6/10 — A cheaper reach needs publication that never escapes a failing mid-build caller: restricting `_reachable_filtersets` to flat edges makes refusals depend on build order (7 of 20 ring cells), against spec-027's "whether a graph raises does not depend on which set builds first".
 
-**Source**: bug-hunt item 216 (factorial flat surface of a dense `RelatedFilter` graph), deferred by the maintainer when the per-set flat-filter cap landed.
-
-**What we'd do**: add `RelatedFilter(..., flat=False)`, which publishes no flat copy of the target's filters through that declaration, from any root set, while the nested `RelatedFilter` branch and explicit `Meta.fields` paths stay.
-
-**Spec**: superseded by the reviewed plan `docs/related-filter-flat-opt-out-plan.md` (bug-hunt item 216), which wins
-where this card disagrees; the card is removed when 216 lands.
-
-- Per declaration, not per set: the flag sits on the edge whose expansion it stops.
-- The nested branch is unaffected: every path the flag removes stays reachable as a nested filter, applied as a correlated `EXISTS` per branch.
-- Two flat spellings over a to-many relation may match different rows while one nested branch needs a single row, and the nested form spells `isNull: true` and `exclude=True` differently; the docs state the semantic difference a dropped flat path loses.
-- The cap's `ConfigurationError` names `flat=False` as a remedy beside raising `MAX_FLAT_FILTERS`.
-- Measured on the prototype: a seven-set complete graph with `flat=False` on its reverse edges publishes 512 flat filters per set and builds in 0.2 s.
-
-**Upstream**: `django-graphene-filters` has no per-declaration switch. Its one setting, `HIDE_FLAT_FILTERS` (0.7.4), hides every flat argument from the schema, and its flat arguments never include copies expanded through a `RelatedFilter`; this package already carries the same global setting.
+**Source**: bug-hunt item 216 (the `RelatedFilter(flat=False)` opt-out; its plan's copy-once and reach decisions).
 
 ---
 
