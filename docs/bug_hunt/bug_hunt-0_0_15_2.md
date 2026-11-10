@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 463 done, 118 to do. The CHANGELOG entries filed here moved to
+Progress: 464 done, 118 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2231,6 +2231,28 @@ Progress: 463 done, 118 to do. The CHANGELOG entries filed here moved to
   keeps a custom-through relation read-only and never publishes it. Refusing the declaration at mutation class
   creation is spec-052 Slice 1 (`required_through_columns`, Decision 2), unbuilt and tracked by the KANBAN 052 DoD;
   no fakeshop mutation writes a custom-through relation
+- [x] 833. A to-many relation-key GlobalID leaf whose walk re-enters its set's table under a type other than the
+  relation's registered target now accepts the ids that registered type mints, as its unscoped twin does. The shapes
+  are a set wired to a secondary with a scoping `get_queryset` on the path, a declared `RelatedFilter` last hop into a
+  set bound to the secondary (hook or not), and a proxy-typed root. It used to refuse every nonempty value whenever
+  the two types' accepted ids were disjoint, the proxy root even under (model, model). Root: two resolvers for one
+  key. The declared predicate (item 780's pre-build in `filters/sets.py::_LeafChain.terminal_value`) validated against
+  the relation's registry type, and the terminal `FilterSet._routed_leaf_chain` rebinds onto the target pk validated
+  against the walking set's bound type. The key terminal and its `_KeyMatch` / fallback copies now carry their leaf as
+  declared, and `filters/base.py::_globalid_target` resolves such a copy through `::_key_leaf_of` (same definition and
+  NodeID slot, `row_path=""`). Both decodes stay and agree. An undeclared hop's face
+  (`filters/sets.py::_UndeclaredHopSet`) carries the walking set as `_projection_owner`, so
+  `filters/base.py::_filter_schema` reads the executing schema's published names for every walked terminal, forward
+  keys past a scoped hop included (under a renaming `NameConverter` these took the plain spelling and refused the
+  published one). A callable or custom secondary on such a set now builds. Grids (merged with 748/751): 84 of 1152, 9
+  of 132 and 12 of 44 cells moved, each onto its unscoped twin; nothing that built was refused, no unscoped cell
+  moved. Pinned by
+  `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py::test_a_reentry_key_serves_the_id_its_relation_target_type_mints`,
+  `::test_a_reentry_key_refuses_an_id_its_relation_target_type_does_not_mint` and
+  `::test_a_walked_to_many_key_into_a_model_no_type_exposes_compares_the_node_id_alone` (live, `apply_sync`, raw
+  form), and
+  `tests/filters/test_finalizer.py::test_phase_2_5_admits_a_reentry_key_decoding_against_the_primary_its_relation_reaches`.
+  Docs: spec-031 Decision 13, spec-027. Filed 849. CHANGELOGTODO 850
 
 ## Outside review of the fixes
 
@@ -2461,12 +2483,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   ForeignKey or join on the field not permitted", `filters/sets.py::_apply_relation_leaf`; a class-level `filter`
   override answers "Venue has no field named 'faults'" from `::_names_every_through`). The nested branch serves. Found
   fact-finding 745
-- [ ] 833. (robustness) A to-many relation-key GlobalID leaf whose undeclared hops re-enter the walking set's table
-  under a scoping secondary type decodes its value twice, the declared predicate in
-  `filters/sets.py::_LeafChain.terminal_value` against the relation's primary (`related_target_for`) and the terminal
-  against `utils/querysets.py::relation_target_type(root=...)`, so when the two types' strategies differ (`model`
-  primary, `type` secondary, key `shelf__books` on a set wired to the secondary) every nonempty value is refused, a
-  primary-minted id as "expects BookSecondary", a secondary-minted id as "expects library.book". Found researching 745
 - [ ] 847. A raw-form `RangeFilter` over an annotation a consumer `filter_queryset` adds before filtering (a path
   only the queryset resolves) hands Django the uncleaned string bound: an unmasked `ValueError` under `range` and
   every other declared lookup (316 turned a declared `iexact`'s silent no rows into the same `ValueError`). The
@@ -2481,6 +2497,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `null_value`, matches nothing, where django-filter answers the relation's null test (`<relation>=None`); a raw head
   under `null_label` answers it since 748. Probe: `.work/evidence/fix-i748-raw-heads/verify-r2/test_zz_vr2_mc.py`
   (`[]` at fe4eb38f). Found fixing 748
+- [ ] 849. (robustness) A consumer `GlobalIDFilter(field_name="shelf__books__id")` (or `__pk`), the trailing-pk
+  spelling of a to-many re-entry key, on a Book set wired to a `type`-strategy secondary still validates against the
+  face's type when a hop is scoped. It accepts only the secondary's id and refuses `library.book`, while its unscoped
+  twin accepts only `library.book`, on all three drivers. So since 833 `shelf__books` and `shelf__books__id` on one
+  scoped set accept disjoint ids for the same rows. spec-031 Decision 13 keeps "a re-entry's own id decodes against
+  the secondary its set is bound to" for the declared nested spelling (`shelf: {books: {id}}`); whether the flat
+  undeclared spelling follows that or its unscoped twin is the first question. Found verifying 833
 
 ## To do: holes found re-checking the fixes
 

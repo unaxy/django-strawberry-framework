@@ -194,6 +194,7 @@ from django_strawberry_framework.utils.widgets import widget_keys
 
 from .base import (
     _GLOBALID_RELATION_PK_ATTR,
+    _KEY_LEAF_ATTR,
     _RELATION_VIEW_ATTR,
     ArrayFilter,
     EnumChoiceFilter,
@@ -2449,9 +2450,11 @@ class _LeafChain:
         """Return every filter this chain decodes a GlobalID value in, each as it is bound.
 
         ``terminal``, and for a to-many key the leaf as declared, whose predicate
-        ``terminal_value`` builds first. A chain matching keys (``key_match``, with its
-        ``fallback``) belongs to a leaf running consumer code, whose value no shipped
-        decode reads first (``_decodes_before_binding``), so it is never asked.
+        ``terminal_value`` builds first; a to-many key's ``terminal`` validates what that
+        leaf validates (``filters/base.py::_key_leaf_of``), so both name one type. A chain
+        matching keys (``key_match``, with its ``fallback``) belongs to a leaf running
+        consumer code, whose value no shipped decode reads first
+        (``_decodes_before_binding``), so it is never asked.
         """
         if self.to_many_key is None:
             return (self.terminal,)
@@ -2600,12 +2603,21 @@ class _UndeclaredHopSet:
     bound to this instead of a child filter set instance: ``_meta.model`` is the
     hop's model (a raw-key or integer terminal coerces through it),
     ``_owner_definition`` the definition of the type the rows answer for (a
-    GlobalID terminal validates against it) and ``request`` the walking set's
-    (``None`` for the build's ask, ``FilterSet._globalid_decode_sites``).
+    GlobalID terminal validates against it, unless it is a to-many key's copy,
+    which validates what its leaf as declared validates), ``request`` the walking
+    set's and ``_projection_owner`` the walking set itself, whose request info names
+    the schema a GlobalID terminal reads type names by (both ``None`` for the build's
+    ask, ``FilterSet._globalid_decode_sites``).
     """
 
-    def __init__(self, hop: UndeclaredHop, request: object) -> None:
-        """Bind the face to ``hop``'s model and target type, with the walking set's request."""
+    def __init__(
+        self,
+        hop: UndeclaredHop,
+        request: object,
+        owner: FilterSet | None = None,
+    ) -> None:
+        """Bind the face to ``hop``'s model and target type, the walking set and its request."""
+        self._projection_owner: FilterSet | None = owner
         self._meta: filterset.FilterSetOptions = filterset.FilterSetOptions()
         self._meta.model = _hop_model(hop)
         self._owner_definition: DjangoTypeDefinition | None = (
@@ -7717,7 +7729,7 @@ class FilterSet(
             # The walk continues only past a declared hop whose target resolved to a set class.
             self._projection_child(_hop_target_set(hop), hop)
             if isinstance(hop, DeclaredHop)
-            else _UndeclaredHopSet(hop, self.request)
+            else _UndeclaredHopSet(hop, self.request, self)
         )
         return _rebound_terminal(type(self), filter_instance, hop, field_name, target_set)
 
@@ -7875,6 +7887,9 @@ class FilterSet(
             key_name, key_attname = targets[0].name, targets[0].attname
         terminal = bind(filter_instance, last, key_name)
         setattr(terminal, _GLOBALID_RELATION_PK_ATTR, False)
+        # The key names a row of the relation's target as the leaf as declared reads it,
+        # whichever type the face of the target rows answers for (a re-entry's scoping type).
+        setattr(terminal, _KEY_LEAF_ATTR, filter_instance)
         if shipped:
             # Shipped and forward returned above: this leaf is a to-many key.
             return _LeafChain(hops, terminal, to_many_key=_ToManyKey(key_attname, filter_instance))

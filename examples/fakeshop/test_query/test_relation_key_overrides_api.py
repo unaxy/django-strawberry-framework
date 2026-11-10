@@ -963,9 +963,7 @@ class _Unnamed:
     relation, ``<relation>_visible``). A request runs one statement per call when the
     override reads its default row (``reads``), ``cleans`` for its form's choices, and the
     root query unless the leaf raises; ``statements`` pins the unwalked, walked and
-    hiding counts of an override answering no row by an empty queryset;
-    ``related_received`` is the call of a value the walk's ``RelatedFilter`` target reads
-    as naming a row, where the override runs as declared.
+    hiding counts of an override answering no row by an empty queryset.
     """
 
     key: _Key
@@ -979,7 +977,6 @@ class _Unnamed:
     reads: int = 1
     cleans: int = 0
     statements: tuple[int, int, int] | None = None
-    related_received: tuple[str, str, str] | None = None
 
 
 _SHELF = (models.Shelf, "code", "open")
@@ -1153,7 +1150,6 @@ _UNNAMED: dict[str, _Unnamed] = {
         ("shelves_visible", "str", "Branch"),
         reads=0,
         statements=(0, 0, 0),
-        related_received=("shelves", "str", "Branch"),
     ),
     "text-the-key-column-refuses": _Unnamed(
         _SHELVES,
@@ -1582,8 +1578,6 @@ def test_a_key_override_whose_value_names_no_row_runs_over_the_visible_related_r
     # as left out.
     absent = value is _ABSENT or (value is None and not direct)
     received = shape.received if walk == "unwalked" else shape.walked_received
-    if walk == "related-filter" and shape.related_received is not None:
-        received = shape.related_received
     assert [received] * (2 if absent and walk != "unwalked" else 1) == _CALLS
     root = 0 if isinstance(answer[walk], str) else 1
     expected = shape.reads * len(_CALLS) + shape.cleans + root

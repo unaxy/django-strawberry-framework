@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 207 to do.
+Progress: 0 done, 208 to do.
 
 ## From dry-0_0_15_3
 
@@ -967,6 +967,12 @@ Progress: 0 done, 207 to do.
   a bound past it answers as over `<relation>__id` where it raised an unmasked `OverflowError` or `TypeError`; a raw
   bound past an integer column is held under every declared lookup (`iexact` and `contains` included). The published
   input key is unchanged
+- [ ] 850. CHANGELOG entry for item 833: a to-many relation-key `GlobalID` filter (`shelfBooks`, `genresBooks`) on a
+  filter set wired to a secondary type now accepts the ids the type registered for the relation's target mints, as it
+  does with no scoping hook, instead of refusing every value. This covers a walk that re-enters the set's own table
+  through a type's `get_queryset` or a `RelatedFilter` into a set bound to the secondary. A walked `GlobalID` filter
+  also reads type names as the executing schema publishes them under a renaming `NameConverter`. A `callable` or
+  `custom` secondary on such a set now builds
 
 ## From dry-upstream-0_0_15
 

@@ -36,7 +36,7 @@ five parity-floor primitives (spec-027 Decision 4):
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
@@ -416,6 +416,18 @@ class _RelationView:
 def _relation_view_of(filter_instance: Filter) -> _RelationView | None:
     """Return the ``_RelationView`` a relation-view copy carries, ``None`` for any other filter."""
     return optional_instance(getattr(filter_instance, _RELATION_VIEW_ATTR, None), _RelationView)
+
+
+# A copy of a to-many relation-key filter re-bound to the target's key over the target rows
+# (``filters/sets.py::FilterSet._routed_leaf_chain``) carries the leaf as declared: a GlobalID
+# value names the type registered for the relation's target, so the copy resolves its target
+# as that leaf does, whichever type the face it is bound to answers for.
+_KEY_LEAF_ATTR = "_dst_key_leaf"
+
+
+def _key_leaf_of(filter_instance: Filter) -> Filter | None:
+    """Return the leaf as declared a to-many key's re-bound copy carries, else ``None``."""
+    return optional_instance(getattr(filter_instance, _KEY_LEAF_ATTR, None), Filter)
 
 
 def _marked_pk_field_name(filter_instance: Filter) -> str | None:
@@ -2358,7 +2370,11 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     keeps the upstream scalar shape, so it is never validated as that primary's
     GlobalID); an unbound set over a model no type exposes, and an undeclared hop's
     face into one, walk from that model (``_resolve_globalid_target``'s
-    ``start_model``). Two routing branches:
+    ``start_model``). A to-many relation key's copy re-bound to the target's key
+    over the target rows (``_key_leaf_of``) resolves the definition and id slot its
+    leaf as declared resolves, with an empty row path (the copy compares those rows'
+    own columns), whichever type the face it is bound to answers for, so both decodes
+    of one key name one type. Two routing branches:
 
     1. **Own-PK branch.** When ``filter_instance.field_name`` matches the
        owning model's PK name (``_meta.pk.name`` or ``"pk"``) and that PK is
@@ -2389,6 +2405,10 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     acceptance check in ``_decode_and_validate_global_id`` consumes a single
     definition (spec-031 Decision 13).
     """
+    key_leaf = _key_leaf_of(filter_instance)
+    if key_leaf is not None:
+        declared = _globalid_target(key_leaf, stable=stable)
+        return None if declared is None else replace(declared, row_path="")
     parent: object = getattr(filter_instance, "parent", None)
     # An undeclared hop's face (``filters/sets.py::_UndeclaredHopSet``) carries the
     # definition its rows answer for on itself; a filter set instance answers for its
@@ -2596,10 +2616,11 @@ def _filter_schema(filter_instance: Filter) -> Schema | None:
     Read off the owning ``FilterSet``'s ``_apply_info`` - the resolver ``info``
     ``apply_sync`` / ``apply_async`` stash on the top-level instance and
     ``_q_for_branch`` on every nested sibling - climbing from a relation leaf's
-    child instance (``FilterSet._projection_child``) to the instance that owns
-    it, so the GlobalID type-name check validates against the names THIS schema
-    published. ``None`` for a filterset built outside the apply pipeline (a
-    direct public construction), where no schema exists to consult: its
+    child instance (``FilterSet._projection_child``), or from an undeclared hop's
+    face (``filters/sets.py::_UndeclaredHopSet``) to the set walking it, to the
+    instance that owns it, so the GlobalID type-name check validates against the
+    names THIS schema published. ``None`` for a filterset built outside the apply
+    pipeline (a direct public construction), where no schema exists to consult: its
     ``_apply_info`` is ``None`` or a ``_DirectRequestInfo``, which names none.
     """
     owner = read_attr(filter_instance, "parent", None)

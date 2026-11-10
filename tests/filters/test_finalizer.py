@@ -2368,9 +2368,10 @@ def _scoped_reentry_world(*, callable_primary: bool = False, key: str = "shelf__
     """``key`` re-enters ``Book`` past undeclared hops; a scoping secondary owns the set.
 
     The secondary is ``callable`` and the primary ``model``; with ``callable_primary`` the
-    primary is ``callable`` and the secondary ``type``: the to-many key builds its declared
-    predicate on the owner's rows first (``_LeafChain.terminal_value``), decoding against
-    the primary its relation reaches. ``key`` is ``shelf__books`` (a foreign key, then its
+    primary is ``callable`` and the secondary ``type``. The to-many key decodes against
+    the primary its relation reaches twice, in the declared predicate it builds on the
+    owner's rows first (``_LeafChain.terminal_value``) and on the target rows, whose face
+    answers for the secondary. ``key`` is ``shelf__books`` (a foreign key, then its
     reverse) or ``genres__books`` (a many-to-many, then its reverse).
     """
     book_filter = type(
@@ -2552,12 +2553,6 @@ def _encode_only_refusal(head: str, type_name: str) -> str:
             id="unwired-set-key-into-an-mti-child",
         ),
         pytest.param(
-            _scoped_reentry_world,
-            "filterset ReentryBookFilter declares GlobalID filter 'shelf__books'",
-            "BookSecondary",
-            id="undeclared-reentry-onto-the-bound-secondary",
-        ),
-        pytest.param(
             functools.partial(_scoped_reentry_world, callable_primary=True),
             "filterset ReentryBookFilter declares GlobalID filter 'shelf__books'",
             "BookPrimary",
@@ -2627,13 +2622,12 @@ def test_phase_2_5_refuses_a_globalid_leaf_a_request_decodes_against_an_encode_o
 
     A ``RelatedFilter`` into a set no type wires runs its leaves bound to that set (its
     model's registry primary), an own leaf walking a declared hop decodes in the hop's
-    target set, an undeclared hop re-entering the owner's table decodes against the type
-    the walking set is bound to (a to-many key's declared predicate against the primary
-    its relation reaches), and a leaf both a nested branch and a flat copy serve is named
-    by its declaration, as its wired declaring set's own ahead of a wired sibling's flat
-    copy. Each would build and answer ``GLOBALID_UNVALIDATABLE`` for every
-    nonempty value. The ``null`` and ``[]`` values such a leaf answers without decoding
-    go with it: no schema holding the leaf builds, so no request reaches either.
+    target set, a to-many key whose undeclared hops re-enter the owner's table decodes
+    against the primary its relation reaches, and a leaf both a nested branch and a flat
+    copy serve is named by its declaration, as its wired declaring set's own ahead of a
+    wired sibling's flat copy. Each would build and answer ``GLOBALID_UNVALIDATABLE`` for
+    every nonempty value. The ``null`` and ``[]`` values such a leaf answers without
+    decoding go with it: no schema holding the leaf builds, so no request reaches either.
     """
     world()
 
@@ -2704,6 +2698,22 @@ def test_phase_2_5_admits_a_globalid_leaf_whose_value_consumer_code_reads(shape:
     consumer's code receives the value, whatever type the leaf's path reaches.
     """
     _consumer_decoder_world(shape)
+
+    finalize_django_types()
+
+
+@pytest.mark.parametrize("key", ["shelf__books", "genres__books"])
+def test_phase_2_5_admits_a_reentry_key_decoding_against_the_primary_its_relation_reaches(
+    key: str,
+) -> None:
+    """A scoped to-many re-entry key decodes against its relation's primary, never its set's type.
+
+    ``ReentryBookFilter`` is bound to a ``callable`` ``BookSecondary`` whose
+    ``get_queryset`` scopes the walk; the key's declared predicate and its copy over the
+    target rows (bound to a face answering for ``BookSecondary``) both validate against
+    the ``model`` primary the relation reaches, so no encode-only type is a target.
+    """
+    _scoped_reentry_world(key=key)
 
     finalize_django_types()
 

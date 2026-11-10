@@ -6,20 +6,29 @@ its bound public filter primitive to preserve Strawberry's already-decoded value
 A GlobalID filter into a model no type exposes compares the node id on the relation's
 key, through a ``GenericRelation`` too; one on a ``GenericForeignKey`` is refused when
 its set publishes its filters, served or applied unbound, unless a ``method`` filters it.
+A relation key whose hops re-enter its own set's table takes the id the type registered
+for the relation's target mints, under its published name, whichever type the set or the
+walk's target rows answer for.
 """
 
+import functools
+import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from functools import wraps
+from typing import NamedTuple
 
 import pytest
 import strawberry
 from apps.library import models
 from django.contrib.contenttypes.models import ContentType
-from django.db.models import QuerySet
+from django.db.models import Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
+from django_filters import Filter
+from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
@@ -27,13 +36,18 @@ from graphql_client import (
     json_at,
     json_list,
     json_object,
+    json_str,
 )
+from strategy_schemas import make_django_type
 from strawberry import relay
 from strawberry.scalars import JSON
+from strawberry.schema.name_converter import NameConverter
 from strawberry.types import Info
-from strawberry.types.base import StrawberryList
+from strawberry.types.base import StrawberryList, StrawberryObjectDefinition
+from typing_extensions import override
 
 from django_strawberry_framework import (
+    DjangoConnectionField,
     DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
@@ -45,9 +59,11 @@ from django_strawberry_framework.filters import (
     FilterSet,
     GlobalIDFilter,
     GlobalIDMultipleChoiceFilter,
+    RelatedFilter,
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.utils._narrowing import is_queryset, require, require_instance
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
@@ -558,3 +574,693 @@ def test_a_globalid_filter_on_a_generic_foreign_key_filters_through_its_method(
     )
 
     assert payload == {"data": {"tags": [{"tag": "t"}]}}, payload
+
+
+class _ApiPrefix(NameConverter):
+    """Publish every output object type as ``Api<name>``; inputs keep theirs."""
+
+    @override
+    def from_object(self, object_type: StrawberryObjectDefinition) -> str:
+        name = super().from_object(object_type)
+        return name if object_type.is_input else f"Api{name}"
+
+
+def _encode_by_name(type_cls: type[DjangoType], _model: type[Model], _root: Model) -> str:
+    """A ``callable`` strategy: the type's class name, encode-only."""
+    return type_cls.__name__
+
+
+def _hiding(*pks: int) -> "classmethod[DjangoType, ..., QuerySet[Model]]":
+    """Return a ``get_queryset`` hook scoping a type's rows to those outside ``pks``."""
+
+    def get_queryset(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[Model]:
+        return queryset.exclude(pk__in=pks)
+
+    return classmethod(get_queryset)
+
+
+def _custom_typename() -> "classmethod[DjangoType, ..., str]":
+    """Return a consumer ``resolve_typename``, which classifies its type ``custom``."""
+
+    def resolve_typename(cls: type[DjangoType], _root: object, _info: object) -> str:
+        return cls.__name__
+
+    return classmethod(resolve_typename)
+
+
+class _Library(NamedTuple):
+    """The library rows every re-entry world reads, by name."""
+
+    branches: dict[str, models.Branch]
+    shelves: dict[str, models.Shelf]
+    genres: dict[str, models.Genre]
+    books: dict[str, models.Book]
+    loans: dict[str, models.Loan]
+    publishers: dict[str, models.Publisher]
+
+
+def _library() -> _Library:
+    """Two branches, three shelves, two genres, four books, three loans and three publishers.
+
+    ``s1`` and ``s2`` stand on ``b1``, ``s3`` on ``b2``; ``s1`` and ``s2`` also list ``b2``
+    as an alternate branch. ``bk1`` / ``bk2`` stand on ``s1``, ``bk3`` on ``s2``, ``bk4``
+    on ``s3``; ``bk1`` / ``bk3`` are ``g1``, ``bk2`` / ``bk4`` ``g2``. ``bk1`` is lent
+    twice, ``bk2`` once. ``h1`` prints a run co-published by ``h2``, ``h3`` one
+    co-published by ``h1``.
+    """
+    branches = {name: models.Branch.objects.create(name=name) for name in ("b1", "b2")}
+    shelves = {
+        code: models.Shelf.objects.create(code=code, branch=branches[branch])
+        for code, branch in (("s1", "b1"), ("s2", "b1"), ("s3", "b2"))
+    }
+    shelves["s1"].alt_branches.add(branches["b2"])
+    shelves["s2"].alt_branches.add(branches["b2"])
+    genres = {name: models.Genre.objects.create(name=name) for name in ("g1", "g2")}
+    books: dict[str, models.Book] = {}
+    for title, shelf, genre in (
+        ("bk1", "s1", "g1"),
+        ("bk2", "s1", "g2"),
+        ("bk3", "s2", "g1"),
+        ("bk4", "s3", "g2"),
+    ):
+        books[title] = models.Book.objects.create(title=title, shelf=shelves[shelf])
+        books[title].genres.add(genres[genre])
+    patrons = [models.Patron.objects.create(name=name) for name in ("p1", "p2")]
+    loans = {
+        name: models.Loan.objects.create(book=books[book], patron=patron)
+        for name, book, patron in (
+            ("l1", "bk1", patrons[0]),
+            ("l2", "bk1", patrons[1]),
+            ("l3", "bk2", patrons[0]),
+        )
+    }
+    publishers = {
+        name: models.Publisher.objects.create(name=name, house_code=name.upper())
+        for name in ("h1", "h2", "h3")
+    }
+    edition = models.Edition.objects.create(isbn_13="9780000000001", publisher=publishers["h1"])
+    for printer, co_publisher in (("h1", "h2"), ("h3", "h1")):
+        printing = models.Printing.objects.create(edition=edition, publisher_2=publishers[printer])
+        printing.co_publishers.add(publishers[co_publisher])
+    return _Library(branches, shelves, genres, books, loans, publishers)
+
+
+@dataclass(frozen=True)
+class _Reentry:
+    """A filter set wired to a type, whose GlobalID relation key a request walks hop by hop.
+
+    ``filterset`` serves ``root`` (its rows' type) beside ``types`` under ``converter``;
+    ``path`` is the leaf's input path (Python names, the last one the lookup), ``wire``
+    its published spelling, ``listed`` whether the lookup takes a list and ``form_key``
+    the raw form's key. ``accepted`` names a row as the type registered for the
+    relation's target names it, which answers ``expected``; a re-entry world's
+    ``refused`` names it another way, answered by ``refusal``.
+    """
+
+    filterset: type[FilterSet]
+    root: type[DjangoType]
+    types: tuple[type[DjangoType], ...]
+    path: tuple[str, ...]
+    wire: tuple[str, ...]
+    form_key: str | None
+    accepted: str
+    expected: list[int]
+    refused: str = ""
+    refusal: str = ""
+    listed: bool = True
+    converter: NameConverter | None = None
+
+    def value(self, global_id: str) -> str | list[str]:
+        """The input value naming ``global_id``, a list where the lookup takes one."""
+        return [global_id] if self.listed else global_id
+
+
+def _gid(type_name: str, row: Model | str) -> str:
+    """Encode ``row`` (or the node id itself) under ``type_name``."""
+    node_id = row if isinstance(row, str) else str(saved_pk(row))
+    return str(relay.GlobalID(type_name=type_name, node_id=node_id))
+
+
+def _pks(*rows: Model) -> list[int]:
+    return sorted(saved_pk(row) for row in rows)
+
+
+def _mismatch(expected: str, received: str, *, listed: bool = True) -> str:
+    """Strategy validation's refusal of a type name the target does not accept."""
+    index = " at index 0" if listed else ""
+    return f"GlobalID type mismatch: filter expects {expected} but received {received}{index}"
+
+
+def _pair(
+    model: type[Model],
+    filterset: type[FilterSet],
+    *,
+    primary: str = "model",
+    secondary: object = "type",
+    hidden: tuple[int, ...] = (0,),
+    hook: bool = True,
+    node_id: str | None = None,
+) -> tuple[type[DjangoType], type[DjangoType]]:
+    """A ``primary``-strategy primary type over ``model`` and a secondary serving ``filterset``.
+
+    ``secondary`` is the secondary's ``globalid_strategy`` (``"custom"`` overrides its
+    ``resolve_typename`` instead); with ``hook`` its ``get_queryset`` hides ``hidden``.
+    ``node_id`` names the column the primary's ``NodeID`` reads, its key by default.
+    """
+    stem = f"Reentry{model.__name__}"
+    fields = ("id",) if node_id is None else ("id", node_id)
+    namespace: dict[str, object] = {}
+    meta: dict[str, object] = {
+        "primary": False,
+        "filterset_class": filterset,
+        "connection": {"total_count": True},
+    }
+    if secondary == "custom":
+        namespace["resolve_typename"] = _custom_typename()
+    else:
+        meta["globalid_strategy"] = secondary
+    if hook:
+        namespace["get_queryset"] = _hiding(*hidden)
+    primary_type = make_django_type(
+        f"{stem}Primary",
+        model,
+        fields,
+        meta_extra={"primary": True, "globalid_strategy": primary},
+        namespace_extra=None
+        if node_id is None
+        else {"__annotations__": {node_id: relay.NodeID[str]}},
+    )
+    secondary_type = make_django_type(
+        f"{stem}Secondary",
+        model,
+        ("id",),
+        meta_extra=meta,
+        namespace_extra=namespace,
+    )
+    return primary_type, secondary_type
+
+
+def _flat_set(model: type[Model], key: str, lookups: list[str]) -> type[FilterSet]:
+    meta = type("Meta", (), {"model": model, "fields": {key: lookups}})
+    return type("ReentryFilter", (FilterSet,), {"Meta": meta})
+
+
+def _declared_set(model: type[Model], leaf: Filter) -> type[FilterSet]:
+    meta = type("Meta", (), {"model": model, "fields": []})
+    return type("ReentryFilter", (FilterSet,), {"leaf": leaf, "Meta": meta})
+
+
+def _book_key(rows: _Library, shape: str) -> _Reentry:
+    """``shelf__books`` / ``genres__books`` on a ``Book`` set wired to a scoping ``type`` secondary."""
+    key = "genres__books" if shape == "genres" else "shelf__books"
+    lookup = "in" if shape == "in" else "exact"
+    if shape == "single":
+        filterset = _declared_set(models.Book, GlobalIDFilter(field_name=key))
+    elif shape == "multi":
+        filterset = _declared_set(models.Book, GlobalIDMultipleChoiceFilter(field_name=key))
+    else:
+        filterset = _flat_set(models.Book, key, ["exact", "in"] if shape == "in" else [lookup])
+    primary, secondary = _pair(models.Book, filterset)
+    books = rows.books
+    declared = shape in {"single", "multi"}
+    listed = shape != "single"
+    named = "leaf" if declared else key.replace("__", "_")
+    return _Reentry(
+        filterset,
+        secondary,
+        (primary,),
+        (named, "in_" if shape == "in" else lookup),
+        ("leaf" if declared else "genresBooks" if shape == "genres" else "shelfBooks", lookup),
+        "leaf" if declared else f"{key}__in" if shape == "in" else key,
+        _gid("library.book", books["bk1"]),
+        _pks(books["bk1"], books["bk3"])
+        if shape == "genres"
+        else _pks(books["bk1"], books["bk2"]),
+        _gid("ReentryBookSecondary", books["bk1"]),
+        _mismatch("library.book", "ReentryBookSecondary", listed=listed),
+        listed=listed,
+    )
+
+
+def _loan_key(rows: _Library) -> _Reentry:
+    """``book__loans`` on a ``Loan`` set: a forward key, then its reverse back to ``Loan``."""
+    filterset = _flat_set(models.Loan, "book__loans", ["exact"])
+    primary, secondary = _pair(models.Loan, filterset)
+    return _Reentry(
+        filterset,
+        secondary,
+        (primary, make_django_type("ReentryLoanBook", models.Book, ("id",))),
+        ("book_loans", "exact"),
+        ("bookLoans", "exact"),
+        "book__loans",
+        _gid("library.loan", rows.loans["l1"]),
+        _pks(rows.loans["l1"], rows.loans["l2"]),
+        _gid("ReentryLoanSecondary", rows.loans["l1"]),
+        _mismatch("library.loan", "ReentryLoanSecondary"),
+    )
+
+
+def _shelf_key(rows: _Library) -> _Reentry:
+    """``alt_branches__alt_shelves`` on a ``Shelf`` set: a many-to-many and its reverse."""
+    filterset = _flat_set(models.Shelf, "alt_branches__alt_shelves", ["exact"])
+    primary, secondary = _pair(models.Shelf, filterset)
+    shelves = rows.shelves
+    return _Reentry(
+        filterset,
+        secondary,
+        (primary, make_django_type("ReentryShelfBranch", models.Branch, ("id",))),
+        ("alt_branches_alt_shelves", "exact"),
+        ("altBranchesAltShelves", "exact"),
+        "alt_branches__alt_shelves",
+        _gid("library.shelf", shelves["s1"]),
+        _pks(shelves["s1"], shelves["s2"]),
+        _gid("ReentryShelfSecondary", shelves["s1"]),
+        _mismatch("library.shelf", "ReentryShelfSecondary"),
+    )
+
+
+def _proxy_key(rows: _Library) -> _Reentry:
+    """``shelves__alt_branches`` on a ``ProxyBranch`` set: the path re-enters the proxy's table."""
+    filterset = _flat_set(models.ProxyBranch, "shelves__alt_branches", ["exact"])
+    concrete = make_django_type(
+        "ReentryBranch",
+        models.Branch,
+        ("id",),
+        meta_extra={"globalid_strategy": "model"},
+    )
+    proxy = make_django_type(
+        "ReentryProxyBranch",
+        models.ProxyBranch,
+        ("id",),
+        meta_extra={
+            "globalid_strategy": "model",
+            "filterset_class": filterset,
+            "connection": {"total_count": True},
+        },
+        namespace_extra={"get_queryset": _hiding(0)},
+    )
+    branches = rows.branches
+    return _Reentry(
+        filterset,
+        proxy,
+        (concrete, make_django_type("ReentryProxyShelf", models.Shelf, ("id",))),
+        ("shelves_alt_branches", "exact"),
+        ("shelvesAltBranches", "exact"),
+        "shelves__alt_branches",
+        _gid("library.branch", branches["b2"]),
+        _pks(branches["b1"]),
+        _gid("library.proxybranch", branches["b2"]),
+        _mismatch("library.branch", "library.proxybranch"),
+    )
+
+
+def _declared_last_hop(rows: _Library) -> _Reentry:
+    """``shelf__books`` walking ``shelf`` and ``books``, both declared, into the set itself.
+
+    No type scopes the walk: the last hop's target set is the walking set, bound to the
+    ``type`` secondary.
+    """
+
+    class ReentryShelfFilter(FilterSet):
+        books = RelatedFilter(lambda: ReentryBookFilter, field_name="books")
+
+        class Meta:
+            model = models.Shelf
+            fields = []
+
+    class ReentryBookFilter(FilterSet):
+        shelf = RelatedFilter(ReentryShelfFilter, field_name="shelf")
+        leaf = GlobalIDFilter(field_name="shelf__books")
+
+        class Meta:
+            model = models.Book
+            fields = []
+
+    primary, secondary = _pair(models.Book, ReentryBookFilter, hook=False)
+    books = rows.books
+    return _Reentry(
+        ReentryBookFilter,
+        secondary,
+        (primary, make_django_type("ReentryBookShelf", models.Shelf, ("id",))),
+        ("leaf", "exact"),
+        ("leaf", "exact"),
+        "leaf",
+        _gid("library.book", books["bk1"]),
+        _pks(books["bk1"], books["bk2"]),
+        _gid("ReentryBookSecondary", books["bk1"]),
+        _mismatch("library.book", "ReentryBookSecondary", listed=False),
+        listed=False,
+    )
+
+
+def _renamed_key(rows: _Library) -> _Reentry:
+    """A ``type`` primary under a renaming converter: its published spelling, never its own."""
+    filterset = _flat_set(models.Book, "shelf__books", ["exact"])
+    primary, secondary = _pair(models.Book, filterset, primary="type")
+    books = rows.books
+    return _Reentry(
+        filterset,
+        secondary,
+        (primary,),
+        ("shelf_books", "exact"),
+        ("shelfBooks", "exact"),
+        None,
+        _gid("ApiReentryBookPrimary", books["bk1"]),
+        _pks(books["bk1"], books["bk2"]),
+        _gid("ReentryBookPrimary", books["bk1"]),
+        _mismatch("ApiReentryBookPrimary", "ReentryBookPrimary"),
+        converter=_ApiPrefix(),
+    )
+
+
+def _renamed_forward_key(rows: _Library) -> _Reentry:
+    """``shelf__branch`` past a ``Shelf`` hop a scoping type walks, into a renamed ``type`` branch."""
+    filterset = _flat_set(models.Book, "shelf__branch", ["exact"])
+    branch = make_django_type(
+        "ReentryBranch",
+        models.Branch,
+        ("id",),
+        meta_extra={"globalid_strategy": "type"},
+    )
+    shelf = make_django_type(
+        "ReentryBookShelf",
+        models.Shelf,
+        ("id",),
+        namespace_extra={"get_queryset": _hiding(0)},
+    )
+    book = make_django_type(
+        "ReentryBook",
+        models.Book,
+        ("id",),
+        meta_extra={"filterset_class": filterset, "connection": {"total_count": True}},
+    )
+    books = rows.books
+    return _Reentry(
+        filterset,
+        book,
+        (branch, shelf),
+        ("shelf_branch", "exact"),
+        ("shelfBranch", "exact"),
+        None,
+        _gid("ApiReentryBranch", rows.branches["b1"]),
+        _pks(books["bk1"], books["bk2"], books["bk3"]),
+        _gid("ReentryBranch", rows.branches["b1"]),
+        _mismatch("ApiReentryBranch", "ReentryBranch", listed=False),
+        listed=False,
+        converter=_ApiPrefix(),
+    )
+
+
+def _off_pk_key(rows: _Library, model_name: str) -> _Reentry:
+    """A ``model`` primary whose ``NodeID`` is a unique text column, not its key.
+
+    ``printings_2__co_publishers`` on ``Publisher`` (its house code) or
+    ``shelves__alt_branches`` on ``Branch`` (its name): the target rows compare that column
+    on themselves.
+    """
+    if model_name == "publisher":
+        filterset = _flat_set(models.Publisher, "printings_2__co_publishers", ["exact"])
+        primary, secondary = _pair(models.Publisher, filterset, node_id="house_code")
+        named, kept = rows.publishers["h2"], [rows.publishers["h1"]]
+        extra = (
+            make_django_type("ReentryPrinting", models.Printing, ("id",)),
+            make_django_type("ReentryEdition", models.Edition, ("isbn_13",)),
+        )
+        path, wire, key = (
+            "printings_2_co_publishers",
+            "printings2CoPublishers",
+            "printings_2__co_publishers",
+        )
+        node_id = named.house_code
+    else:
+        filterset = _flat_set(models.Branch, "shelves__alt_branches", ["exact"])
+        primary, secondary = _pair(models.Branch, filterset, node_id="name")
+        named, kept = rows.branches["b2"], [rows.branches["b1"]]
+        extra = (make_django_type("ReentryBranchShelf", models.Shelf, ("id",)),)
+        path, wire, key = "shelves_alt_branches", "shelvesAltBranches", "shelves__alt_branches"
+        node_id = named.name
+    stem = f"Reentry{type(named).__name__}"
+    return _Reentry(
+        filterset,
+        secondary,
+        (primary, *extra),
+        (path, "exact"),
+        (wire, "exact"),
+        key,
+        _gid(type(named)._meta.label_lower, node_id),
+        _pks(*kept),
+        _gid(f"{stem}Secondary", named),
+        _mismatch(type(named)._meta.label_lower, f"{stem}Secondary"),
+    )
+
+
+def _encode_only_secondary(rows: _Library, strategy: str) -> _Reentry:
+    """A ``callable`` or ``custom`` secondary, which mints ids no filter decodes, serves the set."""
+    filterset = _flat_set(models.Book, "shelf__books", ["exact"])
+    primary, secondary = _pair(
+        models.Book,
+        filterset,
+        secondary=_encode_by_name if strategy == "callable" else "custom",
+    )
+    books = rows.books
+    return _Reentry(
+        filterset,
+        secondary,
+        (primary,),
+        ("shelf_books", "exact"),
+        ("shelfBooks", "exact"),
+        "shelf__books",
+        _gid("library.book", books["bk1"]),
+        _pks(books["bk1"], books["bk2"]),
+        _gid("ReentryBookSecondary", books["bk1"]),
+        _mismatch("library.book", "ReentryBookSecondary"),
+    )
+
+
+def _hidden_named_row(rows: _Library) -> _Reentry:
+    """The secondary's ``get_queryset`` hides the book the id names: no parent reaches it."""
+    filterset = _flat_set(models.Book, "shelf__books", ["exact"])
+    books = rows.books
+    primary, secondary = _pair(models.Book, filterset, hidden=(saved_pk(books["bk2"]),))
+    return _Reentry(
+        filterset,
+        secondary,
+        (primary,),
+        ("shelf_books", "exact"),
+        ("shelfBooks", "exact"),
+        "shelf__books",
+        _gid("library.book", books["bk2"]),
+        [],
+        _gid("ReentryBookSecondary", books["bk2"]),
+        _mismatch("library.book", "ReentryBookSecondary"),
+    )
+
+
+_REENTRIES: dict[str, Callable[[_Library], _Reentry]] = {
+    "generated-key": functools.partial(_book_key, shape="generated"),
+    "declared-key": functools.partial(_book_key, shape="single"),
+    "declared-multiple-key": functools.partial(_book_key, shape="multi"),
+    "in-lookup": functools.partial(_book_key, shape="in"),
+    "many-to-many-key": functools.partial(_book_key, shape="genres"),
+    "forward-then-reverse-key": _loan_key,
+    "many-to-many-then-reverse-key": _shelf_key,
+    "proxy-root": _proxy_key,
+    "declared-last-hop": _declared_last_hop,
+    "renamed-primary": _renamed_key,
+    "renamed-forward-key-past-a-scoped-hop": _renamed_forward_key,
+    "off-key-node-id-publisher": functools.partial(_off_pk_key, model_name="publisher"),
+    "off-key-node-id-branch": functools.partial(_off_pk_key, model_name="branch"),
+    "callable-secondary": functools.partial(_encode_only_secondary, strategy="callable"),
+    "custom-secondary": functools.partial(_encode_only_secondary, strategy="custom"),
+    "hidden-named-row": _hidden_named_row,
+}
+
+
+def _reentry_schema(world: _Reentry) -> DjangoSchema:
+    """Serve ``world.root`` as a filtered connection and through ``apply_sync``."""
+    model = world.filterset._meta.model
+    assert model is not None
+
+    def _all_rows(_root: object, _info: object) -> QuerySet[Model]:
+        return model._default_manager.order_by("pk")
+
+    def _applied(info: Info[object, object], where: JSON) -> QuerySet[Model]:
+        return world.filterset.apply_sync(where, model._default_manager.order_by("pk"), info)
+
+    @strawberry.type
+    class Query:
+        rows = DjangoConnectionField(world.root, resolver=_all_rows)
+        applied: QuerySet[Model] = strawberry.field(
+            resolver=_applied,
+            graphql_type=StrawberryList(world.root),
+        )
+
+    finalize_django_types()
+    optimizer = DjangoOptimizerExtension()
+    return DjangoSchema(
+        query=Query,
+        types=world.types,
+        config=strawberry_config()
+        if world.converter is None
+        else strawberry_config(name_converter=world.converter),
+        extensions=[lambda: optimizer],
+    )
+
+
+def _nested(names: tuple[str, ...], value: str | list[str]) -> JSONObject:
+    """``value`` under the input ``names``, outermost first."""
+    nested: JSONObject = {names[-1]: value}
+    for name in reversed(names[:-1]):
+        nested = {name: nested}
+    return nested
+
+
+def _wire_literal(names: tuple[str, ...], value: str | list[str]) -> str:
+    """``value`` under the published input ``names``, spelled as a GraphQL object literal."""
+    literal = json.dumps(value)
+    for name in reversed(names):
+        literal = f"{{{name}: {literal}}}"
+    return literal
+
+
+def _reentry_answer(world: _Reentry, global_id: str, driver: str) -> list[int] | str:
+    """The pks ``driver`` answers for ``global_id`` in ``world``, or its error message."""
+    value = world.value(global_id)
+    schema = _reentry_schema(world)
+    if driver == "form":
+        assert world.form_key is not None
+        model = world.filterset._meta.model
+        assert model is not None
+        bound = world.filterset(
+            data={world.form_key: value},
+            queryset=model._default_manager.all(),
+        )
+        try:
+            rows = require(bound.qs, is_queryset)
+        except GraphQLError as exc:
+            return exc.message
+        return sorted(saved_pk(require_instance(row, Model)) for row in rows)
+    if driver == "live":
+        query = f"{{ rows(filter: {_wire_literal(world.wire, value)}) {{ edges {{ node {{ id }} }} }} }}"
+        payload = _post(schema, query)
+        path: tuple[str, ...] = ("rows", "edges")
+    else:
+        payload = _post(
+            schema,
+            "query($where: JSON!) { applied(where: $where) { id } }",
+            {"where": _nested(world.path, value)},
+        )
+        path = ("applied",)
+    if payload.get("errors"):
+        return json_str(payload, "errors", 0, "message")
+    rows_out = json_list(payload, "data", *path)
+    node_ids = [
+        json_str(row, "node", "id") if driver == "live" else json_str(row, "id")
+        for row in rows_out
+    ]
+    return sorted(int(relay.GlobalID.from_id(node_id).node_id) for node_id in node_ids)
+
+
+#: The worlds whose answer reads the executing schema's published names, which a raw form lacks.
+_SCHEMA_NAMED = {"renamed-primary", "renamed-forward-key-past-a-scoped-hop"}
+_REENTRY_ROWS = [
+    pytest.param(name, driver, id=f"{name}-{driver}")
+    for name in _REENTRIES
+    for driver in ("live", "apply-sync", "form")
+    if driver != "form" or name not in _SCHEMA_NAMED
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("name", "driver"), _REENTRY_ROWS)
+def test_a_reentry_key_serves_the_id_its_relation_target_type_mints(
+    name: str,
+    driver: str,
+) -> None:
+    """A GlobalID relation key whose hops re-enter its set's table names a row as its relation's type.
+
+    Whichever type the walk's target rows answer for (a secondary the set is bound to,
+    scoping the walk or not, a proxy root's type), the key's id is the one the type
+    registered for the relation's target mints, under the name the executing schema
+    published for it and in its ``NodeID`` column, as an unscoped key's is: it answers
+    the exact rows reaching the row it names over the visible target rows.
+    """
+    world = _REENTRIES[name](_library())
+
+    assert _reentry_answer(world, world.accepted, driver) == world.expected
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("name", "driver"), _REENTRY_ROWS)
+def test_a_reentry_key_refuses_an_id_its_relation_target_type_does_not_mint(
+    name: str,
+    driver: str,
+) -> None:
+    """The id the set's own type mints, or an unpublished spelling, is a type mismatch."""
+    world = _REENTRIES[name](_library())
+
+    assert _reentry_answer(world, world.refused, driver) == world.refusal
+
+
+def _untyped_walk(rows: _Library, shape: str) -> _Reentry:
+    """A to-many GlobalID key walking a declared hop into a model no type exposes.
+
+    ``shelves__books`` on ``Branch`` past its declared ``shelves`` (no ``Book`` type), or
+    ``books__loans`` on ``Genre`` past its declared ``books`` (no ``Loan`` type): no type
+    names the key's rows, so any type name is accepted and the node id compared alone.
+    """
+    if shape == "reverse-foreign-key":
+        root_model, hop_model, hop, key = models.Branch, models.Shelf, "shelves", "shelves__books"
+        named, expected = rows.books["bk1"], _pks(rows.branches["b1"])
+    else:
+        root_model, hop_model, hop, key = models.Genre, models.Book, "books", "books__loans"
+        named, expected = rows.loans["l1"], _pks(rows.genres["g1"])
+    hop_set = type(
+        "UntypedHopFilter",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": hop_model, "fields": []})},
+    )
+    filterset = type(
+        "UntypedWalkFilter",
+        (FilterSet,),
+        {
+            hop: RelatedFilter(hop_set, field_name=hop),
+            "leaf": GlobalIDFilter(field_name=key),
+            "Meta": type("Meta", (), {"model": root_model, "fields": []}),
+        },
+    )
+    root = make_django_type(
+        "UntypedWalkRoot",
+        root_model,
+        ("id",),
+        meta_extra={"filterset_class": filterset, "connection": {"total_count": True}},
+    )
+    return _Reentry(
+        filterset,
+        root,
+        (make_django_type("UntypedWalkHop", hop_model, ("id",)),),
+        ("leaf", "exact"),
+        ("leaf", "exact"),
+        "leaf",
+        _gid("Unregistered", named),
+        expected,
+        listed=False,
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("driver", ["live", "apply-sync", "form"])
+@pytest.mark.parametrize("shape", ["reverse-foreign-key", "forward-then-reverse"])
+def test_a_walked_to_many_key_into_a_model_no_type_exposes_compares_the_node_id_alone(
+    shape: str,
+    driver: str,
+) -> None:
+    """No type answers for the key's target, so neither of its decodes checks a type name."""
+    world = _untyped_walk(_library(), shape)
+
+    assert _reentry_answer(world, world.accepted, driver) == world.expected
