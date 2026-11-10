@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 475 done, 121 to do. The CHANGELOG entries filed here moved to
+Progress: 476 done, 120 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2414,6 +2414,25 @@ Progress: 475 done, 121 to do. The CHANGELOG entries filed here moved to
   docs/README.md and GLOSSARY `FilterSet` (pk 463) and `RelatedFilter` (pk 495); no package change. Pinned by
   `examples/fakeshop/test_query/test_relation_filter_boundaries_api.py::test_declaration_queryset_bounds_only_a_dotted_key_whose_walk_crosses_it`
   (both sides, anonymous and staff)
+- [x] 754. (docs, fakeshop) Not a package defect (GOAL "Trust boundary": a `get_queryset` hook is trusted code whose
+  contract is to cascade, and the package cannot tell whether it does). The contract and its consequence are now stated:
+  a type with a non-null forward key into a type whose hook hides rows cascades (`apply_cascade_permissions`, or
+  narrowing by hand an edge the helper cannot walk: a `GenericForeignKey`, a `ForeignObject` that is not a
+  `ForeignKey`); otherwise such a row reads as one whose related row is missing (the relation resolves `null`, a
+  non-null field is a masked completion error, `data: null` with one error at the relation's path under a non-null
+  list) and `isNull: true` on the key matches it. Stated in docs/README.md "Visibility and permissions" and the
+  filtering `isNull` sentence, GLOSSARY `apply_cascade_permissions` (pk 440), `FilterSet` (pk 463), `get_queryset`
+  visibility hook (pk 468) and Relation handling > Resolver behavior (pk 497, the contract spec-034 Decision 6 cites),
+  and the `DjangoType.get_queryset` and `types/resolvers.py::_visible_related_object` docstrings. Fakeshop's library
+  `BookType`, `CatalogueBookType`, `ShelfType` and `ShelfLabelType` keep the uncascaded shape on purpose (the
+  visible-world filter and order rows need a visible book on a hidden shelf; `ShelfLabelType.shelf` is a `ForeignObject`
+  the helper cannot walk), as their docstrings and the fakeshop README say. The item's Book `isNull` half does not
+  reproduce: no Book filter publishes an edge `isNull`; the `ShelfLabel` key is that half
+  (`test_library_inheritance_api.py::test_shelf_labels_filter_shelf_isnull_over_the_shelves_the_viewer_sees`). The
+  masked half is pinned by `test_library_api.py::test_uncascaded_book_on_a_hidden_shelf_reads_its_shelf_as_missing_for_anonymous`,
+  `::test_uncascaded_book_on_a_hidden_shelf_serves_its_shelf_to_staff` and
+  `test_library_inheritance_api.py::test_shelf_label_on_a_hidden_shelf_reads_its_shelf_as_missing_for_anonymous` /
+  `::test_shelf_label_on_a_hidden_shelf_serves_its_shelf_to_staff`
 
 ## Outside review of the fixes
 
@@ -2454,13 +2473,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 754. (docs, fakeshop) A non-null forward edge into a hidden target is a dangling key to the viewer: `isNull: true`
-  matches exactly those rows (item 97's null extension, a one-bit oracle on the hidden target) and a non-null output
-  field masks the whole list as "An unexpected error occurred." (`types/resolvers.py::_visible_related_object`). GOAL:
-  declared rules cascade by default; a `get_queryset` hook is trusted code whose contract is to cascade
-  (`apply_cascade_permissions`, as products' `ItemType` does). The package cannot tell a hook cascades, so it states
-  the contract (README, GLOSSARY cascade and isnull rows); fakeshop's library `BookType`, `CatalogueBookType` and
-  `ShelfLabelType` keep it. Found probing 748
 - [ ] 755. (docs) A `globalid_strategy="type"` Relay secondary with no `get_queryset` serves, through `node(id:)`
   (`types/relay.py::_resolve_nodes_default`), rows its primary's hook hides: each type's hook is its own declaration
   (GOAL "Trust boundary"), and visibility declared on the model covers every type over it. State it beside README's

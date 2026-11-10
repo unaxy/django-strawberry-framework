@@ -530,6 +530,16 @@ def get_queryset(cls, queryset, info):
 Log in as `regular_1` and `staff_1` in turn and compare
 `allCategories { edges { node { name isPrivate } } }`.
 
+Four `library` types keep the uncascaded shape on purpose. `BookType`,
+`CatalogueBookType` and `ShelfType` hide rows without cascading over their non-null
+keys, and `ShelfLabelType`'s multi-column `shelf` is an edge the helper cannot walk,
+so for anyone not staff a visible book on a `secret` shelf stays listed: it orders
+and filters as a book with no shelf, `shelf: { isNull: true }` on
+`allLibraryShelfLabelsFiltered` matches a label on that shelf, and selecting
+`shelf { code }` answers the masked `An unexpected error occurred.` They are the
+acceptance fixtures for what the package answers when a hook does not cascade,
+which is the hook's own contract to keep.
+
 The hook is enforced at the queryset boundary, not by a list of resolver call sites,
 which is why a consumer-authored resolver or a custom `Prefetch` cannot route around
 it ([visibility boundary][glossary-visibility-boundary]).

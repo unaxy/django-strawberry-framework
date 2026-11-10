@@ -33,6 +33,8 @@ query shape, off the SQL the request emitted:
   it: ``exact`` / ``in`` take the shelf's primary key and match both carriers,
   never a hidden shelf, and ``isNull`` is a Boolean answered over the shelves
   the viewer sees (a hidden shelf and a missing one alike), in one statement.
+  Selecting ``shelf`` on a label whose shelf is hidden is a masked completion
+  error for an anonymous viewer, while staff are served the shelf.
 - Multi-table updates: ``updateLendingDesk`` and its ``ViaForm`` / ``ViaSerializer``
   siblings write the ``Venue`` table and the desk's own as two ``UPDATE`` s, the model and
   ``ModelForm`` flavors naming every loaded non-key column in ``update_fields``; a desk
@@ -942,6 +944,62 @@ def test_shelf_labels_filter_shelf_key_matches_both_carriers_and_never_a_hidden_
 
     assert texts == expected, texts
     assert len(label_sql) == 1, label_sql
+
+
+_SHELF_LABEL_SHELF_CODES = (
+    "query { allLibraryShelfLabels(orderBy: [{ text: ASC }]) { text shelf { code } } }"
+)
+
+
+@pytest.mark.django_db
+def test_shelf_label_on_a_hidden_shelf_reads_its_shelf_as_missing_for_anonymous() -> None:
+    """A listed label whose non-null ``shelf`` the viewer cannot see is a masked error.
+
+    ``ShelfLabelType`` keeps every label (the cascade helper cannot walk the
+    multi-column ``shelf``), so ``annex-s9`` is listed while ``ShelfType`` hides
+    its shelf: the relation resolves as a missing row, the non-null ``shelf`` field
+    is a completion error at that label's path, masked by the default error policy,
+    and the non-null list nulls ``data``.
+    """
+    _seed_shelf_labels()
+
+    payload = graphql_payload(_SHELF_LABEL_SHELF_CODES)
+    correlation_id = json_str(payload, "errors", 0, "extensions", "correlationId")
+
+    assert re.fullmatch("[0-9a-f]{32}", correlation_id), correlation_id
+    assert payload == {
+        "data": None,
+        "errors": [
+            {
+                "message": "An unexpected error occurred.",
+                "locations": [{"line": 1, "column": 64}],
+                "path": ["allLibraryShelfLabels", 1, "shelf"],
+                "extensions": {"correlationId": correlation_id},
+            },
+        ],
+    }, payload
+
+
+@pytest.mark.django_db
+def test_shelf_label_on_a_hidden_shelf_serves_its_shelf_to_staff() -> None:
+    """Staff see the ``secret`` shelf, so every label answers with its shelf."""
+    create_users(1)
+    _seed_shelf_labels()
+    client = Client()
+    client.force_login(get_user_model().objects.get(username="staff_1"))
+
+    payload = graphql_payload(_SHELF_LABEL_SHELF_CODES, client=client)
+
+    assert payload == {
+        "data": {
+            "allLibraryShelfLabels": [
+                {"text": "annex-b2", "shelf": {"code": "B2"}},
+                {"text": "annex-s9", "shelf": {"code": "S9"}},
+                {"text": "central-a1", "shelf": {"code": "A1"}},
+                {"text": "central-c3", "shelf": {"code": "C3"}},
+            ],
+        },
+    }, payload
 
 
 @pytest.mark.parametrize(

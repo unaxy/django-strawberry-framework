@@ -483,7 +483,16 @@ def _visible_related_object(
     target_type: "type[DjangoType]",
     info: Info[object, object],
 ) -> AwaitableOrValue[models.Model | None]:
-    """Re-check one relation object through its target visibility hook."""
+    """Re-check one relation object through its target visibility hook.
+
+    Returns the row when the target type's ``get_queryset`` admits it and
+    ``None`` when it hides it, so a hidden target reads as a missing row and
+    never leaks past the hook. A parent type that does not cascade its own
+    hook can still hold a key naming such a row; a non-null relation field then
+    reports the ``None`` as a completion error. The optimizer's planned
+    ``Prefetch`` child, which runs the same hook, answers the relation instead
+    when it plans one.
+    """
     if related is None:
         return None
     source = initial_queryset(target_type)

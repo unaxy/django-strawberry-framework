@@ -312,6 +312,13 @@ class BookType(DjangoType):
 
     Relay-Node-shaped AND ``get_queryset``-filtered: the live hidden-row
     ``null`` eligible type (spec-032 Decision 12).
+
+    The hook deliberately does not cascade over the non-null ``shelf``, so a
+    visible book on a ``secret`` shelf stays listed for non-staff: the live rows
+    pin what a key naming a hidden row answers (an order or filter path reads
+    the shelf as missing, a selected ``shelf`` is a masked completion error).
+    A consumer type keeps such rows out with ``apply_cascade_permissions``, as
+    the ``products`` types do.
     """
 
     @classmethod
@@ -388,7 +395,12 @@ class NullabilityOverrideBookType(DjangoType):
 
 
 class ShelfType(DjangoType):
-    """Shelf declared before Branch to exercise FK finalization."""
+    """Shelf declared before Branch to exercise FK finalization.
+
+    Like ``BookType``, the hook deliberately does not cascade over the non-null
+    ``branch``: a shelf on a branch ``BranchType`` hides stays listed, an
+    uncascaded acceptance shape kept beside the cascading ``products`` types.
+    """
 
     @classmethod
     @override
@@ -1155,7 +1167,8 @@ class CatalogueBookType(DjangoType):
 
     Publishes the catalogue columns and hides ``subtitle``; ``CatalogueBookFilter``
     excludes that column and sweeps the rest, so every filter key is a published
-    column. The visibility rule is ``BookType``'s.
+    column. The visibility rule is ``BookType``'s, uncascaded over the non-null
+    ``shelf`` as there, so a book on a ``secret`` shelf stays listed.
     """
 
     @classmethod
@@ -1229,6 +1242,13 @@ class ShelfLabelType(DjangoType):
     ``"__all__"`` ``ShelfLabelOrder`` publishes ``shelf`` as an order leaf.
     ``ShelfType`` hides ``topic="secret"`` shelves from non-staff requests, so
     for them a label on a secret shelf sorts by ``shelf`` as one with no shelf.
+
+    The type declares no ``get_queryset``, and ``apply_cascade_permissions``
+    cannot walk the multi-column ``shelf`` (a forward ``ForeignObject`` that is
+    not a ``ForeignKey``), so that label deliberately stays listed: for non-staff
+    ``shelf: { isNull: true }`` matches it and a selected ``shelf`` is a masked
+    completion error. A consumer type keeping such labels out narrows by hand in
+    its own hook.
     """
 
     class Meta:

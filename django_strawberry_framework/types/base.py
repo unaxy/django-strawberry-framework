@@ -950,6 +950,15 @@ class DjangoType:
         ``info.context.request.user`` reads the actor on both paths; one built
         with no request hands ``None``.
 
+        Cascading is the override's contract, which the package cannot check:
+        a type with a non-null forward key into a type whose hook hides rows
+        calls ``apply_cascade_permissions`` from its override (and narrows by
+        hand an edge the helper cannot walk). Otherwise a row it shows whose
+        key names a row the viewer cannot see reads as one whose related row
+        is missing: the relation resolves ``None``, which a non-null field
+        reports as a completion error, and a ``FilterSet`` ``isNull: true``
+        test on the key matches the row.
+
         ``queryset`` is a fresh instance of the class that supplied it - for
         every framework-seeded read, the ``QuerySet`` class behind the model's
         default manager (``ProjectQuerySet.as_manager()``,

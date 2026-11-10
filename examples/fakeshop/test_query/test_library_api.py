@@ -8449,6 +8449,57 @@ def test_related_order_reads_every_row_for_staff(shape: str) -> None:
     assert _hidden_order_answer(row, staff=True) == row.staff
 
 
+_BOOK_SHELF_CODES = "query { allLibraryBooks { title shelf { code } } }"
+
+
+@pytest.mark.django_db
+def test_uncascaded_book_on_a_hidden_shelf_reads_its_shelf_as_missing_for_anonymous() -> None:
+    """A visible book whose non-null ``shelf`` the viewer cannot see is a masked error.
+
+    ``BookType.get_queryset`` does not cascade over ``shelf``, so ``on-secret`` stays
+    listed while ``ShelfType`` hides its shelf: the relation resolves as a missing
+    row, the non-null ``shelf`` field is a completion error at that book's path,
+    masked by the default error policy, and the non-null list nulls ``data``.
+    """
+    _seed_books_on_hidden_shelf()
+
+    payload = response_json(_post_graphql(_BOOK_SHELF_CODES))
+    correlation_id = json_str(payload, "errors", 0, "extensions", "correlationId")
+
+    assert re.fullmatch("[0-9a-f]{32}", correlation_id), correlation_id
+    assert payload == {
+        "data": None,
+        "errors": [
+            {
+                "message": "An unexpected error occurred.",
+                "locations": [{"line": 1, "column": 33}],
+                "path": ["allLibraryBooks", 1, "shelf"],
+                "extensions": {"correlationId": correlation_id},
+            },
+        ],
+    }, payload
+
+
+@pytest.mark.django_db
+def test_uncascaded_book_on_a_hidden_shelf_serves_its_shelf_to_staff() -> None:
+    """Staff see the ``secret`` shelf, so every book answers with its shelf."""
+    _seed_books_on_hidden_shelf()
+
+    payload = response_json(_post_graphql_as_staff(_BOOK_SHELF_CODES))
+
+    assert payload == {
+        "data": {
+            "allLibraryBooks": [
+                {"title": "on-zzz", "shelf": {"code": "S3"}},
+                {"title": "on-secret", "shelf": {"code": "S1"}},
+                {"title": "on-aaa", "shelf": {"code": "S2"}},
+                {"title": "bbb-visible", "shelf": {"code": "S2"}},
+                {"title": "aaa-repair", "shelf": {"code": "S2"}},
+            ],
+        },
+    }, payload
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("staff", "expected"),
