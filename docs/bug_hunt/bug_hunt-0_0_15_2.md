@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 478 done, 121 to do. The CHANGELOG entries filed here moved to
+Progress: 479 done, 120 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2475,6 +2475,16 @@ Progress: 478 done, 121 to do. The CHANGELOG entries filed here moved to
   by the `tests/filters/test_inputs.py` rows for the `pk` alias, unknown `to_field_name`, column paths (inheritance
   child, `kiosk__pk`, two hops, no hop), unset `pk` paths and a model-less set. Docs: README, GLOSSARY `FilterSet`
   (pk 463, "Relation leaves"), spec-027 (Decision 4 row, Edge case, Test plan). Filed 875. CHANGELOGTODO 876
+- [x] 755. (docs) Not a package defect (GOAL "Trust boundary": each type's `get_queryset` is its own declaration). The
+  docs now say which hook a refetch runs: a model-label id decodes to the model's primary type and runs its hook; a
+  type-name id decodes to the type it names and runs that class's hook, declared or inherited, so a `type`-strategy
+  secondary (or a `type+model` one reached by its type-name id) with no hook of its own serves, through `node` /
+  `nodes` and its own roots, rows the primary's hook hides; the remedy is a hook on the secondary calling the
+  primary's. Stated in docs/README.md (the secondary-type blockquote and the `node` paragraph) and GLOSSARY
+  `DjangoNodeField` (pk 458), `Meta.globalid_strategy` (pk 518) and `DjangoNodesField` (pk 520). Pinned by
+  `examples/fakeshop/test_query/test_library_api.py::test_a_type_strategy_secondary_refetches_through_its_own_get_queryset_over_http`,
+  its async twin `::test_async_a_type_strategy_secondary_refetches_through_its_own_get_queryset` and
+  `tests/test_relay_node_field.py::test_a_type_model_secondary_type_name_id_runs_its_own_hook_not_the_primarys`
 
 ## Outside review of the fixes
 
@@ -2515,10 +2525,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
 
 ## To do: found along the way
 
-- [ ] 755. (docs) A `globalid_strategy="type"` Relay secondary with no `get_queryset` serves, through `node(id:)`
-  (`types/relay.py::_resolve_nodes_default`), rows its primary's hook hides: each type's hook is its own declaration
-  (GOAL "Trust boundary"), and visibility declared on the model covers every type over it. State it beside README's
-  secondary-type paragraph and GLOSSARY `DjangoNodeField`. Found probing 748
 - [ ] 756. (robustness) A consumer `ModelChoiceFilter` with no `queryset=` (or one `Meta.filter_overrides` selects) is
   accepted at declaration and raises `TypeError: ModelChoiceField.__init__() missing 1 required positional argument:
   'queryset'` on the request that builds its form; GOAL: configuration is validated at construction. Found probing 748

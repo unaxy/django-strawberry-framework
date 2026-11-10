@@ -29407,6 +29407,116 @@ def test_an_unwired_order_subclass_answers_like_an_unrelated_unwired_set_over_ht
     )
 
 
+_SECONDARY_BOOK_SELECTION = (
+    "__typename "
+    "... on BindingPlainBookType { title } "
+    "... on BindingHidingBookType { title } "
+    "... on BookType { title }"
+)
+
+
+def _seed_secondary_refetch_books() -> tuple[object, object]:
+    """One repair book ``BookType.get_queryset`` hides from non-staff and one lent book."""
+    shelf = models.Shelf.objects.create(
+        branch=models.Branch.objects.create(name="Secondary", city="Boston"),
+        code="S",
+        topic="zzz",
+    )
+    repair = models.Book.objects.create(
+        title="repair-book",
+        shelf=shelf,
+        circulation_status=models.Book.CirculationStatus.REPAIR,
+    )
+    lent = models.Book.objects.create(title="lent-book", shelf=shelf)
+    return pk_of(repair), pk_of(lent)
+
+
+def _secondary_refetch_document(field: str, repair_pk: object, lent_pk: object) -> str:
+    """Refetch each secondary's and the primary's id of both books through ``node`` or ``nodes``.
+
+    Read after the ``FAKESHOP_TEST_BOUND_SETS`` reload: the ids come from the rebuilt types.
+    """
+    ids = (
+        global_id_for(library_schema.BindingPlainBookType, repair_pk),
+        global_id_for(library_schema.BindingHidingBookType, repair_pk),
+        global_id_for(library_schema.BookType, repair_pk),
+        global_id_for(library_schema.BindingPlainBookType, lent_pk),
+        global_id_for(library_schema.BookType, lent_pk),
+    )
+    if field == "node":
+        return (
+            "{ "
+            + " ".join(
+                f'n{index}: node(id: "{gid}") {{ {_SECONDARY_BOOK_SELECTION} }}'
+                for index, gid in enumerate(ids)
+            )
+            + " }"
+        )
+    literals = ", ".join(f'"{gid}"' for gid in ids)
+    return f"{{ nodes(ids: [{literals}]) {{ {_SECONDARY_BOOK_SELECTION} }} }}"
+
+
+def _secondary_refetch_payload(field: str, *, staff: bool) -> JSONValue:
+    """The whole payload: both secondaries serve the repair book; the primary's id only to staff."""
+    rows: list[JSONValue] = [
+        {"__typename": "BindingPlainBookType", "title": "repair-book"},
+        {"__typename": "BindingHidingBookType", "title": "repair-book"},
+        {"__typename": "BookType", "title": "repair-book"} if staff else None,
+        {"__typename": "BindingPlainBookType", "title": "lent-book"},
+        {"__typename": "BookType", "title": "lent-book"},
+    ]
+    if field == "node":
+        return {"data": {f"n{index}": row for index, row in enumerate(rows)}}
+    return {"data": {"nodes": rows}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("staff", [False, True], ids=["anonymous", "staff"])
+@pytest.mark.parametrize("field", ["node", "nodes"], ids=["node", "nodes"])
+def test_a_type_strategy_secondary_refetches_through_its_own_get_queryset_over_http(
+    project_schema_override: Callable[[], None],
+    *,
+    staff: bool,
+    field: str,
+) -> None:
+    """A ``type``-strategy secondary's id runs the secondary's hook, never its primary's.
+
+    ``BookType.get_queryset`` hides repair books from non-staff requests; the
+    hookless Binding secondaries have none of their own. A type-name id decodes
+    to the secondary, so an anonymous refetch serves the repair book through
+    either secondary while the primary's model-label id of the same row answers
+    ``null``. Staff sees every row. Reading the primary's hook for every
+    decoded type would null the secondaries' anonymous repair rows.
+    """
+    repair_pk, lent_pk = _seed_secondary_refetch_books()
+    with override_settings(FAKESHOP_TEST_BOUND_SETS=True):
+        project_schema_override()
+        query = _secondary_refetch_document(field, repair_pk, lent_pk)
+        response = _post_graphql_as_staff(query) if staff else _post_graphql(query)
+        payload = response_json(response)
+    assert payload == _secondary_refetch_payload(field, staff=staff), payload
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("field", ["node", "nodes"], ids=["node", "nodes"])
+async def test_async_a_type_strategy_secondary_refetches_through_its_own_get_queryset(
+    project_schema_override: Callable[[], None],
+    field: str,
+) -> None:
+    """The ``/graphql-async/`` twin: the async Relay branch reads the secondary's own hook too.
+
+    An anonymous refetch serves the repair book through either hookless
+    secondary while the primary's id answers ``null``; reading the primary's
+    hook in ``_resolve_nodes_async`` would null the secondaries' repair rows.
+    """
+    repair_pk, lent_pk = await sync_to_async(_seed_secondary_refetch_books)()
+    with override_settings(FAKESHOP_TEST_BOUND_SETS=True):
+        project_schema_override()
+        query = _secondary_refetch_document(field, repair_pk, lent_pk)
+        payload = await _post_async_shipped(query)
+    assert payload == _secondary_refetch_payload(field, staff=False), payload
+
+
 def _published_filter_override_schema(shape: str, *, customize: bool) -> DjangoSchema:
     """Rung 3: consumer publication rewrites vary per declaration, so no one shipped set can own them.
 

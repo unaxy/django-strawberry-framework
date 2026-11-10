@@ -17,6 +17,9 @@ function-local models in ``test_node_refetch_api.py``, as do the sync-misuse
 messages whose exception classes stay here. The NodeID over a queryset annotation
 refetches live on ``SeriesType``
 (``test_library_api.py::test_library_series_node_refetches_by_its_annotated_handle``).
+Fakeshop ships no ``type+model`` secondary, so the hook a ``type+model``
+type-name id reads (its named type's, where the emitted model-label id reads
+the primary's) is pinned here on function-local types.
 """
 
 import re
@@ -35,6 +38,7 @@ from strawberry import relay
 from strawberry.schema_directive import Location as DirectiveLocation
 from strawberry.schema_directive import schema_directive
 from strawberry.types.cast import TYPE_CAST_ATTRIBUTE
+from typing_extensions import override
 
 import django_strawberry_framework
 import django_strawberry_framework.relay as relay_module
@@ -56,6 +60,7 @@ from django_strawberry_framework.relay import (
     _stamp_node_type,
     decode_model_global_id,
 )
+from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.relay import (
     SyncMisuseError,
     implements_relay_node,
@@ -524,6 +529,79 @@ def test_node_field_without_node_types_raises_at_finalize() -> None:
     _make_node_type("CategoryNode")
     DjangoNodesField()
     finalize_django_types()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("field", ["node", "nodes"], ids=["node", "nodes"])
+def test_a_type_model_secondary_type_name_id_runs_its_own_hook_not_the_primarys(
+    field: str,
+) -> None:
+    """Under ``type+model`` a type-name id reads its named type's hook; the emitted id the primary's.
+
+    The primary hides one row; the hookless secondary declares none. The
+    secondary's type-name id of that row decodes to the secondary and serves
+    it, while the model-label id the secondary emits decodes to the primary and
+    answers ``null``.
+    """
+    services.seed_data(1)
+    hidden = Category.objects.order_by("pk").first()
+    assert hidden is not None
+    hidden_pk = saved_pk(hidden)
+
+    class HidingCategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            primary = True
+            globalid_strategy = "type+model"
+
+        @classmethod
+        @override
+        def get_queryset(cls, queryset: QuerySet[Category], info: object) -> QuerySet[Category]:
+            return queryset.exclude(pk=hidden_pk)
+
+    class HooklessCategoryNode(DjangoType):
+        class Meta:
+            model = Category
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            globalid_strategy = "type+model"
+
+    if field == "node":
+        schema = _schema_with(
+            "node",
+            relay.Node | None,
+            DjangoNodeField(),
+            extra_types=(HidingCategoryNode, HooklessCategoryNode),
+        )
+    else:
+        schema = _schema_with(
+            "nodes",
+            list[relay.Node | None],
+            DjangoNodesField(),
+            extra_types=(HidingCategoryNode, HooklessCategoryNode),
+        )
+    emitted = global_id_for(HooklessCategoryNode, hidden_pk)
+    assert emitted == _gid("products.category", hidden_pk)
+    ids = (_gid("HooklessCategoryNode", hidden_pk), emitted)
+    selection = (
+        "__typename ... on HooklessCategoryNode { name } ... on HidingCategoryNode { name }"
+    )
+    if field == "node":
+        document = (
+            f'{{ named: node(id: "{ids[0]}") {{ {selection} }} '
+            f'emitted: node(id: "{ids[1]}") {{ {selection} }} }}'
+        )
+    else:
+        document = f'{{ nodes(ids: ["{ids[0]}", "{ids[1]}"]) {{ {selection} }} }}'
+    result = schema.execute_sync(document)
+    assert result.errors is None, result.errors
+    served = {"__typename": "HooklessCategoryNode", "name": hidden.name}
+    if field == "node":
+        assert result.data == {"named": served, "emitted": None}
+    else:
+        assert result.data == {"nodes": [served, None]}
 
 
 # ---------------------------------------------------------------------------
