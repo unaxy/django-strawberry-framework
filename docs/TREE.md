@@ -825,6 +825,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_products_api.py          # Live GraphQL HTTP tests for products reads, mutations, permissions, optimization, and request parsing.
 ├── test_products_visibility_api.py  # Live GraphQL proof that generated relations enforce target visibility themselves.
 ├── test_projected_owned_filters_api.py  # Native HTTP owners for projected methods and filters carrying their own callable.
+├── test_range_filter_declared_lookup_api.py  # A declared ``RangeFilter`` compares two bounds as a range whatever lookup it declares.
 ├── test_raw_filter_forms_api.py  # Consumer JSON and raw arguments preserve filter forms, widget keys and public primitive calls.
 ├── test_raw_relation_filter_arguments_api.py  # Raw relation filters reached through ordinary public scalar Query arguments.
 ├── test_raw_relation_key_forms_api.py  # Unbound raw relation forms compare target primary keys and drop uncoercible members over HTTP.

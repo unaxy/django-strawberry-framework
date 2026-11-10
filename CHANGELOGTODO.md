@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 206 to do.
+Progress: 0 done, 207 to do.
 
 ## From dry-0_0_15_3
 
@@ -445,8 +445,8 @@ Progress: 0 done, 206 to do.
   never negated by the package under `exclude=True`; a GlobalID filter holding its own `filter` refuses unstorable text
   with `FILTER_INVALID` (before: a masked error, or `GLOBALID_INVALID` when its `filter` delegated to the decode)
 - [ ] 315. CHANGELOG entry for item 160: a declared `RangeFilter` given only `start` (or only `end`, or the other side
-  `null`) filters `>= start` (`<= end`) instead of matching no row; both bounds keep the declared lookup and a range
-  with neither bound filters nothing
+  `null`) filters `>= start` (`<= end`) instead of matching no row, and a range with neither bound filters nothing
+  (two bounds: entry 848)
 - [ ] 309. CHANGELOG entry for items 291 and 292: a `DjangoModelFormMutation` whose bound relation field disagrees with
   the field the input decodes against (an `__init__` or `get_form` override changing `to_field_name`, or a queryset over
   another model) raises `ConfigurationError` before validation instead of linking whichever row the bound key names; a
@@ -956,6 +956,17 @@ Progress: 0 done, 206 to do.
   branch instead of raising `TypeError`. Narrowings, matching the walked key: built with no request, a named head's
   hooks receive `None`; an async-only target `get_queryset` raises `SyncMisuseError`; a head whose `queryset=` is of
   another model raises `ConfigurationError`
+- [ ] 848. CHANGELOG entry for item 316: a `RangeFilter` declared with any lookup other than `range`, including
+  django-filter's own spelling `RangeFilter(field_name="price")` with the default `exact`, now compares two bounds as
+  a range (`{ exact: { start, end } }`, a declared `gte`, `in` or `iexact` all keep the rows between the bounds), as
+  django-filter's `RangeFilter` does; both bounds used to reach the declared lookup as one list, a masked error over
+  integer and key columns, `FILTER_INVALID` over decimal, date and datetime, and wrong rows over text and under `in` /
+  `iexact`. A `lookup_expr` transform stays on the compared path (`date` compares the day, so an end date keeps a row
+  stamped later that day); an integer column applies the bounds as `gte` + `lte`, so a bound past the column widens or
+  matches nothing. Raw form data over a relation itself compares the column the relation's values are compared on, so
+  a bound past it answers as over `<relation>__id` where it raised an unmasked `OverflowError` or `TypeError`; a raw
+  bound past an integer column is held under every declared lookup (`iexact` and `contains` included). The published
+  input key is unchanged
 
 ## From dry-upstream-0_0_15
 

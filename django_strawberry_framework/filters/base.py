@@ -1763,17 +1763,22 @@ class RangeField(Field):
 class RangeFilter(_ColumnCleanedFilter):
     """Filter that consumes a two-element list via `RangeField`.
 
-    Both bounds apply the declared lookup (``lookup_expr="range"`` compiles to ``BETWEEN``),
-    except over an integer column, where a ``range`` applies them as ``<field>__gte`` and
-    ``<field>__lte`` in one predicate, as the generated ``range`` does
+    The declared ``lookup_expr`` names the published input key (``exact`` for the default,
+    ``range``, a bare ``date``) and the transforms the bounds compare through; its final
+    lookup is never applied. Two bounds compare as a range whatever that lookup is
+    (``<field>__range``, ``BETWEEN``), as django-filter's ``RangeFilter.filter`` replaces
+    its ``lookup_expr`` with ``range``; over an integer column they apply as
+    ``<field>__gte`` and ``<field>__lte`` in one predicate, as the generated ``range`` does
     (``IntegerRangeFilter``): Django's range-aware integer lookups read a bound past the
     column's range as widening or matching nothing, where ``BETWEEN`` would bind it raw and
     overflow the backend. A range with one bound left out or ``null`` applies that lone
-    bound: a start alone as ``<field>__gte``, an end alone as ``<field>__lte``, through
-    every transform Django's query applies ahead of the lookup (``year__range`` and a bare
-    ``year`` both compare ``<field>__year__gte``). django-filter's ``RangeFilter`` picks
-    ``gte`` / ``lte`` the same way but on its ``field_name`` alone, replacing the whole
-    ``lookup_expr``. A range with neither bound constrains nothing.
+    bound: a start alone as ``<field>__gte``, an end alone as ``<field>__lte``. Both shapes
+    compare through every transform Django's query applies ahead of the lookup
+    (``year__exact``, ``year__range`` and a bare ``year`` all compare ``<field>__year``,
+    two bounds as ``<field>__year__range``), the value each bound is cleaned as; django-filter
+    applies ``range`` / ``gte`` / ``lte`` on its ``field_name`` alone, dropping a
+    ``lookup_expr`` transform and comparing the bare column. A range with neither bound
+    constrains nothing.
 
     Each bound is cleaned by the form field of the ``gte`` filter for the value the range
     compares (``_column_form_field``): the column's, or the output's of the transforms between
@@ -1806,22 +1811,28 @@ class RangeFilter(_ColumnCleanedFilter):
 
     @override
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
-        """Apply a one-sided range as its lone bound, an integer range as ``gte`` + ``lte``.
+        """Apply a lone bound as ``gte`` / ``lte``, two bounds as ``range`` (integer: ``gte`` + ``lte``).
 
-        A range input with one bound left out (or ``null``) reaches here as ``[start, None]`` /
-        ``[None, end]``. The declared ``range`` lookup would compile it to ``BETWEEN x AND NULL``,
-        which matches no row, so the lone bound applies on its own through `_apply_lookups`
-        (``distinct`` and ``exclude`` honoured), through every transform Django's query applies
-        ahead of the lookup (``_lookup_lhs_path``: a ``year__range`` bound and a bare ``year``
-        one are a ``year__gte`` / ``year__lte``). ``[None, None]`` returns ``qs`` unchanged. Two
-        bounds of a ``range`` over an integer column apply as ``gte`` + ``lte`` in one
-        predicate (``IntegerRangeFilter.filter``), so a bound past the column's range never
-        reaches the backend; any other two-bound range keeps the declared lookup. A lone bound
+        The declared lookup's final part is replaced as django-filter's ``RangeFilter.filter``
+        replaces it; every transform Django's query applies ahead of it stays on the path
+        (``_lookup_lhs_path``: ``year__exact``, ``year__range`` and a bare ``year`` all compare
+        ``year``). A range input with one bound left out (or ``null``) reaches here as
+        ``[start, None]`` / ``[None, end]`` and applies that bound alone as ``gte`` / ``lte``,
+        since ``BETWEEN x AND NULL`` matches no row. ``[None, None]`` returns ``qs`` unchanged.
+        Two bounds apply as ``range``; over an integer column (no transform between it and the
+        lookup) as ``gte`` + ``lte`` in one predicate (``IntegerRangeFilter.filter``), so a
+        bound past the column's range never reaches the backend. A relation itself (raw form
+        data; GraphQL publishes no range over one) is compared on the column its values are
+        compared on (``_compared_value_column``: its ``to_field``, else the target's primary
+        key), so both shapes apply the compared column's ``gte`` / ``lte`` (two integer bounds
+        as its ``gte`` + ``lte``) and a held bound past it widens or matches nothing, where
+        the relation's own lookups would bind it raw and Django registers no ``range`` on
+        a relation. Every shape goes through
+        `_apply_lookups` (``distinct`` and ``exclude`` honoured). A lone bound, the ``range``
         and the ``gte`` + ``lte`` pair name the column the path resolves to
         (``_ResolvedField.path``), so over a relation-valued primary key they apply the stored
-        column's lookups, never the relation's, which bind a bound past the column raw; a
-        two-bound range over a relation-valued key storing a non-integer column applies
-        ``range`` to the stored column too, which Django refuses on the relation itself.
+        column's lookups, never the relation's, which bind a bound past the column raw or,
+        for ``range``, which Django refuses on the relation itself.
         A scoped terminal's synthetic parent has no queryset, so a path it cannot resolve
         is read from ``qs.query`` before deciding whether the two-bound integer rewrite
         applies. The same actual query owns the integer holding before that decision.
@@ -1839,20 +1850,24 @@ class RangeFilter(_ColumnCleanedFilter):
         ) is not None:
             resolved = _ResolvedField(actual_field, field_name)
         path = field_name if resolved is None else resolved.path
-        if start is None or end is None:
-            # A lone bound compares what the range compares: every transform Django's query
-            # applies ahead of the lookup stays on the path (``year__range``'s ``year``, a
-            # bare trailing ``year`` too).
-            bound_path = _lookup_lhs_path(qs.query, LOOKUP_SEP.join((path, lookup_expr)))
-            if end is None:
-                return _apply_lookups(self, qs, {f"{bound_path}__gte": start})
+        field = None if resolved is None else resolved.field
+        # A relation compares the column its values are compared on, holding past it.
+        if (
+            field is not None
+            and field.is_relation
+            and (column := _compared_value_column(self, field)) is not None
+        ):
+            path, field = LOOKUP_SEP.join((path, column.name)), column
+        # Every transform ahead of the declared lookup stays (the value each bound is
+        # cleaned as); the lookup itself gives way to ``gte`` / ``lte`` / ``range``.
+        bound_path = _lookup_lhs_path(qs.query, LOOKUP_SEP.join((path, lookup_expr)))
+        if end is None:
+            return _apply_lookups(self, qs, {f"{bound_path}__gte": start})
+        if start is None:
             return _apply_lookups(self, qs, {f"{bound_path}__lte": end})
-        if lookup_expr == "range" and resolved is not None:
-            if isinstance(resolved.field, models.IntegerField):
-                return _apply_lookups(self, qs, {f"{path}__gte": start, f"{path}__lte": end})
-            if path != field_name:
-                return _apply_lookups(self, qs, {f"{path}__range": (start, end)})
-        return super().filter(qs, value)
+        if bound_path == path and isinstance(field, models.IntegerField):
+            return _apply_lookups(self, qs, {f"{path}__gte": start, f"{path}__lte": end})
+        return _apply_lookups(self, qs, {f"{bound_path}__range": (start, end)})
 
 
 def install_comparison_cleaner(owned: Field, target: Field) -> bool:
@@ -1932,11 +1947,12 @@ def _integer_compared_column(
     value of (``_bound_value_field``: the column, or an integer transform's output such as
     ``year``'s or ``len``'s), a relation's the target column it compares on
     (``_compared_value_column``), an ``ArrayField``'s its innermost element column
-    (``utils/_array_field.py::array_leaf_field``), where the lookup the filter resolves is
-    Django's own and prepares its value through that field (``_django_prepares``).
-    ``None`` where it does not (``iexact``, a text pattern, ``regex``, ``isnull``: Django
-    hands the value on as it is; a project lookup, which owns what its value means),
-    where no walk resolved one, and
+    (``utils/_array_field.py::array_leaf_field``), where the lookup the filter applies is
+    Django's own and prepares its value through that field (``_django_prepares``): the one it
+    resolves, or for a ``RangeFilter``, which replaces its declared lookup with ``gte`` /
+    ``lte`` / ``range`` (``RangeFilter.filter``), those. ``None`` where it does not
+    (``iexact``, a text pattern, ``regex``, ``isnull``: Django hands the value on as it is;
+    a project lookup, which owns what its value means), where no walk resolved one, and
     where that is no ``IntegerField`` or no one column (a filter bound to no
     ``FilterSet``, a path naming no field). The actual ``query`` is read for a
     scoped terminal whose synthetic parent has no queryset of its own.
@@ -1950,7 +1966,11 @@ def _integer_compared_column(
         if query is not None
         else _bound_lookup_operand(filter_instance)
     )
-    if operand is None or operand.field is None or not _django_prepares(operand.lookup):
+    if (
+        operand is None
+        or operand.field is None
+        or not (isinstance(filter_instance, RangeFilter) or _django_prepares(operand.lookup))
+    ):
         return None
     column = _compared_value_column(filter_instance, operand.field)
     if column is None:

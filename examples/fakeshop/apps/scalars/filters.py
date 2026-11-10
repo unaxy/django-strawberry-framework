@@ -37,6 +37,13 @@ scoped range input names). ``Meta.fields`` ``price: "__all__"`` still
 expands the CSV ``range`` lookup on the ``price`` operator bag; the
 declared primitive is a separate ``priceSpan: { range: { start, end } }`` field.
 
+``price_window`` / ``signed_big_window`` on ``ScalarSpecimenFilter`` are the same
+``RangeFilter`` declared as django-filter spells it, with no ``lookup_expr`` (the default
+``exact`` names the input key: ``priceWindow: { exact: { start, end } }``): the acceptance
+surface for a range whose declared lookup is no ``range``. Two bounds still compare as a
+range, ``signed_big_window``'s as ``gte`` + ``lte`` over its integer column, so a bound past
+the column's 64-bit range answers as ``signedBigSpan`` answers it.
+
 ``price_among`` on ``ScalarSpecimenFilter`` is a declared ``ListFilter`` over the same
 column with the ``in`` lookup (``priceAmong: { in: [...] }``): the acceptance surface for
 a declared list filter, each element cleaned as ``price: { in }`` cleans its members.
@@ -185,6 +192,8 @@ class ScalarSpecimenFilter(FilterSet):
 
     tag = RelatedFilter(ScalarSpecimenTagFilter, field_name="tag")
     price_span = RangeFilter(field_name="price", lookup_expr="range")
+    price_window = RangeFilter(field_name="price")
+    signed_big_window = RangeFilter(field_name="signed_big")
     price_among = ListFilter(field_name="price", lookup_expr="in")
     signed_big_span = RangeFilter(field_name="signed_big", lookup_expr="range")
     unsigned_big_span = RangeFilter(field_name="unsigned_big", lookup_expr="range")

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 461 done, 117 to do. The CHANGELOG entries filed here moved to
+Progress: 462 done, 119 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2203,6 +2203,24 @@ Progress: 461 done, 117 to do. The CHANGELOG entries filed here moved to
   override that skips `super()` keeps the walk (no leak) but validates over the declaration's queryset. Pinned by the
   live 751 rows of `examples/fakeshop/test_query/test_direct_filter_actor_api.py` (hidden payload equals missing
   payload, five heads). Fixed with 748
+- [x] 316. Two bounds of a declared `RangeFilter` compare as a range whatever lookup it declares (django-filter's
+  `RangeFilter.filter` rule), so `RangeFilter(field_name="price")` with the default `exact`, a declared `gte`, `in`,
+  `iexact` or a text pattern keeps the rows between the bounds where it raised a masked error, answered
+  `FILTER_INVALID` or returned wrong rows; the published key is unchanged. `filters/base.py::RangeFilter.filter`
+  compares `{bound_path}__range` through the declared transforms (`date` -> `date__range`, a package divergence from
+  django-filter's string replacement, kept because the bounds are cleaned as the transform's output), `gte` + `lte`
+  over an integer column with no transform between, and redirects a relation itself (raw form) to the column its
+  values are compared on (`_compared_value_column`), so a bound past it widens or matches nothing as over
+  `<relation>__id` instead of an unmasked `OverflowError`; `filters/base.py::_integer_compared_column` holds a
+  `RangeFilter`'s bounds whatever it declares, so a raw `-1e400000` under `iexact` / `contains` no longer runs an
+  unbounded `int()`. Pinned by `examples/fakeshop/test_query/test_range_filter_declared_lookup_api.py` (kinds x
+  lookups x two bounds over flat, `not` and raw; relation-valued key; `parent__id`; relation itself forward and reverse
+  past the column against a `<relation>__id` control; the hold with a 1.0 s limit),
+  `test_scalars_filter_api.py::test_price_window_declared_with_no_lookup_compares_its_bounds_as_a_range` and
+  `::test_range_through_a_filtered_relation_alias_compares_two_bounds_through_its_transform`, and
+  `test_scalars_api.py::test_signed_big_window_declared_with_no_lookup_answers_a_bound_past_the_column_as_the_span`
+  (new fakeshop `ScalarSpecimenFilter.price_window` / `signed_big_window`). Docs: spec-027 Decision 4 row, two Edge
+  cases, Test plan, checklist and DoD 3. Fixes 508. Filed 846, 847. CHANGELOGTODO 848
 
 ## Outside review of the fixes
 
@@ -2439,6 +2457,16 @@ tracker number are recorded there; open remainders and new defects are filed as 
   against `utils/querysets.py::relation_target_type(root=...)`, so when the two types' strategies differ (`model`
   primary, `type` secondary, key `shelf__books` on a set wired to the secondary) every nonempty value is refused, a
   primary-minted id as "expects BookSecondary", a secondary-minted id as "expects library.book". Found researching 745
+- [ ] 840. A generated model mutation over a forward many-to-many whose `through=` model has a required extra
+  column (non-null, no default, beyond the two keys; `Membership(user, group, role)`) publishes the relation as
+  writable and fails inside Django's `.set()` (`mutations/resolvers.py::_assign_m2m`) with a masked
+  `IntegrityError`, outside the `FieldError` envelope; the KANBAN 052 DoD names the guard (refuse at type creation
+  with a `ConfigurationError` naming the through model and its columns). Found triaging for the PyPI release
+- [ ] 847. A raw-form `RangeFilter` over an annotation a consumer `filter_queryset` adds before filtering (a path
+  only the queryset resolves) hands Django the uncleaned string bound: an unmasked `ValueError` under `range` and
+  every other declared lookup (316 turned a declared `iexact`'s silent no rows into the same `ValueError`). The
+  queryset-only cleaning gate (`filters/sets.py::_queryset_integer_column`) still reads the declared lookup. Evidence:
+  the 316 verifier's annotation probe. Found verifying 316
 - [ ] 838. (robustness) An unbound or absent `RelatedFilter` head's rendered form field (django-filter's `FilterView`
   page, DRF's browsable API through `DjangoFilterBackend.to_html`) lists every row of the declaration's queryset as a
   choice, rows the target type's `get_queryset` hides included, so the rendered page names hidden rows; a bound named
@@ -2678,21 +2706,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   `tests/test_relay_node_field.py::test_decode_model_global_id_passes_raw_value_for_non_field_node_id`), so a relation
   write naming such a type stores whichever row's pk equals the id's text, while the filter side now refuses that slot
   across a relation (`GLOBALID_UNVALIDATABLE`). Refuse it on writes too, or keep the pass-through? Found landing 290
-- [ ] 316. `filters/base.py::RangeFilter` declared with the default `lookup_expr` (`exact`), the django-filter
-  spelling `RangeFilter(field_name="x")`, publishes the `{start, end}` input under an `exact` key, applies a lone
-  bound as `__gte` / `__lte`, and hands two bounds as one list to the declared lookup: a masked error over a number,
-  decimal, date, datetime or relation-key column and silently wrong rows over text (`exact` none, `gte` all on
-  SQLite); nothing validates the declaration (also filed as 508, with a 3738-cell grid). Options: (a) default
-  `lookup_expr` to `range` (the input key becomes `range`); (b) refuse a non-`range` lookup with `ConfigurationError`
-  at class build; (c) keep the declaration and its input key and compare two bounds as a range whatever the terminal
-  lookup (except a declared `range` or `in`), keeping a transform prefix (`date__exact` -> `date__range`) and 372's
-  integer `gte` + `lte`, as django-filter's `RangeFilter` does: prototyped and verified, 668 two-bound cells change
-  (448 masked errors and 220 wrong answers become the declared-`range` answer), no other cell changes; it would also
-  make 315's "both bounds keep the declared lookup" false
-
-  spec-027's Edge case "A `RangeFilter` whose `lookup_expr` ends on a transform" states today's two-bound answer
-  ("Two bounds apply the declared `lookup_expr` as written"); deciding 316 restates it. Since 624 a lone bound walks
-  Django's own lookup split (`filters/base.py::_lookup_lhs_path`), which option (c)'s transform prefix can reuse
 - [ ] 281. A `GenericForeignKey` written beside its carriers: a serializer with writable `content_object` and writable
   `object_id` / `content_type` builds, and a request pairing a visible object's id with another row's `objectId` stores
   that row (a writable `object_id` alone is already a raw write); post-save attestation covers single-column FK /
@@ -2924,6 +2937,13 @@ tracker number are recorded there; open remainders and new defects are filed as 
   document that such a set publishes at its first construction and that a project calls `MySet.get_filters()` at
   startup (`AppConfig.ready`) to publish it earlier; (c) leave it as is. No rule settles a contract for readers
   outside the three drivers the README names. (Found fixing 836)
+- [ ] 846. The package's `filters/base.py::RangeFilter` reads raw form bounds as `<name>_0` / `<name>_1` (Django's
+  `MultiWidget`), where django-filter's `RangeFilter` reads `<name>_min` / `<name>_max`: a DRF client sending
+  `?price_min=1&price_max=5` to a set that swapped `django_filters.RangeFilter` for the package's gets every row and
+  no error (154 cells of the 316 grid). spec-027 Decision 4 documents `_0` / `_1` and django-filter ignores unknown
+  keys the same way, so it fails the defect gate. Should the package's range widget also read `_min` / `_max`
+  (GOAL success criterion 7), or should the migration docs say to keep `django_filters.RangeFilter` under DRF?
+  Evidence: `.work/evidence/spike-i316-range/grid-after.jsonl` (`raw_pkg_minmax`). Found researching 316
 
 ## Hunt not finished in t3
 

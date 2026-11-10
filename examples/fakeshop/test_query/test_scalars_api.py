@@ -469,6 +469,45 @@ def test_filter_specimens_by_declared_bigint_range_out_of_range_bound_no_overflo
 @pytest.mark.django_db
 @pytest.mark.parametrize("negate", [False, True], ids=["flat", "not"])
 @pytest.mark.parametrize(
+    ("bounds", "expected"),
+    [
+        pytest.param({"start": "0", "end": "10"}, ["mid"], id="in-range"),
+        pytest.param({"start": "0", "end": str(2**64)}, ["mid", "top"], id="end-past-max"),
+        pytest.param({"start": str(2**63), "end": str(2**64)}, [], id="start-past-max"),
+        pytest.param({"start": str(-(2**64)), "end": "10"}, ["low", "mid"], id="start-past-min"),
+        pytest.param(
+            {"start": str(-(2**64)), "end": str(_I64_MIN - 1)},
+            [],
+            id="end-past-min",
+        ),
+        pytest.param({"start": str(-(2**64))}, ["low", "mid", "top"], id="lone-start-past-min"),
+        pytest.param({"end": str(2**64)}, ["low", "mid", "top"], id="lone-end-past-max"),
+    ],
+)
+def test_signed_big_window_declared_with_no_lookup_answers_a_bound_past_the_column_as_the_span(
+    bounds: dict[str, str],
+    expected: list[str],
+    *,
+    negate: bool,
+) -> None:
+    """``signedBigWindow: { exact: ... }`` answers every bound as ``signedBigSpan: { range }``.
+
+    ``signed_big_window`` is ``RangeFilter(field_name="signed_big")``, whose default ``exact``
+    only names the input key: two bounds over the integer column apply as ``gte`` + ``lte``
+    in one predicate, a lone one as ``gte`` / ``lte``, so a bound past the column's 64-bit
+    range widens or matches nothing exactly as the declared ``range`` does, flat and under
+    ``not``, never a masked backend error.
+    """
+    _seed_declared_bigint_rows()
+    rows = sorted(set(_DECLARED_BIGINT_ROWS) - set(expected)) if negate else expected
+
+    assert _filtered_labels({"signedBigWindow": {"exact": bounds}}, negate=negate) == rows
+    assert _filtered_labels({"signedBigSpan": {"range": bounds}}, negate=negate) == rows
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("negate", [False, True], ids=["flat", "not"])
+@pytest.mark.parametrize(
     ("column", "members", "expected"),
     [
         pytest.param("signedBig", [7], ["mid"], id="signed-in-range"),

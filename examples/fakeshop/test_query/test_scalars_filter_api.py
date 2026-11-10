@@ -17,7 +17,10 @@ per owning filterset and the ``range`` lookup applies over the wire; a lone
 ``start`` / ``end`` applies as ``gte`` / ``lte`` and a range with no bound filters nothing;
 each bound is cleaned as ``price: { gte }`` cleans its value, so a bound the column cannot
 hold is ``FILTER_INVALID``. ``price_among`` is a declared ``ListFilter`` (``in``) on the
-same column whose elements are cleaned the same way. A temporal value the database the
+same column whose elements are cleaned the same way. ``price_window`` declares the same
+``RangeFilter`` with no ``lookup_expr`` (``priceWindow: { exact: { start, end } }``): two
+bounds compare as a range, a lone one as ``gte`` / ``lte``, flat, under ``not`` and through
+``partner`` nested and flat. A temporal value the database the
 query runs on cannot bind (on SQLite an aware datetime whose UTC projection leaves years
 1..9999, an aware time) is ``FILTER_INVALID`` keyed to its form field on each adapter-bound
 leaf, member and bound, under ``not`` and through ``partner``; PostgreSQL binds those
@@ -30,7 +33,7 @@ field's queryset holds, a path the schema build cannot resolve, so it keeps its 
 1..9999 is ``FILTER_INVALID`` on every backend. ``parentDaysSpan``, a ``RangeFilter`` over
 the same path with a bare ``date`` ``lookup_expr``, keeps its range form's ``String`` bounds,
 cleans each as the parent's ``date`` (a bound no date spells is ``FILTER_INVALID``) and
-compares a lone bound through it. ``parentLagAmong`` / ``parentLagSpan`` and
+compares a lone bound and two bounds through it. ``parentLagAmong`` / ``parentLagSpan`` and
 ``childCountAmong`` / ``childCountSpan`` name the resolver's duration and integer
 annotations: published ``String``, each member and bound is cleaned and compared as the
 annotation's output field, so junk or a duration past ``timedelta`` is ``FILTER_INVALID``, an
@@ -394,6 +397,62 @@ def test_nullable_scalars_filter_partner_price_span_one_sided_bounds(
         """,
         {"allNullableScalarSpecimens": [{"label": label} for label in labels]},
         variables={"filter": {"partner": {"priceSpan": {"range": price_range}}}},
+    )
+
+
+_WINDOW_BOUNDS = {
+    "both": ({"start": "10.0000", "end": "100.0000"}, ["mid"]),
+    "start": ({"start": "10.0000"}, ["mid", "dear"]),
+    "end": ({"end": "100.0000"}, ["cheap", "mid"]),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("side", list(_WINDOW_BOUNDS))
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "flat",
+        "not",
+        "nested-partner",
+        "flat-partner",
+    ],
+)
+def test_price_window_declared_with_no_lookup_compares_its_bounds_as_a_range(
+    branch: str,
+    side: str,
+) -> None:
+    """``priceWindow: { exact: { start, end } }`` keeps the prices between its bounds.
+
+    ``price_window`` is ``RangeFilter(field_name="price")``, django-filter's own spelling: its
+    default ``exact`` names the input key, and two bounds compare as a range, a lone one as
+    ``gte`` / ``lte``, flat, as the exact complement under ``not`` and through the
+    ``partner`` relation nested and flat.
+    """
+    bounds, labels = _WINDOW_BOUNDS[side]
+    tiers = _seed_price_tiers()
+    window: dict[str, object] = {"priceWindow": {"exact": bounds}}
+    if branch in {"flat", "not"}:
+        if branch == "not":
+            labels = [tier.label for tier in tiers if tier.label not in labels]
+            window = {"not": window}
+        _assert_graphql_data(
+            _BY_FILTER,
+            {"allScalarSpecimens": [{"label": label} for label in labels]},
+            variables={"filter": window},
+        )
+        return
+    for partner in tiers:
+        models.NullableScalarSpecimen.objects.create(label=f"of-{partner.label}", partner=partner)
+    partnered = (
+        {"partner": window}
+        if branch == "nested-partner"
+        else {"partnerPriceWindow": {"exact": bounds}}
+    )
+    _assert_graphql_data(
+        _BY_NULLABLE_FILTER,
+        {"allNullableScalarSpecimens": [{"label": f"of-{label}"} for label in labels]},
+        variables={"filter": partnered},
     )
 
 
@@ -904,6 +963,54 @@ def test_range_through_a_filtered_relation_alias_compares_a_lone_bound_through_i
             ],
         },
     }
+    assert response_json(
+        post_graphql(
+            _BY_PARENT_STAMP,
+            variables={"filter": {"parentDaysSpan": {"date": bounds}}},
+        ),
+    ) == {"data": {"allScalarSpecimensByParentStamp": [{"label": label} for label in labels]}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("bounds", "labels"),
+    [
+        pytest.param(
+            {"start": "2020-06-15", "end": "2021-06-15"},
+            ["child-of-alpha", "child-of-beta"],
+            id="both-days",
+        ),
+        pytest.param(
+            {"start": "2021-06-15", "end": "2021-06-15"},
+            ["child-of-alpha"],
+            id="one-day",
+        ),
+        pytest.param({"start": "2020-06-16", "end": "2021-06-14"}, [], id="between-the-days"),
+    ],
+)
+def test_range_through_a_filtered_relation_alias_compares_two_bounds_through_its_transform(
+    bounds: dict[str, str],
+    labels: list[str],
+) -> None:
+    """Two bounds of a bare-``date`` range over a ``FilteredRelation`` alias compare the day.
+
+    ``parentDaysSpan`` declares the bare ``date`` transform as its ``lookup_expr``, no
+    ``range``: two bounds still compare as a range, through the parent's ``date``
+    (``par__occurred_at__date__range``), so an end date keeps a parent stamped 09:30 that
+    day, and parents stamped a year before and after the bounds are dropped.
+    """
+    alpha = _seed_specimen("alpha")
+    beta = _seed_specimen("beta", occurred_at=_DATETIME.replace(year=2020))
+    before = _seed_specimen("before", occurred_at=_DATETIME.replace(year=2019))
+    after = _seed_specimen("after", occurred_at=_DATETIME.replace(year=2022))
+    for parent in (
+        alpha,
+        beta,
+        before,
+        after,
+    ):
+        _seed_specimen(f"child-of-{parent.label}", parent=parent)
+
     assert response_json(
         post_graphql(
             _BY_PARENT_STAMP,
