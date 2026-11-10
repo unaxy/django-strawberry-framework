@@ -3379,6 +3379,10 @@ def _unbindable_value_errors(
         filter_instance = copies.get(name)
         if value is None or filter_instance is None or not _runs_shipped_filter(filter_instance):
             continue
+        # A walk through an unresolved declared hop has no terminal to ask: deriving
+        # its hops refuses it (``FilterSet._walks_unresolved_hop``).
+        if type(filterset_instance)._walks_unresolved_hop(filter_instance):
+            continue
         terminal, source = _bind_ask_terminal_source(
             filterset_instance,
             filter_instance,
@@ -4074,7 +4078,11 @@ class FilterSet(
         """
         if not isinstance(filter_instance, (ArrayFilter, ListFilter, RangeFilter)):
             return False
-        if _bound_value_field(filter_instance) is not None or _has_comparison_cleaner(owned):
+        if (
+            type(self)._walks_unresolved_hop(filter_instance)
+            or _bound_value_field(filter_instance) is not None
+            or _has_comparison_cleaner(owned)
+        ):
             return False
         source_rows = require(self.queryset, is_queryset)
         terminal, source = _bind_ask_terminal_source(self, filter_instance, source_rows)
@@ -7118,9 +7126,29 @@ class FilterSet(
         walk = cls._flat_leaf_walk(filter_instance)
         return () if walk is None else walk[0]
 
+    @classmethod
+    def _walks_unresolved_hop(cls, filter_instance: Filter) -> bool:
+        """Whether ``filter_instance`` reads a declared hop whose target set does not resolve.
+
+        Such a walk (a ``RelatedFilter(None)`` placeholder on its path, ``_visibility_hops``)
+        has no chain: ``_leaf_chain`` needs every declared hop's target set, so a caller
+        reading the chain before ``_apply_relation_leaf`` derives the hops (which refuses an
+        active one, spec-027 Decision 8 step 3) asks this first and leaves the leaf alone.
+        """
+        return any(
+            isinstance(hop, DeclaredHop) and hop.target is None
+            for hop in cls._visibility_hops(filter_instance)
+        )
+
     def _necessary_annotation_hop(self, filter_instance: Filter) -> RelationHop | None:
-        """Find the final scoped owner when the actual comparison output is unresolved."""
+        """Find the final scoped owner when the actual comparison output is unresolved.
+
+        A leaf walking an unresolved declared hop (``_walks_unresolved_hop``) has no chain to
+        read and needs no owner: deriving its hops refuses it when it is active.
+        """
         if not _runs_shipped_filter(filter_instance):
+            return None
+        if type(self)._walks_unresolved_hop(filter_instance):
             return None
         chain = self._leaf_chain(filter_instance)
         if chain is None or not chain.hops or not _runs_shipped_filter(chain.terminal):
@@ -7466,7 +7494,11 @@ class FilterSet(
                 projection = terminal._projection
                 terminal_owner = projection.filterset
                 terminal = _projection_child_filter(projection)
-            if hops and _runs_shipped_filter(terminal):
+            if (
+                hops
+                and _runs_shipped_filter(terminal)
+                and not cls._walks_unresolved_hop(filter_instance)
+            ):
                 walk = terminal_owner._flat_leaf_walk(terminal)
                 field_path, lookup = _filterset_walked_lookup(terminal_owner, terminal)
                 remainder = field_path if walk is None else walk[1]
@@ -7833,8 +7865,8 @@ class FilterSet(
         names no through key (``_names_every_through``), the leaf re-bound to the target key
         over the visible target rows. A forward ``RelatedFilter`` head running consumer code,
         one hop or more, carries as ``null_view`` the chain its own ``null_value`` reads
-        (``_head_null_view``). Every declared hop's target set resolves: a caller derives (or
-        checks) the hops first.
+        (``_head_null_view``). Every declared hop's target set resolves: a caller derives the
+        hops first, or checks ``_walks_unresolved_hop`` and leaves such a leaf alone.
         """
         if isinstance(filter_instance, ProjectedChildFilter):
             projection = filter_instance._projection
@@ -8269,10 +8301,7 @@ class FilterSet(
         it.
         """
         built = require(self.queryset, is_queryset)
-        if any(
-            isinstance(hop, DeclaredHop) and hop.target is None
-            for hop in type(self)._visibility_hops(filter_instance)
-        ):
+        if type(self)._walks_unresolved_hop(filter_instance):
             terminal = _projected_terminal(filter_instance)
             rows: models.QuerySet[models.Model, object] = (
                 built

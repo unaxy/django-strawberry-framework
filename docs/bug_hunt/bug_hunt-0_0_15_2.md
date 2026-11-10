@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 479 done, 120 to do. The CHANGELOG entries filed here moved to
+Progress: 480 done, 119 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2485,6 +2485,23 @@ Progress: 479 done, 120 to do. The CHANGELOG entries filed here moved to
   `examples/fakeshop/test_query/test_library_api.py::test_a_type_strategy_secondary_refetches_through_its_own_get_queryset_over_http`,
   its async twin `::test_async_a_type_strategy_secondary_refetches_through_its_own_get_queryset` and
   `tests/test_relay_node_field.py::test_a_type_model_secondary_type_name_id_runs_its_own_hook_not_the_primarys`
+- [x] 851. A leaf walking a `RelatedFilter(None)` placeholder hop again answers spec-027 Decision 8 step 3 (the
+  `ConfigurationError` when supplied, no effect when absent or inactive) instead of a masked `TypeError` from
+  `utils/_narrowing.py::require` in `_hop_target_set`, over raw form, `apply_sync` and `apply_async`. `93679177` added
+  `FilterSet._leaf_chain` callers that run during form cleaning before the hops are derived
+  (`_unbindable_value_errors` through `_bind_ask_terminal_source`, `FilterSet._necessary_annotation_hop`), plus an
+  async pre-pass reading `_hop_model` (`FilterSet._derive_flat_hop_visibility_async`), none applying the rule
+  `_absent_leaf_applies` applied (bisect: 11 rows pass at `62c68ea7`, 8 fail at `93679177`; its targeted run never
+  ran the module). The rule is one predicate, `FilterSet._walks_unresolved_hop`, now asked by those three, by
+  `_absent_leaf_applies` and by `FilterSet._install_source_comparison` (a list / range / array leaf over a name no
+  column holds); binding through resolved hops is unchanged (411-row grid: every active-placeholder row equals
+  `62c68ea7`). Pinned by the eight item rows of
+  `examples/fakeshop/test_query/test_relation_filter_defaults_api.py`,
+  `::test_a_raw_form_list_leaf_through_a_forward_placeholder_refuses_only_when_cleaned` and
+  `::test_a_pipeline_leaf_through_a_forward_placeholder_refuses_only_when_supplied` (column, annotation list and
+  range leaves x supplied / absent x sync / async, exact statement counts). A GlobalID leaf through a placeholder is
+  refused earlier at schema build (`types/finalizer.py::_audit_unregistered_related_filter_targets`). Unreleased
+  regression, no CHANGELOG entry
 
 ## Outside review of the fixes
 
@@ -2692,17 +2709,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   under `null_label` answers it since 748. A to-many `ModelChoiceFilter(null_label=...)` overriding `filter`, sent
   `null` or its `null_value="0"`, answers `[]` at `fe4eb38f`, pinned as unchanged by
   `tests/filters/test_sets.py::test_a_declared_model_choice_override_keeps_its_null_value_routing`. Found fixing 748
-- [ ] 851. Eight live rows in `examples/fakeshop/test_query/test_relation_filter_defaults_api.py` fail on main since
-  `93679177` (they pass at `62c68ea7`): `test_forward_placeholder_refuses_its_supplied_raw_form_leaf_over_http`,
-  `test_nested_placeholder_refuses_a_supplied_child_leaf_over_http` (2),
-  `test_raw_form_default_cannot_make_an_unresolved_child_branch_disappear` (2),
-  `test_raw_form_inactive_copy_never_derives_its_unresolved_child_branch` (2) and
-  `test_an_inactive_unresolved_relation_does_not_block_the_parents_own_leaf[forward-placeholder]`. A request through a
-  set whose `RelatedFilter` target is an unresolved placeholder answers a masked `TypeError: expected the type the
-  source guarantees, got NoneType`: `filters/sets.py::FilterSet._prepare_raw_form_binding` ->
-  `::FilterSet._postclean_binding_hops` -> `::FilterSet._necessary_annotation_hop` -> `::FilterSet._leaf_chain` ->
-  `::FilterSet._routed_leaf_chain` -> `::FilterSet._bound_terminal` -> `::_hop_target_set` (`require` on a hop with no
-  target set). Found while the release-prep session researched 818
 - [ ] 852. (robustness) A `required=True` own filter of a served set is not enforced over GraphQL when the request
   omits it: `filter: {}` (or a `filter:` naming only other keys) answers every row, under the package's and
   django-filter's form builders alike, while README says a `required` filter acts on the form of the set that declares

@@ -22,7 +22,7 @@ from django.db.models import F, Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.urls import path
-from django_filters import BooleanFilter, CharFilter, DateFilter
+from django_filters import BooleanFilter, CharFilter, DateFilter, Filter
 from django_filters.filterset import BaseFilterSet
 from graphql_client import (
     JSONObject,
@@ -43,7 +43,7 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.filters import FilterSet, RelatedFilter
+from django_strawberry_framework.filters import FilterSet, ListFilter, RangeFilter, RelatedFilter
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import read_attr, require_instance
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
@@ -333,15 +333,32 @@ def _placeholder(
     return BranchParent, child
 
 
-def _forward_placeholder() -> type[FilterSet]:
-    class BookParent(FilterSet):
-        shelf = RelatedFilter(None, field_name="shelf", queryset=models.Shelf.objects.all())
+def _forward_placeholder(*, leaf: str | None = None) -> type[FilterSet]:
+    """A book set whose ``shelf`` branch is the ``None`` placeholder, plus one walked ``leaf``.
 
-        class Meta:
-            model = models.Book
-            fields = {"title": ["exact"], "shelf__code": ["exact"]}
-
-    return BookParent
+    ``model-column`` and ``listed`` compare the shelf's ``code`` column; the
+    ``annotation-*`` leaves name ``label``, a column no ``Shelf`` row stores, so only a
+    target type's ``get_queryset`` could supply it.
+    """
+    leaves: dict[str, Filter] = {
+        "model-column": CharFilter(field_name="shelf__code"),
+        "listed": ListFilter(field_name="shelf__code", lookup_expr="in"),
+        "annotation-list": ListFilter(field_name="shelf__label", lookup_expr="in"),
+        "annotation-range": RangeFilter(field_name="shelf__label", lookup_expr="range"),
+    }
+    return type(
+        "BookParent",
+        (FilterSet,),
+        {
+            "shelf": RelatedFilter(None, field_name="shelf", queryset=models.Shelf.objects.all()),
+            **({} if leaf is None else {"shelf_leaf": leaves[leaf]}),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": models.Book, "fields": {"title": ["exact"], "shelf__code": ["exact"]}},
+            ),
+        },
+    )
 
 
 def _message(owner: type[FilterSet], branch: str, *, missing_type: bool = False) -> str:
@@ -386,6 +403,78 @@ def test_forward_placeholder_refuses_its_supplied_raw_form_leaf_over_http() -> N
     filterset = _forward_placeholder()
     schema = _holder(filterset, model=models.Book, label="title", direct=True)
     _refused(_post(schema, {"shelf__code": "match"}, label="title"), _message(filterset, "shelf"))
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("where", "refused"),
+    [({"shelf_leaf": ["match"]}, True), ({"shelf_leaf": []}, True), ({}, False)],
+    ids=["listed", "empty-list", "absent"],
+)
+def test_a_raw_form_list_leaf_through_a_forward_placeholder_refuses_only_when_cleaned(
+    record_compiled_sql: RecordCompiledSql,
+    where: JSONObject,
+    *,
+    refused: bool,
+) -> None:
+    """A list cleaned through the unresolved branch refuses its derivation; an absent one is a no-op.
+
+    An empty list matches no row, so it constrains as a listed value does.
+    """
+    _world()
+    filterset = _forward_placeholder(leaf="listed")
+    schema = _holder(filterset, model=models.Book, label="title", direct=True)
+    sql = record_compiled_sql()
+    payload = _post(schema, where, label="title")
+    if refused:
+        _refused(payload, _message(filterset, "shelf"))
+    else:
+        assert payload == _expected(["alpha", "beta"], universe=["alpha", "beta"]), payload
+    # The refusal runs before any read; the no-op reads the filtered and the unfiltered roots.
+    assert len(sql) == (0 if refused else 2), sql
+    assert len(_table_sql(sql, "library_book")) == len(sql), sql
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("leaf", "value"),
+    [
+        ("model-column", "match"),
+        ("annotation-list", ["match"]),
+        ("annotation-range", {"start": "a", "end": "z"}),
+    ],
+    ids=["model-column", "annotation-list", "annotation-range"],
+)
+@pytest.mark.parametrize("supplied", [True, False], ids=["supplied", "absent"])
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_a_pipeline_leaf_through_a_forward_placeholder_refuses_only_when_supplied(
+    record_compiled_sql: RecordCompiledSql,
+    leaf: str,
+    value: object,
+    transport: str,
+    *,
+    supplied: bool,
+) -> None:
+    """Both pipelines refuse a supplied walked leaf as the unresolved branch; an absent one is a no-op.
+
+    A column only a target type's ``get_queryset`` could annotate is refused the same way
+    a stored column is, before any comparison is prepared from the branch's rows.
+    """
+    _world()
+    filterset = _forward_placeholder(leaf=leaf)
+    schema = _holder(filterset, model=models.Book, label="title", transport=transport)
+    where: JSONObject = {"title": "alpha"} | ({"shelf_leaf": value} if supplied else {})
+    sql = record_compiled_sql()
+    payload = _post(schema, where, label="title", transport=transport)
+    if supplied:
+        _refused(payload, _message(filterset, "shelf"))
+    else:
+        assert payload == _expected(["alpha"], universe=["alpha", "beta"]), payload
+    # No branch row is ever read. A refusal reads nothing on the sync pipeline; the async
+    # one has already started the sibling ``allRows`` read when ``rows`` refuses.
+    reads = (0 if transport == "sync" else 1) if supplied else 2
+    assert len(sql) == reads, sql
+    assert len(_table_sql(sql, "library_book")) == reads, sql
 
 
 @pytest.mark.django_db
