@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 462 done, 119 to do. The CHANGELOG entries filed here moved to
+Progress: 463 done, 118 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2221,6 +2221,16 @@ Progress: 462 done, 119 to do. The CHANGELOG entries filed here moved to
   `test_scalars_api.py::test_signed_big_window_declared_with_no_lookup_answers_a_bound_past_the_column_as_the_span`
   (new fakeshop `ScalarSpecimenFilter.price_window` / `signed_big_window`). Docs: spec-027 Decision 4 row, two Edge
   cases, Test plan, checklist and DoD 3. Fixes 508. Filed 846, 847. CHANGELOGTODO 848
+- [x] 840. Not a defect (AGENTS defect rule): the item's "masked `IntegrityError`, outside the `FieldError` envelope"
+  is false at HEAD. `mutations/resolvers.py::_model_write_step` runs `_assign_m2m` inside `save_or_field_errors`, so a
+  custom `through=` model with a required extra column (an `IntegerField`, `BooleanField`, `DateField`, `JSONField` or
+  non-null `ForeignKey` with no default) answers the in-band `__all__` `constraint` leaf ("A database constraint was
+  violated.") with the write rolled back, the spec-036 contract for an `IntegrityError` at write; a `CharField()` extra
+  is filled with `""` and succeeds, as Django does. Repro grid: 336 cells x SQLite and PostgreSQL 17 over the model,
+  form and serializer flavors, 30 constraint cells, 0 masked errors, every row restored; DRF's own `ModelSerializer`
+  keeps a custom-through relation read-only and never publishes it. Refusing the declaration at mutation class
+  creation is spec-052 Slice 1 (`required_through_columns`, Decision 2), unbuilt and tracked by the KANBAN 052 DoD;
+  no fakeshop mutation writes a custom-through relation
 
 ## Outside review of the fixes
 
@@ -2457,11 +2467,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   against `utils/querysets.py::relation_target_type(root=...)`, so when the two types' strategies differ (`model`
   primary, `type` secondary, key `shelf__books` on a set wired to the secondary) every nonempty value is refused, a
   primary-minted id as "expects BookSecondary", a secondary-minted id as "expects library.book". Found researching 745
-- [ ] 840. A generated model mutation over a forward many-to-many whose `through=` model has a required extra
-  column (non-null, no default, beyond the two keys; `Membership(user, group, role)`) publishes the relation as
-  writable and fails inside Django's `.set()` (`mutations/resolvers.py::_assign_m2m`) with a masked
-  `IntegrityError`, outside the `FieldError` envelope; the KANBAN 052 DoD names the guard (refuse at type creation
-  with a `ConfigurationError` naming the through model and its columns). Found triaging for the PyPI release
 - [ ] 847. A raw-form `RangeFilter` over an annotation a consumer `filter_queryset` adds before filtering (a path
   only the queryset resolves) hands Django the uncleaned string bound: an unmasked `ValueError` under `range` and
   every other declared lookup (316 turned a declared `iexact`'s silent no rows into the same `ValueError`). The
