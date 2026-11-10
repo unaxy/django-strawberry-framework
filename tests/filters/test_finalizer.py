@@ -28,8 +28,8 @@ Covers:
   queryset is refused when its set publishes, under every serving shape (a relation
   key's lookup asked of the relation, to-one or to-many), while the shapes Django
   resolves on some queryset (a name past a relation, a range applied as a relation's
-  bounds) build; a raw set's to-many key leaf answers Django's own refusal whether or
-  not a hop is walked.
+  bounds) build; a raw set declaring such a to-many key leaf is refused at its first
+  construction, as at the package's first read, whether or not a hop is walked.
 
 Bound and unbound filtersets answering requests live in ``test_query/``.
 ``test_filter_declarations_api.py`` owns copyable callable and widget controls
@@ -5054,25 +5054,43 @@ def _raw_key_set(key: _ToManyRelation, walk: str, probe: Filter) -> type[FilterS
     return filterset_cls
 
 
+def _first_use_refusal(filterset_cls: type[FilterSet], data: dict[str, object]) -> str:
+    """The refusal ``filterset_cls``'s first construction raises, asserted again at every use.
+
+    A refused set never publishes, so each construction asks again and raises the same
+    refusal, and the package's first read (``get_filters()``) raises it too.
+    """
+    with pytest.raises(ConfigurationError) as first:
+        _ = filterset_cls(data=data)
+    with pytest.raises(ConfigurationError) as again:
+        _ = filterset_cls(data=data)
+    with pytest.raises(ConfigurationError) as read:
+        _ = filterset_cls.get_filters()
+    assert str(again.value) == str(first.value)
+    assert str(read.value) == str(first.value)
+    assert filterset_cls._expansion_snapshot() is None
+    return str(first.value)
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("walk", _KEY_WALKS)
 @pytest.mark.parametrize("make_key", _TO_MANY_KEYS)
-def test_a_raw_to_many_key_lookup_the_relation_refuses_raises_djangos_error(
+def test_a_raw_to_many_key_lookup_the_relation_refuses_is_refused_at_first_construction(
     make_key: Callable[[], _ToManyRelation],
     walk: str,
 ) -> None:
-    """A raw set's to-many key lookup the relation does not register raises Django's refusal.
+    """A raw set's to-many key lookup the relation does not register is refused when built.
 
-    A set applied as ``FilterSet(data=...)`` never publishes, so its leaf reaches the request:
     ``icontains`` is no lookup of a to-many relation (Django's query asks it of the relation's
-    last join: a reverse relation, a many-to-many's through key onto its target), and the
-    request raises Django's own ``FieldError`` whether or not a hop is walked. The related
-    column spelled past the relation (``children__id``) answers Django's rows in both.
+    last join: a reverse relation, a many-to-many's through key onto its target), so Django
+    refuses the predicate with ``FieldError``, and a set declaring it is refused at its first
+    construction (``FilterSet(data=...)``, its first use) whether or not a hop is walked. The
+    related column spelled past the relation (``children__id``) answers Django's rows.
     """
     key = make_key()
     value = str(read_attr(key.target, "pk"))
     model = type(key.source)
-    with pytest.raises(FieldError) as django_refusal:
+    with pytest.raises(FieldError):
         _ = model._default_manager.filter(**{f"{key.relation}__icontains": value})
     probe = ModelMultipleChoiceFilter(
         field_name=key.relation,
@@ -5080,9 +5098,12 @@ def test_a_raw_to_many_key_lookup_the_relation_refuses_raises_djangos_error(
         queryset=type(key.target)._default_manager.all(),
     )
     filterset_cls = _raw_key_set(key, walk, probe)
-    with pytest.raises(FieldError) as raised:
-        _ = list(filterset_cls(data={"probe": [value]}).qs)
-    assert str(raised.value) == str(django_refusal.value)
+    refusal = _first_use_refusal(filterset_cls, {"probe": [value]})
+    assert refusal.startswith(
+        f"FilterSet SpecimenFilter: ModelMultipleChoiceFilter 'probe' has field_name "
+        f"{key.relation!r} and lookup_expr 'icontains', but Django resolves no transform or "
+        "lookup 'icontains' on ",
+    )
     spelled = CharFilter(field_name=f"{key.relation}__{key.column}", lookup_expr="icontains")
     rows = _specimen_set([], {"probe": spelled}, name="SpelledFilter", model=model)
     expected = model._default_manager.filter(**{f"{key.relation}__{key.column}__icontains": value})
@@ -5116,25 +5137,29 @@ def test_a_raw_to_many_key_lookup_the_relation_refuses_raises_djangos_error(
         ),
     ],
 )
-def test_a_raw_reverse_key_lookup_any_filter_class_applies_raises_djangos_error(
+def test_a_raw_reverse_key_lookup_any_filter_class_applies_is_refused_at_first_construction(
     declare: Callable[[], Filter],
     lookup_expr: str,
     walk: str,
 ) -> None:
-    """Every filter class applying a lookup the reverse relation refuses raises Django's refusal.
+    """Every filter class applying a lookup the reverse relation refuses is refused when built.
 
-    The walked hop builds what the class's own ``filter`` hands Django, whatever value its form
-    cleans to (text, a decimal, a model instance), so the request raises the unwalked
-    request's ``FieldError``.
+    Django refuses the predicate with ``FieldError`` whatever value the class's form cleans to
+    (text, a decimal, a model instance), so a raw set declaring it is refused at its first
+    construction, naming the class and the lookup, whether or not a hop is walked.
     """
     key = _reverse_key()
     value = str(saved_pk(key.target))
-    with pytest.raises(FieldError) as django_refusal:
+    with pytest.raises(FieldError):
         _ = ScalarSpecimen.objects.filter(**{f"children__{lookup_expr}": value})
-    filterset_cls = _raw_key_set(key, walk, declare())
-    with pytest.raises(FieldError) as raised:
-        _ = list(filterset_cls(data={"probe": value}).qs)
-    assert str(raised.value) == str(django_refusal.value)
+    probe = declare()
+    filterset_cls = _raw_key_set(key, walk, probe)
+    refusal = _first_use_refusal(filterset_cls, {"probe": value})
+    assert refusal.startswith(
+        f"FilterSet SpecimenFilter: {truth.kind(probe)} 'probe' has field_name 'children' and "
+        f"lookup_expr {lookup_expr!r}, but Django resolves no transform or lookup "
+        f"{lookup_expr!r} on ",
+    )
 
 
 class _CountingOverride(ModelMultipleChoiceFilter):
@@ -5487,11 +5512,14 @@ def test_a_lazily_spelled_to_many_key_lookup_is_refused_naming_its_text(
 
 
 def _raw_outcome(filterset_cls: type[FilterSet], data: dict[str, object]) -> object:
-    """The rows ``filterset_cls`` applied raw to ``data`` answers, or the exception it raises."""
+    """The rows ``filterset_cls`` applied raw to ``data`` answers, or the exception it raises.
+
+    The exception is Django's at the request, or the set's refusal at its construction.
+    """
     try:
         rows = require(filterset_cls(data=data).qs, is_queryset)
         return sorted(str(read_attr(row, "pk")) for row in rows)
-    except (TypeError, FieldError) as exc:
+    except (TypeError, FieldError, ConfigurationError) as exc:
         return (truth.kind(exc), str(exc))
 
 
@@ -5519,8 +5547,9 @@ def test_a_lazily_spelled_raw_to_many_key_leaf_answers_walked_as_unwalked(
     """A walked hop builds a lazily spelled to-many key leaf as Django builds it unwalked.
 
     The walked leaf builds its declared predicate first, so whatever Django and
-    django-filter answer the lazy spelling with unwalked (rows, or the error a lazy keyword
-    raises), the walked request answers too.
+    django-filter answer the lazy spelling with unwalked (rows, the error a lazy keyword
+    raises, or the refusal of a lookup the relation does not register at the set's first
+    construction), the walked request answers too.
     """
     key = _reverse_key()
     data: dict[str, object] = {"probe": [str(read_attr(key.target, "pk"))]}

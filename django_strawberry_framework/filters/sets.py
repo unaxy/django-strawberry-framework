@@ -3758,6 +3758,17 @@ class FilterSet(
     ) -> None:
         """Copy the set's own filters and the flat copies ``data`` names; the rest when read.
 
+        The set's first construction is its first use: a set not yet published
+        publishes its filter table here (``_filter_table``), before django-filter
+        copies ``base_filters``, so every instance copies the published table, a
+        plain subclass of a served set and a set no ``DjangoType`` names included,
+        and a declaration the publication refuses raises ``ConfigurationError``
+        from every construction until it is fixed. A set that cannot publish yet
+        (a read re-entering its build, a second thread mid-build, a set with no
+        ``Meta.model`` whose ``RelatedFilter`` target is still a lazy string)
+        copies the table that read answered, never the class-creation
+        ``base_filters``.
+
         django-filter deep-copies every ``base_filters`` entry into
         ``self.filters`` per instance, so a request would pay for the whole flat
         surface (every path a ``RelatedFilter`` graph reaches) whatever it
@@ -3778,9 +3789,17 @@ class FilterSet(
         the copies the request runs.
         """
         cls = type(self)
-        snapshot = cls._expansion_snapshot()
         construction = _active_construction_var.get()
         _ = _active_construction_var.set(None)
+        snapshot = cls._expansion_snapshot()
+        # The table a set that cannot publish yet answered, copied in place of the
+        # class-creation ``base_filters``; ``None`` once the set has published.
+        unpublished: Mapping[str, Filter] | None = None
+        if snapshot is None:
+            table = cls._filter_table()
+            snapshot = cls._expansion_snapshot()
+            if snapshot is None:
+                unpublished = table
         self._form_bindings = None if construction is None else construction.bindings
         self._pipeline_constructed = construction is not None
         self._bind_unavailable_names = set()
@@ -3796,9 +3815,18 @@ class FilterSet(
             # pipeline stashes the resolver's own ``info`` (``_build_stashed_instance``).
             self._apply_info = _DirectRequestInfo(_DirectRequestContext(request))
         if snapshot is None or not snapshot.deferred_copies or not pipeline_built:
-            # basedpyright: typeshed types ``data`` as a ``dict`` or ``QueryDict``; upstream
-            # stores the mapping and its form reads it as one. It rejects a ``Mapping``
-            super().__init__(data, queryset, request=request, prefix=prefix)  # pyright: ignore[reportArgumentType]
+            # ``BaseFilterSet.__init__`` deep-copies ``self.base_filters``: an unpublished
+            # set's instance attribute shadows the class-creation table for that one read.
+            instance_attrs = truth.instance_state(self)
+            if unpublished is not None:
+                instance_attrs["base_filters"] = OrderedDict(unpublished)
+            try:
+                # basedpyright: typeshed types ``data`` as a ``dict`` or ``QueryDict``; upstream
+                # stores the mapping and its form reads it as one. It rejects a ``Mapping``
+                super().__init__(data, queryset, request=request, prefix=prefix)  # pyright: ignore[reportArgumentType]
+            finally:
+                if unpublished is not None:
+                    del instance_attrs["base_filters"]
             return
         source = snapshot.filters
         deferred = snapshot.deferred_copies
@@ -4585,12 +4613,14 @@ class FilterSet(
         The fail-closed accessor the flat-leaf applicator consumes. Reads from
         ``cls.__dict__`` DIRECTLY -- never ``getattr`` -- so a subclass never
         inherits a parent's snapshot via MRO (mirroring how ``expanded_once``
-        isolates the expansion cache). ``None`` when no snapshot has been
-        published on THIS class: a filterset instantiated before its lazy
-        ``RelatedFilter`` targets resolve (``should_cache_expansion`` skips the
-        cache) presents the unexpanded surface and correctly degrades to
-        running without a snapshot, and the adapter treats any name absent from a present
-        snapshot's mapping as a non-candidate.
+        isolates the expansion cache). ``None`` until THIS class publishes, at
+        its first use (its first construction, or the package's first read of
+        its table, ``_filter_table``), and on a set that cannot publish yet: a
+        set with no ``Meta.model`` whose lazy ``RelatedFilter`` target is still
+        a string (``should_cache_expansion`` skips the cache) copies the table
+        ``_filter_table`` answered and runs without a snapshot. The adapter
+        treats any name absent from a present snapshot's mapping as a
+        non-candidate.
         """
         # Only the expansion cache writes this own-namespace slot, with an ``ExpansionSnapshot``.
         return optional_instance(

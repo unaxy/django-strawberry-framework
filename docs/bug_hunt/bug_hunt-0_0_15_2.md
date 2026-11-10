@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 456 done, 117 to do. The CHANGELOG entries filed here moved to
+Progress: 458 done, 116 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2135,6 +2135,37 @@ Progress: 456 done, 117 to do. The CHANGELOG entries filed here moved to
   `/graphql/` twin, logical arms, context reads and memo, `request=None`, the DRF-authenticated user). Docs: spec-027
   Decision 8, README, GLOSSARY `FilterSet` and `get_queryset` visibility hook. Unblocks 748. Filed 836. CHANGELOGTODO
   837
+- [x] 793. Fixed with 836 (one root): an unserved set's refusals (`filters/base.py::refuse_unresolvable_lookup`,
+  `::refuse_identityless_relation`) run at its first construction, so `FilterSet(data=...)`, `DjangoFilterBackend` or
+  `FilterView` over a set declaring a refused filter raises `ConfigurationError` at construction and at every later
+  one until it is fixed, where a raw set raised Django's own `FieldError` at `.qs` only for requests naming it. First
+  use is defined once (GLOSSARY `FilterSet`, spec-027 Decision 4, both docstrings): the set's first construction or
+  the package's first read of it (`get_filters()`, `apply_sync` / `apply_async`); the rows saying a raw set never
+  publishes are deleted. Pinned by
+  `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_set_declaring_a_refused_filter_is_refused_at_its_first_construction`
+  (three drivers; a `RangeFilter` over a relation, a `GlobalIDFilter` over a `GenericForeignKey`) and
+  `tests/filters/test_finalizer.py::test_a_raw_to_many_key_lookup_the_relation_refuses_is_refused_at_first_construction`
+  / `::test_a_raw_reverse_key_lookup_any_filter_class_applies_is_refused_at_first_construction`. CHANGELOGTODO 842
+- [x] 836. A `FilterSet` no `DjangoType` names (a plain subclass of a wired set such as `class _Plain(BookFilter):
+  pass`, or an unserved set) now publishes its filter table at its first construction:
+  `filters/sets.py::FilterSet.__init__` reads `_filter_table()` when the class has no snapshot, before django-filter's
+  `BaseFilterSet.__init__` deep-copies `base_filters`, so `FilterSet(data, queryset, request=...)`, DRF's
+  `DjangoFilterBackend` and django-filter's `FilterView` copy the expanded table and answer every walked key with the
+  served set's rows, where they ignored it as an unknown key and answered the view's unfiltered rows. A class still
+  unable to publish (a construction re-entering its own build, a second thread mid-build, a model-less set with a lazy
+  target) shadows the instance's `base_filters` with the table that read answered. A plain subclass publishes its own
+  expansion (605 keys for `_Plain(BookFilter)`, not `BookFilter`'s 189: the path-relative cycle rule compares
+  classes). A `base_filters` entry assigned on the class before first use is replaced by the published table, as a
+  served set's is at finalize; `get_filters()` is the override seam. A raw walked key over a hop whose target has no
+  registered `DjangoType` follows the walked-key rule (`FilterSet._branch_visibility_seed`'s `ConfigurationError`).
+  Grid: 180 of 600 cells moved from the view's unfiltered rows to the served answer, for all three drivers; wired
+  sets, their statement counts and answers did not move. Pinned by
+  `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_set_no_type_names_answers_a_walked_key_as_book_filter`
+  (three drivers, plain subclass and unserved set, walked and two-hop keys, anonymous and staff) and
+  `tests/filters/test_sets.py::test_a_construction_inside_a_sets_own_build_copies_the_surface_the_build_publishes`,
+  `::test_a_construction_racing_a_sets_first_build_copies_the_surface_the_build_publishes` and
+  `::test_a_sets_constructions_publish_its_table_once`. Docs: README `FilterSet`, GLOSSARY `FilterSet`, spec-027
+  Decisions 4 and 8. Filed 841. CHANGELOGTODO 842
 
 ## Outside review of the fixes
 
@@ -2318,10 +2349,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (README: a flat path "answers as Django would if every row the target type's `get_queryset` hides ... did not exist").
   Its values are cleaned over the set's queryset (804). Needs the hop walk to treat the alias's relation as a walked hop
   over the applied queryset's `_filtered_relations`. Split from 721
-- [ ] 793. (robustness) A set used only through raw form drivers (`FilterSet(data=...)`, `DjangoFilterBackend`) never
-  publishes, so `refuse_unresolvable_lookup` / `refuse_identityless_relation` never run for it, though the glossary and
-  spec-027 say a refusal fires for "an unserved set at its first use": `tests/filters/test_base.py::_ScalarRangeSet`
-  with a refused `RangeFilter("parent", "range")` builds and serves raw. Found fixing 721
 - [ ] 795. (robustness) A consumer `filter` override on a flat leaf a hop walks, on a forward relation key or a path
   into a target column, that returns a new queryset when it constrains nothing (`return qs.distinct()` or `qs.all()` on
   an empty value) reads as constraining, so supplied empty or left out it keeps only the parents that reach a visible
@@ -2390,11 +2417,10 @@ tracker number are recorded there; open remainders and new defects are filed as 
   against `utils/querysets.py::relation_target_type(root=...)`, so when the two types' strategies differ (`model`
   primary, `type` secondary, key `shelf__books` on a set wired to the secondary) every nonempty value is refused, a
   primary-minted id as "expects BookSecondary", a secondary-minted id as "expects library.book". Found researching 745
-- [ ] 836. (robustness) A plain subclass of a wired `FilterSet` used outside the schema (`class _Plain(BookFilter):
-  pass` in a DRF view) publishes only its class-creation table (13 `base_filters` against `BookFilter`'s 189: the
-  `RelatedFilter` expansion runs only for a set the finalizer binds), so a walked key it is sent (`shelf__topic`) is
-  ignored as an unknown key and the view answers its unfiltered rows; nothing hidden leaks (the rows are the view's
-  own queryset). Found verifying 750
+- [ ] 841. (robustness) drf-spectacular's `contrib/django_filters.py` reads `filterset_class.base_filters` without
+  constructing the set, so the OpenAPI parameters it generates for a `FilterSet` no `DjangoType` names list the
+  class-creation table (no walked keys) until the set's first construction publishes it (836), and the published table
+  after; `FilterSet.__init__` is the one first-use seam the package owns. Found fixing 836
 
 ## To do: holes found re-checking the fixes
 

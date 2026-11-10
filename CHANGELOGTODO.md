@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 204 to do.
+Progress: 0 done, 205 to do.
 
 ## From dry-0_0_15_3
 
@@ -939,6 +939,14 @@ Progress: 0 done, 204 to do.
   that request (DRF's `Request` under the backend), so staff and permission holders get the rows they get over GraphQL
   instead of being filtered as anonymous, a hook reading `info.context.request.user` no longer raises, and neither does
   a nested branch inside a logical arm; a set built with no request still passes `None`
+- [ ] 842. CHANGELOG entry for items 836 and 793: a `FilterSet` no `DjangoType` names (a plain subclass of a
+  served set, or a set used only through `FilterSet(data, queryset, request=...)`, DRF's `DjangoFilterBackend` or
+  django-filter's `FilterView`) publishes its filter table at its first construction, so its walked keys
+  (`shelf__topic`, `shelf__branch__name`) filter as on the served set instead of being ignored as unknown keys (the
+  view answered its unfiltered rows); a declaration the package refuses (an unresolvable lookup, a `GlobalIDFilter`
+  over a relation with no identity) now raises `ConfigurationError` at that construction and every later one, where
+  a raw set raised Django's own `FieldError` only on requests naming it; an entry assigned to the class's
+  `base_filters` before first use is replaced by the published table (override `get_filters()` instead)
 
 ## From dry-upstream-0_0_15
 

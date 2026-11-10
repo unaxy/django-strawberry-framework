@@ -865,6 +865,124 @@ def test_a_get_filters_call_reentering_a_set_from_its_own_build_gets_the_surface
     assert published == _DESK_RING_FILTERS[member]
 
 
+@pytest.mark.parametrize("member", sorted(_DESK_RING_FILTERS))
+def test_a_construction_inside_a_sets_own_build_copies_the_surface_the_build_publishes(
+    member: str,
+) -> None:
+    """A set constructed while its first build runs copies the whole surface, not its class table.
+
+    The set cannot publish while it builds, so the construction copies the surface the
+    re-entering read answers, never the class-creation ``base_filters`` django-filter's
+    metaclass stored (the set's own filters and ``RelatedFilter`` heads alone).
+    """
+    copied: list[set[str]] = []
+    class_tables: list[set[str]] = []
+    constructing: list[type[FilterSet]] = []
+
+    class ConstructingFilterSet(FilterSet):
+        @classmethod
+        @override
+        def get_fields(cls) -> OrderedDict[str, object]:
+            if cls in constructing and cls.__dict__.get(cls._lifecycle.guard):
+                constructing.remove(cls)
+                class_tables.append(set(cls.base_filters))
+                copied.append(set(cls(data={}).filters))
+            return super().get_fields()
+
+    ring = _desk_ring(ConstructingFilterSet)
+    constructing.append(ring[member])
+
+    instance = ring[member](data={})
+
+    assert copied == [_DESK_RING_FILTERS[member]]
+    assert class_tables != copied
+    assert set(instance.filters) == _DESK_RING_FILTERS[member]
+    assert set(ring[member].base_filters) == _DESK_RING_FILTERS[member]
+
+
+@pytest.mark.parametrize("paused", sorted(_DESK_RING_FILTERS))
+def test_a_construction_racing_a_sets_first_build_copies_the_surface_the_build_publishes(
+    paused: str,
+) -> None:
+    """A second thread constructing a set while its first build runs copies the whole surface.
+
+    The first thread's construction holds the set mid-build; the second thread's
+    construction finds it unpublished and copies the surface its re-entering read
+    answers, as the first thread's instance copies the published table.
+    """
+    inside, release = threading.Event(), threading.Event()
+    builders: set[int] = set()
+    pausing: list[type[FilterSet]] = []
+
+    class PausingFilterSet(FilterSet):
+        @classmethod
+        @override
+        def get_fields(cls) -> OrderedDict[str, object]:
+            if cls in pausing and threading.get_ident() in builders:
+                inside.set()
+                assert release.wait(5)
+            return super().get_fields()
+
+    ring = _desk_ring(PausingFilterSet)
+    pausing.append(ring[paused])
+    built: list[set[str]] = []
+
+    def build() -> None:
+        builders.add(threading.get_ident())
+        built.append(set(ring[paused](data={}).filters))
+
+    builder = threading.Thread(target=build)
+    builder.start()
+    assert inside.wait(5)
+    try:
+        assert ring[paused]._expansion_snapshot() is None
+        racing = set(ring[paused](data={}).filters)
+    finally:
+        release.set()
+        builder.join(5)
+
+    assert racing == _DESK_RING_FILTERS[paused]
+    assert built == [racing]
+
+
+def test_a_sets_constructions_publish_its_table_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a set's first construction publishes; every later one copies the published table.
+
+    A plain subclass of a set publishes its own table (the parent's is not inherited), at
+    its own first construction.
+    """
+    ring = _desk_ring()
+
+    class PlainBranchFilter(ring["branch"]):
+        pass
+
+    publishes: list[type[FilterSet]] = []
+    publish = FilterSet._publish_filters.__func__
+
+    def counting_publish(cls: type[FilterSet], expansion: Mapping[str, Filter]) -> None:
+        publishes.append(cls)
+        publish(cls, expansion)
+
+    monkeypatch.setattr(FilterSet, "_publish_filters", classmethod(counting_publish))
+
+    tables = [set(PlainBranchFilter(data={}).filters) for _ in range(3)]
+
+    assert publishes.count(PlainBranchFilter) == 1
+    assert ring["branch"] in publishes
+    snapshot = PlainBranchFilter._expansion_snapshot()
+    parent_snapshot = ring["branch"]._expansion_snapshot()
+    assert snapshot is not None
+    assert parent_snapshot is not None
+    assert tables == [set(snapshot.filters)] * 3
+    # The cycle rule reads class identity: the path back to the parent does not end at the
+    # subclass, so it expands one step further than the parent's own table.
+    assert set(parent_snapshot.filters) == _DESK_RING_FILTERS["branch"]
+    assert set(snapshot.filters) - _DESK_RING_FILTERS["branch"] == {
+        "desks__shelf__branch__desks__name",
+        "desks__shelf__branch__desks__shelf",
+    }
+
+
 # A two-set cycle with a ``RelatedFilter(None)`` placeholder on one set: the
 # placeholder stays a head on its set and on every flat copy of that set.
 _PLACEHOLDER_CYCLE_FILTERS = {
@@ -1436,7 +1554,7 @@ def test_a_set_that_cannot_publish_answers_its_get_filters_on_every_read(
 
     Its expansion never resolves the target, so no read caches it; the set's table is
     its ``get_filters()`` result, a ``get_filters()`` override's ``extra`` included,
-    read after read.
+    read after read, and a construction copies that table and publishes nothing.
     """
 
     class UnpublishableFilter(FilterSet):
@@ -1451,6 +1569,8 @@ def test_a_set_that_cannot_publish_answers_its_get_filters_on_every_read(
 
     expected = ["name", "later", "extra"] if overridden else ["name", "later"]
     assert list(UnpublishableFilter._filter_table()) == expected
+    instance = UnpublishableFilter(data={}, queryset=library_models.Branch.objects.all())
+    assert list(instance.filters) == expected
     assert list(UnpublishableFilter._filter_table()) == expected
     assert UnpublishableFilter._expansion_snapshot() is None
 
@@ -10108,8 +10228,13 @@ def test_expansion_snapshot_absent_for_unresolved_lazy_target() -> None:
     assert BranchFilter._expansion_snapshot() is None
 
 
-def test_expansion_snapshot_none_before_build_is_the_fail_closed_hook() -> None:
-    """Pre-finalization (no snapshot built), the accessor returns None for the adapter."""
+def test_expansion_snapshot_none_before_first_use_and_published_by_first_construction() -> None:
+    """The accessor is ``None`` until a set's first use; its first construction publishes it.
+
+    Before any use no snapshot exists, so the adapter treats every flat name as a
+    non-candidate. Constructing the set is its first use: it publishes the set and its
+    ``RelatedFilter`` target, and the instance copies the flat copy the expansion adds.
+    """
 
     class ShelfFilter(FilterSet):
         class Meta:
@@ -10117,24 +10242,25 @@ def test_expansion_snapshot_none_before_build_is_the_fail_closed_hook() -> None:
             fields = {"code": ["exact"]}
 
     class BranchFilter(FilterSet):
-        shelves = RelatedFilter("ShelfFilter", field_name="shelves")
+        shelves = RelatedFilter(ShelfFilter, field_name="shelves")
 
         class Meta:
             model = library_models.Branch
             fields = {"name": ["exact"]}
 
-    # No ``get_filters`` build has cached a snapshot yet: the accessor is None,
-    # so a filterset instantiated before its lazy targets resolve presents the
-    # unexpanded surface and every flat name is absent from the (absent)
-    # mapping -- the adapter runs every leaf's plain outer invocation.
     assert ShelfFilter._expansion_snapshot() is None
     assert BranchFilter._expansion_snapshot() is None
+    assert "shelves__code" not in BranchFilter.base_filters
     instance = BranchFilter(
         data={},
         queryset=library_models.Branch.objects.all(),
         request=None,
     )
-    assert type(instance)._expansion_snapshot() is None
+    snapshot = BranchFilter._expansion_snapshot()
+    assert snapshot is not None
+    assert ShelfFilter._expansion_snapshot() is not None
+    assert list(instance.filters) == list(snapshot.filters)
+    assert "shelves__code" in instance.filters
 
 
 def test_expansion_snapshot_reset_by_registry_clear_and_rebuilt_fresh() -> None:

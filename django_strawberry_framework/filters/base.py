@@ -3411,11 +3411,12 @@ def refuse_identityless_relation(
     model), has none, and Django refuses a queryset filter through it with
     ``FieldError``, so the declaration could answer no request.
     ``filters/sets.py::FilterSet._publish_filters`` asks this of every leaf a set
-    publishes: a set a type serves refuses it when the schema builds, an unserved set
-    applied over JSON at its first use. A path naming no field is not read here, and
-    neither is a filter with a ``method``: django-filter dispatches it to that method,
-    which filters as it chooses (the content type and object id columns, say), never
-    through the relation its ``field_name`` names.
+    publishes: a set a type serves refuses it when the schema builds, an unserved set at
+    its first use (its first construction, ``FilterSet.__init__``, or the package's first
+    read of its table), and again at every construction until it is fixed. A path naming
+    no field is not read here, and neither is a filter with a ``method``: django-filter
+    dispatches it to that method, which filters as it chooses (the content type and
+    object id columns, say), never through the relation its ``field_name`` names.
     """
     if not isinstance(filter_instance, (GlobalIDFilter, GlobalIDMultipleChoiceFilter)):
         return
@@ -3473,8 +3474,10 @@ def refuse_unresolvable_lookup(
     leaf a set publishes whose ``filter`` is shipped code
     (``filters/sets.py::_runs_shipped_filter``), as ``refuse_identityless_relation`` is
     asked: a set a type serves refuses it when the schema builds, an unserved set at its
-    first use. Nothing is kept between asks: a lookup a project registers after a set
-    publishes (Django registers lookups at startup, ``AppConfig.ready``) is not seen by it.
+    first use (its first construction, or the package's first read of its table) and at
+    every construction after until it is fixed. Nothing is kept between asks: a lookup a
+    project registers after a set publishes (Django registers lookups at startup,
+    ``AppConfig.ready``) is not seen by it.
 
     Not judged: a first name the model does not carry (a queryset annotation, a
     ``FilteredRelation`` alias, which only the queryset a filter runs on holds: Django's

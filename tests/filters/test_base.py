@@ -331,6 +331,15 @@ class _ScalarRangeSet(FilterSet):
     price_span = RangeFilter(field_name="price", lookup_expr="range")
     payload_span = RangeFilter(field_name="payload", lookup_expr="range")
     nowhere_span = RangeFilter(field_name="nowhere", lookup_expr="range")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = ("label",)
+
+
+class _PlainParentRangeSet(django_filters.FilterSet):
+    """A ``range`` over a relation, which a package set refuses at its first use."""
+
     parent_span = RangeFilter(field_name="parent", lookup_expr="range")
 
     class Meta:
@@ -378,17 +387,18 @@ def test_range_filter_field_cleans_bounds_once_bound_to_a_filterset() -> None:
     [
         pytest.param(_ScalarRangeSet, "payload_span", id="column-without-a-default-filter"),
         pytest.param(_ScalarRangeSet, "nowhere_span", id="path-naming-no-field"),
-        pytest.param(_ScalarRangeSet, "parent_span", id="relation"),
+        pytest.param(_PlainParentRangeSet, "parent_span", id="relation"),
     ],
 )
 def test_range_filter_without_a_column_form_field_passes_bounds_through(
-    filterset_class: type[FilterSet],
+    filterset_class: type[django_filters.FilterSet],
     name: str,
 ) -> None:
     """No column comparison field to read leaves the range field cleaning no bound.
 
     Django registers no ``range`` lookup on a relation, so a ``range`` over one compares no
-    column a bound could be cleaned as.
+    column a bound could be cleaned as (a django-filter set builds it; a package set
+    refuses it at its first use).
     """
     filterset = filterset_class(data={}, queryset=scalar_models.ScalarSpecimen.objects.none())
 

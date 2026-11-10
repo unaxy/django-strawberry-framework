@@ -21,21 +21,30 @@ Under the package's set the raw form runs the bind ask the typed input runs, as 
 errors: a year comparison past 9999, a duration past the backend's range on every lookup
 and text the package refuses are refused with the typed input's messages, and the bare ``.qs``
 applies the leaves that cleaned.
+A set no type names (a plain subclass of ``BookFilter``, a set of the test's own) publishes
+its filter table at its first construction, under a consumer's own call, DRF's
+``DjangoFilterBackend`` and django-filter's ``FilterView`` alike: a walked key one or two hops
+deep answers ``BookFilter``'s rows as each viewer sees them, and a declaration Django answers
+no request for (a ``range`` over a relation, a GlobalID filter over a ``GenericForeignKey``) is
+refused at every construction.
 """
 
 import contextlib
 import datetime
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from decimal import Decimal
 from functools import wraps
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import django_filters
 import pytest
 import strawberry
 from apps.library import models as library_models
+from apps.library.filters import BookFilter
+from apps.products.services import create_users
 from apps.scalars import models
 from django import forms
+from django.contrib.auth import get_user_model
 from django.core.exceptions import FieldError
 from django.db import connection
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -53,20 +62,30 @@ from django.db.models import (
 )
 from django.db.models.sql.compiler import SQLCompiler
 from django.forms.utils import ErrorDict
-from django.http import HttpRequest, HttpResponseBase, QueryDict
-from django.test import override_settings
+from django.http import HttpRequest, HttpResponseBase, JsonResponse, QueryDict
+from django.test import Client, override_settings
 from django.test.utils import register_lookup
 from django.urls import path
 from django_filters.filterset import BaseFilterSet
+from django_filters.rest_framework import DjangoFilterBackend
+from django_filters.views import FilterView
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
     assert_database_answer,
     database_answer,
     graphql_payload,
+    json_int,
+    json_list,
+    json_loads,
     json_object,
+    read_attr,
 )
+from rest_framework import generics, serializers
+from rest_framework.authentication import SessionAuthentication
+from rest_framework.renderers import JSONRenderer
 from strawberry.scalars import JSON
+from strawberry.types import Info
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -75,9 +94,11 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import (
     ArrayFilter,
     FilterSet,
+    GlobalIDFilter,
     ListFilter,
     RangeFilter,
     RelatedFilter,
@@ -85,6 +106,7 @@ from django_strawberry_framework.filters import (
 from django_strawberry_framework.filters.base import _lookup_operand, _model_lookup_operand
 from django_strawberry_framework.utils._narrowing import (
     is_list_or_tuple,
+    is_queryset,
     require,
     require_instance,
 )
@@ -111,7 +133,137 @@ def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
-urlpatterns = [path("graphql-raw-filter-forms/", _graphql_view)]
+class _PlainBookFilter(BookFilter):
+    """A plain subclass of the set ``BookType`` serves, which no type names."""
+
+
+class _UnservedBranchSet(FilterSet):
+    class Meta:
+        model = library_models.Branch
+        fields = {"name": ["exact"], "city": ["exact"]}
+
+
+class _UnservedShelfSet(FilterSet):
+    branch = RelatedFilter(_UnservedBranchSet, field_name="branch")
+
+    class Meta:
+        model = library_models.Shelf
+        fields = {"topic": ["exact"]}
+
+
+class _UnservedBookSet(FilterSet):
+    """A set no type names, walking ``shelf`` and ``shelf__branch`` through its declarations."""
+
+    shelf = RelatedFilter(_UnservedShelfSet, field_name="shelf")
+
+    class Meta:
+        model = library_models.Book
+        fields = {"title": ["exact"]}
+
+
+class _RangeOverRelationSet(FilterSet):
+    """A ``range`` over a relation: Django registers no ``range`` lookup on one."""
+
+    branch_span = RangeFilter(field_name="branch", lookup_expr="range")
+
+    class Meta:
+        model = library_models.Shelf
+        fields = ("code",)
+
+
+class _GlobalIDOverGenericSet(FilterSet):
+    """A GlobalID filter over a ``GenericForeignKey``, which compares no row identity."""
+
+    content_object = GlobalIDFilter(field_name="content_object")
+
+    class Meta:
+        model = library_models.TaggedItem
+        fields = ("tag",)
+
+
+#: The raw sets the driver routes build, by route name.
+_RAW_SETS: dict[str, type[FilterSet]] = {
+    "book-filter": BookFilter,
+    "plain-subclass": _PlainBookFilter,
+    "unserved": _UnservedBookSet,
+    "range-over-a-relation": _RangeOverRelationSet,
+    "global-id-over-a-generic-key": _GlobalIDOverGenericSet,
+}
+
+
+def _raw_set_rows(filterset_class: type[FilterSet]) -> QuerySet[Model]:
+    model = filterset_class._meta.model
+    assert model is not None
+    return model._default_manager.order_by("pk")
+
+
+def _row_ids(rows: Iterable[object]) -> JsonResponse:
+    return JsonResponse([saved_pk(require_instance(row, Model)) for row in rows], safe=False)
+
+
+def _direct_rows(request: HttpRequest, name: str) -> JsonResponse:
+    """A consumer view building the set itself over the query string, with the request."""
+    filterset_class = _RAW_SETS[name]
+    filterset = filterset_class(
+        data=request.GET,
+        queryset=_raw_set_rows(filterset_class),
+        request=request,
+    )
+    return _row_ids(require(filterset.qs, is_queryset))
+
+
+class _IdSerializer(serializers.Serializer[Model]):
+    id = serializers.IntegerField(source="pk")
+
+
+class _BackendRowsView(generics.ListAPIView[Model]):
+    """A session-authenticated DRF list filtered through ``DjangoFilterBackend``."""
+
+    serializer_class = _IdSerializer
+    filter_backends = (DjangoFilterBackend,)
+    filterset_class: ClassVar[type[BaseFilterSet] | None] = None
+    authentication_classes = (SessionAuthentication,)
+    permission_classes = ()
+    renderer_classes = (JSONRenderer,)
+    pagination_class = None
+
+
+class _ListedRowsView(FilterView):
+    """django-filter's ``FilterView`` answering its filtered rows' ids as JSON."""
+
+    @override
+    def render_to_response(
+        self,
+        context: dict[str, object],
+        **response_kwargs: object,
+    ) -> JsonResponse:
+        return _row_ids(self.object_list)
+
+
+urlpatterns = [
+    path("graphql-raw-filter-forms/", _graphql_view),
+    *(
+        route
+        for name, filterset_class in _RAW_SETS.items()
+        for route in (
+            path(f"raw-sets/direct/{name}/", _direct_rows, {"name": name}),
+            path(
+                f"raw-sets/backend/{name}/",
+                _BackendRowsView.as_view(
+                    filterset_class=filterset_class,
+                    queryset=_raw_set_rows(filterset_class),
+                ),
+            ),
+            path(
+                f"raw-sets/filter-view/{name}/",
+                _ListedRowsView.as_view(
+                    filterset_class=filterset_class,
+                    queryset=_raw_set_rows(filterset_class),
+                ),
+            ),
+        )
+    ),
+]
 
 
 class _DecimalSeeingFilter(django_filters.NumberFilter):
@@ -2179,3 +2331,176 @@ def test_a_raw_duration_past_the_backends_range_is_refused_by_the_form(
         },
     }, result
     assert len(recorded) == 1, recorded
+
+
+def _actor_is_staff(info: Info) -> bool:
+    user = read_attr(read_attr(read_attr(info, "context"), "request"), "user")
+    return read_attr(user, "is_staff") is True
+
+
+def _register_hiding_types() -> None:
+    """Serve Shelf and Branch through types hiding a secret shelf and a restricted branch.
+
+    Each walked key's hop reads its target type's ``get_queryset`` as the request's actor:
+    the anonymous viewer never matches through a ``topic="secret"`` shelf or a
+    ``city="restricted"`` branch, staff do.
+    """
+
+    class HidingShelfType(DjangoType):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("id", "code", "topic")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[library_models.Shelf],
+            info: Info,
+        ) -> QuerySet[library_models.Shelf]:
+            return queryset if _actor_is_staff(info) else queryset.exclude(topic="secret")
+
+    class HidingBranchType(DjangoType):
+        class Meta:
+            model = library_models.Branch
+            fields = ("id", "name", "city")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[library_models.Branch],
+            info: Info,
+        ) -> QuerySet[library_models.Branch]:
+            return queryset if _actor_is_staff(info) else queryset.exclude(city="restricted")
+
+    del HidingShelfType, HidingBranchType
+    finalize_django_types()
+
+
+def _shelved_world() -> dict[str, int]:
+    """An open shelf's book, a secret shelf's book and a restricted branch's book, by title."""
+    home = library_models.Branch.objects.create(name="Home", city="Boston")
+    vault = library_models.Branch.objects.create(name="Vault", city="restricted")
+    shelves = {
+        "b-open": library_models.Shelf.objects.create(code="S-open", topic="general", branch=home),
+        "b-secret": library_models.Shelf.objects.create(
+            code="S-secret",
+            topic="secret",
+            branch=home,
+        ),
+        "b-vault": library_models.Shelf.objects.create(
+            code="S-vault",
+            topic="general",
+            branch=vault,
+        ),
+    }
+    return {
+        title: saved_pk(library_models.Book.objects.create(title=title, shelf=shelf))
+        for title, shelf in shelves.items()
+    }
+
+
+def _raw_set_client(viewer: str) -> Client:
+    client = Client()
+    if viewer == "staff":
+        client.force_login(get_user_model().objects.get(username="staff_1"))
+    return client
+
+
+def _raw_set_ids(
+    client: Client,
+    driver: str,
+    name: str,
+    query: dict[str, str],
+) -> list[int]:
+    data = QueryDict(mutable=True)
+    data.update(query)
+    with override_settings(ROOT_URLCONF=__name__):
+        response = client.get(f"/raw-sets/{driver}/{name}/?{data.urlencode()}")
+    assert response.status_code == 200, response.content
+    rows = json_list(json_loads(response.content))
+    return [json_int(row, "id") if driver == "backend" else json_int(row) for row in rows]
+
+
+#: (walked key and value, the titles each viewer's request answers)
+_WALKED_KEYS: dict[str, tuple[dict[str, str], list[str], list[str]]] = {
+    "walked-column-on-a-hidden-shelf": ({"shelf__topic": "secret"}, [], ["b-secret"]),
+    "two-hop-column-past-a-hidden-shelf": (
+        {"shelf__branch__city": "Boston"},
+        ["b-open"],
+        ["b-open", "b-secret"],
+    ),
+    "two-hop-column-on-a-hidden-branch": ({"shelf__branch__name": "Vault"}, [], ["b-vault"]),
+}
+
+_RAW_DRIVERS = ["direct", "backend", "filter-view"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("viewer", ["anonymous", "staff"])
+@pytest.mark.parametrize("key", sorted(_WALKED_KEYS))
+@pytest.mark.parametrize("name", ["plain-subclass", "unserved"])
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_set_no_type_names_answers_a_walked_key_as_book_filter(
+    driver: str,
+    name: str,
+    key: str,
+    viewer: str,
+) -> None:
+    """A set no type names, built raw, answers a walked key with ``BookFilter``'s rows.
+
+    ``BookFilter`` is built raw in the same request (no type names it in this registry).
+
+    Its first construction publishes its filter table, so the flat copies its
+    ``RelatedFilter`` declarations expand to are fields of its form and each walks its hop
+    as the request's actor sees it, under a consumer's own construction, DRF's
+    ``DjangoFilterBackend`` and django-filter's ``FilterView`` alike: never the view's
+    unfiltered rows.
+    """
+    create_users(1)
+    _register_hiding_types()
+    books = _shelved_world()
+    client = _raw_set_client(viewer)
+    query, anonymous, staff = _WALKED_KEYS[key]
+    expected = [books[title] for title in (staff if viewer == "staff" else anonymous)]
+
+    assert _raw_set_ids(client, driver, name, query) == expected
+    assert _raw_set_ids(client, driver, "book-filter", query) == expected
+
+
+#: (the set, the refusal its first construction raises)
+_REFUSED_SETS = {
+    "range-over-a-relation": (
+        "FilterSet _RangeOverRelationSet: RangeFilter 'branch_span' has field_name 'branch' and "
+        "lookup_expr 'range', but Django resolves no transform or lookup 'range' on "
+        "Shelf.branch (ForeignKey), so every request naming the filter would be refused."
+    ),
+    "global-id-over-a-generic-key": (
+        "FilterSet _GlobalIDOverGenericSet: GlobalIDFilter 'content_object' has field_name "
+        "'content_object', which names TaggedItem.content_object, a GenericForeignKey: Django "
+        "filters no queryset through it, so no related row's identity can be compared on it."
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", sorted(_REFUSED_SETS))
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_set_declaring_a_refused_filter_is_refused_at_its_first_construction(
+    driver: str,
+    name: str,
+) -> None:
+    """A set no type names is refused at its first construction, its first use, by every driver.
+
+    Its publication refuses the declaration Django can answer no request for, so the
+    request building it raises ``ConfigurationError`` naming the set and the filter whatever
+    data it sends, and every later request does too until the declaration is fixed.
+    """
+    create_users(1)
+    client = _raw_set_client("anonymous")
+    for _ in range(2):
+        with pytest.raises(ConfigurationError) as refused:
+            _ = _raw_set_ids(client, driver, name, {})
+        assert str(refused.value).startswith(_REFUSED_SETS[name])
+    assert _RAW_SETS[name]._expansion_snapshot() is None
