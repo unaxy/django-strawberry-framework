@@ -441,9 +441,8 @@ def test_related_queryset_requires_the_exact_child_model_only_when_the_branch_is
             payload,
             "RelatedFilter ExplicitBranchParent.shelves: the explicit ``queryset=`` is keyed on "
             f"{model_name} but the target filterset is keyed on Shelf. Pass a queryset of Shelf "
-            "instances to ``RelatedFilter(queryset=...)``; proxy and multi-table-inheritance "
-            "children are NOT accepted because Django's queryset ``&`` operator rejects mixed "
-            "model classes.",
+            "instances to ``RelatedFilter(queryset=...)``; its model must be the target "
+            "filterset's own, so proxy and multi-table-inheritance children are NOT accepted.",
         )
     else:
         all_rows = [{"name": name} for name in ("alpha", "beta", "gamma")]

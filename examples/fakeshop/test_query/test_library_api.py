@@ -5006,6 +5006,51 @@ def test_library_branches_filter_respects_related_queryset_boundary_on_parent() 
     ]
 
 
+_BRANCHES_BY_SHELF_HOME_BRANCHES = """
+query ($filter: BranchFilterInputType) {
+  allLibraryBranches(filter: $filter) { name }
+}
+"""
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("spelling", "expected"),
+    [("nested", ["North"]), ("flat", ["North"]), ("not", ["South"])],
+    ids=["nested", "flat", "not"],
+)
+def test_library_branches_shelves_queryset_bounds_a_distinct_model_choice_leaf_over_http(
+    spelling: str,
+    expected: list[str],
+) -> None:
+    """``BranchFilter.shelves``'s ``queryset=`` bounds the rows ``homeBranches`` reads ``distinct()``.
+
+    ``ShelfFilter.home_branches`` is django-filter's ``ModelMultipleChoiceFilter``, which runs
+    ``distinct()``; the branch admits the matched shelves among the ``permanent collection``
+    ones, so ``South``, whose only shelf is ``seasonal``, matches neither spelling.
+    """
+    north, south, _restricted = _seed_shelves_on_home_branches()
+    models.Shelf.objects.filter(branch=north).update(topic="permanent collection")
+    models.Shelf.objects.filter(branch=south).update(topic="seasonal")
+    leaf = {"exact": [saved_pk(north.pk), saved_pk(south.pk)]}
+    nested = {"shelves": {"homeBranches": leaf}}
+    filter_input = {
+        "nested": nested,
+        "flat": {"shelvesHomeBranches": leaf},
+        "not": {"not": nested},
+    }[spelling]
+
+    with CaptureQueriesContext(connection) as captured:
+        _assert_graphql_data(
+            _BRANCHES_BY_SHELF_HOME_BRANCHES,
+            {"allLibraryBranches": [{"name": name} for name in expected]},
+            variables={"filter": filter_input},
+        )
+
+    # The form field's choice check, then the one branch read.
+    assert len(captured) == 2
+
+
 @pytest.mark.django_db
 def test_book_genres_uses_absolute_import_path_related_filter() -> None:
     """Spec-027: ``BookFilter.genres`` resolves via the Layer-2 absolute path."""

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 209 to do.
+Progress: 0 done, 210 to do.
 
 ## From dry-0_0_15_3
 
@@ -979,6 +979,14 @@ Progress: 0 done, 209 to do.
   path), and `RelatedFilter(..., flat=False)` keeps a declaration's nested branch while copying none of its target's
   filters flat; clients regenerate their schema, a form-data key only the copy registered is ignored, and an own key
   the copy would replace is the set's own filter again, with its own behaviour
+- [ ] 856. CHANGELOG entry for item 818: a `RelatedFilter(queryset=...)` branch admits its child rows among the rows
+  the queryset holds whatever `distinct()` either side reads: a child filter django-filter runs `distinct()` for
+  (`MultipleChoiceFilter`, `AllValuesMultipleFilter`, `ModelMultipleChoiceFilter`, any `distinct=True` filter), a
+  target `get_queryset` returning `distinct()` rows, and a `distinct()`, `union()` or `values()` explicit `queryset=`
+  used to raise Django's "Cannot combine ..." error, masked over GraphQL and bare from a raw `FilterSet(...).qs`,
+  nested, flat, under `not` / `and` / `or` and in raw form. A `queryset=` pinned with `.using()` to an alias the
+  request does not read is now refused, as Django refuses a subquery across databases, instead of being read on the
+  request's alias
 
 ## From dry-upstream-0_0_15
 

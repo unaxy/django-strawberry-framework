@@ -18,6 +18,15 @@ request=...).qs`` a consumer resolver reads. The flat copy's form field, which c
 the parent's own copy's; the owner-bound twins (a ``method=``, a child set ``__init__``) answer as
 their nested twins do. A set's own leaf whose path walks a relation no ``RelatedFilter`` declares,
 scoped by its target type's ``get_queryset``, runs bound to that relation's model the same way.
+
+A declared branch's explicit ``queryset=`` admits the child rows among the rows it holds however
+either side reads ``distinct()``: child filters django-filter runs ``distinct()`` for
+(``AllValuesMultipleFilter``, a consumer ``MultipleChoiceFilter`` and
+``ModelMultipleChoiceFilter``), a callable, ``distinct()`` or combined (``union()``) ``queryset=``
+and a target type's ``get_queryset`` returning ``distinct()`` rows, through a forward key, a
+reverse key, a many-to-many and a scoped second hop, flat, nested, under ``not``, ``and`` and
+``or``, in pinned statement counts, on the sync and async views and through a raw ``FilterSet(data,
+queryset, request=...).qs``.
 """
 
 from collections.abc import Mapping
@@ -668,6 +677,410 @@ def test_a_raw_filterset_walks_a_flat_copy_on_its_target_model(case: str) -> Non
     query, expected = _RAW_CASES[case]
     _world()
     _CURRENT["schema"] = _schema()
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload(
+                "query ($query: String!) { rawBooks(query: $query) }",
+                variables={"query": query},
+                url="/graphql-flat-binding/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+
+    assert payload == {"data": {"rawBooks": expected}}, payload
+
+
+# --- A declared branch's explicit ``queryset=`` over distinct child rows ---------------------
+
+
+def _shelves_for_request(request: HttpRequest | None) -> QuerySet[models.Shelf]:
+    """django-filter's request-aware ``queryset=`` form: every shelf but ``A-1``."""
+    del request
+    return models.Shelf.objects.exclude(code="A-1")
+
+
+class ScopedBranchFilter(FilterSet):
+    """The branch a shelf stands in: a distinct ``name_values`` and a plain ``name_text``."""
+
+    name_values = AllValuesMultipleFilter(field_name="name")
+    name_text = CharFilter(field_name="name")
+
+    class Meta:
+        model = models.Branch
+        fields = ()
+
+
+class ScopedGenreFilter(FilterSet):
+    """A book's genres: django-filter's ``AllValuesMultipleFilter`` over ``name``."""
+
+    name_values = AllValuesMultipleFilter(field_name="name")
+
+    class Meta:
+        model = models.Genre
+        fields = ()
+
+
+class ScopedShelfFilter(FilterSet):
+    """Shelf leaves django-filter runs ``distinct()`` for, a plain one, and a scoped branch hop."""
+
+    code_values = AllValuesMultipleFilter(field_name="code")
+    code_labelled = _LabelledPicks(field_name="code", choices=_CODES)
+    branch_labelled = _LabelledRows(field_name="branch", queryset=models.Branch.objects.all())
+    code_contains = CharFilter(field_name="code", lookup_expr="icontains")
+    branch = RelatedFilter(
+        ScopedBranchFilter,
+        field_name="branch",
+        queryset=models.Branch.objects.exclude(name="North"),
+    )
+
+    class Meta:
+        model = models.Shelf
+        fields = ()
+
+
+def _scoped_book_filter(name: str, queryset: object) -> type[FilterSet]:
+    """A ``Book`` set whose ``shelf`` branch declares ``queryset`` (none for ``None``)."""
+    shelf = (
+        RelatedFilter(ScopedShelfFilter, field_name="shelf")
+        if queryset is None
+        else RelatedFilter(ScopedShelfFilter, field_name="shelf", queryset=queryset)
+    )
+    genres = RelatedFilter(
+        ScopedGenreFilter,
+        field_name="genres",
+        queryset=models.Genre.objects.exclude(name="Fiction"),
+    )
+    meta = type("Meta", (), {"model": models.Book, "fields": ()})
+    namespace = {
+        "__module__": __name__,
+        "shelf": shelf,
+        "genres": genres,
+        "Meta": meta,
+    }
+    return type(name, (FilterSet,), namespace)
+
+
+#: The ``Book`` sets, by the ``queryset=`` their ``shelf`` branch declares.
+_SCOPED_BOOK_SETS = {
+    "plain": _scoped_book_filter(
+        "ScopedPlainBookFilter",
+        models.Shelf.objects.exclude(code="A-1"),
+    ),
+    "callable": _scoped_book_filter("ScopedCallableBookFilter", _shelves_for_request),
+    "distinct": _scoped_book_filter(
+        "ScopedDistinctBookFilter",
+        models.Shelf.objects.exclude(code="A-1").distinct(),
+    ),
+    "combined": _scoped_book_filter(
+        "ScopedCombinedBookFilter",
+        models.Shelf.objects.filter(code="C-3").union(models.Shelf.objects.filter(code="D-4")),
+    ),
+    "open": _scoped_book_filter("ScopedOpenBookFilter", None),
+}
+
+
+class ScopedBranchRootFilter(FilterSet):
+    """Branches through the reverse key ``shelves``, every shelf but ``C-3``."""
+
+    shelves = RelatedFilter(
+        ScopedShelfFilter,
+        field_name="shelves",
+        queryset=models.Shelf.objects.exclude(code="C-3"),
+    )
+
+    class Meta:
+        model = models.Branch
+        fields = ()
+
+
+def _scoped_raw_titles(variant: str, query: str, request: HttpRequest) -> list[str]:
+    """A consumer's own ``<book set>(data, queryset, request=...).qs``."""
+    filterset = _SCOPED_BOOK_SETS[variant](
+        data=QueryDict(query),
+        queryset=models.Book.objects.order_by("title"),
+        request=request,
+    )
+    assert filterset.is_valid(), filterset.errors
+    matched: QuerySet[Model] = filterset.qs
+    return [require_instance(read_attr(book, "title"), str) for book in matched]
+
+
+def _scoped_schema(variant: str) -> DjangoSchema:
+    book_set = _SCOPED_BOOK_SETS[variant]
+
+    class ScopedBook(DjangoType):
+        class Meta:
+            model = models.Book
+            fields = ("id", "title")
+            interfaces = (relay.Node,)
+            filterset_class = book_set
+
+    class ScopedBranch(DjangoType):
+        class Meta:
+            model = models.Branch
+            fields = ("id", "name")
+            interfaces = (relay.Node,)
+            filterset_class = ScopedBranchRootFilter
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.Branch],
+            info: strawberry.Info[object, object],
+        ) -> QuerySet[models.Branch]:
+            # A visibility hook reading its rows ``distinct()``.
+            return queryset.exclude(city="restricted").distinct()
+
+    class ScopedShelf(DjangoType):
+        class Meta:
+            model = models.Shelf
+            fields = ("id", "code")
+            filterset_class = ScopedShelfFilter
+
+    class ScopedGenre(DjangoType):
+        class Meta:
+            model = models.Genre
+            fields = ("id", "name")
+            filterset_class = ScopedGenreFilter
+
+    @strawberry.type
+    class Query:
+        books: DjangoConnection[ScopedBook] = DjangoConnectionField(ScopedBook)
+        branches: DjangoConnection[ScopedBranch] = DjangoConnectionField(ScopedBranch)
+
+        @strawberry.field
+        def raw_books(self, info: strawberry.Info[object, object], query: str) -> list[str]:
+            del self
+            return _scoped_raw_titles(
+                variant,
+                query,
+                require_instance(read_attr(info.context, "request"), HttpRequest),
+            )
+
+    del ScopedShelf, ScopedGenre
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+_SCOPED_ROOTS = {"books": "title", "branches": "name"}
+#: Every label each root lists unfiltered.
+_SCOPED_EVERYONE = {"books": ["Dune", "Emma"], "branches": ["North", "South"]}
+
+#: ``(book set, root, flat input, nested input, expected labels, (flat, nested) statements)``:
+#: each child leaf admits a row the branch's ``queryset=`` leaves out, so only the rows the
+#: queryset holds answer.
+_ScopedCase: TypeAlias = tuple[
+    str,
+    str,
+    Mapping[str, object],
+    Mapping[str, object],
+    list[str],
+    tuple[int, int],
+]
+
+_SCOPED_CASES: dict[str, _ScopedCase] = {
+    "forward-all-values": (
+        "plain",
+        "books",
+        {"shelfCodeValues": {"exact": ["A-1", "C-3"]}},
+        {"shelf": {"codeValues": {"exact": ["A-1", "C-3"]}}},
+        ["Emma"],
+        (4, 4),
+    ),
+    "forward-consumer-multiple-choice": (
+        "plain",
+        "books",
+        {"shelfCodeLabelled": {"exact": ["A-1", "C-3"]}},
+        {"shelf": {"codeLabelled": {"exact": ["A-1", "C-3"]}}},
+        ["Emma"],
+        (1, 2),
+    ),
+    "forward-key": (
+        "plain",
+        "books",
+        {"shelfBranchLabelled": {"exact": [_NORTH, _SOUTH]}},
+        {"shelf": {"branchLabelled": {"exact": [_NORTH, _SOUTH]}}},
+        ["Emma"],
+        (2, 3),
+    ),
+    "callable-queryset": (
+        "callable",
+        "books",
+        {"shelfCodeValues": {"exact": ["A-1", "C-3"]}},
+        {"shelf": {"codeValues": {"exact": ["A-1", "C-3"]}}},
+        ["Emma"],
+        (4, 4),
+    ),
+    "distinct-queryset-plain-leaf": (
+        "distinct",
+        "books",
+        {"shelfCodeContains": {"iContains": "-"}},
+        {"shelf": {"codeContains": {"iContains": "-"}}},
+        ["Emma"],
+        (1, 2),
+    ),
+    "combined-queryset": (
+        "combined",
+        "books",
+        {"shelfCodeValues": {"exact": ["A-1", "C-3"]}},
+        {"shelf": {"codeValues": {"exact": ["A-1", "C-3"]}}},
+        ["Emma"],
+        (4, 4),
+    ),
+    "many-to-many": (
+        "open",
+        "books",
+        {"genresNameValues": {"exact": ["Fiction", "Poetry"]}},
+        {"genres": {"nameValues": {"exact": ["Fiction", "Poetry"]}}},
+        ["Emma"],
+        (4, 4),
+    ),
+    "reverse": (
+        "open",
+        "branches",
+        {"shelvesCodeValues": {"exact": ["A-1", "C-3"]}},
+        {"shelves": {"codeValues": {"exact": ["A-1", "C-3"]}}},
+        ["North"],
+        (4, 4),
+    ),
+    "second-hop-scoped": (
+        "open",
+        "books",
+        {"shelfBranchNameValues": {"exact": ["North", "South"]}},
+        {"shelf": {"branch": {"nameValues": {"exact": ["North", "South"]}}}},
+        ["Emma"],
+        (4, 5),
+    ),
+    "second-hop-distinct-hook-plain-leaf": (
+        "open",
+        "books",
+        {"shelfBranchNameText": {"exact": "South"}},
+        {"shelf": {"branch": {"nameText": {"exact": "South"}}}},
+        ["Emma"],
+        (1, 3),
+    ),
+}
+
+
+def _scoped_document(variant: str, root: str) -> str:
+    label = _SCOPED_ROOTS[root]
+    input_type = (
+        f"{_SCOPED_BOOK_SETS[variant].__name__}InputType"
+        if root == "books"
+        else "ScopedBranchRootFilterInputType"
+    )
+    return (
+        f"query ($filter: {input_type}) "
+        f"{{ {root}(filter: $filter) {{ edges {{ node {{ {label} }} }} }} }}"
+    )
+
+
+def _scoped_post(
+    schema: DjangoSchema,
+    variant: str,
+    root: str,
+    filter_input: Mapping[str, object],
+) -> tuple[JSONObject, int]:
+    document = _scoped_document(variant, root)
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__), CaptureQueriesContext(connection) as sql:
+            payload = graphql_payload(
+                document,
+                variables={"filter": filter_input},
+                url="/graphql-flat-binding/",
+            )
+    finally:
+        _CURRENT["schema"] = None
+    return payload, len(sql)
+
+
+def _scoped_labels(root: str, labels: list[str]) -> JSONObject:
+    label = _SCOPED_ROOTS[root]
+    return {"data": {root: {"edges": [{"node": {label: value}} for value in labels]}}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("case", sorted(_SCOPED_CASES))
+def test_a_scoped_branch_admits_its_child_rows_the_queryset_holds(case: str) -> None:
+    """A branch's ``queryset=`` bounds its child rows however either side reads ``distinct()``."""
+    variant, root, flat, nested, expected, statements = _SCOPED_CASES[case]
+    _world()
+    schema = _scoped_schema(variant)
+
+    flat_payload, flat_queries = _scoped_post(schema, variant, root, flat)
+    nested_payload, nested_queries = _scoped_post(schema, variant, root, nested)
+    negated_payload, _negated_queries = _scoped_post(schema, variant, root, {"not": nested})
+    both_payload, _both_queries = _scoped_post(schema, variant, root, {"and": [nested, nested]})
+    either_payload, _either_queries = _scoped_post(
+        schema,
+        variant,
+        root,
+        {"or": [nested, nested]},
+    )
+
+    assert flat_payload == _scoped_labels(root, expected), flat_payload
+    assert nested_payload == flat_payload
+    assert both_payload == flat_payload
+    assert either_payload == flat_payload
+    everyone = _SCOPED_EVERYONE[root]
+    assert negated_payload == _scoped_labels(
+        root,
+        [label for label in everyone if label not in expected],
+    ), negated_payload
+    assert (flat_queries, nested_queries) == statements
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("case", sorted(_SCOPED_CASES))
+async def test_a_scoped_branch_admits_its_child_rows_the_queryset_holds_async(case: str) -> None:
+    """Under the async view (``apply_async``) each spelling answers the same rows."""
+    variant, root, flat, nested, expected, _statements = _SCOPED_CASES[case]
+    await sync_to_async(_world)()
+    schema = _scoped_schema(variant)
+    document = _scoped_document(variant, root)
+    everyone = _SCOPED_EVERYONE[root]
+    spellings = (
+        (flat, expected),
+        (nested, expected),
+        ({"not": nested}, [value for value in everyone if value not in expected]),
+        ({"and": [nested, nested]}, expected),
+        ({"or": [nested, nested]}, expected),
+    )
+    _CURRENT["schema"] = schema
+    payloads: list[JSONObject] = []
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            for filter_input, _expected in spellings:
+                result = await AsyncTestClient().query(
+                    document,
+                    variables={"filter": filter_input},
+                    assert_no_errors=False,
+                    url="/graphql-flat-binding-async/",
+                )
+                payloads.append(response_json(result.response))
+    finally:
+        _CURRENT["schema"] = None
+
+    assert payloads == [_scoped_labels(root, labels) for _input, labels in spellings], payloads
+
+
+_SCOPED_RAW_CASES = {
+    "forward-all-values": ("plain", "shelf__code_values=A-1&shelf__code_values=C-3", ["Emma"]),
+    "distinct-queryset-plain-leaf": ("distinct", "shelf__code_contains=-", ["Emma"]),
+    "combined-queryset": ("combined", "shelf__code_values=A-1&shelf__code_values=C-3", ["Emma"]),
+    "second-hop-distinct-hook-plain-leaf": ("open", "shelf__branch__name_text=South", ["Emma"]),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("case", sorted(_SCOPED_RAW_CASES))
+def test_a_raw_filterset_walks_a_scoped_branch_to_the_rows_its_queryset_holds(case: str) -> None:
+    """A resolver's own scoped book set's ``(data, queryset, request=...).qs`` reads these rows."""
+    variant, query, expected = _SCOPED_RAW_CASES[case]
+    _world()
+    _CURRENT["schema"] = _scoped_schema(variant)
     try:
         with override_settings(ROOT_URLCONF=__name__):
             payload = graphql_payload(

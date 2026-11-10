@@ -21,21 +21,22 @@ names under ``### examples/fakeshop/test_query/test_multi_db.py``):
 
 The suite also owns the alias pins that only a second database can prove: the
 row-preserving relational leaf predicate executing wholly on ``shard_b``, a
-``GenericRelation`` branch filter matching ``shard_b``'s own content-type pk, the write
-alias for generated and serializer mutations, and the post-``OrderSet`` routing
-attestation. Four routing rows mount a consumer override on a ``.using("shard_b")``
-list field and cover an alias change, a hints change, an in-place rewrite of the
-queryset the override was handed, and an equal-but-distinct hint token under a router
-that tells hint objects apart by identity; each must fail before any row executes,
-with no ``library_branch`` SQL on either alias. The fifth row is ACCEPTED and is what
-the attestation rests on: the override mutates state INSIDE a hint object it preserves
-by identity, so nothing the seal compares changed, yet a router reading into that
-object would now answer ``default``. The effective alias is frozen before the override
-runs and the result is pinned to it, so the completed read returns the ``shard_b`` row
-and ``default`` sees no ``library_branch`` SQL at all. A sixth row runs the alias-change
-case through a ``DjangoConnectionField`` instead, because the connection field runs the
-SAME post-``OrderSet`` seal and would otherwise take its Relay window on the substituted
-shard's rows.
+``GenericRelation`` branch filter matching ``shard_b``'s own content-type pk, a
+``RelatedFilter`` ``queryset=`` pinned by ``.using`` (admitted on the alias the request
+reads, refused on another), the write alias for generated and serializer mutations, and
+the post-``OrderSet`` routing attestation. Four routing rows mount a consumer override
+on a ``.using("shard_b")`` list field and cover an alias change, a hints change, an
+in-place rewrite of the queryset the override was handed, and an equal-but-distinct hint
+token under a router that tells hint objects apart by identity; each must fail before
+any row executes, with no ``library_branch`` SQL on either alias. The fifth row is
+ACCEPTED and is what the attestation rests on: the override mutates state INSIDE a hint
+object it preserves by identity, so nothing the seal compares changed, yet a router
+reading into that object would now answer ``default``. The effective alias is frozen
+before the override runs and the result is pinned to it, so the completed read returns
+the ``shard_b`` row and ``default`` sees no ``library_branch`` SQL at all. A sixth row
+runs the alias-change case through a ``DjangoConnectionField`` instead, because the
+connection field runs the SAME post-``OrderSet`` seal and would otherwise take its Relay
+window on the substituted shard's rows.
 
 Critical contract pins (do not violate without an explicit spec revision):
 
@@ -1233,6 +1234,100 @@ def test_generic_relation_filter_matches_content_type_on_shard_b_alias() -> None
     assert [json_at(b, "name") for b in json_list(data, "branchesTaggedOnShardB")] == [
         "Shard Tagged",
     ]
+
+
+@pytest.fixture
+def _build_pinned_shelves_filter_test_schema() -> Iterator[None]:
+    """Build a per-test schema filtering ``shard_b`` branches through a pinned ``queryset=``.
+
+    Each ``RelatedFilter`` over ``shelves`` declares ``queryset=`` pinned by ``.using`` to one
+    alias: ``shard_b``, the alias the request reads, or ``default``.
+    """
+    make_django_type("PinnedShelfType", models.Shelf, ("id", "code"), node=False)
+    branch_type = make_django_type("PinnedBranchType", models.Branch, ("id", "name"), node=False)
+    finalize_django_types()
+
+    class _PinnedShelfFilter(FilterSet):
+        class Meta:
+            model = models.Shelf
+            fields = {"code": ["exact"]}
+
+    def _branch_filter(alias: str) -> type[FilterSet]:
+        shelves = RelatedFilter(
+            _PinnedShelfFilter,
+            field_name="shelves",
+            queryset=models.Shelf.objects.using(alias).filter(topic="permanent collection"),
+        )
+        meta = type("Meta", (), {"model": models.Branch, "fields": ()})
+        return type(
+            f"_Pinned{alias.title()}BranchFilter",
+            (FilterSet,),
+            {"shelves": shelves, "Meta": meta},
+        )
+
+    branch_filters = {alias: _branch_filter(alias) for alias in ("shard_b", "default")}
+
+    @strawberry.type
+    class _PinnedShelvesQuery:
+        def _branches_on_shard_b(
+            self,
+            info: Info[object, object],
+            pinned: str,
+            code: str,
+        ) -> QuerySet[models.Branch]:
+            queryset = models.Branch.objects.using("shard_b").order_by("name")
+            return branch_filters[pinned].apply_sync({"shelves": {"code": code}}, queryset, info)
+
+        branches_on_shard_b: QuerySet[models.Branch] = strawberry.field(
+            resolver=_branches_on_shard_b,
+            graphql_type=list[branch_type],
+        )
+
+    _current["schema"] = DjangoSchema(query=_PinnedShelvesQuery, config=strawberry_config())
+    yield
+    _current["schema"] = None
+
+
+@pytest.mark.usefixtures("private_registry", "_build_pinned_shelves_filter_test_schema")
+@pytest.mark.django_db(databases=["default", "shard_b"])
+def test_a_related_filter_queryset_pinned_to_another_alias_is_refused_on_shard_b() -> None:
+    """A ``queryset=`` pinned to the alias the request reads admits its rows; another is refused.
+
+    The request reads ``shard_b``; a declaration pinned to ``default`` names rows of a database
+    the request does not read, so the branch refuses it as Django refuses a subquery across
+    databases, before any branch row is read, rather than reading ``shard_b`` in its place.
+    """
+    for alias in ("default", "shard_b"):
+        kept = models.Branch.objects.using(alias).create(name="Kept", city="Boston")
+        other = models.Branch.objects.using(alias).create(name="Other", city="Boston")
+        models.Shelf.objects.using(alias).create(
+            code="A-1",
+            topic="permanent collection",
+            branch=kept,
+        )
+        models.Shelf.objects.using(alias).create(code="A-1", topic="seasonal", branch=other)
+    with override_settings(ROOT_URLCONF=__name__):
+        clear_url_caches()
+        try:
+            admitted, admitted_sql = _capture_payload(
+                '{ branchesOnShardB(pinned: "shard_b", code: "A-1") { name } }',
+            )
+            refused, refused_sql = _capture_payload(
+                '{ branchesOnShardB(pinned: "default", code: "A-1") { name } }',
+            )
+        finally:
+            clear_url_caches()
+
+    assert admitted == {"data": {"branchesOnShardB": [{"name": "Kept"}]}}, admitted
+    _assert_read_alias(admitted_sql, "shard_b", {"library_branch": 1})
+    _assert_one_refusal(
+        refused,
+        message="An unexpected error occurred.",
+        field="branchesOnShardB",
+    )
+    assert {
+        alias: _touching_tables(sql, "library_branch") for alias, sql in refused_sql.items()
+    } == {"default": [], "shard_b": []}
 
 
 # ---------------------------------------------------------------------------

@@ -2075,9 +2075,12 @@ def _admitted_rows(
     the declaration's explicit ``queryset=``; ``child_rows`` of ``None`` admits
     the explicit queryset alone, and with neither the branch admits no
     restriction (``None``). A callable ``queryset=`` is called with ``request``,
-    the filter set's own, as django-filter calls it for a ``ModelChoiceFilter``. A
-    sliced explicit queryset, which Django refuses to combine, admits the ``child_rows``
-    among the rows the slice holds, read as an ``IN`` subquery of its keys.
+    the filter set's own, as django-filter calls it for a ``ModelChoiceFilter``. The
+    explicit queryset is read as the rows it holds, an ``IN`` subquery of its keys (the
+    form Django's own ``QuerySet.__or__`` falls back to for a queryset it cannot filter),
+    never combined with ``&``: a sliced, ``distinct()`` or combined (``union()``) one
+    admits the ``child_rows`` among the rows it holds, whatever ``distinct()`` the child
+    filters or the target type's ``get_queryset`` put on ``child_rows``.
     """
     # ``_has_explicit_queryset`` records that ``queryset=`` was passed; without it
     # ``RelatedFilter.get_queryset`` answers the target's default rows instead.
@@ -2088,19 +2091,11 @@ def _admitted_rows(
         return explicit
     if explicit is None:
         return child_rows
-    # Django raises an opaque ``TypeError: Cannot combine queries on two
-    # different base models`` from ``Query.combine`` if the consumer-supplied
-    # ``RelatedFilter(queryset=...)`` is keyed on a different model class than
-    # the target filterset's ``_meta.model``. Surface a typed
-    # ``ConfigurationError`` naming the filter and both models so a GraphQL
-    # consumer gets an actionable message instead of the raw ``TypeError``.
-    #
-    # The comparison uses ``is`` identity because Django's own
-    # ``Query.combine`` does the same (``self.model != rhs.model``) - proxies
-    # and multi-table-inheritance children carry distinct ``model``
-    # identities even though they share a database table with their concrete
-    # parent. Consumers who need to mix proxy / concrete must pass an explicit
-    # queryset of the target filterset's exact ``_meta.model`` class.
+    # ``pk__in`` compares primary keys whatever model either side is keyed on, so a
+    # ``queryset=`` of another model would silently name unrelated rows. The model must be
+    # the target filterset's own (``is``: a proxy and a multi-table-inheritance relative
+    # carry ``model`` identities of their own); a typed ``ConfigurationError`` names the
+    # filter and both models.
     if explicit.model is not child_rows.model:
         raise ConfigurationError(
             f"RelatedFilter {truth.qualname(owner)}.{declared_attr}: "
@@ -2109,16 +2104,11 @@ def _admitted_rows(
             f"filterset is keyed on "
             f"{truth.qualname(child_rows.model)}. Pass a queryset "
             f"of {truth.qualname(child_rows.model)} instances to "
-            "``RelatedFilter(queryset=...)``; proxy and "
-            "multi-table-inheritance children are NOT "
-            "accepted because Django's queryset ``&`` "
-            "operator rejects mixed model classes.",
+            "``RelatedFilter(queryset=...)``; its model must be "
+            "the target filterset's own, so proxy and "
+            "multi-table-inheritance children are NOT accepted.",
         )
-    if explicit.query.is_sliced:
-        # Django refuses to combine a sliced query (``Query.combine``); it reads one as an
-        # ``IN`` subquery, the rows the slice holds.
-        return child_rows.filter(pk__in=explicit.values("pk"))
-    return explicit & child_rows
+    return child_rows.filter(pk__in=explicit.values("pk"))
 
 
 def _restrict_through_branch(

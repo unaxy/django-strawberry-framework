@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 465 done, 118 to do. The CHANGELOG entries filed here moved to
+Progress: 466 done, 119 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2273,6 +2273,23 @@ Progress: 465 done, 118 to do. The CHANGELOG entries filed here moved to
   cycles, GlobalID under both flags). Docs: spec-027 Decision 3 Layer 4 and its other homes, spec-028 Layer 4, README,
   `conf.py`, GLOSSARY `FilterSet` and `RelatedFilter`. The plan file is deleted (last at `771c299f`); BACKLOG
   `related_filter_flat_opt_out` becomes `related_filter_copy_once`. Filed 852. CHANGELOGTODO 853
+- [x] 818. A declared branch's explicit `queryset=` is read as an `IN` subquery of its keys and never combined
+  through `&`: `filters/sets.py::_admitted_rows` returns `child_rows.filter(pk__in=explicit.values("pk"))` for every
+  explicit queryset (the sliced case folded in, the form Django's own `QuerySet.__or__` falls back to) and keeps its
+  typed model-identity `ConfigurationError` with a reworded reason. A child filter django-filter runs `distinct()`
+  for, a target `get_queryset` returning `distinct()` rows, and a `distinct()`, `union()`, DISTINCT ON or `values()`
+  explicit queryset answer the queryset's rows nested, flat, under `not` / `and` / `or` and raw, where Django's
+  `Query.combine` raised a masked "Cannot combine a unique query with a non-unique query." (128 of 880 grid cells and
+  44 edge cells on SQLite and PostgreSQL; the shipped `allLibraryBranches(filter: {shelves: {homeBranches: ...}})`
+  reached it). A `.using()`-pinned `queryset=` on another alias is refused (spec-045 Decision 4), where it was read
+  on the request's alias. Pinned by `examples/fakeshop/test_query/test_flat_copy_binding_api.py::
+  test_a_scoped_branch_admits_its_child_rows_the_queryset_holds` (+ `_async`) and
+  `::test_a_raw_filterset_walks_a_scoped_branch_to_the_rows_its_queryset_holds`,
+  `test_library_api.py::test_library_branches_shelves_queryset_bounds_a_distinct_model_choice_leaf_over_http`,
+  `test_multi_db.py::test_a_related_filter_queryset_pinned_to_another_alias_is_refused_on_shard_b` (sharded) and the
+  reworded `test_filter_consumer_contracts_api.py::test_related_queryset_requires_the_exact_child_model_only_when_the_branch_is_active`.
+  Docs: spec-027 Decision 8 step 4a, raw-form heads, checklist, Edge cases, Test plan and DoD 31. Filed 854, 855.
+  CHANGELOGTODO 856
 
 ## Outside review of the fixes
 
@@ -2453,12 +2470,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   (`filters/inputs.py::_unscalared_field_refusal`) can name the filter and a remedy a `FilterSet` has. Pinned on the
   filter path by `tests/types/test_converters.py::test_generated_column_refuses_an_output_no_conversion_publishes`.
   Found fixing 730
-- [ ] 818. (robustness) A nested `RelatedFilter` branch declared with `queryset=` whose child set holds a
-  `distinct=True` filter (an `AllValuesMultipleFilter`, a static `MultipleChoiceFilter` over a forward, reverse or
-  many-to-many path, a forward `ModelMultipleChoiceFilter`, a `CharFilter(distinct=True)`) answers a masked
-  "Cannot combine a unique query with a non-unique query." from `filters/sets.py::_admitted_rows`, which combines the
-  branch's `queryset=` with the child's distinct rows; the same branch without `queryset=`, and a two-hop walk with
-  `queryset=` on the first hop, filter. Found fixing 734
+- [ ] 854. (robustness) A `RelatedFilter(queryset=...)` pinned with `.using()` to an alias the request does not read
+  is refused with Django's cross-database `ValueError` from the `IN` subquery (masked on the wire, bare from a raw
+  `FilterSet(...).qs`), where the same pin from a target type's `get_queryset` gets a typed `ConfigurationError`
+  naming the alias (`utils/querysets.py`). A primary/replica router with `queryset=Model.objects.using("default")`
+  while reads route to a replica reaches it. Found researching 818
 - [ ] 819. (robustness) A `ModelMultipleChoiceFilter(field_name="branch", to_field_name="name",
   queryset=Branch.objects.all())` on a set walked flat or nested from a parent answers a masked `ValueError` ("Field
   'id' expected a number but got ...") for a value naming a branch by its `name`, where django-filter matches the
@@ -2993,6 +3009,12 @@ tracker number are recorded there; open remainders and new defects are filed as 
   keys the same way, so it fails the defect gate. Should the package's range widget also read `_min` / `_max`
   (GOAL success criterion 7), or should the migration docs say to keep `django_filters.RangeFilter` under DRF?
   Evidence: `.work/evidence/spike-i316-range/grid-after.jsonl` (`raw_pkg_minmax`). Found researching 316
+- [ ] 855. Should a `RelatedFilter(queryset=...)` of a proxy or multi-table-inheritance relative of the target set's
+  model be admitted? Since 818 the explicit queryset is read as an `IN` subquery of its keys, so a proxy's or an MTI
+  child's `pk` names the same rows; `filters/sets.py::_admitted_rows` still refuses any model but the target set's
+  own with a `ConfigurationError` (pinned by `test_filter_consumer_contracts_api.py::
+  test_related_queryset_requires_the_exact_child_model_only_when_the_branch_is_active` [active-proxy]). Admitting
+  them widens a pinned refusal. Found researching 818
 
 ## Hunt not finished in t3
 
