@@ -2730,12 +2730,6 @@ tracker number are recorded there; open remainders and new defects are filed as 
   numbered 100 / 101 through a flat or raw parent key (`filters/sets.py::_LeafChain.terminal_value` /
   `_relation_key_value` re-read the cleaned instances' keys). One declaration, two answers, the 789 family; a forward
   key (`CardItem.card`, `number`) answers `[]` both ways. Found fact-finding 819
-- [ ] 874. (robustness) On a multi-table-inheritance child target whose type is registered only for the child
-  (`KioskFault.kiosk` to `SelfServeDesk`, pk `lendingdesk_ptr`), a `GlobalIDFilter` on the trailing-pk spelling
-  (`kiosk__pk`, `kiosk__id` or `kiosk__lendingdesk_ptr`), undeclared or past an unwired declared hop, validates no
-  type: a `library.venue` id carrying the desk's pk matches the row, while the key `kiosk` refuses it ("expects
-  library.selfservedesk"). That breaks the key / trailing-pk twin parity of 833 and 849. Found verifying 860 (the
-  `mti` / `mti-twin` cells of its verifier probe)
 - [ ] 875. (robustness) A model-choice filter with a model `queryset` whose `field_name` resolves nothing on the set's
   model (`ModelChoiceFilter(field_name="nothing", queryset=Branch.objects.all())`) or names a `GenericForeignKey`
   builds, typed from its queryset, and fails per request (stock django-filter raises `FieldError` per request); the
@@ -3208,6 +3202,31 @@ tracker number are recorded there; open remainders and new defects are filed as 
   and `tests/filters/test_finalizer.py::test_phase_2_5_admits_a_key_of_the_hop_target_set_decoding_against_that_set`
   [secondary-wired-key]; 860's routing marker applies under (a) by dropping its unwired-set condition. Found
   researching 860
+- [ ] 874. Decide: on a relation whose target's primary key is itself a relation (an MTI child's parent link,
+  `KioskFault.kiosk` to `SelfServeDesk` keyed by `lendingdesk_ptr`; a one-to-one pk, `Annotation.profile` to
+  `PatronProfile` keyed by `patron`), which type does a `GlobalIDFilter` ending on that key past the hop validate
+  against (`kiosk__pk`, `kiosk__lendingdesk_ptr`, `kiosk__lendingdesk_ptr_id`, `kiosk__id`; `profile__pk`,
+  `profile__patron`)? Today the pk segment is walked as the relation it is
+  (`filters/base.py::_resolve_globalid_target`, and for visibility `utils/permissions.py::leading_relation_hops`;
+  GLOSSARY `FilterSet`: "a `pk` segment on a model keyed by a one-to-one or a parent link is that relation"): it names
+  the type registered for the model the pk points at, or validates nothing when that model has none. So with only
+  `SelfServeDesk` typed any type's id carrying the desk's pk matches, with `LendingDesk` typed too only a
+  `LendingDesk` id matches and the desk's own id is refused, and `kiosk__id` (the inherited `Venue.id`) validates
+  nothing in every world, while the key `kiosk` validates `SelfServeDesk` (833 / 849 / 860: a relation key compares
+  "as a leaf ending on the type's primary key (`books__id`) does"). The same shape holds on every hop shape and driver
+  and for the one-to-one pk; a plain pk is at parity. (a) A trailing segment naming the reached model's own key past a
+  hop (`pk`, the pk by name or attname, the scalar end of its parent-link chain) names the reached type, as the key
+  does: a researched prototype does this in the walk and in routing, which also stops such a trailing pk reading the
+  pointed-at type's `get_queryset` rows (observable only when the target type does not cascade, item 754: a
+  `NumberFilter("kiosk__pk")` then answers as `kiosk__id` does) and moves `kiosk__lendingdesk_ptr__pk` from `Venue` to
+  `LendingDesk`; `profile__patron` would then stop being a relation key into `Patron`. (b) Keep the relation reading
+  and restate the parity sentences for relation-valued keys (and decide `kiosk__id`). Related, either way: the owner's
+  own key on its own set (a `GlobalIDFilter(field_name="pk")` on a set bound to a Relay `SelfServeDesk` type, or the
+  generated `lendingdesk_ptr` key) validates the parent's type and refuses the child type's own emitted id; it matches
+  the generated relation key (`filters/sets.py::FilterSet._is_own_pk_under_relay_owner`) and
+  `tests/filters/test_base.py::test_resolve_globalid_target_walks_a_relation_primary_key`. Grids: 30200 MTI cells
+  (5076 move under (a), all consumer flat leaves), 9058 one-to-one and plain cells (1152 move, 0 plain). Found
+  verifying 860
 
 ## Hunt not finished in t3
 
