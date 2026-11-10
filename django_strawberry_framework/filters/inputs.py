@@ -130,12 +130,13 @@ from .base import (
     _filterset_model_field,
     _filterset_value_field,
     _filterset_walked_lookup,
+    _model_identity_column,
     _related_column_path,
     comparison_form_field,
     copied_filter,
     copied_form_field,
     defers_choices,
-    model_choice_identity_column,
+    model_choice_model,
     relation_identity_column,
 )
 
@@ -1430,25 +1431,49 @@ def _range_axis_scalar(filter_instance: Filter, filterset_cls: type[FilterSet]) 
 
 def _model_choice_identity_annotation(
     filter_instance: Filter,
-    model_field: ModelField | None,
     filterset_cls: type[FilterSet] | None,
 ) -> object:
     """Type one value of a consumer model-choice filter from the column its form cleans.
 
-    The column is ``filters/base.py::model_choice_identity_column``'s (the ``queryset``
-    model's primary key or ``to_field_name`` field, or the ``field_name`` relation's
-    target for a callable ``queryset``) through the shared ``SCALAR_MAP`` lookup. The
-    filter keeps its own form field, so its ``queryset`` still validates every value.
-    The refusal names the filter as declared (``_declaration_of``).
+    The column is the ``to_field_name`` field (the primary key when unset) of the model
+    its form field looks values up in (``filters/base.py::model_choice_model``: the
+    ``queryset`` model, or for a callable ``queryset`` the model the ``field_name`` path
+    ends on), read through the shared ``SCALAR_MAP`` lookup. The filter keeps its own
+    form field, so its ``queryset`` still validates every value. Both refusals name the
+    filter as declared (``_declaration_of``), whose own ``queryset``, ``field_name`` and
+    ``to_field_name`` are the ones read.
     """
-    column = model_choice_identity_column(filter_instance, model_field)
-    if column is None:
-        declaration = _declaration_of(filter_instance, filterset_cls)
+    declaration = _declaration_of(filter_instance, filterset_cls)
+    subject = _declaration_subject(declaration, filterset_cls)
+    model = model_choice_model(declaration.filterset, declaration.declared)
+    if model is None:
+        if callable(read_attr(declaration.declared, "queryset", None)):
+            raise ConfigurationError(
+                f"{subject} has a callable queryset, which names its model only once a request "
+                "arrives, and its field_name is no path of fields on the FilterSet model to "
+                "read that model from, so there is no column to type its input from. Pass a "
+                "model queryset, or point field_name at the field the filter compares (the "
+                "relation, or the to_field_name column past it).",
+            )
         raise ConfigurationError(
-            f"{_declaration_subject(declaration, filterset_cls)} has no model queryset (its "
-            "queryset is callable or unset) and its field_name names no relation on the "
-            "FilterSet model, so there is no column to type its input from. Pass a model "
-            "queryset, or point field_name at a relation.",
+            f"{subject} has no queryset and its field_name names no relation on the FilterSet "
+            "model, so there is no column to type its input from. Pass a model queryset.",
+        )
+    to_field_name = declaration.declared.extra.get("to_field_name")
+    column = _model_identity_column(model, to_field_name)
+    if column is None:
+        if callable(read_attr(declaration.declared, "queryset", None)):
+            source = (
+                "the model its field_name path ends on (a callable queryset names none at build)"
+            )
+            remedy = "Pass a model queryset, name a column of that model,"
+        else:
+            source = "the model its form field looks each value up in"
+            remedy = "Name a column of that model,"
+        raise ConfigurationError(
+            f"{subject} has to_field_name {to_field_name!r}, which names no column of "
+            f"{truth.qualname(model)}, {source}, so there is no column to type its input "
+            f"from. {remedy} or drop to_field_name to look values up by primary key.",
         )
     return _scalar_from_model_field(column, filter_instance, filterset_cls)
 
@@ -2020,7 +2045,7 @@ def _refuse_widget_reading_other_keys(
     (``_declaration_of``). A filter whose form field builds nothing unbound
     (``_declared_form_field``) is not read here, nor a model-choice filter (django-filter's
     ``QuerySetRequestMixin``) whose ``queryset`` is callable or unset, as
-    ``filters/base.py::model_choice_identity_column`` reads it: a callable one is called
+    ``filters/base.py::model_choice_model`` reads it: a callable one is called
     with the request, which the schema build has none of, and an unset one builds no field
     (the model-choice arm names that refusal).
     """
@@ -2124,7 +2149,7 @@ def convert_filter_to_input_annotation(
         return _relation_identity_annotation(matched, model_field, filterset_cls)
 
     def _model_choice(matched: Filter) -> object:
-        element = _model_choice_identity_annotation(matched, model_field, filterset_cls)
+        element = _model_choice_identity_annotation(matched, filterset_cls)
         return GenericAlias(list, (element,)) if _model_choice_takes_list(matched) else element
 
     def _csv(matched: Filter) -> object:

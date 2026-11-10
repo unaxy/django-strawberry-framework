@@ -262,6 +262,7 @@ from django_strawberry_framework.utils.imports import import_attr_if_importable
 from django_strawberry_framework.utils.inputs import published_input_specs
 from django_strawberry_framework.utils.querysets import sync_pipeline_recourse, to_python_value
 from django_strawberry_framework.utils.relations import (
+    choice_key_field,
     is_model_class,
     is_single_column_foreign_key,
 )
@@ -283,7 +284,6 @@ from django_strawberry_framework.utils.write_values import (
 from django_strawberry_framework.write_mixins import backing_model_of
 
 from .inputs import (
-    choice_key_field,
     held_json_column,
     relation_target_model,
     shape_disagreeing_column,

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 215 to do.
+Progress: 0 done, 216 to do.
 
 ## From dry-0_0_15_3
 
@@ -1021,6 +1021,12 @@ Progress: 0 done, 215 to do.
   answered `GLOBALID_INVALID`, a right-type id holding the row's primary-key digits over such an id matches nothing,
   and a `callable` / `custom` target behind such a hop is refused at `finalize_django_types()`. A filter set's own
   key, and a hop's flat copy of it, keep reading the node id alone
+- [ ] 876. CHANGELOG entry for item 871: a declared `ModelChoiceFilter` / `ModelMultipleChoiceFilter` with a callable
+  `queryset=` (`queryset=lambda request: ...`) now builds when its `field_name` ends on a column, as with
+  django-filter's `field_name="branch__name", to_field_name="name"`, or on the `pk` alias, typed from the model the
+  `field_name` path ends on, where the schema build refused it; `to_field_name="pk"` now means the primary key instead
+  of raising `FieldDoesNotExist`; a `to_field_name` naming no column of the model raises `ConfigurationError` naming
+  the filter set and filter
 
 ## From dry-upstream-0_0_15
 

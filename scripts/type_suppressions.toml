@@ -170,7 +170,7 @@
 "examples/fakeshop/apps/kanban/tests/test_services.py::test_missing_required_field_error_code_is_stable" = { reportArgumentType = 1 }
 "examples/fakeshop/apps/kanban/tests/test_services.py::test_move_card_number_rejects_non_integer" = { reportArgumentType = 1 }
 "examples/fakeshop/apps/library/filters.py::ModelChoiceInFilter" = { reportUnsafeMultipleInheritance = 1 }
-"examples/fakeshop/apps/library/filters.py::ShelfFilter.home_branch_for_request" = { reportArgumentType = 1 }
+"examples/fakeshop/apps/library/filters.py::_request_scoped_branches" = { reportArgumentType = 1 }
 "examples/fakeshop/apps/library/forms.py::ShelfRelationsForm.__init__" = { reportArgumentType = 1 }
 "examples/fakeshop/apps/library/migrations/0002_shelf_alt_branches.py::Migration.operations" = { reportUnknownArgumentType = 1 }
 "examples/fakeshop/apps/library/migrations/0007_inheritance_and_relation_shapes.py::Migration.operations" = { reportUnknownArgumentType = 1 }
@@ -284,11 +284,10 @@
 "tests/filters/test_inputs.py::_OTHER_KEY_WIDGET_DECLARATIONS" = { reportArgumentType = 1 }
 "tests/filters/test_inputs.py::_filter_input_call_form" = { reportArgumentType = 1 }
 "tests/filters/test_inputs.py::_filter_input_subscript_form" = { reportInvalidTypeArguments = 1 }
-"tests/filters/test_inputs.py::test_a_model_choice_filter_with_a_request_scoped_queryset_builds_without_calling_it" = { reportArgumentType = 1 }
+"tests/filters/test_inputs.py::_request_scoped_choice" = { reportArgumentType = 1 }
 "tests/filters/test_inputs.py::test_filter_input_subscript_rejects_non_filterset_naming_the_subscript" = { reportArgumentType = 1, reportInvalidTypeArguments = 1 }
 "tests/filters/test_inputs.py::test_filter_input_type_rejects_non_filterset" = { reportArgumentType = 3 }
 "tests/filters/test_inputs.py::test_logic_operator_descriptors_and_mappings" = { reportIndexIssue = 2 }
-"tests/filters/test_inputs.py::test_model_choice_filter_with_no_column_source_names_the_filterset_and_the_fix.ItemFilter" = { reportArgumentType = 1 }
 "tests/filters/test_sets.py::_CrKioskDesk.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/filters/test_sets.py::_CrOwnKeyDesk.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/filters/test_sets.py::test_a_set_overriding_a_form_reading_seam_defers_every_flat_copy" = { cast = 2 }

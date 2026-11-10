@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 from collections import OrderedDict
+from typing import TypeVar
 
 from django import forms
 from django.contrib.auth.models import AbstractUser
@@ -57,17 +58,67 @@ def _validate_email_must_have_at_sign(value: str) -> None:
         raise forms.ValidationError("missing @", code="missing_at_sign")
 
 
+_RequestScopedFilterT = TypeVar(
+    "_RequestScopedFilterT",
+    ModelChoiceFilter,
+    ModelMultipleChoiceFilter,
+)
+
+
+def _unrestricted_branches(_request: HttpRequest | None = None) -> QuerySet[models.Branch]:
+    """Every branch but the ``city="restricted"`` ones: the declared model-choice queryset.
+
+    ``ShelfFilter``'s model-choice filters validate against it.
+    ``_request_scoped_branches`` passes it uncalled as a callable ``queryset``, which
+    django-filter calls with the request when it builds the form.
+    """
+    return models.Branch.objects.exclude(city="restricted")
+
+
+def _request_scoped_branches(
+    filter_class: type[_RequestScopedFilterT],
+    field_name: str,
+    to_field_name: str | None = None,
+) -> _RequestScopedFilterT:
+    """Declare ``filter_class`` over ``field_name`` with ``_unrestricted_branches`` as a callable queryset.
+
+    The queryset is passed uncalled, so django-filter calls it with the request when it
+    builds the form, and the schema types the input from the model ``field_name`` ends on.
+    """
+    extra = {} if to_field_name is None else {"to_field_name": to_field_name}
+    # basedpyright: types-django-filter types ``queryset`` as a ``QuerySet``;
+    # ``QuerySetRequestMixin.get_queryset`` calls a callable one with the request
+    return filter_class(field_name, queryset=_unrestricted_branches, **extra)  # pyright: ignore[reportArgumentType]
+
+
 class BranchFilter(FilterSet):
     """Branch filterset bound to ``BranchType`` at finalize phase 2.5.
 
     ``alt_shelves`` is a relation key over a reverse many-to-many whose target
     (``ShelfType``) is not a Relay node, so it filters by a list of shelf primary keys.
+
+    ``names_for_request`` is django-filter's ``to_field_name`` idiom on the set's own
+    ``name`` column with a callable queryset: its ``field_name`` crosses no relation, so
+    the model its form field looks each name up in is ``Branch`` itself, and its input
+    is a list of branch names. ``pks_for_request`` takes a list of branch pks the same
+    way over Django's ``pk`` alias (``to_field_name="pk"`` too, so the predicate compares
+    each value's key rather than the row), typed from ``Branch``'s key.
     """
 
     shelves = RelatedFilter(
         "ShelfFilter",
         field_name="shelves",
         queryset=models.Shelf.objects.filter(topic="permanent collection"),
+    )
+    names_for_request = _request_scoped_branches(
+        ModelMultipleChoiceFilter,
+        "name",
+        to_field_name="name",
+    )
+    pks_for_request = _request_scoped_branches(
+        ModelMultipleChoiceFilter,
+        "pk",
+        to_field_name="pk",
     )
 
     class Meta:
@@ -83,16 +134,6 @@ class BranchFilter(FilterSet):
 # basedpyright: each ``__init__`` above ``Filter`` forwards ``*args, **kwargs`` to ``super()``
 class ModelChoiceInFilter(BaseInFilter, ModelChoiceFilter):  # pyright: ignore[reportUnsafeMultipleInheritance]
     """The django-filter ``in`` idiom over a model-choice filter: a list of branch keys."""
-
-
-def _unrestricted_branches(_request: HttpRequest | None = None) -> QuerySet[models.Branch]:
-    """Every branch but the ``city="restricted"`` ones: the declared model-choice queryset.
-
-    ``ShelfFilter``'s model-choice filters validate against it. ``home_branch_for_request``
-    passes it uncalled as a callable ``queryset``, which django-filter calls with the
-    request when it builds the form.
-    """
-    return models.Branch.objects.exclude(city="restricted")
 
 
 class ShelfFilterForm(forms.Form):
@@ -130,9 +171,13 @@ class ShelfFilter(FilterSet):
     (its ``to_field_name``), ``home_branch_in`` a list through the ``BaseInFilter`` wrapper,
     ``home_branches_named`` a list of branch names (``field_name="branch__name"``: a
     multiple-choice filter compares each value's ``to_field_name`` on its ``field_name``,
-    so that path ends on the ``name`` column), and
-    ``home_branch_for_request`` one branch pk typed from the ``branch`` relation,
-    since its callable queryset has no model until a request arrives.
+    so that path ends on the ``name`` column), ``home_branch_for_request`` one branch pk
+    and ``home_branches_named_for_request`` a list of branch names: each passes the
+    queryset uncalled, which names its model only once a request arrives, so its input
+    is typed from the model its ``field_name`` path ends on (``Branch``, by primary key
+    and by ``to_field_name``). ``home_branch_pks_for_request`` takes a list of branch pks
+    the same way over ``branch__pk`` (``to_field_name="pk"``): a path ending on Django's
+    ``pk`` alias ends on the model the part before it reaches, ``Branch``.
 
     ``condition_span`` and ``tier_span`` are declared ``RangeFilter`` filters over the text and
     integer choice columns: each bound is compared with the stored values, so a bound off
@@ -167,11 +212,16 @@ class ShelfFilter(FilterSet):
         queryset=_unrestricted_branches(),
         to_field_name="name",
     )
-    home_branch_for_request = ModelChoiceFilter(
-        field_name="branch",
-        # basedpyright: types-django-filter types ``queryset`` as a ``QuerySet``;
-        # ``QuerySetRequestMixin.get_queryset`` calls a callable one with the request
-        queryset=_unrestricted_branches,  # pyright: ignore[reportArgumentType]
+    home_branch_for_request = _request_scoped_branches(ModelChoiceFilter, "branch")
+    home_branches_named_for_request = _request_scoped_branches(
+        ModelMultipleChoiceFilter,
+        "branch__name",
+        to_field_name="name",
+    )
+    home_branch_pks_for_request = _request_scoped_branches(
+        ModelMultipleChoiceFilter,
+        "branch__pk",
+        to_field_name="pk",
     )
     condition_span = RangeFilter(field_name="condition", lookup_expr="range")
     tier_span = RangeFilter(field_name="tier", lookup_expr="range")

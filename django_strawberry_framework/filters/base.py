@@ -46,7 +46,6 @@ from django.db import connections, models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields.json import HasKeys as JSONHasKeys
 from django.db.models.lookups import Transform
-from django.db.models.options import Options
 from django.db.models.sql import Query
 from django.forms import (
     CharField,
@@ -143,6 +142,7 @@ from django_strawberry_framework.utils.querysets import (
 from django_strawberry_framework.utils.relations import (
     _classify_path_cached,
     _walk_lookup_expr,
+    choice_key_field,
     generated_column,
     generated_column_source,
     is_model_class,
@@ -3259,43 +3259,74 @@ def relation_identity_column(relation: object) -> ConcreteField | None:
     """
     if not getattr(relation, "is_relation", False):
         return None
-    return _model_identity_column(getattr(relation, "related_model", None), None)
+    model = getattr(relation, "related_model", None)
+    return _model_identity_column(model, None) if is_model_class(model) else None
 
 
-def _model_identity_column(model: object, to_field_name: str | None) -> ConcreteField | None:
+def _model_identity_column(
+    model: type[models.Model],
+    to_field_name: str | None,
+) -> ConcreteField | None:
     """Return the concrete column holding ``model``'s primary key, or its ``to_field_name``.
 
-    A relation-valued column (a multi-table-inheritance parent link, a one-to-one used
-    as the key, a foreign key named as ``to_field_name``) is followed to the column that
-    actually stores the value. ``None`` when ``model`` is not a resolved model.
+    The field is the one Django's ``ModelChoiceField`` looks a value up by,
+    ``to_field_name or "pk"`` (``utils/relations.py::choice_key_field``). A
+    relation-valued column (a multi-table-inheritance parent link, a one-to-one used as
+    the key, a foreign key named as ``to_field_name``) is followed to the column that
+    actually stores the value. ``None`` when ``to_field_name`` names no column of
+    ``model``.
     """
-    meta: object = getattr(model, "_meta", None)
-    if not isinstance(meta, Options):
-        return None
-    column = stored_value_column(meta.get_field(to_field_name) if to_field_name else meta.pk)
-    return column if isinstance(column, models.Field) else None
+    field = choice_key_field(model, to_field_name)
+    return None if field is None else stored_value_column(field)
 
 
-def model_choice_identity_column(
+def model_choice_model(
+    filterset: type[BaseFilterSet] | None,
     filter_instance: Filter,
-    relation: object,
-) -> ConcreteField | None:
-    """Return the column a consumer ``ModelChoiceFilter`` family filter's form field cleans.
+) -> type[models.Model] | None:
+    """Return the model a consumer ``ModelChoiceFilter`` family filter's form field looks values up in.
 
-    A ``ModelChoiceFilter`` / ``ModelMultipleChoiceFilter`` the consumer declares (or
-    selects through ``Meta.filter_overrides``) keeps django-filter's model-choice form
-    field, which looks each value up in the filter's ``queryset`` by ``to_field_name``
-    (the primary key when unset). The value's column is that field of the queryset's
-    model. A callable ``queryset`` (``queryset=lambda request: ...``) has no model until
-    a request arrives, so the model is the target of ``relation``, the field the
-    filter's ``field_name`` names on its FilterSet model. ``None`` when neither source
-    names a model.
+    A ``ModelChoiceFilter`` / ``ModelMultipleChoiceFilter`` the consumer declares on
+    ``filterset`` (or selects through ``Meta.filter_overrides``) keeps django-filter's
+    model-choice form field, which looks each value up in the filter's ``queryset`` by
+    ``to_field_name`` (``_model_identity_column``): a model queryset's model. A callable
+    ``queryset`` (``queryset=lambda request: ...``) names its model only once a request
+    arrives, so the model is the one the filter's ``field_name`` path ends on over
+    ``filterset``'s model (the path Django walks, ``_filterset_walked_lookup``, classified
+    by ``utils/relations.py::_classify_path_cached``): the model its last relation
+    reaches, ``filterset``'s model for a path crossing none. A path ending on Django's
+    ``pk`` alias ends on the model the part before it reaches (``kiosk__pk`` on
+    ``kiosk``'s target, a bare ``pk`` on ``filterset``'s model), as ``kiosk__id`` does. An
+    unset ``queryset`` names a model only through a path ending on a relation, and a
+    ``pk`` path ends on the column the key stores, never on a relation. ``None`` for a
+    path the classifier refuses (a name naming no field, a queryset annotation, a
+    ``GenericForeignKey``).
     """
-    queryset = getattr(filter_instance, "queryset", None)
-    model = None if callable(queryset) else getattr(queryset, "model", None)
-    if model is None and getattr(relation, "is_relation", False):
-        model = getattr(relation, "related_model", None)
-    return _model_identity_column(model, filter_instance.extra.get("to_field_name"))
+    queryset = read_attr(filter_instance, "queryset", None)
+    if queryset is not None and not callable(queryset):
+        model = read_attr(queryset, "model", None)
+        return model if is_model_class(model) else None
+    model = _filterset_model(filterset)
+    if model is None:
+        return None
+    walked = _filterset_walked_lookup(filterset, filter_instance)[0]
+    prefix, _sep, last = walked.rpartition(LOOKUP_SEP)
+    if last == "pk":
+        # Django's ``pk`` alias is the primary key of the model the path before it
+        # reaches, read as the column it stores (``_model_resolved_field``), never as the
+        # parent link a multi-table-inheritance child's key is.
+        if queryset is None:
+            return None
+        if not prefix:
+            return model
+        walked = prefix
+    try:
+        path = _classify_path_cached(model, walked)
+    except PathResolutionError:
+        return None
+    if queryset is None and not relation_bool(path.terminal, "is_relation"):
+        return None
+    return path.hops[-1].target_model if path.hops else model
 
 
 def _compared_columns(filter_instance: Filter, field: ModelField) -> tuple[ConcreteField, ...]:

@@ -2901,21 +2901,31 @@ def test_library_declared_model_choice_filters_take_the_column_their_form_cleans
 
     The primary key (``Int``) by default, the ``to_field_name`` column (``name``, a
     ``String``) when set; a list for ``ModelMultipleChoiceFilter`` and for the
-    ``BaseInFilter`` wrapper. A callable queryset types from the ``branch`` relation.
+    ``BaseInFilter`` wrapper. A callable queryset types from the model its ``field_name``
+    path ends on: ``Branch`` for the ``branch`` relation and for its ``name`` column, and
+    for ``BranchFilter.names_for_request``, whose ``name`` path crosses no relation, the
+    set's own model. Each list's element is pinned by the ``[String!]`` variable its rows
+    in ``test_library_declared_model_multiple_choice_filter_takes_its_to_field_name_values_over_http``
+    send.
     """
     scalar_int = {"kind": "SCALAR", "name": "Int", "ofType": None}
-    int_list = {"kind": "LIST", "name": None, "ofType": {"kind": "NON_NULL", "name": None}}
+    nonnull_list = {"kind": "LIST", "name": None, "ofType": {"kind": "NON_NULL", "name": None}}
     assert _input_field_type("ShelfFilterHomeBranchFilterInputType", "exact") == scalar_int
     assert _input_field_type("ShelfFilterHomeBranchNamedFilterInputType", "exact") == {
         "kind": "SCALAR",
         "name": "String",
         "ofType": None,
     }
-    assert _input_field_type("ShelfFilterHomeBranchesFilterInputType", "exact") == int_list
-    assert _input_field_type("ShelfFilterHomeBranchInFilterInputType", "in") == int_list
+    assert _input_field_type("ShelfFilterHomeBranchesFilterInputType", "exact") == nonnull_list
+    assert _input_field_type("ShelfFilterHomeBranchInFilterInputType", "in") == nonnull_list
     assert (
         _input_field_type("ShelfFilterHomeBranchForRequestFilterInputType", "exact") == scalar_int
     )
+    assert (
+        _input_field_type("ShelfFilterHomeBranchesNamedForRequestFilterInputType", "exact")
+        == nonnull_list
+    )
+    assert _input_field_type("BranchFilterNamesForRequestFilterInputType", "exact") == nonnull_list
 
 
 _SHELVES_BY_HOME_BRANCH = """
@@ -2997,7 +3007,7 @@ def test_library_declared_model_choice_filter_takes_its_to_field_name_value_over
 
 
 class _NamedHomeBranchesRow(NamedTuple):
-    """One spelling of ``ShelfFilter.home_branches_named`` and the labels it answers.
+    """One spelling of a branch-name model-choice filter and the labels it answers.
 
     ``filter_input`` holds ``$names``; ``root`` is the list field queried and ``label``
     the field each row is read by. ``form_key`` is the key a refused name answers under.
@@ -3046,6 +3056,48 @@ _NAMED_HOME_BRANCHES_ROWS = {
         expected=["N-1 genre", "S-1 genre"],
         form_key="books__shelf__home_branches_named",
     ),
+    "root-for-request": _NamedHomeBranchesRow(
+        root="allLibraryShelves",
+        filter_input="{ homeBranchesNamedForRequest: { exact: $names } }",
+        label="code",
+        expected=["N-1", "S-1"],
+        form_key="home_branches_named_for_request",
+    ),
+    "nested-for-request": _NamedHomeBranchesRow(
+        root="allLibraryBooks",
+        filter_input="{ shelf: { homeBranchesNamedForRequest: { exact: $names } } }",
+        label="title",
+        expected=["N-1 book", "S-1 book"],
+        form_key="shelf__home_branches_named_for_request",
+    ),
+    "flat-from-genres-for-request": _NamedHomeBranchesRow(
+        root="allLibraryGenres",
+        filter_input="{ booksShelfHomeBranchesNamedForRequest: { exact: $names } }",
+        label="name",
+        expected=["N-1 genre", "S-1 genre"],
+        form_key="books__shelf__home_branches_named_for_request",
+    ),
+    "branches-for-request": _NamedHomeBranchesRow(
+        root="allLibraryBranches",
+        filter_input="{ namesForRequest: { exact: $names } }",
+        label="name",
+        expected=["North", "South"],
+        form_key="names_for_request",
+    ),
+    "nested-branch-for-request": _NamedHomeBranchesRow(
+        root="allLibraryShelves",
+        filter_input="{ branch: { namesForRequest: { exact: $names } } }",
+        label="code",
+        expected=["N-1", "S-1"],
+        form_key="branch__names_for_request",
+    ),
+    "flat-branch-for-request": _NamedHomeBranchesRow(
+        root="allLibraryShelves",
+        filter_input="{ branchNamesForRequest: { exact: $names } }",
+        label="code",
+        expected=["N-1", "S-1"],
+        form_key="branch__names_for_request",
+    ),
 }
 
 
@@ -3054,11 +3106,14 @@ _NAMED_HOME_BRANCHES_ROWS = {
 def test_library_declared_model_multiple_choice_filter_takes_its_to_field_name_values_over_http(
     row: str,
 ) -> None:
-    """``home_branches_named`` takes a list of branch names, checked against its queryset.
+    """A branch-name model-choice filter takes a list of branch names, checked against its queryset.
 
-    The filter is django-filter's ``to_field_name`` idiom (``field_name="branch__name"``,
-    ``to_field_name="name"``): its form field looks each name up in the queryset, and the
-    predicate compares the names with the ``name`` column ``field_name`` reaches. A list of
+    Each filter is django-filter's ``to_field_name`` idiom (``field_name="branch__name"``,
+    or ``"name"`` on ``BranchFilter``, with ``to_field_name="name"``): its form field looks
+    each name up in the queryset, and the predicate compares the names with the ``name``
+    column ``field_name`` reaches. ``ShelfFilter.home_branches_named`` holds a model
+    queryset; ``home_branches_named_for_request`` and ``BranchFilter.names_for_request``
+    pass a callable one, called with the request, and answer the same rows. A list of
     permitted names filters in two statements (the form's lookup, then the rows); a list
     holding the restricted branch's name is the form's "Select a valid choice" after the
     lookup alone, under the key of the spelling sent.
@@ -3103,6 +3158,56 @@ def test_library_declared_model_choice_filter_with_a_callable_queryset_over_http
         variables={"pk": north.pk},
     )
     _assert_invalid_choice(query, {"pk": restricted.pk}, "home_branch_for_request")
+
+
+_PK_ALIAS_ROWS = {
+    "own-pk": _NamedHomeBranchesRow(
+        root="allLibraryBranches",
+        filter_input="{ pksForRequest: { exact: $pks } }",
+        label="name",
+        expected=["North", "South"],
+        form_key="pks_for_request",
+    ),
+    "relation-pk": _NamedHomeBranchesRow(
+        root="allLibraryShelves",
+        filter_input="{ homeBranchPksForRequest: { exact: $pks } }",
+        label="code",
+        expected=["N-1", "S-1"],
+        form_key="home_branch_pks_for_request",
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("row", list(_PK_ALIAS_ROWS))
+def test_library_declared_model_choice_filter_over_the_pk_alias_with_a_callable_queryset(
+    row: str,
+) -> None:
+    """A ``pk``-alias model-choice filter takes branch pks, checked against its callable queryset.
+
+    ``BranchFilter.pks_for_request`` names the set's own ``pk`` and
+    ``ShelfFilter.home_branch_pks_for_request`` the ``branch`` relation's ``branch__pk``,
+    each with ``to_field_name="pk"``: either path ends on ``Branch``, so the input is a
+    list of ``Branch`` keys (``[Int!]``). Permitted pks filter in two statements, and a
+    list holding the restricted branch's pk answers "Select a valid choice" after the
+    form's lookup alone.
+    """
+    north, south, restricted = _seed_shelves_on_home_branches()
+    case = _PK_ALIAS_ROWS[row]
+    query = (
+        f"query ($pks: [Int!]) {{ {case.root}(filter: {case.filter_input}) {{ {case.label} }} }}"
+    )
+
+    with CaptureQueriesContext(connection) as captured:
+        _assert_graphql_data(
+            query,
+            {case.root: [{case.label: label} for label in case.expected]},
+            variables={"pks": [north.pk, south.pk]},
+        )
+    assert len(captured) == 2, captured.captured_queries
+    with CaptureQueriesContext(connection) as captured:
+        _assert_invalid_choice(query, {"pks": [north.pk, restricted.pk]}, case.form_key)
+    assert len(captured) == 1, captured.captured_queries
 
 
 @pytest.mark.django_db

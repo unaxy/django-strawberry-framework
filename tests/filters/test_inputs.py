@@ -36,6 +36,7 @@ from enum import Enum
 from types import MappingProxyType, SimpleNamespace
 from typing import (
     TYPE_CHECKING,
+    NamedTuple,
     Protocol,
     TypeAlias,
     get_args,
@@ -1555,6 +1556,30 @@ def test_a_one_value_filter_whose_widget_reads_other_keys_is_refused_when_the_sc
     )
 
 
+_ModelChoiceT = typing.TypeVar(
+    "_ModelChoiceT",
+    bound=django_filters.ModelChoiceFilter | django_filters.ModelMultipleChoiceFilter,
+)
+
+
+def _request_scoped_choice(
+    filter_class: type[_ModelChoiceT],
+    queryset: Callable[[HttpRequest | None], QuerySet[models.Model]],
+    field_name: str | None = None,
+    *,
+    to_field_name: str | None = None,
+    method: str | None = None,
+) -> _ModelChoiceT:
+    """Declare ``filter_class`` with ``queryset`` uncalled, as django-filter's callable ``queryset``.
+
+    django-filter calls it with the request when it builds the form field, so the schema
+    build reads no rows of it.
+    """
+    # basedpyright: types-django-filter types ``queryset`` as a ``QuerySet``;
+    # ``QuerySetRequestMixin.get_queryset`` calls a callable one with the request
+    return filter_class(field_name, queryset=queryset, method=method, to_field_name=to_field_name)  # pyright: ignore[reportArgumentType]
+
+
 def test_a_model_choice_filter_with_a_request_scoped_queryset_builds_without_calling_it() -> None:
     """The widget check never builds a form field whose ``queryset`` waits for the request.
 
@@ -1564,11 +1589,10 @@ def test_a_model_choice_filter_with_a_request_scoped_queryset_builds_without_cal
     def _no_request_yet(_request: HttpRequest | None) -> QuerySet[library_models.Shelf]:
         raise AssertionError
 
-    declared = django_filters.ModelChoiceFilter(
+    declared = _request_scoped_choice(
+        django_filters.ModelChoiceFilter,
+        _no_request_yet,
         field_name="shelf",
-        # basedpyright: types-django-filter types ``queryset`` as a ``QuerySet``;
-        # ``QuerySetRequestMixin.get_queryset`` calls a callable one with the request
-        queryset=_no_request_yet,  # pyright: ignore[reportArgumentType]
     )
 
     class BookShelfChoiceSet(FilterSet):
@@ -1634,9 +1658,8 @@ _LEAF_REFUSAL_CASES = {
         lambda: django_filters.ModelChoiceFilter(field_name="code"),
         "{child}.leaf: ModelChoiceFilter on 'code' (reached through {parent}.shelf)",
         "{child}: ModelChoiceFilter on 'code'",
-        " has no model queryset (its queryset is callable or unset) and its field_name names "
-        "no relation on the FilterSet model, so there is no column to type its input from. "
-        "Pass a model queryset, or point field_name at a relation.",
+        " has no queryset and its field_name names no relation on the FilterSet model, so "
+        "there is no column to type its input from. Pass a model queryset.",
     ),
     "choice": _LeafRefusalCase(
         lambda: ChoiceFilter(field_name="topic", choices=[("a", "A")]),
@@ -3286,21 +3309,21 @@ def test_declared_model_choice_filter_follows_a_relation_valued_primary_key() ->
 
 
 def test_model_choice_filter_with_no_column_source_names_the_filterset_and_the_fix() -> None:
-    """A callable queryset on a ``method=`` filter naming no relation fails at input build.
+    """A callable queryset on a ``method=`` filter naming no field fails at input build.
 
     Neither source names a model: the callable queryset has none until a request
-    arrives and ``field_name`` (``owner``) is no relation on ``Item``. The message names
-    the FilterSet, the filter and both fixes, never ``SCALAR_MAP`` / ``Meta.exclude``.
+    arrives and ``field_name`` (``owner``) is no path of fields on ``Item``. The message
+    names the FilterSet, the filter and both fixes, never ``SCALAR_MAP`` /
+    ``Meta.exclude``.
     """
 
-    def _request_categories(_request: object) -> QuerySet[Category]:
+    def _request_categories(_request: HttpRequest | None) -> QuerySet[Category]:
         return Category.objects.all()
 
     class ItemFilter(FilterSet):
-        owner = django_filters.ModelChoiceFilter(
-            # basedpyright: types-django-filter types ``queryset`` as a ``QuerySet``;
-            # ``QuerySetRequestMixin.get_queryset`` calls a callable one with the request
-            queryset=_request_categories,  # pyright: ignore[reportArgumentType]
+        owner = _request_scoped_choice(
+            django_filters.ModelChoiceFilter,
+            _request_categories,
             method="filter_owner",
         )
 
@@ -3320,9 +3343,331 @@ def test_model_choice_filter_with_no_column_source_names_the_filterset_and_the_f
         _build_input_fields(ItemFilter)
     message = str(exc_info.value)
     assert message.startswith("ItemFilter: ModelChoiceFilter on 'owner'")
-    assert "Pass a model queryset, or point field_name at a relation." in message
+    assert message.endswith(
+        " has a callable queryset, which names its model only once a request arrives, and its "
+        "field_name is no path of fields on the FilterSet model to read that model from, so "
+        "there is no column to type its input from. Pass a model queryset, or point field_name "
+        "at the field the filter compares (the relation, or the to_field_name column past it).",
+    )
     assert "SCALAR_MAP" not in message
     assert "Meta.exclude" not in message
+
+
+def _requested_branches(_request: HttpRequest | None) -> QuerySet[library_models.Branch]:
+    """Every branch: a callable ``queryset``, read only once a request arrives."""
+    return library_models.Branch.objects.all()
+
+
+def _model_choice_annotation(
+    model: type[models.Model],
+    filter_class: type[
+        django_filters.ModelChoiceFilter | django_filters.ModelMultipleChoiceFilter
+    ],
+    queryset: QuerySet[models.Model] | Callable[[HttpRequest | None], QuerySet[models.Model]],
+    field_name: str,
+    to_field_name: str | None = None,
+) -> object:
+    """Type ``filter_class`` over ``field_name``, declared as ``pick`` on a set over ``model``.
+
+    ``queryset`` is a model queryset or a callable one (``_request_scoped_choice``).
+    """
+    if callable(queryset):
+        declared = _request_scoped_choice(
+            filter_class,
+            queryset,
+            field_name,
+            to_field_name=to_field_name,
+        )
+    else:
+        declared = filter_class(field_name, queryset=queryset, to_field_name=to_field_name)
+    pick_set = type(
+        "PickSet",
+        (FilterSet,),
+        {"pick": declared, "Meta": type("Meta", (), {"model": model, "fields": []})},
+    )
+    return convert_filter_to_input_annotation(pick_set.base_filters["pick"], None, None, pick_set)
+
+
+_MODEL_CHOICE_ARMS = {
+    "model-queryset": library_models.Branch.objects.all,
+    "callable-queryset": lambda: _requested_branches,
+}
+
+
+@pytest.mark.parametrize("arm", list(_MODEL_CHOICE_ARMS))
+@pytest.mark.parametrize(
+    ("filter_class", "field_name", "expected"),
+    [
+        (django_filters.ModelChoiceFilter, "branch", int | None),
+        (django_filters.ModelMultipleChoiceFilter, "branch__name", list[int] | None),
+    ],
+    ids=["single-on-the-relation", "multiple-on-its-column"],
+)
+def test_a_model_choice_to_field_name_of_pk_keys_by_the_primary_key_as_unset_does(
+    arm: str,
+    filter_class: type[
+        django_filters.ModelChoiceFilter | django_filters.ModelMultipleChoiceFilter
+    ],
+    field_name: str,
+    expected: object,
+) -> None:
+    """``to_field_name="pk"`` types the value as the primary key, as no ``to_field_name`` does.
+
+    Django's ``ModelChoiceField`` looks each value up by ``to_field_name or "pk"``, so
+    ``"pk"`` is the primary key whichever model the form field reads: a model queryset's,
+    or for a callable queryset the model the ``field_name`` path ends on.
+    """
+    queryset = _MODEL_CHOICE_ARMS[arm]()
+    unset = _model_choice_annotation(
+        library_models.Shelf,
+        filter_class,
+        queryset,
+        field_name=field_name,
+    )
+    pk = _model_choice_annotation(
+        library_models.Shelf,
+        filter_class,
+        queryset,
+        field_name=field_name,
+        to_field_name="pk",
+    )
+    assert unset == pk == expected
+
+
+@pytest.mark.parametrize("arm", list(_MODEL_CHOICE_ARMS))
+@pytest.mark.parametrize(
+    ("filter_class", "field_name"),
+    [
+        (django_filters.ModelChoiceFilter, "branch"),
+        (django_filters.ModelMultipleChoiceFilter, "branch__name"),
+    ],
+    ids=["single-on-the-relation", "multiple-on-its-column"],
+)
+@pytest.mark.parametrize("to_field_name", ["nope", "shelves"], ids=["unknown", "reverse"])
+def test_a_model_choice_to_field_name_naming_no_column_is_refused_at_build(
+    arm: str,
+    filter_class: type[
+        django_filters.ModelChoiceFilter | django_filters.ModelMultipleChoiceFilter
+    ],
+    field_name: str,
+    to_field_name: str,
+) -> None:
+    """A ``to_field_name`` naming nothing, or a reverse relation, of ``Branch`` is refused.
+
+    The form field would look each value up by a name that is no column of the model it
+    reads, so no column types the input. The refusal names the set, the filter, the
+    ``to_field_name`` and the model: for a model queryset the model its form field looks
+    values up in, for a callable one the model its ``field_name`` path ends on, with a
+    model queryset among the remedies.
+    """
+    with pytest.raises(ConfigurationError) as exc_info:
+        _model_choice_annotation(
+            library_models.Shelf,
+            filter_class,
+            _MODEL_CHOICE_ARMS[arm](),
+            field_name=field_name,
+            to_field_name=to_field_name,
+        )
+    if arm == "callable-queryset":
+        source = "the model its field_name path ends on (a callable queryset names none at build)"
+        remedy = "Pass a model queryset, name a column of that model,"
+    else:
+        source = "the model its form field looks each value up in"
+        remedy = "Name a column of that model,"
+    assert str(exc_info.value) == (
+        f"PickSet: {filter_class.__name__} on {field_name!r} has to_field_name "
+        f"{to_field_name!r}, which names no column of Branch, {source}, so there is no "
+        f"column to type its input from. {remedy} or drop to_field_name to look values up by "
+        "primary key."
+    )
+
+
+class _ColumnPathCase(NamedTuple):
+    """A model-choice filter over a column path: its set's model, the model queryset's model."""
+
+    model: type[models.Model]
+    field_name: str
+    target: type[models.Model]
+    to_field_name: str | None
+    expected: object
+
+
+_COLUMN_PATH_CASES = {
+    "inheritance-child-unset": _ColumnPathCase(
+        library_models.KioskFault,
+        "kiosk__name",
+        library_models.SelfServeDesk,
+        None,
+        list[int] | None,
+    ),
+    "inheritance-child-grandparent-column": _ColumnPathCase(
+        library_models.KioskFault,
+        "kiosk__name",
+        library_models.SelfServeDesk,
+        "name",
+        list[str] | None,
+    ),
+    "inheritance-child-own-column": _ColumnPathCase(
+        library_models.KioskFault,
+        "kiosk__name",
+        library_models.SelfServeDesk,
+        "kiosk_code",
+        list[str] | None,
+    ),
+    "inheritance-child-parent-column": _ColumnPathCase(
+        library_models.KioskFault,
+        "kiosk__name",
+        library_models.SelfServeDesk,
+        "window_count",
+        list[int] | None,
+    ),
+    "no-relation-crossed": _ColumnPathCase(
+        library_models.Branch,
+        "name",
+        library_models.Branch,
+        "name",
+        list[str] | None,
+    ),
+    "inheritance-child-pk-unset": _ColumnPathCase(
+        library_models.KioskFault,
+        "kiosk__pk",
+        library_models.SelfServeDesk,
+        None,
+        list[int] | None,
+    ),
+    "inheritance-child-pk-own-column": _ColumnPathCase(
+        library_models.KioskFault,
+        "kiosk__pk",
+        library_models.SelfServeDesk,
+        "kiosk_code",
+        list[str] | None,
+    ),
+    "inheritance-child-own-key": _ColumnPathCase(
+        library_models.SelfServeDesk,
+        "pk",
+        library_models.SelfServeDesk,
+        "kiosk_code",
+        list[str] | None,
+    ),
+    "two-hops": _ColumnPathCase(
+        library_models.Book,
+        "shelf__branch__name",
+        library_models.Branch,
+        "name",
+        list[str] | None,
+    ),
+    "two-hops-to-the-relation": _ColumnPathCase(
+        library_models.Book,
+        "shelf__branch",
+        library_models.Branch,
+        "isil",
+        list[str] | None,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(_COLUMN_PATH_CASES))
+def test_a_callable_queryset_types_a_column_path_as_its_model_queryset_does(case: str) -> None:
+    """A callable queryset reads the model its ``field_name`` path ends on, as a model one names.
+
+    ``KioskFault.kiosk`` targets the third level of an inheritance chain and ``name`` is
+    a column of its first; the model ``kiosk__name`` ends on is the relation's target
+    (``SelfServeDesk``), so the target's own ``kiosk_code`` and its parent's
+    ``window_count`` are columns of it too. ``kiosk__pk`` ends there as well, though the
+    target's key is its parent link, and ``SelfServeDesk``'s own ``pk`` ends on the set's
+    model. ``Branch``'s ``name`` crosses no relation, so the
+    model is the set's own; ``Book``'s ``shelf__branch__name`` and ``shelf__branch``
+    cross two, and the model is the last one's target.
+    """
+    row = _COLUMN_PATH_CASES[case]
+
+    def _requested_targets(_request: HttpRequest | None) -> QuerySet[models.Model]:
+        return row.target._default_manager.all()
+
+    by_model = _model_choice_annotation(
+        row.model,
+        django_filters.ModelMultipleChoiceFilter,
+        row.target._default_manager.all(),
+        row.field_name,
+        row.to_field_name,
+    )
+    by_callable = _model_choice_annotation(
+        row.model,
+        django_filters.ModelMultipleChoiceFilter,
+        _requested_targets,
+        row.field_name,
+        row.to_field_name,
+    )
+    assert by_callable == by_model == row.expected
+
+
+@pytest.mark.parametrize(
+    ("model", "field_name"),
+    [
+        (library_models.KioskFault, "kiosk__pk"),
+        (library_models.SelfServeDesk, "pk"),
+        (library_models.Shelf, "branch__pk"),
+    ],
+    ids=["inheritance-child-key", "inheritance-child-own-key", "plain-key"],
+)
+def test_a_model_choice_filter_with_no_queryset_on_a_primary_key_path_is_refused(
+    model: type[models.Model],
+    field_name: str,
+) -> None:
+    """An unset ``queryset`` over Django's ``pk`` alias names no model to look values up in.
+
+    The path ends on the column the key stores, not on a relation, even where the key is
+    a multi-table-inheritance parent link (``SelfServeDesk``'s ``lendingdesk_ptr``).
+    """
+    pick_set = type(
+        "PickSet",
+        (FilterSet,),
+        {
+            "pick": django_filters.ModelChoiceFilter(field_name=field_name),
+            "Meta": type("Meta", (), {"model": model, "fields": []}),
+        },
+    )
+    with pytest.raises(ConfigurationError) as exc_info:
+        convert_filter_to_input_annotation(pick_set.base_filters["pick"], None, None, pick_set)
+    assert str(exc_info.value) == (
+        f"PickSet: ModelChoiceFilter on {field_name!r} has no queryset and its field_name "
+        "names no relation on the FilterSet model, so there is no column to type its input "
+        "from. Pass a model queryset."
+    )
+
+
+def test_a_model_choice_filter_with_a_callable_queryset_on_a_set_without_a_model_is_refused() -> (
+    None
+):
+    """A set without ``Meta.model`` has no model for a callable queryset's ``field_name`` to walk.
+
+    The callable names its model only once a request arrives, and with no model on the
+    set the ``field_name`` path reaches none, so the input is refused with the callable
+    queryset's remedy.
+    """
+
+    class ModelLessSet(FilterSet):
+        names = _request_scoped_choice(
+            django_filters.ModelMultipleChoiceFilter,
+            _requested_branches,
+            field_name="branch__name",
+            to_field_name="name",
+        )
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        convert_filter_to_input_annotation(
+            ModelLessSet.base_filters["names"],
+            None,
+            None,
+            ModelLessSet,
+        )
+    assert str(exc_info.value) == (
+        "ModelLessSet: ModelMultipleChoiceFilter on 'branch__name' has a callable queryset, "
+        "which names its model only once a request arrives, and its field_name is no path of "
+        "fields on the FilterSet model to read that model from, so there is no column to type "
+        "its input from. Pass a model queryset, or point field_name at the field the filter "
+        "compares (the relation, or the to_field_name column past it)."
+    )
 
 
 def test_normalize_input_value_typed_filter_unwraps_none_enum_value() -> None:

@@ -327,6 +327,24 @@ def _resolve_segment_field(model: type[models.Model], segment: str) -> ModelFiel
     return meta.get_field(segment)
 
 
+def choice_key_field(model: type[models.Model], key: str | None) -> ConcreteField | None:
+    """Return the field of ``model`` a model-choice ``to_field_name`` resolves its choice by.
+
+    Unset, ``""`` and ``"pk"`` key by the primary key (``ModelChoiceField.to_python``
+    looks up ``to_field_name or "pk"``); any other name resolves by name or attname.
+    ``None`` when ``model`` has no column of that name.
+    """
+    if not key or key == "pk":
+        return model._meta.pk
+    try:
+        field = model._meta.get_field(key)
+    except FieldDoesNotExist:
+        return None
+    # ``get_field`` answers a ``models.Field`` for every forward name; a reverse relation
+    # or a generic relation is no column of the row and reads as ``None`` below.
+    return field if truth.is_instance(field, models.Field) else None
+
+
 def _is_traversable_relation(field: object) -> TypeGuard[_TraversableRelationLike]:
     """Return whether a resolved field is a relation the walk can follow.
 

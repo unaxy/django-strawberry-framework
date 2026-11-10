@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 477 done, 121 to do. The CHANGELOG entries filed here moved to
+Progress: 478 done, 121 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2455,6 +2455,26 @@ Progress: 477 done, 121 to do. The CHANGELOG entries filed here moved to
   / `::test_an_unwired_target_filterset_refuses_a_wrong_type_id_on_a_leaf_ending_on_its_key` and
   `tests/filters/test_finalizer.py` (the encode-only refusal,
   `::test_phase_2_5_admits_a_key_of_the_hop_target_set_decoding_against_that_set`)
+- [x] 871. A `ModelChoiceFilter` / `ModelMultipleChoiceFilter` / CSV model-choice filter with a callable `queryset` is
+  typed from the model its `field_name` path ends on over the declaring set's model (the last relation's target, the
+  set's own model for a path crossing none; a path ending on Django's `pk` alias ends on the model the part before it
+  reaches, never on a multi-table-inheritance parent link), so django-filter's `field_name="branch__name",
+  to_field_name="name"` idiom builds and answers as the same declaration with a model queryset does, where every
+  column-ending path was refused at schema build (117 of 177 grid shapes now build, all equal to the model arm and
+  stock; nothing that built changed). `to_field_name="pk"` is the primary key on both arms (Django's
+  `to_field_name or "pk"`); a `to_field_name` naming no column of the model, a callable queryset whose `field_name` is
+  no path of fields (or on a set without `Meta.model`) and an unset queryset on a non-relation or `pk` path raise
+  `ConfigurationError` naming the set and filter, replacing a raw `FieldDoesNotExist` and the remedy that steered to
+  `field_name="branch"`. `filters/base.py::model_choice_model` replaces `model_choice_identity_column`;
+  `_model_identity_column`, `relation_identity_column` and `filters/inputs.py::_model_choice_identity_annotation`
+  follow; `choice_key_field` moved from `forms/inputs.py` to `utils/relations.py`. Fakeshop adds
+  `ShelfFilter.home_branches_named_for_request`, `ShelfFilter.home_branch_pks_for_request`,
+  `BranchFilter.names_for_request` and `BranchFilter.pks_for_request`. Pinned live by `examples/fakeshop/test_query/test_library_api.py::test_library_declared_model_multiple_choice_filter_takes_its_to_field_name_values_over_http`
+  (callable and hop-less rows, root / nested / flat), `::test_library_declared_model_choice_filter_over_the_pk_alias_with_a_callable_queryset`
+  and `::test_library_declared_model_choice_filters_take_the_column_their_form_cleans_over_http`, and in the package
+  by the `tests/filters/test_inputs.py` rows for the `pk` alias, unknown `to_field_name`, column paths (inheritance
+  child, `kiosk__pk`, two hops, no hop), unset `pk` paths and a model-less set. Docs: README, GLOSSARY `FilterSet`
+  (pk 463, "Relation leaves"), spec-027 (Decision 4 row, Edge case, Test plan). Filed 875. CHANGELOGTODO 876
 
 ## Outside review of the fixes
 
@@ -2710,21 +2730,16 @@ tracker number are recorded there; open remainders and new defects are filed as 
   numbered 100 / 101 through a flat or raw parent key (`filters/sets.py::_LeafChain.terminal_value` /
   `_relation_key_value` re-read the cleaned instances' keys). One declaration, two answers, the 789 family; a forward
   key (`CardItem.card`, `number`) answers `[]` both ways. Found fact-finding 819
-- [ ] 871. A `ModelMultipleChoiceFilter(field_name="branch__name", to_field_name="name", queryset=<callable>)`
-  (django-filter's `to_field_name` idiom, accepted by stock django-filter) is refused at schema build: "its field_name
-  names no relation on the FilterSet model ... point field_name at a relation"
-  (`filters/inputs.py::_model_choice_identity_annotation` -> `filters/base.py::model_choice_identity_column`), though
-  the column is knowable (`field_name` ends on the `to_field_name` field of the path's last model); the same
-  declaration with a model `queryset=` builds and answers. The remedy, and the README / GLOSSARY "Relation leaves"
-  clause "or of the relation its `field_name` names when `queryset` is a callable", steer the consumer to
-  `field_name="branch"`, which builds and answers the masked `ValueError` on every value (819). GOAL success criterion
-  7. Found researching 869
 - [ ] 874. (robustness) On a multi-table-inheritance child target whose type is registered only for the child
   (`KioskFault.kiosk` to `SelfServeDesk`, pk `lendingdesk_ptr`), a `GlobalIDFilter` on the trailing-pk spelling
   (`kiosk__pk`, `kiosk__id` or `kiosk__lendingdesk_ptr`), undeclared or past an unwired declared hop, validates no
   type: a `library.venue` id carrying the desk's pk matches the row, while the key `kiosk` refuses it ("expects
   library.selfservedesk"). That breaks the key / trailing-pk twin parity of 833 and 849. Found verifying 860 (the
   `mti` / `mti-twin` cells of its verifier probe)
+- [ ] 875. (robustness) A model-choice filter with a model `queryset` whose `field_name` resolves nothing on the set's
+  model (`ModelChoiceFilter(field_name="nothing", queryset=Branch.objects.all())`) or names a `GenericForeignKey`
+  builds, typed from its queryset, and fails per request (stock django-filter raises `FieldError` per request); the
+  callable arm refuses the same paths at schema build (871). Found researching 871
 
 ## To do: holes found re-checking the fixes
 
