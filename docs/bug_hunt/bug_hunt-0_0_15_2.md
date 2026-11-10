@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 480 done, 119 to do. The CHANGELOG entries filed here moved to
+Progress: 481 done, 119 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2502,6 +2502,24 @@ Progress: 480 done, 119 to do. The CHANGELOG entries filed here moved to
   range leaves x supplied / absent x sync / async, exact statement counts). A GlobalID leaf through a placeholder is
   refused earlier at schema build (`types/finalizer.py::_audit_unregistered_related_filter_targets`). Unreleased
   regression, no CHANGELOG entry
+- [x] 875. A `ModelChoiceFilter` / `ModelMultipleChoiceFilter` whose `field_name` names a `GenericForeignKey` (on the
+  set's model or past a relation; django-filter's CSV wrapper and a `Meta.filter_overrides` selection included) is now
+  refused with the GlobalID filter's `ConfigurationError` when its set publishes its filters: at schema build for a
+  served set, at first use for an unbound one. With a model `queryset` it built and answered every request with
+  Django's masked `FieldError`; a callable or unset one was refused only when served, in input-build words, and failed
+  per request unbound. `filters/base.py::refuse_identityless_relation` now also asks the model-choice family, when its
+  `filter` is shipped code (`filters/sets.py::FilterSet._publish_filters` passes `_runs_shipped_filter`) and it
+  declares no `method`; a `method=`, a class-level `filter` override and a `GenericRelation` keep serving, and
+  GlobalID's gate is unchanged. The other half is not a defect: a model-queryset model-choice filter whose
+  `field_name` the model does not carry (a typo, a queryset annotation, a `FilteredRelation` alias) is left to the
+  request like every filter class (`filters/base.py::refuse_unresolvable_lookup`'s stated exemption); an alias and a
+  text annotation serve rows. spec-027 (the `_publish_filters` checklist item, the Decision 4 model-choice row, the
+  declared-predicate paragraph, the test plan) and the live README map are restated. Grids: 6 of 144 and 15 of 30
+  shapes moved, all model-choice on a GFK. Pinned by
+  `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py`
+  (`::test_a_model_choice_filter_on_a_generic_foreign_key_is_refused_when_the_schema_builds`, the unserved first-use,
+  consumer-code, `GenericRelation` and served-annotation rows) and
+  `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_set_declaring_a_refused_filter_is_refused_at_its_first_construction`
 
 ## Outside review of the fixes
 
@@ -2742,10 +2760,11 @@ tracker number are recorded there; open remainders and new defects are filed as 
   numbered 100 / 101 through a flat or raw parent key (`filters/sets.py::_LeafChain.terminal_value` /
   `_relation_key_value` re-read the cleaned instances' keys). One declaration, two answers, the 789 family; a forward
   key (`CardItem.card`, `number`) answers `[]` both ways. Found fact-finding 819
-- [ ] 875. (robustness) A model-choice filter with a model `queryset` whose `field_name` resolves nothing on the set's
-  model (`ModelChoiceFilter(field_name="nothing", queryset=Branch.objects.all())`) or names a `GenericForeignKey`
-  builds, typed from its queryset, and fails per request (stock django-filter raises `FieldError` per request); the
-  callable arm refuses the same paths at schema build (871). Found researching 871
+- [ ] 877. (robustness) An unserved set's column-typed shipped filter (`CharFilter`, `NumberFilter`) on a
+  `GenericForeignKey` builds and fails every raw-form, `.qs` and `apply_sync` request with Django's `FieldError`,
+  while a served set refuses it at the input build (`filters/inputs.py::_unscalared_field_refusal`) and spec-027's
+  edge case on a field no `SCALAR_MAP` entry covers and GLOSSARY say an unserved set refuses it at the `apply_sync`
+  request. Found researching 875
 
 ## To do: holes found re-checking the fixes
 

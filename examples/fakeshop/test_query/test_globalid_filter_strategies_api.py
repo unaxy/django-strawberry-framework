@@ -6,6 +6,10 @@ its bound public filter primitive to preserve Strawberry's already-decoded value
 A GlobalID filter into a model no type exposes compares the node id on the relation's
 key, through a ``GenericRelation`` too; one on a ``GenericForeignKey`` is refused when
 its set publishes its filters, served or applied unbound, unless a ``method`` filters it.
+So is a model-choice filter on one, whatever its ``queryset``, unless a ``method`` or a
+``filter`` override of its own filters it; through a ``GenericRelation`` it keeps the
+tagged rows, and on a name only the type's queryset holds (a ``FilteredRelation`` alias,
+a text annotation) it serves rows.
 A relation key whose hops re-enter its own set's table takes the id the type registered
 for the relation's target mints, under its published name, whichever type the set or the
 walk's target rows answer for, and so does a consumer leaf ending on the re-entry's
@@ -29,16 +33,18 @@ from typing import NamedTuple, TypeVar
 import pytest
 import strawberry
 from apps.library import models
+from apps.library.filters import ModelChoiceInFilter
 from asgiref.sync import sync_to_async
+from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection
-from django.db.models import CharField, Model, QuerySet, Value
+from django.db.models import CharField, F, FilteredRelation, Model, QuerySet, Value
 from django.db.models.functions import Cast, Concat
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
-from django_filters import Filter
+from django_filters import Filter, ModelChoiceFilter, ModelMultipleChoiceFilter
 from graphql import GraphQLError
 from graphql_client import (
     JSONObject,
@@ -76,7 +82,12 @@ from django_strawberry_framework.filters import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.utils._narrowing import is_queryset, require, require_instance
+from django_strawberry_framework.utils._narrowing import (
+    is_list_or_tuple,
+    is_queryset,
+    require,
+    require_instance,
+)
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import saved_pk
 
@@ -378,6 +389,23 @@ def test_a_globalid_filter_into_a_model_no_type_exposes_compares_the_node_id_alo
 _GlobalIDFilterClass = type[GlobalIDFilter | GlobalIDMultipleChoiceFilter]
 
 
+class _SuperGlobalIDFilter(GlobalIDFilter):
+    """A consumer ``filter`` override that still compares the node id through ``super()``."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        return super().filter(qs, value)
+
+
+class _OwnGlobalIDMultipleChoiceFilter(GlobalIDMultipleChoiceFilter):
+    """A consumer ``filter`` override that filters nothing, never calling ``super()``."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        del value
+        return qs
+
+
 def _tagged_object_filter(filter_class: _GlobalIDFilterClass) -> type[FilterSet]:
     """A set filtering ``TaggedItem`` rows by a GlobalID of its ``GenericForeignKey``."""
 
@@ -431,7 +459,15 @@ def _generic_foreign_key_refusal(filter_class: _GlobalIDFilterClass) -> str:
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("filter_class", [GlobalIDFilter, GlobalIDMultipleChoiceFilter])
+@pytest.mark.parametrize(
+    "filter_class",
+    [
+        GlobalIDFilter,
+        GlobalIDMultipleChoiceFilter,
+        _SuperGlobalIDFilter,
+        _OwnGlobalIDMultipleChoiceFilter,
+    ],
+)
 def test_a_globalid_filter_on_a_generic_foreign_key_is_refused_when_the_schema_builds(
     filter_class: _GlobalIDFilterClass,
 ) -> None:
@@ -483,16 +519,17 @@ def test_an_unserved_globalid_filter_on_a_generic_foreign_key_is_refused_at_firs
     assert str(exc_info[1]).startswith(_generic_foreign_key_refusal(GlobalIDFilter)), exc_info[1]
 
 
-def _generic_relation_schema() -> DjangoSchema:
-    """A Relay ``Branch`` type filtering by a GlobalID of one of its ``tags``.
+def _generic_relation_schema(leaf: Filter) -> DjangoSchema:
+    """A Relay ``Branch`` type filtering by ``leaf``, one of its ``tags``.
 
     ``Branch.tags`` is a ``GenericRelation`` (the reverse of ``TaggedItem.content_object``)
-    and no type exposes ``TaggedItem``, so the node id is compared on the tag's key.
+    and no type exposes ``TaggedItem``, so a GlobalID ``leaf``'s node id is compared on the
+    tag's key.
     """
     registry.clear()
 
     class BranchTagFilter(FilterSet):
-        tagged = GlobalIDFilter(field_name="tags")
+        tagged = leaf
 
         class Meta:
             model = models.Branch
@@ -535,7 +572,7 @@ def test_a_globalid_filter_through_a_generic_relation_compares_the_tag_key() -> 
     sibling = models.Branch.objects.create(name="Sibling", city="Boston")
     tag = models.TaggedItem.objects.create(content_object=target, tag="t")
     models.TaggedItem.objects.create(content_object=sibling, tag="s")
-    schema = _generic_relation_schema()
+    schema = _generic_relation_schema(GlobalIDFilter(field_name="tags"))
     query = "query($where: JSON!) { branches(where: $where) { name } }"
 
     value = str(relay.GlobalID(type_name="library.taggeditem", node_id=str(tag.pk)))
@@ -599,6 +636,497 @@ def test_a_globalid_filter_on_a_generic_foreign_key_filters_through_its_method(
     )
 
     assert payload == {"data": {"tags": [{"tag": "t"}]}}, payload
+
+
+def _branch_rows(_request: object = None) -> QuerySet[models.Branch]:
+    """Every branch: a model-choice filter's ``queryset``, or the callable returning it."""
+    return models.Branch.objects.order_by("pk")
+
+
+class _ContentObjectChoiceFilter(ModelChoiceFilter):
+    """A ``filter`` override keeping the tags whose content type and object id name the branch."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        if not isinstance(value, models.Branch):
+            return qs
+        content_type = ContentType.objects.get_for_model(models.Branch)
+        return qs.filter(content_type=content_type, object_id=value.pk)
+
+
+class _ContentObjectMultipleChoiceFilter(ModelMultipleChoiceFilter):
+    """A ``filter`` override keeping the tags whose object id names one of the branches."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        if not is_list_or_tuple(value) or not value:
+            return qs
+        content_type = ContentType.objects.get_for_model(models.Branch)
+        return qs.filter(
+            content_type=content_type,
+            object_id__in=[saved_pk(row) for row in value if isinstance(row, Model)],
+        )
+
+
+def _model_choice_set(
+    model: type[Model],
+    leaf: Filter | None,
+    queryset: object = None,
+    lookup: str = "exact",
+) -> type[FilterSet]:
+    """A set on ``model`` declaring ``leaf`` as ``chosen``, or selecting a model choice.
+
+    With no ``leaf``, ``Meta.filter_overrides`` selects a ``ModelChoiceFilter`` over
+    ``queryset`` (every branch for ``None``; a callable returning them is passed uncalled)
+    for the ``GenericForeignKey`` ``Meta.fields`` names with ``lookup``: for ``in``,
+    django-filter generates its CSV wrapper around the selected class.
+    """
+    meta: dict[str, object] = {"model": model, "fields": []}
+    attrs: dict[str, object] = {}
+    if leaf is None:
+        chosen_rows = _branch_rows() if queryset is None else queryset
+
+        def extra(_field: object) -> dict[str, object]:
+            return {"queryset": chosen_rows}
+
+        meta["fields"] = {"content_object": [lookup]}
+        meta["filter_overrides"] = {
+            GenericForeignKey: {"filter_class": ModelChoiceFilter, "extra": extra},
+        }
+    else:
+        attrs["chosen"] = leaf
+    attrs["Meta"] = type("Meta", (), meta)
+    filterset = type("ModelChoiceGenericSet", (FilterSet,), attrs)
+    assert issubclass(filterset, FilterSet)
+    return filterset
+
+
+def _served_schema(filterset: type[FilterSet]) -> DjangoSchema:
+    """``filterset``'s model on a type serving it, so the schema build publishes the set."""
+    model = filterset._meta.model
+    assert model is not None
+    registry.clear()
+
+    @strawberry.type
+    class Query:
+        rows = DjangoConnectionField(
+            make_django_type(
+                "ServedRowsNode",
+                model,
+                ("id",),
+                meta_extra={"filterset_class": filterset},
+            ),
+        )
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+class _GenericChoice(NamedTuple):
+    """A model-choice shape on a ``GenericForeignKey`` and the words its refusal names."""
+
+    model: type[Model]
+    #: Builds the declared leaf; ``None`` selects one through ``Meta.filter_overrides``.
+    leaf: Callable[[], Filter] | None
+    #: The refused filter's class, published name and ``field_name``.
+    kind: str
+    name: str
+    field_name: str
+    #: The ``GenericForeignKey`` the path ends on.
+    relation: str
+    #: The ``queryset`` a ``Meta.filter_overrides`` selection is handed (``None``: every
+    #: branch).
+    queryset: object = None
+    #: The lookup ``Meta.fields`` names for a ``Meta.filter_overrides`` selection.
+    lookup: str = "exact"
+
+
+_GENERIC_CHOICES: dict[str, _GenericChoice] = {
+    "model-choice": _GenericChoice(
+        models.TaggedItem,
+        lambda: ModelChoiceFilter(field_name="content_object", queryset=_branch_rows()),
+        "ModelChoiceFilter",
+        "chosen",
+        "content_object",
+        "TaggedItem.content_object",
+    ),
+    "model-multiple-choice": _GenericChoice(
+        models.TaggedItem,
+        lambda: ModelMultipleChoiceFilter(field_name="content_object", queryset=_branch_rows()),
+        "ModelMultipleChoiceFilter",
+        "chosen",
+        "content_object",
+        "TaggedItem.content_object",
+    ),
+    "model-choice-past-a-forward-key": _GenericChoice(
+        models.DeskShift,
+        lambda: ModelChoiceFilter(field_name="desk__content_object", queryset=_branch_rows()),
+        "ModelChoiceFilter",
+        "chosen",
+        "desk__content_object",
+        "CirculationDesk.content_object",
+    ),
+    "model-multiple-choice-past-a-reverse-relation": _GenericChoice(
+        models.Branch,
+        lambda: ModelMultipleChoiceFilter(
+            field_name="circulation_desks__content_object",
+            queryset=_branch_rows(),
+        ),
+        "ModelMultipleChoiceFilter",
+        "chosen",
+        "circulation_desks__content_object",
+        "CirculationDesk.content_object",
+    ),
+    "declared-csv-model-choice": _GenericChoice(
+        models.TaggedItem,
+        lambda: ModelChoiceInFilter(
+            field_name="content_object",
+            lookup_expr="in",
+            queryset=_branch_rows(),
+        ),
+        "ModelChoiceInFilter",
+        "chosen",
+        "content_object",
+        "TaggedItem.content_object",
+    ),
+    "filter-overrides-model-choice": _GenericChoice(
+        models.TaggedItem,
+        None,
+        "ModelChoiceFilter",
+        "content_object",
+        "content_object",
+        "TaggedItem.content_object",
+    ),
+    "filter-overrides-generated-csv-model-choice": _GenericChoice(
+        models.TaggedItem,
+        None,
+        "ModelChoiceInFilter",
+        "content_object__in",
+        "content_object",
+        "TaggedItem.content_object",
+        lookup="in",
+    ),
+    "callable-queryset-model-choice": _GenericChoice(
+        models.TaggedItem,
+        None,
+        "ModelChoiceFilter",
+        "content_object",
+        "content_object",
+        "TaggedItem.content_object",
+        _branch_rows,
+    ),
+}
+
+
+def _generic_choice_refusal(shape: _GenericChoice) -> str:
+    return (
+        f"FilterSet ModelChoiceGenericSet: {shape.kind} "
+        f"{shape.name!r} has field_name {shape.field_name!r}, which names {shape.relation}, a "
+        "GenericForeignKey: Django filters no queryset through it, so no related row's "
+        "identity can be compared on it. Filter through the GenericRelation that reverses it "
+        "on the related model, or on the content type and object id columns it reads."
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", sorted(_GENERIC_CHOICES))
+def test_a_model_choice_filter_on_a_generic_foreign_key_is_refused_when_the_schema_builds(
+    name: str,
+) -> None:
+    """A model-choice filter compares the row it looks up on its path, which a GFK cannot hold.
+
+    Whatever its ``queryset`` (a model's rows, a callable returning them), past a forward
+    key or a reverse relation, as django-filter's CSV wrapper or a ``Meta.filter_overrides``
+    selection, it would answer every request with the ``FieldError`` Django's query raises:
+    serving the set refuses it in the GlobalID filter's words.
+    """
+    shape = _GENERIC_CHOICES[name]
+    leaf = None if shape.leaf is None else shape.leaf()
+    filterset = _model_choice_set(shape.model, leaf, shape.queryset, shape.lookup)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        _ = _served_schema(filterset)
+
+    assert str(exc_info.value) == _generic_choice_refusal(shape), exc_info
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", ["model-choice", "model-multiple-choice"])
+def test_an_unserved_model_choice_filter_on_a_generic_foreign_key_is_refused_at_first_use(
+    caplog: pytest.LogCaptureFixture,
+    name: str,
+) -> None:
+    """Applied unbound, the set publishes at its first use: the same refusal, logged.
+
+    The request answers the masked error and the server log carries the
+    ``ConfigurationError``, never a ``FieldError`` from the query.
+    """
+    shape = _GENERIC_CHOICES[name]
+    assert shape.leaf is not None
+    branch = models.Branch.objects.create(name="Target", city="Boston")
+    _ = models.TaggedItem.objects.create(content_object=branch, tag="t")
+    schema = _tagged_item_schema(_model_choice_set(shape.model, shape.leaf()), served=False)
+    unfiltered = _post(schema, "{ tags { tag } }")
+    assert unfiltered == {"data": {"tags": [{"tag": "t"}]}}, unfiltered
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+    value = saved_pk(branch) if name == "model-choice" else [saved_pk(branch)]
+
+    payload = _post(
+        schema,
+        "query($where: JSON!) { tags(where: $where) { tag } }",
+        {"where": {"chosen": value}},
+    )
+
+    assert payload["data"] is None, payload
+    assert json_at(payload, "errors", 0, "message") == "An unexpected error occurred.", payload
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert len(records) == 1, caplog.records
+    exc_info = records[0].exc_info
+    assert exc_info is not None
+    assert type(exc_info[1]) is ConfigurationError, exc_info[1]
+    assert str(exc_info[1]) == _generic_choice_refusal(shape), exc_info[1]
+
+
+def _content_object_method_set(leaf: Filter) -> type[FilterSet]:
+    """A set whose model-choice ``leaf`` on the ``GenericForeignKey`` runs ``by_branches``."""
+
+    class ContentObjectMethodSet(FilterSet):
+        chosen = leaf
+
+        class Meta:
+            model = models.TaggedItem
+            fields = []
+
+        def by_branches(
+            self,
+            queryset: QuerySet[models.TaggedItem],
+            name: str,
+            value: object,
+        ) -> QuerySet[models.TaggedItem]:
+            del name
+            chosen = value if is_list_or_tuple(value) else [value]
+            return queryset.filter(
+                content_type=ContentType.objects.get_for_model(models.Branch),
+                object_id__in=[saved_pk(row) for row in chosen if isinstance(row, Model)],
+            )
+
+    return ContentObjectMethodSet
+
+
+def _own_filter_set(leaf: Filter) -> type[FilterSet]:
+    """A set whose model-choice ``leaf`` on the ``GenericForeignKey`` runs its own ``filter``."""
+
+    class ContentObjectOwnFilterSet(FilterSet):
+        chosen = leaf
+
+        class Meta:
+            model = models.TaggedItem
+            fields = []
+
+    return ContentObjectOwnFilterSet
+
+
+#: Each model-choice leaf the refusal leaves to consumer code, its set builder, and whether
+#: it takes a list of branches.
+_CONSUMER_GENERIC_CHOICES: dict[str, tuple[Callable[[], type[FilterSet]], bool]] = {
+    "model-choice-method": (
+        lambda: _content_object_method_set(
+            ModelChoiceFilter(
+                field_name="content_object",
+                queryset=_branch_rows(),
+                method="by_branches",
+            ),
+        ),
+        False,
+    ),
+    "model-multiple-choice-method": (
+        lambda: _content_object_method_set(
+            ModelMultipleChoiceFilter(
+                field_name="content_object",
+                queryset=_branch_rows(),
+                method="by_branches",
+            ),
+        ),
+        True,
+    ),
+    "model-choice-filter-override": (
+        lambda: _own_filter_set(
+            _ContentObjectChoiceFilter(field_name="content_object", queryset=_branch_rows()),
+        ),
+        False,
+    ),
+    "model-multiple-choice-filter-override": (
+        lambda: _own_filter_set(
+            _ContentObjectMultipleChoiceFilter(
+                field_name="content_object",
+                queryset=_branch_rows(),
+            ),
+        ),
+        True,
+    ),
+}
+
+
+def _node_pks(payload: JSONObject, field: str) -> list[int]:
+    """The primary keys the node ids of ``payload``'s ``field`` rows name, in order."""
+    assert "errors" not in payload, payload
+    rows = json_list(json_object(payload, "data"), field)
+    return [int(relay.GlobalID.from_id(json_str(row, "id")).node_id) for row in rows]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("served", [True, False], ids=["served", "unserved"])
+@pytest.mark.parametrize("name", sorted(_CONSUMER_GENERIC_CHOICES))
+def test_a_model_choice_filter_on_a_generic_foreign_key_filters_through_consumer_code(
+    name: str,
+    *,
+    served: bool,
+) -> None:
+    """A ``method`` or a ``filter`` override filters as it chooses, so the refusal leaves it.
+
+    Neither compares through the relation the ``field_name`` names: these keep the tags
+    whose content type and object id name the chosen branches.
+    """
+    target = models.Branch.objects.create(name="Target", city="Boston")
+    sibling = models.Branch.objects.create(name="Sibling", city="Boston")
+    other = models.Branch.objects.create(name="Other", city="Boston")
+    tags = [
+        saved_pk(models.TaggedItem.objects.create(content_object=branch, tag=branch.name.lower()))
+        for branch in (target, sibling, other)
+    ]
+    build, listed = _CONSUMER_GENERIC_CHOICES[name]
+    schema = _tagged_item_schema(build(), served=served)
+    value = [saved_pk(target), saved_pk(sibling)] if listed else saved_pk(target)
+
+    payload = _post(
+        schema,
+        "query($where: JSON!) { tags(where: $where) { id } }",
+        {"where": {"chosen": value}},
+    )
+
+    assert _node_pks(payload, "tags") == (tags[:2] if listed else tags[:1]), payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("listed", [False, True], ids=["model-choice", "model-multiple-choice"])
+def test_a_model_choice_filter_through_a_generic_relation_keeps_the_tagged_rows(
+    *,
+    listed: bool,
+) -> None:
+    """The reverse of a ``GenericForeignKey`` is a relation Django joins, so it stays filterable.
+
+    A tag chosen from ``TaggedItem``'s rows keeps the branch it is attached to.
+    """
+    target = models.Branch.objects.create(name="Target", city="Boston")
+    sibling = models.Branch.objects.create(name="Sibling", city="Boston")
+    _ = models.Branch.objects.create(name="Other", city="Boston")
+    target_tag = models.TaggedItem.objects.create(content_object=target, tag="t")
+    sibling_tag = models.TaggedItem.objects.create(content_object=sibling, tag="s")
+    tags = models.TaggedItem.objects.order_by("pk")
+    leaf = (
+        ModelMultipleChoiceFilter(field_name="tags", queryset=tags)
+        if listed
+        else ModelChoiceFilter(field_name="tags", queryset=tags)
+    )
+    schema = _generic_relation_schema(leaf)
+    value = [saved_pk(target_tag), saved_pk(sibling_tag)] if listed else saved_pk(target_tag)
+
+    payload = _post(
+        schema,
+        "query($where: JSON!) { branches(where: $where) { id } }",
+        {"where": {"tagged": value}},
+    )
+
+    expected = [saved_pk(target), saved_pk(sibling)] if listed else [saved_pk(target)]
+    assert _node_pks(payload, "branches") == expected, payload
+
+
+def _annotated_desks(
+    _cls: type[DjangoType],
+    queryset: QuerySet[Model],
+    _info: object,
+    **_kwargs: object,
+) -> QuerySet[Model]:
+    """The desks with their branch as a ``FilteredRelation`` alias and its name as text."""
+    return queryset.annotate(
+        on_branch=FilteredRelation("branch"),
+        branch_label=F("branch__name"),
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("listed", [False, True], ids=["model-choice", "model-multiple-choice"])
+@pytest.mark.parametrize("field_name", ["on_branch", "branch_label"])
+def test_a_model_choice_filter_on_a_name_only_the_served_queryset_holds_serves_rows(
+    field_name: str,
+    *,
+    listed: bool,
+) -> None:
+    """A path the model lacks is left to the request: the type's queryset may hold it.
+
+    A ``FilteredRelation`` alias and a text annotation of the type's ``get_queryset`` are
+    no field of ``CirculationDesk``, yet the input typed from the filter's ``queryset``
+    keeps the desk on the chosen branch (the text compared as the branch's ``str``).
+    """
+    first = models.Branch.objects.create(name="First", city="Boston")
+    second = models.Branch.objects.create(name="Second", city="Boston")
+    content_type = ContentType.objects.get_for_model(models.Branch)
+    desks = [
+        saved_pk(
+            models.CirculationDesk.objects.create(
+                name=f"desk-{branch.name}",
+                branch=branch,
+                shelf=models.Shelf.objects.create(code=branch.name, branch=branch),
+                content_type=content_type,
+                object_id=branch.pk,
+            ),
+        )
+        for branch in (first, second)
+    ]
+    leaf = (
+        ModelMultipleChoiceFilter(field_name=field_name, queryset=_branch_rows())
+        if listed
+        else ModelChoiceFilter(field_name=field_name, queryset=_branch_rows())
+    )
+
+    class AnnotatedDeskSet(FilterSet):
+        chosen = leaf
+
+        class Meta:
+            model = models.CirculationDesk
+            fields = []
+
+    registry.clear()
+
+    @strawberry.type
+    class Query:
+        desks = DjangoConnectionField(
+            make_django_type(
+                "AnnotatedDeskNode",
+                models.CirculationDesk,
+                ("id", "name"),
+                meta_extra={"filterset_class": AnnotatedDeskSet},
+                namespace_extra={"get_queryset": classmethod(_annotated_desks)},
+            ),
+        )
+
+    finalize_django_types()
+    schema = DjangoSchema(query=Query, config=strawberry_config())
+    value = f"[{saved_pk(first)}]" if listed else str(saved_pk(first))
+
+    payload = _post(
+        schema,
+        f"{{ desks(filter: {{ chosen: {{ exact: {value} }} }}) {{ edges {{ node {{ id }} }} }} }}",
+    )
+
+    assert "errors" not in payload, payload
+    edges = json_list(json_object(payload, "data", "desks"), "edges")
+    found = [int(relay.GlobalID.from_id(json_str(edge, "node", "id")).node_id) for edge in edges]
+    assert found == desks[:1], payload
 
 
 class _ApiPrefix(NameConverter):

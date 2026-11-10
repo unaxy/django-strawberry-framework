@@ -25,8 +25,8 @@ A set no type names (a plain subclass of ``BookFilter``, a set of the test's own
 its filter table at its first construction, under a consumer's own call, DRF's
 ``DjangoFilterBackend`` and django-filter's ``FilterView`` alike: a walked key one or two hops
 deep answers ``BookFilter``'s rows as each viewer sees them, and a declaration Django answers
-no request for (a ``range`` over a relation, a GlobalID filter over a ``GenericForeignKey``) is
-refused at every construction.
+no request for (a ``range`` over a relation, a GlobalID or model-choice filter over a
+``GenericForeignKey``) is refused at every construction.
 """
 
 import contextlib
@@ -222,6 +222,32 @@ class _GlobalIDOverGenericSet(FilterSet):
         fields = ("tag",)
 
 
+class _ModelChoiceOverGenericSet(FilterSet):
+    """A model-choice filter over a ``GenericForeignKey``, which holds no chosen row."""
+
+    content_object = django_filters.ModelChoiceFilter(
+        field_name="content_object",
+        queryset=library_models.Branch.objects.all(),
+    )
+
+    class Meta:
+        model = library_models.TaggedItem
+        fields = ("tag",)
+
+
+class _ModelMultipleChoicePastKeySet(FilterSet):
+    """A model-multiple-choice filter past a key onto the desk's ``GenericForeignKey``."""
+
+    desk_object = django_filters.ModelMultipleChoiceFilter(
+        field_name="desk__content_object",
+        queryset=library_models.Branch.objects.all(),
+    )
+
+    class Meta:
+        model = library_models.DeskShift
+        fields = ("name",)
+
+
 #: The raw sets the driver routes build, by route name.
 _RAW_SETS: dict[str, type[FilterSet]] = {
     "book-filter": BookFilter,
@@ -234,6 +260,8 @@ _RAW_SETS: dict[str, type[FilterSet]] = {
     "range-own-flat-off": _range_own_parent(flat=False),
     "range-over-a-relation": _RangeOverRelationSet,
     "global-id-over-a-generic-key": _GlobalIDOverGenericSet,
+    "model-choice-over-a-generic-key": _ModelChoiceOverGenericSet,
+    "model-multiple-choice-past-a-key-onto-a-generic-key": _ModelMultipleChoicePastKeySet,
 }
 
 
@@ -2526,6 +2554,18 @@ _REFUSED_SETS = {
         "FilterSet _GlobalIDOverGenericSet: GlobalIDFilter 'content_object' has field_name "
         "'content_object', which names TaggedItem.content_object, a GenericForeignKey: Django "
         "filters no queryset through it, so no related row's identity can be compared on it."
+    ),
+    "model-choice-over-a-generic-key": (
+        "FilterSet _ModelChoiceOverGenericSet: ModelChoiceFilter 'content_object' has "
+        "field_name 'content_object', which names TaggedItem.content_object, a "
+        "GenericForeignKey: Django filters no queryset through it, so no related row's "
+        "identity can be compared on it."
+    ),
+    "model-multiple-choice-past-a-key-onto-a-generic-key": (
+        "FilterSet _ModelMultipleChoicePastKeySet: ModelMultipleChoiceFilter 'desk_object' has "
+        "field_name 'desk__content_object', which names CirculationDesk.content_object, a "
+        "GenericForeignKey: Django filters no queryset through it, so no related row's "
+        "identity can be compared on it."
     ),
 }
 

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 216 to do.
+Progress: 0 done, 217 to do.
 
 ## From dry-0_0_15_3
 
@@ -1027,6 +1027,13 @@ Progress: 0 done, 216 to do.
   `field_name` path ends on, where the schema build refused it; `to_field_name="pk"` now means the primary key instead
   of raising `FieldDoesNotExist`; a `to_field_name` naming no column of the model raises `ConfigurationError` naming
   the filter set and filter
+- [ ] 878. CHANGELOG entry for item 875: a `ModelChoiceFilter` / `ModelMultipleChoiceFilter` whose `field_name` names
+  a `GenericForeignKey` (on the set's model or past a relation, django-filter's CSV wrapper and a
+  `Meta.filter_overrides` selection included) is refused with the GlobalID filter's `ConfigurationError` when its set
+  publishes its filters (at schema build for a served set, at first use for an unbound one), instead of building and
+  answering every request with Django's `FieldError`; a callable or unset `queryset` on such a path is refused in the
+  same words. A `method=` filter, a class-level `filter` override and a filter through a `GenericRelation` are
+  unchanged
 
 ## From dry-upstream-0_0_15
 

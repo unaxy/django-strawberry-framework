@@ -63,6 +63,7 @@ from django_filters import (
     ChoiceFilter,
     Filter,
     ModelChoiceFilter,
+    ModelMultipleChoiceFilter,
     MultipleChoiceFilter,
     NumberFilter,
 )
@@ -3352,9 +3353,10 @@ def _compared_columns(filter_instance: Filter, field: ModelField) -> tuple[Concr
     ``ForeignObject`` off the pk and for a many-to-many whose through foreign key onto
     the target has a ``to_field``, and every carrier's target for a multi-column link.
     No column for a relation Django builds no join for (a ``GenericForeignKey``, whose
-    target is no one model): no value compares on it, so a set holding a GlobalID
-    filter on one refuses it when it publishes (``refuse_identityless_relation``); a
-    raw-key leaf on one is refused by its input build, or matches no row unserved.
+    target is no one model): no value compares on it, so a set holding a GlobalID or
+    model-choice filter on one refuses it when it publishes
+    (``refuse_identityless_relation``); a raw-key leaf on one is refused by its input
+    build, or matches no row unserved.
     """
     marked = bool(getattr(filter_instance, _GLOBALID_RELATION_PK_ATTR, False))
     if isinstance(field, models.ForeignKey) or not field.is_relation:
@@ -3576,14 +3578,19 @@ def refuse_identityless_relation(
     filterset_cls: type[BaseFilterSet],
     filter_name: str,
     filter_instance: Filter,
+    *,
+    shipped: bool,
 ) -> None:
-    """Refuse a GlobalID filter whose path names a relation no row identity is compared on.
+    """Refuse a GlobalID or model-choice filter on a relation no row identity is compared on.
 
     A ``GlobalIDFilter`` / ``GlobalIDMultipleChoiceFilter`` with no resolvable target
     compares its node id on the columns ``_compared_columns`` reads off the relation its
-    ``field_name`` names (``_unresolved_target_node_id``). A relation Django builds no
-    join for, a ``GenericForeignKey`` (a content type and an object id, no one target
-    model), has none, and Django refuses a queryset filter through it with
+    ``field_name`` names (``_unresolved_target_node_id``), and a ``ModelChoiceFilter`` /
+    ``ModelMultipleChoiceFilter`` (a ``Meta.filter_overrides`` selection and
+    django-filter's CSV wrapper around one included) compares there the row its
+    ``queryset`` looks each value up in, whatever that ``queryset`` is. A relation Django
+    builds no join for, a ``GenericForeignKey`` (a content type and an object id, no one
+    target model), has none, and Django refuses a queryset filter through it with
     ``FieldError``, so the declaration could answer no request.
     ``filters/sets.py::FilterSet._publish_filters`` asks this of every leaf a set
     publishes: a set a type serves refuses it when the schema builds, an unserved set at
@@ -3591,9 +3598,15 @@ def refuse_identityless_relation(
     read of its table), and again at every construction until it is fixed. A path naming
     no field is not read here, and neither is a filter with a ``method``: django-filter
     dispatches it to that method, which filters as it chooses (the content type and
-    object id columns, say), never through the relation its ``field_name`` names.
+    object id columns, say), never through the relation its ``field_name`` names. A
+    model-choice filter is asked only when its ``filter`` is ``shipped`` code
+    (``filters/sets.py::_runs_shipped_filter``): a ``filter`` override of its own filters
+    as it chooses too, while a GlobalID filter's override still holds the node-id
+    comparison it would reach through ``super()``.
     """
-    if not isinstance(filter_instance, (GlobalIDFilter, GlobalIDMultipleChoiceFilter)):
+    if not isinstance(filter_instance, (GlobalIDFilter, GlobalIDMultipleChoiceFilter)) and not (
+        shipped and isinstance(filter_instance, (ModelChoiceFilter, ModelMultipleChoiceFilter))
+    ):
         return
     if read_attr(filter_instance, "method", None) is not None:
         return

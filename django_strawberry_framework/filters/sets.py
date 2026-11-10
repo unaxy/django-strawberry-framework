@@ -4534,8 +4534,8 @@ class FilterSet(
         published table: ``base_filters`` (every instance's copies), the
         snapshot's candidate rows, flat copies and form keys, and every package
         read (``_filter_table``). A projected copy the set does not hold is
-        refused first (``_reject_foreign_projection``), and so are a GlobalID filter
-        on a relation no row identity is compared on
+        refused first (``_reject_foreign_projection``), and so are a GlobalID or
+        model-choice filter on a relation no row identity is compared on
         (``filters/base.py::refuse_identityless_relation``) and a leaf running a shipped
         ``filter`` (``_runs_shipped_filter``) whose ``field_name`` and ``lookup_expr``
         Django resolves on no queryset (``filters/base.py::refuse_unresolvable_lookup``)
@@ -4548,8 +4548,9 @@ class FilterSet(
             cls._reject_foreign_projection(filter_name, filter_instance)
             # An expanded copy is its declaring set's filter, refused when that set published.
             if _expansion_record(filter_instance) is None:
-                refuse_identityless_relation(cls, filter_name, filter_instance)
-                if _runs_shipped_filter(filter_instance):
+                shipped = _runs_shipped_filter(filter_instance)
+                refuse_identityless_relation(cls, filter_name, filter_instance, shipped=shipped)
+                if shipped:
                     refuse_unresolvable_lookup(cls, filter_name, filter_instance)
                     refuse_listless_lookup(cls, filter_name, filter_instance)
         model = cls._meta.model
