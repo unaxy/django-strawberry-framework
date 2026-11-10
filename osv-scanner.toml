@@ -1,6 +1,7 @@
 # osv-scanner reads this file beside `uv.lock` (.github/workflows/dependency-audit.yml).
-# Every entry names one advisory, why it cannot be fixed in the lock, and a date
-# after which the audit fails on it again so the exemption is re-decided.
+# Every entry names one advisory (or one exact package version), why it cannot be
+# fixed in the lock, and a date after which the audit fails on it again so the
+# exemption is re-decided.
 
 [[IgnoredVulns]]
 id = "GHSA-hxp9-w8x3-p566"
@@ -10,10 +11,15 @@ through the package's own dependencies. The Python >= 3.11 resolution carries th
 (26.7.1); the Python 3.10 resolution stays on 24.4.2 because 26.7.1 requires Python \
 >= 3.11, so no fixed release exists for that marker while 3.10 is the supported floor."""
 
-[[IgnoredVulns]]
-id = "GHSA-8pqf-f4m5-798g"
-ignoreUntil = 2026-12-31
-reason = """twisted reaches the lock only through the dev group's `channels[daphne]` \
-(daphne[tls]), never through the package's own dependencies. The advisory is a ReDoS in \
-`twisted.mail.imap4.wildcardToRegexp`, an IMAP server path nothing here imports, and its \
-last affected release (26.4.0) is the latest published, so no fixed release exists."""
+[[PackageOverrides]]
+name = "pillow"
+version = "12.3.0"
+ecosystem = "PyPI"
+effectiveUntil = 2026-12-31
+vulnerability.ignore = true
+reason = """pillow reaches the lock only through the dev group, where it backs the fakeshop \
+example's ImageFields, never through the package's own dependencies. The Python >= 3.11 \
+resolution carries the fix (13.0.0); the Python 3.10 resolution stays on 12.3.0 because \
+13.0.0 requires Python >= 3.11, so no fixed release exists for that marker while 3.10 is \
+the supported floor. The override names the exact version, so any other pillow release in \
+the lock is audited in full."""

@@ -58,7 +58,14 @@ from django.test import override_settings
 from django.test.utils import register_lookup
 from django.urls import path
 from django_filters.filterset import BaseFilterSet
-from graphql_client import JSONObject, RecordCompiledSql, graphql_payload, json_object
+from graphql_client import (
+    JSONObject,
+    RecordCompiledSql,
+    assert_database_answer,
+    database_answer,
+    graphql_payload,
+    json_object,
+)
 from strawberry.scalars import JSON
 from typing_extensions import override
 
@@ -437,7 +444,6 @@ def test_a_declared_integer_range_or_list_answers_a_number_past_the_column_witho
         pytest.param("signed_big=1e40", [], 0, id="exact-above-parity"),
         pytest.param("signed_big_containing=1e40", [], 1, id="declared-contains-above-parity"),
         pytest.param("signed_big_ending=1e40", [], 1, id="declared-endswith-above-parity"),
-        pytest.param("signed_big_matching=1e40", [], 1, id="declared-regex-above-parity"),
         pytest.param(
             f"signed_big_containing={_PAST_ANY_INTEGER}",
             [],
@@ -467,8 +473,8 @@ def test_a_generated_or_declared_integer_comparison_answers_a_number_past_the_co
     lies past the top under django-filter's cap, and a fraction short of one past an end
     is compared as Django truncates it. A ``method=`` filter and a class-level ``filter``
     override receive the decimal their form cleaned, and a text-pattern lookup
-    (``contains``, ``endswith``, ``regex``), which Django never converts to an integer,
-    compares the decimal's own spelling.
+    (``contains``, ``endswith``), which Django never converts to an integer, compares the
+    decimal's own spelling.
     """
     cleaned_specimen("kept", kept=True)
     cleaned_specimen("other", kept=False)
@@ -480,6 +486,31 @@ def test_a_generated_or_declared_integer_comparison_answers_a_number_past_the_co
     result = _raw_labels("generated", query_string)
     assert result == {"data": {"rawRows": [{"label": label} for label in labels]}}, result
     assert len(recorded) == statements, recorded
+
+
+@pytest.mark.django_db
+def test_a_declared_regex_over_an_integer_column_answers_as_djangos_own_regex(
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A declared ``regex`` over ``signed_big`` receives ``1e40`` as its form cleaned it.
+
+    Django's ``Regex`` never converts its value to an integer (``Lookup.prepare_rhs``
+    false), so nothing is held and the one statement answers as the backend answers
+    Django's own ``signed_big__regex`` with the decimal: SQLite matches its spelling and
+    finds no row, PostgreSQL has no ``text ~ numeric`` operator and refuses it.
+    """
+    cleaned_specimen("kept", kept=True)
+    cleaned_specimen("other", kept=False)
+    answer = database_answer(
+        models.ScalarSpecimen.objects.filter(signed_big__regex=Decimal("1e40"))
+        .order_by("label")
+        .values_list("label", flat=True),
+    )
+    schema = _schema(error_policy={"enabled": False})
+    recorded = record_compiled_sql("scalars_scalarspecimen")
+    result = _raw_labels("generated", "signed_big_matching=1e40", schema)
+    assert_database_answer(result, "rawRows", answer)
+    assert len(recorded) == 1, recorded
 
 
 @contextlib.contextmanager
@@ -561,15 +592,23 @@ def test_a_plain_parents_two_bound_year_range_past_the_range_answers_as_one_past
     """Both bounds of a ``year__range`` under a plain django-filter parent are held first.
 
     ``-1e999999999999999999`` answers exactly as ``-9223372036854775809``, one past the
-    year output's 64-bit range: the raw driver's own error for a year no database binds
-    (a plain parent's form runs no bind ask), never the ``MemoryError`` its ``int()`` raises.
+    year output's 64-bit range, never with the ``MemoryError`` its ``int()`` raises. A
+    plain parent's form runs no bind ask, so that integer answers as the backend answers
+    Django's own ``occurred_on__year__range``: SQLite's driver cannot bind it,
+    PostgreSQL compares it and matches no row.
     """
     cleaned_specimen("kept", kept=True)
+    one_past = _INT64_MIN - 1
+    answer = database_answer(
+        models.ScalarSpecimen.objects.filter(occurred_on__year__range=(one_past, one_past))
+        .order_by("label")
+        .values_list("label", flat=True),
+    )
     query = "occurred_year_span_0={0}&occurred_year_span_1={0}"
     schema = _schema(error_policy={"enabled": False})
     past = _raw_labels("plain-year", query.format(_PAST_ANY_INTEGER), schema)
-    assert "errors" in past, past
-    assert past == _raw_labels("plain-year", query.format(_INT64_MIN - 1), schema), past
+    assert_database_answer(past, "rawRows", answer)
+    assert past == _raw_labels("plain-year", query.format(one_past), schema), past
 
 
 @pytest.mark.django_db

@@ -823,8 +823,8 @@ def _filterset_lookup_source_field(
 
     The query's own split finds the field part when ``field_name`` or ``lookup_expr``
     contains transforms. A method owns its lookup token, so only its declared field name
-    is read. This source is used to retain generated-output policy even when the final
-    operand is a Boolean null test or a transform's different output field.
+    is read. This source keeps generated-output policy even when the final operand is a
+    Boolean null test or a transform's different output field.
     """
     model = _filterset_model(filterset)
     if model is None:

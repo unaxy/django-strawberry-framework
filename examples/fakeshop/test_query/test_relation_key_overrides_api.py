@@ -1915,7 +1915,9 @@ def test_a_to_many_view_through_a_key_no_round_trip_reaches_keeps_its_inner_join
     onto a multi-table-inheritance child (``KioskFault.kiosk``, whose parent tables Django
     would join ahead of the round trip's outer join) are joined as Django joins them: an
     override reading an empty choice as no related row keeps only the parents reaching a
-    visible first row with none past it.
+    visible first row with none past it. The first alias is joined before any join that
+    references it (the parent tables a later inherited hop crosses included), an order
+    PostgreSQL requires.
     """
     _inner_first_world()
     model, label, field_name, target, rows = _INNER_FIRST[first]
@@ -1939,10 +1941,16 @@ def test_a_to_many_view_through_a_key_no_round_trip_reaches_keeps_its_inner_join
     )
     schema = _schema(inner, model, label, direct=direct)
     _CALLS.clear()
-    payload = _post(schema, label, {"where": {"probe": []}})
+    with CaptureQueriesContext(connection) as queries:
+        payload = _post(schema, label, {"where": {"probe": []}})
     assert _answer(payload) == list(rows), payload
     segment = field_name.rsplit("__", 1)[-1]
     assert [(f"{segment}_visible", "QuerySet", model.__name__)] == _CALLS
+    first = f'"{field_name.split("__", 1)[0]}_visible"'
+    joined = [query["sql"] for query in queries.captured_queries if first in query["sql"]]
+    assert joined, queries.captured_queries
+    for sql in joined:
+        assert sql.index(f"{first} ON") < sql.index(f"{first}."), sql
 
 
 def _round_trip_model_meta(table: str) -> type[object]:

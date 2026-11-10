@@ -3,7 +3,8 @@
 Single-sites the live-tier request contracts: JSON GraphQL posts, raw-body posts,
 status-code assertions, parsed payload extraction, GraphQL-error rejection,
 exact-data assertions, the verb-and-table reading of captured SQL, the pks a batched
-lookup names, and the post-lock re-reads a vendor adds to it. Superset signatures keep
+lookup names, the post-lock re-reads a vendor adds to it, and the answer the configured
+database gives Django's own queryset for a comparison a filter hands it unchanged. Superset signatures keep
 simple callers terse while letting variable-driven and custom-client tests use the same
 envelope.
 
@@ -22,11 +23,11 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 from django.conf import settings
-from django.db import connection
+from django.db import DatabaseError, connection, transaction
 from django.test import Client
 from typing_extensions import TypeIs
 
@@ -127,6 +128,38 @@ def json_bool(value: object, *path: str | int) -> bool:
     found = json_at(value, *path)
     assert isinstance(found, bool), f"expected a JSON boolean at {path!r}, got {found!r}"
     return found
+
+
+def database_answer(labels: Iterable[str]) -> list[str] | Exception:
+    """Read ``labels`` in a savepoint: the labels the database returns, or what it raised.
+
+    A filter that hands Django a value unchanged answers as the configured backend answers
+    Django's own queryset for it, and backends differ (SQLite's driver cannot bind an
+    integer past 64 bits and PostgreSQL compares it; PostgreSQL has no ``text ~ numeric``
+    operator and SQLite matches the number's spelling). The savepoint keeps a refused
+    statement from aborting the test's PostgreSQL transaction, so ask before posting.
+    """
+    try:
+        with transaction.atomic():
+            return list(labels)
+    except (DatabaseError, OverflowError) as refusal:
+        return refusal
+
+
+def assert_database_answer(payload: JSONObject, field: str, answer: list[str] | Exception) -> None:
+    """``payload`` answers ``field`` with ``answer``'s labels, or with its refusal's first line.
+
+    The refusal is compared by its first line: PostgreSQL appends the statement it refused,
+    which spells the package's query, not the one :func:`database_answer` asked.
+    """
+    if isinstance(answer, Exception):
+        assert payload["data"] is None, payload
+        assert len(json_list(payload, "errors")) == 1, payload
+        assert json_at(payload, "errors", 0, "path") == [field], payload
+        message = json_str(payload, "errors", 0, "message")
+        assert message.splitlines()[0] == str(answer).splitlines()[0], payload
+    else:
+        assert payload == {"data": {field: [{"label": label} for label in answer]}}, payload
 
 
 def saved_pk(pk: int | None) -> int:

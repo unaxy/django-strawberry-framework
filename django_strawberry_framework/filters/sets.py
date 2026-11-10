@@ -2162,6 +2162,32 @@ def _through_link(model: type[models.Model], field: object) -> tuple[str, str, s
     return link, onto.join_field.name, onto.target_fields[0].attname
 
 
+def _visible_join_condition(
+    model: type[models.Model],
+    segment: str,
+    relation_name: str,
+    rows: models.QuerySet[models.Model],
+) -> Q:
+    """Return "the row ``relation_name`` joins over ``model``'s relation ``segment`` is one of ``rows``".
+
+    A relation joining on one target column compares the relation itself (Django's
+    ``RelatedIn``) with that column of ``rows``, the target ``Query.names_to_path`` reads
+    for the relation (``utils/querysets.py::lookup_target_fields``). Naming the target's
+    ``pk`` instead crosses it where it is a relation (a parent link, a one-to-one primary
+    key): ``Query.join`` resolves a ``FilteredRelation`` condition as it joins the alias
+    and places each join that resolution adds ahead of the alias, so a later hop crossing
+    the same link reuses a join referencing the alias before the alias is joined, which
+    PostgreSQL refuses. A relation joining on several columns (a multi-column
+    ``ForeignObject``) compares the target's ``pk``: a ``Subquery`` selects one column, and
+    Django refuses a ``QuerySet`` inside a ``FilteredRelation``.
+    """
+    targets = lookup_target_fields(Query(model), segment)
+    if len(targets) == 1:
+        column = require_instance(read_attr(targets[0], "attname"), str)
+        return Q(**{f"{relation_name}{LOOKUP_SEP}in": Subquery(rows.values(column))})
+    return Q(**{f"{relation_name}{LOOKUP_SEP}pk{LOOKUP_SEP}in": Subquery(rows.values("pk"))})
+
+
 def _names_every_through(model: type[models.Model], hops: tuple[RelationHop, ...]) -> bool:
     """Whether each many-to-many ``hops`` cross from ``model`` names its through key (``_through_link``).
 
@@ -4069,8 +4095,6 @@ class FilterSet(
         arms: dict[str, _ProbedArm] = {}
         self._probed_arms = arms
         rows = self.queryset
-        if rows is None:
-            raise ConfigurationError("A bound filter set needs its model queryset.")
         self._suppress_new_bind_hooks = self._native_form_is_invalid(form)
         self._build_logic_arms_native(arms, rows, stop_on_error=False)
         all_sets = (self, *(probed.instance for probed in arms.values()))
@@ -7820,13 +7844,7 @@ class FilterSet(
                     condition = (
                         Q()
                         if condition_rows is None
-                        else Q(
-                            **{
-                                f"{relation_name}{LOOKUP_SEP}pk{LOOKUP_SEP}in": Subquery(
-                                    condition_rows.values("pk"),
-                                ),
-                            },
-                        )
+                        else _visible_join_condition(model, segment, relation_name, condition_rows)
                     )
                     _ = alias(f"{segment}_visible", relation_name, condition)
                 else:

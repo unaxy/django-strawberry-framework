@@ -146,6 +146,7 @@ from graphql_client import JSONObject, json_at, post_graphql, response_json
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import is_dict, is_list_or_tuple
+from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 if TYPE_CHECKING:
@@ -2109,6 +2110,33 @@ def _assert_nothing_written(specimen: models.UniqueScalarSpecimen | None) -> Non
     assert _unique_rows() == expected
 
 
+#: Each ``UniqueScalarSpecimen`` input field's column and the parse of its wire value.
+_UNIQUE_COLUMNS: dict[str, tuple[str, Callable[[str], object]]] = {
+    "openedTime": ("opened_time", datetime.time.fromisoformat),
+    "openedAt": ("opened_at", datetime.datetime.fromisoformat),
+    "amount": ("amount", Decimal),
+}
+
+
+def _native_unique_round_trip(column: str, value: object) -> object:
+    """Store ``value`` in ``column`` through the ORM, read it back, then roll that row back."""
+    with transaction.atomic():
+        native = models.UniqueScalarSpecimen.objects.create(
+            **{
+                "label": "native-control",
+                "opened_time": datetime.time(12, 13),
+                "opened_at": _STORED_AT,
+                "amount": Decimal(0),
+                "active": False,
+                column: value,
+            },
+        )
+        native.refresh_from_db()
+        stored = object_result(getattr, native, column)
+        transaction.set_rollback(True)
+    return stored
+
+
 class _UniqueCell:
     """One value a uniqueness check would bind: its flavor, field, value, settings and outcome."""
 
@@ -2126,13 +2154,25 @@ class _UniqueCell:
         self.field = field
         self.value = value
         self.outcomes = outcomes
-        self.stored = value if stored is None else stored
+        self.stored = stored
         self.settings = dict(settings or {})
 
     def outcome(self) -> str:
         """The outcome on the database the suite runs on."""
         sqlite, postgresql = self.outcomes
         return postgresql if connection.vendor == "postgresql" else sqlite
+
+    def stored_value(self) -> object:
+        """The column value a stored write reads back.
+
+        A cell naming no ``stored`` value asks the database: Django's own write of the sent
+        value, read back through the ORM (PostgreSQL's ``time`` keeps an aware time's wall
+        clock and drops its offset).
+        """
+        column, parse = _UNIQUE_COLUMNS[self.field]
+        if self.stored is not None:
+            return parse(self.stored)
+        return _native_unique_round_trip(column, parse(self.value))
 
 
 _UNIQUE_CELLS = {
@@ -2210,11 +2250,15 @@ def test_value_a_uniqueness_check_would_bind_is_the_field_error(operation: str, 
     into ``DecimalField(20, 4)``: the form and the serializer refuse it before that
     constraint's check binds it. PostgreSQL stores the aware time, the decimal and, under
     ``USE_TZ = False``, the aware datetime. A naive time, a
-    naive datetime under ``USE_TZ = False`` and an in-range hook instant are stored.
+    naive datetime under ``USE_TZ = False`` and an in-range hook instant are stored. A stored
+    write's payload and row carry what Django's own write of the sent value reads back on that
+    database, or the hook's instant.
     """
     cell = _UNIQUE_CELLS[name]
     specimen = None if operation == "create" else _unique_seed()
+    column, parse = _UNIQUE_COLUMNS[cell.field]
     with override_settings(**cell.settings):
+        stored = None if cell.outcome() == _REFUSED else cell.stored_value()
         root, payload = _unique_write(
             _UNIQUE_FLAVORS[cell.flavor],
             specimen,
@@ -2225,7 +2269,12 @@ def test_value_a_uniqueness_check_would_bind_is_the_field_error(operation: str, 
             assert payload == _field_refusal(root, cell.field, _UNSTORABLE)
         else:
             assert json_at(payload, "data", root, "errors") == [], payload
-            assert json_at(payload, "data", root, "result", cell.field) == cell.stored
+            wire = json_at(payload, "data", root, "result", cell.field)
+            assert isinstance(wire, str), payload
+            assert parse(wire) == stored
+            assert (
+                object_result(getattr, models.UniqueScalarSpecimen.objects.get(), column) == stored
+            )
 
     if cell.outcome() == _REFUSED:
         _assert_nothing_written(specimen)

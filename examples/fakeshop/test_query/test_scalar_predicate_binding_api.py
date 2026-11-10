@@ -42,6 +42,8 @@ from django_filters import MultipleChoiceFilter
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    assert_database_answer,
+    database_answer,
     graphql_payload,
     json_at,
     json_list,
@@ -742,16 +744,26 @@ def test_a_typed_decimal_past_a_filtered_relation_key_answers_as_one_past_the_ra
 
     The ``FilteredRelation`` alias's ``exact`` prepares a value through the target's
     primary key, so ``-1e999999999999999999`` answers as ``-9223372036854775809``, the
-    integer one past that key's 64-bit range, does.
+    integer one past that key's 64-bit range, does: as the backend answers Django's own
+    ``par`` comparison with it, SQLite's driver unable to bind it and PostgreSQL comparing
+    it and matching no row.
     """
     document = (
         "query($number: Decimal!) { rows(filter: { parentIs: { exact: $number } }) { label } }"
     )
     kept = cleaned_specimen("kept", kept=True)
-    cleaned_specimen("child", kept=False).parent = kept
+    child = cleaned_specimen("child", kept=False)
+    child.parent = kept
+    child.save(update_fields=["parent"])
+    answer = database_answer(
+        scalar_models.ScalarSpecimen.objects.alias(par=FilteredRelation("parent"))
+        .filter(par=-(2**63) - 1)
+        .order_by("pk")
+        .values_list("label", flat=True),
+    )
     schema = _typed_queryset_path_holder()
     past = _post_typed_queryset_path(document, {"number": "-1e999999999999999999"}, schema)
-    assert "errors" in past, past
+    assert_database_answer(past, "rows", answer)
     one_past = _post_typed_queryset_path(document, {"number": str(-(2**63) - 1)}, schema)
     assert past == one_past, past
 
@@ -761,14 +773,27 @@ def test_a_pattern_lookup_over_an_integer_annotation_compares_the_decimal_as_sen
     """A ``regex`` over ``n`` never converts its value, so nothing is held: parity with the parent.
 
     Django's ``Regex`` does not prepare its value through the annotation's output
-    (``Lookup.prepare_rhs`` false), so ``1e40`` is matched as its own spelling and matches
-    no row; held to ``2**63`` it would be bound past what SQLite binds.
+    (``Lookup.prepare_rhs`` false), so ``1e40`` reaches the backend as the decimal sent and
+    answers as Django's own ``n__regex`` with it: SQLite matches its spelling and finds no
+    row, PostgreSQL has no ``text ~ numeric`` operator and refuses it. Held to ``2**63`` it
+    would be bound past what SQLite binds.
     """
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=False)
+    child.parent = kept
+    child.save(update_fields=["parent"])
+    answer = database_answer(
+        scalar_models.ScalarSpecimen.objects.annotate(n=F("signed_big"))
+        .filter(n__regex=Decimal("1e40"))
+        .order_by("pk")
+        .values_list("label", flat=True),
+    )
     payload = _post_typed_queryset_path(
         "query($number: Decimal!) { rows(filter: { annotatedMatching: { regex: $number } }) { label } }",
         {"number": "1e40"},
+        _typed_queryset_path_holder(),
     )
-    assert payload == _expected(()), payload
+    assert_database_answer(payload, "rows", answer)
 
 
 class _DivisibleBy(django_models.Lookup):

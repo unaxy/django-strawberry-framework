@@ -1852,7 +1852,7 @@ def test_a_filter_copy_refuses_an_instance_whose_queryset_was_unset() -> None:
         data={"name": "North"},
         queryset=library_models.Branch.objects.all(),
     )
-    instance.queryset = None
+    vars(instance)["queryset"] = None
     with pytest.raises(TypeError, match="expected the type the source guarantees"):
         instance._filter_named("desks__shelf__branch__city")
 
