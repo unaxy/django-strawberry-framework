@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 487 done, 118 to do. The CHANGELOG entries filed here moved to
+Progress: 488 done, 117 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2661,15 +2661,17 @@ Progress: 487 done, 118 to do. The CHANGELOG entries filed here moved to
   `tests/filters/test_sets.py` (`::test_declared_hop_reads_no_default_manager_annotation`,
   `::test_flat_hop_value_check_reads_no_default_manager_annotation`), `tests/orders/test_sets.py`,
   `tests/test_permissions.py`, `tests/optimizer/test_walker.py` and `tests/types/test_resolvers.py`. CHANGELOGTODO 907
+- [x] 758. Already fixed by 70d4b42f (item 316): `filters/base.py::RangeFilter.filter` applies two bounds as
+  `<bound_path>__range` through the transforms the declaration names, so a declared bare `year` / `date` over a
+  datetime column and `year` over a date column keep the rows between the bounds on GraphQL, `apply_sync`,
+  `apply_async`, raw form data and `DjangoFilterBackend`; reversed bounds answer no rows and equal bounds one year or
+  day. At the filing commit f66d8216 all five reaches failed as the item says. Re-checked at 30bfb464 over 7
+  declarations x 5 bound shapes x 5 reaches, every cell correct. Pinned by
+  `examples/fakeshop/test_query/test_range_filter_declared_lookup_api.py::test_two_bounds_keep_the_rows_between_them_whatever_lookup_is_declared`
+  (`occurred_on-year`, `occurred_at-date`, `occurred_at-year`; flat, `not` and raw form). No production change
 
 ## To do: found along the way
 
-- [ ] 758. (robustness) A declared bare-transform `RangeFilter` (`lookup_expr="year"` or `"date"` over a datetime
-  column, whose lone bounds the live `bare-year-*` / `bare-date-*` rows pin) sent both bounds hands django-filter's
-  `RangeFilter.filter` a `(start, stop)` tuple under the bare transform (`occurred_at__year=(a, b)`): raw form data
-  (`FilterSet(data=...).qs`, `DjangoFilterBackend`) raises `TypeError`, a 500, and the GraphQL / `apply_sync` reach
-  answers `FILTER_INVALID` "Enter a value the database can represent.", which names no fault of the bounds. Found
-  regrading 684
 - [ ] 759. (tests) No row pins the `date` transform half of 684:
   `tests/filters/test_sets.py::test_declared_filter_through_a_lookup_expr_transform_cleans_values_as_its_output[date-in]`
   and the live `bare-date-*` rows pass with `filters/base.py::_column_form_field` reading `_bound_model_field`, so
