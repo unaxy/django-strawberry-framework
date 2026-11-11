@@ -17,6 +17,7 @@ import errno
 import getpass
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -1678,6 +1679,7 @@ def test_rm_evidence_stays_while_a_sibling_of_the_stem_remains(
     assert work.main(["rm", "fix-i681-pair", "--evidence"]) == 0
     assert "fix-i681-pair-verify still use it" in capsys.readouterr().err
     assert (repo / ".work" / "evidence" / "fix-i681-pair").is_dir()
+    assert work.evidence_tombstones(repo) == []
 
 
 @pytest.mark.usefixtures("repo")
@@ -1909,6 +1911,322 @@ def test_rm_refuses_a_symlinked_copy(repo: Path, tmp_path: Path) -> None:
     (clones / "spike-link").symlink_to(target)
     assert work.main(["rm", "spike-link"]) == 1
     assert target.is_dir()
+
+
+# --------------------------------------------------------------------------------------------
+# Evidence tombstones: an explicit deletion, recorded before anything moves
+# --------------------------------------------------------------------------------------------
+
+
+def _evidence(repo: Path, stem: str) -> Path:
+    return repo / ".work" / "evidence" / stem
+
+
+def _evidence_entries(repo: Path, stem: str) -> list[Path]:
+    trash = repo / ".work" / "trash"
+    entries = trash.iterdir() if trash.is_dir() else iter(())
+    return sorted(entry for entry in entries if entry.name.startswith(f"evidence-{stem}-"))
+
+
+def test_rm_evidence_of_a_saved_copy_deletes_it_though_its_saves_stay(repo: Path) -> None:
+    """The removed copy's own name, left holding its saves, is no sibling of its stem."""
+    path = _new("spike-saved")
+    _ = _write(path / "new.txt", "kept in a save\n")
+    assert work.main(["save", "spike-saved"]) == 0
+    _ = _write(_evidence(repo, "spike-saved") / "proof.txt", "proof\n")
+    assert work.main(["rm", "spike-saved", "--evidence"]) == 0
+    assert set(_pins(repo)["spike-saved"]) == {"save-1"}
+    assert not _evidence(repo, "spike-saved").exists()
+    (grave,) = work.evidence_tombstones(repo)
+    assert (grave.stem, grave.copy, list(grave.states)) == (
+        "spike-saved",
+        "spike-saved",
+        ["proof.txt"],
+    )
+
+
+def test_rm_evidence_writes_a_tombstone_of_exactly_the_deleted_files_before_trashing(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _new("spike-graves")
+    evidence = _evidence(repo, "spike-graves")
+    _ = _write(evidence / "top.txt", "top\n")
+    _ = _write(evidence / "proofs" / "deep" / "out.txt", "nested output\n")
+    _ = _write(evidence / "__pycache__" / "x.cpython-314.pyc", "cache")
+    os.utime(evidence / "top.txt", (1_700_000_000.75, 1_700_000_000.75))
+    _age(path)
+    real_rename = Path.rename
+
+    def refusing(self: Path, target: Path) -> Path:
+        if self == evidence:
+            raise OSError(errno.EBUSY, "Resource busy", str(self))
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", refusing)
+    assert work.main(["rm", "spike-graves", "--evidence"]) == 1
+    (grave,) = work.evidence_tombstones(repo)
+    out = (evidence / "proofs" / "deep" / "out.txt").lstat()
+    assert grave.as_json()["files"] == {
+        "proofs/deep/out.txt": [out.st_size, int(out.st_mtime)],
+        "top.txt": [4, 1_700_000_000],
+    }
+    assert (grave.stem, grave.whole, grave.copy) == ("spike-graves", True, "spike-graves")
+    assert evidence.is_dir()
+    assert _evidence_entries(repo, "spike-graves") == []
+    monkeypatch.setattr(Path, "rename", real_rename)
+    assert work.main(["evidence-rm", "spike-graves"]) == 0
+    (entry,) = _evidence_entries(repo, "spike-graves")
+    assert (entry / "proofs" / "deep" / "out.txt").read_text(encoding="utf-8") == "nested output\n"
+    assert not evidence.exists()
+
+
+def test_rm_evidence_moves_the_stem_to_a_kept_trash_entry_gc_removes_after_retention(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("spike-trashed")
+    _ = _write(_evidence(repo, "spike-trashed") / "proof.txt", "proof\n")
+    _age(path)
+    assert work.main(["rm", "spike-trashed", "--evidence"]) == 0
+    (entry,) = _evidence_entries(repo, "spike-trashed")
+    prefix, stamp, kept = entry.name.rsplit("-", 2)
+    assert (prefix, kept) == ("evidence-spike-trashed", work.KEPT_TRASH)
+    assert (entry / "proof.txt").read_text(encoding="utf-8") == "proof\n"
+    _ = capsys.readouterr()
+    assert work.main(["gc"]) == 0
+    assert (
+        f"keep trash {entry.name}: evidence an explicit deletion moved" in capsys.readouterr().out
+    )
+    assert entry.is_dir()
+    old = entry.with_name(f"{prefix}-{int(stamp) - work.TRASH_RETENTION_SECONDS - 60}-{kept}")
+    _ = entry.rename(old)
+    assert work.main(["gc"]) == 0
+    assert not old.exists()
+
+
+def test_evidence_tombstone_round_trips_and_is_create_only(repo: Path) -> None:
+    grave = work.EvidenceTombstone(
+        "lead-merge",
+        "a",
+        1_731_300_000.5,
+        "a",
+        (("a/b.txt", 3, 17), ("c", 0, 1)),
+        whole=False,
+    )
+    assert work.EvidenceTombstone.parse(json_loads(json.dumps(grave.as_json()))) == grave
+    assert work.write_evidence_tombstone(repo, grave)
+    assert not work.write_evidence_tombstone(repo, grave)
+    other = dataclasses.replace(grave, removed_by="b", copy="fix-i1-x")
+    assert other.file_name == grave.file_name
+    assert not work.write_evidence_tombstone(repo, other)
+    assert work.evidence_tombstones(repo) == [grave]
+    folder = repo / ".work" / work.EVIDENCE_GRAVES
+    assert [path.name for path in folder.iterdir()] == [grave.file_name]
+    later = dataclasses.replace(grave, removed_at=grave.removed_at + 1)
+    assert later.file_name != grave.file_name
+
+
+@pytest.mark.parametrize("stem", ["lead-merge", "load-balancer.patch", "fix-i681-pair"])
+def test_an_evidence_tombstone_accepts_stems_that_are_no_copy_names(stem: str) -> None:
+    grave = work.EvidenceTombstone(stem, "a", 1.0, "a", (("x.txt", 1, 2),), whole=True)
+    assert work.EvidenceTombstone.parse(grave.as_json()) == grave
+
+
+@pytest.mark.parametrize(
+    ("stem", "rel"),
+    [
+        ("../x", "x.txt"),
+        ("a/b", "x.txt"),
+        ("", "x.txt"),
+        (".", "x.txt"),
+        ("..", "x.txt"),
+        ("ok", "../../x"),
+        ("ok", "/etc/passwd"),
+        ("ok", "a/./b"),
+        ("ok", "a//b"),
+    ],
+)
+def test_an_evidence_tombstone_refuses_a_stem_or_path_that_leaves_its_folder(
+    stem: str,
+    rel: str,
+) -> None:
+    document = {
+        "kind": "evidence",
+        "stem": stem,
+        "home": "a",
+        "removedat": 1.0,
+        "removedby": "a",
+        "whole": True,
+        "copy": "",
+        "files": {rel: [1, 2]},
+    }
+    assert work.EvidenceTombstone.parse(document) is None
+
+
+def test_the_copy_tombstone_reader_never_sees_evidence_tombstones(repo: Path) -> None:
+    grave = work.EvidenceTombstone("spike-x", "a", time.time() - 40 * 86400, "a", (), whole=True)
+    assert work.write_evidence_tombstone(repo, grave)
+    assert not (repo / ".work" / work.TOMBSTONES).exists()
+    assert work.tombstones(repo) == []
+    assert work.main(["gc"]) == 0
+    assert work.evidence_tombstones(repo) == [grave]
+
+
+def test_gc_reaps_evidence_tombstones_only_past_their_own_retention(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    now = time.time()
+    fresh, month, stale = (
+        work.EvidenceTombstone("spike-x", "a", at, "a", (("f", 1, 1),), whole=True)
+        for at in (
+            now,
+            now - work.TOMBSTONE_RETENTION_SECONDS - 86400,
+            now - work.EVIDENCE_TOMBSTONE_RETENTION_SECONDS - 60,
+        )
+    )
+    for grave in (fresh, month, stale):
+        assert work.write_evidence_tombstone(repo, grave)
+    _ = capsys.readouterr()
+    assert work.main(["gc", "--dry-run"]) == 0
+    assert f"would delete evidence tombstone {stale.file_name}" in capsys.readouterr().out
+    assert len(work.evidence_tombstones(repo)) == 3
+    assert work.main(["gc"]) == 0
+    assert f"deleted evidence tombstone {stale.file_name}" in capsys.readouterr().out
+    assert sorted(work.evidence_tombstones(repo), key=lambda grave: grave.removed_at) == [
+        month,
+        fresh,
+    ]
+
+
+def test_a_symlinked_evidence_tombstone_folder_is_refused_by_the_layout_check(
+    repo: Path,
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _ = _write(_evidence(repo, "spike-x") / "proof.txt", "proof\n")
+    (repo / ".work" / work.EVIDENCE_GRAVES).symlink_to(outside, target_is_directory=True)
+    assert work.main(["list"]) == 1
+    assert work.main(["evidence-rm", "spike-x"]) == 1
+    assert list(outside.iterdir()) == []
+    assert (_evidence(repo, "spike-x") / "proof.txt").is_file()
+
+
+def test_evidence_rm_by_file_records_only_those_files_and_refuses_an_escaping_path(
+    repo: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _evidence(repo, "lead-merge")
+    _ = _write(evidence / "keep.txt", "keep\n")
+    _ = _write(evidence / "sub" / "drop.txt", "drop\n")
+    outside = _write(tmp_path / "outside" / "x.txt", "outside\n")
+    (evidence / "link").symlink_to(outside.parent, target_is_directory=True)
+    assert (
+        work.main(
+            [
+                "evidence-rm",
+                "lead-merge",
+                "--file",
+                "sub/drop.txt",
+            ],
+        )
+        == 0
+    )
+    (grave,) = work.evidence_tombstones(repo)
+    assert (grave.whole, list(grave.states)) == (False, ["sub/drop.txt"])
+    (entry,) = _evidence_entries(repo, "lead-merge")
+    assert (entry / "sub" / "drop.txt").read_text(encoding="utf-8") == "drop\n"
+    assert (evidence / "keep.txt").is_file()
+    assert not (evidence / "sub").exists()
+    for rel in (
+        "../../x.txt",
+        str(outside),
+        "link/x.txt",
+        "./keep.txt",
+        "sub",
+    ):
+        assert (
+            work.main(
+                [
+                    "evidence-rm",
+                    "lead-merge",
+                    "--file",
+                    rel,
+                ],
+            )
+            == 1
+        )
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+    assert len(work.evidence_tombstones(repo)) == 1
+
+
+def test_evidence_rm_refuses_a_stem_a_name_still_uses_and_waits_for_the_fleet_lock(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-i9-held")
+    _age(path)
+    _ = _write(_evidence(repo, "fix-i9-held") / "proof.txt", "proof\n")
+    assert work.main(["evidence-rm", "fix-i9-held"]) == 1
+    assert "fix-i9-held still use it" in capsys.readouterr().err
+    monkeypatch.setattr(work, "EVIDENCE_LOCK_WAIT_SECONDS", 0.3)
+    with work.fleet_lock(repo):
+        assert work.main(["rm", "fix-i9-held", "--evidence"]) == 1
+        assert "a fleet sync holds" in capsys.readouterr().err
+    assert path.is_dir()
+    assert work.evidence_tombstones(repo) == []
+    assert (_evidence(repo, "fix-i9-held") / "proof.txt").is_file()
+
+
+def test_evidence_rm_adopt_missing_builds_the_record_from_peer_manifests_and_refuses_a_wiped_root(
+    repo: Path,
+    tmp_path: Path,
+) -> None:
+    evidence = _evidence(repo, "lead-merge")
+    here = _write(evidence / "here.txt", "here\n")
+    state = list(work.file_state(here.lstat()))
+    manifests = repo / ".work" / work.FLEET
+    _ = _write(
+        manifests / "evidence-b.json",
+        json.dumps({"lead-merge": {"here.txt": state, "gone.txt": [5, 100]}, "other": {}}),
+    )
+    _ = _write(manifests / "evidence-c.json", json.dumps({"lead-merge": {"gone.txt": [6, 200]}}))
+    assert (
+        work.main(
+            [
+                "evidence-rm",
+                "lead-merge",
+                "--adopt-missing",
+                "--dry-run",
+            ],
+        )
+        == 0
+    )
+    assert work.evidence_tombstones(repo) == []
+    assert work.main(["evidence-rm", "lead-merge", "--adopt-missing"]) == 0
+    graves = work.evidence_tombstones(repo)
+    assert sorted((grave.whole, grave.files) for grave in graves) == [
+        (False, (("gone.txt", 5, 100),)),
+        (False, (("gone.txt", 6, 200),)),
+    ]
+    assert here.is_file()
+    shutil.rmtree(evidence)
+    assert work.main(["evidence-rm", "lead-merge", "--adopt-missing"]) == 0
+    whole = [grave for grave in work.evidence_tombstones(repo) if grave.whole]
+    assert sorted(grave.states.get("here.txt", (0, 0)) for grave in whole) == [
+        (0, 0),
+        (state[0], state[1]),
+    ]
+    count = len(work.evidence_tombstones(repo))
+    shutil.rmtree(repo / ".work" / "evidence")
+    assert work.main(["evidence-rm", "lead-merge", "--adopt-missing"]) == 1
+    (repo / ".work" / "evidence").mkdir()
+    (repo / ".work" / "evidence" / "lead-merge").symlink_to(tmp_path, target_is_directory=True)
+    assert work.main(["evidence-rm", "lead-merge", "--adopt-missing"]) == 1
+    assert len(work.evidence_tombstones(repo)) == count
 
 
 # --------------------------------------------------------------------------------------------

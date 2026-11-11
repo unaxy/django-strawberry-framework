@@ -128,11 +128,15 @@ two other machines hold is reported, for their own runs)
     pin of a name held by a replica of an incarnation whose home ran ``rm
     --drop-saves``, is never carried, so a dropped save never comes back.
 
-    Evidence: ``.work/evidence/<stem>/`` file by file, both ways, union, never
-    deleted. A file on one side only is copied over; one that differs moves from
-    the side that changed since the last sync with that peer to the side that did
-    not, when it is also the newer; otherwise it is reported. The last sync's
-    state per peer is ``.work/fleet/evidence-<peer>.json`` on this machine.
+    Evidence: ``.work/evidence/<stem>/`` file by file, both ways, union; only an
+    evidence tombstone (below) deletes. A file on one side only is copied over; one
+    that differs moves from the side that changed since the last sync with that peer
+    to the side that did not, when it is also the newer; otherwise it is reported. A
+    file holding a state an evidence tombstone records moves neither way. The last
+    sync's state per peer is ``.work/fleet/evidence-<peer>.json`` on this machine; it
+    forgets a stem neither side holds. A file it lists that this machine lacks and the
+    peer holds unchanged (removed by hand: ``rm -rf`` deletes nothing fleet-wide)
+    comes back, with a ``note`` naming ``work.py evidence-rm <stem> --adopt-missing``.
 
     Main: commits only, never working-tree state. Each peer's ``main`` is fetched
     into this repository's object store (no ref, no ``FETCH_HEAD``). A peer
@@ -153,6 +157,23 @@ two other machines hold is reported, for their own runs)
     ``rm`` of a name holding pins alone writes one recording those pins). A machine
     a tombstone reaches drops the pins it records while it holds no copy under the
     name.
+
+    Evidence tombstones: ``.work/evidence-tombstones/<stem>@<digest>.json``, written
+    only by ``work.py rm --evidence`` and ``work.py evidence-rm``: the stem, machine,
+    moment, whether the whole folder went (``whole``), the removed copy, and each
+    deleted file's ``[size, mtime]``. Carried like tombstones (create-only, both ways,
+    by ``--pins-only`` too) but applied only by a full sync, on both machines of the
+    pair after the copy steps (``evidence-apply``): a file holding exactly a recorded
+    state moves into ``.work/trash/evidence-<stem>-<seconds>-kept`` (``gc`` deletes it
+    after 7 days), never deleted outright; one in another state is kept, and the union
+    carries it back to the deleting machine with one ``conflict``; a stem another name
+    there uses (a copy, a replica, a name holding pins alone; the removed copy's own
+    saves aside) is skipped; a path leaving the stem folder or passing a symlink fails.
+    A ``whole`` record also moves a stem folder left holding only unsynced files. State
+    equality, not time, decides, so clock skew changes nothing; ``work.py gc`` deletes
+    a record after 90 days, and a machine offline longer brings the files back. A peer
+    whose probe lacks the ``evidence-tombstones`` feature (an older script) gets no
+    such operation: one ``note``, and its sync goes on.
 
     Deletions: a replica is removed only by a tombstone its home (or a later home
     of it, above) left for the replica's own identity, so a later copy reusing the
@@ -220,9 +241,9 @@ Commands
         Sync with every qualifying peer (or those ``--machine`` names: a row
         name, ssh alias or machine name). ``--copy`` limits the run to those copies
         (their pins and evidence) and leaves main alone; ``--main-only`` syncs
-        main alone; ``--pins-only`` carries tombstones and the pins that never move
-        (``save-N``, ``start``) both ways and nothing else, so it takes seconds and
-        fits a short timer.
+        main alone; ``--pins-only`` carries tombstones (evidence tombstones too, never
+        applied) and the pins that never move (``save-N``, ``start``) both ways and
+        nothing else, so it takes seconds and fits a short timer.
         ``--dry-run`` writes nothing but fetches peers' main commits into the
         object store so it can say what a fast-forward would do.
     ``fetch-pins NAME --machine M [--dry-run]``
@@ -264,8 +285,9 @@ Stopping
 
 Running it periodically
     ``schedule --install`` (above) runs ``sync --pins-only`` every two minutes,
-    so every machine sees every save; the full ``sync`` (replicas, evidence,
-    main) stays the maintainer's to run or time. A cron line
+    so every machine sees every save and every tombstone (no evidence file is
+    deleted there); the full ``sync`` (replicas, evidence and its deletions, main)
+    stays the maintainer's to run or time. A cron line
     (``*/10 * * * * cd ~/projects/django-strawberry-framework &&
     .venv/bin/python scripts/fleet_sync.py sync --json >> ~/.cache/fleet-sync.log
     2>&1``), a
@@ -312,7 +334,7 @@ except ModuleNotFoundError:  # imported as ``scripts.fleet_sync`` (repo root on 
     from scripts import _locks, fleet, work
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
 
 #: ``json.loads``, its result typed ``object`` for the caller to narrow.
 _loads: Callable[[str], object] = json.loads
@@ -332,15 +354,7 @@ NO_CHECKOUT = 103
 NO_SCRIPT = 104
 HOLDER = "holder"
 #: Regenerable or per-platform files no transfer carries.
-EXCLUDES = (
-    ".venv",
-    "__pycache__",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".mypy_cache",
-    "node_modules",
-    "*.pyc",
-)
+EXCLUDES = work.UNSYNCED
 #: A clone's git-directory files that belong to the machine, not the copy.
 CLONE_GIT_EXCLUDES = (
     "/.git/config",
@@ -411,8 +425,14 @@ WRITES = frozenset(
         "prepare-evidence",
         "tombstones-import",
         "pins-link",
+        "evidence-tombstones-import",
+        "evidence-apply",
     },
 )
+#: What this script's agent can do beyond the operations every version has; a peer's probe
+#: lists its own, and an operation a peer does not list is never sent to it.
+EVIDENCE_FEATURE = "evidence-tombstones"
+FEATURES = (EVIDENCE_FEATURE,)
 CALL_TIMEOUT = 600.0
 PROBE_TIMEOUT = 60.0
 #: Seconds a peer's ``hold`` may take to print its token.
@@ -661,11 +681,12 @@ def agent_probe(repo: Path) -> dict[str, object]:
         "rsync": _rsync_version(),
         "python": ".".join(str(part) for part in sys.version_info[:3]),
         "stopped": stop_reason(repo),
+        "features": list(FEATURES),
     }
 
 
 def _stem(name: str) -> str:
-    return work.parse_name(name).stem if work._valid(name) else name
+    return work.stem_of(name)
 
 
 def copy_record(repo: Path, copy: work.Copy) -> dict[str, object]:
@@ -721,23 +742,12 @@ def copy_record(repo: Path, copy: work.Copy) -> dict[str, object]:
     return record
 
 
-def _evidence_files(folder: Path) -> dict[str, list[int]]:
-    """Return ``{relative path: [size, mtime seconds]}`` for every file under ``folder``."""
-    files: dict[str, list[int]] = {}
-    for directory, dirnames, filenames in os.walk(folder):
-        dirnames[:] = [name for name in dirnames if name not in EXCLUDES]
-        for name in filenames:
-            if name.endswith(".pyc"):
-                continue
-            path = Path(directory) / name
-            with contextlib.suppress(OSError):
-                info = path.lstat()
-                files[path.relative_to(folder).as_posix()] = [info.st_size, int(info.st_mtime)]
-    return files
-
-
 def agent_inventory(repo: Path, names: Sequence[str]) -> dict[str, object]:
-    """Return every copy (or those ``names``), their pins and their evidence."""
+    """Return every copy (or those ``names``), their pins, evidence and tombstones.
+
+    Evidence and evidence tombstones are filtered by the stems of ``names`` (a ``-verify``
+    copy's stem is its purpose's), copy tombstones by the names themselves.
+    """
     work.check_layout(repo)
     wanted = set(names)
     copies = {
@@ -759,17 +769,23 @@ def agent_inventory(repo: Path, names: Sequence[str]) -> dict[str, object]:
             if work.copy_hazard(repo, folder, work.EVIDENCE) is not None or not folder.is_dir():
                 continue
             if not wanted or folder.name in stems:
-                evidence[folder.name] = _evidence_files(folder)
+                evidence[folder.name] = work.evidence_files(folder)
     graves = [
         tombstone.as_json()
         for tombstone in work.tombstones(repo)
         if not wanted or tombstone.name in wanted
+    ]
+    evidence_graves = [
+        grave.as_json()
+        for grave in work.evidence_tombstones(repo)
+        if not wanted or grave.stem in stems
     ]
     return {
         "copies": copies,
         "pins": pin_map,
         "evidence": evidence,
         "tombstones": graves,
+        "evidence_tombstones": evidence_graves,
     }
 
 
@@ -821,28 +837,17 @@ def _newer(path: Path, since: float) -> bool:
 def _inside(copy_root: Path, relative: str) -> Path:
     """Return ``copy_root / relative``, refusing a path that could name a file outside the copy.
 
-    Each folder on the way is ``lstat``-ed: a symlinked (or non-folder) one, an absolute path
-    and a ``..`` part are refused; a folder that is not there leaves a path to no file.
+    ``work.inside``: an absolute path, a ``..`` part and a symlinked (or non-folder) folder on
+    the way are refused.
 
     Raises:
         FleetError: the path is absolute, climbs with ``..`` or passes a symlinked folder.
 
     """
-    parts = PurePosixPath(relative).parts
-    if not parts or PurePosixPath(relative).is_absolute() or ".." in parts:
-        msg = f"{relative!r} is no path inside the copy"
-        raise FleetError(msg)
-    folder = copy_root
-    for part in parts[:-1]:
-        folder /= part
-        try:
-            mode = folder.lstat().st_mode
-        except (FileNotFoundError, NotADirectoryError):
-            break
-        if not stat.S_ISDIR(mode):
-            msg = f"{relative!r} passes {folder.relative_to(copy_root).as_posix()}, no real folder"
-            raise FleetError(msg)
-    return copy_root.joinpath(*parts)
+    try:
+        return work.inside(copy_root, relative)
+    except work.WorkError as error:
+        raise FleetError(str(error)) from None
 
 
 def file_digest(copy_root: Path, relative: str) -> str:
@@ -1475,6 +1480,90 @@ def agent_tombstones_import(repo: Path, data: bytes) -> dict[str, object]:
     return {"created": created, "dropped": dropped}
 
 
+def agent_evidence_tombstones_import(repo: Path, data: bytes) -> dict[str, object]:
+    """Write every evidence tombstone a JSON list carries that this machine lacks.
+
+    Create-only, and nothing is applied: only a full sync's ``evidence-apply`` moves a file.
+    """
+    created: list[str] = []
+    listed = _decode(data, "evidence tombstones").get("evidence_tombstones")
+    for raw in listed if fleet.is_json_array(listed) else []:
+        grave = work.EvidenceTombstone.parse(raw)
+        if grave is not None and work.write_evidence_tombstone(repo, grave):
+            created.append(grave.file_name)
+    return {"created": created}
+
+
+def agent_evidence_apply(repo: Path, names: Sequence[str]) -> dict[str, object]:
+    """Move every evidence file a tombstone held here records, in that very state, to the trash.
+
+    Each held record (only those of the stems of ``names``, when given) is applied to this
+    machine's current disk: a file holding exactly a recorded state goes into a fresh
+    ``.work/trash/evidence-<stem>-<seconds>-kept`` entry (``work.move_evidence_file``), one
+    in another state is kept (``kept``), a missing one is nothing to do. A stem a name here
+    still uses (``work.evidence_users``; the record's own copy holding pins alone does not) is
+    skipped whole, and an unsafe stem folder or a path leaving it fails. With ``whole``, a stem
+    folder left holding only files no sync carries (``work.UNSYNCED``) goes into the entry too;
+    one still holding other files stays, their count answered as ``remaining``. Idempotent.
+    """
+    stems = {_stem(name) for name in names}
+    root = work.work_dir(repo) / work.EVIDENCE
+    trashed: dict[str, int] = {}
+    kept: list[list[str]] = []
+    skipped: dict[str, str] = {}
+    failed: dict[str, str] = {}
+    remaining: dict[str, int] = {}
+    for grave in work.evidence_tombstones(repo):
+        stem = grave.stem
+        folder = root / stem
+        if (stems and stem not in stems) or not work._present(root, folder):
+            continue
+        hazard = work.copy_hazard(repo, folder, work.EVIDENCE)
+        if hazard is not None or not work._is_kind(root, folder, stat.S_ISDIR):
+            failed[stem] = f"unsafe, never touched: {hazard or 'not a folder'}"
+            continue
+        users = work.evidence_users(repo, stem, removed=grave.copy)
+        if users:
+            skipped[stem] = f"{', '.join(users)} still use it here"
+            continue
+        made: list[Path] = []
+
+        def entry(stem: str = stem, made: list[Path] = made) -> Path:
+            if not made:
+                made.append(work.evidence_trash_entry(repo, stem, make=True))
+            return made[0]
+
+        moved = 0
+        for rel, size, mtime in grave.files:
+            try:
+                outcome = work.move_evidence_file(folder, rel, (size, mtime), entry)
+            except (work.WorkError, OSError) as error:
+                failed[f"{stem}/{rel}"] = str(error)
+                continue
+            if outcome == "moved":
+                moved += 1
+            elif outcome == "changed":
+                kept.append([stem, rel])
+        if moved:
+            trashed[stem] = trashed.get(stem, 0) + moved
+        if grave.whole and work._present(root, folder):
+            left = len(work.evidence_files(folder))
+            if not left:
+                try:
+                    work.move_tree_into(folder, entry())
+                except OSError as error:
+                    failed[stem] = f"its leftovers stay: {error}"
+            elif moved:
+                remaining[stem] = left
+    return {
+        "trashed": trashed,
+        "kept": kept,
+        "skipped": skipped,
+        "failed": failed,
+        "remaining": remaining,
+    }
+
+
 def agent_set_home(
     repo: Path,
     name: str,
@@ -1805,6 +1894,10 @@ def _agent_output(repo: Path, args: _Args) -> dict[str, object] | bytes:
         return agent_remove(repo, args.name, args.home, args.identity)
     if operation == "tombstones-import":
         return agent_tombstones_import(repo, sys.stdin.buffer.read())
+    if operation == "evidence-tombstones-import":
+        return agent_evidence_tombstones_import(repo, sys.stdin.buffer.read())
+    if operation == "evidence-apply":
+        return agent_evidence_apply(repo, args.copy)
     if operation == "set-home":
         return agent_set_home(
             repo,
@@ -1826,7 +1919,10 @@ def _agent_output(repo: Path, args: _Args) -> dict[str, object] | bytes:
         return agent_head_export(repo, args.name, args.have)
     if operation == "commit-import":
         return agent_commit_import(repo, sys.stdin.buffer.read())
-    return agent_prepare_evidence(repo, args.name)
+    if operation == "prepare-evidence":
+        return agent_prepare_evidence(repo, args.name)
+    msg = f"no agent operation {operation!r} here"
+    raise FleetError(msg)
 
 
 # --------------------------------------------------------------------------------------------
@@ -1842,6 +1938,7 @@ class Endpoint:
     label: str
     ssh: str
     scripts: str = ""
+    features: tuple[str, ...] = ()
 
     @property
     def local(self) -> bool:
@@ -2012,6 +2109,7 @@ class Probe:
     fleet_busy: bool
     rsync: str
     stopped: str = ""
+    features: tuple[str, ...] = ()
 
     @classmethod
     def parse(cls, answer: Mapping[str, object]) -> Probe:
@@ -2029,6 +2127,7 @@ class Probe:
             fleet_busy=answer.get("fleet_busy") is True,
             rsync=_string(answer, "rsync"),
             stopped=_string(answer, "stopped"),
+            features=tuple(_strings(answer.get("features"))),
         )
 
 
@@ -2220,7 +2319,7 @@ def qualify(machine: Machine, local: Probe | None) -> None:
         machine.endpoint = None
         return
     machine.probe = probe
-    machine.endpoint = dataclasses.replace(endpoint, machine=machine.id)
+    machine.endpoint = dataclasses.replace(endpoint, machine=machine.id, features=probe.features)
     reasons = _disqualifications(probe, local)
     if reasons:
         machine.reason = "; ".join(reasons)
@@ -2458,6 +2557,7 @@ class Inventory:
     pins: Mapping[str, str]
     evidence: Mapping[str, Mapping[str, tuple[int, int]]]
     tombstones: Mapping[str, work.Tombstone]
+    evidence_tombstones: Mapping[str, work.EvidenceTombstone]
 
     @classmethod
     def read(cls, endpoint: Endpoint, names: Sequence[str]) -> Inventory:
@@ -2479,6 +2579,11 @@ class Inventory:
         parsed = [
             work.Tombstone.parse(raw) for raw in (graves if fleet.is_json_array(graves) else [])
         ]
+        listed = answer.get("evidence_tombstones")
+        evidence_graves = [
+            work.EvidenceTombstone.parse(raw)
+            for raw in (listed if fleet.is_json_array(listed) else [])
+        ]
         return cls(
             copies={
                 name: CopyInfo.parse(name, raw)
@@ -2487,6 +2592,9 @@ class Inventory:
             pins=_string_map(answer.get("pins")),
             evidence=evidence,
             tombstones={grave.file_name: grave for grave in parsed if grave is not None},
+            evidence_tombstones={
+                grave.file_name: grave for grave in evidence_graves if grave is not None
+            },
         )
 
 
@@ -3165,39 +3273,188 @@ def sync_tombstones(
     return rows
 
 
+def sync_evidence_tombstones(
+    here: Endpoint,
+    peer: Endpoint,
+    mine: Inventory,
+    theirs: Inventory,
+    tokens: Mapping[str, str],
+    *,
+    dry_run: bool,
+) -> list[Row]:
+    """Copy every evidence tombstone one side lacks to it, both ways; apply none, delete none.
+
+    A peer whose probe lacks :data:`EVIDENCE_FEATURE` (an older script, which would refuse the
+    operation and fail the pair) gets no call: one ``note`` row says so while this side holds
+    a record, and the sync goes on.
+    """
+    if EVIDENCE_FEATURE not in peer.features:
+        if not mine.evidence_tombstones:
+            return []
+        return [
+            Row(
+                "evidence",
+                peer.label,
+                "note",
+                f"{peer.label} runs an older fleet_sync; evidence deletions not carried there",
+            ),
+        ]
+    rows: list[Row] = []
+    for source, target, have, want in (
+        (
+            here,
+            peer,
+            mine.evidence_tombstones,
+            theirs.evidence_tombstones,
+        ),
+        (
+            peer,
+            here,
+            theirs.evidence_tombstones,
+            mine.evidence_tombstones,
+        ),
+    ):
+        missing = [have[key] for key in sorted(set(have) - set(want))]
+        if not missing:
+            continue
+        detail = f"evidence tombstone {source.label} -> {target.label}"
+        if dry_run:
+            rows.extend(Row(grave.stem, peer.label, "would", detail) for grave in missing)
+            continue
+        document = json.dumps({"evidence_tombstones": [grave.as_json() for grave in missing]})
+        answer = target.call(
+            "evidence-tombstones-import",
+            "--token",
+            tokens[target.machine],
+            stdin=document.encode("utf-8"),
+        )
+        created = set(_strings(answer.get("created")))
+        rows.extend(
+            Row(grave.stem, peer.label, "synced", detail)
+            for grave in missing
+            if grave.file_name in created
+        )
+    return rows
+
+
+def _evidence_graves(*inventories: Inventory) -> list[work.EvidenceTombstone]:
+    """Return the evidence tombstones the inventories hold between them, each once."""
+    graves: dict[str, work.EvidenceTombstone] = {}
+    for inventory in inventories:
+        graves.update(inventory.evidence_tombstones)
+    return [graves[key] for key in sorted(graves)]
+
+
+def apply_evidence_tombstones(
+    endpoint: Endpoint,
+    inventory: Inventory,
+    graves: Sequence[work.EvidenceTombstone],
+    tokens: Mapping[str, str],
+    names: Sequence[str],
+    peer: Machine,
+    *,
+    dry_run: bool,
+) -> list[Row]:
+    """Have ``endpoint`` move the evidence files its tombstones record to its trash.
+
+    Called by a full sync only, never by ``--pins-only``, and only on an endpoint whose probe
+    lists :data:`EVIDENCE_FEATURE` and whose evidence holds a recorded stem. ``--dry-run``
+    counts, from ``inventory``, the files holding a recorded state.
+    """
+    stems = {grave.stem for grave in graves} & set(inventory.evidence)
+    if not stems or EVIDENCE_FEATURE not in endpoint.features:
+        return []
+    if dry_run:
+        rows: list[Row] = []
+        for stem in sorted(stems):
+            files = inventory.evidence[stem]
+            count = sum(
+                1
+                for grave in graves
+                if grave.stem == stem
+                for rel, size, mtime in grave.files
+                if files.get(rel) == (size, mtime)
+            )
+            if count:
+                rows.append(
+                    Row(stem, peer.label, "would", f"evidence: trash {count} on {endpoint.label}"),
+                )
+        return rows
+    args = ["evidence-apply"]
+    for name in names:
+        args += ["--copy", name]
+    answer = endpoint.call(*args, "--token", tokens[endpoint.machine])
+    days = work.TRASH_RETENTION_SECONDS // 86400
+    rows = [
+        Row(
+            stem,
+            peer.label,
+            "synced",
+            f"evidence: {count} deleted on {endpoint.label} (kept in .work/trash for {days} days)",
+        )
+        for stem, count in sorted(_object(answer.get("trashed")).items())
+    ]
+    rows += [
+        Row(stem, peer.label, "skip", f"evidence kept on {endpoint.label}: {reason}")
+        for stem, reason in sorted(_string_map(answer.get("skipped")).items())
+    ]
+    rows += [
+        Row(subject, peer.label, "failed", f"evidence on {endpoint.label}: {reason}")
+        for subject, reason in sorted(_string_map(answer.get("failed")).items())
+    ]
+    rows += [
+        Row(
+            stem,
+            peer.label,
+            "note",
+            f"evidence folder kept on {endpoint.label}: {count} files no tombstone records",
+        )
+        for stem, count in sorted(_object(answer.get("remaining")).items())
+    ]
+    return rows
+
+
 def _manifest_path(peer: str) -> Path:
     return work._container(REPO_ROOT, work.FLEET, create=True) / f"evidence-{peer}.json"
 
 
 def _read_manifest(peer: str) -> dict[str, dict[str, tuple[int, int]]]:
-    path = work.work_dir(REPO_ROOT) / work.FLEET / f"evidence-{peer}.json"
-    try:
-        document = _object(_loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError):
-        return {}
-    manifest: dict[str, dict[str, tuple[int, int]]] = {}
-    for stem, files in document.items():
-        entries: dict[str, tuple[int, int]] = {}
-        for rel, state in _object(files).items():
-            if fleet.is_json_array(state) and len(state) == 2:
-                size, mtime = state
-                if isinstance(size, int) and isinstance(mtime, int):
-                    entries[rel] = (size, mtime)
-        manifest[stem] = entries
-    return manifest
+    return work.evidence_manifest(work.work_dir(REPO_ROOT) / work.FLEET / f"evidence-{peer}.json")
+
+
+def _buried(
+    graves: Iterable[work.EvidenceTombstone],
+) -> dict[str, dict[str, set[tuple[int, int]]]]:
+    """Return ``{stem: {rel: states}}``: every file state an evidence tombstone records."""
+    buried: dict[str, dict[str, set[tuple[int, int]]]] = {}
+    for grave in graves:
+        for rel, size, mtime in grave.files:
+            buried.setdefault(grave.stem, {}).setdefault(rel, set()).add((size, mtime))
+    return buried
 
 
 def _evidence_moves(
     mine: Mapping[str, tuple[int, int]],
     theirs: Mapping[str, tuple[int, int]],
     last: Mapping[str, tuple[int, int]],
+    buried: Mapping[str, set[tuple[int, int]]] | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
-    """Return the files to push, to pull and in conflict for one evidence folder."""
+    """Return the files to push, to pull and in conflict for one evidence folder.
+
+    A file holding a state an evidence tombstone records (``buried``: rel to states) counts as
+    absent on its side: it is never carried in either direction nor reported, so a machine
+    that has not deleted it yet (offline, older script) never brings it back.
+    """
     push: list[str] = []
     pull: list[str] = []
     clash: list[str] = []
+    graves = buried or {}
     for rel in sorted(set(mine) | set(theirs)):
         a, b = mine.get(rel), theirs.get(rel)
+        if a in graves.get(rel, ()):
+            a = None
+        if b in graves.get(rel, ()):
+            b = None
         if a == b:
             continue
         if b is None:
@@ -3213,6 +3470,65 @@ def _evidence_moves(
     return push, pull, clash
 
 
+def _returned_rows(
+    stem: str,
+    rels: Sequence[str],
+    deleter: Endpoint,
+    holder: Endpoint,
+    graves: Sequence[work.EvidenceTombstone],
+) -> list[Row]:
+    """Return a ``conflict`` row for each file ``deleter`` deleted that ``holder`` changed since.
+
+    Such a file (another state than the record's) is carried back to ``deleter`` by the union,
+    so the row comes once, in the run that carries it home.
+    """
+    deleted = {
+        rel
+        for grave in graves
+        if grave.stem == stem and work.canonical(grave.home) == deleter.machine
+        for rel, _size, _mtime in grave.files
+    }
+    return [
+        Row(
+            f"{stem}/{rel}",
+            holder.label if deleter.local else deleter.label,
+            "conflict",
+            f"evidence deleted on {deleter.label}, changed on {holder.label} since: kept there "
+            f"and copied back to {deleter.label}",
+        )
+        for rel in rels
+        if rel in deleted
+    ]
+
+
+def _hand_deleted_rows(
+    stem: str,
+    rels: Sequence[str],
+    last: Mapping[str, tuple[int, int]],
+    files: Mapping[str, tuple[int, int]],
+    lost: Endpoint,
+    source: Endpoint,
+) -> list[Row]:
+    """Return one ``note`` row when files ``lost`` held at the last sync come back from ``source``.
+
+    Each such file was in the last sync's manifest, is absent on ``lost`` and is unchanged on
+    ``source``: removed by hand (``rm -rf``), which no sync takes for a deletion.
+    """
+    back = [rel for rel in rels if last.get(rel) is not None and last.get(rel) == files.get(rel)]
+    if not back:
+        return []
+    return [
+        Row(
+            stem,
+            source.label if lost.local else lost.label,
+            "note",
+            f"{len(back)} evidence files removed by hand on {lost.label} came back from "
+            f"{source.label}; `work.py evidence-rm {stem} --adopt-missing` on {lost.label} "
+            "deletes them everywhere",
+        ),
+    ]
+
+
 def sync_evidence(
     here: Endpoint,
     peer: Endpoint,
@@ -3221,13 +3537,26 @@ def sync_evidence(
     tokens: Mapping[str, str],
     *,
     dry_run: bool,
+    graves: Sequence[work.EvidenceTombstone] = (),
+    stems: Collection[str] | None = None,
 ) -> list[Row]:
-    """Union every evidence folder with ``peer``, file by file; never delete."""
+    """Union every evidence folder with ``peer``, file by file; never delete.
+
+    A file holding a state one of ``graves`` records is carried neither way. The manifest of
+    the last sync with ``peer`` forgets a stem (of ``stems``, the run's scope; every stem
+    when ``None``) neither side holds any more.
+    """
     manifest = _read_manifest(peer.machine)
+    buried = _buried(graves)
     rows: list[Row] = []
     for stem in sorted(set(mine.evidence) | set(theirs.evidence)):
         a, b = mine.evidence.get(stem, {}), theirs.evidence.get(stem, {})
-        push, pull, clash = _evidence_moves(a, b, manifest.get(stem, {}))
+        last = manifest.get(stem, {})
+        push, pull, clash = _evidence_moves(a, b, last, buried.get(stem))
+        rows += _returned_rows(stem, pull, here, peer, graves)
+        rows += _returned_rows(stem, push, peer, here, graves)
+        rows += _hand_deleted_rows(stem, pull, last, b, here, peer)
+        rows += _hand_deleted_rows(stem, push, last, a, peer, here)
         rows.extend(
             Row(
                 f"{stem}/{rel}",
@@ -3261,6 +3590,10 @@ def sync_evidence(
         merged.update({rel: b[rel] for rel in pull})
         merged.update({rel: a[rel] for rel in push})
         manifest[stem] = {rel: state for rel, state in merged.items() if rel not in clash}
+    held = set(mine.evidence) | set(theirs.evidence)
+    for stem in [stem for stem in manifest if stem not in held]:
+        if stems is None or stem in stems:
+            del manifest[stem]
     if not dry_run:
         path = _manifest_path(peer.machine)
         staged = path.with_name(f".{path.name}.{work._token()}")
@@ -3477,6 +3810,14 @@ def sync_pins_with_peer(
                 tokens,
                 dry_run=args.dry_run,
             )
+            rows += sync_evidence_tombstones(
+                mine_end,
+                their_end,
+                mine,
+                theirs,
+                tokens,
+                dry_run=args.dry_run,
+            )
             rows += sync_pins(
                 mine_end,
                 their_end,
@@ -3509,6 +3850,14 @@ def _sync_pair(
         mine = Inventory.read(mine_end, args.copy)
         theirs = Inventory.read(their_end, args.copy)
         rows += sync_tombstones(mine_end, their_end, mine, theirs, tokens, dry_run=args.dry_run)
+        rows += sync_evidence_tombstones(
+            mine_end,
+            their_end,
+            mine,
+            theirs,
+            tokens,
+            dry_run=args.dry_run,
+        )
         graves = [*mine.tombstones.values(), *theirs.tombstones.values()]
         names = sorted(set(mine.copies) | set(theirs.copies))
         steps = [
@@ -3525,10 +3874,30 @@ def _sync_pair(
         ]
         for step in sorted(steps, key=lambda step: step.kind != "remove"):
             rows.append(_run_step(step, tokens, peer, dry_run=args.dry_run))
+        carried = _evidence_graves(mine, theirs)
+        for end, inventory in ((mine_end, mine), (their_end, theirs)):
+            rows += apply_evidence_tombstones(
+                end,
+                inventory,
+                carried,
+                tokens,
+                args.copy,
+                peer,
+                dry_run=args.dry_run,
+            )
         mine = Inventory.read(mine_end, args.copy) if not args.dry_run else mine
         theirs = Inventory.read(their_end, args.copy) if not args.dry_run else theirs
         rows += sync_pins(mine_end, their_end, mine, theirs, tokens, dry_run=args.dry_run)
-        rows += sync_evidence(mine_end, their_end, mine, theirs, tokens, dry_run=args.dry_run)
+        rows += sync_evidence(
+            mine_end,
+            their_end,
+            mine,
+            theirs,
+            tokens,
+            dry_run=args.dry_run,
+            graves=_evidence_graves(mine, theirs),
+            stems={_stem(name) for name in args.copy} if args.copy else None,
+        )
 
 
 def _run_step(
@@ -4371,6 +4740,8 @@ def build_parser() -> argparse.ArgumentParser:
             "prepare-evidence",
             "tombstones-import",
             "pins-link",
+            "evidence-tombstones-import",
+            "evidence-apply",
         ),
     )
     _ = agent.add_argument("name", nargs="?", default="")

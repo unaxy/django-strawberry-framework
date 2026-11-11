@@ -25,8 +25,8 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
         pre-edit snapshots, database copies); a repro test belongs in the
         copy's own ``tests/`` tree, where its conftest applies. Keyed by the name's
         stem, so a ``-verify`` or ``-rN`` sibling shares its purpose's folder.
-        ``rm`` never touches it unless asked (``--evidence``); nothing deletes
-        it by age.
+        Deleted only when asked (``rm --evidence``, ``evidence-rm``), on every
+        fleet machine, never by age.
     ``names/<name>/``
         The claim on a name, one namespace for clones, worktrees and adopted
         copies, taken before anything else: a folder holding its owner
@@ -43,7 +43,10 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
         Where ``rm`` moves a copy before deleting it, so a copy is never left
         half deleted under its own name. A replica ``fleet_sync.py`` removes
         stays there as ``<name>-<seconds>-kept`` for 7 days
-        (``TRASH_RETENTION_SECONDS``), restorable, until ``gc`` deletes it.
+        (``TRASH_RETENTION_SECONDS``), restorable, until ``gc`` deletes it; so
+        does deleted evidence, as ``evidence-<stem>-<seconds>-kept`` (restore it
+        with ``mv`` and ``touch``: an untouched file keeps its recorded state and
+        is deleted again).
     ``tombstones/<name>@<digest>.json``
         One per copy its home removed (``rm``, ``rm --discard``, ``gc``): the
         name, the home, the copy's identity (its note's ``incarnation``, else
@@ -61,7 +64,15 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
         deletes them after 30 days (``TOMBSTONE_RETENTION_SECONDS``). A later
         copy under the same name has another identity, so an old tombstone
         never removes it.
-    ``land.lock``
+    ``evidence-tombstones/<stem>@<digest>.json``
+        One per explicit evidence deletion (``rm --evidence``, ``evidence-rm``):
+        the stem, the machine, the moment, whether the whole folder went, the
+        removed copy, and each deleted file's ``[size, mtime]``.
+        ``fleet_sync.py`` carries them and, in a full sync, moves a file holding
+        exactly a recorded state to the trash on every machine (a changed or later
+        file is never touched) and carries none back; ``gc`` deletes them after 90
+        days (``EVIDENCE_TOMBSTONE_RETENTION_SECONDS``). Apart from
+        ``tombstones/``, so an older script never reads them.    ``land.lock``
         A file one ``land`` (or ``repair``) at a time holds an exclusive kernel
         lock on (``flock``; ``msvcrt.locking`` on Windows): released however
         its holder ends, never taken over.
@@ -290,7 +301,12 @@ Commands
         cannot prove its own (an earlier copy's, or one a fleet sync carried
         in) is kept and named, for ``rm <name> --drop-saves`` of the name it then holds alone
         once checked; the evidence folder
-        stays unless ``--evidence`` and no sibling copy of the stem remains.
+        stays unless ``--evidence`` and no other name of the stem remains (a
+        sibling copy or a name holding pins alone; the copy's own saves do not
+        count), which then, holding ``.work/fleet.lock`` (waiting up to 60 s, else
+        refusing with nothing removed), records an evidence tombstone and moves
+        the folder to ``.work/trash/evidence-<stem>-<seconds>-kept``, in that
+        order, as ``evidence-rm`` does.
         On the copy's home (``--discard`` included) it leaves a tombstone; on a
         replica (``--discard``) it removes this machine's replica alone and keeps
         it in ``.work/trash/<name>-<seconds>-kept`` for 7 days (a replica may be
@@ -298,15 +314,28 @@ Commands
         A copy moved to the trash that cannot be deleted is reported, its
         metadata, pins and claim dropped as for a removal, and it stays in
         ``.work/trash/`` for ``gc``; ``rm`` exits 1.
+    ``evidence-rm <stem> [--file REL]... [--adopt-missing] [--dry-run]``
+        Delete one stem's evidence on every fleet machine, for a stem no name
+        uses (refused otherwise, a name holding pins alone included): holding
+        ``.work/fleet.lock`` as ``rm --evidence`` does, record the files in an
+        evidence tombstone, then move them to the trash (the folder in one
+        rename; with ``--file``, only those files, ``whole`` false, a path that
+        is not plain and relative or that passes a symlink refused).
+        ``--adopt-missing`` records the files removed here by hand that the peer
+        manifests (``.work/fleet/evidence-<peer>.json``) still list, at their
+        last synced states, one record per manifest; refused when
+        ``.work/evidence`` itself is missing (a wipe is no deletion) or the stem
+        folder is a symlink. ``--dry-run`` reports and writes nothing.
     ``gc [--dry-run]``
         Remove only what is finished: a landed copy whose landed content the
         shared ``HEAD`` holds (each ``rm`` refusal still applies), worktree
         metadata of this script's copies whose folder is gone, start and
         landed pins of names with no copy left once the shared ``HEAD`` holds
         them, ``.work/trash/`` entries whose ``rm`` is no longer running (a
-        ``-kept`` entry once 7 days have passed), and tombstones older than 30
-        days. A landed copy it removes leaves a tombstone as ``rm`` does, and
-        the pins it drops by age a pins-only one, so no sync carries them back.
+        ``-kept`` entry once 7 days have passed), tombstones older than 30
+        days and evidence tombstones older than 90. A landed copy it removes
+        leaves a tombstone as ``rm`` does, and the pins it drops by age a
+        pins-only one, so no sync carries them back.
         Never a replica (its note ``replica``, or a home other than this
         machine, as a former home a handoff demoted): ``fleet_sync.py`` removes
         a replica, by its home's tombstone. Never a live copy that is not landed,
@@ -450,6 +479,9 @@ FLEET = "fleet"
 FLEET_LOCK = "fleet.lock"
 #: Where a home's removal of a copy leaves its tombstone, the one record a replica is removed by.
 TOMBSTONES = "tombstones"
+#: Where an explicit evidence deletion leaves its record (:class:`EvidenceTombstone`), apart
+#: from the copy tombstones so a script that predates it never reads, relays or strips one.
+EVIDENCE_GRAVES = "evidence-tombstones"
 DIR_CONTAINERS = (
     CLONES,
     WORKTREES,
@@ -459,6 +491,7 @@ DIR_CONTAINERS = (
     PIN_STORE,
     FLEET,
     TOMBSTONES,
+    EVIDENCE_GRAVES,
 )
 FILE_ENTRIES = (
     LAND_LOCK,
@@ -501,6 +534,21 @@ TRASH_RETENTION_SECONDS = 7 * 24 * 60 * 60
 #: How long ``gc`` keeps a tombstone: past the trash retention, and long enough for a machine
 #: that was offline to come back and drop its replica.
 TOMBSTONE_RETENTION_SECONDS = 30 * 24 * 60 * 60
+#: How long ``gc`` keeps an evidence tombstone: a machine offline for less still deletes the
+#: files when it returns, one offline longer brings them back.
+EVIDENCE_TOMBSTONE_RETENTION_SECONDS = 90 * 24 * 60 * 60
+#: Seconds ``rm --evidence`` and ``evidence-rm`` wait for ``.work/fleet.lock`` before refusing.
+EVIDENCE_LOCK_WAIT_SECONDS = 60.0
+#: Regenerable or per-platform files no transfer carries and no evidence listing holds.
+UNSYNCED = (
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    "node_modules",
+    "*.pyc",
+)
 #: The last part of a trash entry kept for :data:`TRASH_RETENTION_SECONDS`, not deleted at once.
 KEPT_TRASH = "kept"
 #: Whether a read-only file refuses its own delete (Windows); elsewhere its folder decides.
@@ -889,10 +937,22 @@ def write_tombstone(repo: Path, tombstone: Tombstone) -> bool:
     reader sees a half-written one). A file already there is never replaced: one holding
     this very tombstone is success (``False``, nothing to write).
     """
-    folder = _container(repo, TOMBSTONES, create=True)
-    target = folder / tombstone.file_name
-    staged = folder / f".{tombstone.file_name}.{_token()}"
-    _ = staged.write_text(json.dumps(tombstone.as_json(), sort_keys=True), encoding="utf-8")
+    return _publish_once(
+        _container(repo, TOMBSTONES, create=True),
+        tombstone.file_name,
+        tombstone.as_json(),
+    )
+
+
+def _publish_once(folder: Path, file_name: str, document: Mapping[str, object]) -> bool:
+    """Write ``document`` to ``folder / file_name`` create-only; return whether it wrote it.
+
+    Staged in full under a dot name, then hard-linked into place: ``os.link`` fails on an
+    existing name, so nothing replaces a published file and no reader sees half of one.
+    """
+    target = folder / file_name
+    staged = folder / f".{file_name}.{_token()}"
+    _ = staged.write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
     try:
         os.link(staged, target)
     except FileExistsError:
@@ -987,6 +1047,429 @@ def drop_buried_pins(repo: Path, name: str) -> list[str]:
                 drop_pin(repo, name, leaf, sha)
                 dropped.append(leaf)
     return dropped
+
+
+# --------------------------------------------------------------------------------------------
+# Evidence tombstones: an explicit deletion of evidence files, carried by the fleet sync
+# --------------------------------------------------------------------------------------------
+
+
+def stem_of(name: str) -> str:
+    """Return the evidence stem a copy name keys (a name outside the grammar is its own stem)."""
+    return parse_name(name).stem if _valid(name) else name
+
+
+def valid_stem(stem: str) -> bool:
+    """Return whether ``stem`` is a plain folder name under ``.work/evidence``.
+
+    Not the copy-name grammar: evidence folders such as ``lead-merge`` or
+    ``load-balancer.patch`` exist. Refused: empty, a leading dot (``.``, ``..``, a staged
+    file), a path separator, a control character.
+    """
+    return (
+        bool(stem)
+        and not stem.startswith(".")
+        and not any(char in "/\\" or ord(char) < 32 for char in stem)
+    )
+
+
+def evidence_rel(rel: str) -> bool:
+    """Return whether ``rel`` is a canonical relative POSIX path (no ``.``, ``..`` or root)."""
+    path = PurePosixPath(rel)
+    return (
+        bool(rel)
+        and "\0" not in rel
+        and not path.is_absolute()
+        and path.as_posix() == rel
+        and not {".", ".."}.intersection(path.parts)
+    )
+
+
+def file_state(info: os.stat_result) -> tuple[int, int]:
+    """Return a file's evidence state: its size and whole-second mtime (what rsync ``-t`` keeps)."""
+    return info.st_size, int(info.st_mtime)
+
+
+@dataclasses.dataclass(frozen=True)
+class EvidenceTombstone:
+    """An explicit deletion of evidence files (``.work/evidence-tombstones/``).
+
+    ``files`` holds ``(rel, size, mtime)`` for every file deleted: another machine deletes a
+    file only while it holds exactly that state, so a file changed since, or a later file at
+    the same path, is never touched, whatever any clock says. ``removed_at`` serves retention
+    alone. ``whole`` says the stem folder itself went (``rm --evidence``, ``evidence-rm
+    <stem>``), not chosen files (``--file``). ``copy`` names the copy whose ``rm`` wrote it
+    (``""`` for ``evidence-rm``): that name holding pins alone uses the stem nowhere.
+    """
+
+    stem: str
+    home: str
+    removed_at: float
+    removed_by: str
+    files: tuple[tuple[str, int, int], ...]
+    whole: bool
+    copy: str = ""
+
+    @property
+    def states(self) -> dict[str, tuple[int, int]]:
+        """Return ``{rel: (size, mtime)}``."""
+        return {rel: (size, mtime) for rel, size, mtime in self.files}
+
+    @property
+    def file_name(self) -> str:
+        """Return the record's file name: one per stem, moment and file set."""
+        listed = {rel: [size, mtime] for rel, size, mtime in self.files}
+        key = f"{self.stem}\0{json.dumps(self.removed_at)}\0{json.dumps(listed, sort_keys=True)}"
+        return f"{self.stem}@{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}.json"
+
+    def matches(
+        self,
+        rel: str,
+        size: int,
+        mtime: int,
+    ) -> bool:
+        """Return whether ``rel`` holding ``(size, mtime)`` is a state this record deleted."""
+        return self.states.get(rel) == (size, mtime)
+
+    def as_json(self) -> dict[str, object]:
+        """Return the record as its JSON document."""
+        return {
+            "kind": "evidence",
+            "stem": self.stem,
+            "home": self.home,
+            "removedat": self.removed_at,
+            "removedby": self.removed_by,
+            "whole": self.whole,
+            "copy": self.copy,
+            "files": {rel: [size, mtime] for rel, size, mtime in self.files},
+        }
+
+    @classmethod
+    def parse(cls, raw: object) -> EvidenceTombstone | None:
+        """Return the record a JSON document holds, ``None`` for anything else.
+
+        A stem that is no plain folder name, or any path that is not canonical and relative,
+        refuses the whole record: it comes from another machine and fails closed.
+        """
+        if not fleet.is_json_object(raw) or raw.get("kind") != "evidence":
+            return None
+        stem, home, removed_by = (raw.get(key) for key in ("stem", "home", "removedby"))
+        removed_at, whole, copy = raw.get("removedat"), raw.get("whole"), raw.get("copy", "")
+        listed = raw.get("files")
+        if (
+            not isinstance(stem, str)
+            or not valid_stem(stem)
+            or not isinstance(home, str)
+            or not home
+            or not isinstance(removed_by, str)
+            or not removed_by
+            or isinstance(removed_at, bool)
+            or not isinstance(removed_at, (int, float))
+            or not isinstance(whole, bool)
+            or not isinstance(copy, str)
+            or not fleet.is_json_object(listed)
+        ):
+            return None
+        files: list[tuple[str, int, int]] = []
+        for rel, state in listed.items():
+            if not evidence_rel(rel) or not fleet.is_json_array(state) or len(state) != 2:
+                return None
+            size, mtime = state
+            if (
+                isinstance(size, bool)
+                or isinstance(mtime, bool)
+                or not isinstance(size, int)
+                or not isinstance(mtime, int)
+                or size < 0
+            ):
+                return None
+            files.append((rel, size, mtime))
+        return cls(stem, home, float(removed_at), removed_by, tuple(sorted(files)), whole, copy)
+
+
+def evidence_tombstones(repo: Path) -> list[EvidenceTombstone]:
+    """Return every readable evidence tombstone (a broken or misnamed file is skipped)."""
+    folder = work_dir(repo) / EVIDENCE_GRAVES
+    if not folder.is_dir():
+        return []
+    found: list[EvidenceTombstone] = []
+    for path in sorted(folder.glob("*.json")):
+        try:
+            grave = EvidenceTombstone.parse(_loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+        if grave is not None and grave.file_name == path.name:
+            found.append(grave)
+    return found
+
+
+def write_evidence_tombstone(repo: Path, grave: EvidenceTombstone) -> bool:
+    """Publish ``grave`` create-only (as :func:`write_tombstone`); return whether it wrote it."""
+    return _publish_once(
+        _container(repo, EVIDENCE_GRAVES, create=True),
+        grave.file_name,
+        grave.as_json(),
+    )
+
+
+def evidence_files(folder: Path) -> dict[str, tuple[int, int]]:
+    """Return ``{relative path: [size, mtime seconds]}`` for every synced file under ``folder``.
+
+    :data:`UNSYNCED` folders and ``*.pyc`` files are left out; a file that cannot be
+    ``lstat``-ed is too.
+    """
+    files: dict[str, tuple[int, int]] = {}
+    for directory, dirnames, filenames in os.walk(folder):
+        dirnames[:] = [name for name in dirnames if name not in UNSYNCED]
+        for name in filenames:
+            if name.endswith(".pyc"):
+                continue
+            path = Path(directory) / name
+            with contextlib.suppress(OSError):
+                files[path.relative_to(folder).as_posix()] = file_state(path.lstat())
+    return files
+
+
+def evidence_manifest(path: Path) -> dict[str, dict[str, tuple[int, int]]]:
+    """Return a fleet evidence manifest (``{stem: {rel: (size, mtime)}}``), ``{}`` if unreadable."""
+    try:
+        document = _loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    manifest: dict[str, dict[str, tuple[int, int]]] = {}
+    for stem, files in (document if fleet.is_json_object(document) else {}).items():
+        entries: dict[str, tuple[int, int]] = {}
+        for rel, state in (files if fleet.is_json_object(files) else {}).items():
+            if fleet.is_json_array(state) and len(state) == 2:
+                size, mtime = state
+                if isinstance(size, int) and isinstance(mtime, int):
+                    entries[rel] = (size, mtime)
+        manifest[stem] = entries
+    return manifest
+
+
+def inside(root: Path, relative: str) -> Path:
+    """Return ``root / relative``, refusing a path that could name a file outside ``root``.
+
+    Each folder on the way is ``lstat``-ed: a symlinked (or non-folder) one, an absolute path
+    and a ``..`` part are refused; a folder that is not there leaves a path to no file.
+
+    Raises:
+        WorkError: the path is absolute, climbs with ``..`` or passes a symlinked folder.
+
+    """
+    parts = PurePosixPath(relative).parts
+    if not parts or PurePosixPath(relative).is_absolute() or ".." in parts:
+        msg = f"{relative!r} is no path inside {root.name}"
+        raise WorkError(msg)
+    folder = root
+    for part in parts[:-1]:
+        folder /= part
+        try:
+            mode = folder.lstat().st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            break
+        if not stat.S_ISDIR(mode):
+            msg = f"{relative!r} passes {folder.relative_to(root).as_posix()}, no real folder"
+            raise WorkError(msg)
+    return root.joinpath(*parts)
+
+
+def evidence_users(repo: Path, stem: str, *, removed: str = "") -> list[str]:
+    """Return the names whose stem is ``stem``: copies, replicas and names holding pins alone.
+
+    ``removed``, the copy an ``rm --evidence`` removes, is no user once it holds pins alone:
+    its own saves never keep the evidence its ``rm`` deletes. A ``-verify`` or ``-rN``
+    sibling, and any other name holding pins alone, is one.
+    """
+    return sorted(
+        name
+        for name, copy in discover(repo).items()
+        if stem_of(name) == stem and not (name == removed and copy.form == "pins")
+    )
+
+
+@contextlib.contextmanager
+def fleet_lock(repo: Path, wait: float | None = None) -> Generator[None, None, None]:
+    """Hold ``.work/fleet.lock`` for the block, waiting up to ``wait`` seconds for it.
+
+    An evidence deletion takes it so no fleet sync's transfer races its record and its move.
+
+    Raises:
+        WorkError: a fleet sync (or a peer's hold) kept it the whole wait.
+
+    """
+    _ = ensure_sentinel(repo)
+    lock = work_dir(repo) / FLEET_LOCK
+    check_layout(repo)
+    deadline = time.monotonic() + (EVIDENCE_LOCK_WAIT_SECONDS if wait is None else wait)
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        while True:
+            try:
+                locked = _locks.try_lock(descriptor)
+            except OSError as error:
+                msg = f"cannot lock {lock}: {error}"
+                raise WorkError(msg) from error
+            if locked:
+                break
+            if time.monotonic() >= deadline:
+                msg = f"a fleet sync holds {lock}; nothing deleted, run it again once it ends"
+                raise WorkError(msg)
+            time.sleep(0.2)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def evidence_trash_entry(repo: Path, stem: str, *, make: bool) -> Path:
+    """Return a fresh ``.work/trash/evidence-<stem>-<seconds>-kept`` entry (made when ``make``).
+
+    ``gc`` keeps a ``-kept`` entry :data:`TRASH_RETENTION_SECONDS` from its seconds. A name
+    taken already moves on a second, so two deletions never share an entry; the callers hold
+    ``.work/fleet.lock`` (``work.py``) or the fleet sync's hold (its agent), so none races.
+    """
+    trash = _container(repo, TRASH, create=True)
+    stamp = int(time.time())
+    while True:
+        entry = trash / f"evidence-{stem}-{stamp}-{KEPT_TRASH}"
+        if make:
+            try:
+                entry.mkdir()
+            except FileExistsError:
+                stamp += 1
+                continue
+            return entry
+        if not _present(trash, entry):
+            return entry
+        stamp += 1
+
+
+def _prune_empty(root: Path, folder: Path) -> None:
+    """Remove ``folder`` and each emptied folder above it, up to (never) ``root``."""
+    while folder != root and _is_within(folder, root):
+        try:
+            folder.rmdir()
+        except OSError:
+            return
+        folder = folder.parent
+
+
+def move_evidence_file(
+    folder: Path,
+    rel: str,
+    state: tuple[int, int],
+    entry: Callable[[], Path],
+) -> str:
+    """Move ``folder/rel`` into the trash entry ``entry()`` when it holds exactly ``state``.
+
+    Returns ``"moved"``, ``"gone"`` (no file there) or ``"changed"`` (another state, a folder,
+    or written while it moved and put back). The file is ``lstat``-ed before the rename and
+    again after it (the same inode, the same state); emptied folders are pruned, ``folder``
+    itself never.
+
+    Raises:
+        WorkError: ``rel`` leaves ``folder`` (:func:`inside`), or the file changed while it
+            moved and its place is taken again (it stays in the entry).
+        OSError: the rename failed (the file stays where it was).
+
+    """
+    path = inside(folder, rel)
+    try:
+        before = path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return "gone"
+    if stat.S_ISDIR(before.st_mode) or file_state(before) != state:
+        return "changed"
+    target = entry() / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _ = path.rename(target)
+    after = target.lstat()
+    same = (after.st_ino, after.st_dev) == (before.st_ino, before.st_dev)
+    if not same or file_state(after) != state:
+        if _present(path.parent, path):
+            msg = f"{rel} changed while it moved to the trash; it stays in {target}"
+            raise WorkError(msg)
+        _ = target.rename(path)
+        return "changed"
+    _prune_empty(folder, path.parent)
+    return "moved"
+
+
+def move_tree_into(source: Path, target: Path) -> None:
+    """Move everything under ``source`` into ``target`` (merging folders), then remove ``source``.
+
+    Links are moved as links, never followed. A name both hold as files is refused.
+
+    Raises:
+        OSError: a rename failed, or ``target`` already holds a file of that name.
+
+    """
+    for child in sorted(source.iterdir()):
+        destination = target / child.name
+        both_folders = _is_kind(source, child, stat.S_ISDIR) and _is_kind(
+            target,
+            destination,
+            stat.S_ISDIR,
+        )
+        if both_folders:
+            move_tree_into(child, destination)
+        elif _present(target, destination):
+            msg = f"{destination} is already in the trash entry"
+            raise FileExistsError(msg)
+        else:
+            _ = child.rename(destination)
+    source.rmdir()
+
+
+def discard_evidence(repo: Path, stem: str, *, copy: str = "") -> tuple[EvidenceTombstone, Path]:
+    """Record every file of ``.work/evidence/<stem>`` in a tombstone, then move the folder to the trash.
+
+    The record is written first: a crash after it leaves the files for the next full fleet
+    sync to move (it applies this machine's own records too); before it nothing happened. The
+    folder goes into a fresh ``evidence-<stem>-<seconds>-kept`` entry in one rename. The caller
+    holds ``.work/fleet.lock``.
+
+    Raises:
+        WorkError: the folder could not be moved (the record stands; the files stay).
+
+    """
+    folder = work_dir(repo) / EVIDENCE / stem
+    here = machine_id()
+    listed = evidence_files(folder)
+    files = tuple(sorted((rel, size, mtime) for rel, (size, mtime) in listed.items()))
+    grave = EvidenceTombstone(stem, here, time.time(), here, files, whole=True, copy=copy)
+    _ = write_evidence_tombstone(repo, grave)
+    entry = evidence_trash_entry(repo, stem, make=False)
+    try:
+        _ = folder.rename(entry)
+    except OSError as error:
+        msg = (
+            f"evidence {stem}: recorded in {EVIDENCE_GRAVES}/{grave.file_name} but not moved to "
+            f"the trash ({error.strerror or error}); the next full fleet sync moves its files"
+        )
+        raise WorkError(msg) from None
+    return grave, entry
+
+
+def _gc_evidence_tombstones(repo: Path, *, dry_run: bool) -> int:
+    """Delete evidence tombstones older than their retention; return 1 on a failure."""
+    status = 0
+    cutoff = time.time() - EVIDENCE_TOMBSTONE_RETENTION_SECONDS
+    for grave in evidence_tombstones(repo):
+        if grave.removed_at >= cutoff:
+            continue
+        if dry_run:
+            print(f"would delete evidence tombstone {grave.file_name}")
+            continue
+        try:
+            (work_dir(repo) / EVIDENCE_GRAVES / grave.file_name).unlink()
+        except OSError as error:
+            print(f"cannot delete evidence tombstone {grave.file_name}: {error}", file=sys.stderr)
+            status = 1
+        else:
+            print(f"deleted evidence tombstone {grave.file_name}")
+    return status
 
 
 # --------------------------------------------------------------------------------------------
@@ -4626,20 +5109,176 @@ def cmd_rm(args: _Args) -> int:
         raise WorkError(msg)
     if not args.discard:
         refuse_replica(copy, "remove (or `rm --discard`, which drops the replica alone)")
-    stem = parse_name(copy.name).stem if _valid(copy.name) else copy.name
-    kept = remove(repo, copy, discard=args.discard, drop_saves=args.drop_saves)
-    if args.evidence:
-        siblings = [
-            name for name in discover(repo) if _valid(name) and parse_name(name).stem == stem
-        ]
-        evidence = work_dir(repo) / EVIDENCE / stem
-        if siblings:
-            _say(f"evidence {evidence} kept: {', '.join(siblings)} still use it")
-        elif evidence.is_dir() and copy_hazard(repo, evidence, EVIDENCE) is None:
-            delete_tree(evidence)
+    stem = stem_of(copy.name)
+    with fleet_lock(repo) if args.evidence else contextlib.nullcontext():
+        kept = remove(repo, copy, discard=args.discard, drop_saves=args.drop_saves)
+        days = TRASH_RETENTION_SECONDS // 86400
+        trashed = f" (a replica: kept in .work/trash for {days} days)"
+        trashed = trashed if is_replica(copy.note) else ""
+        print(f"removed {copy.name}{trashed}{kept_pins_note(copy.name, kept)}")
+        if args.evidence:
+            _rm_evidence(repo, stem, copy.name)
+    return 0
+
+
+def _rm_evidence(repo: Path, stem: str, removed: str) -> None:
+    """Delete the stem's evidence fleet-wide after ``rm --evidence`` unless another name uses it.
+
+    Raises:
+        WorkError: the folder could not be moved to the trash (:func:`discard_evidence`).
+
+    """
+    evidence = work_dir(repo) / EVIDENCE / stem
+    users = evidence_users(repo, stem, removed=removed)
+    if users:
+        _say(f"evidence {evidence} kept: {', '.join(users)} still use it")
+    elif evidence.is_dir() and copy_hazard(repo, evidence, EVIDENCE) is None:
+        grave, entry = discard_evidence(repo, stem, copy=removed)
+        print(_discarded(grave, entry))
+
+
+def _discarded(grave: EvidenceTombstone, entry: Path | None) -> str:
+    """Return the line naming an evidence deletion's record and its trash entry."""
     days = TRASH_RETENTION_SECONDS // 86400
-    trashed = f" (a replica: kept in .work/trash for {days} days)" if is_replica(copy.note) else ""
-    print(f"removed {copy.name}{trashed}{kept_pins_note(copy.name, kept)}")
+    moved = f", moved to .work/trash/{entry.name} for {days} days" if entry is not None else ""
+    return (
+        f"evidence {grave.stem}: {len(grave.files)} files recorded in "
+        f".work/{EVIDENCE_GRAVES}/{grave.file_name}{moved}; the fleet sync deletes them everywhere"
+    )
+
+
+def cmd_evidence_rm(args: _Args) -> int:
+    """Delete one stem's evidence (or some of its files) on every fleet machine."""
+    repo = REPO_ROOT
+    _ = ensure_sentinel(repo)
+    stem = args.name
+    if not valid_stem(stem):
+        msg = f"{stem!r} is no evidence folder name"
+        raise WorkError(msg)
+    if args.file and args.adopt_missing:
+        msg = "--file and --adopt-missing exclude each other"
+        raise WorkError(msg)
+    root = work_dir(repo) / EVIDENCE
+    folder = root / stem
+    hazard = copy_hazard(repo, folder, EVIDENCE)
+    if hazard is not None:
+        msg = f"evidence {stem}: {hazard}; never touched"
+        raise WorkError(msg)
+    with contextlib.nullcontext() if args.dry_run else fleet_lock(repo):
+        users = evidence_users(repo, stem)
+        if users:
+            msg = (
+                f"evidence {stem}: {', '.join(users)} still use it (a name holding pins alone "
+                "too); `work.py rm <name> --evidence` removes a copy with its evidence"
+            )
+            raise WorkError(msg)
+        if args.adopt_missing:
+            return _adopt_missing(repo, stem, dry_run=args.dry_run)
+        if not _is_kind(root, folder, stat.S_ISDIR):
+            msg = f"no evidence folder {folder}"
+            raise WorkError(msg)
+        if args.file:
+            return _evidence_rm_files(repo, stem, folder, args.file, dry_run=args.dry_run)
+        if args.dry_run:
+            print(f"would record and trash evidence {stem}: {len(evidence_files(folder))} files")
+            return 0
+        grave, entry = discard_evidence(repo, stem)
+        print(_discarded(grave, entry))
+    return 0
+
+
+def _evidence_rm_files(
+    repo: Path,
+    stem: str,
+    folder: Path,
+    rels: Sequence[str],
+    *,
+    dry_run: bool,
+) -> int:
+    """Record the files ``rels`` of ``folder`` in a tombstone (``whole`` false), then trash them.
+
+    Raises:
+        WorkError: a path is not canonical, leaves the folder or names no file; or a file
+            changed while it moved.
+
+    """
+    states: dict[str, tuple[int, int]] = {}
+    for rel in rels:
+        if not evidence_rel(rel):
+            msg = f"{rel!r} is no plain relative path inside evidence {stem}"
+            raise WorkError(msg)
+        path = inside(folder, rel)
+        mode = _mode(folder, path)
+        if mode is None or stat.S_ISDIR(mode):
+            msg = f"evidence {stem} holds no file {rel}"
+            raise WorkError(msg)
+        states[rel] = file_state(path.lstat())
+    if dry_run:
+        print(f"would record and trash {len(states)} files of evidence {stem}")
+        return 0
+    here = machine_id()
+    files = tuple(sorted((rel, size, mtime) for rel, (size, mtime) in states.items()))
+    grave = EvidenceTombstone(stem, here, time.time(), here, files, whole=False)
+    _ = write_evidence_tombstone(repo, grave)
+    made: list[Path] = []
+
+    def entry() -> Path:
+        if not made:
+            made.append(evidence_trash_entry(repo, stem, make=True))
+        return made[0]
+
+    changed = [
+        rel
+        for rel, state in sorted(states.items())
+        if move_evidence_file(folder, rel, state, entry) != "moved"
+    ]
+    print(_discarded(grave, made[0] if made else None))
+    if changed:
+        msg = f"evidence {stem}: changed while it moved, kept here: {', '.join(changed)}"
+        raise WorkError(msg)
+    return 0
+
+
+def _adopt_missing(repo: Path, stem: str, *, dry_run: bool) -> int:
+    """Record the files of ``stem`` the peer manifests list and this machine lacks (``rm -rf``).
+
+    One tombstone per peer manifest holding such files, each with that manifest's states (the
+    states last synced with that peer); ``whole`` when the stem folder itself is gone. The
+    caller holds ``.work/fleet.lock`` unless ``dry_run``.
+
+    Raises:
+        WorkError: ``.work/evidence`` itself is missing (a wipe, not a deletion), or no
+            manifest lists a file missing here.
+
+    """
+    root = work_dir(repo) / EVIDENCE
+    if not _is_kind(work_dir(repo), root, stat.S_ISDIR):
+        msg = f"{root} is missing: a wiped evidence root is no deletion; nothing adopted"
+        raise WorkError(msg)
+    folder = root / stem
+    gone = not _present(root, folder)
+    local = {} if gone else evidence_files(folder)
+    found: list[dict[str, tuple[int, int]]] = []
+    fleet_folder = work_dir(repo) / FLEET
+    for manifest in sorted(fleet_folder.glob("evidence-*.json")) if fleet_folder.is_dir() else []:
+        listed = evidence_manifest(manifest).get(stem, {})
+        missing = {rel: state for rel, state in listed.items() if rel not in local}
+        if missing and all(evidence_rel(rel) for rel in missing):
+            found.append(missing)
+    if not found:
+        msg = f"evidence {stem}: no peer manifest lists a file missing here; nothing adopted"
+        raise WorkError(msg)
+    if dry_run:
+        count = len({rel for missing in found for rel in missing})
+        print(f"would record {count} files of evidence {stem} removed by hand")
+        return 0
+    here = machine_id()
+    removed_at = time.time()
+    for missing in found:
+        files = tuple(sorted((rel, size, mtime) for rel, (size, mtime) in missing.items()))
+        grave = EvidenceTombstone(stem, here, removed_at, here, files, whole=gone)
+        _ = write_evidence_tombstone(repo, grave)
+        print(_discarded(grave, None))
     return 0
 
 
@@ -4764,7 +5403,12 @@ def cmd_gc(args: _Args) -> int:
                     "%Y-%m-%d",
                     time.localtime(int(stamp) + TRASH_RETENTION_SECONDS),
                 )
-                print(f"keep trash {entry.name}: a replica the fleet sync removed, until {until}")
+                what = (
+                    "evidence an explicit deletion moved"
+                    if entry.name.startswith("evidence-")
+                    else "a replica the fleet sync removed"
+                )
+                print(f"keep trash {entry.name}: {what}, until {until}")
                 continue
         elif pid.isdigit() and _pid_alive(int(pid)) and int(pid) != os.getpid():
             continue
@@ -4781,7 +5425,8 @@ def cmd_gc(args: _Args) -> int:
             status = 1
         else:
             print(f"deleted trash {entry.name}")
-    return status | _gc_tombstones(repo, dry_run=args.dry_run)
+    status |= _gc_tombstones(repo, dry_run=args.dry_run)
+    return status | _gc_evidence_tombstones(repo, dry_run=args.dry_run)
 
 
 def _gc_tombstones(repo: Path, *, dry_run: bool) -> int:
@@ -5003,6 +5648,8 @@ class _Args(argparse.Namespace):
     discard: bool
     drop_saves: bool
     evidence: bool
+    file: list[str]
+    adopt_missing: bool
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -5066,8 +5713,31 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also delete its save and landed pins",
     )
-    _ = rm.add_argument("--evidence", action="store_true", help="also delete its evidence")
+    _ = rm.add_argument(
+        "--evidence",
+        action="store_true",
+        help="also delete its evidence on every machine",
+    )
     rm.set_defaults(handler=cmd_rm)
+
+    evidence_rm = commands.add_parser(
+        "evidence-rm",
+        help="delete a stem's evidence (or some files) on every machine",
+    )
+    _ = evidence_rm.add_argument("name", metavar="stem")
+    _ = evidence_rm.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        help="only this file (relative to the stem folder)",
+    )
+    _ = evidence_rm.add_argument(
+        "--adopt-missing",
+        action="store_true",
+        help="record the files removed here by hand that peers still hold",
+    )
+    _ = evidence_rm.add_argument("--dry-run", action="store_true")
+    evidence_rm.set_defaults(handler=cmd_evidence_rm)
 
     gc = commands.add_parser("gc", help="remove only what is finished")
     _ = gc.add_argument("--dry-run", action="store_true")
