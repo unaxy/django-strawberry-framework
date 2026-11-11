@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from scripts import shared_checkout_guard as guard
+from tests._idioms import json_at
 
 _AGENTLESS: dict[str, str] = {}
 
@@ -420,3 +421,406 @@ def test_a_tracked_file_renamed_on_disk_by_case_alone_is_still_refused(shared: P
     if not kept.exists():
         pytest.skip("needs a case-insensitive filesystem")
     assert guard.edit_refusal(_edit(renamed), _AGENTLESS) is not None
+
+
+@pytest.fixture
+def tracked_shared(tmp_path: Path) -> Path:
+    root = tmp_path / "shared"
+    root.mkdir()
+    _ = subprocess.run(
+        [
+            "git",
+            "init",
+            "-q",
+            str(root),
+        ],
+        check=True,
+    )
+    (root / ".work").mkdir()
+    _ = (root / ".gitignore").write_text(".work/\n*.local.json\n")
+    _ = (root / "kept.local.json").write_text("{}\n")
+    _ = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "add",
+            "-f",
+            "kept.local.json",
+        ],
+        check=True,
+    )
+    return root
+
+
+def _payload(path: Path | str, cwd: Path | None = None, tool: str = "Edit") -> dict[str, object]:
+    result: dict[str, object] = {"tool_name": tool, "tool_input": {"file_path": str(path)}}
+    if cwd is not None:
+        result["cwd"] = str(cwd)
+    return result
+
+
+def test_dot_segments_symlinks_missing_parents_and_a_missing_cwd_are_refused(
+    tracked_shared: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tracked_shared
+    (root / "pkg").mkdir()
+    _ = (root / "pkg" / "module.py").write_text("VALUE = 1\n")
+    (root / "alias").symlink_to(root / "pkg", target_is_directory=True)
+    (root / ".work" / "escape").symlink_to(root / "pkg", target_is_directory=True)
+    for name in (
+        "pkg/../pkg/module.py",
+        "alias/module.py",
+        ".work/escape/module.py",
+        "new/parent/new.py",
+    ):
+        assert guard.edit_refusal(_payload(root / name), {}) is not None, name
+    monkeypatch.chdir(root)
+    assert guard.edit_refusal(_payload("pkg/module.py"), {}) is not None
+
+
+def test_copies_harness_worktrees_and_nested_repos_are_allowed(
+    tracked_shared: Path,
+) -> None:
+    for name, git_entry in (
+        (".work/clones/fix-copy", "directory"),
+        (".work/worktrees/fix-copy", "file"),
+        (".claude/worktrees/harness", "file"),
+        ("vendor/nested", "directory"),
+    ):
+        root = tracked_shared / name
+        root.mkdir(parents=True)
+        if git_entry == "file":
+            _ = (root / ".git").write_text("gitdir: unused\n")
+        else:
+            (root / ".git").mkdir()
+        assert guard.edit_refusal(_payload(root / "module.py"), {}) is None
+
+
+def _system_hook(cwd: Path, raw: str) -> subprocess.CompletedProcess[str]:
+    project = Path(guard.__file__).resolve().parents[1]
+    command = json_at(
+        guard._loads((project / ".claude" / "settings.json").read_text()),
+        "hooks",
+        "PreToolUse",
+        0,
+        "hooks",
+        0,
+        "command",
+    )
+    assert isinstance(command, str)
+    environment = dict(os.environ, PATH="/usr/bin:/bin", CLAUDE_PROJECT_DIR=str(project))
+    environment.pop(guard.EDIT_OVERRIDE_ENV, None)
+    return subprocess.run(
+        ["/bin/sh", "-c", command],
+        cwd=cwd,
+        input=raw,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("where", "name", "refused"),
+    [
+        ("shared", "module.py", True),
+        ("private", "module.py", False),
+        ("shared", "/nonexistent/codex-guard-probe/module.py", False),
+        ("shared", "kept.local.json", True),
+        ("shared", "untracked.local.json", False),
+    ],
+)
+def test_the_system_python_hook_without_a_payload_cwd(
+    tracked_shared: Path,
+    tmp_path: Path,
+    where: str,
+    name: str,
+    *,
+    refused: bool,
+) -> None:
+    private = _git_init(tmp_path / "private")
+    cwd = tracked_shared if where == "shared" else private
+    result = _system_hook(cwd, json.dumps(_payload(name)))
+    assert result.returncode == 0, result.stderr
+    assert ('"permissionDecision": "deny"' in result.stdout) == refused, (
+        result.stdout,
+        result.stderr,
+    )
+
+
+@pytest.mark.parametrize("raw", ["not json", "[]", "null"])
+def test_the_system_python_hook_denies_an_unreadable_payload(
+    tracked_shared: Path,
+    raw: str,
+) -> None:
+    result = _system_hook(tracked_shared, raw)
+    assert result.returncode == 0, result.stderr
+    assert '"permissionDecision": "deny"' in result.stdout
+
+
+def test_a_hardlink_cannot_supply_the_canonical_name(shared: Path) -> None:
+    allowed = shared / "CHANGELOGTODO.md"
+    allowed.write_text("before\n")
+    tracked = shared / "zz_source.py"
+    tracked.hardlink_to(allowed)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(shared),
+            "add",
+            "-f",
+            "--",
+            tracked.name,
+        ],
+        check=True,
+    )
+    target = shared / "ZZ_SOURCE.PY"
+    if not target.exists():
+        pytest.skip("requires case-insensitive storage")
+    assert target.samefile(tracked)
+    assert guard.canonical(shared, target) == tracked
+    result = _system_hook(shared, json.dumps(_edit(target, tool="Write")))
+    assert result.returncode == 0, result.stderr
+    assert '"permissionDecision": "deny"' in result.stdout, (
+        guard.canonical(shared, target),
+        result.stdout,
+        result.stderr,
+    )
+
+
+def test_a_tracked_inode_is_not_an_untracked_ignored_file(shared: Path) -> None:
+    tracked = _track(shared, "source.py")
+    target = shared / "cache.local.json"
+    target.hardlink_to(tracked)
+    assert target.samefile(tracked)
+    result = _system_hook(shared, json.dumps(_edit(target, tool="Write")))
+    assert result.returncode == 0, result.stderr
+    assert '"permissionDecision": "deny"' in result.stdout
+
+
+def test_a_missing_index_is_not_an_empty_tracking_answer(shared: Path) -> None:
+    tracked = _track(shared, "kept.local.json")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(shared),
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "isolated guard fixture",
+        ],
+        check=True,
+    )
+    (shared / ".git" / "index").unlink()
+    result = _system_hook(shared, json.dumps(_edit(tracked)))
+    assert result.returncode == 0, result.stderr
+    assert '"permissionDecision": "deny"' in result.stdout
+
+
+def test_a_raw_index_name_is_checked_by_identity(tmp_path: Path) -> None:
+    parent = Path(os.environ.get("DSF_CASE_SENSITIVE_ROOT", str(tmp_path)))
+    root = _git_init(parent / f"raw-{os.getpid()}-{tmp_path.name}")
+    (root / ".work").mkdir()
+    (root / ".gitignore").write_text(".work/\n*.local.json\n")
+    raw_name = b"bad-\xff.local.json"
+    raw_path = os.fsencode(root) + b"/" + raw_name
+    try:
+        descriptor = os.open(raw_path, os.O_CREAT | os.O_WRONLY, 0o600)
+    except OSError as error:
+        pytest.skip(f"filesystem refuses raw-byte names: {error}")
+    _ = os.write(descriptor, b"raw")
+    os.close(descriptor)
+    target = root / os.fsdecode(raw_name)
+    blob = (
+        subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(root),
+                "hash-object",
+                "-w",
+                "--stdin",
+            ],
+            input=b"raw",
+        )
+        .decode()
+        .strip()
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"100644,{blob},{target.name}",
+        ],
+        check=True,
+    )
+    listed = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(root),
+            "ls-files",
+            "-z",
+        ],
+    )
+    assert raw_name in listed.split(b"\0")
+    canonical = guard.canonical(root, target)
+    assert canonical.samefile(target)
+    result = _system_hook(root, json.dumps(_edit(target)))
+    assert result.returncode == 0, result.stderr
+    assert '"permissionDecision": "deny"' in result.stdout, (listed, canonical, result.stdout)
+
+
+@pytest.mark.parametrize(
+    ("name", "alias"),
+    [("kept.local.json", "KEPT.local.json"), ("stra\u00dfe.local.json", "STRASSE.local.json")],
+)
+def test_a_deleted_case_sibling_does_not_reserve_a_distinct_new_name(
+    tmp_path: Path,
+    name: str,
+    alias: str,
+) -> None:
+    parent = Path(os.environ.get("DSF_CASE_SENSITIVE_ROOT", str(tmp_path)))
+    root = _git_init(parent / f"deleted-{os.getpid()}-{tmp_path.name}")
+    (root / ".work").mkdir()
+    (root / ".gitignore").write_text(".work/\n*.local.json\n")
+    tracked = _track(root, name)
+    target = root / alias
+    if target.exists():
+        pytest.skip("requires filesystem-distinct names")
+    target.write_text("different file\n")
+    assert not target.samefile(tracked)
+    target.unlink()
+    tracked.unlink()
+    assert guard.edit_refusal(_edit(target), {}) is None
+
+
+@pytest.mark.parametrize(
+    ("relative", "allowed"),
+    [
+        ("new/deep/cache.local.json", True),
+        ("new/deep/module.py", False),
+        (".work/new/deep/module.py", True),
+    ],
+)
+def test_new_files_keep_their_intended_boundary(
+    shared: Path,
+    relative: str,
+    *,
+    allowed: bool,
+) -> None:
+    assert (guard.edit_refusal(_edit(shared / relative), {}) is None) == allowed
+
+
+def test_a_work_directory_case_alias_stays_allowed(shared: Path) -> None:
+    alias = shared / ".WORK"
+    if not alias.exists():
+        pytest.skip("requires case-insensitive storage")
+    assert alias.samefile(shared / ".work")
+    assert guard.edit_refusal(_edit(alias / "evidence" / "New" / "module.py"), {}) is None
+
+
+@pytest.mark.parametrize(
+    ("relative", "allowed"),
+    [("kept.local.json", False), (".work/evidence/New/module.py", True)],
+)
+def test_a_symlinked_parent_keeps_the_real_boundary(
+    tracked_shared: Path,
+    tmp_path: Path,
+    relative: str,
+    *,
+    allowed: bool,
+) -> None:
+    alias = tmp_path / "parent-link"
+    alias.symlink_to(tracked_shared, target_is_directory=True)
+    assert (guard.edit_refusal(_edit(alias / relative), {}) is None) == allowed
+
+
+def test_untracked_ignored_hardlinks_remain_allowed(shared: Path) -> None:
+    first = shared / "first.local.json"
+    first.write_text("cached\n")
+    second = shared / "second.local.json"
+    second.hardlink_to(first)
+    assert first.samefile(second)
+    assert guard.edit_refusal(_edit(first), {}) is None
+    assert guard.edit_refusal(_edit(second), {}) is None
+
+
+def test_system_python_fails_closed_until_permissions_return(shared: Path) -> None:
+    closed = shared / "closed"
+    closed.mkdir()
+    target = closed / "cache.local.json"
+    target.write_text("{}\n")
+    closed.chmod(0)
+    try:
+        result = _system_hook(shared, json.dumps(_edit(target)))
+    finally:
+        closed.chmod(0o700)
+    assert result.returncode == 0, result.stderr
+    assert '"permissionDecision": "deny"' in result.stdout
+    assert "PermissionError" in result.stdout
+    assert not result.stderr
+    restored = _system_hook(shared, json.dumps(_edit(target)))
+    assert restored.returncode == 0, restored.stderr
+    assert not restored.stdout
+
+
+def test_system_python_handles_a_listing_lstat_race(shared: Path) -> None:
+    target = shared / "CACHE.LOCAL.JSON"
+    (shared / "cache.local.json").write_text("{}\n")
+    (shared / "ephemeral").write_text("temporary\n")
+    if not target.exists():
+        pytest.skip("requires case-insensitive storage")
+    raw = json.dumps(_edit(target))
+    program = f"""
+import importlib.util, io, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("guard_under_test", {guard.__file__!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+native = module._stored_name
+def race(folder, names, part, held):
+    if folder == Path({str(shared)!r}):
+        (folder / "ephemeral").unlink()
+        names = ["ephemeral"] + [name for name in names if name != "ephemeral"]
+    return native(folder, names, part, held)
+module._stored_name = race
+sys.stdin = io.StringIO({raw!r})
+raise SystemExit(module.main())
+"""
+    environment = {
+        key: value for key, value in os.environ.items() if key != guard.EDIT_OVERRIDE_ENV
+    }
+    result = subprocess.run(
+        ["/usr/bin/python3", "-c", program],
+        input="",
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '"permissionDecision": "deny"' in result.stdout
+    assert "FileNotFoundError" in result.stdout
+    assert not result.stderr
+
+
+def test_an_in_place_file_hard_linked_to_tracked_source_is_refused(shared: Path) -> None:
+    tracked = _track(shared, "source.py", "VALUE = 1\n")
+    in_place = shared / "CHANGELOGTODO.md"
+    in_place.hardlink_to(tracked)
+    assert guard.edit_refusal(_edit(in_place), _AGENTLESS) is not None
+    _ = _track(shared, "CHANGELOGTODO.md")
+    assert guard.edit_refusal(_edit(shared / "docs" / "bug_hunt" / "notes.md"), _AGENTLESS) is None

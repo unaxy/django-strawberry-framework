@@ -10,9 +10,10 @@ copies"). Two entry points enforce it:
   ``Write`` and ``NotebookEdit``; :func:`main` reads the hook payload on stdin). It
   denies a write whose target lies in the shared checkout outside ``.work/``, unless
   the target is an untracked git-ignored file or :func:`edited_in_place`. Each rule
-  reads the target as the filesystem spells it (:func:`canonical`), and "untracked"
-  asks the checkout's own index by file identity (:func:`is_tracked`), so no case or
-  Unicode alias and no inherited ``GIT_*`` variable reaches a tracked file. It covers
+  reads the target as the filesystem spells it (:func:`canonical`), and an exempt
+  target is refused anyway when it is, by file identity, a tracked file not itself
+  exempt (:func:`reaches_tracked`, asked of the checkout's own index), so no case or
+  Unicode alias, hard link or inherited ``GIT_*`` variable reaches one. It covers
   every Claude session and subagent; other harnesses meet :func:`pytest_refusal` and
   AGENTS.md.
 - :func:`pytest_refusal`, called by the repo-root ``conftest.py`` with its own folder:
@@ -111,8 +112,10 @@ def canonical(root: Path, target: Path) -> Path:
     """Return ``target`` (under ``root``) spelled as the filesystem stores each component.
 
     On a case-insensitive or normalization-insensitive filesystem ``DOCS/Fix.MD`` names
-    the stored ``docs/FIX.md``; each existing component takes the stored name of the
-    entry with its identity. A missing tail is kept as given.
+    the stored ``docs/FIX.md``: a component whose name is not listed takes the one
+    entry that is the same file and equal under caseless matching. Hard links make an
+    identity ambiguous, so with none or several such entries the given name stays, as
+    does a missing tail.
     """
     current = root
     parts = target.relative_to(root).parts
@@ -132,17 +135,27 @@ def _stored_name(
     part: str,
     held: os.stat_result,
 ) -> str:
-    """Return the entry of ``folder`` with ``held``'s identity (``part`` if none has it)."""
-    for name in names:
-        found = (folder / name).lstat()
-        if (found.st_dev, found.st_ino) == (held.st_dev, held.st_ino):
-            return name
-    return part
+    """Return the one entry of ``folder`` that is ``held`` and folds as ``part``, else ``part``."""
+    found = [
+        name
+        for name in names
+        if _identity((folder / name).lstat()) == _identity(held) and _fold(name) == _fold(part)
+    ]
+    return found[0] if len(found) == 1 else part
+
+
+def _identity(status: os.stat_result) -> tuple[int, int]:
+    return (status.st_dev, status.st_ino)
 
 
 def _fold(relative: str) -> str:
     """Return ``relative`` for caseless comparison (Unicode canonical caseless match)."""
     return unicodedata.normalize("NFD", unicodedata.normalize("NFD", relative).casefold())
+
+
+def _normal(relative: str) -> str:
+    """Return ``relative`` for comparison on a case-sensitive filesystem (normalization only)."""
+    return unicodedata.normalize("NFD", relative)
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
@@ -161,50 +174,78 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
     )
 
 
-def is_tracked(root: Path, relative: str) -> bool:
-    """Return whether ``root``'s index tracks the file ``relative`` names, under any alias.
-
-    A tracked name equal to ``relative`` counts; so does one equal under caseless
-    matching that is the same file on disk. Where neither exists on disk, a caseless
-    match counts too (writing the alias could recreate the tracked file).
+def tracked_names(root: Path) -> list[str]:
+    """Return every path ``root``'s own index tracks.
 
     Raises:
-        OSError: ``git ls-files`` failed, so the caller cannot tell.
+        OSError: ``git ls-files`` failed, or the index is missing in a repository with
+            a commit (an empty answer there is not "nothing is tracked").
 
     """
     listed = _git(root, "ls-files", "-z")
     if listed.returncode != 0:
         msg = f"git ls-files failed: {listed.stderr.decode(errors='replace').strip()}"
         raise OSError(msg)
+    names = [name for name in os.fsdecode(listed.stdout).split("\0") if name]
+    if not names and _git(root, "rev-parse", "--verify", "-q", "HEAD").returncode == 0:
+        index = _git(root, "rev-parse", "--git-path", "index")
+        where = root / os.fsdecode(index.stdout).strip()
+        if index.returncode != 0 or not where.is_file():
+            msg = f"the index of {root} is missing, so what it tracks is unknown"
+            raise OSError(msg)
+    return names
+
+
+def _case_insensitive(root: Path) -> bool:
+    """Return whether ``root``'s filesystem reads ``.WORK`` as its ``.work`` folder."""
+    alias = root / ".WORK"
+    return alias.exists() and alias.samefile(root / ".work")
+
+
+def _never(_name: str) -> bool:
+    return False
+
+
+def reaches_tracked(root: Path, relative: str, exempt: Callable[[str], bool] = _never) -> bool:
+    """Return whether writing ``relative`` writes a tracked file whose own name is not ``exempt``.
+
+    An existing target is matched by file identity against every tracked path, so a
+    hard link or any alias the filesystem resolves counts. A missing target counts
+    when a tracked name equals it, or folds as it (case-insensitive filesystems) or
+    normalizes as it (case-sensitive ones) while that tracked file is missing too.
+
+    Raises:
+        OSError: the index or a path cannot be read (:func:`tracked_names`).
+
+    """
     target = root / relative
-    folded = _fold(relative)
-    for name in os.fsdecode(listed.stdout).split("\0"):
-        if name == relative:
-            return True
-        if not name or _fold(name) != folded:
+    names = [name for name in tracked_names(root) if not exempt(name)]
+    try:
+        held = target.stat()
+    except FileNotFoundError:
+        key = _fold if _case_insensitive(root) else _normal
+        return any(
+            name == relative or (key(name) == key(relative) and not (root / name).exists())
+            for name in names
+        )
+    for name in names:
+        try:
+            status = (root / name).stat()
+        except (FileNotFoundError, NotADirectoryError):
             continue
-        tracked = root / name
-        if not tracked.exists():
-            if not target.exists():
-                return True
-        elif target.exists() and tracked.samefile(target):
+        if _identity(status) == _identity(held):
             return True
     return False
 
 
 def is_ignored(root: Path, relative: str) -> bool:
-    """Return whether git ignores ``relative`` and does not track it (:func:`is_tracked`).
+    """Return whether a git ignore rule matches ``relative`` (tracked or not).
 
     ``check-ignore --no-index`` reads ``relative`` as a name, never matching it against
-    the index (a literal ``*.local.json`` is a file name here).
-
-    Raises:
-        OSError: a ``git`` lookup failed, so the caller cannot tell.
-
+    the index (a literal ``*.local.json`` is a file name here); :func:`reaches_tracked`
+    asks about tracking.
     """
-    if _git(root, "check-ignore", "--no-index", "-q", "--", relative).returncode != 0:
-        return False
-    return not is_tracked(root, relative)
+    return _git(root, "check-ignore", "--no-index", "-q", "--", relative).returncode == 0
 
 
 def edit_refusal(payload: Mapping[str, object], environ: Mapping[str, str]) -> str | None:
@@ -228,7 +269,10 @@ def edit_refusal(payload: Mapping[str, object], environ: Mapping[str, str]) -> s
     relative = canonical(root, target).relative_to(root).as_posix()
     if relative.startswith(".work/"):
         return None
-    if edited_in_place(relative) or is_ignored(root, relative):
+    if edited_in_place(relative):
+        if not reaches_tracked(root, relative, edited_in_place):
+            return None
+    elif is_ignored(root, relative) and not reaches_tracked(root, relative):
         return None
     return (
         f"Refused: {relative} is in the shared checkout ({root}), which no agent edits directly. "
