@@ -342,8 +342,9 @@ scope and timing.
   exists, so a regression is a loud local red, not a silent pass
 - [x] 46. Typing the ledger cannot see. `utils/querysets.py::related_queryset` proves its rows are model
   instances on the constructed queryset (`_yields_model_rows`: a `QuerySet` whose instance `_iterable_class` is a
-  `ModelIterable`, django-polymorphic's subclass included) and raises `TypeError` for a class whose `__init__` stores
-  a projection's iterable, in place of a class predicate claiming model rows. `utils/_narrowing.py::is_lookup`
+  `ModelIterable`, django-polymorphic's subclass included) and raises `ConfigurationError` naming the model, the class
+  and the iterable for a class whose `__init__` stores a projection's iterable, in place of a class predicate
+  claiming model rows. `utils/_narrowing.py::is_lookup`
   (`Lookup[object]`) is the one lookup predicate `filters/sets.py` and `rest_framework/query_bind.py` share.
   `BindAskingFilterForm`'s flags take `False` class defaults and are read as attributes, not through a `getattr`
   default. The `filters/sets.py` hop visibility map is keyed by its private `_HopKey` alias
