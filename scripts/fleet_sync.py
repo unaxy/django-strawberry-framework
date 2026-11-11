@@ -254,6 +254,13 @@ Commands
     unreadable machine list, a checkout outside ``~/projects``, Windows here, and
     for ``sync``, ``fetch-pins`` and ``handoff`` a host no row names).
 
+Stopping
+    ``scripts/fleet_stop.py stop --reason TEXT`` writes ``.work/fleet-stop`` on every
+    machine (``resume`` clears it). While it is there the timer's shell line exits
+    before any Python, ``sync``, ``fetch-pins`` and ``handoff`` refuse, the agent
+    answers only its probe (which carries the reason, so peers skip the machine), and
+    a run that meets a stopped peer writes the flag on its own machine too.
+
 Running it periodically
     ``schedule --install`` (above) runs ``sync --pins-only`` every two minutes,
     so every machine sees every save; the full ``sync`` (replicas, evidence,
@@ -584,6 +591,56 @@ def _rsync_version() -> str:
     return completed.stdout.splitlines()[0].strip() if completed.stdout else "rsync"
 
 
+#: The stop flag ``scripts/fleet_stop.py`` writes, under a checkout's ``.work/``.
+STOP_FLAG = "fleet-stop"
+
+
+def stop_reason(repo: Path) -> str:
+    """Return why the fleet is stopped at ``repo`` (its ``.work/fleet-stop``), else ``""``."""
+    flag = work.work_dir(repo) / STOP_FLAG
+    try:
+        text = flag.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    try:
+        reason = _string(_object(_loads(text)), "reason")
+    except ValueError:
+        reason = ""
+    return reason or text or "stopped (no reason given)"
+
+
+def write_stop(repo: Path, reason: str) -> None:
+    """Stop the fleet at ``repo``: write its flag as ``scripts/fleet_stop.py`` does."""
+    flag = work.work_dir(repo) / STOP_FLAG
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    temporary = flag.with_name(f".{STOP_FLAG}.tmp")
+    _ = temporary.write_text(
+        json.dumps({"reason": reason, "by": work.machine_id(), "at": _now()}) + "\n",
+        encoding="utf-8",
+    )
+    _ = temporary.replace(flag)
+
+
+def refuse_stopped(repo: Path) -> None:
+    """Raise :class:`SetupError` when the fleet is stopped at ``repo``.
+
+    Raises:
+        SetupError: its ``.work/fleet-stop`` exists; the message gives the reason.
+
+    """
+    stopped = stop_reason(repo)
+    if stopped:
+        msg = (
+            f"the fleet is stopped ({stopped}); `python3 scripts/fleet_stop.py resume` "
+            "restarts it on every machine"
+        )
+        raise SetupError(msg)
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 def agent_probe(repo: Path) -> dict[str, object]:
     """Return what qualifies this machine: identity, checkout, main, locks, tools."""
     roots = _git_runner.run_git(repo, "rev-list", "--max-parents=0", "HEAD").stdout.split()
@@ -602,6 +659,7 @@ def agent_probe(repo: Path) -> dict[str, object]:
         "fleet_busy": _lock_busy(work.work_dir(repo) / work.FLEET_LOCK),
         "rsync": _rsync_version(),
         "python": ".".join(str(part) for part in sys.version_info[:3]),
+        "stopped": stop_reason(repo),
     }
 
 
@@ -1693,6 +1751,8 @@ def run_agent(args: _Args) -> int:
         work.refuse_locating_env()
         work.check_layout(repo)
         operation = args.operation
+        if operation != "probe":
+            refuse_stopped(repo)
         if operation == "hold":
             return agent_hold(repo, sys.stdin.buffer, sys.stdout)
         if operation in WRITES:
@@ -1950,6 +2010,7 @@ class Probe:
     land_busy: bool
     fleet_busy: bool
     rsync: str
+    stopped: str = ""
 
     @classmethod
     def parse(cls, answer: Mapping[str, object]) -> Probe:
@@ -1966,6 +2027,7 @@ class Probe:
             land_busy=answer.get("land_busy") is True,
             fleet_busy=answer.get("fleet_busy") is True,
             rsync=_string(answer, "rsync"),
+            stopped=_string(answer, "stopped"),
         )
 
 
@@ -2182,6 +2244,8 @@ def _disqualifications(probe: Probe, local: Probe | None) -> list[str]:
         reasons.append("a work.py land is in progress there")
     if probe.fleet_busy:
         reasons.append("another fleet_sync run holds its lock")
+    if probe.stopped:
+        reasons.append(f"the fleet is stopped there ({probe.stopped})")
     return reasons
 
 
@@ -2241,7 +2305,24 @@ def find_machines(
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(others), 1)) as pool:
         for future in [pool.submit(qualify, machine, here.probe) for machine in others]:
             future.result()
+    if member:
+        adopt_stop(others)
     return here, others
+
+
+def adopt_stop(others: Sequence[Machine]) -> None:
+    """Stop this machine too when a peer is stopped (it was offline at ``fleet_stop.py stop``).
+
+    Raises:
+        SetupError: a peer is stopped; this machine's flag now says which and why.
+
+    """
+    for machine in others:
+        if machine.probe is not None and machine.probe.stopped:
+            reason = f"adopted from {machine.label}: {machine.probe.stopped}"
+            write_stop(REPO_ROOT, reason)
+            msg = f"the fleet is stopped ({reason}); this machine is stopped too"
+            raise SetupError(msg)
 
 
 # --------------------------------------------------------------------------------------------
@@ -3721,6 +3802,8 @@ SCHEDULE_TOOLS = (
 SCHEDULE_LOG = "fleet-pins.log"
 #: Seconds between scheduled ``sync --pins-only`` runs unless ``--every`` says otherwise.
 SCHEDULE_EVERY = 120
+#: Seconds a scheduled run may take before it is killed (a stuck or looping run).
+SCHEDULE_TIME_LIMIT = 900
 #: The shortest interval ``schedule`` accepts; a run reads every peer's inventory.
 SCHEDULE_SHORTEST = 30
 
@@ -3735,6 +3818,24 @@ def schedule_path() -> str:
     return os.pathsep.join(folders)
 
 
+def schedule_line() -> str:
+    """Return the shell line a scheduled run executes.
+
+    It checks the stop flag (``scripts/fleet_stop.py``) before any Python starts, so a
+    broken ``fleet_sync.py`` cannot skip it, and kills a run past
+    :data:`SCHEDULE_TIME_LIMIT` seconds (``perl``'s ``alarm`` survives the ``exec``).
+    """
+    python = shlex.quote(str(REPO_ROOT / ".venv" / "bin" / "python"))
+    run = f"{python} scripts/fleet_sync.py sync --pins-only --json"
+    limit = f"perl -e 'alarm shift @ARGV; exec @ARGV or die' {SCHEDULE_TIME_LIMIT}"
+    return (
+        f"cd {shlex.quote(str(REPO_ROOT))} || exit 1; "
+        f"[ -e .work/{STOP_FLAG} ] && exit 0; "
+        f"command -v perl >/dev/null 2>&1 && exec {limit} {run}; "
+        f"exec {run}"
+    )
+
+
 def schedule_files(home: Path, every: int, platform: str = sys.platform) -> dict[Path, str]:
     """Return the timer files that run ``sync --pins-only --json`` every ``every`` seconds.
 
@@ -3746,14 +3847,8 @@ def schedule_files(home: Path, every: int, platform: str = sys.platform) -> dict
         SetupError: ``platform`` is neither.
 
     """
-    command = [
-        str(REPO_ROOT / ".venv" / "bin" / "python"),
-        str(REPO_ROOT / "scripts" / "fleet_sync.py"),
-        "sync",
-        "--pins-only",
-        "--json",
-    ]
     log = REPO_ROOT / ".work" / SCHEDULE_LOG
+    command = ["/bin/sh", "-c", schedule_line()]
     if platform == "darwin":
         agent = {
             "Label": SCHEDULE_LABEL,
@@ -3768,12 +3863,13 @@ def schedule_files(home: Path, every: int, platform: str = sys.platform) -> dict
         plist = home / "Library" / "LaunchAgents" / f"{SCHEDULE_LABEL}.plist"
         return {plist: plistlib.dumps(agent).decode()}
     if platform.startswith("linux"):
-        run = f"{shlex.join(command)} >> {shlex.quote(str(log))} 2>&1"
+        run = f"{{ {schedule_line()}; }} >> {shlex.quote(str(log))} 2>&1"
         units = home / ".config" / "systemd" / "user"
         service = (
             "[Unit]\nDescription=Sync django-strawberry-framework saves across the fleet\n\n"
             f"[Service]\nType=oneshot\nWorkingDirectory={REPO_ROOT}\n"
-            f"Environment=PATH={schedule_path()}\nExecStart=/bin/sh -c {shlex.quote(run)}\n"
+            f"Environment=PATH={schedule_path()}\nTimeoutStartSec={SCHEDULE_TIME_LIMIT}\n"
+            f"ExecStart=/bin/sh -c {shlex.quote(run)}\n"
         )
         timer = (
             "[Unit]\nDescription=Sync django-strawberry-framework saves across the fleet\n\n"
@@ -3822,9 +3918,14 @@ def schedule_commands(files: Mapping[Path, str], platform: str = sys.platform) -
 
 
 def load_schedule(commands: Sequence[Sequence[str]]) -> None:
-    """Run :func:`schedule_commands`' commands; ``launchctl bootout`` of an unloaded agent may fail."""
+    """Run :func:`schedule_commands`' commands.
+
+    ``launchctl bootout`` of an agent not loaded yet (a first install) fails; its output
+    is dropped and its status ignored.
+    """
     for command in commands:
-        _ = subprocess.run(command, check=command[1] != "bootout")
+        unloading = command[1] == "bootout"
+        _ = subprocess.run(command, check=not unloading, capture_output=unloading)
 
 
 def cmd_schedule(args: _Args) -> int:
@@ -4268,6 +4369,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: The commands a stop flag refuses: each moves data between machines.
+STOPPED_COMMANDS = frozenset({"sync", "fetch-pins", "handoff"})
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Dispatch one command; exit 0 clean, 1 conflicts or skipped work, 2 bad setup."""
     words = list(sys.argv[1:] if argv is None else argv)
@@ -4287,6 +4392,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         work.refuse_locating_env()
         work.check_layout(REPO_ROOT)
+        if args.command in STOPPED_COMMANDS:
+            refuse_stopped(REPO_ROOT)
         return handlers[args.command](args)
     except (SetupError, work.WorkError) as error:
         print(f"fleet_sync: {error}", file=sys.stderr)

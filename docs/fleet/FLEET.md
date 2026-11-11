@@ -18,7 +18,7 @@ Each check is a target with its measure; the status is what the last audit showe
 ## References
 
 - rule `AGENTS.md` (first line) copies `START.md` "Private working copies" sync `START.md` "Syncing the fleet" machines `docs/fleet/MACHINES.md` `docs/fleet/machines.json` muse `docs/fleet/MUSE.md`
-- work `scripts/work.py` sync `scripts/fleet_sync.py` registry `scripts/fleet.py` picker `scripts/load_balancing.py` locks `scripts/_locks.py` flows `scripts/workspace.py`
+- work `scripts/work.py` sync `scripts/fleet_sync.py` stop `scripts/fleet_stop.py` registry `scripts/fleet.py` picker `scripts/load_balancing.py` locks `scripts/_locks.py` flows `scripts/workspace.py`
 - guard `scripts/shared_checkout_guard.py` edit hook `.claude/settings.json` pytest guard `conftest.py`
 
 <!-- LINK DEFINITIONS -->

@@ -1865,7 +1865,9 @@ def test_the_macos_schedule_is_a_launchd_agent_running_sync_pins_only(tmp_path: 
     [(path, text)] = files.items()
     assert path == tmp_path / "Library" / "LaunchAgents" / f"{fleet_sync.SCHEDULE_LABEL}.plist"
     agent = json_object(_load_plist(text.encode()))
-    assert json_list(agent, "ProgramArguments")[-3:] == ["sync", "--pins-only", "--json"]
+    program = json_list(agent, "ProgramArguments")
+    assert program[:2] == ["/bin/sh", "-c"]
+    assert "scripts/fleet_sync.py sync --pins-only --json" in str(program[2])
     assert agent["StartInterval"] == 120
     assert agent["WorkingDirectory"] == str(fleet_sync.REPO_ROOT)
     assert agent["StandardOutPath"] == str(fleet_sync.REPO_ROOT / ".work" / "fleet-pins.log")
@@ -1924,3 +1926,51 @@ def test_schedule_prints_by_default_and_installs_only_when_asked(
     written = list(fleet_sync.schedule_files(tmp_path, 60))
     assert all(path.is_file() for path in written)
     assert ran == fleet_sync.schedule_commands(fleet_sync.schedule_files(tmp_path, 60))
+
+
+def test_a_stopped_fleet_refuses_sync_and_fetch_pins(
+    fleet: Fleet,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fleet_sync.write_stop(fleet.repo_a, "runaway sync")
+    assert fleet_sync.stop_reason(fleet.repo_a) == "runaway sync"
+    for command in (
+        ["sync", "--pins-only"],
+        [
+            "fetch-pins",
+            NAME,
+            "--machine",
+            "b",
+        ],
+    ):
+        _ = capsys.readouterr()
+        assert fleet_sync.main([*command, "--remote-scripts", SCRIPTS]) == 2
+        assert "the fleet is stopped (runaway sync)" in capsys.readouterr().err
+
+
+def test_a_machine_that_meets_a_stopped_peer_stops_itself(fleet: Fleet) -> None:
+    copy = _new()
+    _ = _write(copy / "saved.txt", "saved\n")
+    assert work.main(["save", NAME]) == 0
+    fleet_sync.write_stop(fleet.repo_b, "stopped on b")
+    code, _document = fleet.run("sync", "--pins-only")
+    assert code == 2
+    assert fleet_sync.stop_reason(fleet.repo_a).startswith("adopted from ")
+    assert fleet_sync.stop_reason(fleet.repo_a).endswith("stopped on b")
+    assert NAME not in work.pins(fleet.repo_b)
+
+
+def test_the_timer_line_checks_the_stop_flag_before_any_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fleet_sync, "REPO_ROOT", tmp_path)
+    line = fleet_sync.schedule_line()
+    assert line.index(".work/fleet-stop") < line.index(".venv/bin/python")
+    assert f"alarm shift @ARGV; exec @ARGV or die' {fleet_sync.SCHEDULE_TIME_LIMIT}" in line
+    (tmp_path / ".work").mkdir()
+    (tmp_path / ".work" / "fleet-stop").write_text("stopped\n")
+    assert subprocess.run(["/bin/sh", "-c", line], check=False).returncode == 0
+    (tmp_path / ".work" / "fleet-stop").unlink()
+    ran = subprocess.run(["/bin/sh", "-c", line], capture_output=True, check=False)
+    assert ran.returncode != 0
