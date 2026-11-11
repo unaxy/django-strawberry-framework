@@ -18,16 +18,20 @@ import getpass
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
-from collections.abc import Generator, Mapping
+from collections.abc import Callable, Generator, Mapping
 from pathlib import Path
 
 import pytest
 
 from scripts import _git, _locks, fleet, prove_failability, work, workspace
 from tests._idioms import json_at, json_list, json_loads, json_object
+
+#: ``sqlite3.Cursor.fetchall``, its rows typed for the caller.
+_fetchall: Callable[[sqlite3.Cursor], list[tuple[object, ...]]] = sqlite3.Cursor.fetchall
 
 PACKAGE = work.PACKAGE
 ME = getpass.getuser()
@@ -792,16 +796,152 @@ def test_land_refuses_a_deletion_whose_shared_folder_cannot_be_read(
     assert "already there" not in captured.err
 
 
-def test_land_refuses_a_carve_only_database(
+DB = Path("examples") / "fakeshop" / "db.sqlite3"
+
+
+def _sql(path: Path, *statements: str) -> None:
+    connection = sqlite3.connect(path, isolation_level=None)
+    for statement in statements:
+        _ = connection.execute(statement)
+    connection.close()
+
+
+def _terms(path: Path) -> list[tuple[object, ...]]:
+    connection = sqlite3.connect(path)
+    rows = _fetchall(connection.execute("SELECT id, body FROM term ORDER BY id"))
+    connection.close()
+    return rows
+
+
+def _commit_db(repo: Path, *statements: str) -> None:
+    """Commit the shared database after ``statements`` (a fresh one first if it is no SQLite)."""
+    path = repo / DB
+    if not path.read_bytes().startswith(b"SQLite format 3"):
+        path.unlink()
+        _sql(path, "CREATE TABLE term (id integer PRIMARY KEY, body text NOT NULL)")
+    _sql(path, *statements)
+    _ = _git_out(repo, "commit", "-qam", "database")
+
+
+def test_land_merges_the_copys_database_rows_onto_a_moved_main(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _commit_db(repo, "INSERT INTO term VALUES (1, 'one'), (2, 'two')")
+    path = _new("fix-db")
+    _sql(path / DB, "UPDATE term SET body = 'ONE' WHERE id = 1")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _commit_db(repo, "UPDATE term SET body = 'TWO' WHERE id = 2")
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-db"]) == 0
+    out = capsys.readouterr().out
+    assert f"landed: {DB.as_posix()}\n  rows: term: update 1\n" in out
+    assert _terms(repo / DB) == [(1, "ONE"), (2, "TWO")]
+    assert (repo / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 3\n"
+
+
+def test_land_refuses_a_database_row_main_changed_too_and_applies_nothing(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _commit_db(repo, "INSERT INTO term VALUES (1, 'one')")
+    path = _new("fix-db")
+    _sql(path / DB, "UPDATE term SET body = 'mine' WHERE id = 1")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _commit_db(repo, "UPDATE term SET body = 'main' WHERE id = 1")
+    held = (repo / DB).read_bytes()
+    assert work.main(["land", "fix-db"]) == 1
+    err = capsys.readouterr().err
+    assert "term rowid 1: changed here and on main; nothing applied" in err
+    assert (repo / DB).read_bytes() == held
+    assert (repo / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 2\n"
+
+
+def test_land_skips_a_database_whose_bytes_moved_but_no_row(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _commit_db(repo, "INSERT INTO term VALUES (1, 'one')")
+    path = _new("fix-db")
+    _sql(
+        path / DB,
+        "INSERT INTO term VALUES (2, 'two')",
+        "DELETE FROM term WHERE id = 2",
+        "VACUUM",
+    )
+    assert work.main(["land", "fix-db"]) == 0
+    captured = capsys.readouterr()
+    assert f"already there: {DB.as_posix()}" in captured.err
+    assert "nothing to land" in captured.err
+    assert not _git_out(repo, "status", "--porcelain", "--", DB.as_posix())
+
+
+def test_land_refuses_a_database_file_that_is_not_sqlite(
     repo: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     path = _new("fix-db")
-    _ = _write(path / "examples" / "fakeshop" / "db.sqlite3", "rows\n")
+    _ = _write(path / DB, "rows\n")
     _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
     assert work.main(["land", "fix-db"]) == 1
-    assert "carve it by hand" in capsys.readouterr().err
+    assert "cannot be read as a SQLite database" in capsys.readouterr().err
     assert (repo / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 2\n"
+
+
+def test_land_refuses_a_copy_database_with_a_live_wal(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _commit_db(repo, "INSERT INTO term VALUES (1, 'one'), (2, 'two')")
+    path = _new("fix-db")
+    writer = sqlite3.connect(path / DB)
+    try:
+        _ = writer.execute("PRAGMA journal_mode = WAL")
+        _ = writer.execute("PRAGMA wal_autocheckpoint = 0")
+        _ = writer.execute("UPDATE term SET body = 'WAL' WHERE id = 1")
+        writer.commit()
+        _commit_db(repo, "UPDATE term SET body = 'MAIN' WHERE id = 2")
+        held = (repo / DB).read_bytes()
+        assert work.main(["land", "fix-db"]) == 1
+        assert "db.sqlite3-wal holds database writes its file does not" in capsys.readouterr().err
+        assert (repo / DB).read_bytes() == held
+    finally:
+        writer.close()
+
+
+def test_land_patch_carries_the_merged_database(repo: Path, tmp_path: Path) -> None:
+    _commit_db(repo, "INSERT INTO term VALUES (1, 'one')")
+    path = _new("fix-db")
+    _sql(path / DB, "UPDATE term SET body = 'ONE' WHERE id = 1")
+    patch = tmp_path / "landing.patch"
+    assert (
+        work.main(
+            [
+                "land",
+                "fix-db",
+                "--dry-run",
+                "--patch",
+                str(patch),
+            ],
+        )
+        == 0
+    )
+    assert f"diff --git a/{DB.as_posix()} b/{DB.as_posix()}".encode() in patch.read_bytes()
+    assert not _git_out(repo, "status", "--porcelain", "--", DB.as_posix())
+    _ = _git_out(repo, "apply", str(patch))
+    assert _terms(repo / DB) == [(1, "ONE")]
+
+
+def test_land_again_takes_only_the_rows_changed_since_the_last_landing(repo: Path) -> None:
+    _commit_db(repo, "INSERT INTO term VALUES (1, 'one'), (2, 'two')")
+    path = _new("fix-db")
+    _sql(path / DB, "UPDATE term SET body = 'ONE' WHERE id = 1")
+    assert work.main(["land", "fix-db"]) == 0
+    _ = _git_out(repo, "commit", "-qam", "first database landing")
+    _commit_db(repo, "UPDATE term SET body = 'TWO' WHERE id = 2")
+    _sql(path / DB, "UPDATE term SET body = 'ONE AGAIN' WHERE id = 1")
+    assert work.main(["land", "fix-db"]) == 0
+    assert _terms(repo / DB) == [(1, "ONE AGAIN"), (2, "TWO")]
 
 
 def test_land_refuses_a_copy_whose_commits_are_not_on_main(
@@ -4410,3 +4550,56 @@ def test_new_and_adopt_refuse_a_purpose_or_owner_holding_a_control_character(
     )
     assert "control character" in capsys.readouterr().err
     assert not work.locate(repo, "fix-ctl").adopted
+
+
+def test_land_merges_a_primary_key_update(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _commit_db(
+        repo,
+        "DROP TABLE term",
+        "CREATE TABLE term (id integer PRIMARY KEY AUTOINCREMENT, body text NOT NULL)",
+        "INSERT INTO term VALUES (1, 'one')",
+    )
+    path = _new("fix-db-key")
+    _sql(path / DB, "UPDATE term SET id = 100 WHERE id = 1")
+    code = work.main(["land", "fix-db-key"])
+    assert code == 0, capsys.readouterr()
+    assert _terms(repo / DB) == [(100, "one")]
+
+
+def test_land_without_a_tracked_database_lands_the_rest(repo: Path) -> None:
+    _ = _git_out(repo, "rm", "--", DB.as_posix())
+    _ = _git_out(repo, "commit", "-qm", "remove fixture database")
+    path = _new("fix-no-db")
+    _ = _write(path / "gone.txt", "ours\n")
+    assert work.main(["land", "fix-no-db"]) == 0
+    assert not (repo / DB).exists()
+    assert (repo / "gone.txt").read_text() == "ours\n"
+
+
+def test_land_refuses_a_wal_commit_made_after_the_first_check(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _commit_db(repo, "INSERT INTO term VALUES (1, 'one'), (2, 'two')")
+    path = _new("fix-db-late-wal")
+    writer = sqlite3.connect(path / DB)
+    try:
+        _ = writer.execute("PRAGMA journal_mode = WAL")
+        _ = writer.execute("PRAGMA wal_autocheckpoint = 0")
+        _commit_db(repo, "UPDATE term SET body = 'MAIN-OWNED' WHERE id = 2")
+        preflight = work.refuse_live_journals
+
+        def commit_after_check(root: Path, copy_root: Path) -> None:
+            preflight(root, copy_root)
+            _ = writer.execute("UPDATE term SET body = 'WAL-OWNED' WHERE id = 1")
+            writer.commit()
+
+        monkeypatch.setattr(work, "refuse_live_journals", commit_after_check)
+        code = work.main(["land", "fix-db-late-wal"])
+        output = capsys.readouterr()
+        assert code == 1, output
+        assert "db.sqlite3-wal holds database writes" in output.err
+        assert _terms(repo / DB) == [(1, "one"), (2, "MAIN-OWNED")]
+    finally:
+        writer.close()

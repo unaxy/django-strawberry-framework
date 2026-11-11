@@ -231,15 +231,21 @@ Commands
         holds exactly as the copy does is skipped; every other touched path must
         hold exactly its ``HEAD`` entry there (bytes hashed and mode read from
         disk, index entry too, so an ``assume-unchanged`` bit hides nothing),
-        and ``examples/fakeshop/db.sqlite3`` is never patched (carve it by
-        hand, START.md), nor a path under a folder that is a symlink in the
+        and nothing lands under a folder that is a symlink in the
         shared checkout (refused when planning and again right before each
         write, so a write never follows a link out of it; a path that is
         itself a symlink blob is written as a link). The patch is first
         applied to a private index read from the shared ``HEAD``: that is the
         expected result, merged with whatever main changed since, and a patch
         that does not apply there refuses with nothing written, naming each
-        path whose own patch does not apply. The journal is written, then
+        path whose own patch does not apply. ``examples/fakeshop/db.sqlite3``
+        is never a binary patch: the shared ``HEAD``'s database takes only the
+        rows the copy changed since the patch's start (``scripts/_sqlite_rows.py``;
+        printed as ``rows:`` under the path), so main's own rows and the copy's
+        freelist residue stay out; a schema change, a row main changed too, a
+        live ``-wal`` or ``-journal`` beside either database, or a result
+        failing a constraint refuses with nothing written, and bytes that moved
+        with no row skip the path. The journal is written, then
         each path (deletions first) is written into the working tree only
         (never the shared index): the new bytes go to a temporary file beside
         it, the path is re-hashed against its state before, and one
@@ -251,7 +257,8 @@ Commands
         success the copy is marked landed and ``refs/work/<name>/landed`` pins
         the merged result on that ``HEAD`` (``landed-copy`` the copy's own
         content). ``--dry-run`` checks and reports without writing;
-        ``--patch`` also writes the patch. The maintainer commits; main stays
+        ``--patch`` also writes the patch (the merged database as its binary
+        diff from ``HEAD``). The maintainer commits; main stays
         linear.
     ``rm <name> [--discard] [--drop-saves] [--evidence]``
         Remove one copy: move it into ``.work/trash/`` (one rename, which a
@@ -403,6 +410,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -412,10 +420,11 @@ from urllib.parse import urlsplit, urlunsplit
 try:
     import _git as _git_runner
     import _locks
+    import _sqlite_rows
     import fleet
 except ModuleNotFoundError:  # imported as ``scripts.work`` (repo root on path)
     from scripts import _git as _git_runner
-    from scripts import _locks, fleet
+    from scripts import _locks, _sqlite_rows, fleet
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
@@ -481,8 +490,9 @@ NO_PUSH = "no-push"
 #: A file in a copy's git directory: its ``.venv`` came from another machine or none exists,
 #: so ``run`` rebuilds it (``uv sync --frozen``) first.
 VENV_STALE = "dsf-work-venv-stale"
-#: Paths ``land`` never patches: a binary database carved row by row (START.md).
-CARVE_ONLY_PATHS = frozenset({"examples/fakeshop/db.sqlite3"})
+#: Tracked SQLite databases ``land`` merges row by row (``scripts/_sqlite_rows.py``), never
+#: as a binary patch.
+ROW_MERGED_PATHS = frozenset({"examples/fakeshop/db.sqlite3"})
 MIN_FREE_BYTES = 6 * 1024**3
 RECENT_SECONDS = 10 * 60
 #: How long a replica ``fleet_sync.py`` removed stays restorable in ``.work/trash`` before
@@ -3635,6 +3645,7 @@ class LandPlan:
     before: dict[str, State]
     expected: dict[str, State]
     unheld: list[str]
+    rows: dict[str, list[_sqlite_rows.RowChange]] = dataclasses.field(default_factory=dict)
 
 
 def _branch(repo: Path) -> str:
@@ -3967,19 +3978,24 @@ def plan_landing(
 
     Raises:
         WorkError: the shared ``HEAD`` is not ``main``, the copy's ``HEAD`` is not on it,
-            the copy's landing pins cannot be trusted (:func:`earlier_landing`), the patch
-            touches a carve-only path, puts a path back at the copy's start where its last
-            landing held other content and the shared ``HEAD`` is not at that start
-            (``PatchBase.reset``), or touches a path the shared tree holds otherwise than
-            its ``HEAD`` (paths holding the copy's own uncommitted landing,
-            :func:`own_landing_paths`, are named apart from another writer's), or the patch
-            does not apply onto the shared ``HEAD`` (the paths whose own patch does not
-            apply are named).
+            the copy's landing pins cannot be trusted (:func:`earlier_landing`), a
+            row-merged database has a live journal (:func:`refuse_live_journals`), the patch
+            changes a database row main changed too or its schema (:func:`merge_database`),
+            puts a path back at the copy's start where its last landing held other content
+            and the shared ``HEAD`` is not at that start (``PatchBase.reset``), or touches a
+            path the shared tree holds otherwise than its ``HEAD`` (paths holding the copy's
+            own uncommitted landing, :func:`own_landing_paths`, are named apart from another
+            writer's), or the patch does not apply onto the shared ``HEAD`` (the paths whose
+            own patch does not apply are named).
 
     """
     copy_root = _live(copy)
     head, base = _refuse_off_main(repo, copy_root)
+    refuse_live_journals(repo, copy_root)
     tree = content_tree(copy_root)
+    # A write committed between the check and the capture sits in a journal the
+    # captured file lacks: checked again, so a capture is used only if none appeared.
+    refuse_live_journals(repo, copy_root)
     start = patch_base(repo, copy, copy_root, tree, from_start=from_start)
     if start.reset:
         msg = (
@@ -3989,10 +4005,6 @@ def plan_landing(
         )
         raise WorkError(msg)
     changes = start.changes
-    carved = sorted(change.path for change in changes if change.path in CARVE_ONLY_PATHS)
-    if carved:
-        msg = f"{', '.join(carved)} changed: carve it by hand (START.md), land the rest after"
-        raise WorkError(msg)
     for change in changes:
         refuse_symlinked_folder(repo, change.path)
     applied = [change for change in changes if working_state(repo, change.path) != change.state]
@@ -4004,7 +4016,18 @@ def plan_landing(
         raise WorkError(_unclean_message(unclean, own))
     env = {"GIT_INDEX_FILE": str(index)}
     _ = _git(repo, "read-tree", head, env=env)
-    patch = _diff(copy_root, start.since, tree, paths)
+    merged_rows = [change for change in applied if change.path in ROW_MERGED_PATHS]
+    rows = {
+        change.path: merge_database(repo, copy_root, (start.since, head, index), change)
+        for change in merged_rows
+    }
+    for change in merged_rows:
+        if not rows[change.path]:
+            applied.remove(change)
+            skipped.append(change.path)
+    paths = [change.path for change in applied]
+    patched = [path for path in paths if path not in ROW_MERGED_PATHS]
+    patch = _diff(copy_root, start.since, tree, patched)
     if patch:
         try:
             _ = _git_bytes(
@@ -4017,7 +4040,7 @@ def plan_landing(
                 stdin=patch,
             )
         except WorkError as error:
-            failing = _not_applying(repo, copy_root, start, (tree, paths, env))
+            failing = _not_applying(repo, copy_root, start, (tree, patched, env))
             named = f" in {', '.join(failing)}" if failing else ""
             msg = (
                 f"the copy's patch does not apply onto the shared HEAD {head[:12]}{named}; "
@@ -4025,6 +4048,7 @@ def plan_landing(
             )
             raise WorkError(msg) from None
     merged = _git(repo, "write-tree", env=env).strip()
+    patch += _diff(repo, head, merged, [path for path in paths if path in ROW_MERGED_PATHS])
     expected = _index_states(repo, paths, env)
     before = _tree_states(repo, head, paths)
     return LandPlan(
@@ -4038,7 +4062,104 @@ def plan_landing(
         before,
         expected,
         start.unheld,
+        {path: changed for path, changed in rows.items() if changed},
     )
+
+
+def refuse_live_journals(repo: Path, copy_root: Path) -> None:
+    """Refuse a row-merged database, in the copy or the shared tree, with a live journal.
+
+    A ``-wal`` or ``-journal`` file beside it holds committed rows its file does not, so
+    the file git captures is not its content (``scripts/_sqlite_rows.py``).
+    :func:`plan_landing` checks before and after capturing the copy's content, so a
+    write committed in between refuses too; the sidecars are git-ignored, so none
+    lands as a file of its own.
+
+    Raises:
+        WorkError: naming each such journal.
+
+    """
+    live = [
+        journal
+        for root in (copy_root, repo)
+        for path in sorted(ROW_MERGED_PATHS)
+        if (journal := _sqlite_rows.live_journal(root / path)) is not None
+    ]
+    if live:
+        msg = (
+            f"{', '.join(str(journal) for journal in live)} holds database writes its file "
+            "does not (a connection is open or was not checkpointed); close it and run "
+            "`PRAGMA wal_checkpoint(TRUNCATE)`; nothing applied"
+        )
+        raise WorkError(msg)
+
+
+def merge_database(
+    repo: Path,
+    copy_root: Path,
+    where: tuple[str, str, Path],
+    change: Change,
+) -> list[_sqlite_rows.RowChange]:
+    """Stage in the private index the shared ``HEAD``'s database plus the copy's rows; return them.
+
+    ``where`` is ``(since, head, index)``: the tree the copy's patch starts from, the
+    shared ``HEAD`` and the private index. The result starts as a byte copy of the
+    ``HEAD`` database and takes only the rows the copy changed since (``scripts/_sqlite_rows.py``),
+    so nothing else the copy's file holds lands, freelist residue included. An empty
+    list stages nothing: the copy changed no row.
+
+    Raises:
+        WorkError: the copy deleted the database or added it, the schemas differ, a row
+            conflicts with main's, or the result fails a constraint or an integrity check.
+
+    """
+    since, head, index = where
+    path = change.path
+    started = _tree_states(copy_root, since, [path])[path]
+    held = _tree_states(repo, head, [path])[path]
+    if change.state is None or started is None or held is None:
+        msg = f"{path} was added or deleted: carve it by hand (START.md), land the rest after"
+        raise WorkError(msg)
+    folder = Path(tempfile.mkdtemp(prefix="dsf-work-db-", dir=index.parent))
+    try:
+        files = {
+            "base": (copy_root, started),
+            "ours": (copy_root, change.state),
+            "theirs": (repo, held),
+        }
+        for name, (root, (_mode, oid)) in files.items():
+            _ = (folder / name).write_bytes(_git_bytes(root, "cat-file", "blob", oid))
+        out = folder / "merged"
+        try:
+            rows = _sqlite_rows.merge(folder / "base", folder / "ours", folder / "theirs", out)
+        except _sqlite_rows.MergeError as error:
+            msg = f"{path}: {error}; nothing applied"
+            raise WorkError(msg) from None
+        if rows:
+            blob = _git(repo, "hash-object", "-w", "--no-filters", str(out)).strip()
+            _ = _git(
+                repo,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"{held[0]},{blob},{path}",
+                env={"GIT_INDEX_FILE": str(index)},
+            )
+        return rows
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def rows_summary(rows: Sequence[_sqlite_rows.RowChange]) -> str:
+    """Return each table's changed rows as ``table: update 463, insert 901``."""
+    tables: dict[str, list[_sqlite_rows.RowChange]] = {}
+    for row in rows:
+        tables.setdefault(row.table, []).append(row)
+    parts: list[str] = []
+    for table, changed in sorted(tables.items()):
+        kinds = ", ".join(f"{row.kind} {row.key}" for row in changed)
+        parts.append(f"{table}: {kinds}")
+    return "; ".join(parts)
 
 
 @contextlib.contextmanager
@@ -4353,6 +4474,8 @@ def _land(
     if args.dry_run:
         for change in plan.applied:
             print(f"would land: {change.path}")
+            if change.path in plan.rows:
+                print(f"  rows: {rows_summary(plan.rows[change.path])}")
         return 0
     drift = _drifted(repo, plan, plan.before)
     if drift:
@@ -4362,6 +4485,8 @@ def _land(
     _pin_landing(repo, copy, plan)
     for change in plan.applied:
         print(f"landed: {change.path}")
+        if change.path in plan.rows:
+            print(f"  rows: {rows_summary(plan.rows[change.path])}")
     return 0
 
 
