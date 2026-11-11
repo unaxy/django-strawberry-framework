@@ -422,6 +422,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "tests/test_predicate_pg_explain.py",
     "tests/test_prepared_view_handoff.py",
     "tests/test_prove_failability.py",
+    "tests/test_public_inference.py",
     "tests/test_registry.py",
     "tests/test_relation_fixtures.py",
     "tests/test_relay_connection.py",

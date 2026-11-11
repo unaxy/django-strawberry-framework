@@ -563,6 +563,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_predicate_pg_explain.py  # Postgres planner regression for the row-preserving to-many filter predicates.
 ├── test_prepared_view_handoff.py # The prepared-view handoff's ignore arms.
 ├── test_prove_failability.py     # Script tests for the failability-proof runner's refusals and restore proof.
+├── test_public_inference.py      # What a consumer's type checker infers for the public API, pinned with ``assert_type``.
 ├── test_registry.py              # TypeRegistry and finalization tests for lookups, primaries, lifecycle callbacks, retries, and reset.
 ├── test_relation_fixtures.py     # The composite relation fixture drops its unmanaged tables after use.
 ├── test_relay_connection.py      # Relation-connection construction, registry lifecycle and private window-state tests.
@@ -953,6 +954,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_predicate_pg_explain.py  # Postgres planner regression for the row-preserving to-many filter predicates.
 ├── test_prepared_view_handoff.py # The prepared-view handoff's ignore arms.
 ├── test_prove_failability.py     # Script tests for the failability-proof runner's refusals and restore proof.
+├── test_public_inference.py      # What a consumer's type checker infers for the public API, pinned with ``assert_type``.
 ├── test_registry.py              # TypeRegistry and finalization tests for lookups, primaries, lifecycle callbacks, retries, and reset.
 ├── test_relation_fixtures.py     # The composite relation fixture drops its unmanaged tables after use.
 ├── test_relay_connection.py      # Relation-connection construction, registry lifecycle and private window-state tests.

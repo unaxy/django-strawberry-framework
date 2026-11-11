@@ -33,7 +33,7 @@ Rules of the road:
 
 ## Status
 
-Measured 2026-11-11 at 41de5b69, basedpyright 1.40.2 (pyright 1.1.414).
+Measured 2026-11-11 at 41de5b69 (the tests/ row recounted for typing item 44), basedpyright 1.40.2 (pyright 1.1.414).
 
 | | Count |
 | --- | --- |
@@ -51,7 +51,7 @@ holds. The density is the number of suppressions (ignore lines plus casts) per 1
 | Area | Files | Lines | Rules relaxed | Ignore lines | Casts | Per 1k lines |
 | --- | --- | --- | --- | --- | --- | --- |
 | Package (`django_strawberry_framework/`) | 131 | 115,090 | none | 116 | 70 | 1.62 |
-| tests/ | 214 | 255,725 | `reportUnannotatedClassAttribute`, `reportUnusedCallResult` | 472 | 22 | 1.93 |
+| tests/ | 215 | 255,986 | `reportUnannotatedClassAttribute`, `reportUnusedCallResult` | 472 | 22 | 1.93 |
 | examples/ | 266 | 201,962 | `reportUnannotatedClassAttribute`; `reportUnusedCallResult` in its test folders | 55 | 0 | 0.27 |
 | scripts/ | 45 | 43,638 | none | 3 | 11 | 0.32 |
 | Root (`conftest.py`, `line_count.py`, `docs/dry/export_dry_review.py`) | 3 | 2,254 | none | 0 | 0 | 0 |
@@ -169,11 +169,6 @@ Do the items in order; each lands as its own commit.
   - Add a test row asserting that the `_DRF_SOFT_EXPORTS` keys equal the names the `TYPE_CHECKING` block imports,
     both read from the module's AST.
   - `tests/rest_framework/test_soft_dependency.py` pins the key set only.
-- [ ] 44. Public inference pinned with `assert_type`. `reportAssertTypeFailure` is locked with nothing to check.
-  - Add one typed module under tests/ whose `assert_type` calls pin what a consumer's checker infers for:
-    `DjangoListField`, `DjangoConnectionField`, `DjangoNodeField`, a `FilterSet` / `OrderSet` `apply_sync` return,
-    and `DjangoType.get_queryset`.
-  - Pin only what the code states today.
 - [ ] 45. The reason rule, gated. About 37 ignore lines carry no reason (2026-11-02 count).
   - `check_type_suppressions.py` refuses an ignore with no comment text on its line and no `#` line directly above
     (or above its decorators).
@@ -185,6 +180,16 @@ Do the items in order; each lands as its own commit.
   - a ledger kind for parameterized predicate claims (`TypeIs[...]` / `TypeGuard[...]` over a generic, 43 sites).
 - [ ] 48. Re-measure the pre-commit hooks, every hook with today's scope and timing (the last table was
   4ce779e1, nine hooks). Do it after items 42 and 45, which change hook scope.
+- [ ] 49. Public reads that infer `Any`. A consumer gets `Any` rows from each of these, and none can be pinned
+  without a `reportExplicitAny` ignore:
+  - `DjangoType.get_queryset` on a type that does not override it returns `QuerySet[Any, Any]`. The base's comment
+    says a TypeVar return was rejected because overrides return `super().get_queryset(...)` non-generically, so
+    this needs a design.
+  - django-filter's `FilterSet.qs` reads `QuerySet[Any, Any]`.
+  - `testing.Response.data` / `.extensions` read `dict[str, Any] | None`, inherited from Strawberry's `Response`.
+
+  Narrow each with a package type (a typed `qs`, `dict[str, object] | None`), then pin it in
+  `tests/test_public_inference.py`.
 
 ## Waiting on upstream
 
@@ -311,6 +316,17 @@ Each item's commit holds the detail (`git log --grep 'item <N>'` or `git log -S`
 39. `reportUntypedFunctionDecorator` and `reportOptionalMemberAccess` locked.
 40. CI installs exactly the lock (`uv sync --locked` everywhere but the Postgres Django bump).
 41. `Typing :: Typed` classifier; `**/hunt-ws` excluded; whole-repo readers skip ruff-excluded trees.
+44. `tests/test_public_inference.py` pins what a consumer's checker infers, with `assert_type` (a no-op at run
+    time, so both basedpyright passes are the check). It covers:
+    - the field factories (`DjangoListField`, `DjangoConnectionField`, `DjangoNodeField`, `DjangoNodesField`, bare
+      and typed) and `current_user()`;
+    - `FilterSet` / `OrderSet` `apply_sync` / `apply_async`, which keep `QuerySet[Model]`;
+    - `TestClient` / `AsyncTestClient` / `GraphQLTestMixin` `query()` and the `Response` reads.
+
+    A change to any of those types is a `reportAssertTypeFailure`. `DjangoType.get_queryset` declares
+    `QuerySet[Any, Any]`, which no pin can spell without an ignore, so it is checked by assignment instead: its
+    return, inherited or through `super()`, must assign to the caller's `QuerySet[Genre]`, and the README override
+    spelling must pass `@override`. The `Any`-typed reads are item 49.
 46. Weakenings the ledger could not see were retired:
     - `related_queryset` proves its rows are model instances (`_yields_model_rows`) and raises
       `ConfigurationError` otherwise;

@@ -17,7 +17,7 @@ Rules of the road:
 
 ## Status
 
-Measured 2026-11-11 at 41de5b69, ruff 0.17.4.
+Measured 2026-11-11 at 41de5b69 (the tests/ row recounted for typing item 44), ruff 0.17.4.
 
 | | Count |
 | --- | --- |
@@ -40,7 +40,7 @@ per 1,000 lines of source.
 | Area | Files | Lines | `# noqa` lines | Per 1k lines | Per-file ignores |
 | --- | --- | --- | --- | --- | --- |
 | Package (`django_strawberry_framework/`) | 131 | 115,090 | 178 | 1.55 | none |
-| tests/ | 214 | 255,725 | 155 | 0.61 | 17 codes, plus `D102` / `D103` on `test_*.py` |
+| tests/ | 215 | 255,986 | 155 | 0.61 | 17 codes, plus `D102` / `D103` on `test_*.py` |
 | examples/ | 266 | 201,962 | 101 | 0.50 | 12 codes, plus `D102` / `D103` on `test_*.py`, `D` / `DJ008` on migrations, `INP001` / `UP031` by folder |
 | scripts/ | 45 | 43,638 | 12 | 0.27 | 6 codes |
 | Root (`conftest.py`, `line_count.py`, `docs/dry/export_dry_review.py`) | 3 | 2,254 | 4 | 1.77 | `TID253`, `T201`, `INP001` per file |
