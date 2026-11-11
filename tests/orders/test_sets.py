@@ -3298,7 +3298,11 @@ def _plain_type(model: type[Model], name: str) -> type[DjangoType]:
 
 @pytest.mark.usefixtures("isolate_global_registry")
 def test_scoped_hops_read_only_relations_whose_type_hides_rows() -> None:
-    """A relation is scoped by a registered type with its own hook; nothing else is."""
+    """A relation is scoped by a registered type with its own hook; nothing else is.
+
+    Each hop carries the relation its joined path ends on, the field whose link its
+    visibility test correlates on.
+    """
     shelf_type = _hiding_type(Shelf, "HidingShelfType", topic="secret")
     _plain_type(Branch, "PlainBranchType")
 
@@ -3307,8 +3311,9 @@ def test_scoped_hops_read_only_relations_whose_type_hides_rows() -> None:
             model = Book
             fields = ["title"]
 
-    assert BookPaths._scoped_hops(Book, "shelf__topic") == (("shelf", shelf_type),)
-    assert BookPaths._scoped_hops(Book, "shelf__branch__name") == (("shelf", shelf_type),)
+    shelf = Book._meta.get_field("shelf")
+    assert BookPaths._scoped_hops(Book, "shelf__topic") == (("shelf", shelf_type, shelf),)
+    assert BookPaths._scoped_hops(Book, "shelf__branch__name") == (("shelf", shelf_type, shelf),)
     assert BookPaths._scoped_hops(Book, "genres__name") == ()
     assert BookPaths._scoped_hops(Book, "title") == ()
 
@@ -3325,8 +3330,8 @@ def test_scoped_hops_read_every_hop_of_an_undeclared_to_many_path() -> None:
             fields = ["name"]
 
     assert GenrePaths._scoped_hops(Genre, "books__shelf__topic") == (
-        ("books", book_type),
-        ("books__shelf", shelf_type),
+        ("books", book_type, Genre._meta.get_field("books")),
+        ("books__shelf", shelf_type, Book._meta.get_field("shelf")),
     )
 
 
@@ -3340,7 +3345,9 @@ def test_scoped_hops_read_a_pk_segment_on_a_relation_keyed_model_as_that_relatio
             model = PatronProfile
             fields = ["postal_code"]
 
-    assert ProfilePaths._scoped_hops(PatronProfile, "pk") == (("patron", patron_type),)
+    assert ProfilePaths._scoped_hops(PatronProfile, "pk") == (
+        ("patron", patron_type, PatronProfile._meta.get_field("patron")),
+    )
 
 
 @pytest.mark.usefixtures("isolate_global_registry")
@@ -3368,8 +3375,9 @@ def test_scoped_hops_read_a_declared_hop_through_its_target_sets_bound_type() ->
             model = Book
             fields = ["title", "shelf__topic"]
 
-    assert DeclaredBookOrder._scoped_hops(Book, "shelf__topic") == (("shelf", secondary),)
-    assert UndeclaredBookOrder._scoped_hops(Book, "shelf__topic") == (("shelf", primary),)
+    shelf = Book._meta.get_field("shelf")
+    assert DeclaredBookOrder._scoped_hops(Book, "shelf__topic") == (("shelf", secondary, shelf),)
+    assert UndeclaredBookOrder._scoped_hops(Book, "shelf__topic") == (("shelf", primary, shelf),)
 
 
 @pytest.mark.usefixtures("isolate_global_registry")
@@ -3391,8 +3399,8 @@ def test_scoped_hops_read_the_intermediate_model_of_a_multi_relation_declaration
             fields = ["title"]
 
     assert ThroughShelfOrder._scoped_hops(Book, "shelf__branch__city") == (
-        ("shelf", shelf_type),
-        ("shelf__branch", branch_type),
+        ("shelf", shelf_type, Book._meta.get_field("shelf")),
+        ("shelf__branch", branch_type, Shelf._meta.get_field("branch")),
     )
 
 
@@ -3410,7 +3418,7 @@ def test_scoped_hops_reentering_the_sets_model_read_the_type_the_set_is_bound_to
     ReentrantShelfOrder._owner_definition = secondary.__django_strawberry_definition__
 
     assert ReentrantShelfOrder._scoped_hops(Shelf, "books__shelf__topic") == (
-        ("books__shelf", secondary),
+        ("books__shelf", secondary, Book._meta.get_field("shelf")),
     )
 
 
@@ -3642,6 +3650,10 @@ def _lamp_orders() -> dict[str, tuple[type[OrderSet], object]]:
             column_order,
             [{"kiosk_rel": {"name": Ordering.ASC_NULLS_LAST}}, by_title],
         ),
+        "unconstrained-override-under-the-relation": (
+            _override_lamp_order(desk_order, "loose_kiosk__kiosk_code"),
+            [by_title],
+        ),
     }
 
 
@@ -3656,6 +3668,7 @@ def _lamp_orders() -> dict[str, tuple[type[OrderSet], object]]:
         ("unconstrained-column-term-ending-on-the-relation", "L2 L1 L3 L4 L5", "L2 L3 L4 L1 L5"),
         ("unconstrained-override-ending-on-the-relation", "L2 L1 L3 L4 L5", "L2 L3 L4 L1 L5"),
         ("column-under-the-relation", "L1 L3 L4 L5 L2", "L3 L4 L5 L2 L1"),
+        ("unconstrained-override-under-the-relation", "L2 L1 L3 L4 L5", "L2 L3 L4 L1 L5"),
     ],
 )
 def test_a_hop_scoped_by_an_ancestor_lacking_the_to_field_hides_through_the_related_row(
@@ -3672,7 +3685,9 @@ def test_a_hop_scoped_by_an_ancestor_lacking_the_to_field_hides_through_the_rela
     lamp reads as a lamp with no desk for the anonymous actor; a lamp whose
     nullable key is empty, and one whose unconstrained key names no desk
     (``L5``), stay listed and read as one for everyone. A term under the relation
-    reads through its join, as before. One statement per apply.
+    takes the same test: ``loose_kiosk__kiosk_code`` reads the trimmed carrier, so
+    ``L5`` stays and reads as missing, and ``kiosk__name`` reads ``name`` through
+    the join its value takes. One statement per apply.
     """
     lamp_order, order_input = _lamp_orders()[shape]
     with relation_fixture_tables(connection, (_OsDesk, _OsKioskDesk, _OsLamp)):
@@ -3888,6 +3903,256 @@ def test_a_hop_through_an_inherited_to_field_reads_only_rows_of_the_related_mode
                 )
                 titles = list(ordered.values_list("title", flat=True))
             assert (titles, len(captured.captured_queries)) == (expected, 1)
+
+
+class _OsShelf(_OsUnmanagedModel):
+    """A shelf a chain desk names by its unique ``code``."""
+
+    name: _Text = models.TextField()
+    code: _Text = models.TextField(unique=True)
+
+
+class _OsSlot(_OsUnmanagedModel):
+    """A slot a chain desk holds one-to-one."""
+
+    # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
+    pk: int | None
+
+    name: _Text = models.TextField()
+
+
+class _OsChainDesk(_OsUnmanagedModel):
+    """A desk keyed by ``kiosk_code`` that names its shelf by ``code`` and holds one slot."""
+
+    name: _Text = models.TextField()
+    kiosk_code: _Text = models.TextField(unique=True)
+    # No constraint: the stored code may name no shelf at all.
+    shelf: _FK[_OsShelf] = models.ForeignKey(
+        _OsShelf,
+        on_delete=models.DO_NOTHING,
+        to_field="code",
+        db_constraint=False,
+        related_name="+",
+    )
+    slot: models.OneToOneField[_OsSlot | Combinable, _OsSlot] = models.OneToOneField(
+        _OsSlot,
+        on_delete=models.DO_NOTHING,
+        db_constraint=False,
+        related_name="+",
+    )
+
+
+class _OsChainLamp(_OsUnmanagedModel):
+    """A lamp keyed to a chain desk by its ``kiosk_code`` and, separately, by its ``slot``.
+
+    ``loose__shelf__code`` crosses a second ``to_field`` hop; ``viaslot__slot__id``
+    is trimmed by Django across both joins to the lamp's own ``viaslot`` column.
+    """
+
+    title: _Text = models.TextField()
+    loose: _FK[_OsChainDesk] = models.ForeignKey(
+        _OsChainDesk,
+        on_delete=models.DO_NOTHING,
+        to_field="kiosk_code",
+        db_constraint=False,
+        related_name="+",
+    )
+    viaslot: _FK[_OsChainDesk] = models.ForeignKey(
+        _OsChainDesk,
+        on_delete=models.DO_NOTHING,
+        to_field="slot",
+        db_constraint=False,
+        related_name="+",
+    )
+
+
+def _staff_sees_all_type(model: type[Model], name: str) -> type[DjangoType]:
+    """Register a type for ``model`` hiding the row named ``"hidden"`` from all but ``_STAFF_INFO``."""
+
+    def get_queryset(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        info: object,
+        **_kwargs: object,
+    ) -> QuerySet[Model]:
+        return queryset if info is _STAFF_INFO else queryset.exclude(name="hidden")
+
+    return type(
+        name,
+        (DjangoType,),
+        {
+            "Meta": type("Meta", (), {"model": model, "fields": "__all__"}),
+            "get_queryset": classmethod(get_queryset),
+        },
+    )
+
+
+def _override_order(lamp_model: type[Model], path: str) -> type[OrderSet]:
+    """A ``lamp_model`` set whose ``get_flat_orders`` override orders by ``path``, then ``title``."""
+
+    class OverrideOrder(OrderSet):
+        class Meta:
+            model = lamp_model
+            fields = ["title"]
+
+        @classmethod
+        @override
+        def get_flat_orders(
+            cls,
+            order_data: list[tuple[str, Ordering | None]],
+            prefix: str = "",
+        ) -> list[tuple[str, Ordering | None]]:
+            return [(path, Ordering.ASC_NULLS_LAST), ("title", Ordering.ASC)]
+
+    return OverrideOrder
+
+
+def _kiosk_lamp_orders() -> dict[str, tuple[type[OrderSet], object]]:
+    """The lamp sets ordering by ``loose_kiosk__kiosk_code`` through a hiding kiosk-desk type.
+
+    The type is bound to ``_OsKioskDesk``, whose rows carry ``kiosk_code``, in
+    each spelling a term can take: a declared ``RelatedOrder`` branch, a
+    ``Meta.fields`` path, and a ``get_flat_orders`` override.
+    """
+    kiosk_type = _staff_sees_all_type(_OsKioskDesk, "HidingKioskDeskType")
+    kiosk_order = _set_named("KioskDeskOrder", _OsKioskDesk, ["kiosk_code"])
+    kiosk_order._owner_definition = kiosk_type.__django_strawberry_definition__
+    nested = _set_named(
+        "NestedLampOrder",
+        _OsLamp,
+        ["title"],
+        loose_rel=RelatedOrder(kiosk_order, field_name="loose_kiosk"),
+    )
+    path = _set_named("PathLampOrder", _OsLamp, ["title", "loose_kiosk__kiosk_code"])
+    by_title = {"title": Ordering.ASC}
+    return {
+        "related-order-branch": (
+            nested,
+            [{"loose_rel": {"kiosk_code": Ordering.ASC_NULLS_LAST}}, by_title],
+        ),
+        "meta-fields-path": (
+            path,
+            [{"loose_kiosk_kiosk_code": Ordering.ASC_NULLS_LAST}, by_title],
+        ),
+        "get-flat-orders-override": (
+            _override_order(_OsLamp, "loose_kiosk__kiosk_code"),
+            [by_title],
+        ),
+    }
+
+
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "spelling",
+    ["related-order-branch", "meta-fields-path", "get-flat-orders-override"],
+)
+@pytest.mark.parametrize(
+    ("info", "expected"),
+    [(_STAFF_INFO, "L2 L1 L3 L4 L5"), (_ANONYMOUS_INFO, "L2 L3 L4 L1 L5")],
+    ids=["staff", "anonymous"],
+)
+def test_a_term_past_a_to_field_hop_keeps_a_lamp_naming_no_desk_and_reads_it_as_missing(
+    spelling: str,
+    info: object,
+    expected: str,
+) -> None:
+    """``loose_kiosk__kiosk_code`` drops no lamp the plain term keeps, in every spelling.
+
+    Django trims the value to the lamp's own ``loose_kiosk`` carrier, so the plain
+    term joins nothing and keeps ``L5``, whose unconstrained code names no desk.
+    The hop's test correlates the kiosk rows' ``kiosk_code`` to that carrier too,
+    so ``L5`` stays listed and reads as a lamp with no desk for every actor; the
+    hidden desk's ``L1`` reads as one for the anonymous actor. One statement.
+    """
+    lamp_order, order_input = _kiosk_lamp_orders()[spelling]
+    with relation_fixture_tables(connection, (_OsDesk, _OsKioskDesk, _OsLamp)):
+        kiosks = {
+            code: _OsKioskDesk.objects.create(name=name, kiosk_code=code)
+            for name, code in (("hidden", "b"), ("z", "a"), ("y", "c"))
+        }
+        for title, loose in (
+            ("L1", "b"),
+            ("L2", "a"),
+            ("L3", "c"),
+            ("L4", "c"),
+            ("L5", "zz"),
+        ):
+            _ = _OsLamp.objects.create(title=title, kiosk=kiosks["a"], loose_kiosk_id=loose)
+        with CaptureQueriesContext(connection) as captured:
+            ordered = lamp_order.apply_sync(order_input, _OsLamp.objects.all(), info)
+            titles = list(ordered.values_list("title", flat=True))
+    assert (titles, len(captured.captured_queries)) == (expected.split(), 1)
+
+
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("path", "staff", "anonymous"),
+    [
+        ("loose__shelf__code", "L1 L2 L5 L3", "L2 L5 L1 L3"),
+        ("viaslot__slot__id", "L1 L2 L5 L3 L4", "L2 L5 L1 L3 L4"),
+    ],
+    ids=["second-to-field-hop", "two-join-trim"],
+)
+def test_every_hop_over_a_non_pk_link_correlates_on_its_link_columns(
+    path: str,
+    staff: str,
+    anonymous: str,
+) -> None:
+    """A hop keyed by a non-pk link is read by its carriers wherever the path continues past it.
+
+    Desks, shelves and slots each hide the row named ``"hidden"`` from the
+    anonymous actor. ``loose__shelf__code`` reads the desk's ``shelf`` carrier
+    through the ``loose`` join (``L4``'s code names no desk, so the plain term's
+    join drops it too); ``L3``'s desk names no shelf, so the ``shelf`` hop's test
+    correlated on that carrier keeps ``L3`` and reads it as missing.
+    ``viaslot__slot__id`` is the lamp's own ``viaslot`` column, so the plain term
+    keeps every lamp; the ``viaslot`` hop's test correlates the desks' ``slot``
+    to it, so ``L4``, naming no desk, stays and reads as missing, as does ``L3``,
+    whose desk names no slot. One statement per apply.
+    """
+    for model in (_OsChainDesk, _OsShelf, _OsSlot):
+        _ = _staff_sees_all_type(model, f"Hiding{model.__name__}Type")
+    lamp_order = _override_order(_OsChainLamp, path)
+    with relation_fixture_tables(
+        connection,
+        (
+            _OsShelf,
+            _OsSlot,
+            _OsChainDesk,
+            _OsChainLamp,
+        ),
+    ):
+        hidden_shelf = _OsShelf.objects.create(name="hidden", code="s1")
+        _ = _OsShelf.objects.create(name="a", code="s2")
+        hidden_slot = _OsSlot.objects.create(name="hidden")
+        slot = _OsSlot.objects.create(name="a")
+        _ = _OsChainDesk.objects.create(
+            name="hidden",
+            kiosk_code="k1",
+            shelf=hidden_shelf,
+            slot=hidden_slot,
+        )
+        _ = _OsChainDesk.objects.create(name="b", kiosk_code="k2", shelf_id="s2", slot=slot)
+        _ = _OsChainDesk.objects.create(name="c", kiosk_code="k3", shelf_id="zz", slot_id=999)
+        for title, loose, viaslot in (
+            ("L1", "k1", hidden_slot.pk),
+            ("L2", "k2", slot.pk),
+            ("L3", "k3", 999),
+            ("L4", "zz", 777),
+            ("L5", "k2", slot.pk),
+        ):
+            _ = _OsChainLamp.objects.create(title=title, loose_id=loose, viaslot_id=viaslot)
+        for info, expected in ((_STAFF_INFO, staff), (_ANONYMOUS_INFO, anonymous)):
+            with CaptureQueriesContext(connection) as captured:
+                ordered = lamp_order.apply_sync(
+                    [{"title": Ordering.ASC}],
+                    _OsChainLamp.objects.all(),
+                    info,
+                )
+                titles = list(ordered.values_list("title", flat=True))
+            assert (titles, len(captured.captured_queries)) == (expected.split(), 1)
 
 
 _ManagerShape: TypeAlias = Callable[[type[Model], str, str], "AbstractContextManager[type]"]

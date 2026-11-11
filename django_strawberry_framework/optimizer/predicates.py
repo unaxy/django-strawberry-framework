@@ -31,12 +31,13 @@ walking the branch read the related rows the same way.
 already reached is one of THESE rows", correlated by that joined row's primary
 key. An order value belongs to one joined row, not to the outer row, so the
 test reuses the join the value is read through instead of re-walking the path
-from the outer row. A value read from a relation's own carrier columns needs
-no join, so for a relation keyed by columns other than the related pk the test
-correlates on the carrier / target pairs instead and never adds the join that
-would drop a row whose carriers match nothing; rows lacking a target column
-are matched to the related row those carriers name inside the subquery
-instead. Its exact type is
+from the outer row. A relation keyed by columns other than the related pk is
+read by its carrier columns instead, wherever the path goes on: Django trims a
+value read from a target column to its carrier, and ``<relation>__pk`` would add
+the inner join that drops a row whose carriers match nothing, so the test
+correlates on the carrier / target pairs and never adds that join; rows lacking
+a target column are matched to the related row those carriers name inside the
+subquery instead. Its exact type is
 ``utils/querysets.py::VisibleRowExists``. ``correlates_joined_rows`` answers
 which models' rows that primary-key test reads as the joined rows, as
 ``correlates_related_rows`` answers it for ``related_rows_exist``.
@@ -646,7 +647,7 @@ def _carries(rows_model: type[models.Model], field: ModelField) -> bool:
 def visible_row_exists(
     rows: QuerySet[models.Model],
     joined_path: str,
-    relation: object = None,
+    relation: ModelField,
 ) -> VisibleRowExists:
     """Return ``EXISTS`` "the row the outer query reaches through ``joined_path`` is one of ``rows``".
 
@@ -656,24 +657,27 @@ def visible_row_exists(
     aggregate the test reads the same joined row the aggregate does. ``rows``
     keep any ``DISTINCT`` inside the subquery, where it changes no answer.
 
-    ``relation`` is the relation ``joined_path`` ends on when the value is read
-    from that relation's own carrier columns. When it is keyed by columns other
-    than the related pk (``utils/relations.py::non_pk_forward_link``) the test
-    correlates each target column to its carrier on the row before the relation
-    instead: ``<relation>__pk`` would add an inner join the value never needed,
-    and that join drops a row whose carriers match no related row, where the
-    plain value keeps it. Such a row fails the test, so its value reads as a
-    missing related row's. Rows of a model that does not carry every target
-    column (``_carries``: a multi-table-inheritance ancestor of a related model
-    keyed by a column it declares below them) cannot be correlated to the
-    carriers directly; their test keeps the rows whose key is the key of the
+    ``relation`` is the relation ``joined_path`` ends on. When it is keyed by
+    columns other than the related pk (``utils/relations.py::non_pk_forward_link``)
+    the test correlates each target column to its carrier on the row before the
+    relation instead, whatever the value reads past it: ``<relation>__pk`` names a
+    column only a join reaches, and Django cannot trim it the way it trims a value
+    read from a target column (``shelf__code``, or two joins at once when the
+    target column is itself a key), so the test would add an inner join that drops
+    a row whose carriers match no related row, where the plain value keeps it.
+    Such a row fails the test, so its value reads as a missing related row's; a
+    value read from the related row's other columns takes the join from the value
+    itself, exactly where the plain term takes it. Rows of a model that does not
+    carry every target column (``_carries``: a multi-table-inheritance ancestor of
+    a related model keyed by a column it declares below them) cannot be correlated
+    to the carriers directly; their test keeps the rows whose key is the key of the
     related row the carriers name, read from the related model's base manager
     inside the subquery, so it adds no join either. The related model, not the
     model declaring a target column: a ``ForeignObject`` whose ``to_fields`` name
     a column an intermediate parent declares reaches only the child's rows, and
     a code only an intermediate row holds names no related row.
     """
-    link = None if relation is None else non_pk_forward_link(relation)
+    link = non_pk_forward_link(relation)
     if link is None:
         return VisibleRowExists(rows.filter(pk=OuterRef(f"{joined_path}{LOOKUP_SEP}pk")))
     head, _sep, _tail = joined_path.rpartition(LOOKUP_SEP)
@@ -701,10 +705,12 @@ def correlates_joined_rows(
     """Return whether ``visible_row_exists`` reads ``rows_model`` rows as joined ``joined_model`` rows.
 
     The test keeps the given rows whose primary key equals the joined row's
-    (``<joined path>__pk``). The joined row is a row of ``joined_model``'s table
-    the outer query's own join reached, so it exists, whatever direction the
-    relation runs and whether its key is constrained. Rows of ``rows_model``
-    answer for it when both hold:
+    (``<joined path>__pk``), a row of ``joined_model``'s table the outer query's
+    own join reached, whatever direction the relation runs and whether its key is
+    constrained. Over a relation keyed by other columns it keeps the rows whose
+    link columns equal the carriers instead, which name that same row when one
+    exists (the targets are unique) and none when the carriers match nothing.
+    Rows of ``rows_model`` answer for it when both hold:
 
     - ``rows_model`` shares its rows with ``joined_model``: one concrete model, a
       proxy, or a multi-table-inheritance ancestor or descendant. A sibling

@@ -33,7 +33,8 @@ query shape, off the SQL the request emitted:
   ``branch`` and ``shelf_code``; the ``"__all__"`` ``ShelfLabelOrder`` publishes
   it after its carriers, a ``shelf`` term orders by both carriers in one
   statement, and a label on a shelf ``ShelfType`` hides, or naming no shelf at
-  all, stays listed and sorts as one with none; behind the to-many
+  all, stays listed and sorts as one with none, under a ``shelfRow: { code }``
+  term past the relation as well; behind the to-many
   ``BranchOrder.shelf_labels`` hop each carrier is aggregated per branch and
   correlated to the label's own carrier columns. ``ShelfLabelFilter`` filters by
   it: ``exact`` / ``in`` take the shelf's primary key and match both carriers,
@@ -1020,8 +1021,8 @@ _DIRECTIONS = (
 )
 
 
-def _ordered_with_missing(direction: str, present: list[str], missing: str) -> list[str]:
-    """``present`` (given ascending) in ``direction``, with the row ordering as ``NULL`` placed.
+def _ordered_with_missing(direction: str, present: list[str], *missing: str) -> list[str]:
+    """``present`` (given ascending) in ``direction``, with the rows ordering as ``NULL`` placed.
 
     A ``NULLS`` member places it where it says. A bare ``ASC`` / ``DESC`` leaves
     it to the database (``orders/inputs.py::Ordering``), which Django names
@@ -1036,7 +1037,7 @@ def _ordered_with_missing(direction: str, present: list[str], missing: str) -> l
     else:
         missing_first = ascending != connection.features.nulls_order_largest
     ordered = present if ascending else present[::-1]
-    return [missing, *ordered] if missing_first else [*ordered, missing]
+    return [*missing, *ordered] if missing_first else [*ordered, *missing]
 
 
 def test_shelf_label_order_input_publishes_the_foreign_object_beside_its_carriers() -> None:
@@ -1045,6 +1046,8 @@ def test_shelf_label_order_input_publishes_the_foreign_object_beside_its_carrier
     ``ShelfLabelOrder`` declares ``fields = "__all__"``. ``shelf`` has no column
     of its own (its value is the ``branch`` / ``shelf_code`` pair), and it is
     published after its carriers in model field order, like every other field.
+    The ``shelf_row`` branch over the same relation follows under its own name,
+    so the ``shelf`` leaf stays an ``Ordering``.
     """
     fields = _introspect_input_fields("ShelfLabelOrderInputType")
 
@@ -1054,8 +1057,14 @@ def test_shelf_label_order_input_publishes_the_foreign_object_beside_its_carrier
         "branch",
         "shelfCode",
         "shelf",
+        "shelfRow",
     ], fields
     assert fields["shelf"] == {"kind": "ENUM", "name": "Ordering", "ofType": None}, fields
+    assert fields["shelfRow"] == {
+        "kind": "INPUT_OBJECT",
+        "name": "ShelfOrderInputType",
+        "ofType": None,
+    }, fields
 
 
 @pytest.mark.django_db
@@ -1166,6 +1175,67 @@ def test_shelf_labels_keep_a_label_naming_no_shelf_and_sort_it_as_missing(direct
         ],
         "central-zz",
     ), texts
+    assert len(label_sql) == 1, label_sql
+    assert "JOIN" not in label_sql[0], label_sql[0]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("direction", _DIRECTIONS)
+@pytest.mark.parametrize(
+    ("staff", "missing", "statements"),
+    [(True, ["central-zz"], 3), (False, ["annex-s9", "central-zz"], 1)],
+    ids=["staff", "anonymous"],
+)
+def test_shelf_labels_keep_a_label_naming_no_shelf_under_a_term_past_the_relation(
+    *,
+    direction: str,
+    staff: bool,
+    missing: list[str],
+    statements: int,
+) -> None:
+    """``shelfRow: { code: ... }`` keeps the label naming no shelf and sorts it as missing.
+
+    ``shelf__code`` is a target column of the ``shelf`` link, so Django trims the
+    value to the label's ``shelf_code`` carrier and the plain term joins nothing.
+    ``ShelfType`` hides the ``secret`` shelf from anonymous viewers, so the hop is
+    scoped; its test correlates the shelf's ``(branch, code)`` to the label's
+    carriers, so it adds no ``library_shelf`` join either: ``central-zz`` stays
+    listed and reads as a label with no shelf, as ``annex-s9`` does for an
+    anonymous viewer. Ties among them keep the ``text`` order. The label page is
+    one statement; staff add their session and user reads.
+    """
+    create_users(1)
+    _seed_shelf_labels()
+    models.ShelfLabel.objects.create(
+        text="central-zz",
+        branch=models.Branch.objects.get(name="Central"),
+        shelf_code="ZZ",
+    )
+    client = Client()
+    if staff:
+        client.force_login(get_user_model().objects.get(username="staff_1"))
+
+    with CaptureQueriesContext(connection) as captured:
+        data = assert_graphql_success(
+            f"{{ allLibraryShelfLabels(orderBy: [{{shelfRow: {{code: {direction}}}}}, "
+            "{text: ASC}]) { text } }",
+            client=client,
+        )
+
+    texts = [json_str(row, "text") for row in json_list(data, "allLibraryShelfLabels")]
+    present = [
+        "central-a1",
+        "annex-b2",
+        "central-c3",
+        "annex-s9",
+    ]
+    assert texts == _ordered_with_missing(
+        direction,
+        [text for text in present if text not in missing],
+        *missing,
+    ), texts
+    assert len(captured.captured_queries) == statements, captured.captured_queries
+    label_sql = _sql_from_table(captured, "library_shelflabel")
     assert len(label_sql) == 1, label_sql
     assert "JOIN" not in label_sql[0], label_sql[0]
 

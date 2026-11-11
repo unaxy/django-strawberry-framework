@@ -433,7 +433,14 @@ class ShelfLabelOrder(OrderSet):
     multi-column forward ``ForeignObject``: it publishes ``shelf`` beside its
     two carriers ``branch`` and ``shelf_code``, and a ``shelf`` term orders by
     both carriers in link order.
+
+    ``shelf_row`` reaches the same relation's ``ShelfOrder`` columns under its own
+    name, so the ``shelf`` leaf keeps its carrier ordering: a
+    ``shelfRow: { code: ASC }`` term reads ``shelf__code``, which Django trims to
+    the ``shelf_code`` carrier, under ``ShelfType``'s visibility.
     """
+
+    shelf_row = RelatedOrder("ShelfOrder", field_name="shelf")
 
     class Meta:
         model = models.ShelfLabel

@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 226 to do.
+Progress: 0 done, 227 to do.
 
 ## From dry-0_0_15_3
 
@@ -1087,6 +1087,11 @@ Progress: 0 done, 226 to do.
   under an annotating type, a handed annotated queryset, a `filter_queryset` that annotates), where it failed every
   filter of the set with a masked `AttributeError` or cleaned the value as the outer column; undeclared leaves and
   flat copies of declared children answer as their nested spelling
+- [ ] 915. CHANGELOG entry for item 866: ordering through a relation keyed by columns other than the related primary
+  key (`ForeignKey(to_field=...)`, a forward `ForeignObject`) behind a target type whose `get_queryset` hides rows no
+  longer drops rows when the term reads past that relation (`shelf__code`, a second `to_field` hop, a `to_field` onto
+  a one-to-one key): a row whose key names no related row stays listed and sorts as missing, as plain `order_by` keeps
+  it, and a connection's `totalCount` matches its edges. The fakeshop `ShelfLabelOrderInputType` gains `shelfRow`
 
 ## From dry-upstream-0_0_15
 

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 492 done, 117 to do. The CHANGELOG entries filed here moved to
+Progress: 493 done, 117 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2764,6 +2764,27 @@ Progress: 492 done, 117 to do. The CHANGELOG entries filed here moved to
   `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_name_past_a_self_relation_reads_the_parent_types_annotation`
   and `tests/utils/test_querysets.py::test_a_name_past_a_relation_splits_as_over_the_rows_annotating_none` (the
   `lookup_target_fields` route, equivalent on the wire). CHANGELOG: item 913
+- [x] 866. An order term crossing a relation keyed by columns other than the related pk (a `to_field` key, a forward
+  `ForeignObject` onto other columns) under a target type that overrides `get_queryset` no longer drops a row the
+  plain term keeps: the visibility test correlated `pk=OuterRef("<joined>__pk")` unless the term ended on the
+  relation, a reference Django cannot trim, so the outer query took an INNER join plain `order_by(path)` never makes
+  and a row whose non-null carrier names no row vanished for every actor (`loose__kiosk_code`, a second `to_field` hop
+  `loose__shelf__code`, the two-join trim `viaslot__slot__id`, an MTI-parent hiding type, fakeshop `ShelfLabel`
+  `shelfRow: { code }`), and a connection's `totalCount` disagreed with its edges. Every scoped hop over a non-pk link
+  now correlates on its carrier / target columns wherever the term ends (the reference Django's own `Query.trim_joins`
+  produces), so such a row stays and sorts as missing, in one statement and with equal or fewer joins.
+  `orders/sets.py::OrderSet._scoped_hops` yields `(joined path, type, relation)`,
+  `::OrderSet._resolve_order_expressions` passes every hop's relation, and
+  `optimizer/predicates.py::visible_row_exists` takes `relation` as required; fakeshop `ShelfLabelOrder` declares
+  `shelf_row = RelatedOrder("ShelfOrder", field_name="shelf")` (`shelfRow: ShelfOrderInputType`). Grid: 396 of 8076
+  cells dropped rows, 0 now, no other cell changed. spec-028 (Decision 8 step 4, slice checklist, Edge cases, Test
+  plan, DoD 4), docstrings, the test README and GLOSSARY `RelatedOrder` (pk 496) follow. Pinned by
+  `tests/orders/test_sets.py::test_a_term_past_a_to_field_hop_keeps_a_lamp_naming_no_desk_and_reads_it_as_missing`,
+  `::test_every_hop_over_a_non_pk_link_correlates_on_its_link_columns`, the
+  `unconstrained-override-under-the-relation` row of
+  `::test_a_hop_scoped_by_an_ancestor_lacking_the_to_field_hides_through_the_related_row` and
+  `examples/fakeshop/test_query/test_library_inheritance_api.py::test_shelf_labels_keep_a_label_naming_no_shelf_under_a_term_past_the_relation`.
+  CHANGELOG: item 915
 
 ## To do: found along the way
 
@@ -2906,12 +2927,6 @@ Progress: 492 done, 117 to do. The CHANGELOG entries filed here moved to
 - [ ] 864. (robustness) The `ArrayField` input gate judges a `method=` filter over an array by its key name: a
   `method=` `ListFilter` with `lookup_expr="in"` over an `ArrayField` is refused, though the method reads the list and
   applies no lookup. Found fixing 716
-- [ ] 866. An order term ending on a `to_field` column under a declared hop (`[{kiosk_rel: {kiosk_code:
-  ASC}}]`, path `kiosk__kiosk_code`) whose target set is bound to a hiding type of the related model drops a row whose
-  non-null `db_constraint=False` key names no row, for every actor, where Django's `order_by("kiosk__kiosk_code")`
-  trims the join and keeps it (spec-028 Decision 8 step 4: a test never removes a row the plain term keeps). The
-  visibility test joins through `<relation>__pk`; passing the relation when the term's column is its target column
-  would correlate on the carriers. Found verifying 752
 - [ ] 867. (robustness) A wired `OrderSet` whose `RelatedOrder` two sets down names a lazy target that cannot import
   raises a bare `ImportError` at `finalize_django_types()`, where a direct unresolved target is rewrapped as a
   `ConfigurationError` naming the declaration and the filter family rewraps both
@@ -2957,6 +2972,13 @@ Progress: 492 done, 117 to do. The CHANGELOG entries filed here moved to
   filter over `tags` names `TaggedItem`, and a target whose key type differs from the source's (a UUID primary key)
   could answer a different verdict; a `ListFilter("vtags", lookup_expr="in")` likely too. Unchanged by 906. Found
   verifying 906
+- [ ] 916. (robustness) A `RelatedOrder` whose target set is bound to a hiding type of the intermediate
+  multi-table-inheritance parent that declares a `ForeignObject`'s target column (`_OsTierLamp.leaf` onto
+  `_OsTierLeaf`, the type on `_OsTierMid`) reads a term ending on the relation through the carrier branch of
+  `optimizer/predicates.py::visible_row_exists`, which correlates the intermediate rows directly: a lamp whose code
+  only an intermediate row holds, which no leaf row extends, sorts as present with its code instead of as missing,
+  against the docstring and spec-028 Decision 8 step 4 ("a code only an intermediate row holds names no related row");
+  a type on the root ancestor (the keys branch) answers it. Identical before 866. Found verifying 866
 
 ## To do: holes found re-checking the fixes
 

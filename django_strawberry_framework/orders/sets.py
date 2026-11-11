@@ -116,6 +116,7 @@ if TYPE_CHECKING:
     from django_strawberry_framework.types.base import DjangoType
     from django_strawberry_framework.types.definition import DjangoTypeDefinition
     from django_strawberry_framework.utils.permissions import DeclaredHop
+    from django_strawberry_framework.utils.typing import ModelField
 
 _NormalizedTerms = tuple[tuple[str, "Ordering | None"], ...]
 _M = TypeVar("_M", bound=models.Model)
@@ -398,7 +399,8 @@ def _require_scoped_order_target(
 
     A declared hop orders by the rows of the type its target set is bound to
     (``OrderSet._scoped_hops``), tested against the row the hop's join reached by
-    primary key (``optimizer/predicates.py::visible_row_exists``), so that type's
+    primary key, or by the link columns of a relation keyed by others
+    (``optimizer/predicates.py::visible_row_exists``), so that type's
     model must be one whose rows that test reads as rows of ``reached``
     (``optimizer/predicates.py::correlates_joined_rows``): ``reached``'s concrete
     model, a proxy, or a multi-table-inheritance parent or child keyed by the same
@@ -968,8 +970,8 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         cls,
         model: type[models.Model],
         field_path: str,
-    ) -> tuple[tuple[str, type[DjangoType]], ...]:
-        """Return ``(joined path, scoping type)`` per relation ``field_path`` crosses that hides rows.
+    ) -> tuple[tuple[str, type[DjangoType], ModelField], ...]:
+        """Return ``(joined path, scoping type, relation)`` per hop of ``field_path`` that hides rows.
 
         The relations are ``utils/relations.py::leading_relation_hops``'s over
         ``model``, each reaching the model Django's join reaches; a ``pk`` segment
@@ -991,11 +993,11 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         declaration on every set a wired set reaches, so this answers for an
         order a caller applies directly.
 
-        The joined path of a hop is what ``visible_row_exists`` correlates to.
-        For the hop a path ends on, ``_resolve_order_expressions`` also passes the
-        relation, so for one keyed by columns other than the related pk
-        (``utils/relations.py::non_pk_forward_link``) that test reads the
-        carriers the value is read from rather than joining the relation.
+        The joined path of a hop is what ``visible_row_exists`` correlates to,
+        and the relation is the field that path ends on (``classify_path``'s
+        terminal for it), so a hop keyed by columns other than the related pk
+        (``utils/relations.py::non_pk_forward_link``) is tested on its carriers
+        rather than by joining the relation, wherever the path goes on past it.
         """
         joins = leading_relation_hops(model, field_path)
         if not joins:
@@ -1039,12 +1041,14 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         segments = field_path.split(LOOKUP_SEP)
         reached = model
         joined: list[str] = []
-        scoped: list[tuple[str, type[DjangoType]]] = []
+        scoped: list[tuple[str, type[DjangoType], ModelField]] = []
         for segment, join, target_type in zip(segments, joins, types, strict=False):
             joined.append(reached._meta.pk.name if segment == "pk" else segment)
             reached = join.target_model
             if target_type is not None and target_type.has_custom_get_queryset():
-                scoped.append((LOOKUP_SEP.join(joined), target_type))
+                joined_path = LOOKUP_SEP.join(joined)
+                relation = classify_path(model, joined_path).terminal
+                scoped.append((joined_path, target_type, relation))
         return tuple(scoped)
 
     @classmethod
@@ -1065,14 +1069,15 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         ``NULL`` wherever a test fails, so a hidden related row orders the parent
         exactly as a missing one does. A path crossing no such relation orders
         by its plain column. A test never removes a row the plain term keeps:
-        for a path ending on a relation keyed by columns other than the related
-        pk (a ``to_field`` key, a ``ForeignObject`` onto other columns) the
-        value is the carriers, so its own test correlates on the link's carrier
-        / target pairs instead of joining the relation, and a row whose carriers
-        match no related row stays and reads as missing. Rows of a scoping type
-        whose model lacks a target column (a multi-table-inheritance parent of a
-        model keyed by a ``to_field`` the child declares) are matched to the
-        related row the carriers name inside the test's own subquery
+        each hop over a relation keyed by columns other than the related pk (a
+        ``to_field`` key, a ``ForeignObject`` onto other columns) correlates on
+        the link's carrier / target pairs instead of joining the relation, at any
+        position on the path, so a value Django trims to the carriers
+        (``shelf__code``, ``viaslot__slot__id``) adds no join, and a row whose
+        carriers match no related row stays and reads as missing. Rows of a
+        scoping type whose model lacks a target column (a multi-table-inheritance
+        parent of a model keyed by a ``to_field`` the child declares) are matched
+        to the related row the carriers name inside the test's own subquery
         (``visible_row_exists``), so they join nothing either.
 
         A path ending on a forward ``ForeignObject`` that is not a
@@ -1130,12 +1135,8 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             model=model,
         ):
             tests = [
-                visible_row_exists(
-                    visible_rows(scope),
-                    joined,
-                    terminal if joined == field_path else None,
-                )
-                for joined, scope in cls._scoped_hops(model, field_path)
+                visible_row_exists(visible_rows(scope), joined, relation)
+                for joined, scope, relation in cls._scoped_hops(model, field_path)
             ]
             to_many = _path_traverses_to_many(model, field_path)
             for column_path in order_column_paths(field_path, terminal):
@@ -1195,7 +1196,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
             flat_orders,
             model=queryset.model,
         ):
-            for _joined, scope in cls._scoped_hops(queryset.model, field_path):
+            for _joined, scope, _relation in cls._scoped_hops(queryset.model, field_path):
                 if scope not in derived:
                     seed = related_queryset(model_for(scope), using=queryset.db)
                     derived[scope] = await apply_type_visibility_async(scope, seed, info)
