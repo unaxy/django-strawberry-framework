@@ -523,16 +523,6 @@ def lookup_operand(
     return output, walk.lookup, walk.node_types
 
 
-def _lookup_node_types(terminal: ModelField, lookup_expr: str) -> tuple[type[object], ...]:
-    """Return the classes the predicate Django builds for ``lookup_expr`` on ``terminal`` holds.
-
-    ``_LookupWalk.node_types`` of ``validate_lookup_expr``'s walk, which starts a reverse
-    ``ForeignObjectRel`` as itself, answering through its forward field. Raises
-    ``LookupValidationError`` as the walk does.
-    """
-    return _walk_lookup_expr(terminal, lookup_expr).node_types
-
-
 def lookup_transform_parts(terminal: ModelField | Expression, lookup_expr: str) -> tuple[str, ...]:
     """Return the parts of ``lookup_expr`` Django's query applies to ``terminal`` as transforms.
 

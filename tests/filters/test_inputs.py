@@ -6568,6 +6568,42 @@ def test_relation_generation_hook_advice_follows_its_actual_selection(
     assert "Meta.fields" not in message
 
 
+def test_a_relation_leaf_whose_set_owns_its_lookup_hook_is_refused_without_the_key_route() -> None:
+    """A set overriding ``filter_for_lookup`` is offered no generated key route for a relation.
+
+    The relation's target has no Relay type, so its key is what a generated filter would
+    compare; the set's own hook selects that filter, so ``Meta.fields`` is no remedy the
+    package can promise: the refusal names the model-choice filters, the related column past
+    the relation and a ``RelatedFilter``.
+    """
+
+    class LookupHook(FilterSet):
+        @classmethod
+        @override
+        def filter_for_lookup(
+            cls,
+            field: ModelField,
+            lookup_type: str,
+        ) -> tuple[type[Filter] | None, dict[str, object]]:
+            return super().filter_for_lookup(field, lookup_type)
+
+    class ShelfLookupHook(LookupHook):
+        leaf = CharFilter(field_name="branch")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = []
+
+    _serve_on_a_column(library_models.Shelf, ShelfLookupHook)
+
+    assert _build_refusal() == (
+        "ShelfLookupHook: CharFilter on 'branch' reads Shelf.branch, a ForeignKey no SCALAR_MAP "
+        "entry types, so nothing types its input; use a ModelChoiceFilter / "
+        "ModelMultipleChoiceFilter, name the related column past it (field_name 'branch__id'), "
+        "or filter the related row's own fields through a RelatedFilter."
+    )
+
+
 @pytest.mark.parametrize(
     ("column", "kind"),
     [

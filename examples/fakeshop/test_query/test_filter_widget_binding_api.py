@@ -5,7 +5,8 @@ The form's actual widgets, constructor edits and physical data keys own cleaning
 A form rebinding each value as its text keeps a one-key widget's value, while a split
 date/time widget cannot split a datetime's text: a masked ``ConfigurationError``. A nested
 split range bound whose wall clock in the current time zone leaves years 1..9999 is the
-field's ``FILTER_INVALID`` refusal.
+field's ``FILTER_INVALID`` refusal, an empty-permitted form cleaning itself in ``__init__``
+included. A consumer form cleaned again over new data is asked about that data alone.
 The native holder orders its branch rows by primary key.
 """
 
@@ -875,6 +876,75 @@ def test_empty_permitted_form_delegates_unchanged_and_propagates_consumer_change
         _CURRENT["schema"] = None
     assert json_at(refused, "errors", 0, "message") == "consumer change detection"
     assert calls == []
+
+
+@pytest.mark.django_db
+def test_an_empty_permitted_form_cleaning_itself_early_keeps_its_widgets_refusal() -> None:
+    """An empty-permitted form whose ``__init__`` cleans it answers the widget's own refusal.
+
+    Its change detection reads the nested split range widget, which cannot split a bound whose
+    wall clock in the current time zone falls in year 0: that refusal is the form's error,
+    and the clean stops there, never asking the widget again.
+    """
+    _branches()
+
+    class RangeFilter(FilterSet):
+        span = _NestedDateRangeFilter(field_name="moment", lookup_expr="range")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+            form = _data_form("early-clean", empty_permitted=True)
+
+    schema = _schema(RangeFilter, ranged=True)
+    with override_settings(TIME_ZONE="UTC"):
+        payload = _range_post(schema, "0001-01-01T00:30:00+01:00", None)
+
+    refusal = {"message": "Enter a value the current time zone can represent.", "code": "invalid"}
+    assert payload == {
+        "data": None,
+        "errors": [
+            {
+                "message": "Invalid filter input",
+                "locations": [{"line": 1, "column": _RANGE_DOCUMENT.index("rows") + 1}],
+                "path": ["rows"],
+                "extensions": {"code": "FILTER_INVALID", "errors": {"span": [refusal]}},
+            },
+        ],
+    }, payload
+
+
+@pytest.mark.django_db
+def test_a_form_cleaned_again_over_new_data_asks_that_data() -> None:
+    """A consumer form falling back to other data and cleaning again is asked about that data.
+
+    Its ``__init__`` cleans the sent data, finds the text the package refuses, swaps in a
+    fallback and calls ``full_clean()`` again: the second clean reads the fallback afresh, so
+    the refusal of the first is gone and the fallback filters the rows.
+    """
+    _branches()
+
+    class FallbackForm(forms.Form):
+        def __init__(
+            self,
+            data: Mapping[str, object] | None = None,
+            *,
+            prefix: str | None = None,
+        ) -> None:
+            super().__init__(data=data, prefix=prefix)
+            if not self.is_valid():
+                self.data = {"pick": "Beta"}
+                self.full_clean()
+
+    class FallbackSet(FilterSet):
+        pick = django_filters.CharFilter(field_name="name")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+            form: type[forms.Form] = FallbackForm
+
+    assert _post(_schema(FallbackSet), {"pick": "\ud800"}) == _expected(("Beta",))
 
 
 @pytest.mark.django_db

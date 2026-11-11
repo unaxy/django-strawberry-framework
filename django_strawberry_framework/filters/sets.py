@@ -237,7 +237,6 @@ from .base import (
     comparison_form_field,
     copied_declared_filter,
     copied_form_field,
-    install_comparison_cleaner,
     membership_in_filter_class,
     refuse_identityless_relation,
     refuse_listless_lookup,
@@ -3319,11 +3318,9 @@ def _queryset_integer_column(filter_instance: Filter, query: Query) -> ModelFiel
         _declared_field_name(filter_instance),
         filter_instance.lookup_expr,
     )
-    if operand is None or not _django_prepares(operand.lookup):
+    if operand is None or operand.field is None or not _django_prepares(operand.lookup):
         return None
     field = operand.field
-    if field is None:
-        return None
     # The same last-join target fields the handed-query comparison uses. A reverse
     # relation is a ForeignObjectRel, not a concrete Field; no one column is returned
     # for a multi-column join.
@@ -4117,10 +4114,13 @@ class FilterSet(
 
         A rebound undeclared terminal has no FilterSet queryset of its own. Its
         comparison output must come from the visible final rows, not from a
-        parent model field or the unbound rebound filter's form field.
+        parent model field or the unbound rebound filter's form field. Only an
+        ``ArrayFilter`` / ``ListFilter`` / ``RangeFilter`` terminal is given one: the walk
+        rebinds a copy of the filter itself, so the terminal's class is the filter's. The
+        owned field keeps the consumer's ``clean`` override, widget and validators; only
+        its missing inner cleaner (``_has_comparison_cleaner``) is filled, from the
+        terminal's output column. Return whether the owned field holds one afterward.
         """
-        if not isinstance(filter_instance, (ArrayFilter, ListFilter, RangeFilter)):
-            return False
         if (
             type(self)._walks_unresolved_hop(filter_instance)
             or _bound_value_field(filter_instance) is not None
@@ -4151,19 +4151,16 @@ class FilterSet(
         )
         if field is None:
             return False
-        target: forms.Field
-        if element:
-            target = _ElementField(
-                element_field=field,
-                depth=depth,
-                members_are_arrays=is_array_in_lookup(operand.lookup),
-            )
-            target.bounds = truth.is_subclass(operand.lookup, models.lookups.Range)
-        elif isinstance(owned, RangeField):
-            target = RangeField(bound_field=field)
-        else:
-            return False
-        return install_comparison_cleaner(owned, target)
+        if isinstance(owned, _ElementField):
+            owned.element_field = field
+            owned.depth = depth
+            owned.members_are_arrays = is_array_in_lookup(operand.lookup)
+            owned.bounds = truth.is_subclass(operand.lookup, models.lookups.Range)
+            return True
+        if isinstance(owned, RangeField):
+            owned.bound_field = field
+            return True
+        return False
 
     def _late_comparison_names(self) -> tuple[str, ...]:
         """Name each cleaned list or range value whose path only a later queryset resolves.
@@ -7357,10 +7354,9 @@ class FilterSet(
         """Find the final scoped owner when the actual comparison output is unresolved.
 
         A leaf walking an unresolved declared hop (``_walks_unresolved_hop``) has no chain to
-        read and needs no owner: deriving its hops refuses it when it is active.
+        read and needs no owner: deriving its hops refuses it when it is active. Every caller
+        passes a filter running shipped code (``_runs_shipped_filter``).
         """
-        if not _runs_shipped_filter(filter_instance):
-            return None
         if type(self)._walks_unresolved_hop(filter_instance):
             return None
         chain = self._leaf_chain(filter_instance, aliases)
@@ -7369,16 +7365,10 @@ class FilterSet(
         hop = chain.hops[-1]
         if isinstance(hop, UndeclaredHop) and hop.scope is None:
             return None
+        # The terminal is a filter of a set over the hop's model, so its value field is read
+        # on that model and over the queryset the set holds: an output neither answers is
+        # one only the hop's visible rows hold.
         if _bound_value_field(chain.terminal) is not None:
-            return None
-        if (
-            _query_lookup_operand(
-                Query(_hop_model(hop)),
-                _declared_field_name(chain.terminal),
-                chain.terminal.lookup_expr,
-            )
-            is not None
-        ):
             return None
         return hop
 
@@ -7399,15 +7389,16 @@ class FilterSet(
         )
 
     def _install_disabled_initial_comparisons(self, names: tuple[str, ...]) -> None:
-        """Enrich the canonical and actual form fields after their final owner is visible."""
+        """Enrich the canonical and actual form fields after their final owner is visible.
+
+        ``names`` are fields of this set's form: ``_disabled_initial_annotation_fields`` reads
+        them off it, and the form is built once.
+        """
         form = self.form
         for name in names:
-            owned = form.fields.get(name)
-            if owned is None:
-                continue
             filter_instance = self._filter_named(name)
             _ = self._install_source_comparison(filter_instance, filter_instance.field)
-            _ = self._install_source_comparison(filter_instance, owned)
+            _ = self._install_source_comparison(filter_instance, form.fields[name])
 
     def _annotation_owner_alias(self) -> str:
         """Use the constructed instance's database for both readiness and acquisition."""

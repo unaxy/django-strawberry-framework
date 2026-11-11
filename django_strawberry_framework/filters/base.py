@@ -726,7 +726,7 @@ def _bound_value_field(filter_instance: Filter, query: Query | None = None) -> M
     return _bound_lookup_operand(filter_instance, query).field
 
 
-def _reads_integer_transform(filter_instance: Filter, query: Query | None = None) -> bool:
+def _reads_integer_transform(filter_instance: Filter, query: Query) -> bool:
     """Whether a per-request filter compares an integer transform output.
 
     A generated ``<column>__year__in``, an ``ArrayField``'s ``len``, or a transform a
@@ -752,11 +752,7 @@ def _reads_integer_transform(filter_instance: Filter, query: Query | None = None
         _bound_field_name(filter_instance),
         _bound_lookup_expr(filter_instance),
     )
-    operand = (
-        _query_lookup_operand(query, field_name, lookup_expr)
-        if query is not None
-        else _bound_lookup_operand(filter_instance)
-    )
+    operand = _query_lookup_operand(query, field_name, lookup_expr)
     if operand is None:
         return False
     value_field = operand.field
@@ -764,19 +760,8 @@ def _reads_integer_transform(filter_instance: Filter, query: Query | None = None
         return False
     if any(issubclass(node_type, Transform) for node_type in operand.node_types):
         return True
-    if query is None:
-        parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
-        model_operand = _filterset_lookup_operand(parent, filter_instance)
-        query = _model_unresolved_query(filter_instance, model_operand)
-    if query is None:
-        return False
-    try:
-        _names, start, _leftover = split_lookup(
-            query,
-            LOOKUP_SEP.join((field_name, lookup_expr)),
-        )
-    except FieldError:
-        return False
+    # The split ``_query_lookup_operand`` just accepted: the same path over the same query.
+    _names, start, _leftover = split_lookup(query, LOOKUP_SEP.join((field_name, lookup_expr)))
     return isinstance(start, Transform)
 
 
@@ -2022,34 +2007,6 @@ class RangeFilter(_ColumnCleanedFilter):
         if bound_path == path and isinstance(field, models.IntegerField):
             return _apply_lookups(self, qs, {f"{path}__gte": start, f"{path}__lte": end})
         return _apply_lookups(self, qs, {f"{bound_path}__range": (start, end)})
-
-
-def install_comparison_cleaner(owned: Field, target: Field) -> bool:
-    """Give an owned list/range field only its target's comparison cleaner.
-
-    The containing field keeps the consumer's ``clean`` override, widget, and
-    validators. An existing inner field also belongs to the consumer, so only
-    a missing one is filled from the target's output column. Return whether
-    the owned field has a usable inner cleaner afterward.
-    """
-    if isinstance(owned, _ElementField) and isinstance(target, _ElementField):
-        if owned.element_field is not None:
-            return True
-        if target.element_field is None:
-            return False
-        owned.element_field = target.element_field
-        owned.depth = target.depth
-        owned.members_are_arrays = target.members_are_arrays
-        owned.bounds = target.bounds
-        return True
-    if isinstance(owned, RangeField) and isinstance(target, RangeField):
-        if owned.bound_field is not None:
-            return True
-        if target.bound_field is None:
-            return False
-        owned.bound_field = target.bound_field
-        return True
-    return False
 
 
 def _integer_in_column(filter_instance: Filter, query: Query) -> ModelField | None:

@@ -8452,6 +8452,16 @@ def _book_genres_reading_a_numbered_join(rows: QuerySet[Model]) -> QuerySet[Mode
     )
 
 
+def _shelf_neighbours_reading_their_branch(rows: QuerySet[Model]) -> QuerySet[Model]:
+    """Alias the shelves of each shelf's other branches under a condition reading its branch."""
+    return rows.annotate(want=django_models.F("branch__name")).alias(
+        va=django_models.FilteredRelation(
+            "alt_branches__shelves",
+            condition=django_models.Q(alt_branches__shelves__topic=django_models.F("want")),
+        ),
+    )
+
+
 class _ReboundCase(NamedTuple):
     """An alias whose condition reads an annotation the filter's own joins would rebind."""
 
@@ -8483,6 +8493,18 @@ _REBOUND_CASES: dict[str, _ReboundCase] = {
             "FilteredRelation alias 'vbk' reads annotation 'want', which reads 'vs'; a filter "
             "over the alias joins 'vs' again to reach 'vs__books', which would rebind the "
             "annotation to that join, so no filter can scope the alias."
+        ),
+    ),
+    "a-table-another-relation-joins": _ReboundCase(
+        models.Shelf,
+        _shelf_neighbours_reading_their_branch,
+        "va__code",
+        "code",
+        (
+            "FilteredRelation alias 'va' reads annotation 'want', which reads 'library_branch'; "
+            "a filter over the alias joins 'library_branch' again to reach "
+            "'alt_branches__shelves', which would rebind the annotation to that join, so no "
+            "filter can scope the alias."
         ),
     ),
     "a-numbered-join": _ReboundCase(
