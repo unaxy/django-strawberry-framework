@@ -159,7 +159,8 @@ two other machines hold is reported, for their own runs)
     name.
 
     Evidence tombstones: ``.work/evidence-tombstones/<stem>@<digest>.json``, written
-    only by ``work.py rm --evidence`` and ``work.py evidence-rm``: the stem, machine,
+    only by ``work.py rm --evidence`` (never on a replica) and ``work.py evidence-rm``: the
+    stem, machine,
     moment, whether the whole folder went (``whole``), the removed copy, and each
     deleted file's ``[size, mtime]``. Carried like tombstones (create-only, both ways,
     by ``--pins-only`` too) but applied only by a full sync, on both machines of the
@@ -168,9 +169,14 @@ two other machines hold is reported, for their own runs)
     after 7 days), never deleted outright; one in another state is kept, and the union
     carries it back to the deleting machine with one ``conflict``; a stem another name
     there uses (a copy, a replica, a name holding pins alone; the removed copy's own
-    saves aside) is skipped; a path leaving the stem folder or passing a symlink fails.
-    A ``whole`` record also moves a stem folder left holding only unsynced files. State
-    equality, not time, decides, so clock skew changes nothing; ``work.py gc`` deletes
+    saves aside) is kept there with a ``note`` (no exit 1: the name is that machine's
+    to remove); a path leaving the stem folder or passing a symlink fails. A
+    ``whole`` record also moves the stem folder, left holding only unsynced files, in
+    an apply that moved a recorded file from it; a folder it moved nothing from (made
+    since, or holding only a ``.venv``) stays. State equality decides (a size and a
+    whole-second mtime, not content), never time, so clock skew changes nothing; a
+    false match stays restorable from the trash (``work.py evidence-restore``, which
+    gives each file a fresh mtime). ``work.py gc`` deletes
     a record after 90 days, and a machine offline longer brings the files back. A peer
     whose probe lacks the ``evidence-tombstones`` feature (an older script) gets no
     such operation: one ``note``, and its sync goes on.
@@ -1503,8 +1509,10 @@ def agent_evidence_apply(repo: Path, names: Sequence[str]) -> dict[str, object]:
     in another state is kept (``kept``), a missing one is nothing to do. A stem a name here
     still uses (``work.evidence_users``; the record's own copy holding pins alone does not) is
     skipped whole, and an unsafe stem folder or a path leaving it fails. With ``whole``, a stem
-    folder left holding only files no sync carries (``work.UNSYNCED``) goes into the entry too;
-    one still holding other files stays, their count answered as ``remaining``. Idempotent.
+    folder this call moved a recorded file from and left holding only files no sync carries
+    (``work.UNSYNCED``) goes into the entry too; one still holding other files stays, their
+    count answered as ``remaining``, and one it moved nothing from (made since, or holding
+    only a ``.venv``) stays untouched. Idempotent.
     """
     stems = {_stem(name) for name in names}
     root = work.work_dir(repo) / work.EVIDENCE
@@ -1546,7 +1554,7 @@ def agent_evidence_apply(repo: Path, names: Sequence[str]) -> dict[str, object]:
                 kept.append([stem, rel])
         if moved:
             trashed[stem] = trashed.get(stem, 0) + moved
-        if grave.whole and work._present(root, folder):
+        if grave.whole and trashed.get(stem) and work._present(root, folder):
             left = len(work.evidence_files(folder))
             if not left:
                 try:
@@ -3395,7 +3403,7 @@ def apply_evidence_tombstones(
         for stem, count in sorted(_object(answer.get("trashed")).items())
     ]
     rows += [
-        Row(stem, peer.label, "skip", f"evidence kept on {endpoint.label}: {reason}")
+        Row(stem, peer.label, "note", f"evidence kept on {endpoint.label}: {reason}")
         for stem, reason in sorted(_string_map(answer.get("skipped")).items())
     ]
     rows += [

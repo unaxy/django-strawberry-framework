@@ -45,8 +45,8 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
         stays there as ``<name>-<seconds>-kept`` for 7 days
         (``TRASH_RETENTION_SECONDS``), restorable, until ``gc`` deletes it; so
         does deleted evidence, as ``evidence-<stem>-<seconds>-kept`` (restore it
-        with ``mv`` and ``touch``: an untouched file keeps its recorded state and
-        is deleted again).
+        with ``evidence-restore``, which gives each file a fresh mtime: a file moved
+        back by hand keeps its recorded state and is deleted again unless touched).
     ``tombstones/<name>@<digest>.json``
         One per copy its home removed (``rm``, ``rm --discard``, ``gc``): the
         name, the home, the copy's identity (its note's ``incarnation``, else
@@ -72,7 +72,10 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
         exactly a recorded state to the trash on every machine (a changed or later
         file is never touched) and carries none back; ``gc`` deletes them after 90
         days (``EVIDENCE_TOMBSTONE_RETENTION_SECONDS``). Apart from
-        ``tombstones/``, so an older script never reads them.    ``land.lock``
+        ``tombstones/``, so an older script never reads them. A state is a size and
+        a whole-second mtime, not content: a file rewritten in the same second at
+        the same size matches, and the trash keeps such a false match restorable.
+    ``land.lock``
         A file one ``land`` (or ``repair``) at a time holds an exclusive kernel
         lock on (``flock``; ``msvcrt.locking`` on Windows): released however
         its holder ends, never taken over.
@@ -306,7 +309,8 @@ Commands
         count), which then, holding ``.work/fleet.lock`` (waiting up to 60 s, else
         refusing with nothing removed), records an evidence tombstone and moves
         the folder to ``.work/trash/evidence-<stem>-<seconds>-kept``, in that
-        order, as ``evidence-rm`` does.
+        order, as ``evidence-rm`` does. ``--evidence`` on a replica is refused with
+        nothing removed: evidence is deleted from the copy's home.
         On the copy's home (``--discard`` included) it leaves a tombstone; on a
         replica (``--discard``) it removes this machine's replica alone and keeps
         it in ``.work/trash/<name>-<seconds>-kept`` for 7 days (a replica may be
@@ -316,7 +320,8 @@ Commands
         ``.work/trash/`` for ``gc``; ``rm`` exits 1.
     ``evidence-rm <stem> [--file REL]... [--adopt-missing] [--dry-run]``
         Delete one stem's evidence on every fleet machine, for a stem no name
-        uses (refused otherwise, a name holding pins alone included): holding
+        uses (refused otherwise, a name holding pins alone included; a stem only
+        a replica here uses is deleted from that copy's home): holding
         ``.work/fleet.lock`` as ``rm --evidence`` does, record the files in an
         evidence tombstone, then move them to the trash (the folder in one
         rename; with ``--file``, only those files, ``whole`` false, a path that
@@ -326,6 +331,15 @@ Commands
         last synced states, one record per manifest; refused when
         ``.work/evidence`` itself is missing (a wipe is no deletion) or the stem
         folder is a symlink. ``--dry-run`` reports and writes nothing.
+    ``evidence-restore <trash-entry-or-stem> [--dry-run]``
+        Move the files of one ``.work/trash/evidence-<stem>-<seconds>-kept``
+        entry (named, or the one entry a stem has) back into
+        ``.work/evidence/<stem>/``, refusing with nothing moved when a file is
+        already there, and give each restored file a fresh mtime (a second no
+        evidence tombstone records for it), so no record matches it and the fleet
+        sync carries it as a live file. Tombstones are never changed. Holds
+        ``.work/fleet.lock`` as ``evidence-rm`` does; ``--dry-run`` reports and
+        moves nothing.
     ``gc [--dry-run]``
         Remove only what is finished: a landed copy whose landed content the
         shared ``HEAD`` holds (each ``rm`` refusal still applies), worktree
@@ -456,7 +470,7 @@ except ModuleNotFoundError:  # imported as ``scripts.work`` (repo root on path)
     from scripts import _locks, _sqlite_rows, fleet
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping, Sequence
+    from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
 
 #: ``json.loads``, its result typed ``object`` for the caller to narrow.
 _loads: Callable[[str], object] = json.loads
@@ -5107,9 +5121,11 @@ def cmd_rm(args: _Args) -> int:
     ):
         msg = f"{copy.name} is a harness copy at {copy.path}; its harness removes it, not this script"
         raise WorkError(msg)
+    stem = stem_of(copy.name)
+    if args.evidence:
+        refuse_replica_evidence(stem, [copy])
     if not args.discard:
         refuse_replica(copy, "remove (or `rm --discard`, which drops the replica alone)")
-    stem = stem_of(copy.name)
     with fleet_lock(repo) if args.evidence else contextlib.nullcontext():
         kept = remove(repo, copy, discard=args.discard, drop_saves=args.drop_saves)
         days = TRASH_RETENTION_SECONDS // 86400
@@ -5135,6 +5151,30 @@ def _rm_evidence(repo: Path, stem: str, removed: str) -> None:
     elif evidence.is_dir() and copy_hazard(repo, evidence, EVIDENCE) is None:
         grave, entry = discard_evidence(repo, stem, copy=removed)
         print(_discarded(grave, entry))
+
+
+def refuse_replica_evidence(stem: str, copies: Iterable[Copy]) -> None:
+    """Refuse deleting ``stem``'s evidence while this machine holds its copies as replicas alone.
+
+    ``copies`` are the stem's users here; a name holding pins alone is no copy. Evidence is
+    deleted fleet-wide from the copy's home: a replica's ``whole`` record would trash files
+    the home still writes, and a home skips a stem its copy uses on every full sync.
+
+    Raises:
+        WorkError: every copy among ``copies`` (one at least) is a replica; nothing is removed.
+
+    """
+    held = [copy for copy in copies if copy.form != "pins"]
+    replicas = [copy for copy in held if is_replica(copy.note)]
+    if not replicas or len(replicas) < len(held):
+        return
+    names = ", ".join(copy.name for copy in replicas)
+    homes = ", ".join(sorted({home_of(copy.note) for copy in replicas}))
+    msg = (
+        f"evidence {stem}: {names} here is a replica of {homes}'s copy; evidence is deleted "
+        "from the copy's home: run it there"
+    )
+    raise WorkError(msg)
 
 
 def _discarded(grave: EvidenceTombstone, entry: Path | None) -> str:
@@ -5167,6 +5207,8 @@ def cmd_evidence_rm(args: _Args) -> int:
     with contextlib.nullcontext() if args.dry_run else fleet_lock(repo):
         users = evidence_users(repo, stem)
         if users:
+            found = discover(repo)
+            refuse_replica_evidence(stem, [found[name] for name in users if name in found])
             msg = (
                 f"evidence {stem}: {', '.join(users)} still use it (a name holding pins alone "
                 "too); `work.py rm <name> --evidence` removes a copy with its evidence"
@@ -5279,6 +5321,116 @@ def _adopt_missing(repo: Path, stem: str, *, dry_run: bool) -> int:
         grave = EvidenceTombstone(stem, here, removed_at, here, files, whole=gone)
         _ = write_evidence_tombstone(repo, grave)
         print(_discarded(grave, None))
+    return 0
+
+
+def evidence_entry_stem(name: str) -> str | None:
+    """Return the stem an ``evidence-<stem>-<seconds>-kept`` trash entry name holds, else ``None``."""
+    prefix, suffix = "evidence-", f"-{KEPT_TRASH}"
+    if not name.startswith(prefix) or not name.endswith(suffix):
+        return None
+    stem, _, seconds = name[len(prefix) : -len(suffix)].rpartition("-")
+    return stem if seconds.isdigit() and valid_stem(stem) else None
+
+
+def _restore_entry(repo: Path, text: str) -> tuple[Path, str]:
+    """Return the evidence trash entry ``text`` names (an entry, or a stem with one) and its stem.
+
+    Raises:
+        WorkError: ``text`` names no entry, or a stem with none or several.
+
+    """
+    trash = _container(repo, TRASH)
+    stem = evidence_entry_stem(text)
+    if stem is not None and _is_kind(trash, trash / text, stat.S_ISDIR):
+        return trash / text, stem
+    if not valid_stem(text):
+        msg = f"{text!r} is no evidence trash entry or stem"
+        raise WorkError(msg)
+    listed = sorted(trash.iterdir()) if _is_kind(work_dir(repo), trash, stat.S_ISDIR) else []
+    entries = [
+        entry
+        for entry in listed
+        if evidence_entry_stem(entry.name) == text and _is_kind(trash, entry, stat.S_ISDIR)
+    ]
+    if not entries:
+        msg = f"no .work/trash/evidence-{text}-<seconds>-{KEPT_TRASH} entry to restore"
+        raise WorkError(msg)
+    if len(entries) > 1:
+        names = ", ".join(entry.name for entry in entries)
+        msg = f"evidence {text} has several trash entries ({names}); name the one to restore"
+        raise WorkError(msg)
+    return entries[0], text
+
+
+def _entry_files(entry: Path) -> list[str]:
+    """Return the relative path of every file (a link included, never followed) under ``entry``."""
+    files: list[str] = []
+    folders = [entry]
+    while folders:
+        folder = folders.pop()
+        for child in sorted(folder.iterdir()):
+            if _is_kind(folder, child, stat.S_ISDIR):
+                folders.append(child)
+            else:
+                files.append(child.relative_to(entry).as_posix())
+    return sorted(files)
+
+
+def _fresh_mtime(size: int, buried: Collection[tuple[int, int]]) -> int:
+    """Return the current second, or the first later one, at which ``size`` is no buried state."""
+    stamp = int(time.time())
+    while (size, stamp) in buried:
+        stamp += 1
+    return stamp
+
+
+def cmd_evidence_restore(args: _Args) -> int:
+    """Move one evidence trash entry's files back, each with a fresh mtime no record holds."""
+    repo = REPO_ROOT
+    _ = ensure_sentinel(repo)
+    entry, stem = _restore_entry(repo, args.name)
+    root = work_dir(repo) / EVIDENCE
+    folder = root / stem
+    hazard = copy_hazard(repo, folder, EVIDENCE)
+    if hazard is not None:
+        msg = f"evidence {stem}: {hazard}; nothing restored"
+        raise WorkError(msg)
+    with contextlib.nullcontext() if args.dry_run else fleet_lock(repo):
+        rels = _entry_files(entry)
+        taken = [rel for rel in rels if _present(folder, inside(folder, rel))]
+        if taken:
+            msg = (
+                f"evidence {stem} already holds {', '.join(taken)}; nothing restored from "
+                f".work/trash/{entry.name}"
+            )
+            raise WorkError(msg)
+        if args.dry_run:
+            print(
+                f"would restore {len(rels)} files of evidence {stem} from .work/trash/{entry.name}",
+            )
+            return 0
+        buried: dict[str, set[tuple[int, int]]] = {}
+        for grave in evidence_tombstones(repo):
+            if grave.stem == stem:
+                for rel, size, mtime in grave.files:
+                    buried.setdefault(rel, set()).add((size, mtime))
+        lutime = os.utime in os.supports_follow_symlinks
+        for rel in rels:
+            target = inside(folder, rel)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _ = inside(entry, rel).rename(target)
+            info = target.lstat()
+            if lutime or not stat.S_ISLNK(info.st_mode):
+                stamp = _fresh_mtime(info.st_size, buried.get(rel, ()))
+                os.utime(target, (stamp, stamp), follow_symlinks=not lutime)
+        for directory, _dirnames, _filenames in os.walk(entry, topdown=False):
+            with contextlib.suppress(OSError):
+                Path(directory).rmdir()
+    print(
+        f"evidence {stem}: {len(rels)} files restored from .work/trash/{entry.name} with fresh "
+        "mtimes; the fleet sync carries them as live files",
+    )
     return 0
 
 
@@ -5738,6 +5890,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _ = evidence_rm.add_argument("--dry-run", action="store_true")
     evidence_rm.set_defaults(handler=cmd_evidence_rm)
+
+    evidence_restore = commands.add_parser(
+        "evidence-restore",
+        help="move deleted evidence back from the trash with fresh mtimes",
+    )
+    _ = evidence_restore.add_argument("name", metavar="trash-entry-or-stem")
+    _ = evidence_restore.add_argument("--dry-run", action="store_true")
+    evidence_restore.set_defaults(handler=cmd_evidence_restore)
 
     gc = commands.add_parser("gc", help="remove only what is finished")
     _ = gc.add_argument("--dry-run", action="store_true")

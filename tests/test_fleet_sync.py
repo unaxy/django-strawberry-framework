@@ -1748,7 +1748,10 @@ def test_an_evidence_deletion_reaches_the_peer_by_full_sync_alone_and_goes_to_it
 def test_a_stem_a_peer_name_still_uses_is_skipped_there_and_its_file_never_revives(
     fleet: Fleet,
 ) -> None:
-    """A sibling holding pins alone on c keeps c's file; a, holding the record, never pulls it."""
+    """A sibling holding pins alone on c keeps c's file with a note, never an exit 1 per run.
+
+    a, holding the record, never pulls the file back.
+    """
     repo_c = fleet.machine("c")
     copy = _new()
     _age(copy)
@@ -1764,9 +1767,11 @@ def test_a_stem_a_peer_name_still_uses_is_skipped_there_and_its_file_never_reviv
     assert work.discover(repo_c)[sibling].form == "pins"
     fleet.at_a()
     assert work.main(["rm", NAME, "--evidence"]) == 0
-    code, document = fleet.run("sync", "--copy", NAME)
-    assert code == 1, document
-    assert ("skip", NAME, f"evidence kept on c: {sibling} still use it here") in _results(document)
+    for _run in range(2):
+        code, document = fleet.run("sync", "--copy", NAME)
+        assert code == 0, document
+        kept = ("note", NAME, f"evidence kept on c: {sibling} still use it here")
+        assert kept in _results(document)
     assert not _evidence(fleet.repo_a).exists()
     assert not _evidence(fleet.repo_b).exists()
     assert (_evidence(repo_c) / "f.txt").is_file()
@@ -2114,6 +2119,31 @@ def test_the_stem_folder_stays_while_unrecorded_files_remain_and_goes_with_only_
     assert (mixed / "new.txt").is_file()
     assert not (mixed / "f.txt").exists()
     assert _apply(fleet.repo_b)["remaining"] == {}
+
+
+def test_a_whole_record_leaves_a_stem_folder_it_moved_no_recorded_file_from(
+    fleet: Fleet,
+) -> None:
+    """A stem made again since the delete, or holding only a venv, is no leftover of it."""
+    fleet.at_b()
+    reused = _evidence(fleet.repo_b, "lead-merge")
+    venv_only = _evidence(fleet.repo_b, "sol-review")
+    graves = [
+        _grave("lead-merge", {"f.txt": _write(reused / "f.txt", "proof\n")}),
+        _grave("sol-review", {"f.txt": _write(venv_only / "f.txt", "proof\n")}),
+    ]
+    for grave in graves:
+        assert work.write_evidence_tombstone(fleet.repo_b, grave)
+    shutil.rmtree(reused)
+    reused.mkdir()
+    (venv_only / "f.txt").unlink()
+    python = _write(venv_only / ".venv" / "bin" / "python", "venv\n")
+    answer = _apply(fleet.repo_b)
+    assert (answer["trashed"], answer["failed"]) == ({}, {})
+    assert reused.is_dir()
+    assert python.read_text(encoding="utf-8") == "venv\n"
+    assert _evidence_trash(fleet.repo_b, "lead-merge") == []
+    assert _evidence_trash(fleet.repo_b, "sol-review") == []
 
 
 def test_a_copy_filter_applies_only_the_stems_of_the_named_copies_including_verify_siblings(

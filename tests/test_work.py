@@ -2229,6 +2229,72 @@ def test_evidence_rm_adopt_missing_builds_the_record_from_peer_manifests_and_ref
     assert len(work.evidence_tombstones(repo)) == count
 
 
+def test_an_evidence_deletion_on_a_replica_is_refused_and_removes_nothing(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Evidence goes from the copy's home: a replica's record would trash what the home writes."""
+    path = _new("spike-mirror")
+    _make_replica(path)
+    _age(path)
+    proof = _write(_evidence(repo, "spike-mirror") / "proof.txt", "proof\n")
+    _ = capsys.readouterr()
+    for argv in (
+        [
+            "rm",
+            "spike-mirror",
+            "--discard",
+            "--evidence",
+        ],
+        ["rm", "spike-mirror", "--evidence"],
+        ["evidence-rm", "spike-mirror"],
+    ):
+        assert work.main(argv) == 1
+        error = capsys.readouterr().err
+        assert "spike-mirror here is a replica of rio-mac's copy" in error, argv
+        assert "evidence is deleted from the copy's home: run it there" in error, argv
+    assert path.is_dir()
+    assert proof.is_file()
+    assert work.evidence_tombstones(repo) == []
+    assert _evidence_entries(repo, "spike-mirror") == []
+    assert work.main(["rm", "spike-mirror", "--discard"]) == 0
+    assert proof.is_file()
+
+
+def test_evidence_restore_moves_the_files_back_with_a_fresh_mtime_no_record_holds(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restored file holds no recorded state, even one deleted in the second it comes back."""
+    now = int(time.time())
+    monkeypatch.setattr(time, "time", lambda: now + 0.5)
+    evidence = _evidence(repo, "lead-merge")
+    proof = _write(evidence / "proofs" / "out.txt", "proof\n")
+    top = _write(evidence / "top.txt", "top\n")
+    os.utime(proof, (1_700_000_000, 1_700_000_000))
+    os.utime(top, (now, now))
+    assert work.main(["evidence-rm", "lead-merge"]) == 0
+    (grave,) = work.evidence_tombstones(repo)
+    (entry,) = _evidence_entries(repo, "lead-merge")
+    _ = _write(evidence / "top.txt", "made since\n")
+    _ = capsys.readouterr()
+    assert work.main(["evidence-restore", "lead-merge"]) == 1
+    assert "evidence lead-merge already holds top.txt; nothing restored" in capsys.readouterr().err
+    assert sorted(work.evidence_files(entry)) == ["proofs/out.txt", "top.txt"]
+    (evidence / "top.txt").unlink()
+    assert work.main(["evidence-restore", entry.name, "--dry-run"]) == 0
+    assert sorted(work.evidence_files(entry)) == ["proofs/out.txt", "top.txt"]
+    assert work.main(["evidence-restore", entry.name]) == 0
+    assert not entry.exists()
+    restored = work.evidence_files(evidence)
+    assert restored == {"proofs/out.txt": (6, now), "top.txt": (4, now + 1)}
+    assert not [rel for rel, state in restored.items() if grave.matches(rel, *state)]
+    assert (evidence / "proofs" / "out.txt").read_text(encoding="utf-8") == "proof\n"
+    assert work.evidence_tombstones(repo) == [grave]
+    assert work.main(["evidence-restore", "lead-merge"]) == 1
+
+
 # --------------------------------------------------------------------------------------------
 # gc
 # --------------------------------------------------------------------------------------------
