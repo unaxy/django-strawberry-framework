@@ -140,15 +140,23 @@ two other machines hold is reported, for their own runs)
     peer holds unchanged (removed by hand: ``rm -rf`` deletes nothing fleet-wide)
     comes back, with a ``note`` naming ``work.py evidence-rm <stem> --adopt-missing``.
 
-    Main: commits only, never working-tree state. Each peer's ``main`` is fetched
+    Main: commits only, pulled, never pushed. Each peer's ``main`` is fetched
     into this repository's object store (no ref, no ``FETCH_HEAD``). A peer
-    strictly ahead fast-forwards this machine's main only while ``HEAD`` is
-    ``refs/heads/main``, no work.py ``land`` runs (its lock is held across the
-    fast-forward), no merge, rebase, cherry-pick, revert or bisect is in progress,
-    and ``git merge --ff-only`` accepts it (it refuses when a dirty path would
-    change). A peer behind is left to that peer's own run; diverged is reported,
-    never merged. Coexists with the Linux desktop's ``git-autosync`` (fast-forward
-    from origin while clean): both only fast-forward, and ``.work/`` is ignored.
+    strictly ahead fast-forwards this machine's main (never the peer's) only while
+    ``.work/land.lock`` is free (taken without waiting and held across the
+    guards and the fast-forward, so no work.py ``land`` starts in between), the
+    fleet is not stopped, ``HEAD`` is ``refs/heads/main``, no merge, rebase,
+    cherry-pick, revert or bisect is in progress, the index is not locked
+    (``index.lock``: another git process is writing it), and ``git merge --ff-only
+    --no-autostash`` accepts it. An uncommitted change (other sessions' work in the
+    shared checkout) is never stashed or overwritten: git refuses a fast-forward
+    that would change a dirty or untracked path, reported with those paths, and
+    every other uncommitted change survives the fast-forward as it was. A
+    fast-forward that changes ``uv.lock`` adds a ``note`` that the ``.venv`` is stale
+    (``uv sync --frozen``); no run touches ``.venv``. A peer behind is left to that
+    peer's own run; diverged is reported, one row per peer, never merged. Coexists
+    with the Linux desktop's ``git-autosync`` (fast-forward from origin while
+    clean): both only fast-forward, and ``.work/`` is ignored.
 
     Tombstones: ``.work/tombstones/`` file by file, both ways, before any copy is
     planned; union, create-only, never deleted by a sync (``work.py gc`` prunes
@@ -245,13 +253,17 @@ Commands
         replicas with freshness (``fresh``, ``stale``, ``changed``, ``syncing``)
         and conflicts; main ahead or behind per machine (commits a peer has and
         this machine lacks read ``unknown`` until a sync fetches them).
-    ``sync [--dry-run] [--machine M]... [--copy NAME]... [--main-only | --pins-only]``
+    ``sync [--dry-run] [--machine M]... [--copy NAME]... [--main-only | --pins-only | --timer]``
         Sync with every qualifying peer (or those ``--machine`` names: a row
         name, ssh alias or machine name). ``--copy`` limits the run to those copies
         (their pins and evidence) and leaves main alone; ``--main-only`` syncs
         main alone; ``--pins-only`` carries tombstones (evidence tombstones too, never
         applied) and the pins that never move (``save-N``, ``start``) both ways and
-        nothing else, so it takes seconds and fits a short timer.
+        nothing else; ``--timer`` (the timer's run) does what ``--pins-only`` does,
+        then main as a full sync does it (unless ``--copy``), each guard that holds
+        main and each peer main it cannot fetch a ``note``: its main rows never set the
+        exit code (a diverged main stays a ``conflict`` row in the log and exits 0,
+        since it lasts until someone merges by hand and would fail every tick).
         ``--dry-run`` writes nothing but fetches peers' main commits into the
         object store so it can say what a fast-forward would do.
     ``fetch-pins NAME --machine M [--dry-run]``
@@ -269,7 +281,7 @@ Commands
         without waiting for a replica. M needs the existing pin agent operations,
         not this new public command; ``--remote-scripts`` applies as above.
     ``schedule [--every SECONDS] [--install]``
-        Print this machine's timer for ``sync --pins-only --json`` every
+        Print this machine's timer for ``sync --timer --json`` every
         ``--every`` seconds (default 120, at least 30): a launchd agent on macOS,
         a systemd user service and timer on Linux, each logging to the checkout's
         ``.work/fleet-pins.log``.
@@ -289,13 +301,17 @@ Stopping
     machine (``resume`` clears it). While it is there the timer's shell line exits
     before any Python, ``sync``, ``fetch-pins`` and ``handoff`` refuse, the agent
     answers only its probe (which carries the reason, so peers skip the machine), and
-    a run that meets a stopped peer writes the flag on its own machine too.
+    a run that meets a stopped peer writes the flag on its own machine too. A flag
+    written while a run is under way stops its main pass: the fast-forward reads it
+    under ``.work/land.lock`` and leaves main where it is.
 
 Running it periodically
-    ``schedule --install`` (above) runs ``sync --pins-only`` every two minutes,
-    so every machine sees every save and every tombstone (no evidence file is
-    deleted there); the full ``sync`` (replicas, evidence and its deletions, main)
-    stays the maintainer's to run or time. A cron line
+    ``schedule --install`` (above) runs ``sync --timer`` every two minutes, so
+    every machine sees every save and every tombstone (no evidence file is deleted
+    there) and every machine's main converges on the fleet's newest by
+    fast-forward; a timer installed before ``--timer`` existed runs ``sync
+    --pins-only`` until ``schedule --install`` runs again. The full ``sync``
+    (replicas, evidence and its deletions) stays the maintainer's to run or time. A cron line
     (``*/10 * * * * cd ~/projects/django-strawberry-framework &&
     .venv/bin/python docs/fleet/scripts/fleet_sync.py sync --json >> ~/.cache/fleet-sync.log
     2>&1``), a
@@ -3692,45 +3708,126 @@ def main_relation(machine: Machine, *, fetch: bool) -> tuple[str, str]:
     return "behind", f"{machine.label} is {here_only} behind; its own run fast-forwards it"
 
 
-def fast_forward(target: str, *, dry_run: bool) -> tuple[str, str]:
-    """Fast-forward this machine's main to ``target`` under every guard; return the result."""
+#: The lock file ``git`` holds while it writes the index; another session's git is mid-write.
+INDEX_LOCK = "index.lock"
+#: The lockfile whose change leaves this checkout's ``.venv`` behind main.
+UV_LOCK = "uv.lock"
+#: The note a fast-forward that changed :data:`UV_LOCK` adds; nothing here touches ``.venv``.
+STALE_VENV = (
+    f"the fast-forward changed {UV_LOCK}: this checkout's .venv is stale; "
+    "run `uv sync --frozen` in it"
+)
+
+
+def main_blocked() -> str:
+    """Return why this checkout's main may not move now, else ``""``.
+
+    The fleet stopped, ``HEAD`` off ``refs/heads/main``, a merge, rebase, cherry-pick,
+    revert or bisect in progress, or the index locked by another git process. Read under
+    ``.work/land.lock`` (:func:`fast_forward`), so no ``land`` starts between this answer
+    and the fast-forward.
+    """
+    stopped = stop_reason(REPO_ROOT)
+    if stopped:
+        return f"the fleet is stopped ({stopped}): not fast-forwarded"
     branch = work._branch(REPO_ROOT)
     if branch != work.LANDING_BRANCH:
-        return (
-            "skip",
-            f"HEAD is {branch or 'detached'}, not {work.LANDING_BRANCH}: not fast-forwarded",
-        )
+        return f"HEAD is {branch or 'detached'}, not {work.LANDING_BRANCH}: not fast-forwarded"
     busy = [name for name in IN_PROGRESS if work._git_path(REPO_ROOT, name).exists()]
     if busy:
-        return "skip", f"{', '.join(busy)} in progress: not fast-forwarded"
+        return f"{', '.join(busy)} in progress: not fast-forwarded"
+    if work._git_path(REPO_ROOT, INDEX_LOCK).exists():
+        return f"the index is locked ({INDEX_LOCK}): not fast-forwarded"
+    return ""
+
+
+def refused_paths(stderr: str) -> list[str]:
+    """Return the paths a refused ``git merge`` lists (its tab-indented lines), in its order."""
+    return [line.strip() for line in stderr.splitlines() if line.startswith("\t")]
+
+
+@dataclasses.dataclass(frozen=True)
+class Forward:
+    """What one guarded fast-forward did: its outcome, the reason, and whether ``uv.lock`` moved."""
+
+    outcome: str
+    message: str
+    stale_venv: bool = False
+
+
+def fast_forward(target: str, *, dry_run: bool) -> Forward:
+    """Fast-forward this machine's main to ``target`` under every guard; return the result.
+
+    Pull-only: only this checkout's ``main`` moves, and only by ``git merge --ff-only``
+    (``--no-autostash``: an uncommitted change is never stashed). The guards
+    (:func:`main_blocked`) are read and the merge run while ``.work/land.lock`` is held,
+    taken without waiting (a ``land`` holding it skips the pass). Git refuses a
+    fast-forward that would change a path holding an uncommitted change (staged,
+    unstaged or untracked); the refusal is reported with those paths and nothing moves,
+    and every other uncommitted change survives the fast-forward as it was.
+    """
     if dry_run:
-        return "would", f"would fast-forward main to {target[:12]}"
+        if _lock_busy(work.work_dir(REPO_ROOT) / work.LAND_LOCK):
+            return Forward("skip", "a work.py land is in progress: not fast-forwarded")
+        blocked = main_blocked()
+        if blocked:
+            return Forward("skip", blocked)
+        return Forward("would", f"would fast-forward main to {target[:12]}")
     try:
         with work.land_lock(REPO_ROOT):
-            completed = _git_runner.run_git(REPO_ROOT, "merge", "--ff-only", "--quiet", target)
+            blocked = main_blocked()
+            if blocked:
+                return Forward("skip", blocked)
+            before = _local_main()
+            completed = _git_runner.run_git(
+                REPO_ROOT,
+                "merge",
+                "--ff-only",
+                "--no-autostash",
+                "--quiet",
+                target,
+                env={"LC_ALL": "C"},
+            )
     except work.WorkError:
-        return "skip", "a work.py land is in progress: not fast-forwarded"
+        return Forward("skip", "a work.py land is in progress: not fast-forwarded")
     if completed.returncode != 0:
-        return "skip", f"git merge --ff-only refused: {_last_line(completed.stderr.encode())}"
-    return "synced", f"fast-forwarded main to {target[:12]}"
+        paths = refused_paths(completed.stderr)
+        reason = (
+            f"uncommitted changes to {', '.join(paths)} would be overwritten"
+            if paths
+            else _last_line(completed.stderr.encode())
+        )
+        return Forward("skip", f"git merge --ff-only refused: {reason}")
+    moved = _git_runner.run_git(REPO_ROOT, "diff", "--quiet", before, target, "--", UV_LOCK)
+    stale = moved.returncode != 0
+    return Forward("synced", f"fast-forwarded main to {target[:12]}", stale_venv=stale)
 
 
-def sync_main(peers: Sequence[Machine], *, dry_run: bool) -> list[Row]:
-    """Fast-forward main from each peer strictly ahead; report the rest."""
+def sync_main(peers: Sequence[Machine], *, dry_run: bool, timer: bool = False) -> list[Row]:
+    """Fast-forward main from each peer strictly ahead; report the rest.
+
+    Each peer gets one row. A ``timer`` run (``sync --timer``) reports a guard that held
+    main, or a peer's main it could not fetch, as a ``note``; a diverged main stays a
+    ``conflict`` row either way.
+    """
+    held = "note" if timer else "skip"
     rows: list[Row] = []
     for machine in peers:
         state, detail = main_relation(machine, fetch=True)
         result = {
             "same": "fresh",
             "behind": "fresh",
-            "unknown": "skip",
+            "unknown": held,
             "diverged": "conflict",
         }
         if state != "ahead" or machine.probe is None:
-            rows.append(Row("main", machine.label, result.get(state, "skip"), detail))
+            rows.append(Row("main", machine.label, result.get(state, held), detail))
             continue
-        outcome, message = fast_forward(machine.probe.main, dry_run=dry_run)
-        rows.append(Row("main", machine.label, outcome, f"{detail}: {message}"))
+        forward = fast_forward(machine.probe.main, dry_run=dry_run)
+        outcome = held if forward.outcome == "skip" else forward.outcome
+        rows.append(Row("main", machine.label, outcome, f"{detail}: {forward.message}"))
+        if forward.stale_venv:
+            rows.append(Row("main", machine.label, "note", STALE_VENV))
     return rows
 
 
@@ -4115,9 +4212,11 @@ def cmd_sync(args: _Args) -> int:
     lock = contextlib.nullcontext("") if args.dry_run else holding(REPO_ROOT)
     try:
         with lock as local_token:
-            if args.pins_only:
+            if args.pins_only or args.timer:
                 for machine in peers:
                     rows += sync_pins_with_peer(here, machine, local_token, args)
+                if args.timer and not args.copy:
+                    rows += sync_main(peers, dry_run=args.dry_run, timer=True)
             else:
                 if not args.main_only:
                     for machine in peers:
@@ -4128,7 +4227,8 @@ def cmd_sync(args: _Args) -> int:
         rows.append(Row("sync", here.label, "skip", str(error)))
     document = {"machines": machine_rows(here, others), "rows": [row.as_json() for row in rows]}
     _render(document, as_json=args.json)
-    return 1 if any(row.result in TROUBLE for row in rows) else 0
+    counted = [row for row in rows if not (args.timer and row.subject == "main")]
+    return 1 if any(row.result in TROUBLE for row in counted) else 0
 
 
 def cmd_fetch_pins(args: _Args) -> int:
@@ -4206,7 +4306,7 @@ SCHEDULE_TOOLS = (
 )
 #: The log every scheduled run appends to, under the checkout's ``.work/`` (git-ignored).
 SCHEDULE_LOG = "fleet-pins.log"
-#: Seconds between scheduled ``sync --pins-only`` runs unless ``--every`` says otherwise.
+#: Seconds between scheduled ``sync --timer`` runs unless ``--every`` says otherwise.
 SCHEDULE_EVERY = 120
 #: Seconds a scheduled run may take before it is killed (a stuck or looping run).
 SCHEDULE_TIME_LIMIT = 900
@@ -4232,7 +4332,7 @@ def schedule_line() -> str:
     :data:`SCHEDULE_TIME_LIMIT` seconds (``perl``'s ``alarm`` survives the ``exec``).
     """
     python = shlex.quote(str(REPO_ROOT / ".venv" / "bin" / "python"))
-    run = f"{python} docs/fleet/scripts/fleet_sync.py sync --pins-only --json"
+    run = f"{python} docs/fleet/scripts/fleet_sync.py sync --timer --json"
     limit = f"perl -e 'alarm shift @ARGV; exec @ARGV or die' {SCHEDULE_TIME_LIMIT}"
     return (
         f"cd {shlex.quote(str(REPO_ROOT))} || exit 1; "
@@ -4243,7 +4343,7 @@ def schedule_line() -> str:
 
 
 def schedule_files(home: Path, every: int, platform: str = sys.platform) -> dict[Path, str]:
-    """Return the timer files that run ``sync --pins-only --json`` every ``every`` seconds.
+    """Return the timer files that run ``sync --timer --json`` every ``every`` seconds.
 
     A launchd agent on macOS, a systemd user service and timer on Linux; each runs the
     checkout's ``.venv`` Python from the checkout and appends to ``.work/fleet-pins.log``;
@@ -4353,7 +4453,7 @@ def cmd_schedule(args: _Args) -> int:
         _ = path.write_text(text, encoding="utf-8")
         print(f"wrote {path}")
     load_schedule(commands)
-    print(f"installed: sync --pins-only every {args.every}s")
+    print(f"installed: sync --timer every {args.every}s")
     return 0
 
 
@@ -4646,6 +4746,7 @@ class _Args(argparse.Namespace):
     copy: list[str]
     main_only: bool
     pins_only: bool
+    timer: bool
     every: int
     install: bool
     name: str
@@ -4698,7 +4799,12 @@ def build_parser() -> argparse.ArgumentParser:
     _ = sync_scope.add_argument(
         "--pins-only",
         action="store_true",
-        help="saves and tombstones alone (seconds; for a timer)",
+        help="saves and tombstones alone (seconds)",
+    )
+    _ = sync_scope.add_argument(
+        "--timer",
+        action="store_true",
+        help="saves, tombstones and this machine's main fast-forward (the 2-minute timer's run)",
     )
 
     fetch = commands.add_parser(

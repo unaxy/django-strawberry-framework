@@ -2257,6 +2257,190 @@ def test_a_copy_run_leaves_main_alone(fleet: Fleet) -> None:
     assert _git_out(fleet.repo_a, "rev-parse", "HEAD").strip() == before
 
 
+def _main(repo: Path) -> str:
+    return _git_out(repo, "rev-parse", "refs/heads/main").strip()
+
+
+def _after_pins(patch: pytest.MonkeyPatch, then: Callable[[], object]) -> None:
+    """Run ``then`` after each peer's pin pass, before the timer run's main pass."""
+    real = fleet_sync.sync_pins_with_peer
+
+    def wrapped(
+        here: fleet_sync.Machine,
+        peer: fleet_sync.Machine,
+        local_token: str,
+        args: fleet_sync._Args,
+    ) -> list[fleet_sync.Row]:
+        rows = real(here, peer, local_token, args)
+        _ = then()
+        return rows
+
+    patch.setattr(fleet_sync, "sync_pins_with_peer", wrapped)
+
+
+def test_the_timer_run_carries_saves_and_fast_forwards_main_where_pins_only_does_not(
+    fleet: Fleet,
+) -> None:
+    copy = _new()
+    _ = _write(copy / "saved.txt", "saved on a\n")
+    assert work.main(["save", NAME]) == 0
+    before = _main(fleet.repo_a)
+    ahead = _commit(fleet.repo_b, "new.txt", "from b\n")
+    code, document = fleet.run("sync", "--pins-only")
+    assert code == 0, document
+    assert _main(fleet.repo_a) == before
+    code, document = fleet.run("sync", "--timer", "--dry-run")
+    assert code == 0, document
+    assert any("would fast-forward main" in detail for _r, _s, detail in _results(document))
+    assert _main(fleet.repo_a) == before
+    code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    assert _main(fleet.repo_a) == ahead
+    assert (fleet.repo_a / "new.txt").read_text() == "from b\n"
+    assert _main(fleet.repo_b) == ahead
+    assert work.pins(fleet.repo_b)[NAME] == work.pins(fleet.repo_a)[NAME]
+    assert ("note", "main", fleet_sync.STALE_VENV) not in _results(document)
+
+
+def test_a_land_holding_its_lock_skips_the_timers_main_pass_with_a_note(fleet: Fleet) -> None:
+    before = _main(fleet.repo_a)
+    _ = _commit(fleet.repo_b, "new.txt", "from b\n")
+    with contextlib.ExitStack() as stack:
+        _after_pins(fleet.monkeypatch, lambda: stack.enter_context(work.land_lock(fleet.repo_a)))
+        code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    assert _main(fleet.repo_a) == before
+    assert any(
+        result == "note" and subject == "main" and "land is in progress" in detail
+        for result, subject, detail in _results(document)
+    )
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "detached",
+        "merge",
+        "bisect",
+        "index-lock",
+    ],
+)
+def test_the_timer_leaves_main_alone_off_main_mid_operation_or_with_the_index_locked(
+    fleet: Fleet,
+    state: str,
+) -> None:
+    _ = _commit(fleet.repo_b, "new.txt", "from b\n")
+    expected = {
+        "detached": "not refs/heads/main",
+        "merge": "MERGE_HEAD in progress",
+        "bisect": "BISECT_LOG in progress",
+        "index-lock": "the index is locked",
+    }[state]
+    if state == "detached":
+        _ = _git_out(fleet.repo_a, "checkout", "-q", "--detach")
+    elif state == "merge":
+        _ = _git_out(fleet.repo_a, "checkout", "-q", "--detach")
+        side = _commit(fleet.repo_a, "side.txt", "side\n")
+        _ = _git_out(fleet.repo_a, "checkout", "-q", "main")
+        _ = _git_out(fleet.repo_a, "merge", "-q", "--no-commit", "--no-ff", side)
+    elif state == "bisect":
+        _ = _git_out(fleet.repo_a, "bisect", "start")
+    else:
+        _ = _write(fleet.repo_a / ".git" / "index.lock", "")
+    main, head = _main(fleet.repo_a), _git_out(fleet.repo_a, "rev-parse", "HEAD").strip()
+    code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    assert (_main(fleet.repo_a), _git_out(fleet.repo_a, "rev-parse", "HEAD").strip()) == (
+        main,
+        head,
+    )
+    assert any(
+        result == "note" and subject == "main" and expected in detail
+        for result, subject, detail in _results(document)
+    ), document
+
+
+def test_the_timer_fast_forward_keeps_every_uncommitted_change_it_does_not_touch(
+    fleet: Fleet,
+) -> None:
+    ahead = _commit(fleet.repo_b, "new.txt", "from b\n")
+    _ = _write(fleet.repo_a / "gone.txt", "unstaged here\n")
+    package = fleet.repo_a / "django_strawberry_framework" / "__init__.py"
+    _ = _write(package, "VALUE = 2\n")
+    _ = _git_out(fleet.repo_a, "add", str(package))
+    _ = _write(fleet.repo_a / "untracked.txt", "untracked here\n")
+    code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    assert _main(fleet.repo_a) == ahead
+    assert (fleet.repo_a / "gone.txt").read_text() == "unstaged here\n"
+    assert package.read_text() == "VALUE = 2\n"
+    staged = _git_out(fleet.repo_a, "diff", "--cached", "--name-only").split()
+    assert staged == ["django_strawberry_framework/__init__.py"]
+    assert (fleet.repo_a / "untracked.txt").read_text() == "untracked here\n"
+
+
+def test_a_dirty_path_the_fast_forward_would_change_blocks_it_with_a_note_naming_it(
+    fleet: Fleet,
+) -> None:
+    _ = _git_out(fleet.repo_a, "config", "merge.autoStash", "true")
+    _ = _commit(fleet.repo_b, "gone.txt", "changed on b\n")
+    before = _main(fleet.repo_a)
+    _ = _write(fleet.repo_a / "gone.txt", "dirty here\n")
+    code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    assert _main(fleet.repo_a) == before
+    assert (fleet.repo_a / "gone.txt").read_text() == "dirty here\n"
+    assert not _git_out(fleet.repo_a, "stash", "list").strip()
+    assert any(
+        result == "note"
+        and subject == "main"
+        and "uncommitted changes to gone.txt would be overwritten" in detail
+        for result, subject, detail in _results(document)
+    ), document
+
+
+def test_a_diverged_main_is_one_conflict_row_per_peer_and_leaves_the_timer_exit_clean(
+    fleet: Fleet,
+) -> None:
+    _ = _commit(fleet.repo_b, "b.txt", "b\n")
+    here = _commit(fleet.repo_a, "a.txt", "a\n")
+    code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    diverged = [row for row in _results(document) if row[1] == "main" and "diverged" in row[2]]
+    assert [result for result, _s, _d in diverged] == ["conflict"]
+    assert _main(fleet.repo_a) == here
+    assert fleet.run("sync", "--main-only")[0] == 1
+
+
+def test_a_fast_forward_that_changes_uv_lock_adds_a_stale_venv_note(fleet: Fleet) -> None:
+    ahead = _commit(fleet.repo_b, "uv.lock", "version = 1\n")
+    venv = sorted(str(path) for path in (fleet.repo_a / ".venv").rglob("*"))
+    code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    assert _main(fleet.repo_a) == ahead
+    assert ("note", "main", fleet_sync.STALE_VENV) in _results(document)
+    assert sorted(str(path) for path in (fleet.repo_a / ".venv").rglob("*")) == venv
+
+
+def test_the_stop_flag_stops_the_timer_run_and_one_written_mid_run_its_main_pass(
+    fleet: Fleet,
+) -> None:
+    before = _main(fleet.repo_a)
+    _ = _commit(fleet.repo_b, "new.txt", "from b\n")
+    fleet_sync.write_stop(fleet.repo_a, "halt")
+    assert fleet.run("sync", "--timer")[0] == 2
+    assert _main(fleet.repo_a) == before
+    (fleet.repo_a / ".work" / fleet_sync.STOP_FLAG).unlink()
+    _after_pins(fleet.monkeypatch, lambda: fleet_sync.write_stop(fleet.repo_a, "mid run"))
+    code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    assert _main(fleet.repo_a) == before
+    assert any(
+        result == "note" and "the fleet is stopped (mid run)" in detail
+        for result, _s, detail in _results(document)
+    ), document
+
+
 # --------------------------------------------------------------------------------------------
 # Locks
 # --------------------------------------------------------------------------------------------
@@ -2406,20 +2590,31 @@ def test_sync_pins_only_carries_saves_both_ways_and_nothing_else(fleet: Fleet) -
     assert not [row for row in _results(document) if row[0] != "skip"]
 
 
-def test_sync_pins_only_and_main_only_cannot_be_combined(fleet: Fleet) -> None:
+@pytest.mark.parametrize(
+    "flags",
+    [("--pins-only", "--main-only"), ("--timer", "--pins-only"), ("--timer", "--main-only")],
+)
+def test_the_sync_scope_flags_cannot_be_combined(fleet: Fleet, flags: tuple[str, str]) -> None:
     with pytest.raises(SystemExit) as raised:
-        _ = fleet.run("sync", "--pins-only", "--main-only")
+        _ = fleet.run("sync", *flags)
     assert raised.value.code == 2
 
 
-def test_the_macos_schedule_is_a_launchd_agent_running_sync_pins_only(tmp_path: Path) -> None:
+def test_the_timer_line_runs_sync_timer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fleet_sync, "REPO_ROOT", tmp_path)
+    line = fleet_sync.schedule_line()
+    assert "docs/fleet/scripts/fleet_sync.py sync --timer --json" in line
+    assert "--pins-only" not in line
+
+
+def test_the_macos_schedule_is_a_launchd_agent_running_sync_timer(tmp_path: Path) -> None:
     files = fleet_sync.schedule_files(tmp_path, 120, "darwin")
     [(path, text)] = files.items()
     assert path == tmp_path / "Library" / "LaunchAgents" / f"{fleet_sync.SCHEDULE_LABEL}.plist"
     agent = json_object(_load_plist(text.encode()))
     program = json_list(agent, "ProgramArguments")
     assert program[:2] == ["/bin/sh", "-c"]
-    assert "docs/fleet/scripts/fleet_sync.py sync --pins-only --json" in str(program[2])
+    assert "docs/fleet/scripts/fleet_sync.py sync --timer --json" in str(program[2])
     assert agent["StartInterval"] == 120
     assert agent["WorkingDirectory"] == str(fleet_sync.REPO_ROOT)
     assert agent["StandardOutPath"] == str(fleet_sync.REPO_ROOT / ".work" / "fleet-pins.log")
@@ -2435,7 +2630,7 @@ def test_the_linux_schedule_is_a_systemd_user_timer(tmp_path: Path) -> None:
     units = tmp_path / ".config" / "systemd" / "user"
     service = files[units / f"{fleet_sync.SCHEDULE_UNIT}.service"]
     timer = files[units / f"{fleet_sync.SCHEDULE_UNIT}.timer"]
-    assert "sync --pins-only --json" in service
+    assert "sync --timer --json" in service
     assert "OnUnitActiveSec=300s" in timer
     assert f">> {fleet_sync.REPO_ROOT / '.work' / 'fleet-pins.log'} 2>&1" in service
     assert fleet_sync.schedule_commands(files, "linux")[-1][-2:] == [
@@ -2460,7 +2655,7 @@ def test_schedule_prints_by_default_and_installs_only_when_asked(
     monkeypatch.setattr(fleet_sync, "load_schedule", record)
     assert fleet_sync.main(["schedule"]) == 0
     printed = capsys.readouterr().out
-    assert "--pins-only" in printed
+    assert "sync --timer --json" in printed
     assert not list(tmp_path.rglob("*"))
     assert not ran
     assert fleet_sync.main(["schedule", "--every", "10"]) == 2
