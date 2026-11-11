@@ -2,7 +2,7 @@
 
 ## North Star
 
-A scalable workspace where tens of agents, from any provider, on any fleet machine (rio-air, rio-ubu, rio-mini), with no prior context, work at the same time, each only through a synced private copy that lands cleanly, so the shared checkout changes only by `land` plus the maintainer's commit, and every machine sees every copy.
+A scalable workspace where tens of agents, from any provider, on any fleet machine (rio-air, rio-ubu, rio-mini, rio-bee), with no prior context, work at the same time, each only through a synced private copy that lands cleanly, so the shared checkout changes only by `land` plus the maintainer's commit, and every machine sees every copy.
 
 ## Checks
 
@@ -17,8 +17,8 @@ Each check is a target with its measure; the status is what the last audit showe
 
 ## References
 
-- rule `AGENTS.md` (first line) copies `START.md` "Private working copies" sync `START.md` "Syncing the fleet" machines `docs/fleet/MACHINES.md` `docs/fleet/machines.json` muse `docs/fleet/MUSE.md`
-- work `scripts/work.py` sync `scripts/fleet_sync.py` stop `scripts/fleet_stop.py` registry `scripts/fleet.py` picker `scripts/load_balancing.py` locks `scripts/_locks.py` flows `scripts/workspace.py`
+- rule `AGENTS.md` (first line) copies `START.md` "Private working copies" sync `START.md` "Syncing the fleet" machines `docs/fleet/MACHINES.md` `docs/fleet/machines.json` setup `docs/fleet/SETUP.md` muse `docs/fleet/MUSE.md`
+- work `scripts/work.py` sync `scripts/fleet_sync.py` stop `scripts/fleet_stop.py` setup `scripts/fleet_setup.py` registry `scripts/fleet.py` picker `scripts/load_balancing.py` locks `scripts/_locks.py` flows `scripts/workspace.py`
 - guard `scripts/shared_checkout_guard.py` edit hook `.claude/settings.json` pytest guard `conftest.py`
 
 <!-- LINK DEFINITIONS -->

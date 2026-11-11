@@ -73,6 +73,29 @@
       "aliases": [
         "Rios-Mac-mini"
       ]
+    },
+    {
+      "name": "rio-bee",
+      "ssh": "rio-bee",
+      "os": "linux",
+      "repo": "~/projects/django-strawberry-framework",
+      "weight": {
+        "light": 0.4,
+        "heavy": 0.2
+      },
+      "floors": {
+        "light": {
+          "min_mem_available_gib": 2,
+          "min_disk_free_gib": 6,
+          "max_psi_memory_full_avg10": 5
+        },
+        "heavy": {
+          "min_mem_available_gib": 3,
+          "min_disk_free_gib": 12,
+          "max_psi_memory_full_avg10": 5
+        }
+      },
+      "aliases": []
     }
   ]
 }
