@@ -26,7 +26,7 @@ import uuid
 import warnings
 import zoneinfo
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn, TypeVar
@@ -187,6 +187,7 @@ from django_strawberry_framework.utils.querysets import (
     _where_tree_defect,
     apply_type_visibility_async,
     apply_type_visibility_sync,
+    base_queryset,
     coerce_field_value_or_none,
     expand_relation_order,
     identity_key,
@@ -199,6 +200,7 @@ from django_strawberry_framework.utils.querysets import (
     reject_async_in_sync_context,
     reject_async_iterable_in_sync_context,
     reject_awaitable_sync_source,
+    related_queryset,
     run_in_one_sync_boundary,
     truncates_to_integer,
     visible_related_object,
@@ -378,6 +380,71 @@ def test_initial_queryset_uses_default_manager() -> None:
     qs = initial_queryset(_sync_type())
     assert isinstance(qs, models.QuerySet)
     assert qs.model is Category
+
+
+_MANAGER_SHAPES = ["from_queryset", "hand_written", "polymorphic"]
+_ManagerShape = Callable[[type[models.Model], str, str], AbstractContextManager[type]]
+
+
+def _shelves_one_hidden() -> None:
+    """Shelves ``aa-ok`` and ``zz-hidden`` on one branch."""
+    branch = Branch.objects.create(name="Shaped")
+    Shelf.objects.create(branch=branch, code="aa-ok")
+    Shelf.objects.create(branch=branch, code="zz-hidden")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", _MANAGER_SHAPES)
+def test_related_queryset_is_every_row_in_the_default_manager_class(
+    shape: str,
+    default_manager_shape: _ManagerShape,
+) -> None:
+    """A relation's seed is the default manager's ``QuerySet`` class over every row.
+
+    The manager's own ``get_queryset`` hides ``zz-hidden``; the seed keeps its
+    class (and a class's ``__init__`` state) and drops its filter, as Django's
+    join across a relation reads no manager.
+    """
+    _shelves_one_hidden()
+    with default_manager_shape(Shelf, shape, "code") as queryset_class:
+        rows = related_queryset(Shelf)
+
+        assert truth.class_of(rows) is queryset_class
+        assert sorted(rows.values_list("code", flat=True)) == ["aa-ok", "zz-hidden"]
+        assert list(base_queryset(Shelf).values_list("code", flat=True)) == ["aa-ok"]
+        assert read_attr(rows, "shape_state", None) is (True if shape == "polymorphic" else None)
+
+
+@pytest.mark.django_db
+def test_related_queryset_reads_no_filtering_base_manager(
+    default_manager_shape: _ManagerShape,
+) -> None:
+    """A ``Meta.base_manager_name`` that filters is not read: the seed is the join's rows."""
+    _shelves_one_hidden()
+    with default_manager_shape(Shelf, "base", "code"):
+        rows = related_queryset(Shelf)
+
+        assert truth.class_of(rows) is models.QuerySet
+        assert sorted(rows.values_list("code", flat=True)) == ["aa-ok", "zz-hidden"]
+        assert list(Shelf._base_manager.values_list("code", flat=True)) == ["aa-ok"]
+
+
+def test_related_queryset_pins_the_requested_alias_else_the_managers() -> None:
+    """``using`` pins the seed; unpinned it keeps the manager's own (unrouted) alias."""
+    assert queryset_db(related_queryset(Shelf, using="other")) == "other"
+    assert queryset_db(related_queryset(Shelf)) is None
+
+
+def test_related_queryset_refuses_an_abstract_model() -> None:
+    """An abstract model has no default manager: the seed names it, as ``base_queryset`` does."""
+
+    class AbstractShelf(models.Model):
+        class Meta:
+            abstract = True
+            app_label = "library"
+
+    with pytest.raises(ConfigurationError, match=r"^AbstractShelf is an abstract model"):
+        related_queryset(AbstractShelf)
 
 
 # ---------------------------------------------------------------------------

@@ -148,17 +148,19 @@ itself composes onto (the cascade's source included), is a framework-owned plain
 `django.db.models.QuerySet`: the consumer's executable override dispatch (the
 subclass identity), which is the leak vector, is dropped there. The hook's
 INPUT keeps the source's own class (the class behind the model's default manager
-for every framework-seeded read), constructed as Django's `QuerySet._clone`
-constructs one and given the same validated state, so a hook can call its
-project `QuerySet` methods. Nothing leaks through it: the framework calls only
-`.using()` on that object (the write-pipeline pin) and re-seals whatever the
-hook returns, and a project `QuerySet` class is trusted application Python
-(GOAL "Trust boundary"). Attributes a project class sets on an instance outside
-Django's constructor arguments are not carried. The cascade's OUTPUT is restated
-the same way: `apply_cascade_permissions` seals its source plain and narrows that
-plain rebuild, then returns the narrowed state as the source's own class, so a
-project method chains after the cascade while no consumer `filter` ever runs on
-the cascade predicate.
+for every framework-seeded read; a read across a relation starts from every row
+in that class, the manager's own `get_queryset` override contributing only its
+class there, no filter, annotation, ordering or other query state), constructed
+as Django's `QuerySet._clone` constructs one and given the same validated state,
+so a hook can call its project `QuerySet` methods. Nothing leaks through it: the
+framework calls only `.using()` on that object (the write-pipeline pin) and
+re-seals whatever the hook returns, and a project `QuerySet` class is trusted
+application Python (GOAL "Trust boundary"). Attributes a project class sets on
+an instance outside Django's constructor arguments are not carried. The
+cascade's OUTPUT is restated the same way: `apply_cascade_permissions` seals its
+source plain and narrows that plain rebuild, then returns the narrowed state as
+the source's own class, so a project method chains after the cascade while no
+consumer `filter` ever runs on the cascade predicate.
 
 Reading state without dispatch is not the same as USING it without dispatch, so
 every `QuerySet.__dict__` field the seal carries forward — `_db`, `_hints`,

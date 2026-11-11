@@ -19,7 +19,7 @@ shipped schema never declares; edge classification over real relation
 shapes; ``fields=`` scoping (shipped hooks pass ``fields=None`` or a fixed
 subset); SQL-shape of sealed cascade internals a live capture cannot uniquely
 show; thread / task ``ContextVar`` isolation; the async ``aapply`` off-loop
-contract; identity-hook default-manager composition over products types
+contract; identity-hook target composition over products types
 (the four root products types declare custom ``get_queryset`` hooks;
 ``ItemHoldType`` is identity but no cascading edge targets it); mixed-actor
 cascade-then-gate composition (anonymous-narrowed queryset + staff
@@ -27,7 +27,7 @@ cascade-then-gate composition (anonymous-narrowed queryset + staff
 ``strictness="raise"`` cascade silence is live
 (``test_list_field_api.py::test_cascaded_item_list_stays_silent_under_strictness_raise``).
 The MTI parent-link row cascade, the nullable-edge ``IS NULL`` disjunct and a
-filtering proxy default manager as the cascade base are live in
+cascade over a proxy whose filtering default manager hides nothing there are live in
 ``examples/fakeshop/test_query/test_library_inheritance_api.py``.
 
 Fixture mechanics
@@ -71,6 +71,7 @@ from unittest import mock
 import pytest
 import pytest_django
 from apps.library.models import (
+    Book,
     Branch,
     CirculationDesk,
     Genre,
@@ -208,9 +209,9 @@ def _make_type(
 
     ``get_queryset`` (when given) becomes the type's hook so
     ``has_custom_get_queryset()`` reports ``True``; omitting it leaves the identity
-    default (an identity-hook target still composes its registered
-    ``_default_manager`` subquery - registration, not hook customization, is
-    what puts a target inside the visibility contract). The default ``fields=("id",)``
+    default (an identity-hook target still composes a subquery over every
+    target row - registration, not hook customization, is what puts a target
+    inside the visibility contract). The default ``fields=("id",)``
     keeps the *selected* surface scalar-only so finalization never has to resolve a
     relation field to a (possibly-unregistered) target type - the cascade walks the
     model's ``_meta.get_fields()`` edges regardless of what the type exposes (the
@@ -819,8 +820,8 @@ def test_mti_multiple_parent_links_both_cascade() -> None:
     names = frozenset(f.name for f in _edge_plan(MtiBoth).cascadable)
     assert {"mtileftbase_ptr", "mtirightbase_ptr"} <= names
 
-    # Both parent links compose a subquery (identity hooks included - the
-    # registered parents' default managers are the visibility base).
+    # Both parent links compose a subquery (identity hooks included -
+    # registration puts the parents inside the visibility contract).
     result = apply_cascade_permissions(both_type, MtiBoth.objects.all(), _INFO)
     assert str(result.query).count("IN (SELECT") == 2
 
@@ -907,15 +908,18 @@ def test_multi_db_subquery_pinned_to_caller_alias() -> None:
 
 
 @pytest.mark.django_db(transaction=True)
-def test_identity_hook_targets_compose_default_manager(
+def test_identity_hook_targets_compose_every_target_row(
     django_assert_num_queries: pytest_django.DjangoAssertNumQueries,
 ) -> None:
-    """A registered identity-hook target STILL composes its ``_default_manager``.
+    """A registered identity-hook target STILL composes a subquery over its rows.
 
-    A ``has_custom_get_queryset() is False`` skip would silently bypass a
-    registered type whose filtered ``_default_manager`` IS its visibility policy
-    (the ``VisibleBranch`` proxy, whose row-level effect is
-    ``test_library_inheritance_api.py::test_signage_on_a_city_less_branch_is_hidden_by_the_proxy_default_manager``).
+    Registration, not a custom hook, puts a target inside the visibility
+    contract, so a ``has_custom_get_queryset() is False`` skip would bypass a
+    registered target, and an identity target's subquery still drops a row
+    whose key names no target row. The subquery reads every target row
+    (``utils/querysets.py::related_queryset``): a filtered ``_default_manager``
+    is not a visibility policy (the row-level effect is
+    ``test_library_inheritance_api.py::test_signage_cascade_over_an_identity_branch_type_reads_every_branch``).
     Every registered target contributes a subquery - and the subqueries
     still compile into the caller's single ``SELECT``, so identity composition
     adds zero query round-trips. The four root products types declare custom
@@ -940,7 +944,7 @@ def test_identity_hook_targets_compose_default_manager(
     # unregistered here so the transitive edge contributes nothing).
     assert str(result.query).count("IN (SELECT") == 2
     # ...at zero added round-trips: one SELECT evaluates the whole shape, and the
-    # identity subqueries (unfiltered default managers) preserve every row.
+    # identity subqueries (every target row) preserve every row.
     with django_assert_num_queries(1):
         assert list(result) == [entry]
 
@@ -969,7 +973,7 @@ def test_two_edge_cascade_issues_a_single_filter_call() -> None:
     The walk accumulates the per-edge ``Q`` objects and narrows once after the
     loop, so the earlier edges' subqueries are cloned exactly once instead of
     once per further edge. The composed SQL stays pinned by
-    ``test_identity_hook_targets_compose_default_manager``.
+    ``test_identity_hook_targets_compose_every_target_row``.
     """
     _make_type("CountItemType", Item)  # identity defaults - composition only
     _make_type("CountPropertyType", Property)
@@ -1065,7 +1069,7 @@ def test_secondary_type_never_cascade_target() -> None:
     """``registry.get`` returns the primary; a stricter secondary hook never cascades."""
     # Category has a permissive PRIMARY (identity) and a stricter SECONDARY that
     # would hide rows. The Item->Category edge resolves via ``registry.get`` to the
-    # PRIMARY: the identity primary composes its (unfiltered) default manager, so
+    # PRIMARY: the identity primary composes every Category row, so
     # the subquery is present but the stricter secondary hook does NOT narrow.
     _make_type("CatPrimaryType", Category, primary=True)  # identity, primary
     _make_type(
@@ -1084,7 +1088,7 @@ def test_secondary_type_never_cascade_target() -> None:
     services.seed_public_category_with_item()
 
     result = apply_cascade_permissions(item_type, Item.objects.all(), _INFO)
-    # Resolved through the permissive primary (identity default manager): the
+    # Resolved through the permissive primary (identity hook): the
     # subquery composes, and the secondary's ``qs.none()`` never applies - the
     # row survives (a secondary-narrowed walk would return zero rows).
     assert "IN (SELECT" in str(result.query)
@@ -1331,6 +1335,50 @@ def test_reentrant_zero_edge_cascade_returns_the_sources_queryset_class() -> Non
         assert seen == [_ReNodeQuerySet]
         assert truth.class_of(result) is _ReNodeQuerySet
         assert sorted(result.values_list("name", flat=True)) == ["hidden", "keeps", "shown"]
+
+
+_ManagerShape: TypeAlias = Callable[
+    [type[models.Model], str, str],
+    contextlib.AbstractContextManager[type],
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", ["from_queryset", "hand_written", "polymorphic"])
+def test_cascade_edge_hook_reads_every_target_row_in_the_default_manager_class(
+    shape: str,
+    default_manager_shape: _ManagerShape,
+) -> None:
+    """A cascade edge runs the target hook over every row, in the class its manager returns.
+
+    ``Shelf``'s default manager hides ``zz-hidden``; the hooked ``Shelf`` type
+    returns its input, so the book on the hidden shelf stays, as ``book.shelf``
+    loads that shelf.
+    """
+    branch = Branch.objects.create(name="Shaped")
+    shown = Shelf.objects.create(branch=branch, code="aa-ok")
+    hidden = Shelf.objects.create(branch=branch, code="zz-hidden")
+    Book.objects.create(title="B-PUB", shelf=shown)
+    Book.objects.create(title="B-HID", shelf=hidden)
+    seen: list[tuple[type, tuple[str, ...]]] = []
+
+    def shelf_hook(
+        _cls: type[DjangoType],
+        qs: models.QuerySet[models.Model],
+        _info: object,
+    ) -> models.QuerySet[models.Model]:
+        seen.append((truth.class_of(qs), tuple(sorted(qs.values_list("code", flat=True)))))
+        return qs
+
+    _make_type("ShapedShelfType", Shelf, get_queryset=shelf_hook)
+    book_type = _make_type("ShapedBookType", Book)
+    finalize_django_types()
+
+    with default_manager_shape(Shelf, shape, "code") as queryset_class:
+        result = apply_cascade_permissions(book_type, Book.objects.all(), _INFO, fields=["shelf"])
+
+        assert sorted(result.values_list("title", flat=True)) == ["B-HID", "B-PUB"]
+    assert seen == [(queryset_class, ("aa-ok", "zz-hidden"))]
 
 
 def _restatement_state(queryset: models.QuerySet[_CtParent, object]) -> dict[str, object]:
@@ -2259,8 +2307,8 @@ def test_fields_valid_but_unregistered_target_accepted() -> None:
     the name validates clean and the walk contributes nothing (no raise, no
     subquery) - there is no visibility policy to apply. Consistent with
     ``fields=None``. (A registered IDENTITY-hook target is the opposite: it
-    composes its default manager - see
-    ``test_identity_hook_targets_compose_default_manager``.)
+    composes a subquery over every target row - see
+    ``test_identity_hook_targets_compose_every_target_row``.)
     """
     entry_type = _make_type("HooklessEntryType", Entry)
     finalize_django_types()

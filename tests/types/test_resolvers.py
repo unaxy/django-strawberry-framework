@@ -20,12 +20,13 @@ import datetime
 import inspect
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Sized
+from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, NoReturn
 from unittest.mock import Mock
 
 import pytest
-from apps.library.models import Patron
+from apps.library.models import Book, Branch, Patron, Shelf
 from apps.products import services
 from apps.products.models import Category, Item
 from apps.scalars.models import ScalarSpecimen
@@ -75,6 +76,7 @@ from django_strawberry_framework.types.resolvers import (
     _make_relation_resolver,
     _visible_related_object,
 )
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import is_awaitable, is_iterable, read_attr
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._idioms import saved_pk
@@ -1719,3 +1721,41 @@ async def test_async_many_side_refuses_a_bound_that_is_not_a_queryset(
     assert is_awaitable(pending)
     with pytest.raises(TypeError, match="expected the type the source guarantees, got list"):
         await pending
+
+
+_ManagerShape = Callable[[type[Model], str, str], AbstractContextManager[type]]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", ["from_queryset", "hand_written", "polymorphic"])
+def test_unplanned_relation_recheck_reads_every_target_row_in_the_default_manager_class(
+    shape: str,
+    default_manager_shape: _ManagerShape,
+) -> None:
+    """The resolver's re-check of a loaded row runs the hook over every target row.
+
+    ``book.shelf`` loads a shelf the default manager hides; the hooked ``Shelf``
+    type returns its input, so the re-check admits that shelf, and the hook
+    receives the class the default manager returns.
+    """
+    branch = Branch.objects.create(name="Shaped")
+    hidden = Shelf.objects.create(branch=branch, code="zz-hidden")
+    book = Book.objects.create(title="B-HID", shelf=hidden)
+    seen: list[type] = []
+
+    class ShapedShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "code")
+
+        @classmethod
+        @override
+        def get_queryset(cls, queryset: QuerySet[Shelf], info: object) -> QuerySet[Shelf]:
+            seen.append(truth.class_of(queryset))
+            return queryset
+
+    with default_manager_shape(Shelf, shape, "code") as queryset_class:
+        loaded = Book.objects.get(pk=book.pk).shelf
+
+        assert _visible_related_object(loaded, ShapedShelfType, make_info()) == hidden
+    assert seen == [queryset_class]

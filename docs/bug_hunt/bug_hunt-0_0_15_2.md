@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 486 done, 119 to do. The CHANGELOG entries filed here moved to
+Progress: 487 done, 118 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2631,16 +2631,39 @@ Progress: 486 done, 119 to do. The CHANGELOG entries filed here moved to
   `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_key_over_a_filtered_relation_alias_reads_the_shelfs_visibility`.
   Filed 906. CHANGELOGTODO 905
 
+- [x] 68. A model's filtering (or annotating) default manager no longer shapes reads that reach its model across a
+  relation. Filter hops (declared, nested and flat, and undeclared over a hooked target), related order hops, the
+  visibility cascade and single-valued relations (the optimizer's planned forward FK / O2O / reverse O2O child and the
+  unplanned re-check) now start from every row of the model, as Django's join reads them, in the class the default
+  manager's own `get_queryset` returns; the override contributes only that class there (no filter, annotation,
+  ordering or other query state), and the type's `get_queryset` still runs on every hop, so a row a type's hook hides
+  stays hidden. Reads that start at the model (roots, connections, Relay id lookups, writes) and nested many-side
+  lists and connections keep the default manager. A filtering `Meta.base_manager_name` is not read; a filter or hook
+  naming a column only the manager annotates answers Django's `FieldError` across a hop. New
+  `utils/querysets.py::related_queryset`, read by `filters/sets.py::FilterSet._branch_visibility_seed`,
+  `::_scoped_seed_rows`, `::_hop_visible_rows`, `::_projection_child`, `::_bind_ask_terminal_source`,
+  `::_absent_leaf_applies`, `::_chain_base`, `orders/sets.py::OrderSet._visible_rows_sync` / `_visible_rows_async`,
+  `permissions.py::_walk`, `optimizer/walker.py::_relation_child_seed` and
+  `types/resolvers.py::_visible_related_object`; `_LeafChain.terminal_value` and `RelatedFilter.get_queryset`'s
+  fallback keep `base_queryset`. Fakeshop `VisibleBranchType.get_queryset` now declares the city-less exclusion the
+  `VisibleBranch` manager used to supply to the cascade (SDL unchanged). README hook-class paragraph,
+  `types/base.py::DjangoType.get_queryset`, GLOSSARY pk 440 / 468 / 553, START "Verified and rejected", specs 003,
+  023 (+ rationale), 027 (Decision 8 step 3, DoD 34), 033, 034 (+ rationale, the deviation from
+  django-graphene-filters' `_default_manager`), 045, 060 and 062 follow. Pinned by
+  `examples/fakeshop/test_query/test_library_inheritance_api.py`
+  (`::test_signage_on_a_city_less_branch_is_hidden_by_the_proxy_type_hook`,
+  `::test_signage_filter_through_the_declared_branch_hop_reads_every_branch`,
+  `::test_signage_filter_across_an_undeclared_hooked_branch_hop_reads_every_branch`,
+  `::test_signage_order_by_a_hooked_branch_hop_reads_every_branch`,
+  `::test_signage_cascade_over_an_identity_branch_type_reads_every_branch`,
+  `::test_signage_branch_through_a_hooked_branch_type_resolves_every_branch`, sync and async) and package rows over
+  `from_queryset`, hand-written and polymorphic-shaped managers in `tests/utils/test_querysets.py`,
+  `tests/filters/test_sets.py` (`::test_declared_hop_reads_no_default_manager_annotation`,
+  `::test_flat_hop_value_check_reads_no_default_manager_annotation`), `tests/orders/test_sets.py`,
+  `tests/test_permissions.py`, `tests/optimizer/test_walker.py` and `tests/types/test_resolvers.py`. CHANGELOGTODO 907
+
 ## To do: found along the way
 
-- [ ] 68. A model's default manager hides rows from declared filter hops but not from undeclared filter hops or
-  ordering. Answered 2026-11-03 from AGENTS and GOAL: a filtered default manager is not declared visibility (GOAL:
-  visibility is a model rule or a type's `get_queryset`; a project manager is trusted code), and Django reads no
-  manager across a join and `_base_manager` for related access (AGENTS: upstream is asked). So every hop seeds from
-  the same rows Django's join reads, roots and writes keep `_default_manager`, and the GLOSSARY cascade line ("a
-  registered proxy type whose filtered `_default_manager` IS its visibility policy") and the fakeshop `VisibleBranch`
-  docstring are corrected, and so is START.md's "Verified and rejected" `_branch_visibility_seed` row, which this
-  reverses; a fixture that needs the policy declares a hook or rule. Moved from Waiting on you
 - [ ] 758. (robustness) A declared bare-transform `RangeFilter` (`lookup_expr="year"` or `"date"` over a datetime
   column, whose lone bounds the live `bare-year-*` / `bare-date-*` rows pin) sent both bounds hands django-filter's
   `RangeFilter.filter` a `(start, stop)` tuple under the bare transform (`occurred_at__year=(a, b)`): raw form data

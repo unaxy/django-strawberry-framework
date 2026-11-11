@@ -22,6 +22,7 @@ import gc
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn, SupportsIndex, TypeAlias, TypeVar, overload
@@ -3887,3 +3888,74 @@ def test_a_hop_through_an_inherited_to_field_reads_only_rows_of_the_related_mode
                 )
                 titles = list(ordered.values_list("title", flat=True))
             assert (titles, len(captured.captured_queries)) == (expected, 1)
+
+
+_ManagerShape: TypeAlias = Callable[[type[Model], str, str], "AbstractContextManager[type]"]
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize("shape", ["from_queryset", "hand_written", "polymorphic"])
+@pytest.mark.parametrize("hop", ["declared", "undeclared"])
+def test_order_hop_hook_reads_every_target_row_in_the_default_manager_class(
+    *,
+    shape: str,
+    hop: str,
+    default_manager_shape: _ManagerShape,
+) -> None:
+    """A related ordering runs the target hook over every row, in the class its manager returns.
+
+    ``Shelf``'s default manager hides ``zz-hidden``. A declared ``RelatedOrder``
+    hop and an undeclared ``shelf__code`` term into the hooked ``Shelf`` type
+    hand the hook the manager's project class over every shelf, so the book on
+    the hidden shelf sorts by its code, first descending, never as a missing one.
+    """
+    branch = Branch.objects.create(name="Shaped")
+    shown = Shelf.objects.create(branch=branch, code="aa-ok")
+    hidden = Shelf.objects.create(branch=branch, code="zz-hidden")
+    Book.objects.create(title="B-PUB", shelf=shown)
+    Book.objects.create(title="B-HID", shelf=hidden)
+    seen: list[tuple[type, tuple[str, ...]]] = []
+
+    class ShapedShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "code")
+
+        @classmethod
+        @override
+        def get_queryset(cls, queryset: QuerySet[Shelf], info: object) -> QuerySet[Shelf]:
+            codes = tuple(sorted(queryset.values_list("code", flat=True)))
+            seen.append((truth.class_of(queryset), codes))
+            return queryset
+
+    class ShapedShelfOrder(OrderSet):
+        class Meta:
+            model = Shelf
+            fields = ["code"]
+
+    class DeclaredBookOrder(OrderSet):
+        shelf = RelatedOrder(ShapedShelfOrder, field_name="shelf")
+
+        class Meta:
+            model = Book
+            fields = ["title"]
+
+    class UndeclaredBookOrder(OrderSet):
+        class Meta:
+            model = Book
+            fields = ["title", "shelf__code"]
+
+    book_order, terms = (
+        (DeclaredBookOrder, [{"shelf": {"code": Ordering.DESC}}])
+        if hop == "declared"
+        else (UndeclaredBookOrder, [{"shelf_code": Ordering.DESC}])
+    )
+    assert model_for(ShapedShelfType) is Shelf
+
+    with default_manager_shape(Shelf, shape, "code") as queryset_class:
+        rows = book_order.apply_sync(terms, Book.objects.all(), _make_info())
+
+        assert list(rows.values_list("title", flat=True)) == ["B-HID", "B-PUB"]
+    assert seen
+    assert set(seen) == {(queryset_class, ("aa-ok", "zz-hidden"))}

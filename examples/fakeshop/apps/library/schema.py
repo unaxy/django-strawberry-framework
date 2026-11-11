@@ -1089,7 +1089,22 @@ class VenueSponsorType(DjangoType):
 
 
 class VisibleBranchType(DjangoType):
-    """The ``VisibleBranch`` proxy; its only visibility policy is its default manager."""
+    """The ``VisibleBranch`` proxy, whose hook hides branches that have no city on record.
+
+    The proxy's default manager hides the same branches from a read that starts
+    at it, but a relation reaching a branch reads every row, as Django's join and
+    descriptor do; the hook is the declared policy every read applies.
+    """
+
+    @classmethod
+    @override
+    def get_queryset(
+        cls,
+        queryset: QuerySet[models.VisibleBranch],
+        info: Info,
+    ) -> QuerySet[models.VisibleBranch]:
+        """Hide city-less branches."""
+        return queryset.exclude(city="")
 
     class Meta:
         model = models.VisibleBranch
@@ -1101,10 +1116,9 @@ class VisibleBranchType(DjangoType):
 class BranchSignageType(DjangoType):
     """A branch sign whose visibility follows its ``VisibleBranch`` target.
 
-    The hook cascades over ``branch``. ``VisibleBranchType`` declares no hook,
-    so the cascade composes the target from ``VisibleBranch._default_manager``
-    and a sign on a city-less branch is hidden, although ``sign.branch`` itself
-    would still load that branch.
+    The hook cascades over ``branch``, so a sign on a branch ``VisibleBranchType``
+    hides (one with no city) is hidden too, although ``sign.branch`` itself would
+    still load that branch.
     """
 
     @classmethod
@@ -1114,7 +1128,7 @@ class BranchSignageType(DjangoType):
         queryset: QuerySet[models.BranchSignage],
         info: Info,
     ) -> QuerySet[models.BranchSignage]:
-        """Cascade the proxy target's default-manager visibility onto the sign."""
+        """Cascade the proxy target's visibility onto the sign."""
         return apply_cascade_permissions(cls, queryset, info)
 
     class Meta:
@@ -1493,7 +1507,7 @@ class Query:
     all_library_venue_sponsors: list[VenueSponsorType] = DjangoListField(VenueSponsorType)
     # Acceptance surface for a relation target that is a proxy with a filtering default manager.
     all_library_visible_branches: list[VisibleBranchType] = DjangoListField(VisibleBranchType)
-    # Acceptance surface for a visibility cascade composed from a proxy target's default manager.
+    # Acceptance surface for a visibility cascade over a proxy target whose type hook hides rows.
     all_library_branch_signage: list[BranchSignageType] = DjangoListField(BranchSignageType)
     # Acceptance surface for one model carrying every relation kind, with explicitly named reverse
     # relations and a cascade scoped to its single-column edges.

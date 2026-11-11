@@ -19,7 +19,13 @@ query shape, off the SQL the request emitted:
   ``RepairTicketType`` does not cascade back, so the walk never re-enters.
 - Proxies with a filtering default manager: ``allLibraryOpenVenues`` is the
   ``OpenVenue`` manager's rows, and a ``BranchSignage`` row declared to the
-  ``VisibleBranch`` proxy is hidden when that manager hides its branch.
+  ``VisibleBranch`` proxy is hidden when ``VisibleBranchType``'s hook hides its
+  branch (the manager alone does not reach across the relation). On a private
+  schema whose branch type declares no rule (or returns its input), every read
+  across ``branch`` reaches the branch the manager hides: declared and flat
+  filter hops, an undeclared hooked path and relation key, related orderings,
+  the cascade on list and connection roots, and the non-null ``branch``
+  optimized and unoptimized, each sync and async.
 - ``CirculationDesk``, one model carrying every relation kind: its reverse
   ``children`` / ``profile`` resolve, and its cascade scoped to ``branch`` /
   ``shelf`` serves rows despite the generic foreign key a full walk refuses.
@@ -53,21 +59,30 @@ query shape, off the SQL the request emitted:
   separately.
 """
 
+import asyncio
 import datetime
 import re
+from collections.abc import Callable
+from functools import wraps
 
 import pytest
+import strawberry
 from apps.library import models
 from apps.library import schema as library_schema
 from apps.products.services import create_users
 from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection
+from django.db.models import Model, QuerySet
 from django.db.models.signals import pre_save
-from django.test import Client
+from django.http import HttpRequest, HttpResponseBase
+from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
+from django.urls import path
 from graphql_client import (
     DeleteAfterAuthorization,
+    JSONObject,
+    RecordCompiledSql,
     assert_graphql_success,
     graphql_payload,
     json_at,
@@ -75,12 +90,29 @@ from graphql_client import (
     json_object,
     json_str,
     post_lock_reread_shapes,
+    response_json,
     select_tables_after_last_delete,
     statement_shapes,
     statement_shapes_after_last_delete,
 )
+from strategy_schemas import make_django_type
 
-from django_strawberry_framework import DjangoMutation
+from django_strawberry_framework import (
+    DjangoConnectionField,
+    DjangoListField,
+    DjangoMutation,
+    DjangoOptimizerExtension,
+    DjangoSchema,
+    DjangoType,
+    aapply_cascade_permissions,
+    apply_cascade_permissions,
+    finalize_django_types,
+)
+from django_strawberry_framework.connection import _connection_type_for
+from django_strawberry_framework.filters import FilterSet, RelatedFilter
+from django_strawberry_framework.orders import OrderSet, RelatedOrder
+from django_strawberry_framework.testing import AsyncTestClient
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 
 def _sql_from_table(captured: CaptureQueriesContext, table: str) -> list[str]:
@@ -459,14 +491,14 @@ def test_open_venues_are_the_proxy_default_manager_rows() -> None:
 
 
 @pytest.mark.django_db
-def test_signage_on_a_city_less_branch_is_hidden_by_the_proxy_default_manager() -> None:
-    """The cascade composes a proxy target from its default manager, not its base manager.
+def test_signage_on_a_city_less_branch_is_hidden_by_the_proxy_type_hook() -> None:
+    """The cascade hides a sign whose branch the ``VisibleBranchType`` hook hides.
 
-    ``BranchSignage.branch`` is declared to ``VisibleBranch``, whose default
-    manager hides city-less branches, and ``VisibleBranchType`` declares no
-    hook. The sign on the city-less branch is hidden over the wire although
-    ``sign.branch`` still loads that branch through the forward descriptor's
-    base manager.
+    ``BranchSignage.branch`` is declared to ``VisibleBranch``, whose hook (and
+    default manager) hide city-less branches. The cascade seeds the target from
+    every branch, as the forward descriptor's base manager loads them, and runs
+    the hook, so the sign on the city-less branch is hidden over the wire
+    although ``sign.branch`` still loads that branch.
     """
     main = models.Branch.objects.create(name="Main", city="Metro")
     outpost = models.Branch.objects.create(name="Outpost", city="")
@@ -480,6 +512,394 @@ def test_signage_on_a_city_less_branch_is_hidden_by_the_proxy_default_manager() 
     ], data
     assert models.BranchSignage.objects.get(pk=hidden.pk).branch.name == "Outpost"
     assert not models.VisibleBranch.objects.filter(pk=outpost.pk).exists()
+
+
+_BRANCH_READS: dict[str, DjangoSchema | None] = {"schema": None}
+_MODES = ["sync", "async"]
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _branch_reads_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _BRANCH_READS["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
+
+
+@wraps(AsyncDjangoGraphQLView.as_view())
+async def _branch_reads_async_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _BRANCH_READS["schema"]
+    assert schema is not None
+    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
+
+
+# Served only under ``override_settings(ROOT_URLCONF=__name__)`` by ``_branch_reads``.
+urlpatterns = [
+    path("graphql-branch-reads/", _branch_reads_view),
+    path("graphql-branch-reads-async/", _branch_reads_async_view),
+]
+
+
+async def _branch_reads_async(document: str) -> JSONObject:
+    result = await AsyncTestClient(path="/graphql-branch-reads-async/").query(
+        document,
+        assert_no_errors=False,
+    )
+    assert result.response.status_code == 200
+    return response_json(result.response)
+
+
+def _branch_reads(schema: DjangoSchema, document: str, mode: str) -> JSONObject:
+    """Post ``document`` to ``schema``'s sync or async mount and return the whole payload."""
+    _BRANCH_READS["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            if mode == "async":
+                return asyncio.run(_branch_reads_async(document))
+            return graphql_payload(document, url="/graphql-branch-reads/")
+    finally:
+        _BRANCH_READS["schema"] = None
+
+
+def _seed_branch_signage() -> int:
+    """Signs ``S-MAIN`` on ``Main`` and ``S-OUTPOST`` on the city-less ``Outpost``; its pk."""
+    main = models.Branch.objects.create(name="Main", city="Metro")
+    outpost = models.Branch.objects.create(name="Outpost", city="")
+    models.BranchSignage.objects.create(code="S-MAIN", branch_id=main.pk)
+    models.BranchSignage.objects.create(code="S-OUTPOST", branch_id=outpost.pk)
+    assert outpost.pk is not None
+    return outpost.pk
+
+
+def _passthrough_hook(
+    _cls: type[DjangoType],
+    queryset: QuerySet[Model],
+    _info: object,
+    **_kwargs: object,
+) -> QuerySet[Model]:
+    return queryset
+
+
+def _cascade_hook(
+    cls: type[DjangoType],
+    queryset: QuerySet[Model],
+    info: object,
+    **_kwargs: object,
+) -> QuerySet[Model]:
+    return apply_cascade_permissions(cls, queryset, info)
+
+
+async def _async_cascade_hook(
+    cls: type[DjangoType],
+    queryset: QuerySet[Model],
+    info: object,
+    **_kwargs: object,
+) -> QuerySet[Model]:
+    return await aapply_cascade_permissions(cls, queryset, info)
+
+
+def _branch_type(hook: str, **meta: object) -> type[DjangoType]:
+    """``VisibleBranch`` with no hook (``identity``) or one returning its input (``passthrough``)."""
+    namespace: dict[str, object] = {}
+    if hook == "passthrough":
+        namespace["get_queryset"] = classmethod(_passthrough_hook)
+    return make_django_type(
+        "SignBranchNode",
+        models.VisibleBranch,
+        ("id", "name"),
+        node=False,
+        meta_extra=meta,
+        namespace_extra=namespace,
+    )
+
+
+def _branch_filterset() -> type[FilterSet]:
+    return type(
+        "SignBranchFilter",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": models.VisibleBranch, "fields": {"name": ["exact"]}})},
+    )
+
+
+def _signage_schema(
+    *,
+    hook: Callable[..., object] | None = None,
+    optimizer: bool = True,
+    **meta: object,
+) -> DjangoSchema:
+    """A ``BranchSignage`` connection (``rows``) and list (``listed``) over the declared types."""
+    namespace: dict[str, object] = {} if hook is None else {"get_queryset": classmethod(hook)}
+    signage = make_django_type(
+        "SignNode",
+        models.BranchSignage,
+        ("id", "code", "branch"),
+        meta_extra=meta,
+        namespace_extra=namespace,
+    )
+    finalize_django_types()
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {
+                    "rows": _connection_type_for(
+                        signage,
+                        signage.__django_strawberry_definition__,
+                    ),
+                    "listed": list[signage],
+                },
+                "rows": DjangoConnectionField(signage),
+                "listed": DjangoListField(signage),
+            },
+        ),
+    )
+    extension = DjangoOptimizerExtension()
+    return DjangoSchema(
+        query=query,
+        extensions=[lambda: extension] if optimizer else [],
+        error_policy={"enabled": False},
+    )
+
+
+def _signage_rows(*codes: str) -> JSONObject:
+    return {"data": {"rows": {"edges": [{"node": {"code": code}} for code in codes]}}}
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("hook", ["identity", "passthrough"])
+@pytest.mark.parametrize(
+    ("where", "statements"),
+    [('{branch: {name: {exact: "Outpost"}}}', 1), ('{branchName: {exact: "Outpost"}}', 1)],
+    ids=["nested", "flat"],
+)
+def test_signage_filter_through_the_declared_branch_hop_reads_every_branch(
+    *,
+    mode: str,
+    hook: str,
+    where: str,
+    statements: int,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A declared ``RelatedFilter`` hop seeds every branch, not the proxy manager's rows.
+
+    ``VisibleBranch``'s default manager hides the city-less ``Outpost``, and the
+    branch type declares no rule of its own (no hook, or one returning its
+    input), so a nested branch filter and a flat leaf through the declared hop
+    both reach ``Outpost``, as Django's join across ``branch`` does.
+    """
+    _seed_branch_signage()
+    branch_filterset = _branch_filterset()
+    _branch_type(hook, filterset_class=branch_filterset)
+    signage_filterset = type(
+        "SignFilter",
+        (FilterSet,),
+        {
+            "branch": RelatedFilter(branch_filterset, field_name="branch"),
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": models.BranchSignage,
+                    "fields": {"code": ["exact"], "branch__name": ["exact"]},
+                },
+            ),
+        },
+    )
+    schema = _signage_schema(filterset_class=signage_filterset)
+    recorded = record_compiled_sql()
+
+    payload = _branch_reads(
+        schema,
+        f"{{ rows(filter: {where}) {{ edges {{ node {{ code }} }} }} }}",
+        mode,
+    )
+
+    assert payload == _signage_rows("S-OUTPOST"), payload
+    assert len(recorded) == statements, recorded
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize(
+    ("where", "statements"),
+    [('{branchName: {exact: "Outpost"}}', 1), ("{branch: {exact: OUTPOST}}", 1)],
+    ids=["path", "key"],
+)
+def test_signage_filter_across_an_undeclared_hooked_branch_hop_reads_every_branch(
+    *,
+    mode: str,
+    where: str,
+    statements: int,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """An undeclared hop into a hooked branch type runs the hook over every branch.
+
+    The flat ``branch__name`` path and the ``branch`` relation key are scoped by
+    the branch type's ``get_queryset``, which returns its input, so the rows it
+    scopes are every branch and ``Outpost``'s sign matches.
+    """
+    outpost = _seed_branch_signage()
+    _branch_type("passthrough")
+    signage_filterset = type(
+        "SignFilter",
+        (FilterSet,),
+        {
+            "Meta": type(
+                "Meta",
+                (),
+                {
+                    "model": models.BranchSignage,
+                    "fields": {"code": ["exact"], "branch__name": ["exact"], "branch": ["exact"]},
+                },
+            ),
+        },
+    )
+    schema = _signage_schema(filterset_class=signage_filterset)
+    recorded = record_compiled_sql()
+    document = f"{{ rows(filter: {where}) {{ edges {{ node {{ code }} }} }} }}"
+
+    payload = _branch_reads(schema, document.replace("OUTPOST", str(outpost)), mode)
+
+    assert payload == _signage_rows("S-OUTPOST"), payload
+    assert len(recorded) == statements, recorded
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize(
+    ("term", "order_by", "statements"),
+    [("declared", "{branch: {name: DESC}}", 1), ("undeclared", "{branchName: DESC}", 1)],
+    ids=["declared", "undeclared"],
+)
+def test_signage_order_by_a_hooked_branch_hop_reads_every_branch(
+    *,
+    mode: str,
+    term: str,
+    order_by: str,
+    statements: int,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A related ordering into a hooked branch type sorts by every branch's name.
+
+    The hook returns its input, so ``Outpost`` is a row it admits and sorts
+    ahead of ``Main`` descending; a branch the manager alone hides is not sorted
+    as a missing one.
+    """
+    _seed_branch_signage()
+    branch_orderset = type(
+        "SignBranchOrder",
+        (OrderSet,),
+        {"Meta": type("Meta", (), {"model": models.VisibleBranch, "fields": ["name"]})},
+    )
+    _branch_type("passthrough", orderset_class=branch_orderset)
+    signage_attrs: dict[str, object] = {}
+    fields = ["code"]
+    if term == "declared":
+        signage_attrs["branch"] = RelatedOrder(branch_orderset, field_name="branch")
+    else:
+        fields.append("branch__name")
+    signage_attrs["Meta"] = type("Meta", (), {"model": models.BranchSignage, "fields": fields})
+    signage_orderset = type("SignOrder", (OrderSet,), signage_attrs)
+    schema = _signage_schema(orderset_class=signage_orderset)
+    recorded = record_compiled_sql()
+
+    payload = _branch_reads(
+        schema,
+        f"{{ rows(orderBy: [{order_by}]) {{ edges {{ node {{ code }} }} }} }}",
+        mode,
+    )
+
+    assert payload == _signage_rows("S-OUTPOST", "S-MAIN"), payload
+    assert len(recorded) == statements, recorded
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize(
+    ("document", "statements"),
+    [("{ rows { edges { node { code } } } }", 1), ("{ listed { code } }", 1)],
+    ids=["connection", "list"],
+)
+def test_signage_cascade_over_an_identity_branch_type_reads_every_branch(
+    *,
+    mode: str,
+    document: str,
+    statements: int,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """The cascade composes a registered identity branch type over every branch.
+
+    The branch type declares no hook, so no rule hides ``Outpost`` and its sign
+    stays listed on both roots; the proxy's filtering default manager is not a
+    visibility rule.
+    """
+    _seed_branch_signage()
+    _branch_type("identity")
+    schema = _signage_schema(hook=_async_cascade_hook if mode == "async" else _cascade_hook)
+    recorded = record_compiled_sql()
+
+    payload = _branch_reads(schema, document, mode)
+
+    data = json_object(payload, "data")
+    rows = (
+        [json_at(edge, "node", "code") for edge in json_list(data, "rows", "edges")]
+        if "rows" in data
+        else [json_at(row, "code") for row in json_list(data, "listed")]
+    )
+    assert "errors" not in payload, payload
+    assert sorted(map(str, rows)) == ["S-MAIN", "S-OUTPOST"], payload
+    assert len(recorded) == statements, recorded
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize(
+    ("optimizer", "statements"),
+    [(True, 2), (False, 5)],
+    ids=["optimized", "unoptimized"],
+)
+def test_signage_branch_through_a_hooked_branch_type_resolves_every_branch(
+    *,
+    mode: str,
+    optimizer: bool,
+    statements: int,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A sign's non-null ``branch`` resolves a branch only the proxy manager hides.
+
+    The hooked branch type returns its input, so the planned child (optimized)
+    and the resolver's re-check of the loaded row (unoptimized) both read every
+    branch, as ``sign.branch`` does: ``Outpost`` resolves, never a null
+    completion error.
+    """
+    _seed_branch_signage()
+    _branch_type("passthrough")
+    schema = _signage_schema(optimizer=optimizer)
+    recorded = record_compiled_sql()
+
+    payload = _branch_reads(
+        schema,
+        "{ rows { edges { node { code branch { name } } } } }",
+        mode,
+    )
+
+    assert payload == {
+        "data": {
+            "rows": {
+                "edges": [
+                    {"node": {"code": "S-MAIN", "branch": {"name": "Main"}}},
+                    {"node": {"code": "S-OUTPOST", "branch": {"name": "Outpost"}}},
+                ],
+            },
+        },
+    }, payload
+    assert len(recorded) == statements, recorded
 
 
 @pytest.mark.django_db

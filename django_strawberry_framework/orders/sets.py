@@ -82,8 +82,8 @@ from django_strawberry_framework.utils.permissions import (
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,
-    base_queryset,
     model_for,
+    related_queryset,
     relation_target_type,
     run_in_one_sync_boundary,
 )
@@ -1166,7 +1166,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         def rows(scope: type[DjangoType]) -> models.QuerySet[models.Model]:
             found = derived.get(scope)
             if found is None:
-                seed = base_queryset(model_for(scope), using=queryset.db)
+                seed = related_queryset(model_for(scope), using=queryset.db)
                 found = derived[scope] = apply_type_visibility_sync(
                     scope,
                     seed,
@@ -1197,7 +1197,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         ):
             for _joined, scope in cls._scoped_hops(queryset.model, field_path):
                 if scope not in derived:
-                    seed = base_queryset(model_for(scope), using=queryset.db)
+                    seed = related_queryset(model_for(scope), using=queryset.db)
                     derived[scope] = await apply_type_visibility_async(scope, seed, info)
         return derived.__getitem__
 

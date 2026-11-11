@@ -965,8 +965,21 @@ class DjangoType:
         ``Manager.from_queryset(...)``) - so an override can call that class's
         own methods. It carries the source's query state, routing, hints and
         prefetch lookups, not attributes the class sets on an instance outside
-        Django's constructor arguments. Whatever the override returns is rebuilt
-        into a plain ``QuerySet`` before the framework composes onto it.
+        Django's constructor arguments. A read that starts at the model (a root
+        list or connection, a Relay id lookup, a write's target rows) and a
+        nested many-side list or connection (Django's related managers subclass
+        the default manager's class) are sourced from the default manager, so
+        that query state is the manager's own. A read that reaches the model
+        across a relation (a filter or ordering hop, a cascade edge, a
+        single-valued relation) starts from every row of the model, in that same
+        class, since Django's join reads no manager: the default manager's own
+        ``get_queryset`` override contributes only its class there, no filter,
+        annotation, ordering or other query state. A filter or hook that names a
+        column the manager annotates is answered at a root and in a nested list
+        or connection, and across a hop, a cascade edge or a single-valued
+        relation only when the type's ``get_queryset`` adds it. Whatever the
+        override returns is rebuilt into a plain ``QuerySet`` before the
+        framework composes onto it.
 
         An override may be ``def`` or ``async def``. Under the asynchronous
         executor a ``def`` override runs off the event loop in a thread-sensitive

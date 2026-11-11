@@ -28,12 +28,16 @@ depends on:
   ``fields=[]`` and the enclosing edge still binds the hook's direct
   narrowing.
 - **Every registered target composes.** Each edge whose target model has a
-  registered primary type contributes a subquery built from the target's
-  ``_default_manager`` on the root alias and run through its ``get_queryset``
-  -- *including* identity hooks, because skipping an identity-hook target as
-  "nothing to narrow" would silently bypass a registered proxy type whose
-  filtered ``_default_manager`` IS its visibility policy. Only an edge whose
-  target model has no registered type is outside the visibility contract.
+  registered primary type contributes a subquery built from every target row
+  on the root alias, in the default manager's class
+  (``utils/querysets.py::related_queryset``, the rows the edge's forward
+  descriptor loads, so a row the cascade keeps resolves its relation), and
+  run through its ``get_queryset`` -- *including* identity hooks:
+  registration, not a custom hook, puts a target inside the contract, and an
+  identity target's subquery still drops a row whose key names no target row.
+  A filtered ``_default_manager`` is not a visibility policy; a type that
+  needs one declares it in its hook. Only an edge whose target model has no
+  registered type is outside the visibility contract.
 - **Hook returns are validated, then normalized.** A target hook must return
   a ``QuerySet`` over the edge target's concrete table (proxy / concrete
   siblings are compatible; unrelated models and MTI child querysets are not),
@@ -135,8 +139,8 @@ from .utils.querysets import (
     _prepared_visibility_source,
     _restated_as_source_class,
     apply_type_visibility_sync,
-    base_queryset,
     model_for,
+    related_queryset,
     run_in_one_sync_boundary,
 )
 from .utils.relations import is_forward_single_relation, is_single_column_foreign_key
@@ -593,25 +597,25 @@ def apply_cascade_permissions(
 ) -> _QS:
     """Narrow ``queryset`` so each forward relation respects its target visibility.
 
-    Call from inside a ``DjangoType.get_queryset`` (spec-034 Decision 5). Walks ``cls``'s
-    model single-column concrete forward FK / OneToOne edges (MTI parent links
-    included), resolves each edge's target type through the registry primary
-    lookup, runs that type's ``get_queryset`` against the target model's
-    ``_default_manager`` rows (seeded on the root call's explicit DB alias, or
-    unrouted under an unrouted root -- identity hooks included, so a filtered
-    default manager still narrows), and
-    intersects ``Q(<edge>__in=<visible>)`` (plus ``| Q(<edge>__isnull=True)``
-    when the edge is nullable) into ``queryset``. Edges whose target model has
-    no registered type are skipped -- there is no visibility policy to apply.
-    Returns a fresh instance of ``queryset``'s own class, same model and row type
-    (a project ``QuerySet`` subclass in, that subclass out), so a project ``QuerySet``
-    method chains after the cascade; the source is sealed and narrowed as a
-    framework-owned plain rebuild first, so the class's own ``filter`` never sees
-    the cascade predicate, and attributes the class sets on an instance outside
-    Django's constructor arguments are not carried. It never evaluates, reorders,
-    or projects the caller's queryset -- pure ``.filter(...)`` composition, so
-    the ``__in`` subqueries compile into the caller's single ``SELECT`` and add
-    zero query round-trips (spec-034 Decision 7).
+    Call from inside a ``DjangoType.get_queryset`` (spec-034 Decision 5). Walks
+    ``cls``'s model single-column concrete forward FK / OneToOne edges (MTI
+    parent links included), resolves each edge's target type through the
+    registry primary lookup, runs that type's ``get_queryset`` against every
+    target model row, the ones the edge's descriptor loads (seeded on the root
+    call's explicit DB alias, or unrouted under an unrouted root -- identity
+    hooks included), and intersects ``Q(<edge>__in=<visible>)`` (plus
+    ``| Q(<edge>__isnull=True)`` when the edge is nullable) into ``queryset``.
+    Edges whose target model has no registered type are skipped -- there is no
+    visibility policy to apply. Returns a fresh instance of ``queryset``'s own
+    class, same model and row type (a project ``QuerySet`` subclass in, that
+    subclass out), so a project ``QuerySet`` method chains after the cascade;
+    the source is sealed and narrowed as a framework-owned plain rebuild first,
+    so the class's own ``filter`` never sees the cascade predicate, and
+    attributes the class sets on an instance outside Django's constructor
+    arguments are not carried. It never evaluates, reorders, or projects the
+    caller's queryset -- pure ``.filter(...)`` composition, so the ``__in``
+    subqueries compile into the caller's single ``SELECT`` and add zero query
+    round-trips (spec-034 Decision 7).
 
     Args:
         cls: the owning ``DjangoType`` (its ``.model`` is the walk root).
@@ -742,7 +746,7 @@ def _walk(
         target_type = registry.get(field.related_model)
         if target_type is None:
             continue
-        base = base_queryset(field.related_model, using=state.alias)
+        base = related_queryset(field.related_model, using=state.alias)
         edge_state = dataclasses.replace(
             state,
             path=(*state.path, f"{truth.name(cls)}.{field.name}"),

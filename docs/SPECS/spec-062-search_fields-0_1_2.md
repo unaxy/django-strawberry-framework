@@ -1073,11 +1073,11 @@ each hop's target type lets the request see:
   target type's `get_queryset` over the base rows
   `_branch_visibility_seed` seeds on `queryset.db`; a scoped undeclared
   hop's (and a scoped intermediate model's) are its scope type's
-  `get_queryset` over `utils/querysets.py::base_queryset(<model>,
+  `get_queryset` over `utils/querysets.py::related_queryset(<model>,
   using=queryset.db)`; both run through
   `utils/querysets.py::apply_type_visibility_sync` / `_async`. An unscoped
-  undeclared hop reads every row of its model through `_base_manager`, as
-  Django's join reads them. Rows are derived once per request under the
+  undeclared hop reads every row of its model, as Django's join reads
+  them. Rows are derived once per request under the
   filter side's keys — `(id(declaration), alias)` for a declared hop,
   `(scope type, alias)` for an undeclared hop or intermediate model
   (`filters/sets.py::FilterSet._hop_visible_rows`,
@@ -1348,7 +1348,7 @@ implement the original per-action policy.
   correlated subquery or link correlation, and never routes a relational
   arm through `optimizer/predicates.py::attach_exists`.
 - `utils/querysets.py::apply_type_visibility_sync` / `_async` over
-  `utils/querysets.py::base_queryset` for every hop's visible rows
+  `utils/querysets.py::related_queryset` for every hop's visible rows
   (Decision 12), through the request-scoped derivation
   `filters/sets.py::FilterSet._hop_visible_rows` /
   `filters/sets.py::FilterSet._scoped_rows` perform (lifted in Slice 1) —
@@ -1473,7 +1473,7 @@ implement the original per-action policy.
   (Decision 1, Decision 13).
 - **Multi-database routing** — the runtime compiler binds `queryset.db`
   from the live routed queryset, every hop's base rows to that alias
-  (`base_queryset(<target model>, using=queryset.db)`, the alias
+  (`related_queryset(<target model>, using=queryset.db)`, the alias
   `_branch_visibility_seed` pins for the filter side), and every
   intermediate link read to it (`related_rows_exist`'s `using`); no
   database alias, queryset, or router answer enters the frozen plan

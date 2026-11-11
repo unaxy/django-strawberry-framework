@@ -44,6 +44,7 @@ import threading
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import (
@@ -77,6 +78,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelation
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import FieldError
 from django.db import DEFAULT_DB_ALIAS, connection, connections, models
 from django.db import models as dj_models
 from django.db import models as django_models
@@ -113,6 +115,7 @@ from django_filters.filterset import FilterSetMetaclass as DjangoFilterMetaclass
 from django_filters.utils import label_for_filter
 from django_filters.widgets import SuffixedMultiWidget
 from graphql import GraphQLError
+from strategy_schemas import make_django_type
 from strawberry import relay
 from typing_extensions import override
 
@@ -10240,8 +10243,8 @@ def test_collect_related_declarations_honors_base_tombstone() -> None:
 def test_declared_hop_rows_threads_parent_db_alias() -> None:
     """A declared hop's visibility base is pinned to the parent request's DB alias.
 
-    The cascade-permission path builds its base with
-    ``._default_manager.using(queryset.db).all()``; the related-visibility path
+    The cascade-permission path seeds each edge's target rows on the root's
+    alias (``utils/querysets.py::related_queryset``); the related-visibility path
     must match so an alias-sensitive ``get_queryset`` hook runs against the
     parent's shard rather than the default alias.
     """
@@ -10271,6 +10274,377 @@ def test_declared_hop_rows_threads_parent_db_alias() -> None:
     # No alias threaded -> the router default stays in place (single-DB case).
     default = BranchFilter._declared_hop_rows("shelves", shelves, None, {}, None)
     assert default.db == "default"
+
+
+_ManagerShape = Callable[[type[models.Model], str, str], AbstractContextManager[type]]
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize("shape", ["from_queryset", "hand_written", "polymorphic"])
+@pytest.mark.parametrize("hop", ["declared", "undeclared"])
+def test_filter_hop_hook_reads_every_target_row_in_the_default_manager_class(
+    *,
+    shape: str,
+    hop: str,
+    default_manager_shape: _ManagerShape,
+) -> None:
+    """A filter hop runs the target hook over every row, in the class its manager returns.
+
+    ``Shelf``'s default manager hides ``zz-hidden``. A declared ``RelatedFilter``
+    hop and an undeclared ``shelf__code`` hop into the hooked ``Shelf`` type
+    hand the hook the manager's project class over every shelf, so the book on
+    the hidden shelf matches, as Django's join across ``shelf`` reads it.
+    """
+    branch = library_models.Branch.objects.create(name="Shaped")
+    shown = library_models.Shelf.objects.create(branch=branch, code="aa-ok")
+    hidden = library_models.Shelf.objects.create(branch=branch, code="zz-hidden")
+    library_models.Book.objects.create(title="B-PUB", shelf=shown)
+    library_models.Book.objects.create(title="B-HID", shelf=hidden)
+    seen: list[tuple[type, tuple[str, ...]]] = []
+
+    class ShapedShelfType(DjangoType):
+        class Meta:
+            model = library_models.Shelf
+            fields = ("id", "code")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[library_models.Shelf],
+            info: object,
+        ) -> QuerySet[library_models.Shelf]:
+            codes = tuple(sorted(queryset.values_list("code", flat=True)))
+            seen.append((truth.class_of(queryset), codes))
+            return queryset
+
+    class ShapedShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class DeclaredBookFilter(FilterSet):
+        shelf = RelatedFilter(ShapedShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    class UndeclaredBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"], "shelf__code": ["exact"]}
+
+    book_filter, where = (
+        (DeclaredBookFilter, {"shelf": {"code": {"exact": "zz-hidden"}}})
+        if hop == "declared"
+        else (UndeclaredBookFilter, {"shelf__code": {"exact": "zz-hidden"}})
+    )
+    assert registry.get(library_models.Shelf) is ShapedShelfType
+
+    with default_manager_shape(library_models.Shelf, shape, "code") as queryset_class:
+        rows = book_filter.apply_sync(where, library_models.Book.objects.all(), _make_info())
+
+        assert list(rows.values_list("title", flat=True)) == ["B-HID"]
+    assert seen
+    assert set(seen) == {(queryset_class, ("aa-ok", "zz-hidden"))}
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize("annotated_by", ["manager", "type"])
+def test_declared_hop_reads_no_default_manager_annotation(
+    *,
+    annotated_by: str,
+    default_manager_shape: _ManagerShape,
+) -> None:
+    """A column the default manager annotates is answered at a root, not across a hop.
+
+    ``Shelf``'s default manager annotates ``shape_mark``, which a declared
+    ``ShelfFilter.shape_mark`` names. A read starting at ``Shelf`` answers it; a
+    declared hop seeds every shelf as Django's join reads them, so the column
+    exists there only when the ``Shelf`` type's ``get_queryset`` adds it, and
+    otherwise the hop raises Django's own ``FieldError``, as
+    ``Book.objects.filter(shelf__shape_mark=1)`` does.
+    """
+    branch = library_models.Branch.objects.create(name="Shaped")
+    shelf = library_models.Shelf.objects.create(branch=branch, code="aa-ok")
+    library_models.Book.objects.create(title="B-PUB", shelf=shelf)
+
+    def annotating_hook(
+        _cls: type[DjangoType],
+        queryset: QuerySet[models.Model],
+        _info: object,
+    ) -> QuerySet[models.Model]:
+        return queryset.annotate(shape_mark=models.Value(1))
+
+    _ = make_django_type(
+        "MarkedShelfType",
+        library_models.Shelf,
+        ("id",),
+        node=False,
+        namespace_extra=(
+            {"get_queryset": classmethod(annotating_hook)} if annotated_by == "type" else None
+        ),
+    )
+
+    class MarkedShelfFilter(FilterSet):
+        shape_mark = django_filters.NumberFilter(field_name="shape_mark")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class MarkedBookFilter(FilterSet):
+        shelf = RelatedFilter(MarkedShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    with default_manager_shape(library_models.Shelf, "annotating", "shape_mark"):
+        at_root = MarkedShelfFilter.apply_sync(
+            {"shape_mark": {"exact": 1}},
+            library_models.Shelf._default_manager.all(),
+            _make_info(),
+        )
+        assert list(at_root.values_list("code", flat=True)) == ["aa-ok"]
+        where = {"shelf": {"shape_mark": {"exact": 1}}}
+        if annotated_by == "manager":
+            with pytest.raises(FieldError, match="Cannot resolve keyword 'shape_mark' into field"):
+                _ = list(
+                    MarkedBookFilter.apply_sync(
+                        where,
+                        library_models.Book.objects.all(),
+                        _make_info(),
+                    ),
+                )
+        else:
+            rows = MarkedBookFilter.apply_sync(
+                where,
+                library_models.Book.objects.all(),
+                _make_info(),
+            )
+            assert list(rows.values_list("title", flat=True)) == ["B-PUB"]
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize(
+    ("mark", "lookup", "value"),
+    [
+        (
+            models.Value(
+                Decimal("1.5"),
+                output_field=models.DecimalField(max_digits=3, decimal_places=1),
+            ),
+            "exact",
+            Decimal("1e30"),
+        ),
+        (models.Value(datetime.date(2020, 1, 1), output_field=models.DateField()), "year", 2**70),
+        (
+            models.Value(
+                datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc),
+                output_field=models.DateTimeField(),
+            ),
+            "year",
+            2**70,
+        ),
+        (
+            models.Value(
+                datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc),
+                output_field=models.DateTimeField(),
+            ),
+            "date__year",
+            2**70,
+        ),
+    ],
+    ids=[
+        "decimal",
+        "date",
+        "datetime",
+        "datetime-date",
+    ],
+)
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_flat_hop_value_check_reads_no_default_manager_annotation(
+    *,
+    mode: str,
+    mark: models.Value,
+    lookup: str,
+    value: object,
+) -> None:
+    """A column only the default manager annotates is unknown to a flat leaf's hop checks.
+
+    ``Shelf``'s default manager annotates ``mark`` (a decimal, a date, a datetime), which
+    a flat ``Book`` leaf walking the declared ``shelf`` hop names with an out-of-range
+    value (a decimal past the column's digits, a year past the integer range, directly or
+    through a datetime's ``date``). The value checks run over every shelf as Django's
+    join reads them, where ``mark`` does not exist, so the request answers Django's own
+    ``FieldError`` at application on both executors, never a value refusal read from the
+    manager's annotation.
+    """
+    branch = library_models.Branch.objects.create(name="Shaped")
+    shelf = library_models.Shelf.objects.create(branch=branch, code="aa-ok")
+    library_models.Book.objects.create(title="B-PUB", shelf=shelf)
+    _ = make_django_type("MarkShelfType", library_models.Shelf, ("id",), node=False)
+
+    class MarkShelfFilter(FilterSet):
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    class MarkBookFilter(FilterSet):
+        shelf = RelatedFilter(MarkShelfFilter, field_name="shelf")
+        shelf_mark = django_filters.NumberFilter(field_name="shelf__mark", lookup_expr=lookup)
+
+        class Meta:
+            model = library_models.Book
+            fields = {"title": ["exact"]}
+
+    def annotated_rows(self: models.Manager[models.Model]) -> models.QuerySet[models.Model]:
+        return models.QuerySet[models.Model](self.model, using=self._db).annotate(mark=mark)
+
+    def apply() -> QuerySet[library_models.Book]:
+        if mode == "sync":
+            return MarkBookFilter.apply_sync(
+                {"shelf_mark": value},
+                library_models.Book.objects.all(),
+                _make_info(),
+            )
+        return asyncio.run(
+            MarkBookFilter.apply_async(
+                {"shelf_mark": value},
+                library_models.Book.objects.all(),
+                _make_info(),
+            ),
+        )
+
+    manager = type("MarkAnnotating", (models.Manager,), {"get_queryset": annotated_rows})()
+    options = library_models.Shelf._meta
+    saved = options.default_manager_name
+    library_models.Shelf.add_to_class("shape_rows", manager)
+    options.default_manager_name = "shape_rows"
+    _expire_shelf_managers()
+    try:
+        with pytest.raises(FieldError, match="Cannot resolve keyword 'mark' into field"):
+            _ = list(apply())
+    finally:
+        options.default_manager_name = saved
+        options.local_managers.remove(manager)
+        delattr(library_models.Shelf, "shape_rows")
+        _expire_shelf_managers()
+
+
+def _expire_shelf_managers() -> None:
+    """Drop the manager reads ``Shelf._meta`` caches, as ``Options._expire_cache`` does."""
+    cache = vars(library_models.Shelf._meta)
+    for name in (
+        "managers",
+        "managers_map",
+        "base_manager",
+        "default_manager",
+    ):
+        if name in cache:
+            del cache[name]
+
+
+def _passthrough_hook(
+    _cls: type[DjangoType],
+    queryset: QuerySet[models.Model],
+    _info: object,
+) -> QuerySet[models.Model]:
+    return queryset
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize(
+    (
+        "walk",
+        "model",
+        "path",
+        "value",
+        "label",
+        "expected",
+    ),
+    [
+        (
+            "forward",
+            library_models.Book,
+            "shelf__branch__name",
+            "Shaped",
+            "title",
+            ["B-HID", "B-PUB"],
+        ),
+        (
+            "reverse",
+            library_models.Branch,
+            "shelves__books__title",
+            "B-HID",
+            "name",
+            ["Shaped"],
+        ),
+        (
+            "unwalked",
+            library_models.Book,
+            "shelf__branch__name",
+            "Shaped",
+            "title",
+            ["B-HID", "B-PUB"],
+        ),
+    ],
+    ids=["forward", "reverse", "unwalked"],
+)
+def test_unscoped_intermediate_hop_reads_no_filtering_base_manager(
+    *,
+    walk: str,
+    model: type[models.Model],
+    path: str,
+    value: str,
+    label: str,
+    expected: list[str],
+    default_manager_shape: _ManagerShape,
+) -> None:
+    """An unscoped hop reads every row of its model, whatever ``Meta.base_manager_name`` names.
+
+    Each path crosses ``Shelf``, which no type scopes, and ``Shelf``'s base
+    manager hides ``zz-hidden`` (a base manager must not filter). With the far
+    model's type hooked the leaf is walked (forward to ``Branch``, reverse to
+    ``Book``) and the ``Shelf`` hop reads the rows Django's join reads, as the
+    unwalked raw relation (no hooked type) does: the hidden shelf's rows match.
+    """
+    branch = library_models.Branch.objects.create(name="Shaped")
+    shown = library_models.Shelf.objects.create(branch=branch, code="aa-ok")
+    hidden = library_models.Shelf.objects.create(branch=branch, code="zz-hidden")
+    library_models.Book.objects.create(title="B-PUB", shelf=shown)
+    library_models.Book.objects.create(title="B-HID", shelf=hidden)
+    if walk != "unwalked":
+        far = library_models.Branch if walk == "forward" else library_models.Book
+        _ = make_django_type(
+            "HookedFarType",
+            far,
+            ("id",),
+            node=False,
+            namespace_extra={"get_queryset": classmethod(_passthrough_hook)},
+        )
+    chain_filter = type(
+        "ChainFilter",
+        (FilterSet,),
+        {"Meta": type("Meta", (), {"model": model, "fields": {path: ["exact"]}})},
+    )
+    assert issubclass(chain_filter, FilterSet)
+
+    with default_manager_shape(library_models.Shelf, "base", "code"):
+        rows = chain_filter.apply_sync(
+            {path: {"exact": value}},
+            model._default_manager.order_by(label),
+            _make_info(),
+        )
+
+        assert list(rows.values_list(label, flat=True)) == expected
+        assert list(library_models.Shelf._base_manager.values_list("code", flat=True)) == ["aa-ok"]
 
 
 @pytest.mark.django_db

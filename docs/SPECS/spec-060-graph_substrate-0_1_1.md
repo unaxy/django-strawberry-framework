@@ -775,9 +775,9 @@ each pinned because the naive alternative is silently wrong:
   answers with the exact owner (Decision 6); it scopes only when
   `utils/querysets.py::relation_visibility_type` names it. A hop whose
   type declares its own `get_queryset` reads that hook's rows: the
-  compiler seeds `base_queryset(<hop type's model>, using=queryset.db)`
-  (`utils/querysets.py::model_for`, so a proxy-typed owner answering a
-  re-entered hop reads its own default manager) and runs
+  compiler seeds `related_queryset(<hop type's model>, using=queryset.db)`
+  (`utils/querysets.py::model_for`; every row of that model, in its default
+  manager's class, as Django's join reads them) and runs
   the hook through `utils/querysets.py::apply_type_visibility_sync`
   (`utils/querysets.py::apply_type_visibility_async` under
   `graph.apply_async`) with the `info` passed to `graph.apply`, once per
@@ -785,8 +785,8 @@ each pinned because the naive alternative is silently wrong:
   `filters/sets.py::FilterSet._scoped_rows`. A plan compiled twice re-runs
   its hooks: a hook result is re-sealed on every call and is never a memo
   value (Decision 3). A hop whose type keeps the identity hook, or whose
-  model has no registered type, reads `_base_manager` on that alias, as
-  Django's join does. The branch's
+  model has no registered type, reads every row of its model on that
+  alias, as Django's join does. The branch's
   conditions are **path-relative** (`related`'s `Q` and
   `same_related_row`'s tuple alike) and filter the deepest hop's rows in one
   `.filter()` call; the compiler then calls

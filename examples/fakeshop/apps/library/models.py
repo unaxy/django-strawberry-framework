@@ -1051,13 +1051,15 @@ class VisibleBranchManager(models.Manager["VisibleBranch"]):
 
 
 class VisibleBranch(Branch):
-    """Proxy of ``Branch`` whose default manager is its visibility policy.
+    """Proxy of ``Branch`` whose default manager hides city-less branches.
 
     ``BranchSignage.branch`` is declared to this proxy. Django's forward
     descriptor loads the related row through ``_base_manager``, which does not
     apply this filter, so a signage row still reaches a city-less branch
-    through ``signage.branch``; only a visibility cascade, which composes each
-    edge target from its ``_default_manager``, hides that signage row.
+    through ``signage.branch``, and a join across the relation reads every
+    branch. The manager is not a visibility policy: ``VisibleBranchType``
+    declares the same rule as its ``get_queryset``, which the signage cascade
+    applies.
     """
 
     objects = VisibleBranchManager()

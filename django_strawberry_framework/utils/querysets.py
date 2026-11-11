@@ -43,9 +43,10 @@ validates it, then rebuilds a fresh queryset from the validated state. It NEVER
 returns the consumer object. Every rebuild the framework composes onto is a plain
 ``django.db.models.QuerySet``. Two rebuilds keep the source's own ``QuerySet``
 class, so a hook can call the project methods of the class that supplied it (the
-framework seeds each read from the model's default manager): the hook's input, and
-the cascade's narrowed output, which ``_restated_as_source_class`` restates after
-the plain seal and walk; the hook's result is sealed plain again.
+framework seeds each read in the class the model's default manager returns): the
+hook's input, and the cascade's narrowed output, which
+``_restated_as_source_class`` restates after the plain seal and walk; the hook's
+result is sealed plain again.
 
 What the seal preserves: the SQL query state (filters, annotations, joins,
 ordering, values projection), database routing / hints, the prefetch metadata
@@ -151,10 +152,12 @@ from ._queryset_private import (
     queryset_db,
     queryset_fetch_mode,
     queryset_fields,
+    queryset_hints,
     queryset_prefetch_lookups,
     set_queryset_fetch_mode,
     set_queryset_fields,
     set_queryset_for_write,
+    set_queryset_hints,
     set_queryset_prefetch_lookups,
     set_queryset_sticky_filter,
 )
@@ -409,13 +412,12 @@ def model_for(type_cls: type[DjangoType]) -> type[models.Model]:
 def base_queryset(model: type[_ModelT], *, using: str | None = None) -> models.QuerySet[_ModelT]:
     """Return a fresh unevaluated base queryset for ``model``, optionally alias-pinned.
 
-    The MODEL-keyed seed. ``initial_queryset`` is its TYPE-keyed wrapper, and
-    the two are genuinely different questions: a surface that seeds from the
-    registered type's model asks the first, while a surface that seeds from a
-    relation's own target model (the optimizer walker's prefetch child, the
-    cascade's per-edge base, a ``RelatedFilter``'s child) asks the second and
-    must NOT route through the registered type - the relation's model is the
-    authority there.
+    The MODEL-keyed ``_default_manager`` seed of a read that starts at ``model``
+    (a root list or connection, a Relay id lookup, a write's target rows, a
+    many-side relation's planned child, which Django's own related managers read
+    through the default manager's class). ``initial_queryset`` is its TYPE-keyed
+    wrapper. A read that reaches ``model`` across a relation seeds from
+    :func:`related_queryset` instead.
 
     ``using`` pins the seed to a database alias: a sharded parent must seed
     its children on the SAME connection, and the conditional-on-``None`` shape
@@ -433,6 +435,51 @@ def base_queryset(model: type[_ModelT], *, using: str | None = None) -> models.Q
         )
     manager = model._default_manager
     return manager.using(using).all() if using is not None else manager.all()
+
+
+def _is_model_queryset_class(value: object) -> TypeIs[type[models.QuerySet[models.Model]]]:
+    """Whether ``value`` is a ``QuerySet`` class by its real MRO (``related_queryset``'s read)."""
+    return truth.is_subclass(value, models.QuerySet)
+
+
+def related_queryset(
+    model: type[models.Model],
+    *,
+    using: str | None = None,
+) -> models.QuerySet[models.Model]:
+    """Return a fresh unevaluated queryset of every ``model`` row, in its default manager's class.
+
+    The MODEL-keyed seed of a read that reaches ``model`` across a relation: a
+    declared or undeclared ``FilterSet`` hop, a related ordering, the cascade's
+    per-edge base and a planned or re-checked single-valued relation, each
+    before the target type's ``get_queryset`` runs. A join reads no manager (a
+    filter, an ordering or a subquery across a relation sees every row of the
+    table), and Django loads a single related row through ``_base_manager``,
+    which its documentation requires never filter rows away. A filtered
+    ``_default_manager`` is not a visibility rule (that is a model's declared
+    rule or a type's ``get_queryset``), so the manager's own ``get_queryset``
+    override contributes only its class here: no filter, annotation, ordering
+    or other query state.
+
+    The class is the one the model's default manager returns
+    (``MyQuerySet.as_manager()``, ``Manager.from_queryset(MyQuerySet)``, or a
+    ``get_queryset`` that builds a class of its own), read from the queryset
+    :func:`base_queryset` hands back, so a hook can call that class's methods.
+    The rows are a fresh instance of that class, constructed the way Django's
+    ``BaseManager.get_queryset`` constructs one (``model``, the alias and the
+    manager's ``hints``; the class's own ``__init__`` runs). A
+    ``Meta.base_manager_name`` is not read: Django documents that a base manager
+    must not filter, and the rows here are the join's. ``using`` pins the seed to
+    a database alias, as :func:`base_queryset`'s does; unpinned, the manager's
+    own alias stands. An abstract model raises :func:`base_queryset`'s
+    ``ConfigurationError``.
+    """
+    # The manager's override runs (trusted project code) only to name its class and alias.
+    supplied = base_queryset(model)
+    queryset_class = require(truth.class_of(supplied), _is_model_queryset_class)
+    rows = queryset_class(model=model, using=using if using is not None else queryset_db(supplied))
+    set_queryset_hints(rows, dict(queryset_hints(supplied)))
+    return rows
 
 
 def default_order(query: sql.Query, model: type[models.Model]) -> tuple[str | Combinable, ...]:

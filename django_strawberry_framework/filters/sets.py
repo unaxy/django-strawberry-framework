@@ -175,6 +175,7 @@ from django_strawberry_framework.utils.querysets import (
     base_queryset,
     lookup_target_fields,
     model_for,
+    related_queryset,
     relation_path_visibility_types,
     run_in_one_sync_boundary,
 )
@@ -2598,7 +2599,7 @@ def _scoped_seed_rows(
     One body serves the sync derive (``FilterSet._scoped_rows``) and the async pre-fill
     (``FilterSet._await_scoped_rows``), so the two colorings seed the same rows.
     """
-    return base_queryset(model_for(scope), using=parent_db)
+    return related_queryset(model_for(scope), using=parent_db)
 
 
 @dataclass
@@ -3310,7 +3311,7 @@ def _bind_ask_terminal_source(
     owned = chain.owned_rows[last_index] if last_index < len(chain.owned_rows) else None
     source = owned if owned is not None else cached
     if source is None:
-        source = base_queryset(_hop_model(hop), using=queryset.db)
+        source = related_queryset(_hop_model(hop), using=queryset.db)
     return chain.terminal, source
 
 
@@ -5625,7 +5626,7 @@ class FilterSet(
             child_model = require(filterset_cls._meta.model, is_model_class)
             # Never ``None`` on an instance (see ``ProjectedChildFilter.filter``).
             child_queryset = (
-                base_queryset(child_model, using=parent_qs.db)
+                related_queryset(child_model, using=parent_qs.db)
                 if cached_rows is None
                 else cached_rows
             )
@@ -6583,7 +6584,7 @@ class FilterSet(
         target_type, child_filterset = resolved
         # A branch's child filterset declares ``Meta.model``.
         child_model = require(child_filterset._meta.model, is_model_class)
-        return target_type, child_filterset, base_queryset(child_model, using=parent_db)
+        return target_type, child_filterset, related_queryset(child_model, using=parent_db)
 
     @classmethod
     def _branch_target(
@@ -7758,7 +7759,7 @@ class FilterSet(
         if isinstance(hop, UndeclaredHop):
             scope = hop.scope
             if scope is None:
-                return _hop_model(hop)._base_manager.using(parent_db)
+                return related_queryset(_hop_model(hop), using=parent_db)
             return self._scoped_rows(scope, self._apply_info, visibility, parent_db)
         owner, related_filter = _filter_declaration(hop)
         return owner._declared_hop_rows(
@@ -8494,7 +8495,7 @@ class FilterSet(
                 built
                 if terminal is filter_instance
                 # ``BaseFilterSet.__init__`` stamps the set's model on every filter it binds.
-                else base_queryset(
+                else related_queryset(
                     require(read_attr(terminal, "model"), is_model_class),
                     using=built.db,
                 )
@@ -8505,7 +8506,7 @@ class FilterSet(
         chain, _named = self._request_chain(
             require_instance(self._leaf_chain(filter_instance, aliases), _LeafChain),
             value,
-            lambda hop, using: base_queryset(_hop_model(hop), using=using),
+            lambda hop, using: related_queryset(_hop_model(hop), using=using),
             built.db,
         )
         rows = self._chain_base(chain, built)
@@ -8801,7 +8802,7 @@ class FilterSet(
         """Return the unscoped rows for ``chain``'s terminal: the last hop target's, else ``queryset``."""
         if not chain.hops:
             return queryset
-        return base_queryset(_hop_model(chain.hops[-1]), using=queryset.db)
+        return related_queryset(_hop_model(chain.hops[-1]), using=queryset.db)
 
     def _apply_relation_leaf(
         self,

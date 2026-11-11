@@ -9,6 +9,7 @@ windows are ``examples/fakeshop/test_query/test_single_parent_fastpath_api.py``.
 
 import base64
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, NoReturn, Protocol, TypeVar, runtime_checkable
 
@@ -32,7 +33,15 @@ from apps.library.models import (
 from apps.products.models import Category, Entry, Item
 from apps.products.services import seed_data
 from django.contrib.contenttypes.models import ContentType
-from django.db.models import F, Field, ForeignObjectRel, Model, OrderBy, Prefetch, QuerySet
+from django.db.models import (
+    F,
+    Field,
+    ForeignObjectRel,
+    Model,
+    OrderBy,
+    Prefetch,
+    QuerySet,
+)
 from django.utils.text import camel_case_to_spaces
 from graphql import GraphQLResolveInfo, OperationType
 from strategy_schemas import make_django_type
@@ -105,7 +114,13 @@ from django_strawberry_framework.optimizer.walker import (
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
 from django_strawberry_framework.types.finalizer import _record_relation_connection
-from django_strawberry_framework.utils._narrowing import is_list, list_of, read_attr, require
+from django_strawberry_framework.utils import truth
+from django_strawberry_framework.utils._narrowing import (
+    is_list,
+    list_of,
+    read_attr,
+    require,
+)
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
     queryset_prefetch_lookups,
@@ -6453,3 +6468,99 @@ async def test_generic_connection_planning_does_no_sync_db_io_under_async() -> N
         assert "content_type" not in child_where
     finally:
         registry.clear()
+
+
+_ManagerShape = Callable[[type[Model], str, str], AbstractContextManager[type]]
+
+
+def _shelves_and_books() -> Branch:
+    """Books ``B-PUB`` / ``B-HID`` on shelves ``aa-ok`` / ``zz-hidden`` of one branch."""
+    branch = Branch.objects.create(name="Shaped")
+    shown = Shelf.objects.create(branch=branch, code="aa-ok")
+    hidden = Shelf.objects.create(branch=branch, code="zz-hidden")
+    Book.objects.create(title="B-PUB", shelf=shown)
+    Book.objects.create(title="B-HID", shelf=hidden)
+    return branch
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize("shape", ["from_queryset", "hand_written", "polymorphic"])
+def test_single_valued_child_hook_reads_every_target_row_in_the_default_manager_class(
+    shape: str,
+    default_manager_shape: _ManagerShape,
+) -> None:
+    """A planned forward-FK child runs the target hook over every row, in the manager's class.
+
+    ``book.shelf`` loads its shelf through ``_base_manager`` whatever the default
+    manager hides, so the planned child reads the same rows; the hook receives
+    the class the default manager returns.
+    """
+    _shelves_and_books()
+    seen: list[tuple[type, tuple[str, ...]]] = []
+
+    class ShapedShelfType(DjangoType):
+        class Meta:
+            model = Shelf
+            fields = ("id", "code")
+
+        @override
+        @classmethod
+        def get_queryset(cls, queryset: QuerySet[Shelf], info: strawberry.Info) -> QuerySet[Shelf]:
+            seen.append(
+                (truth.class_of(queryset), tuple(sorted(queryset.values_list("code", flat=True)))),
+            )
+            return queryset
+
+    field = FieldMeta.from_django_field(Book._meta.get_field("shelf"))
+    with default_manager_shape(Shelf, shape, "code") as queryset_class:
+        child = _build_child_queryset(
+            field,
+            ShapedShelfType,
+            raw_info_of(make_info()),
+            has_custom_qs=True,
+            target_definition=ShapedShelfType.__django_strawberry_definition__,
+        )
+
+        assert sorted(child.values_list("code", flat=True)) == ["aa-ok", "zz-hidden"]
+        assert Book.objects.get(title="B-HID").shelf.code == "zz-hidden"
+    assert seen == [(queryset_class, ("aa-ok", "zz-hidden"))]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "model",
+        "relation",
+        "field",
+        "parent_rows",
+    ),
+    [
+        pytest.param(Shelf, "shelves", "code", "branch", id="reverse-fk"),
+        pytest.param(Genre, "genres", "name", "book", id="many-to-many"),
+    ],
+)
+def test_many_side_child_reads_the_default_manager_rows(
+    *,
+    model: type[Model],
+    relation: str,
+    field: str,
+    parent_rows: str,
+    default_manager_shape: _ManagerShape,
+) -> None:
+    """A planned reverse-FK or many-to-many child hides the row the default manager hides.
+
+    Django's related managers for these relations subclass the target's default
+    manager class (``branch.shelves.all()``, ``book.genres.all()``), so the
+    planned child seeds from the default manager, as the unplanned resolver's
+    related manager reads, and ``zz-hidden`` is absent.
+    """
+    _ = _shelves_and_books()
+    book = Book.objects.get(title="B-PUB")
+    book.genres.add(Genre.objects.create(name="aa-ok"), Genre.objects.create(name="zz-hidden"))
+    owner = Branch if parent_rows == "branch" else Book
+    child_field = FieldMeta.from_django_field(owner._meta.get_field(relation))
+    with default_manager_shape(model, "hand_written", field):
+        child = _build_child_queryset(child_field, None, None, has_custom_qs=False)
+
+        assert sorted(child.values_list(field, flat=True)) == ["aa-ok"]

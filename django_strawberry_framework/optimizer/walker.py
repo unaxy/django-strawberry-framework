@@ -39,6 +39,7 @@ from django_strawberry_framework.utils.querysets import (
     _SealPolicy,
     apply_type_visibility_sync,
     base_queryset,
+    related_queryset,
 )
 from django_strawberry_framework.utils.relations import (
     instance_accessor,
@@ -394,6 +395,20 @@ _WALKER_ASYNC_RECOURSE = (
 )
 
 
+def _relation_child_seed(field: FieldMeta) -> QuerySet[models.Model]:
+    """Return the rows Django reads ``field``'s relation through, keyed on its related model.
+
+    A many-side relation (reverse FK, many-to-many, generic relation) reads
+    through a related manager, which subclasses the target's default manager
+    class, so its child seeds from that manager (``utils/querysets.py::base_queryset``);
+    a single-valued relation's descriptor loads its row through
+    ``_base_manager``, so its child seeds from every row, in the default
+    manager's class (``utils/querysets.py::related_queryset``).
+    """
+    related_model = require(field.related_model, is_model_class)
+    return base_queryset(related_model) if field.is_many_side else related_queryset(related_model)
+
+
 def _build_child_queryset(
     field: FieldMeta,
     target_type: type[DjangoType] | None,
@@ -435,13 +450,16 @@ def _build_child_queryset(
     ``SyncMisuseError`` here (the optimizer walker is sync; a coroutine would
     otherwise leak into ``OptimizationPlan.apply``) - consistent with the
     connection field's documented "nested async ``get_queryset`` ->
-    ``relation_shapes = list``" recourse. The base queryset is the related
-    model's own ``_default_manager.all()`` (NOT ``initial_queryset(target_type)``
-    - the prefetch child is keyed on ``field.related_model``) and carries no
-    explicit ``.using(...)``. A plan walk is a read with no write pipeline in
-    force, so nothing pins an alias ahead of that seed either: the child's
-    effective alias entering the hook is ``None`` on this path, and the hook
-    cannot pin one of its own.
+    ``relation_shapes = list``" recourse. The base queryset is the one Django
+    reads the relation through, keyed on ``field.related_model`` (NOT
+    ``initial_queryset(target_type)``; ``_relation_child_seed``), so a planned
+    child reads the rows the unplanned path reads: a related manager's for a
+    many-side relation, every row for a single-valued one
+    (``types/resolvers.py::_visible_related_object``). It carries no explicit
+    ``.using(...)``. A plan walk is a read with no write pipeline in force, so
+    nothing pins an alias ahead of that seed either: the child's effective
+    alias entering the hook is ``None`` on this path, and the hook cannot pin
+    one of its own.
 
     ``seed`` replaces that base with the queryset of a consumer
     ``OptimizerHint.prefetch(Prefetch(...))``: the hint chooses how the relation
@@ -450,9 +468,7 @@ def _build_child_queryset(
     the seed's explicit ``.using(...)`` as the alias the hook must keep, and a
     hinted plan is never cached, so a routed seed answers to that one request.
     """
-    queryset = (
-        seed if seed is not None else base_queryset(require(field.related_model, is_model_class))
-    )
+    queryset = seed if seed is not None else _relation_child_seed(field)
     if has_custom_qs:
         # The slice axis is the one axis the two child policies differ on, and it
         # differs because the paths do.

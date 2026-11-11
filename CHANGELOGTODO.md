@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 222 to do.
+Progress: 0 done, 223 to do.
 
 ## From dry-0_0_15_3
 
@@ -1066,6 +1066,11 @@ Progress: 0 done, 222 to do.
   crosses, the alias it starts at, a join Django numbers) is refused with `ConfigurationError` unless every step there
   is a forward key, and so is a `FilteredRelation` whose `relation_name` names no relation, which Django accepts.
   Under `apply_async`, an alias only `filter_queryset` adds raises `SyncMisuseError` at an async-only target hook
+- [ ] 907. CHANGELOG entry for item 68 (breaking): filter and order hops, the visibility cascade and single-valued
+  relations read a related model's rows as Django's join does: every row, in the class its default manager returns,
+  whose own `get_queryset` override contributes only that class there. A filtering or annotating default manager now
+  shapes only reads that start at its model (and nested many-side lists and connections); declare what a hop needs,
+  row visibility included, in the type's `get_queryset`
 
 ## From dry-upstream-0_0_15
 

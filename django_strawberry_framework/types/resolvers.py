@@ -67,10 +67,11 @@ from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,
-    initial_queryset,
     is_manager,
     materialized_rows,
+    model_for,
     normalized_row_source,
+    related_queryset,
     run_in_one_sync_boundary,
 )
 from django_strawberry_framework.utils.relations import (
@@ -485,9 +486,11 @@ def _visible_related_object(
 ) -> AwaitableOrValue[models.Model | None]:
     """Re-check one relation object through its target visibility hook.
 
-    Returns the row when the target type's ``get_queryset`` admits it and
-    ``None`` when it hides it, so a hidden target reads as a missing row and
-    never leaks past the hook. A parent type that does not cascade its own
+    The hook runs over every target row, as Django's descriptor loads
+    ``related`` (``utils/querysets.py::related_queryset``), so only the hook
+    decides. Returns the row when the target type's ``get_queryset`` admits it
+    and ``None`` when it hides it, so a hidden target reads as a missing row
+    and never leaks past the hook. A parent type that does not cascade its own
     hook can still hold a key naming such a row; a non-null relation field then
     reports the ``None`` as a completion error. The optimizer's planned
     ``Prefetch`` child, which runs the same hook, answers the relation instead
@@ -495,7 +498,7 @@ def _visible_related_object(
     """
     if related is None:
         return None
-    source = initial_queryset(target_type)
+    source = related_queryset(model_for(target_type))
     alias = read_attr(read_attr(related, "_state", None), "db", None)
     if is_str(alias):
         source = source.using(alias)

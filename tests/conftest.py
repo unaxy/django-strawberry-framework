@@ -1,14 +1,22 @@
-"""Shared package-test fixtures: registry isolation, script imports, stop signals, budgets."""
+"""Shared package-test fixtures: registry isolation, script imports, stop signals, budgets.
 
+Also the default-manager shapes a project writes (``default_manager_shape``), swapped onto a
+library model for one test.
+"""
+
+import contextlib
 import importlib
 import signal
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING
 
 import pytest
+from django.db import models
+from django.db.models.sql import Query
+from typing_extensions import Self
 
 from django_strawberry_framework.connection import _connection_type_cache
 from django_strawberry_framework.registry import registry
@@ -16,8 +24,12 @@ from django_strawberry_framework.resource_policy import (
     begin_resource_budget,
     end_resource_budget,
 )
+from django_strawberry_framework.utils._narrowing import require_instance
+from django_strawberry_framework.utils._queryset_private import super_clone_queryset
 
 if TYPE_CHECKING:
+    from django.db.models.options import Options
+
     from django_strawberry_framework import ResourcePolicy
     from django_strawberry_framework.resource_policy import _BudgetScope
 
@@ -113,3 +125,161 @@ def arm_resource_budget() -> "Iterator[Callable[[object, ResourcePolicy], None]]
     yield arm
     for scope in reversed(scopes):
         end_resource_budget(scope)
+
+
+#: The value a shaped manager hides in its model's ``field``.
+HIDDEN_BY_MANAGER = "zz-hidden"
+
+
+class FromQuerySetShapeQuerySet(models.QuerySet[models.Model]):
+    """The class ``Manager.from_queryset`` builds a manager from."""
+
+    def project_rows(self) -> Self:
+        """A project method a hook can call."""
+        return self.all()
+
+
+class HandWrittenShapeQuerySet(models.QuerySet[models.Model]):
+    """The class a hand-written ``get_queryset`` constructs."""
+
+    def project_rows(self) -> Self:
+        """A project method a hook can call."""
+        return self.all()
+
+
+class PolymorphicShapeQuerySet(models.QuerySet[models.Model]):
+    """django-polymorphic's ``PolymorphicQuerySet`` shape: ``__init__`` state ``_clone`` carries."""
+
+    shape_state: bool
+
+    def __init__(
+        self,
+        model: type[models.Model] | None = None,
+        query: Query | None = None,
+        using: str | None = None,
+        hints: dict[str, models.Model] | None = None,
+    ) -> None:
+        """Construct as ``QuerySet`` does, then set the state ``_clone`` carries."""
+        super().__init__(model=model, query=query, using=using, hints=hints)
+        self.shape_state = True
+
+    def _clone(self) -> Self:
+        clone = super_clone_queryset(PolymorphicShapeQuerySet, self)
+        assert isinstance(clone, type(self))
+        clone.shape_state = self.shape_state
+        return clone
+
+    def project_rows(self) -> Self:
+        """A project method a hook can call."""
+        return self.all()
+
+
+def _shape_manager(shape: str, field: str) -> tuple[models.Manager[models.Model], type]:
+    """Return a manager of ``shape`` hiding ``field == HIDDEN_BY_MANAGER``, and its class.
+
+    The ``annotating`` shape hides nothing: it annotates ``field`` as the constant ``1``.
+    """
+    hidden = {field: HIDDEN_BY_MANAGER}
+    if shape == "annotating":
+
+        def annotating_rows(self: models.Manager[models.Model]) -> models.QuerySet[models.Model]:
+            return HandWrittenShapeQuerySet(self.model, using=self._db).annotate(
+                **{field: models.Value(1)},
+            )
+
+        manager_cls = type(
+            "HandWrittenAnnotating",
+            (models.Manager,),
+            {"get_queryset": annotating_rows},
+        )
+        return manager_cls(), HandWrittenShapeQuerySet
+
+    if shape == "from_queryset":
+        base = models.Manager[models.Model].from_queryset(FromQuerySetShapeQuerySet)
+
+        def from_queryset_rows(
+            self: models.Manager[models.Model],
+        ) -> models.QuerySet[models.Model]:
+            return base.get_queryset(self).exclude(**hidden)
+
+        manager_cls = type("FromQuerySetHiding", (base,), {"get_queryset": from_queryset_rows})
+        return require_instance(manager_cls(), base), FromQuerySetShapeQuerySet
+
+    if shape == "hand_written":
+
+        def hand_written_rows(self: models.Manager[models.Model]) -> models.QuerySet[models.Model]:
+            return HandWrittenShapeQuerySet(self.model, using=self._db).exclude(**hidden)
+
+        manager_cls = type(
+            "HandWrittenHiding",
+            (models.Manager,),
+            {"get_queryset": hand_written_rows},
+        )
+        return manager_cls(), HandWrittenShapeQuerySet
+
+    def polymorphic_rows(self: models.Manager[models.Model]) -> models.QuerySet[models.Model]:
+        # ``PolymorphicManager.get_queryset``: its ``queryset_class``, narrowed on a proxy.
+        return PolymorphicShapeQuerySet(self.model, using=self._db).exclude(**hidden)
+
+    manager_cls = type(
+        "PolymorphicHiding",
+        (models.Manager,),
+        {"queryset_class": PolymorphicShapeQuerySet, "get_queryset": polymorphic_rows},
+    )
+    return manager_cls(), PolymorphicShapeQuerySet
+
+
+def _expire_managers(options: "Options[models.Model]") -> None:
+    """Drop the manager reads ``Options`` caches, as ``Options._expire_cache`` does."""
+    cache = vars(options)
+    for name in (
+        "managers",
+        "managers_map",
+        "base_manager",
+        "default_manager",
+    ):
+        if name in cache:
+            del cache[name]
+
+
+@contextlib.contextmanager
+def _swapped_manager(
+    model: type[models.Model],
+    shape: str,
+    field: str,
+) -> Generator[type, None, None]:
+    manager, queryset_class = _shape_manager("hand_written" if shape == "base" else shape, field)
+    options = model._meta
+    saved = (options.default_manager_name, options.base_manager_name)
+    model.add_to_class("shape_rows", manager)
+    if shape == "base":
+        options.base_manager_name = "shape_rows"
+    else:
+        options.default_manager_name = "shape_rows"
+    _expire_managers(options)
+    try:
+        yield queryset_class
+    finally:
+        options.default_manager_name, options.base_manager_name = saved
+        options.local_managers.remove(manager)
+        delattr(model, "shape_rows")
+        _expire_managers(options)
+
+
+@pytest.fixture
+def default_manager_shape() -> Callable[
+    [type[models.Model], str, str],
+    contextlib.AbstractContextManager[type],
+]:
+    """Return a context manager making a hiding manager ``model``'s default for a block.
+
+    ``shape`` is how a project writes it: ``from_queryset`` (``Manager.from_queryset`` with a
+    filtering ``get_queryset`` override), ``hand_written`` (a ``get_queryset`` returning its own
+    ``QuerySet`` class, filtered) or ``polymorphic`` (django-polymorphic's manager shape: a
+    ``queryset_class`` whose ``__init__`` sets state ``_clone`` carries); ``base`` makes the
+    ``hand_written`` manager the ``Meta.base_manager_name`` instead, the default untouched. Each
+    hides the rows whose ``field`` is ``HIDDEN_BY_MANAGER``, except ``annotating``, a
+    ``hand_written`` manager annotating ``field`` as ``1`` instead; the block receives the
+    ``QuerySet`` class it returns.
+    """
+    return _swapped_manager
