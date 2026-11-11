@@ -55,9 +55,10 @@ a ``Date``, on ``occurred_at``, and ``year`` / ``iso_year`` on the date column
 ``occurred_on`` take ``Int``; each filters by the value sent. Its declared ``ListFilter``
 (``year__in``) and ``RangeFilter`` (``year__range``, a lone bound included) take and filter
 by an ``Int`` year, a lone bound of a ``RangeFilter`` with a bare ``year`` / ``date``
-``lookup_expr`` through that transform too (an end date keeping a row later that day), and
-the same shapes with a ``method=`` keep the column's ``DateTime``, which reaches the method;
-the two ranges mint two range types.
+``lookup_expr`` through that transform too (an end date keeping a row later that day), a
+``ListFilter`` (``date__in``) takes and filters by a ``Date``, each alike under an active
+zone ahead of UTC, and the same shapes with a ``method=`` keep the column's ``DateTime``,
+which reaches the method; the two ranges mint two range types.
 On PostgreSQL a UTC offset the server refuses (16:00 or more either way, or, bound as
 text as Django's default psycopg cursor binds, a fraction of a second) is
 ``FILTER_INVALID`` the same way, where SQLite projects the datetime onto UTC and filters.
@@ -97,6 +98,7 @@ from django.http.response import HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
+from django.utils import timezone
 from graphql_client import (
     JSONObject,
     json_at,
@@ -1376,7 +1378,7 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
     ``year``) / ``year__gt`` / ``year__in`` / ``iso_year`` / ``iso_year__lte`` / ``time`` /
     ``time__gt`` / ``date`` and the null tests ``year__isnull`` / ``date__isnull`` on
     ``occurred_at``, and ``year`` / ``iso_year`` on the date column ``occurred_on``; a
-    ``ListFilter`` (``year__in``), a ``RangeFilter``
+    ``ListFilter`` (``year__in``) and one through ``date__in``, a ``RangeFilter``
     (``year__range``) and two through a bare ``year`` / ``date``; and the same list and
     range shapes with a ``method=``, whose method receives the column's values.
     A ``NullableScalarSpecimen`` set reaches it through ``partner``, nested and flat, and
@@ -1390,6 +1392,7 @@ def generated_year_schema(private_registry: None) -> Iterator[DjangoSchema]:
         years_span = RangeFilter(field_name="occurred_at", lookup_expr="year__range")
         years_of = RangeFilter(field_name="occurred_at", lookup_expr="year")
         days_of = RangeFilter(field_name="occurred_at", lookup_expr="date")
+        days_among = ListFilter(field_name="occurred_at", lookup_expr="date__in")
         years_of_stamps = ListFilter(
             field_name="occurred_at",
             lookup_expr="year__in",
@@ -1843,6 +1846,7 @@ _BETA_YEAR_STAMP = "2020-03-01T00:00:00+00:00"
     ("year_filter", "labels"),
     [
         pytest.param({"yearsAmong": {"yearIn": [2020]}}, ["beta"], id="list-in"),
+        pytest.param({"daysAmong": {"dateIn": ["2020-06-15"]}}, ["beta"], id="date-list-in"),
         pytest.param(
             {"yearsSpan": {"yearRange": {"start": 2020, "end": 2021}}},
             ["alpha", "beta"],
@@ -1883,14 +1887,41 @@ def test_lookup_expr_transform_leaf_filters_by_its_output_and_a_method_by_its_co
     ``yearsAmong`` / ``yearsSpan`` take the ``year`` transform's ``Int`` and filter by it,
     a lone bound through ``year`` too. ``yearsOf`` / ``daysOf`` spell the bare ``year`` /
     ``date`` transform as the ``lookup_expr``, so a lone bound compares that transform's
-    output (an end date keeps the row later that day). The ``method=`` shapes keep the
-    column's ``DateTime``, cleaned as one, so each datetime reaches the method.
+    output (an end date keeps the row later that day), and ``daysAmong`` takes the ``date``
+    transform's ``Date`` members. The ``method=`` shapes keep the column's ``DateTime``,
+    cleaned as one, so each datetime reaches the method.
     """
     _seed_year_partners()
 
     assert _holder_payload("specimens", year_filter) == {
         "data": {"specimens": {"edges": [{"node": {"label": label}} for label in sorted(labels)]}},
     }
+
+
+@pytest.mark.django_db
+@pytest.mark.usefixtures("generated_year_schema")
+@pytest.mark.parametrize(
+    "year_filter",
+    [
+        pytest.param({"daysAmong": {"dateIn": ["2020-06-15"]}}, id="date-list-in"),
+        pytest.param({"daysOf": {"date": {"end": "2020-06-15"}}}, id="bare-date-end"),
+    ],
+)
+def test_a_date_through_the_date_transform_keeps_its_day_in_a_zone_ahead_of_utc(
+    year_filter: dict[str, object],
+) -> None:
+    """Under an active zone ahead of UTC a ``date__in`` member and a lone end date keep ``beta``.
+
+    Each is cleaned as the ``date`` transform's ``Date``, so ``2020-06-15`` keeps ``beta``
+    (09:30 UTC, that evening in Tokyo); one cleaned as the datetime column's value would be
+    Tokyo midnight, the day before in UTC, and lose ``beta``.
+    """
+    _seed_year_partners()
+
+    with timezone.override("Asia/Tokyo"):
+        assert _holder_payload("specimens", year_filter) == {
+            "data": {"specimens": {"edges": [{"node": {"label": "beta"}}]}},
+        }
 
 
 @pytest.mark.django_db

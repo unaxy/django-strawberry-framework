@@ -12,7 +12,8 @@ primary key or a path through a relation's key, under the default lookup or a de
 ``range``, or through a ``date`` / ``year`` transform (bare, ``exact``, ``range``, ``in``,
 ``gte``), and sends two bounds: the rows between them answer flat, their complement under
 ``not``, and the same rows answer the set's raw form data. A transform stays on the
-compared path, so an end date keeps a row stamped later that day.
+compared path, so an end date keeps a row stamped later that day, under an active zone
+ahead of UTC too (each bound a date, never the column's datetime at that zone's midnight).
 
 Raw form data reaches what no published input can: a range over a relation itself (forward
 ``parent`` and reverse ``children``), whose bounds compare the column the relation's values
@@ -39,6 +40,7 @@ from django.db.models import Model, QuerySet
 from django.http import HttpRequest, HttpResponseBase, QueryDict
 from django.test import override_settings
 from django.urls import path
+from django.utils import timezone
 from graphql_client import JSONObject, graphql_payload, json_list, json_str
 from strawberry import relay
 
@@ -402,6 +404,28 @@ def test_two_bounds_keep_the_rows_between_them_whatever_lookup_is_declared(cell:
     _seed_specimens()
 
     assert _rows_three_ways(_specimen_schema(cell), "label", cell) == _ANSWER
+
+
+_DATE_TRANSFORM_CELLS = [
+    pytest.param(_Cell(column, lookup, bounds, raw), id=f"{column}-{lookup}")
+    for column, lookup, bounds, raw in _TRANSFORMS
+    if lookup.startswith("date")
+]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("cell", _DATE_TRANSFORM_CELLS)
+def test_two_date_bounds_keep_the_rows_between_them_in_a_zone_ahead_of_utc(cell: _Cell) -> None:
+    """Under an active zone ahead of UTC two dates through ``date`` still keep ``b`` .. ``d``.
+
+    Each bound is cleaned as the ``date`` transform's output, a date, so ``2024-01-04`` keeps
+    ``d`` (09:30 UTC, that evening in Tokyo); a bound cleaned as the datetime column's value
+    would be Tokyo midnight, the day before in UTC, and lose ``d``.
+    """
+    _seed_specimens()
+
+    with timezone.override("Asia/Tokyo"):
+        assert _rows_three_ways(_specimen_schema(cell), "label", cell) == _ANSWER
 
 
 @pytest.mark.django_db

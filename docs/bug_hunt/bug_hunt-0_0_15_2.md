@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 488 done, 117 to do. The CHANGELOG entries filed here moved to
+Progress: 489 done, 116 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2669,15 +2669,21 @@ Progress: 488 done, 117 to do. The CHANGELOG entries filed here moved to
   declarations x 5 bound shapes x 5 reaches, every cell correct. Pinned by
   `examples/fakeshop/test_query/test_range_filter_declared_lookup_api.py::test_two_bounds_keep_the_rows_between_them_whatever_lookup_is_declared`
   (`occurred_on-year`, `occurred_at-date`, `occurred_at-year`; flat, `not` and raw form). No production change
+- [x] 759. The `date` transform half of 684 is pinned: a declared `date` transform over a datetime column cleans its
+  values as a date (`filters/base.py::_column_form_field` reads `_bound_value_field`), so a datetime stamp is refused
+  and a day keeps its rows under an active zone ahead of UTC. Pinned live by
+  `examples/fakeshop/test_query/test_range_filter_declared_lookup_api.py::test_two_date_bounds_keep_the_rows_between_them_in_a_zone_ahead_of_utc`
+  (`date`, `date__exact`, `date__range`, `date__gte` two bounds under Asia/Tokyo; flat, `not` and raw) and
+  `examples/fakeshop/test_query/test_scalars_filter_api.py::test_a_date_through_the_date_transform_keeps_its_day_in_a_zone_ahead_of_utc`
+  (a declared `date__in` member and a bare `date` lone end; the UTC `date-list-in` row joins
+  `::test_lookup_expr_transform_leaf_filters_by_its_output_and_a_method_by_its_column`), and at the package tier by
+  `tests/filters/test_sets.py::test_a_datetime_stamp_through_a_declared_date_transform_is_no_valid_date` (a stamp
+  refused "Enter a valid date." for `date__in`, `date__range` and a bare `date` lone end through raw form data and
+  `apply_sync`; the live `Date` scalar refuses it first). The mutant `_bound_value_field` -> `_bound_model_field` now
+  fails 9 new date rows on 6 shapes. Tests only
 
 ## To do: found along the way
 
-- [ ] 759. (tests) No row pins the `date` transform half of 684:
-  `tests/filters/test_sets.py::test_declared_filter_through_a_lookup_expr_transform_cleans_values_as_its_output[date-in]`
-  and the live `bare-date-*` rows pass with `filters/base.py::_column_form_field` reading `_bound_model_field`, so
-  nothing fails if a declared `date__in` / `date__range` over a datetime column goes back to cleaning as a
-  `DateTimeField` (accepting `"2020-06-15T11:00:00Z"`, which the generated leaf and the published `Date` refuse, and
-  keeping only the earlier rows for a lone end bound `"2020-06-15"`). Found regrading 684
 - [ ] 762. (robustness) A ragged or over-deep member of an `in` over a nested `ArrayField` (`[[[1, [2]]]]` through an
   `apply_sync` JSON `where`, or raw form data) raises an unmasked `TypeError` ("Field 'igrid' expected a number") from
   `.qs` and `apply_sync` instead of a field-keyed `FILTER_INVALID`; the same at the parent of 692. PostgreSQL refuses

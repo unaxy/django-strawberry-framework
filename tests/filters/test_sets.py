@@ -7510,6 +7510,78 @@ def test_declared_filter_through_a_lookup_expr_transform_cleans_values_as_its_ou
     assert list(filterset.qs.values_list("label", flat=True)) == labels
 
 
+class _DateTransformFilter(FilterSet):
+    """A ``date__in`` list, a ``date__range`` and a bare ``date`` range over a datetime column."""
+
+    days_among = ListFilter(field_name="occurred_at", lookup_expr="date__in")
+    days_span = RangeFilter(field_name="occurred_at", lookup_expr="date__range")
+    days_to = RangeFilter(field_name="occurred_at", lookup_expr="date")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = []
+
+
+#: A datetime stamp, which the ``date`` transform's ``DateField`` cannot clean.
+_STAMP = "2020-06-15T11:00:00Z"
+_INVALID_DATE = [{"message": "Enter a valid date.", "code": "invalid"}]
+_DATE_TRANSFORM_STAMPS = [
+    pytest.param(
+        "days_among",
+        {"days_among": [_STAMP]},
+        {"days_among": {"date_in": [_STAMP]}},
+        id="date-in",
+    ),
+    pytest.param(
+        "days_span",
+        {"days_span_0": _STAMP, "days_span_1": _STAMP},
+        {"days_span": {"date_range": {"start": _STAMP, "end": _STAMP}}},
+        id="date-range-both",
+    ),
+    pytest.param(
+        "days_to",
+        {"days_to_1": _STAMP},
+        {"days_to": {"date": {"end": _STAMP}}},
+        id="bare-date-lone-end",
+    ),
+]
+
+
+@pytest.mark.parametrize(("form_key", "data", "criteria"), _DATE_TRANSFORM_STAMPS)
+def test_a_datetime_stamp_through_a_declared_date_transform_is_no_valid_date(
+    form_key: str,
+    data: dict[str, object],
+    criteria: dict[str, object],
+) -> None:
+    """A stamp sent to a ``date`` transform is refused as a date, never cleaned as the column.
+
+    The live ``Date`` scalar refuses the stamp before any form, so only raw form data and
+    ``apply_sync`` reach it: each member or bound is cleaned by the transform's output
+    (``DateField``), as ``Enter a valid date.``, where the datetime column's own form field
+    would accept it.
+    """
+    filterset = _DateTransformFilter(
+        data=data,
+        queryset=scalar_models.ScalarSpecimen.objects.all(),
+    )
+
+    assert not filterset.is_valid()
+    assert require_instance(filterset.errors, ErrorDict).get_json_data() == {
+        form_key: _INVALID_DATE,
+    }
+    with pytest.raises(GraphQLError) as excinfo:
+        _ = _DateTransformFilter.apply_sync(
+            criteria,
+            scalar_models.ScalarSpecimen.objects.all(),
+            _make_info(),
+        )
+    assert excinfo.value.message == "Invalid filter input"
+    assert excinfo.value.extensions == {
+        "code": "FILTER_INVALID",
+        "errors": {form_key: _INVALID_DATE},
+    }
+
+
 #: UTC offsets PostgreSQL refuses: 16:00 or more either way, and (bound as text, as Django's
 #: default psycopg cursor binds) a fraction of a second.
 _PLUS_SIXTEEN = datetime.timezone(datetime.timedelta(hours=16))
