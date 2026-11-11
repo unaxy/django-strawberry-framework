@@ -3003,7 +3003,7 @@ def _make_copy(
     _apply_copy_config(path, form)
     if start.restore is not None:
         _ = _git(path, "read-tree", "-u", "--reset", start.restore)
-        _ = _git(path, "reset", "--quiet")
+        _ = _git(path, "reset", "--quiet", "-N")
 
 
 def _undo_new(

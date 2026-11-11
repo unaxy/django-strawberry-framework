@@ -28,8 +28,8 @@ Machines
     ``sh`` and ``rsync`` are POSIX here. A qualifying peer no row lists is synced
     and reported with a suggested ``machines.json`` row; the list is never written.
     Machines are named, and stored names read, by ``scripts/fleet.py``'s rule (its
-    "Identity"): a listed machine is its row's name everywhere, and ``sync`` and
-    ``handoff`` refuse on a host no row names.
+    "Identity"): a listed machine is its row's name everywhere, and ``sync``,
+    ``fetch-pins`` and ``handoff`` refuse on a host no row names.
 
 One writer per copy
     Every copy has a home machine (``home`` in its work.py note; an older note's
@@ -222,12 +222,26 @@ Commands
         (their pins and evidence) and leaves main alone; ``--main-only`` syncs
         main alone. ``--dry-run`` writes nothing but fetches peers' main commits
         into the object store so it can say what a fast-forward would do.
+    ``fetch-pins NAME --machine M [--dry-run]``
+        Fetch only ``refs/work/NAME/*`` from M's ``.work/pins.git`` into this
+        machine's pin store. Existing equal pins stay; different commits are a
+        conflict, both kept. Nothing is pushed back, rewritten or deleted; pins
+        buried by either side's tombstones are not revived. Reads the scoped
+        inventories and transfers required Git objects and pin refs only; it
+        does not sync replica files, evidence files or the main branch.
+        Both machines must qualify as for sync; normal fleet/land locks apply.
+        ``--dry-run`` reports missing pins without writing. Exit 1 also means
+        the source has no live pins for NAME; an unknown/offline source is exit 2.
+        Then ``uv run python scripts/work.py new verify-example --from
+        refs/work/NAME/save-N --purpose 'review saved work'`` restores the save
+        without waiting for a replica. M needs the existing pin agent operations,
+        not this new public command; ``--remote-scripts`` applies as above.
     ``handoff <name> [--to M] [--force-offline-home]``
         Move a copy's home (above).
     ``--json`` on each prints one document for agents. Exit codes: ``0`` synced
     or clean, ``1`` a conflict or skipped work, ``2`` bad setup (no Tailscale, an
     unreadable machine list, a checkout outside ``~/projects``, Windows here, and
-    for ``sync`` and ``handoff`` a host no row names).
+    for ``sync``, ``fetch-pins`` and ``handoff`` a host no row names).
 
 Running it periodically
     Nothing installs a schedule; the maintainer decides. A cron line
@@ -2165,7 +2179,7 @@ def find_machines(
 ) -> tuple[Machine, list[Machine]]:
     """Return this machine and every other machine Tailscale lists, probed in parallel.
 
-    ``member`` (``sync``, ``handoff``: what writes records naming this machine) requires
+    ``member`` (``sync``, ``fetch-pins``, ``handoff``: what writes records) requires
     this machine to be a row of the list (``fleet.this_machine``) and Tailscale's ``Self``
     to resolve to that row; ``status`` only reads, so an unlisted host still reports.
 
@@ -2892,6 +2906,7 @@ def sync_pins(
     tokens: Mapping[str, str],
     *,
     dry_run: bool,
+    pull_only: bool = False,
 ) -> list[Row]:
     """Copy every pin one side lacks to it, create-only; report refs that differ.
 
@@ -2899,6 +2914,7 @@ def sync_pins(
     whose commit the target's pins already reach is linked there without a bundle
     (``pins-link``); a bundle brings the rest. A direction that fails is a ``failed`` row,
     after the rows of the pins it carried before failing; the other still runs.
+    With ``pull_only``, carry pins from ``peer`` to ``here`` alone.
     """
     graves = [*mine.tombstones.values(), *theirs.tombstones.values()]
     rows = [
@@ -2931,6 +2947,8 @@ def sync_pins(
             mine.pins,
         ),
     ):
+        if pull_only and source is here:
+            continue
         missing = sorted(
             ref for ref in set(have) - set(want) if not buried_pin(ref, have[ref], held, graves)
         )
@@ -3574,6 +3592,69 @@ def cmd_sync(args: _Args) -> int:
     return 1 if any(row.result in TROUBLE for row in rows) else 0
 
 
+def cmd_fetch_pins(args: _Args) -> int:
+    """Fetch one copy's pins from one peer without syncing its replica, evidence or main."""
+    _ = work.parse_name(args.name)
+    here, others = find_machines(args.remote_scripts, [args.source], member=True)
+    if not others:
+        msg = f"--machine {args.source!r} names no online peer"
+        raise SetupError(msg)
+    peer = others[0]
+    rows: list[Row] = []
+    if not peer.qualified:
+        rows.append(Row(args.name, peer.label, "skip", peer.reason))
+    else:
+        local, remote = _endpoint(here), _endpoint(peer)
+        lock = contextlib.nullcontext("") if args.dry_run else holding(REPO_ROOT)
+        try:
+            with lock as local_token:
+                hold = contextlib.nullcontext("") if args.dry_run else remote.hold(local_token)
+                with hold:
+                    mine = Inventory.read(local, [args.name])
+                    theirs = Inventory.read(remote, [args.name])
+                    graves = [*mine.tombstones.values(), *theirs.tombstones.values()]
+                    live = [
+                        ref
+                        for ref, commit in theirs.pins.items()
+                        if not buried_pin(ref, commit, theirs, graves)
+                    ]
+                    if not live:
+                        rows.append(
+                            Row(
+                                args.name,
+                                peer.label,
+                                "skip",
+                                "no live pins for this copy; nothing fetched",
+                            ),
+                        )
+                    else:
+                        rows += sync_pins(
+                            local,
+                            remote,
+                            mine,
+                            theirs,
+                            {local.machine: local_token},
+                            dry_run=args.dry_run,
+                            pull_only=True,
+                        )
+                        if not rows:
+                            rows.append(
+                                Row(
+                                    args.name,
+                                    peer.label,
+                                    "unchanged",
+                                    "all source pins already held",
+                                ),
+                            )
+        except (FleetError, work.WorkError) as error:
+            rows.append(Row(args.name, peer.label, "failed", str(error)))
+    _render(
+        {"machines": machine_rows(here, others), "rows": [row.as_json() for row in rows]},
+        as_json=args.json,
+    )
+    return 1 if any(row.result in TROUBLE for row in rows) else 0
+
+
 def cmd_handoff(args: _Args) -> int:
     """Move a copy's home to ``--to`` (default this machine)."""
     here, others = find_machines(args.remote_scripts, [], member=True)
@@ -3909,6 +3990,15 @@ def build_parser() -> argparse.ArgumentParser:
     _ = sync.add_argument("--copy", action="append", default=[], help="only this copy (no main)")
     _ = sync.add_argument("--main-only", action="store_true", help="main alone")
 
+    fetch = commands.add_parser(
+        "fetch-pins",
+        parents=[shared],
+        help="fetch one copy's pins without its replica",
+    )
+    _ = fetch.add_argument("name")
+    _ = fetch.add_argument("--machine", dest="source", required=True, help="the source peer")
+    _ = fetch.add_argument("--dry-run", action="store_true")
+
     handoff_parser = commands.add_parser("handoff", parents=[shared], help="move a copy's home")
     _ = handoff_parser.add_argument("name")
     _ = handoff_parser.add_argument("--to", default="", help="the new home (this machine)")
@@ -3973,6 +4063,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     handlers: dict[str, Callable[[_Args], int]] = {
         "status": cmd_status,
         "sync": cmd_sync,
+        "fetch-pins": cmd_fetch_pins,
         "handoff": cmd_handoff,
     }
     try:

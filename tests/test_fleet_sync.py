@@ -1270,6 +1270,130 @@ def test_pins_travel_both_ways_create_only_and_a_differing_pin_is_a_conflict(fle
     assert work.pins(fleet.repo_b)[NAME]["save-2"] == head
 
 
+def test_fetch_pins_restores_saved_work_without_syncing_the_replica_or_other_data(
+    fleet: Fleet,
+) -> None:
+    fleet.at_b()
+    source = _new()
+    _ = _write(source / "saved.txt", "saved work\n")
+    assert work.main(["save", NAME]) == 0
+    _ = _new("spike-fleet-other")
+    _ = _write(fleet.repo_b / ".work" / "evidence" / NAME / "proof.txt", "evidence\n")
+    _ = _commit(fleet.repo_b, "later.txt", "main moved on\n")
+    source_pins = work.pins(fleet.repo_b)
+    fleet.at_a()
+    _ = _new("spike-fleet-local")
+    local_head = _git_out(fleet.repo_a, "rev-parse", "HEAD").strip()
+    assert work.publish_pin(fleet.repo_a, fleet.repo_a, local_head, NAME, "save-9")
+    refs = _git_out(fleet.repo_a, "show-ref")
+    code, document = fleet.run("fetch-pins", NAME, "--machine", "B.tail0.ts.net.")
+    assert code == 0, document
+    assert work.pins(fleet.repo_a)[NAME] == {**source_pins[NAME], "save-9": local_head}
+    assert "spike-fleet-other" not in work.pins(fleet.repo_a)
+    assert work.pins(fleet.repo_b) == source_pins
+    assert _git_out(fleet.repo_a, "show-ref") == refs
+    assert not (fleet.repo_a / ".git" / "FETCH_HEAD").exists()
+    assert not (fleet.repo_a / ".work" / "clones" / NAME).exists()
+    assert not (fleet.repo_a / ".work" / "evidence" / NAME).exists()
+    restored = _new("verify-fetched-save", "--from", f"refs/work/{NAME}/save-1")
+    assert (restored / "saved.txt").read_text() == "saved work\n"
+    assert "saved.txt" in _git_out(restored, "ls-files").splitlines()
+    code, document = fleet.run("fetch-pins", NAME, "--machine", "b")
+    assert code == 0, document
+    assert _results(document) == [("unchanged", NAME, "all source pins already held")]
+
+
+def test_fetch_pins_keeps_both_commits_when_a_ref_differs(fleet: Fleet) -> None:
+    fleet.at_b()
+    source = _new()
+    _ = _write(source / "saved.txt", "saved work\n")
+    assert work.main(["save", NAME]) == 0
+    source_pins = work.pins(fleet.repo_b)
+    fleet.at_a()
+    head = _git_out(fleet.repo_a, "rev-parse", "HEAD").strip()
+    assert work.publish_pin(fleet.repo_a, fleet.repo_a, head, NAME, "save-1")
+    code, document = fleet.run("fetch-pins", NAME, "--machine", "b")
+    assert code == 1
+    assert any(
+        result == "conflict" and subject == f"{NAME}/save-1"
+        for result, subject, _detail in _results(document)
+    )
+    assert work.pins(fleet.repo_a)[NAME]["save-1"] == head
+    assert work.pins(fleet.repo_b) == source_pins
+
+
+def test_fetch_pins_dry_run_writes_no_pins_or_replica(fleet: Fleet) -> None:
+    fleet.at_b()
+    source = _new()
+    _ = _write(source / "saved.txt", "saved work\n")
+    assert work.main(["save", NAME]) == 0
+    before = work.pins(fleet.repo_b)
+    fleet.at_a()
+    code, document = fleet.run("fetch-pins", NAME, "--machine", "b", "--dry-run")
+    assert code == 0, document
+    assert {result for result, _subject, _detail in _results(document)} == {"would"}
+    assert work.pins(fleet.repo_a) == {}
+    assert work.pins(fleet.repo_b) == before
+    assert not (fleet.repo_a / ".work").exists()
+
+
+def test_fetch_pins_never_revives_a_pin_a_local_tombstone_dropped(fleet: Fleet) -> None:
+    fleet.at_b()
+    source = _new()
+    _ = _write(source / "saved.txt", "saved work\n")
+    assert work.main(["save", NAME]) == 0
+    saved = work.pins(fleet.repo_b)[NAME]["save-1"]
+    fleet.at_a()
+    assert work.publish_pin(fleet.repo_a, source, saved, NAME, "save-1")
+    assert work.main(["rm", NAME, "--drop-saves"]) == 0
+    code, document = fleet.run("fetch-pins", NAME, "--machine", "b")
+    assert code == 0, document
+    assert "save-1" not in work.pins(fleet.repo_a)[NAME]
+    assert work.pins(fleet.repo_b)[NAME]["save-1"] == saved
+
+
+@pytest.mark.parametrize(
+    ("name", "machine", "expected"),
+    [(NAME, "not-a-peer", 2), ("spike-missing", "b", 1), ("bad name", "b", 2)],
+)
+def test_fetch_pins_refuses_an_unknown_source_copy_or_invalid_name(
+    fleet: Fleet,
+    name: str,
+    machine: str,
+    expected: int,
+) -> None:
+    code, _document = fleet.run("fetch-pins", name, "--machine", machine)
+    assert code == expected
+    assert work.pins(fleet.repo_a) == {}
+
+
+@pytest.mark.parametrize(
+    ("where", "lock"),
+    [
+        ("local", "fleet"),
+        ("peer", "fleet"),
+        ("local", "land"),
+        ("peer", "land"),
+    ],
+)
+def test_fetch_pins_respects_existing_fleet_and_land_locks(
+    fleet: Fleet,
+    where: str,
+    lock: str,
+) -> None:
+    fleet.at_b()
+    _ = _new()
+    fleet.at_a()
+    repo = fleet.repo_a if where == "local" else fleet.repo_b
+    hold = fleet_sync.holding(repo) if lock == "fleet" else work.land_lock(repo)
+    with hold:
+        code, document = fleet.run("fetch-pins", NAME, "--machine", "b")
+    assert code == 1
+    expected = "another fleet_sync run" if lock == "fleet" else "land is in progress"
+    assert any(expected in detail for _result, _subject, detail in _results(document))
+    assert work.pins(fleet.repo_a) == {}
+
+
 def test_rm_drop_saves_drops_the_replicas_pins_and_a_new_copy_gets_none(fleet: Fleet) -> None:
     copy = _new()
     _ = _write(copy / "saved.txt", "saved work\n")

@@ -3048,6 +3048,26 @@ def test_a_restored_save_holds_the_work_uncommitted_and_lands(repo: Path, form: 
     assert (repo / "new.txt").read_text(encoding="utf-8") == "new file\n"
 
 
+@pytest.mark.parametrize("form", [[], ["--worktree"]], ids=["clone", "worktree"])
+def test_a_restored_save_registers_its_new_source_paths(repo: Path, form: list[str]) -> None:
+    path = _new("fix-new-file")
+    _ = _write(path / "tests" / "test_added.py", "VALUE = 1\n")
+    assert work.main(["save", "fix-new-file"]) == 0
+    restored = _new("verify-new-file", "--from", "refs/work/fix-new-file/save-1", *form)
+    assert (restored / "tests" / "test_added.py").read_text() == "VALUE = 1\n"
+    assert (
+        "tests/test_added.py"
+        in _git_out(
+            restored,
+            "ls-files",
+            "--",
+            "tests/test_added.py",
+        ).splitlines()
+    )
+    assert _git_out(restored, "diff", "--cached", "--name-only") == ""
+    assert _git_out(restored, "rev-parse", "HEAD") == _git_out(repo, "rev-parse", "HEAD")
+
+
 @pytest.mark.parametrize("store", [False, True], ids=["no-store", "store-without-that-pin"])
 def test_new_refuses_a_pin_that_does_not_exist(
     repo: Path,
