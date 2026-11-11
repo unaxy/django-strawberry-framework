@@ -199,6 +199,7 @@ from django_strawberry_framework.utils.widgets import widget_keys
 from .base import (
     _GLOBALID_RELATION_PK_ATTR,
     _KEY_LEAF_ATTR,
+    _NO_ALIASES,
     _RELATION_VIEW_ATTR,
     ArrayFilter,
     EnumChoiceFilter,
@@ -227,6 +228,8 @@ from .base import (
     _filterset_lookup_operand,
     _filterset_walked_lookup,
     _integer_compared_column,
+    _KeyLeaf,
+    _query_aliases,
     _query_lookup_operand,
     _reads_integer_transform,
     _RelationView,
@@ -284,23 +287,6 @@ _FILTER_ASYNC_RECOURSE = (
 
 #: The empty absent-leaf verdict map (``FilterSet._absent_leaf_verdicts``).
 _NO_VERDICTS: Mapping[str, tuple[object, bool]] = MappingProxyType({})
-
-#: No ``FilteredRelation`` alias for a flat leaf's path to start at (``_query_aliases``).
-_NO_ALIASES: Mapping[str, str] = MappingProxyType({})
-
-
-def _query_aliases(queryset: models.QuerySet[models.Model, object]) -> Mapping[str, str]:
-    """Return each ``FilteredRelation`` alias ``queryset`` holds, to its ``relation_name``.
-
-    The aliases a flat leaf's path may start at (``FilterSet._flat_leaf_walk``), read from
-    ``Query._filtered_relations``, the dict Django resolves a path's first name against
-    (``Query.names_to_path``).
-    """
-    filtered = require(read_attr(queryset.query, "_filtered_relations", None), is_dict)
-    return {
-        str(alias): require_instance(relation, FilteredRelation).relation_name
-        for alias, relation in filtered.items()
-    }
 
 
 _NO_FLAT_NAMES: frozenset[str] = frozenset()
@@ -8057,7 +8043,9 @@ class FilterSet(
         (``_face_of_set``), whose class is the one the request's child instance has, or to
         the undeclared hop's face. ``filters/base.py::_globalid_target`` read on each
         answers the definition the request decodes against. Runs no consumer code and no
-        query.
+        query, so it reads no ``FilteredRelation`` alias (each exists only on a queryset
+        consumer code builds): a leaf whose path starts at one resolves no target here and
+        is judged on the request, against the aliases of the queryset it runs over.
         """
         declared = copy.copy(filter_instance)
         _bind_filter(declared, _face_of_set(cls), require(cls._meta.model, is_model_class))
@@ -8177,7 +8165,11 @@ class FilterSet(
         (``set_bound_definition`` reads none) carries its leaf as declared
         (``filters/base.py::_key_leaf_of``), so it names a row of the type registered for
         the relation's target, as the relation's key does, unless it stands for that set's
-        own key (``_stands_for_own_key``: a flat copy of the set's own declaration).
+        own key (``_stands_for_own_key``: a flat copy of the set's own declaration). A copy
+        resolving its leaf as declared carries ``aliases`` with it
+        (``filters/base.py::_KeyLeaf``), as does the annotation ask: it filters the target
+        rows, which hold none of them, so a declared path starting at a ``FilteredRelation``
+        alias reads it as the relations it joins.
         """
         walk = cls._flat_leaf_walk(filter_instance, aliases)
         if walk is None:
@@ -8198,7 +8190,7 @@ class FilterSet(
                 # type of its own to read the bare key against, so the leaf resolves as its
                 # declaring set declares it. A copy of the target set's own key keeps that
                 # set's reading.
-                setattr(terminal, _KEY_LEAF_ATTR, filter_instance)
+                setattr(terminal, _KEY_LEAF_ATTR, _KeyLeaf(filter_instance, aliases))
             return _LeafChain(hops, terminal)
         if _filterset_walked_lookup(cls, filter_instance)[1] == "isnull":
             return _LeafChain(
@@ -8207,13 +8199,14 @@ class FilterSet(
             )
         if _decodes_before_binding(filter_instance) and _compares_target_annotation(
             filter_instance,
+            aliases,
         ):
             # An id an annotation of the target type's ``get_queryset`` holds is on the
             # visible target rows only: the key compares it there, as its trailing-pk twin
             # does, whichever direction the relation runs.
             terminal = bind(filter_instance, last, target_pk.name)
             setattr(terminal, _GLOBALID_RELATION_PK_ATTR, False)
-            setattr(terminal, _KEY_LEAF_ATTR, filter_instance)
+            setattr(terminal, _KEY_LEAF_ATTR, _KeyLeaf(filter_instance, aliases))
             return _LeafChain(hops, terminal)
         owner_model = _hop_source_model(hops, len(hops) - 1)
         relation = _hop_relation(last)
@@ -8243,7 +8236,7 @@ class FilterSet(
         setattr(terminal, _GLOBALID_RELATION_PK_ATTR, False)
         # The key names a row of the relation's target as the leaf as declared reads it,
         # whichever type the face of the target rows answers for (a re-entry's scoping type).
-        setattr(terminal, _KEY_LEAF_ATTR, filter_instance)
+        setattr(terminal, _KEY_LEAF_ATTR, _KeyLeaf(filter_instance, aliases))
         if shipped:
             # Shipped and forward returned above: this leaf is a to-many key.
             return _LeafChain(hops, terminal, to_many_key=_ToManyKey(key_attname, filter_instance))

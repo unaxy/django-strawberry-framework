@@ -21,7 +21,11 @@ and on the raw form. An id only a ``get_queryset`` annotation holds compares onl
 rows its type answers for, and is refused over rows another type answers for. A leaf
 ending on a relation target's key past a declared hop into a set no type wires names a
 row as the type registered for the target does; past a hop into a set a secondary wires,
-as that secondary.
+as that secondary. A GlobalID filter whose path starts at a ``FilteredRelation`` alias
+(bare, ``__id``, ``__pk``) decodes, validates and refuses as the same filter over the
+relation the alias joins does, over the rows Django's join of the alias reads (its
+condition applied), on every placement and driver; the build cannot see the alias, so an
+encode-only target through one is refused per request.
 """
 
 import asyncio
@@ -41,7 +45,7 @@ from asgiref.sync import sync_to_async
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection
-from django.db.models import CharField, F, FilteredRelation, Model, QuerySet, Value
+from django.db.models import CharField, F, FilteredRelation, Model, Q, QuerySet, Value
 from django.db.models.functions import Cast, Concat
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
@@ -2621,3 +2625,884 @@ def test_a_walked_to_many_key_into_a_model_no_type_exposes_compares_the_node_id_
     world = _untyped_walk(_library(), shape)
 
     assert _reentry_answer(world, world.accepted, driver) == world.expected
+
+
+class _AliasShape(NamedTuple):
+    """A ``FilteredRelation`` alias of the rows a GlobalID filter runs over, and its relation.
+
+    ``alias`` joins ``relation`` (its twin, the same Python path over the model's own
+    relations) from ``model``'s rows into ``target``'s; ``add`` adds it to a queryset.
+    ``own`` and ``hidden`` name the target rows a request sends by ``_library`` name.
+    """
+
+    model: type[Model]
+    relation: str
+    alias: str
+    target: type[Model]
+    add: Callable[[QuerySet[Model]], QuerySet[Model]]
+    own: str
+    hidden: str
+
+
+def _vshelf(rows: QuerySet[Model]) -> QuerySet[Model]:
+    return rows.alias(vshelf=FilteredRelation("shelf"))
+
+
+def _vbooks(rows: QuerySet[Model]) -> QuerySet[Model]:
+    return rows.alias(vbooks=FilteredRelation("books"))
+
+
+def _vgenres(rows: QuerySet[Model]) -> QuerySet[Model]:
+    return rows.alias(vgenres=FilteredRelation("genres"))
+
+
+def _vbranch(rows: QuerySet[Model]) -> QuerySet[Model]:
+    return rows.alias(vshelf=FilteredRelation("shelf"), vbranch=FilteredRelation("vshelf__branch"))
+
+
+def _vshelf_past_s1(rows: QuerySet[Model]) -> QuerySet[Model]:
+    return rows.alias(vshelf=FilteredRelation("shelf", condition=~Q(shelf__code="s1")))
+
+
+def _vbooks_past_bk1(rows: QuerySet[Model]) -> QuerySet[Model]:
+    return rows.alias(vbooks=FilteredRelation("books", condition=~Q(books__title="bk1")))
+
+
+def _vgenres_past_first_genre(rows: QuerySet[Model]) -> QuerySet[Model]:
+    return rows.alias(vgenres=FilteredRelation("genres", condition=~Q(genres__name="g1")))
+
+
+def _vbranch_past_s1(rows: QuerySet[Model]) -> QuerySet[Model]:
+    return rows.alias(
+        vshelf=FilteredRelation("shelf", condition=~Q(shelf__code="s1")),
+        vbranch=FilteredRelation("vshelf__branch"),
+    )
+
+
+_ALIAS_SHAPES: dict[str, _AliasShape] = {
+    "forward": _AliasShape(
+        models.Book,
+        "shelf",
+        "vshelf",
+        models.Shelf,
+        _vshelf,
+        "s1",
+        "s2",
+    ),
+    "reverse": _AliasShape(
+        models.Shelf,
+        "books",
+        "vbooks",
+        models.Book,
+        _vbooks,
+        "bk1",
+        "bk3",
+    ),
+    "many-to-many": _AliasShape(
+        models.Book,
+        "genres",
+        "vgenres",
+        models.Genre,
+        _vgenres,
+        "g1",
+        "g2",
+    ),
+    "alias-over-alias": _AliasShape(
+        models.Book,
+        "shelf__branch",
+        "vbranch",
+        models.Branch,
+        _vbranch,
+        "b1",
+        "b2",
+    ),
+}
+
+
+def _named_row(rows: _Library, name: str) -> Model:
+    """The ``_library`` row named ``name``, whichever table holds it."""
+    tables: tuple[Mapping[str, Model], ...] = (
+        rows.branches,
+        rows.shelves,
+        rows.genres,
+        rows.books,
+    )
+    return next(table[name] for table in tables if name in table)
+
+
+def _joined_pks(shape: _AliasShape, target: Model) -> list[int]:
+    """The rows of ``shape.model`` whose ``relation`` reaches ``target``, as Django joins it."""
+    joined = shape.model._default_manager.filter(**{shape.relation: saved_pk(target)})
+    return sorted({saved_pk(row) for row in joined})
+
+
+def _gid_leaf(field_name: str, *, listed: bool) -> Filter:
+    """A ``GlobalIDFilter`` over ``field_name``, or its multiple-choice ``in`` sibling."""
+    if listed:
+        return GlobalIDMultipleChoiceFilter(field_name=field_name, lookup_expr="in")
+    return GlobalIDFilter(field_name=field_name)
+
+
+def _aliasing(
+    add: Callable[[QuerySet[Model]], QuerySet[Model]],
+) -> "classmethod[DjangoType, ..., QuerySet[Model]]":
+    """A ``get_queryset`` hook adding ``add``'s ``FilteredRelation`` alias to the type's rows."""
+
+    def get_queryset(
+        _cls: type[DjangoType],
+        queryset: QuerySet[Model],
+        _info: object,
+        **_kwargs: object,
+    ) -> QuerySet[Model]:
+        return add(queryset)
+
+    return classmethod(get_queryset)
+
+
+def _alias_target(
+    model: type[Model],
+    strategy: object = "model",
+    *,
+    hidden: Model | None = None,
+    node: bool = True,
+    namespace: Mapping[str, object] | None = None,
+    fields: tuple[str, ...] = ("id",),
+) -> type[DjangoType]:
+    """``AliasTarget``, the primary over ``model`` the alias and its twin decode against.
+
+    ``strategy`` is its ``globalid_strategy`` (``None`` for none); with ``hidden`` its
+    ``get_queryset`` hides that row.
+    """
+    meta: dict[str, object] = {"primary": True}
+    if strategy is not None:
+        meta["globalid_strategy"] = strategy
+    extra: dict[str, object] = dict(namespace or {})
+    if hidden is not None:
+        extra["get_queryset"] = _hiding(saved_pk(hidden))
+    return make_django_type(
+        "AliasTarget",
+        model,
+        fields,
+        node=node,
+        meta_extra=meta,
+        namespace_extra=extra,
+    )
+
+
+#: Where a world's alias is added: on the queryset handed to the set, by the rows type's
+#: ``get_queryset``, or by the set's own ``filter_queryset`` override.
+_HANDED = "handed"
+_TYPE_HOOK = "get_queryset"
+_FILTER_QUERYSET = "filter_queryset"
+
+
+@dataclass(frozen=True)
+class _AliasWorld:
+    """A set over ``model`` declaring ``leaves`` and the rows each driver hands it.
+
+    ``rows`` is the queryset the resolvers and the raw form hand the set (the alias added
+    where ``placement`` adds it); with ``served`` the rows type serves the set as a
+    filtered connection.
+    """
+
+    schema: DjangoSchema
+    filterset: type[FilterSet]
+    rows: Callable[[], QuerySet[Model]]
+    served: bool
+
+
+def _alias_world(
+    shape: _AliasShape,
+    leaves: Mapping[str, Callable[[], Filter]],
+    target_types: Callable[[], tuple[type[DjangoType], ...]],
+    *,
+    placement: str = _HANDED,
+    served: bool = True,
+    methods: Mapping[str, object] | None = None,
+) -> _AliasWorld:
+    """Serve a set declaring ``leaves`` (and ``methods``) over ``shape``'s rows beside ``target_types``.
+
+    The rows type ``AliasRows`` mints ``model`` ids for ``shape.model``; ``applied`` /
+    ``appliedAsync`` hand the set its rows through that type's ``get_queryset``, as a
+    resolver reading the type's rows does.
+    """
+    registry.clear()
+    namespace: dict[str, object] = {name: leaf() for name, leaf in leaves.items()}
+    namespace.update(methods or {})
+    namespace["Meta"] = type("Meta", (), {"model": shape.model, "fields": []})
+    if placement == _FILTER_QUERYSET:
+
+        def filter_queryset(self: FilterSet, queryset: QuerySet[Model]) -> QuerySet[Model]:
+            return FilterSet.filter_queryset(self, shape.add(queryset))
+
+        namespace["filter_queryset"] = filter_queryset
+    filterset = type("AliasFilter", (FilterSet,), namespace)
+    types = target_types()
+    meta: dict[str, object] = {"primary": True, "globalid_strategy": "model"}
+    if served:
+        meta.update(filterset_class=filterset, connection={"total_count": True})
+    root = make_django_type(
+        "AliasRows",
+        shape.model,
+        ("id",),
+        meta_extra=meta,
+        namespace_extra={"get_queryset": _aliasing(shape.add)}
+        if placement == _TYPE_HOOK
+        else None,
+    )
+
+    def handed() -> QuerySet[Model]:
+        rows = shape.model._default_manager.order_by("pk")
+        return shape.add(rows) if placement == _HANDED else rows
+
+    def typed_rows(info: object) -> QuerySet[Model]:
+        typed: QuerySet[Model] = root.get_queryset(handed(), info)
+        return typed
+
+    def _all_rows(_root: object, _info: object) -> QuerySet[Model]:
+        return handed()
+
+    def _applied(info: Info[object, object], where: JSON) -> QuerySet[Model]:
+        return filterset.apply_sync(where, typed_rows(info), info)
+
+    async def _applied_async(info: Info[object, object], where: JSON) -> list[Model]:
+        rows = await filterset.apply_async(where, typed_rows(info), info)
+        return await sync_to_async(list)(rows)
+
+    applied_type = StrawberryList(root)
+    if served:
+
+        @strawberry.type
+        class ServedQuery:
+            rows = DjangoConnectionField(root, resolver=_all_rows)
+            applied: QuerySet[Model] = strawberry.field(
+                resolver=_applied,
+                graphql_type=applied_type,
+            )
+            applied_async: list[Model] = strawberry.field(
+                resolver=_applied_async,
+                graphql_type=applied_type,
+            )
+
+        query: type[object] = ServedQuery
+    else:
+
+        @strawberry.type
+        class UnservedQuery:
+            applied: QuerySet[Model] = strawberry.field(
+                resolver=_applied,
+                graphql_type=applied_type,
+            )
+            applied_async: list[Model] = strawberry.field(
+                resolver=_applied_async,
+                graphql_type=applied_type,
+            )
+
+        query = UnservedQuery
+    finalize_django_types()
+    optimizer = DjangoOptimizerExtension()
+    schema = DjangoSchema(query=query, types=types, extensions=[lambda: optimizer])
+    return _AliasWorld(schema, filterset, functools.partial(typed_rows, None), served)
+
+
+class _Said(NamedTuple):
+    """What one request answers: the rows' keys or an error's message, its code, its statements."""
+
+    answer: list[int] | str
+    code: object
+    statements: int
+
+
+#: Every driver a served world answers through; an unserved world has no connection.
+_ALIAS_DRIVERS = (
+    "live",
+    "apply-sync",
+    "apply-async",
+    "form",
+)
+
+
+def _alias_said(
+    world: _AliasWorld,
+    leaf: str,
+    value: str | list[str] | None,
+    driver: str,
+    recorded: list[str],
+) -> _Said:
+    """What ``driver`` answers for ``value`` sent to ``world``'s ``leaf``.
+
+    A list value (or ``None`` for a listed leaf) is sent to the ``in`` lookup, any other
+    to ``exact``; ``recorded`` is the statement recorder the count is read from.
+    """
+    listed = isinstance(world.filterset.base_filters[leaf], GlobalIDMultipleChoiceFilter)
+    lookup = "in" if listed else "exact"
+    before = len(recorded)
+    if driver == "form":
+        bound = world.filterset(data={leaf: value}, queryset=world.rows())
+        try:
+            found = sorted(
+                saved_pk(require_instance(row, Model)) for row in require(bound.qs, is_queryset)
+            )
+        except GraphQLError as exc:
+            code = None if exc.extensions is None else exc.extensions.get("code")
+            return _Said(exc.message, code, len(recorded) - before)
+        return _Said(found, None, len(recorded) - before)
+    if driver == "live":
+        literal = _wire_literal((leaf, lookup), value) if value is not None else None
+        literal = literal or f"{{{leaf}: {{{lookup}: null}}}}"
+        payload = _post(
+            world.schema,
+            f"{{ rows(filter: {literal}) {{ edges {{ node {{ id }} }} }} }}",
+        )
+        path: tuple[str, ...] = ("rows", "edges")
+    else:
+        where: JSONObject = {leaf: {"in_" if listed else lookup: value}}
+        field = "appliedAsync" if driver == "apply-async" else "applied"
+        document = f"query($where: JSON!) {{ {field}(where: $where) {{ id }} }}"
+        payload = (
+            asyncio.run(_async_post(world.schema, document, {"where": where}))
+            if driver == "apply-async"
+            else _post(world.schema, document, {"where": where})
+        )
+        path = (field,)
+    statements = len(recorded) - before
+    if payload.get("errors"):
+        extensions = json_object(payload, "errors", 0).get("extensions")
+        return _Said(
+            json_str(payload, "errors", 0, "message"),
+            json_object(extensions).get("code") if extensions is not None else None,
+            statements,
+        )
+    node_ids = [
+        json_str(row, "node", "id") if driver == "live" else json_str(row, "id")
+        for row in json_list(payload, "data", *path)
+    ]
+    return _Said(
+        sorted(int(relay.GlobalID.from_id(node_id).node_id) for node_id in node_ids),
+        None,
+        statements,
+    )
+
+
+class _AliasValue(NamedTuple):
+    """A value sent to the alias and to its twin, and what both answer for it.
+
+    ``twin_statements``, when given, is the twin's own statement count where its route
+    runs a different number of statements to the same answer.
+    """
+
+    name: str
+    value: str | list[str] | None
+    expected: _Said
+    twin_statements: int | None = None
+
+
+def _sent(type_name: str, row: Model | str, *, listed: bool) -> str | list[str]:
+    """``row`` encoded under ``type_name``, in a list where the leaf takes one."""
+    global_id = _gid(type_name, row)
+    return [global_id] if listed else global_id
+
+
+def _every_pk(shape: _AliasShape) -> list[int]:
+    return sorted(saved_pk(row) for row in shape.model._default_manager.all())
+
+
+def _assert_alias_answers_as_its_twin(
+    world: _AliasWorld,
+    values: list[_AliasValue],
+    recorded: list[str],
+) -> None:
+    """Each value answers ``expected`` through the alias leaf and its twin, on every driver."""
+    drivers = _ALIAS_DRIVERS if world.served else _ALIAS_DRIVERS[1:]
+    for value in values:
+        for driver in drivers:
+            said = _alias_said(world, "alias", value.value, driver, recorded)
+            twin = _alias_said(world, "twin", value.value, driver, recorded)
+            assert said == value.expected, (value.name, driver, said)
+            if value.twin_statements is not None:
+                assert twin.statements == value.twin_statements, (value.name, driver, twin)
+                twin = twin._replace(statements=said.statements)
+            assert twin == said, (value.name, driver, twin)
+
+
+def _twin_leaves(
+    shape: _AliasShape,
+    suffix: str,
+    *,
+    listed: bool,
+) -> dict[str, Callable[[], Filter]]:
+    """``alias`` over the alias spelled with ``suffix`` and ``twin`` over its relation."""
+    return {
+        "alias": functools.partial(_gid_leaf, f"{shape.alias}{suffix}", listed=listed),
+        "twin": functools.partial(_gid_leaf, f"{shape.relation}{suffix}", listed=listed),
+    }
+
+
+#: Each leaf spelling: the bare alias, or its target's key past it.
+_ALIAS_FORMS = {"bare": "", "id": "__id", "pk": "__pk"}
+_ALIAS_WORLDS = [
+    *(
+        pytest.param(
+            shape,
+            form,
+            scoped,
+            listed,
+            id=f"{shape}-{form}-{'scoped' if scoped else 'unscoped'}-"
+            f"{'multiple' if listed else 'single'}",
+        )
+        for shape in _ALIAS_SHAPES
+        for form in ("bare", "id")
+        for scoped in (True, False)
+        for listed in (False, True)
+    ),
+    pytest.param("forward", "pk", False, False, id="forward-pk-unscoped-single"),
+    pytest.param("reverse", "pk", False, False, id="reverse-pk-unscoped-single"),
+]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "shape_name",
+        "form",
+        "scoped",
+        "listed",
+    ),
+    _ALIAS_WORLDS,
+)
+def test_a_global_id_filter_over_a_filtered_relation_alias_answers_as_over_its_relation(
+    shape_name: str,
+    form: str,
+    *,
+    scoped: bool,
+    listed: bool,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A GlobalID filter starting at an alias decodes against its relation's target type.
+
+    ``vshelf`` (forward), ``vbooks`` (reverse), ``vgenres`` (many-to-many) and ``vbranch``
+    (over the ``vshelf`` alias), bare or past to the target's key, answer what the same
+    filter over the relation answers, on the connection, ``apply_sync``, ``apply_async``
+    and the raw form: the target's own id its rows, a hidden target row's none where its
+    type scopes them, an id of another type or the other spelling of the target's own a
+    type mismatch before any statement, ``null`` every row and ``[]`` none.
+    """
+    rows = _library()
+    shape = _ALIAS_SHAPES[shape_name]
+    strategy = "type" if listed else "model"
+    hidden = _named_row(rows, shape.hidden)
+    world = _alias_world(
+        shape,
+        _twin_leaves(shape, _ALIAS_FORMS[form], listed=listed),
+        lambda: (_alias_target(shape.target, strategy, hidden=hidden if scoped else None),),
+    )
+    label = shape.target._meta.label_lower
+    accepted, other = ("AliasTarget", label) if strategy == "type" else (label, "AliasTarget")
+    wrong = shape.model._meta.label_lower
+    own = _named_row(rows, shape.own)
+    values = [
+        _AliasValue(
+            "own",
+            _sent(accepted, own, listed=listed),
+            _Said(_joined_pks(shape, own), None, 1),
+        ),
+        _AliasValue(
+            "wrong-type",
+            _sent(wrong, own, listed=listed),
+            _Said(_mismatch(accepted, wrong, listed=listed), None, 0),
+        ),
+        _AliasValue(
+            "other-spelling",
+            _sent(other, own, listed=listed),
+            _Said(_mismatch(accepted, other, listed=listed), None, 0),
+        ),
+        _AliasValue("null", None, _Said(_every_pk(shape), None, 1)),
+    ]
+    if scoped:
+        values.append(
+            _AliasValue("hidden", _sent(accepted, hidden, listed=listed), _Said([], None, 1)),
+        )
+    if listed:
+        # ``[]`` matches no row: a hop the target type scopes is read first, unless the
+        # leaf folds into one forward join; ``shelf__branch`` walks its unscoped ``shelf``
+        # hop where ``vbranch`` joins both relations as one alias.
+        walks = scoped and (form != "bare" or shape_name in {"reverse", "many-to-many"})
+        values.append(
+            _AliasValue(
+                "empty",
+                [],
+                _Said([], None, int(walks)),
+                1 if scoped and form == "bare" and shape_name == "alias-over-alias" else None,
+            ),
+        )
+
+    _assert_alias_answers_as_its_twin(world, values, record_compiled_sql("library_"))
+
+
+def _alias_answers(
+    world: _AliasWorld,
+    leaf: str,
+    values: Mapping[str, str | list[str]],
+    recorded: list[str],
+) -> dict[tuple[str, str], _Said]:
+    """Every answer ``world``'s ``leaf`` gives each of ``values`` on each of its drivers."""
+    drivers = _ALIAS_DRIVERS if world.served else _ALIAS_DRIVERS[1:]
+    return {
+        (name, driver): _alias_said(world, leaf, value, driver, recorded)
+        for name, value in values.items()
+        for driver in drivers
+    }
+
+
+_ENCODE_ONLY_WORLDS = [
+    pytest.param(shape, form, target, id=f"{shape}-{form}-{target}")
+    for shape in ("forward", "reverse")
+    for form in ("bare", "id")
+    for target in ("callable", "non-relay")
+]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(("shape_name", "form", "target"), _ENCODE_ONLY_WORLDS)
+def test_an_encode_only_or_non_relay_target_through_a_filtered_relation_alias_is_refused_per_request(
+    shape_name: str,
+    form: str,
+    target: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """The schema build cannot see the alias: a request refuses its target as the twin's.
+
+    A wired set over the relation itself is refused when the schema builds for a
+    ``callable`` target, and is refused per request for a non-Relay one; the alias builds,
+    and every well-formed id answers ``GLOBALID_UNVALIDATABLE`` before any statement, as
+    the twin does (applied unserved, for the ``callable`` target).
+    """
+    rows = _library()
+    shape = _ALIAS_SHAPES[shape_name]
+    listed = shape_name == "reverse"
+    suffix = _ALIAS_FORMS[form]
+
+    def targets() -> tuple[type[DjangoType], ...]:
+        if target == "callable":
+            return (_alias_target(shape.target, _encode_by_name),)
+        return (_alias_target(shape.target, None, node=False),)
+
+    def leaf(field_name: str) -> dict[str, Callable[[], Filter]]:
+        return {"leaf": functools.partial(_gid_leaf, field_name, listed=listed)}
+
+    own = _named_row(rows, shape.own)
+    values = {
+        name: _sent(type_name, own, listed=listed)
+        for name, type_name in (
+            ("type-name", "AliasTarget"),
+            ("model-label", shape.target._meta.label_lower),
+            ("wrong-type", shape.model._meta.label_lower),
+        )
+    }
+    recorded = record_compiled_sql("library_")
+    if target == "callable":
+        with pytest.raises(ConfigurationError, match="AliasTarget"):
+            _ = _alias_world(shape, leaf(f"{shape.relation}{suffix}"), targets)
+    twin = _alias_answers(
+        _alias_world(
+            shape,
+            leaf(f"{shape.relation}{suffix}"),
+            targets,
+            served=target != "callable",
+        ),
+        "leaf",
+        values,
+        recorded,
+    )
+    said = _alias_answers(
+        _alias_world(shape, leaf(f"{shape.alias}{suffix}"), targets),
+        "leaf",
+        values,
+        recorded,
+    )
+
+    for (name, driver), answer in said.items():
+        assert answer == twin.get((name, driver), twin[name, "apply-sync"]), (name, driver)
+        assert (answer.code, answer.statements) == ("GLOBALID_UNVALIDATABLE", 0), answer
+
+
+def _junk_key_refusal(target: type[Model], *, typed: bool) -> tuple[str, str]:
+    """A ``target`` id whose node id no key of ``target`` holds, and its coded refusal.
+
+    The refusal names the primary key where a type exposes ``target``, its key otherwise.
+    """
+    junk = _gid(target._meta.label_lower, "abc")
+    key = "primary-key" if typed else "key"
+    return junk, (
+        f"Invalid GlobalID: {junk!r} carries a node id that is not a valid "
+        f"{target.__name__} {key} value."
+    )
+
+
+_PLACED_WORLDS = [
+    *(
+        pytest.param(
+            "forward",
+            placement,
+            form,
+            typed,
+            id=f"forward-{placement}-{form}-{'typed' if typed else 'untyped'}",
+        )
+        for placement in (_HANDED, _TYPE_HOOK, _FILTER_QUERYSET)
+        for form in ("bare", "id")
+        for typed in (True, False)
+    ),
+    *(
+        pytest.param(
+            shape,
+            _FILTER_QUERYSET,
+            form,
+            False,
+            id=f"{shape}-{_FILTER_QUERYSET}-{form}-untyped",
+        )
+        for shape in ("reverse", "many-to-many")
+        for form in ("bare", "id")
+    ),
+]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    (
+        "shape_name",
+        "placement",
+        "form",
+        "typed",
+    ),
+    _PLACED_WORLDS,
+)
+def test_a_global_id_over_an_alias_answers_as_over_its_relation_in_every_placement(
+    shape_name: str,
+    placement: str,
+    form: str,
+    *,
+    typed: bool,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """Wherever the alias is added, its key is coerced over the queryset the filter runs on.
+
+    The queryset handed to the set, the rows type's ``get_queryset`` or the set's own
+    ``filter_queryset`` override adds ``vshelf`` (``vbooks`` and ``vgenres`` under the
+    override): a node id the target's key cannot hold is ``GLOBALID_INVALID`` before any
+    statement, as over the relation, an id of another type a type mismatch where a type
+    exposes the target, and the node id alone compared where none does.
+    """
+    rows = _library()
+    shape = _ALIAS_SHAPES[shape_name]
+    own = _named_row(rows, shape.own)
+    hidden = _named_row(rows, shape.hidden)
+    world = _alias_world(
+        shape,
+        _twin_leaves(shape, _ALIAS_FORMS[form], listed=False),
+        lambda: (_alias_target(shape.target, hidden=hidden),) if typed else (),
+        placement=placement,
+    )
+    junk, refusal = _junk_key_refusal(shape.target, typed=typed)
+    label, wrong = shape.target._meta.label_lower, shape.model._meta.label_lower
+    values = [
+        _AliasValue("junk-key", junk, _Said(refusal, "GLOBALID_INVALID", 0)),
+        _AliasValue(
+            "wrong-type",
+            _gid(wrong, own),
+            _Said(_mismatch(label, wrong, listed=False), None, 0)
+            if typed
+            else _Said(_joined_pks(shape, own), None, 1),
+        ),
+    ]
+
+    _assert_alias_answers_as_its_twin(world, values, record_compiled_sql("library_"))
+
+
+_ANNOTATED_WORLDS = [
+    pytest.param(shape, listed, id=f"{shape}-{'multiple' if listed else 'single'}")
+    for shape in _ALIAS_SHAPES
+    for listed in (False, True)
+]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(("shape_name", "listed"), _ANNOTATED_WORLDS)
+def test_an_annotation_held_id_through_a_filtered_relation_alias_compares_on_the_visible_target_rows(
+    shape_name: str,
+    *,
+    listed: bool,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """An id only the target type's ``get_queryset`` annotation holds is compared on its rows.
+
+    The bare alias names a row by its ``node_key`` (``k<pk>``) as its relation does: the
+    target's own id answers its rows in one statement, an id of another type is a type
+    mismatch before any, and ``[]`` reads the visible target rows once and answers none.
+    """
+    rows = _library()
+    shape = _ALIAS_SHAPES[shape_name]
+    world = _alias_world(
+        shape,
+        _twin_leaves(shape, "", listed=listed),
+        lambda: (
+            _alias_target(
+                shape.target,
+                namespace={
+                    "__annotations__": {"node_key": relay.NodeID[str]},
+                    "get_queryset": _keyed(),
+                },
+            ),
+        ),
+    )
+    own = _named_row(rows, shape.own)
+    handle = f"{_KEY_PREFIX}{saved_pk(own)}"
+    label, wrong = shape.target._meta.label_lower, shape.model._meta.label_lower
+    values = [
+        _AliasValue(
+            "own",
+            _sent(label, handle, listed=listed),
+            _Said(_joined_pks(shape, own), None, 1),
+        ),
+        _AliasValue(
+            "wrong-type",
+            _sent(wrong, handle, listed=listed),
+            _Said(_mismatch(label, wrong, listed=listed), None, 0),
+        ),
+    ]
+    if listed:
+        values.append(_AliasValue("empty", [], _Said([], None, 1)))
+
+    _assert_alias_answers_as_its_twin(world, values, record_compiled_sql("library_"))
+
+
+#: Aliases whose condition leaves out the row a request names (``s1`` for ``vshelf``,
+#: ``bk1`` for ``vbooks``, ``g1`` for ``vgenres``; ``vbranch`` reaches ``b1`` only through
+#: ``vshelf``), beside the column the target's ``NodeID`` reads. A to-many alias's target
+#: type scopes its rows, so the request walks it to the target rows.
+_CONDITIONED_SHAPES: dict[str, tuple[_AliasShape, str]] = {
+    "forward": (_ALIAS_SHAPES["forward"]._replace(add=_vshelf_past_s1), "code"),
+    "reverse": (_ALIAS_SHAPES["reverse"]._replace(add=_vbooks_past_bk1), "title"),
+    "many-to-many": (
+        _ALIAS_SHAPES["many-to-many"]._replace(add=_vgenres_past_first_genre),
+        "name",
+    ),
+    "alias-over-alias": (_ALIAS_SHAPES["alias-over-alias"]._replace(add=_vbranch_past_s1), "name"),
+}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("form", ["bare", "id", "pk"])
+@pytest.mark.parametrize("shape_name", sorted(_CONDITIONED_SHAPES))
+def test_a_global_id_over_a_conditioned_alias_compares_its_id_column_through_the_alias(
+    shape_name: str,
+    form: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A ``NodeID`` column is compared past the alias, under the alias's own condition.
+
+    ``vshelf`` joins no shelf ``s1``: the id naming ``s1`` (or ``b1``, reached through
+    ``s1`` and ``s2``, ``bk1`` through ``vbooks``, ``g1`` through ``vgenres``) answers
+    what Django's own ``vshelf__code`` / ``vbranch__name`` / ``vbooks__title`` /
+    ``vgenres__name`` answers, never the relation's rows the condition leaves out, bare
+    or past the key, a to-many alias walked to its scoped target rows included.
+    """
+    rows = _library()
+    shape, column = _CONDITIONED_SHAPES[shape_name]
+    to_many = shape_name in {"reverse", "many-to-many"}
+    world = _alias_world(
+        shape,
+        _twin_leaves(shape, _ALIAS_FORMS[form], listed=False),
+        lambda: (
+            _alias_target(
+                shape.target,
+                hidden=_named_row(rows, shape.hidden) if to_many else None,
+                namespace={"__annotations__": {column: relay.NodeID[str]}},
+                fields=("id", column),
+            ),
+        ),
+    )
+    recorded = record_compiled_sql("library_")
+    # ``_library`` names each row by the column its target's ``NodeID`` reads.
+    node_id = shape.own
+    every = shape.model._default_manager.all()
+    expected = sorted(
+        saved_pk(row) for row in shape.add(every).filter(**{f"{shape.alias}__{column}": node_id})
+    )
+    over_relation = sorted(
+        saved_pk(row) for row in every.filter(**{f"{shape.relation}__{column}": node_id})
+    )
+    assert expected != over_relation
+    value = _gid(shape.target._meta.label_lower, node_id)
+
+    for driver in _ALIAS_DRIVERS:
+        assert _alias_said(world, "alias", value, driver, recorded) == (expected, None, 1), driver
+        assert _alias_said(world, "twin", value, driver, recorded) == (over_relation, None, 1)
+
+
+class _NodeIdGlobalIDFilter(GlobalIDFilter):
+    """A consumer ``filter`` override comparing the node id it decodes itself."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        if value is None:
+            return qs
+        return qs.filter(**{str(self.field_name): _node_id_of(value)})
+
+
+def _node_id_of(value: object) -> str:
+    """The node id a GlobalID value names, decoded by consumer code."""
+    global_id = value if isinstance(value, relay.GlobalID) else relay.GlobalID.from_id(str(value))
+    return global_id.node_id
+
+
+def _by_node(
+    _set: FilterSet,
+    queryset: QuerySet[Model],
+    name: str,
+    value: object,
+) -> QuerySet[Model]:
+    """A consumer ``method``: the node id the GlobalID names, compared on ``name``."""
+    return queryset.filter(**{name: _node_id_of(value)})
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("decoder", ["method", "filter-override"])
+@pytest.mark.parametrize("shape_name", ["forward", "reverse"])
+def test_a_consumer_decoder_over_a_filtered_relation_alias_reads_its_own_value(
+    shape_name: str,
+    decoder: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A ``method`` or a ``filter`` override decodes the value itself, over the alias as not.
+
+    Neither checks a type name: an id of another type naming the target's key answers
+    the rows reaching that row, as over the relation, in one statement.
+    """
+    rows = _library()
+    shape = _ALIAS_SHAPES[shape_name]
+
+    def leaf(field_name: str) -> Callable[[], Filter]:
+        if decoder == "method":
+            return functools.partial(GlobalIDFilter, field_name=field_name, method="by_node")
+        return functools.partial(_NodeIdGlobalIDFilter, field_name=field_name)
+
+    world = _alias_world(
+        shape,
+        {"alias": leaf(shape.alias), "twin": leaf(shape.relation)},
+        lambda: (_alias_target(shape.target, hidden=_named_row(rows, shape.hidden)),),
+        methods={"by_node": _by_node},
+    )
+    own = _named_row(rows, shape.own)
+    values = [
+        _AliasValue(
+            name,
+            _gid(type_name, own),
+            _Said(_joined_pks(shape, own), None, 1),
+        )
+        for name, type_name in (
+            ("own", shape.target._meta.label_lower),
+            ("wrong-type", shape.model._meta.label_lower),
+        )
+    ]
+
+    _assert_alias_answers_as_its_twin(world, values, record_compiled_sql("library_"))

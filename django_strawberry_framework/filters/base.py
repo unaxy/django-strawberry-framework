@@ -39,6 +39,7 @@ import copy
 from dataclasses import dataclass, replace
 from functools import cache
 from itertools import takewhile
+from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
 from django.core.exceptions import FieldError, ValidationError
@@ -122,6 +123,7 @@ from django_strawberry_framework.utils._array_field import (
 from django_strawberry_framework.utils._narrowing import (
     dict_of,
     is_concrete_field,
+    is_dict,
     is_list,
     is_list_or_tuple,
     is_str,
@@ -138,7 +140,10 @@ from django_strawberry_framework.utils.errors import (
     held_past_integer_range,
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
-from django_strawberry_framework.utils.permissions import set_bound_definition
+from django_strawberry_framework.utils.permissions import (
+    alias_relation_path,
+    set_bound_definition,
+)
 from django_strawberry_framework.utils.querysets import (
     _names_to_path,
     base_queryset,
@@ -432,23 +437,55 @@ def _relation_view_of(filter_instance: Filter) -> _RelationView | None:
     return optional_instance(getattr(filter_instance, _RELATION_VIEW_ATTR, None), _RelationView)
 
 
+#: No ``FilteredRelation`` alias for a filter's path to start at (``_query_aliases``).
+_NO_ALIASES: Mapping[str, str] = MappingProxyType({})
+
+
+def _query_aliases(queryset: models.QuerySet[models.Model, object]) -> Mapping[str, str]:
+    """Return each ``FilteredRelation`` alias ``queryset`` holds, to its ``relation_name``.
+
+    The aliases a filter's path may start at: a flat leaf's walk reads them
+    (``filters/sets.py::FilterSet._flat_leaf_walk``), and a GlobalID filter resolves its
+    target through them (``_globalid_target``). Read from ``Query._filtered_relations``,
+    the dict Django resolves a path's first name against (``Query.names_to_path``).
+    """
+    filtered = require(read_attr(queryset.query, "_filtered_relations", None), is_dict)
+    return {
+        str(alias): require_instance(relation, models.FilteredRelation).relation_name
+        for alias, relation in filtered.items()
+    }
+
+
 # A copy of a relation-key filter re-bound to the target's key over the target rows
-# (``filters/sets.py::FilterSet._routed_leaf_chain``: a to-many key, or a GlobalID key whose
-# target's id an annotation holds, forward or to-many), and a copy of a leaf ending on the
-# target's primary key past a declared hop into a set no type wires, carries the leaf as
-# declared: a GlobalID value names the type registered for the relation's target, so the copy
-# resolves its target as that leaf does, whichever type the face or set it is bound to answers
-# for.
+# (``filters/sets.py::FilterSet._routed_leaf_chain``: a to-many key, or a GlobalID key
+# whose target's id an annotation holds, forward or to-many), and a copy of a leaf ending
+# on the target's primary key past a declared hop into a set no type wires, carries the
+# leaf as declared (``_KeyLeaf``): a GlobalID value names the type registered for the
+# relation's target, so the copy resolves its target as that leaf does, whichever type the
+# face or set it is bound to answers for.
 _KEY_LEAF_ATTR = "_dst_key_leaf"
 
 
-def _key_leaf_of(filter_instance: Filter) -> Filter | None:
-    """Return the leaf as declared a copy marked ``_KEY_LEAF_ATTR`` carries, else ``None``.
+@dataclass(frozen=True, eq=False)
+class _KeyLeaf:
+    """The declared leaf a re-bound copy resolves its GlobalID target as, and its aliases.
+
+    ``aliases`` are the ``FilteredRelation`` aliases of the rows the declaring set's leaves
+    run over (``_query_aliases``): the copy filters other rows, so a declared path starting
+    at one of them resolves through these.
+    """
+
+    leaf: Filter
+    aliases: Mapping[str, str] = _NO_ALIASES
+
+
+def _key_leaf_of(filter_instance: Filter) -> _KeyLeaf | None:
+    """Return the ``_KeyLeaf`` a copy marked ``_KEY_LEAF_ATTR`` carries, else ``None``.
 
     The copy is a relation key's re-bound to the target's key, or a leaf's ending on the
     target's primary key past a declared hop into a set no type wires.
     """
-    return optional_instance(getattr(filter_instance, _KEY_LEAF_ATTR, None), Filter)
+    return optional_instance(getattr(filter_instance, _KEY_LEAF_ATTR, None), _KeyLeaf)
 
 
 def _marked_pk_field_name(filter_instance: Filter) -> str | None:
@@ -512,7 +549,10 @@ def _bound_lookup_expr(filter_instance: Filter) -> str:
     return _filterset_walked_lookup(parent, filter_instance)[1]
 
 
-def _bound_resolved_field(filter_instance: Filter) -> _ResolvedField | None:
+def _bound_resolved_field(
+    filter_instance: Filter,
+    query: Query | None = None,
+) -> _ResolvedField | None:
     """Return the field and column path a per-request filter's ORM path names.
 
     Reads the LIVE ``field_name`` against the filterset django-filter's
@@ -521,13 +561,15 @@ def _bound_resolved_field(filter_instance: Filter) -> _ResolvedField | None:
     field (``_filterset_resolved_field``). A path the model names no field for and the
     queryset that filterset was handed resolves (``_model_unresolved_query``: a queryset
     annotation or alias, a ``FilteredRelation`` alias and the columns past it) answers the
-    field it names there (``_query_path_field``), on the filter's own path.
+    field it names there (``_query_path_field``), on the filter's own path; ``query``, when
+    given, is the query of the queryset the filter is applied to, read in its place.
     """
     parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
     resolved = _filterset_resolved_field(parent, filter_instance)
     query = _model_unresolved_query(
         filter_instance,
         _filterset_lookup_operand(parent, filter_instance),
+        query,
     )
     if query is None or (resolved is not None and resolved.field is not None):
         return resolved
@@ -547,12 +589,15 @@ def _model_unresolved_query(
     path a fresh ``Query`` of the model resolves, cached per key; only a path it answers no
     field for (a queryset annotation or alias, a ``FilteredRelation`` alias and the columns
     past it) is read over the queryset the filter's ``FilterSet`` was handed, or over
-    ``query`` when one is given. ``None`` for every other filter, a ``method=`` filter
-    included (its own method receives the value, so it keeps the model's answer).
+    ``query`` when given: the query of the queryset a bound filter is applied to, which
+    holds what a consumer ``filter_queryset`` added. ``None`` for every other filter, a
+    ``method=`` filter included (its own method receives the value, so it keeps the
+    model's answer), and for a filter bound to no ``FilterSet`` instance.
     """
     if read_attr(filter_instance, "method", None) is not None or operand.field is not None:
         return None
-    return _bound_query(filter_instance) if query is None else query
+    bound = _bound_query(filter_instance)
+    return bound if bound is None or query is None else query
 
 
 def _bound_query(filter_instance: Filter) -> Query | None:
@@ -660,12 +705,13 @@ def _bound_lookup_operand(filter_instance: Filter, query: Query | None = None) -
     return operand if resolved is None else resolved
 
 
-def _bound_model_field(filter_instance: Filter) -> ModelField | None:
+def _bound_model_field(filter_instance: Filter, query: Query | None = None) -> ModelField | None:
     """Return the model field a per-request filter's ORM path names on its FilterSet's model.
 
-    The field of ``_bound_resolved_field``; ``None`` when the path names none.
+    The field of ``_bound_resolved_field`` (over ``query`` where the model names none);
+    ``None`` when the path names none.
     """
-    resolved = _bound_resolved_field(filter_instance)
+    resolved = _bound_resolved_field(filter_instance, query)
     return None if resolved is None else resolved.field
 
 
@@ -2448,37 +2494,46 @@ def _off_pk_id_slot(definition: DjangoTypeDefinition) -> _OffPkIdSlot | None:
     return _OffPkIdSlot(origin, *_node_id_slot(origin))
 
 
-def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _GlobalIDTarget | None:
+def _globalid_target(
+    filter_instance: Filter,
+    *,
+    stable: bool = False,
+    aliases: Mapping[str, str] = _NO_ALIASES,
+) -> _GlobalIDTarget | None:
     """Resolve where a GlobalID-aware filter validates and compiles its node id.
 
-    Reads the owner of the filter's runtime ``parent``: a filter set instance's
-    class's own binding (``utils/permissions.py::set_bound_definition``, which
-    the finalizer's phase 2.5 wires, spec-027 #"Bind the owner."), or, for an
-    undeclared hop's face, the type registered for the face's model
-    (``registry.get``), as the unwalked relation's leaf resolves it
-    (``related_target_for``), whichever type the face's rows answer for (a leaf
-    ending on a re-entry's primary key names the relation's target type, never the
-    type the walking set is bound to; ``foreign_rows`` records that the two differ),
-    and resolves the LIVE ``field_name`` (a leaf ``_expand_related_filter`` rebased
-    resolves its rebased path). Rows no definition answers for resolve from their
-    model once the registry is stable (``registry.is_finalized()``, or ``stable``: the
-    finalizer's build-time audit asks once every type is collected and its strategy
-    stamped, ``types/finalizer.py::_audit_globalid_filter_strategies``, so the build
-    resolves the definition a request resolves): an unbound set instance (a
-    ``RelatedFilter`` target no ``DjangoType`` wires, a subclass of a wired set
-    included) from its model's registry primary (``registry.get``), the type its
-    relation leaves are generated from, for the relation branch only (its own key,
-    nested or as a hop's flat copy of it, keeps the upstream scalar shape, so it is
-    never validated as that primary's GlobalID); an unbound set over a model no type
-    exposes, and an undeclared hop's face into one, walk from that model
-    (``_resolve_globalid_target``'s ``start_model``). A relation key's copy re-bound to
-    the target's key over the target rows, and a copy of a leaf another set declares
-    ending on the target's primary key past a declared hop into a set no type wires
-    (``_key_leaf_of``, both), resolves the definition and id slot its leaf as declared
-    resolves, with an empty row path (the copy compares those rows' own columns),
-    whichever type the face or set it is bound to answers for, so every decode of one
-    relation names one type; its rows are foreign when a type other than that
-    definition answers for them (``_rows_definition``). Two routing branches:
+    Reads the owner of the filter's runtime ``parent``: a filter set instance's class's
+    own binding (``utils/permissions.py::set_bound_definition``, which the finalizer's
+    phase 2.5 wires, spec-027 #"Bind the owner."), or, for an undeclared hop's face,
+    the type registered for the face's model (``registry.get``), as the unwalked
+    relation's leaf resolves it (``related_target_for``), whichever type the face's
+    rows answer for (a leaf ending on a re-entry's primary key names the relation's
+    target type, never the type the walking set is bound to; ``foreign_rows`` records
+    that the two differ), and resolves the LIVE ``field_name`` (a leaf
+    ``_expand_related_filter`` rebased resolves its rebased path). A path starting at a
+    ``FilteredRelation`` alias of ``aliases`` (those of the queryset the filter is
+    applied to, ``_query_aliases``; a re-bound copy reads its ``_KeyLeaf``'s) resolves
+    as the relations the alias joins (``_resolve_globalid_target``), so it validates as
+    the same filter over that relation does; with none at hand (the build's ask) it
+    resolves nothing. Rows no definition answers for resolve from their model once the
+    registry is stable (``registry.is_finalized()``, or ``stable``: the finalizer's
+    build-time audit asks once every type is collected and its strategy stamped,
+    ``types/finalizer.py::_audit_globalid_filter_strategies``, so the build resolves
+    the definition a request resolves): an unbound set instance (a ``RelatedFilter``
+    target no ``DjangoType`` wires, a subclass of a wired set included) from its
+    model's registry primary (``registry.get``), the type its relation leaves are
+    generated from, for the relation branch only (its own key, nested or as a hop's
+    flat copy of it, keeps the upstream scalar shape, so it is never validated as that
+    primary's GlobalID); an unbound set over a model no type exposes, and an undeclared
+    hop's face into one, walk from that model (``_resolve_globalid_target``'s
+    ``start_model``). A relation key's copy re-bound to the target's key over the
+    target rows, and a copy of a leaf another set declares ending on the target's
+    primary key past a declared hop into a set no type wires (``_key_leaf_of``, both),
+    resolves the definition and id slot its leaf as declared resolves, with an empty
+    row path (the copy compares those rows' own columns), whichever type the face or
+    set it is bound to answers for, so every decode of one relation names one type; its
+    rows are foreign when a type other than that definition answers for them
+    (``_rows_definition``). Two routing branches:
 
     1. **Own-PK branch.** When ``filter_instance.field_name`` matches the
        owning model's PK name (``_meta.pk.name`` or ``"pk"``) and that PK is
@@ -2512,7 +2567,7 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
     """
     key_leaf = _key_leaf_of(filter_instance)
     if key_leaf is not None:
-        declared = _globalid_target(key_leaf, stable=stable)
+        declared = _globalid_target(key_leaf.leaf, stable=stable, aliases=key_leaf.aliases)
         if declared is None:
             return None
         # The copy compares the rows its face answers for: another type's rows carry no
@@ -2562,7 +2617,13 @@ def _globalid_target(filter_instance: Filter, *, stable: bool = False) -> _Globa
         if view is None
         else view.path
     )
-    resolved = _resolve_globalid_target(owner, start_model, field_name, stable=stable)
+    resolved = _resolve_globalid_target(
+        owner,
+        start_model,
+        field_name,
+        stable=stable,
+        aliases=aliases,
+    )
     if resolved is None:
         return None
     definition, row_path = resolved
@@ -2588,13 +2649,17 @@ def _rows_definition(parent: object) -> DjangoTypeDefinition | None:
     return registry.get_definition(registry.get(require(meta.model, is_model_class)))
 
 
-def _compares_target_annotation(filter_instance: Filter) -> bool:
+def _compares_target_annotation(
+    filter_instance: Filter,
+    aliases: Mapping[str, str] = _NO_ALIASES,
+) -> bool:
     """Whether a GlobalID ``filter_instance``'s target carries its id in an annotation.
 
     A ``relay.NodeID`` over an attribute no model column holds (``_OffPkIdSlot.field``
     is ``None``) exists only on the rows the target type's ``get_queryset`` returns.
+    ``aliases`` are those of the rows the leaf runs over (``_globalid_target``).
     """
-    target = _globalid_target(filter_instance, stable=True)
+    target = _globalid_target(filter_instance, stable=True, aliases=aliases)
     return target is not None and target.slot is not None and target.slot.field is None
 
 
@@ -2604,6 +2669,7 @@ def _resolve_globalid_target(
     field_name: str | None,
     *,
     stable: bool = False,
+    aliases: Mapping[str, str] = _NO_ALIASES,
 ) -> tuple[DjangoTypeDefinition, str] | None:
     """Resolve ``field_name`` from ``owner`` to ``(target definition, row path)``.
 
@@ -2626,7 +2692,12 @@ def _resolve_globalid_target(
     build-time audit, which runs once every type is collected and its strategy stamped,
     before ``registry.is_finalized()`` flips) or a finalized registry; before either the
     walk ends at that hop, so a filter set applied before finalization reads such a leaf
-    node-id-only.
+    node-id-only. A first segment naming a ``FilteredRelation`` alias of ``aliases`` walks
+    as the model relations the alias joins (``utils/permissions.py::alias_relation_path``,
+    an alias over another alias read as that alias's relations), as Django reads it at the
+    start of a path (``Query.names_to_path``); the row path keeps the alias, the spelling
+    the queryset holding it resolves (``vshelf`` for ``vshelf``, ``vshelf`` for
+    ``vshelf__id``).
     """
     if not isinstance(field_name, str) or not field_name:
         return None
@@ -2634,6 +2705,15 @@ def _resolve_globalid_target(
     current_def: DjangoTypeDefinition | None = owner
     current_model = start_model
     segments = field_name.split("__")
+    # A path starting at a ``FilteredRelation`` alias walks as the relations the alias
+    # joins, as Django reads it there (``Query.names_to_path``); its row path keeps the
+    # alias, the spelling the queryset holding it resolves.
+    alias = segments[0] if segments[0] in aliases else None
+    joined = 0
+    if alias is not None:
+        relations = alias_relation_path(alias, aliases).split(LOOKUP_SEP)
+        joined = len(relations)
+        segments = [*relations, *segments[1:]]
 
     for i, raw_segment in enumerate(segments):
         pk_field = read_attr(truth.static_attr(current_model, "_meta", None), "pk", None)
@@ -2647,7 +2727,8 @@ def _resolve_globalid_target(
         # is a relation like any other and resolves to the definition it points at.
         if segment == pk_name and not getattr(pk_field, "is_relation", False):
             if i == len(segments) - 1 and current_def is not None:
-                return current_def, "__".join(segments[:i])
+                row_path = segments[:i] if alias is None else [alias, *segments[joined:i]]
+                return current_def, "__".join(row_path)
             return None
 
         target = None if current_def is None else current_def.related_target_for(segment)
@@ -2794,6 +2875,7 @@ def _decode_and_validate_global_id(
     index: int | None = None,
     target: _GlobalIDTarget | None = None,
     alias: str,
+    query: Query | None = None,
 ) -> object:
     """Decode `value` to a node id and validate its type and target id per strategy.
 
@@ -2819,7 +2901,8 @@ def _decode_and_validate_global_id(
     `GraphQLError(..., extensions={"code": "GLOBALID_UNVALIDATABLE"})`.
     `finalizer._audit_globalid_filter_strategies` refuses, during finalization,
     every leaf a wired filterset serves that decodes against an encode-only target;
-    that runtime arm answers for a filterset no wired type serves. A finalized
+    that runtime arm answers for a filterset no wired type serves and for a leaf whose
+    path starts at a `FilteredRelation` alias, which the audit cannot see. A finalized
     non-Relay target has no recorded strategy and can reach the separate
     missing-strategy refusal through an ordinary request.
     A malformed wire string (unparseable base64 / not a
@@ -2857,9 +2940,11 @@ def _decode_and_validate_global_id(
     link's column for a relation), so an id that column cannot hold, and every id for a
     relation linked by more than one column, answers ``GLOBALID_INVALID``. The path is
     the one Django walks (``_bound_field_name``), so a ``lookup_expr`` continuing it to a
-    column coerces through that column. A filter whose path names no model field (no
-    FilterSet model, no field on it), or whose lookup applies a transform, passes the
-    decoded node id through. ``target``
+    column coerces through that column; a path the model names no field for is read over
+    ``query``, the queryset the filter is applied to, which holds a ``FilteredRelation``
+    alias wherever it was added (a ``filter_queryset`` override included). A filter whose
+    path names no model field (no FilterSet model, no field on it), or whose lookup applies
+    a transform, passes the decoded node id through. ``target``
     threads the filter's ``_globalid_target`` through a list so it resolves once per
     call; when omitted it is resolved here.
     """
@@ -2889,8 +2974,9 @@ def _decode_and_validate_global_id(
             # finalized as a Relay node. The encode-only audit refuses callable
             # and custom targets of every leaf a wired set serves during
             # finalization; their runtime arm answers for a set no wired type
-            # serves. A finalized non-Relay target can reach this refusal
-            # through an ordinary request because the audit admits it.
+            # serves and for a leaf whose path starts at a ``FilteredRelation``
+            # alias. A finalized non-Relay target can reach this refusal through
+            # an ordinary request because the audit admits it.
             suffix = "" if index is None else f" at index {index}"
             if strategy in ENCODE_ONLY_GLOBALID_STRATEGIES:
                 message = (
@@ -2980,7 +3066,7 @@ def _decode_and_validate_global_id(
             )
         return coerced_node_id
     if target is None:
-        field = _bound_model_field(filter_instance)
+        field = _bound_model_field(filter_instance, query)
         if field is not None:
             return _unresolved_target_node_id(
                 value,
@@ -3083,14 +3169,15 @@ class GlobalIDFilter(Filter):
     is used. Its cleaning passes the input through without CharField's text coercion.
 
     Accepts both raw `str` and `strawberry.relay.GlobalID` objects per
-    spec-027 #"Accepts both raw". Validates the decoded `type_name` against
-    the strategy-aware accepted set (resolved through the parent filterset's
-    bound owner's `related_target_for(field_name)`, or the owner
-    itself when the filter targets the own PK) per spec-031 Decision 13; a
-    mismatch raises `GraphQLError("GlobalID type mismatch...")` before
-    any queryset clause runs. The decoded node id is the value of the target
-    type's id slot, its primary key or the column a consumer `relay.NodeID[...]`
-    names, and is coerced and compared as that column, as `node(id:)` reads it.
+    spec-027 #"Accepts both raw". Validates the decoded `type_name` against the
+    strategy-aware accepted set (resolved through the parent filterset's bound owner's
+    `related_target_for(field_name)`, or the owner itself when the filter targets the
+    own PK; a `field_name` starting at a `FilteredRelation` alias of the queryset it
+    filters resolves as the relation the alias joins) per spec-031 Decision 13; a
+    mismatch raises `GraphQLError("GlobalID type mismatch...")` before any queryset
+    clause runs. The decoded node id is the value of the target type's id slot, its
+    primary key or the column a consumer `relay.NodeID[...]` names, and is coerced and
+    compared as that column, as `node(id:)` reads it.
     """
 
     @override
@@ -3118,8 +3205,14 @@ class GlobalIDFilter(Filter):
         """
         if value is None:
             return super().filter(qs, None)
-        target = _globalid_target(self)
-        node_id = _decode_and_validate_global_id(value, self, target=target, alias=qs.db)
+        target = _globalid_target(self, aliases=_query_aliases(qs))
+        node_id = _decode_and_validate_global_id(
+            value,
+            self,
+            target=target,
+            alias=qs.db,
+            query=qs.query,
+        )
         path = _globalid_predicate_path(self, target)
         if path is not None:
             return _apply_lookup_predicate(self, qs, node_id, field_name=path)
@@ -3259,9 +3352,16 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
         )
         if len(value) == 0:
             return _match_none_queryset(self, qs)
-        target = _globalid_target(self)
+        target = _globalid_target(self, aliases=_query_aliases(qs))
         node_ids = [
-            _decode_and_validate_global_id(item, self, index=idx, target=target, alias=qs.db)
+            _decode_and_validate_global_id(
+                item,
+                self,
+                index=idx,
+                target=target,
+                alias=qs.db,
+                query=qs.query,
+            )
             for idx, item in enumerate(value)
         ]
         path = _globalid_predicate_path(self, target)

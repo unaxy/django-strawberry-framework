@@ -1929,6 +1929,11 @@ def _audit_globalid_filter_strategies(wired: list[type[FilterSet]]) -> None:
     the declaration it stands for (``filters/sets.py::_leaf_declaration``). Every reached
     set's own leaves are asked before any expansion copy, so a leaf a wired set declares
     is refused as that set's own, ahead of a flat copy another wired set publishes of it.
+    A leaf whose path starts at a ``FilteredRelation`` alias is not judged here: the alias
+    exists only on a queryset consumer code builds (a type's ``get_queryset``, the
+    queryset handed to the set, a ``filter_queryset`` override), which the build never
+    runs, so such a leaf resolves no target and its encode-only target is refused per
+    request (``GLOBALID_UNVALIDATABLE``), as on a set no wired type serves.
     """
     from django_strawberry_framework.filters.base import (  # noqa: PLC0415 - binds only a subsystem the consumer imported
         ENCODE_ONLY_GLOBALID_STRATEGIES,

@@ -11,8 +11,9 @@ the leaves included. A declared ``ListFilter`` / ``RangeFilter`` over such a pat
 itself, an alias of the reverse ``children`` relation or a ``year`` of a date annotation
 cleans and compares each value as the queryset does, a served set's own ``filter_queryset``
 annotation included under the sync and the async view, its junk ``FILTER_INVALID`` keyed by
-the leaf or its logical arm, and a ``GlobalIDFilter`` over the alias, the reverse alias or a
-key annotation coerces its node id through the related key.
+the leaf or its logical arm; a ``GlobalIDFilter`` over an alias of a typed relation
+decodes and refuses as over that relation, and one over an alias into an untyped model or
+over a key annotation coerces its node id through the related key.
 """
 
 from __future__ import annotations
@@ -596,7 +597,8 @@ class _QuerysetIntegerPathFilter(FilterSet):
     annotated_span = RangeFilter(field_name="n", lookup_expr="range")
     dated_years_among = ListFilter(field_name="d", lookup_expr="year__in")
     parents_among = ListFilter(field_name="par", lookup_expr="in")
-    parent_node = GlobalIDFilter(field_name="par")
+    par_node = GlobalIDFilter(field_name="par")
+    parent_node = GlobalIDFilter(field_name="parent")
     costs_among = ListFilter(field_name="cost", lookup_expr="in")
     offspring_among = ListFilter(field_name="offspring", lookup_expr="in")
     crossed_big_span = RangeFilter(field_name="par", lookup_expr="signed_big__range")
@@ -605,6 +607,8 @@ class _QuerysetIntegerPathFilter(FilterSet):
     direct_big_among = ListFilter(field_name="par__signed_big", lookup_expr="in")
     implicit_big_span = RangeFilter(field_name="par", lookup_expr="signed_big")
     offspring_node = GlobalIDFilter(field_name="offspring")
+    children_node = GlobalIDFilter(field_name="children")
+    tag_node = GlobalIDFilter(field_name="vtag")
     parent_ref_node = GlobalIDFilter(field_name="parent_ref")
     names_among = ListFilter(field_name="named", lookup_expr="in")
 
@@ -636,7 +640,11 @@ def _typed_queryset_path_holder() -> DjangoSchema:
                     named=F("label"),
                     parent_ref=F("parent"),
                 )
-                .alias(par=FilteredRelation("parent"), offspring=FilteredRelation("children"))
+                .alias(
+                    par=FilteredRelation("parent"),
+                    offspring=FilteredRelation("children"),
+                    vtag=FilteredRelation("tag"),
+                )
                 .order_by("pk")
             )
             return _QuerysetIntegerPathFilter.apply_sync(filter, queryset, info)
@@ -1064,7 +1072,7 @@ def _kept_pk_after_seed() -> str:
 @pytest.mark.parametrize(
     ("node_id", "labels"),
     [
-        pytest.param("kept", ("child",), id="key"),
+        pytest.param("tag", ("child",), id="key"),
         pytest.param("abc", None, id="junk"),
         pytest.param(_PAST_INT64, None, id="past-the-key"),
     ],
@@ -1073,16 +1081,20 @@ def test_a_global_id_over_a_filtered_relation_alias_is_coerced_through_its_targe
     node_id: str,
     labels: tuple[str, ...] | None,
 ) -> None:
-    """``parentNode`` names the alias with no type to resolve: its node id is the target key's.
+    """``tagNode`` names an alias into a model no type exposes: its node id is the target key's.
 
-    The id is coerced through ``parent``'s primary key, the column the alias compares, so
-    one that key cannot hold is ``GLOBALID_INVALID``, never Django's ``ValueError``.
+    ``vtag`` joins ``tag``, whose ``ScalarSpecimenTag`` no ``DjangoType`` of this schema
+    exposes, so the id is coerced through that model's primary key, the column the alias
+    compares: one that key cannot hold is ``GLOBALID_INVALID``, never Django's
+    ``ValueError``.
     """
-    kept_pk = _kept_pk_after_seed()
-    global_id = to_base64("Anything", kept_pk if node_id == "kept" else node_id)
+    _ = _kept_pk_after_seed()
+    tag = scalar_models.ScalarSpecimenTag.objects.create(label="tagged")
+    _ = scalar_models.ScalarSpecimen.objects.filter(label="child").update(tag=tag)
+    global_id = to_base64("Anything", str(saved_pk(tag)) if node_id == "tag" else node_id)
     schema = _typed_queryset_path_holder()
     payload = _post_typed_queryset_path(
-        '{ rows(filter: { parentNode: { exact: "%s" } }) { label } }' % global_id,
+        '{ rows(filter: { tagNode: { exact: "%s" } }) { label } }' % global_id,
         {},
         schema,
     )
@@ -1222,9 +1234,6 @@ def test_a_continued_alias_with_implicit_exact_cleans_a_lone_range_bound() -> No
 @pytest.mark.parametrize(
     ("leaf", "node_id", "labels"),
     [
-        pytest.param("offspringNode", "child", ("kept",), id="reverse-alias-key"),
-        pytest.param("offspringNode", "abc", None, id="reverse-alias-junk"),
-        pytest.param("offspringNode", _PAST_INT64, None, id="reverse-alias-past-the-key"),
         pytest.param("parentRefNode", "kept", ("child",), id="key-annotation"),
         pytest.param("parentRefNode", _PAST_INT64, None, id="key-annotation-past-the-key"),
     ],
@@ -1236,13 +1245,12 @@ def test_a_global_id_over_a_queryset_relation_path_is_coerced_through_the_relate
 ) -> None:
     """A ``GlobalIDFilter`` with no type to resolve compares its node id on the related key.
 
-    ``offspring`` aliases the reverse ``children`` relation and ``parent_ref`` annotates the
-    ``parent`` key: the node id is coerced through the child's or the parent's primary key,
-    so one that key cannot hold is ``GLOBALID_INVALID``, as over the model's own relation.
+    ``parent_ref`` annotates the ``parent`` key: the node id is coerced through the
+    parent's primary key, so one that key cannot hold is ``GLOBALID_INVALID``, as over the
+    model's own relation.
     """
-    child_pk = _child_pk_after_seed()
-    kept_pk = str(saved_pk(scalar_models.ScalarSpecimen.objects.get(label="kept")))
-    named = {"child": child_pk, "kept": kept_pk}.get(node_id, node_id)
+    kept_pk = _kept_pk_after_seed()
+    named = kept_pk if node_id == "kept" else node_id
     payload = _post_typed_queryset_path(
         '{ rows(filter: { %s: { exact: "%s" } }) { label } }' % (leaf, to_base64("Any", named)),
         {},
@@ -1253,6 +1261,51 @@ def test_a_global_id_over_a_queryset_relation_path_is_coerced_through_the_relate
         return
     assert payload["data"] is None, payload
     assert json_at(payload, "errors", 0, "extensions") == {"code": "GLOBALID_INVALID"}
+
+
+#: The refusal of an id over a relation into ``QuerysetPathOutput``, which is no Relay node.
+_UNVALIDATABLE_SPECIMEN = (
+    "GlobalID filter target QuerysetPathOutput has no recorded globalid strategy; the type "
+    "was not finalized as a Relay node, so its filter input cannot validate a GlobalID."
+)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("named", ["kept", "child", "abc"])
+@pytest.mark.parametrize(
+    "leaf",
+    [
+        "parNode",
+        "parentNode",
+        "offspringNode",
+        "childrenNode",
+    ],
+)
+def test_a_global_id_over_an_alias_of_a_typed_relation_answers_as_that_relation(
+    leaf: str,
+    named: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """``par`` / ``offspring`` answer as ``parent`` / ``children``: their target is no Relay node.
+
+    The aliases join the self relations into ``ScalarSpecimen``, which
+    ``QuerysetPathOutput`` exposes without a Relay id, so every id is refused as
+    ``GLOBALID_UNVALIDATABLE`` before any statement, over the alias as over the relation.
+    """
+    kept_pk = _kept_pk_after_seed()
+    child_pk = str(saved_pk(scalar_models.ScalarSpecimen.objects.get(label="child")))
+    node_id = {"kept": kept_pk, "child": child_pk}.get(named, named)
+    schema = _typed_queryset_path_holder()
+    sqls = record_compiled_sql()
+    payload = _post_typed_queryset_path(
+        '{ rows(filter: { %s: { exact: "%s" } }) { label } }' % (leaf, to_base64("Any", node_id)),
+        {},
+        schema,
+    )
+    assert payload["data"] is None, payload
+    assert json_at(payload, "errors", 0, "message") == _UNVALIDATABLE_SPECIMEN
+    assert json_at(payload, "errors", 0, "extensions") == {"code": "GLOBALID_UNVALIDATABLE"}
+    assert _root_sql(sqls, scalar_models.ScalarSpecimen) == [], sqls
 
 
 class _LateAnnotationFilter(FilterSet):

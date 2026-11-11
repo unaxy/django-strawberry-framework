@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 224 to do.
+Progress: 0 done, 225 to do.
 
 ## From dry-0_0_15_3
 
@@ -1077,6 +1077,11 @@ Progress: 0 done, 224 to do.
   members is now the form's error (`FILTER_INVALID` over GraphQL, a 400 from `DjangoFilterBackend`) instead of an
   unhandled `ValueError`, and a junk list member is no longer silently dropped. `FilterSet.is_valid()` / `errors`
   build `qs` to report it, so a consumer override of either should call `super()`
+- [ ] 912. CHANGELOG entry for item 906: a `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter` whose `field_name` starts
+  at a `FilteredRelation` alias now decodes against the type registered for the relation the alias joins: an id of
+  another type is a type mismatch instead of filtering rows by its number, an encode-only or non-Relay target answers
+  `GLOBALID_UNVALIDATABLE` per request, and a bad key under an alias a `filter_queryset` override adds answers
+  `GLOBALID_INVALID` instead of a raw error
 
 ## From dry-upstream-0_0_15
 

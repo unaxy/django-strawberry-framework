@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 490 done, 117 to do. The CHANGELOG entries filed here moved to
+Progress: 491 done, 117 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2608,7 +2608,7 @@ Progress: 490 done, 117 to do. The CHANGELOG entries filed here moved to
   alias over several relations or over another alias; added by a type's `get_queryset`, the queryset handed to the set
   or a `filter_queryset` override) now reads the visibility of each relation the alias joins, its condition read by
   Django's own join of the alias, on GraphQL, `apply_sync`, `apply_async` and raw forms, where the anonymous viewer
-  matched through rows the target type's `get_queryset` hides. `filters/sets.py::_query_aliases` reads
+  matched through rows the target type's `get_queryset` hides. `filters/base.py::_query_aliases` reads
   `Query._filtered_relations` off the queryset the leaves run over; `utils/permissions.py::_walk_undeclared_hops`
   walks the alias as one `UndeclaredHop` (`alias`, `via`), and `::_alias_hop` refuses an alias joining no relation
   path with `ConfigurationError`; `filters/sets.py::FilterSet._reaches_alias` reaches rows over
@@ -2713,6 +2713,35 @@ Progress: 490 done, 117 to do. The CHANGELOG entries filed here moved to
   `examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_served_value_over_an_annotation_filter_queryset_adds_is_cleaned_as_it_compares`
   and `tests/filters/test_sets.py::test_an_unbound_set_is_invalid_and_holds_no_error_as_django_filters_is`. CHANGELOG:
   item 908
+- [x] 906. A `GlobalIDFilter` / `GlobalIDMultipleChoiceFilter` whose `field_name` starts at a `FilteredRelation` alias
+  of the queryset it filters (`vshelf`, `vshelf__id`, `vshelf__pk`; forward, reverse, many-to-many, an alias over
+  another alias; added by a type's `get_queryset`, the queryset handed to the set or a `filter_queryset` override) now
+  decodes against the type registered for the relation the alias joins and validates and refuses as the same filter
+  over that relation does, over the rows Django's join of the alias reads: an id of another type (or the other
+  spelling of the target's own) is a type mismatch where it filtered rows by its number, an encode-only or non-Relay
+  target answers `GLOBALID_UNVALIDATABLE`, an id an annotation of the target type's `get_queryset` holds compares on
+  the visible target rows where it was refused, and a bad key under a `filter_queryset` alias answers
+  `GLOBALID_INVALID` where Django's raw `ValueError` escaped. `filters/base.py::_resolve_globalid_target` reads a
+  first segment naming an alias as the relations it joins (`utils/permissions.py::alias_relation_path`, over 792's
+  `_alias_spelling`), with the aliases of the queryset the leaf runs over: `GlobalIDFilter.filter` /
+  `GlobalIDMultipleChoiceFilter.filter` read `_query_aliases(qs)` (moved to `filters/base.py`) and hand `qs.query` to
+  the node-id coercion through 847's `query` (`_model_unresolved_query`);
+  `filters/sets.py::FilterSet._routed_leaf_chain` hands its aliases to `_compares_target_annotation` and the
+  `_KeyLeaf` marks. The schema build reads no alias, so an encode-only target through one builds and is refused per
+  request, as GLOSSARY `FilterSet` / `Meta.globalid_strategy` (pk 463, 518), README, spec-027 (Decision 4, Decision 6
+  step 3, Decision 8 step 3, Edge cases, Test plan, DoD 33, slice checklist) and spec-031 (Decision 4, Decision 13,
+  slice checklist, Edge cases, Impact, DoD) now say. A GlobalID over an alias of a typed relation on a non-Relay
+  output answers `GLOBALID_UNVALIDATABLE` as over that relation, where it served rows for any type name. Grids: 1,512
+  and 2,828 cells moved, every one to the relation twin's answer; 792's alias rows, consumer decoders, `null` and
+  statement counts unchanged. Pinned by `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py`
+  (`::test_a_global_id_filter_over_a_filtered_relation_alias_answers_as_over_its_relation`,
+  `::test_an_encode_only_or_non_relay_target_through_a_filtered_relation_alias_is_refused_per_request`,
+  `::test_a_global_id_over_an_alias_answers_as_over_its_relation_in_every_placement`,
+  `::test_an_annotation_held_id_through_a_filtered_relation_alias_compares_on_the_visible_target_rows`,
+  `::test_a_global_id_over_a_conditioned_alias_compares_its_id_column_through_the_alias`,
+  `::test_a_consumer_decoder_over_a_filtered_relation_alias_reads_its_own_value`) and
+  `examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_global_id_over_an_alias_of_a_typed_relation_answers_as_that_relation`.
+  Filed 911. CHANGELOGTODO 912
 
 ## To do: found along the way
 
@@ -2887,10 +2916,6 @@ Progress: 490 done, 117 to do. The CHANGELOG entries filed here moved to
   `String` from no field) and fails every request carrying a value with Django's `FieldError` (`Query.names_to_path`),
   masked over a resolver; `filters/inputs.py::refuse_joinless_relation` judges only a path ending on one. Found
   researching 877
-- [ ] 906. (robustness) A `GlobalIDFilter` whose `field_name` names a `FilteredRelation` alias (`field_name="vshelf"`)
-  is not judged when its set publishes: the build-time GlobalID checks (`filters/sets.py::_globalid_decode_sites`)
-  cannot see an alias, which only the queryset holds, so its key checks no type name against the alias's target and an
-  encode-only target over the alias is refused per request instead of at build. Found fixing 792
 - [ ] 909. (robustness) A `FilteredRelation` alias a package `FilterSet.filter_queryset` override adds
   (`super().filter_queryset(queryset.alias(kids=FilteredRelation("issues")))`), compared as the relation itself by
   `ListFilter(field_name="kids", lookup_expr="in")` or `RangeFilter(field_name="kids", lookup_expr="exact")`, is not
@@ -2907,6 +2932,14 @@ Progress: 490 done, 117 to do. The CHANGELOG entries filed here moved to
   under any django-filter `FilterSet` parent (it holds for a handed annotation). The stock parent has no
   `_apply_flat_leaves` / `is_valid` seam, so the fix site is the filter (`RangeFilter.filter` / `ListFilter.filter`
   cleaning over `qs.query`). Found fixing 847
+- [ ] 911. (robustness) A filter whose `field_name` starts at a `FilteredRelation` alias over a `GenericRelation` into
+  a model no `DjangoType` exposes (`vtags = FilteredRelation("tags")` on `Branch`,
+  `GlobalIDFilter(field_name="vtags")`) coerces its value through the source model's key, not the target's:
+  `filters/base.py::_query_path_field` returns the `GenericRel` (model `TaggedItem`, related model `Branch`) where the
+  model walk returns the `GenericRelation` field, so a junk key answers "not a valid Branch key value" where the same
+  filter over `tags` names `TaggedItem`, and a target whose key type differs from the source's (a UUID primary key)
+  could answer a different verdict; a `ListFilter("vtags", lookup_expr="in")` likely too. Unchanged by 906. Found
+  verifying 906
 
 ## To do: holes found re-checking the fixes
 

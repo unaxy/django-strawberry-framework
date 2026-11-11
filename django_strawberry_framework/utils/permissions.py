@@ -827,6 +827,18 @@ def _alias_spelling(alias: str, aliases: Mapping[str, str]) -> tuple[list[str], 
     return relations, spelled
 
 
+def alias_relation_path(alias: str, aliases: Mapping[str, str]) -> str:
+    """Return the path of model relations the ``FilteredRelation`` alias ``alias`` joins.
+
+    ``aliases`` maps each alias of a queryset to its ``relation_name``
+    (``filters/base.py::_query_aliases``); an alias whose ``relation_name`` starts at an
+    alias defined before it reads that alias's own relations (``_alias_spelling``), as
+    Django's ``Query.names_to_path`` does: ``vbranch`` over ``vshelf__branch``, where
+    ``vshelf`` joins ``shelf``, is ``shelf__branch``.
+    """
+    return LOOKUP_SEP.join(_alias_spelling(alias, aliases)[0])
+
+
 def _alias_hop(
     set_cls: type[object],
     model: type[models.Model],
