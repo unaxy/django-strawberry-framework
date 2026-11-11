@@ -130,8 +130,8 @@ jobs:
         #
         # 1. Path-disjoint matrix shards run on independent runners and
         #    Postgres servers; `scripts/postgres_shards.py paths` prints a
-        #    shard's paths after checking the partition (the assignment fails
-        #    the step under the shell's errexit). The live-API shards use `load`
+        #    shard's paths after checking that pytest's own collection is
+        #    partitioned exactly. The live-API shards use `load`
         #    so individual tests can fill all workers; package shards retain
         #    `loadscope` because their global-registry fixtures require it.
         #
@@ -165,10 +165,11 @@ jobs:
           FAKESHOP_PG_DSN: postgres://fakeshop:fakeshop@127.0.0.1:5432/fakeshop
           SHARD: ${{ matrix.shard }}
         run: |
-          targets="$(uv run --no-sync python scripts/postgres_shards.py paths "$SHARD")"
-          # The script refuses a path holding whitespace, so word splitting is exact.
-          # shellcheck disable=SC2086
+          # A failing `paths` fails this assignment under errexit; the array
+          # keeps each printed path one argument, never word-split or globbed.
+          listing="$(uv run --no-sync python scripts/postgres_shards.py paths "$SHARD")"
+          mapfile -t targets <<< "$listing"
           uv run --no-sync pytest \
             -o addopts="-v -n 12 --dist ${{ matrix.distribution }} --durations=25" \
             -m "django_db or pg" \
-            $targets
+            "${targets[@]}"

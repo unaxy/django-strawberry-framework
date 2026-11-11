@@ -13,12 +13,16 @@ independent runners. This script owns which paths each shard runs:
   and only its balance waits for a refresh;
 - ``package-core`` and ``example-non-live``: whole directories.
 
-The split is computed from the files on disk at run time, so it never needs a
-hand-kept module list. ``paths`` checks the partition before it prints a shard's
-paths: every test file under ``pytest.ini``'s ``testpaths`` (matched by its
-``python_files``) belongs to exactly one shard, or the job fails. Whether the
-workflow's matrix names exactly these shards is pinned by
-``tests/test_postgres_shards.py``.
+The module inventory is pytest's own: a ``pytest --collect-only`` run over
+``pytest.ini``'s ``testpaths`` loads this module as a plugin, records every file
+pytest would collect (its ``python_files``, ``norecursedirs``, conftest
+``collect_ignore`` and every other collection rule applied by pytest itself)
+and hands pytest no collectors, so no test module is imported. ``paths`` checks
+the partition before it prints a shard's paths: every collected module belongs
+to exactly one shard, or the job fails. Whether the workflow's matrix names
+exactly these shards is pinned by ``tests/test_postgres_shards.py``. The
+collection loads the root ``conftest.py``, whose guard refuses the shared
+checkout: run the commands in a ``scripts/work.py`` copy.
 
 Commands::
 
@@ -28,26 +32,32 @@ Commands::
     python scripts/postgres_shards.py refresh <log>...  # rewrite the weights from job logs
 
 ``refresh`` reads the ``gh run view --job <id> --log`` output of every
-``other-live-*`` shard of one Postgres run (the pytest run is ``-v`` under
-xdist, so each result line carries its worker and a timestamp) and charges each
-module the time between a worker's previous result and the module's result on
-that worker, setup and teardown included. A module with no test selected by the
-tier's ``-m`` filter never prints a result and keeps the median weight.
+``other-live-*`` shard of one finished Postgres run (the pytest run is ``-v``
+under xdist, so each result line carries its worker and a timestamp) and
+charges each module the time between a worker's previous result and the
+module's result on that worker, setup and teardown included. A log without the
+xdist workers line, without a result, or without pytest's closing summary
+line (a cancelled or timed-out job) is refused before anything is written. A
+module with no test selected by the tier's ``-m`` filter never prints a result
+and keeps the median weight.
 """
 
 from __future__ import annotations
 
 import argparse
-import configparser
 import datetime as dt
-import fnmatch
 import json
+import os
 import re
 import statistics
+import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+import pytest
 
 try:
     import _git
@@ -55,7 +65,7 @@ except ModuleNotFoundError:  # imported as ``scripts.postgres_shards`` (repo roo
     from scripts import _git
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Generator, Iterable, Sequence
 
     from typing_extensions import TypeIs
 
@@ -72,17 +82,11 @@ TRAILING_FIXED_SHARDS: dict[str, tuple[str, ...]] = {
     "package-core": ("tests",),
     "example-non-live": ("examples/fakeshop/apps", "examples/fakeshop/tests"),
 }
-# pytest's default ``norecursedirs``; ``pytest.ini`` does not override it.
-NORECURSE_PATTERNS = (
-    "*.egg",
-    ".*",
-    "_darcs",
-    "build",
-    "CVS",
-    "dist",
-    "node_modules",
-    "venv",
-    "{arch}",
+# The collection subprocess writes the files it recorded to the path this names.
+RECORD_ENV = "DSF_POSTGRES_SHARDS_RECORD"
+# The outer pytest run's knobs a nested collection must not inherit; the ini names the settings.
+_INHERITED_PYTEST_ENV = re.compile(
+    r"PYTEST_ADDOPTS|PYTEST_XDIST_\w+|PYTEST_CURRENT_TEST|COV_CORE_\w+|DJANGO_SETTINGS_MODULE",
 )
 
 # ``json.loads`` returns ``Any``; this alias hands callers an ``object`` to narrow.
@@ -93,42 +97,69 @@ _RESULT_LINE = re.compile(
     r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?)Z \[(gw\d+)\] \[\s*\d+%\] "
     r"(?:PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS) ([^\s:]+\.py)",
 )
+# pytest's closing line, e.g. ``==== 4 failed, 8409 passed in 1643.78s (0:27:23) ====``.
+_SUMMARY_LINE = re.compile(r"=+ .* in \d+(?:\.\d+)?s(?: \([\d:]+\))? =+\s*$")
+
+_recorded: set[Path] = set()
 
 
 class ShardError(RuntimeError):
     """A partition or input error the caller fixes before CI can run."""
 
 
-def pytest_settings(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Return ``(testpaths, python_files)`` as ``pytest.ini`` declares them."""
-    parser = configparser.ConfigParser(interpolation=None)
-    _ = parser.read(root / "pytest.ini", encoding="utf-8")
-    section = parser["pytest"]
-    return tuple(section["testpaths"].split()), tuple(section["python_files"].split())
+@pytest.hookimpl(wrapper=True)
+def pytest_collect_file(file_path: Path) -> Generator[None, list[object], list[object]]:
+    """Record a file pytest would collect, then hand pytest no collector for it."""
+    collectors = yield
+    if collectors:
+        _recorded.add(file_path)
+    return []
 
 
-def _recursable(relative_dir: Path) -> bool:
-    return not any(
-        fnmatch.fnmatchcase(part, pattern) or part == "__pycache__"
-        for part in relative_dir.parts
-        for pattern in NORECURSE_PATTERNS
-    )
+def pytest_collection_finish() -> None:
+    """Write the recorded files where ``collected_modules`` reads them."""
+    if target := os.environ.get(RECORD_ENV):
+        lines = sorted(str(path) for path in _recorded)
+        _ = Path(target).write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
 
 
-def collected_files(root: Path, target: str, patterns: Sequence[str]) -> set[str]:
-    """Return the repo-relative test files pytest collects from ``target`` (a file or directory)."""
-    path = root / target
-    if path.is_file():
-        return {target}
-    if not path.is_dir():
-        message = f"shard target {target} does not exist"
-        raise ShardError(message)
-    return {
-        candidate.relative_to(root).as_posix()
-        for candidate in path.rglob("*.py")
-        if _recursable(candidate.parent.relative_to(path))
-        and any(fnmatch.fnmatchcase(candidate.name, pattern) for pattern in patterns)
+def collected_modules(root: Path) -> set[str]:
+    """Return the repo-relative test modules pytest collects from ``root`` with no path arguments."""
+    env = {
+        key: value for key, value in os.environ.items() if not _INHERITED_PYTEST_ENV.fullmatch(key)
     }
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(REPO_ROOT), env.get("PYTHONPATH")]))
+    with tempfile.TemporaryDirectory() as scratch:
+        record = Path(scratch) / "collected.txt"
+        env[RECORD_ENV] = str(record)
+        command = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-o",
+            "addopts=",
+            "-p",
+            "no:cacheprovider",
+            "-p",
+            "scripts.postgres_shards",
+        ]
+        result = subprocess.run(
+            command,
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        # Exit 5 is "no tests collected": the plugin hands pytest no collectors by design.
+        if result.returncode not in {0, 5} or not record.exists():
+            message = f"pytest collection failed (exit {result.returncode}):\n{result.stdout}{result.stderr}"
+            raise ShardError(message)
+        lines = record.read_text(encoding="utf-8").splitlines()
+    resolved_root = root.resolve()
+    return {Path(line).resolve().relative_to(resolved_root).as_posix() for line in lines}
 
 
 def _is_json_object(value: object) -> TypeIs[dict[str, object]]:
@@ -170,12 +201,15 @@ def split(modules: Iterable[str], weights: dict[str, float], count: int) -> list
     return [sorted(modules_in_bin) for modules_in_bin in bins]
 
 
-def shards(root: Path = REPO_ROOT) -> dict[str, tuple[str, ...]]:
-    """Return every shard's pytest paths, in matrix order."""
-    _testpaths, patterns = pytest_settings(root)
+def other_live_modules(universe: Iterable[str]) -> set[str]:
+    """Return the collected live-API modules no fixed shard names."""
     fixed_live = {path for paths in LEADING_FIXED_SHARDS.values() for path in paths}
-    other_live = collected_files(root, LIVE_ROOT, patterns) - fixed_live
-    bins = split(other_live, load_weights(root), OTHER_LIVE_SHARDS)
+    return {module for module in universe if module.startswith(f"{LIVE_ROOT}/")} - fixed_live
+
+
+def shards(universe: Iterable[str], weights: dict[str, float]) -> dict[str, tuple[str, ...]]:
+    """Return every shard's pytest paths, in matrix order."""
+    bins = split(other_live_modules(universe), weights, OTHER_LIVE_SHARDS)
     return {
         **LEADING_FIXED_SHARDS,
         **{f"{OTHER_LIVE_PREFIX}{index}": tuple(modules) for index, modules in enumerate(bins, 1)},
@@ -183,21 +217,23 @@ def shards(root: Path = REPO_ROOT) -> dict[str, tuple[str, ...]]:
     }
 
 
-def partition_problems(root: Path, assignment: dict[str, tuple[str, ...]]) -> list[str]:
-    """Return why ``assignment`` is not an exact partition of the collected test files."""
-    testpaths, patterns = pytest_settings(root)
-    universe: set[str] = set()
-    for testpath in testpaths:
-        universe |= collected_files(root, testpath, patterns)
+def partition_problems(universe: set[str], assignment: dict[str, tuple[str, ...]]) -> list[str]:
+    """Return why ``assignment`` is not an exact partition of the collected modules ``universe``.
+
+    A file path owns itself; a directory path owns every collected module under it.
+    """
     owners: dict[str, list[str]] = {}
     problems: list[str] = []
     for name, paths in assignment.items():
-        if not paths:
-            problems.append(f"shard {name} runs nothing")
         for path in paths:
-            if re.search(r"\s", path):
-                problems.append(f"shard {name} path {path!r} holds whitespace")
-            for module in collected_files(root, path, patterns):
+            if "\n" in path:
+                problems.append(f"shard {name} path {path!r} holds a line break")
+            owned = (
+                {path} if path in universe else {m for m in universe if m.startswith(f"{path}/")}
+            )
+            if not owned:
+                problems.append(f"shard {name} path {path} holds no collected module")
+            for module in owned:
                 owners.setdefault(module, []).append(name)
     problems += [f"{module} is in no shard" for module in sorted(universe - owners.keys())]
     problems += [
@@ -205,27 +241,25 @@ def partition_problems(root: Path, assignment: dict[str, tuple[str, ...]]) -> li
         for module, names in sorted(owners.items())
         if len(names) > 1
     ]
-    problems += [
-        f"{module} (shard {owners[module][0]}) is outside pytest.ini's testpaths"
-        for module in sorted(owners.keys() - universe)
-    ]
     return problems
 
 
 def checked_shards(root: Path = REPO_ROOT) -> dict[str, tuple[str, ...]]:
-    """Return ``shards(root)``, raising ``ShardError`` unless it partitions the suite exactly."""
-    assignment = shards(root)
-    if problems := partition_problems(root, assignment):
+    """Return the shards of ``root``, raising ``ShardError`` unless they partition it exactly."""
+    universe = collected_modules(root)
+    assignment = shards(universe, load_weights(root))
+    if problems := partition_problems(universe, assignment):
         raise ShardError("\n".join(problems))
     return assignment
 
 
 def log_weights(texts: Iterable[str]) -> dict[str, float]:
-    """Return the worker seconds each module took across the pytest job logs ``texts``."""
+    """Return the worker seconds each module took across the finished pytest job logs ``texts``."""
     totals: defaultdict[str, float] = defaultdict(float)
-    for text in texts:
+    for number, text in enumerate(texts, 1):
         start: dt.datetime | None = None
         previous: dict[str, dt.datetime] = {}
+        finished = False
         for line in text.splitlines():
             if start is None:
                 if match := _WORKERS_LINE.search(line):
@@ -235,23 +269,32 @@ def log_weights(texts: Iterable[str]) -> dict[str, float]:
                 stamp = dt.datetime.fromisoformat(match[1][:26])
                 totals[match[3]] += (stamp - previous.get(match[2], start)).total_seconds()
                 previous[match[2]] = stamp
+            elif _SUMMARY_LINE.search(line):
+                finished = True
         if start is None:
-            message = "a log has no xdist 'N workers [' line; pass whole pytest job logs"
+            message = f"log {number} has no xdist 'N workers [' line; pass whole pytest job logs"
+            raise ShardError(message)
+        if not previous:
+            message = f"log {number} has no test result line"
+            raise ShardError(message)
+        if not finished:
+            message = f"log {number} ends before pytest's summary line (cancelled or truncated)"
             raise ShardError(message)
     return dict(totals)
 
 
 def refresh(root: Path, log_paths: Sequence[Path]) -> list[str]:
     """Rewrite the weights file from ``log_paths``; return the split modules the logs never ran."""
-    _testpaths, patterns = pytest_settings(root)
-    fixed_live = {path for paths in LEADING_FIXED_SHARDS.values() for path in paths}
-    other_live = collected_files(root, LIVE_ROOT, patterns) - fixed_live
+    other_live = other_live_modules(collected_modules(root))
     measured = log_weights(
         path.read_text(encoding="utf-8", errors="replace") for path in log_paths
     )
     weights = {
         module: round(seconds) for module, seconds in measured.items() if module in other_live
     }
+    if not weights:
+        message = "the logs measure no other-live module; pass the other-live-* job logs"
+        raise ShardError(message)
     text = json.dumps(dict(sorted(weights.items())), indent=2) + "\n"
     _ = (root / WEIGHTS_FILE).write_text(text, encoding="utf-8")
     return sorted(other_live - weights.keys())
