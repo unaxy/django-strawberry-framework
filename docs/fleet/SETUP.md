@@ -136,7 +136,11 @@ banner for interactive logins, `~/.tmux.conf`, git's `init.defaultBranch` and th
 machine running `apply`, the house tools `heavy` / `pressure` / `agent-status` / `git-autosync`
 (rendered for the target's threads and RAM; `git-autosync` takes `.work/land.lock` across its
 fast-forward) with its 3-minute timer, OpenCode, Muse, grok, Antigravity (`agy`) and osv-scanner,
-and the agent rules file `~/MACHINE.md` rendered from the target's measured facts. The logins
+the agent rules file `~/MACHINE.md` rendered from the target's measured facts, and `rio-ubu`'s
+GNOME settings (`files/desktop/dconf.ini`: fonts, clock, input, window buttons and keybindings,
+Nautilus and file-chooser views, Ptyxis and Text Editor, the dock on the left at 40 px, no sleep on
+AC, location off) plus the Files sidebar's `~/projects`, four New Document templates and the
+"Copy Path" script; the dock keeps only the favourites the target has installed. The logins
 (`gh auth login`, `opencode auth login`, then `muse`, `grok` and `agy` once each) stay by hand.
 Rootless Docker is left out.
 

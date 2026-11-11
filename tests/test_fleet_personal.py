@@ -155,9 +155,22 @@ def test_the_setup_folder_holds_no_private_value() -> None:
     hits = [
         f"{path.relative_to(SETUP)}: {match.group(0)}"
         for path in files
-        for match in PRIVATE.finditer(path.read_text(encoding="utf-8"))
+        for match in PRIVATE.finditer(_without_extension_lists(path.read_text(encoding="utf-8")))
     ]
     assert hits == []
+
+
+#: GNOME Shell extension UUIDs are public ids shaped like emails (``ding@rastersoft.com``).
+EXTENSION_LIST = re.compile(r"^(?:enabled|disabled)-extensions=\[(.*)\]$", re.MULTILINE)
+EXTENSION_UUID = re.compile(r"'[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+'")
+
+
+def _without_extension_lists(text: str) -> str:
+    """Return ``text`` with the extension-list keys removed, each checked to hold UUIDs only."""
+    for match in EXTENSION_LIST.finditer(text):
+        items = [item.strip() for item in match.group(1).split(",") if item.strip()]
+        assert all(EXTENSION_UUID.fullmatch(item) for item in items), match.group(0)
+    return EXTENSION_LIST.sub("", text)
 
 
 @pytest.mark.parametrize(
@@ -185,3 +198,38 @@ def test_the_private_value_pattern_catches_each_kind(sample: str) -> None:
 )
 def test_the_private_value_pattern_lets_ordinary_text_through(sample: str) -> None:
     assert PRIVATE.search(f"text {sample} text") is None
+
+
+def test_the_dock_keeps_only_installed_favourites_in_order(tmp_path: Path) -> None:
+    apps = tmp_path / ".local" / "share" / "applications"
+    apps.mkdir(parents=True)
+    for name in ("org.gnome.Settings.desktop", "org.gnome.Nautilus.desktop"):
+        _ = (apps / name).write_text("[Desktop Entry]\n")
+    assert personal.favorites(_box(tmp_path)) == (
+        "['org.gnome.Nautilus.desktop', 'org.gnome.Settings.desktop']"
+    )
+
+
+def test_no_installed_favourite_is_an_empty_typed_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(personal, "APPLICATION_DIRS", ("~/none",))
+    assert personal.favorites(_box(tmp_path)) == "@as []"
+
+
+def test_the_desktop_settings_render_and_read_back_as_dconf_paths(tmp_path: Path) -> None:
+    keys = personal.dconf_keys(personal.dconf_text(_box(tmp_path)))
+    assert keys["/org/gnome/shell/extensions/dash-to-dock/dock-position"] == "'LEFT'"
+    assert keys["/org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-type"] == "'nothing'"
+    assert str(tmp_path) in keys["/org/gnome/shell/extensions/executor/right-commands-json"]
+    assert not any("preferred-monitor" in path for path in keys)
+
+
+def test_the_files_sidebar_puts_projects_first_once(tmp_path: Path) -> None:
+    bookmarks = tmp_path / ".config" / "gtk-3.0" / "bookmarks"
+    bookmarks.parent.mkdir(parents=True)
+    mark = f"file://{tmp_path}/projects projects"
+    _ = bookmarks.write_text(f"file://{tmp_path}/Documents\n{mark}\n")
+    body, _mode = personal._desktop_files(_box(tmp_path))[bookmarks]
+    assert body == f"{mark}\nfile://{tmp_path}/Documents\n"

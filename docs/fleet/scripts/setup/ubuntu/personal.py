@@ -2,8 +2,8 @@
 
 The core setup (``docs/fleet/scripts/fleet_setup.py add <host>``) makes a machine a fleet member;
 this script is the optional layer on top: the extra command-line tools, the shell, tmux and git
-preferences, the load-aware house tools and the agent rules file. It installs no GUI application
-and writes no desktop setting.
+preferences, the load-aware house tools, the agent rules file and the GNOME desktop settings. It
+installs no GUI application.
 
 Usage, from ``~/projects/django-strawberry-framework`` on any fleet machine::
 
@@ -61,10 +61,24 @@ Steps
         ``~/MACHINE.md``, ``~/AGENTS_READ_THIS_FIRST.md``, ``~/projects/AGENTS.md`` and
         ``~/projects/AGENTS_READ_THIS_FIRST.md``: one agent rules file rendered from
         ``files/MACHINE.md.in`` with this machine's measured facts.
+    ``desktop-settings``
+        GNOME as ``rio-ubu`` has it, from ``files/desktop/dconf.ini`` (``dconf load /``): fonts,
+        clock, mouse/keyboard/touchpad, window buttons and behaviour, keybindings, Nautilus and
+        file-chooser views, Ptyxis and Text Editor, the dock (left, 40 px, fixed, full height,
+        dots, cycle on scroll), desktop icons, screen blank 15 min and no sleep on AC, location
+        off, and the enabled extensions list. The dock's favourites are
+        ``files/desktop/favorites.txt`` less the apps the target lacks. Machine state stays out
+        (monitor connectors, window sizes, profile ids, night-light coordinates, extension
+        bookkeeping).
+        Settings for an extension the target lacks are stored and take effect if it is added.
+    ``desktop-files``
+        ``~/projects`` first in the Files sidebar, four ``~/Templates`` (New Document), and the
+        Nautilus "Copy Path" script on Ctrl+Alt+C (``wl-copy``, from ``wl-clipboard``).
     ``logins``
         By hand: ``gh auth login``, ``opencode``, ``muse``, ``grok`` and ``agy`` each sign in once.
 
-Left out on purpose: GUI applications, GNOME settings and rootless Docker.
+Left out on purpose: GUI applications (and the Claude Desktop Nautilus scripts that need one),
+GNOME Shell extensions the target lacks, and rootless Docker.
 
 Standard library only, Python 3.9, so it runs from the system ``python3`` with nothing else.
 """
@@ -103,6 +117,7 @@ APT_PACKAGES = (
     "gnupg",
     "stress-ng",
     "lm-sensors",
+    "wl-clipboard",
 )
 OSV_VERSION = "v2.7.0"
 KINDS = ("sudo", "user", "hand")
@@ -504,6 +519,98 @@ def _lines_rules(box: Box) -> list[str]:
     return [write_line(path, text) for path in rules_targets(box)]
 
 
+# The GNOME desktop: settings and Nautilus extras, no application installed.
+
+DESKTOP = FILES / "desktop"
+#: Folders a ``.desktop`` file may live in; a dock favourite is kept only when one holds it.
+APPLICATION_DIRS = (
+    "/usr/share/applications",
+    "/usr/local/share/applications",
+    "/var/lib/snapd/desktop/applications",
+    "~/.local/share/applications",
+)
+BOOKMARK = "file://{home}/projects projects"
+ACCEL = "<Control><Alt>c Copy Path"
+
+
+def favorites(box: Box) -> str:
+    """Return the dock's favourites as a GVariant list: rio-ubu's order, installed apps only."""
+    wanted = [
+        line.strip()
+        for line in (DESKTOP / "favorites.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+    folders = [Path(folder.replace("~", str(box.home), 1)) for folder in APPLICATION_DIRS]
+    kept = [name for name in wanted if any((folder / name).exists() for folder in folders)]
+    return "[" + ", ".join(f"'{name}'" for name in kept) + "]" if kept else "@as []"
+
+
+def dconf_text(box: Box) -> str:
+    """Return the desktop settings rendered for ``box`` (dconf's own keyfile form)."""
+    mapping = {"HOME": str(box.home), "FAVORITES": favorites(box)}
+    return render((DESKTOP / "dconf.ini").read_text(encoding="utf-8"), mapping)
+
+
+def dconf_keys(text: str) -> dict[str, str]:
+    """Return every ``/path/key`` and its value in a dconf keyfile."""
+    keys: dict[str, str] = {}
+    section = ""
+    for line in text.splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+        elif "=" in line and section:
+            key, value = line.split("=", 1)
+            keys[f"/{section}/{key}"] = value
+    return keys
+
+
+def _check_desktop_settings(box: Box) -> str | None:
+    wrong = [
+        path
+        for path, value in dconf_keys(dconf_text(box)).items()
+        if _read(["dconf", "read", path]) != value
+    ]
+    return f"{len(wrong)} desktop settings ({wrong[0]} ...)" if wrong else None
+
+
+def _lines_desktop_settings(box: Box) -> list[str]:
+    staged = box.home / ".cache" / "dsf-fleet-setup" / "desktop.ini"
+    return [write_line(staged, dconf_text(box)), f"dconf load / < {shlex.quote(str(staged))}"]
+
+
+def _desktop_files(box: Box) -> dict[Path, tuple[str, str]]:
+    """Return each Nautilus extra's path, content and mode."""
+    files: dict[Path, tuple[str, str]] = {}
+    for source in sorted((DESKTOP / "templates").iterdir()):
+        # A template a project gate would read as code or docs is stored as ``<name>.tmpl``.
+        name = source.name.removesuffix(".tmpl")
+        files[box.home / "Templates" / name] = (source.read_text(encoding="utf-8"), "644")
+    scripts = box.home / ".local" / "share" / "nautilus" / "scripts"
+    for source in sorted((DESKTOP / "nautilus-scripts").iterdir()):
+        files[scripts / source.name] = (source.read_text(encoding="utf-8"), "755")
+    accels = box.home / ".config" / "nautilus" / "scripts-accels"
+    lines = [line for line in _text(accels).splitlines() if line.strip() and line != ACCEL]
+    files[accels] = ("\n".join([ACCEL, *lines]) + "\n", "644")
+    bookmarks = box.home / ".config" / "gtk-3.0" / "bookmarks"
+    mark = BOOKMARK.format(home=box.home)
+    rest = [line for line in _text(bookmarks).splitlines() if line.strip() and line != mark]
+    files[bookmarks] = ("\n".join([mark, *rest]) + "\n", "644")
+    return files
+
+
+def _check_desktop_files(box: Box) -> str | None:
+    stale = [
+        path.name
+        for path, (body, _mode) in _desktop_files(box).items()
+        if not path.exists() or _text(path) != body
+    ]
+    return ", ".join(stale) if stale else None
+
+
+def _lines_desktop_files(box: Box) -> list[str]:
+    return [write_line(path, body, mode) for path, (body, mode) in _desktop_files(box).items()]
+
+
 def _check_logins(_box: Box) -> str | None:
     return None if _read(["sh", "-c", "gh auth status >/dev/null 2>&1 && echo ok"]) else "gh"
 
@@ -554,6 +661,8 @@ STEPS: tuple[Step, ...] = (
     ),
     Step("osv-scanner", "user", _exists(".local", "bin", "osv-scanner"), _lines_osv),
     Step("rules", "user", _check_rules, _lines_rules),
+    Step("desktop-settings", "user", _check_desktop_settings, _lines_desktop_settings),
+    Step("desktop-files", "user", _check_desktop_files, _lines_desktop_files),
     Step("logins", "hand", _check_logins, _lines_logins),
 )
 
@@ -598,6 +707,8 @@ def run_lines(lines: Sequence[str], box: Box, *, sudo: bool = False) -> int:
     )
     env = dict(os.environ)
     env["PATH"] = f"{box.bin}{os.pathsep}{env.get('PATH', '/usr/bin:/bin')}"
+    # dconf writes through the session bus; over ssh there is none in the environment.
+    _ = env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{os.getuid()}/bus")
     print(f"+ {script[:ECHO_LIMIT]}{' ...' if len(script) > ECHO_LIMIT else ''}", flush=True)
     try:
         return subprocess.run(argv, check=False, cwd=box.home, env=env).returncode

@@ -1,0 +1,5 @@
+#!/bin/bash
+# Copies the full paths of the selected files (one per line); the current folder if nothing is selected.
+p=$(printf '%s' "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}" | sed '/^$/d')
+[ -n "$p" ] || p=$(pwd)
+printf '%s' "$p" | wl-copy

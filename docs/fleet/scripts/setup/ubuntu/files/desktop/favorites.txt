@@ -1,0 +1,24 @@
+# The dock's order (rio-ubu's); personal.py keeps only the apps installed on the target.
+org.gnome.Nautilus.desktop
+brave_brave.desktop
+google-chrome.desktop
+firefox_firefox.desktop
+com.microsoft.VSCode.desktop
+com.anthropic.Claude.desktop
+chatgpt.desktop
+dev.warp.Warp.desktop
+cursor.desktop
+t3code.desktop
+ai.opencode.desktop.desktop
+org.gnome.Ptyxis.desktop
+com.onepassword.OnePassword.desktop
+org.gnome.Calculator.desktop
+org.gnome.Characters.desktop
+org.gnome.baobab.desktop
+org.gnome.Sysprof.desktop
+solaar.desktop
+snap-store_snap-store.desktop
+update-manager.desktop
+com.mattjakeman.ExtensionManager.desktop
+org.gnome.tweaks.desktop
+org.gnome.Settings.desktop
