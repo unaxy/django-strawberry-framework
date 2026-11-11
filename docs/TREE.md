@@ -559,6 +559,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
 ├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
 ├── test_permissions.py           # Package-only cascade-permission pins that no live GraphQL request can express.
+├── test_postgres_shards.py       # Script tests for ``scripts/postgres_shards.py``, the Postgres tier's shard assignment.
 ├── test_predicate_pg_explain.py  # Postgres planner regression for the row-preserving to-many filter predicates.
 ├── test_prepared_view_handoff.py # The prepared-view handoff's ignore arms.
 ├── test_prove_failability.py     # Script tests for the failability-proof runner's refusals and restore proof.
@@ -948,6 +949,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
 ├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
 ├── test_permissions.py           # Package-only cascade-permission pins that no live GraphQL request can express.
+├── test_postgres_shards.py       # Script tests for ``scripts/postgres_shards.py``, the Postgres tier's shard assignment.
 ├── test_predicate_pg_explain.py  # Postgres planner regression for the row-preserving to-many filter predicates.
 ├── test_prepared_view_handoff.py # The prepared-view handoff's ignore arms.
 ├── test_prove_failability.py     # Script tests for the failability-proof runner's refusals and restore proof.
