@@ -95,7 +95,17 @@ from collections.abc import AsyncIterable, Iterable
 from collections.abc import Set as AbstractSet
 from decimal import Context as DecimalContext
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, Generic, ParamSpec, TypeGuard, TypeVar, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Literal,
+    ParamSpec,
+    TypeGuard,
+    TypeVar,
+    cast,
+    overload,
+)
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import FieldDoesNotExist, FieldError, ValidationError
@@ -568,24 +578,53 @@ def lookup_target_fields(query: sql.Query, lookup: str) -> tuple[object, ...]:
     Resolved the way ``django/db/models/sql/query.py::Query.build_filter`` resolves a
     filter argument: ``Query.solve_lookup_type`` splits ``lookup`` into the field path
     and the transforms and lookup left over, reading a name ``query`` annotates or
-    aliases (``Query.annotations``) as that expression, and the field path is then
-    walked by ``Query.names_to_path``, the walk ``Query.setup_joins`` runs, which reads
-    ``pk`` as the primary key, a ``FilteredRelation`` alias ``query`` holds as its
-    relation and a field on a concrete parent through the parent hop. The fields are
-    the walk's targets: the column a path ending on a field names (``occurred_at`` for
-    ``occurred_at__year``), or the fields of the model the last hop of a path ending on
-    a relation reaches that the join compares. An annotation's is its
-    ``output_field``. ``()`` where Django refuses the path (``FieldError``: a name
-    naming nothing, a generic foreign key hop, an expression whose output field Django
-    cannot resolve).
+    aliases (``Query.annotations``) at the start of the path as that expression and a
+    name past a relation as a name of the related model (``_solve_lookup_type``), and
+    the field path is then walked by ``Query.names_to_path``, the walk
+    ``Query.setup_joins`` runs, which reads ``pk`` as the primary key, a
+    ``FilteredRelation`` alias ``query`` holds as its relation and a field on a concrete
+    parent through the parent hop. The fields are the walk's targets: the column a path
+    ending on a field names (``occurred_at`` for ``occurred_at__year``), or the fields
+    of the model the last hop of a path ending on a relation reaches that the join
+    compares. An annotation's is its ``output_field``. ``()`` where Django refuses the
+    path (``FieldError``: a name naming nothing, a generic foreign key hop, an
+    expression whose output field Django cannot resolve).
     """
     try:
-        _lookups, field_parts, expression = query.solve_lookup_type(lookup)
+        query, _lookups, field_parts, expression = _solve_lookup_type(query, lookup)
         if expression is not False:
             return (read_attr(expression, "output_field"),)
         return _names_to_path(query, field_parts, query.get_meta())[2]
     except FieldError:
         return ()
+
+
+def _solve_lookup_type(
+    query: sql.Query,
+    lookup: str,
+) -> tuple[sql.Query, Sequence[str], Sequence[str], Expression | Literal[False]]:
+    """Return ``query.solve_lookup_type(lookup)`` with no annotation read past a relation, and its query.
+
+    ``Query.names_to_path`` reads a name the model a relation reaches has no field for as
+    the ``query``'s own selected annotation of that name (``Query.annotation_select``) at
+    any position of the path, though the annotation is an expression over ``query``'s
+    model, never over the rows past the hop: a name a relation reaches is a name of the
+    related model. A path ending on such a name is walked again over a clone of ``query``
+    selecting no annotation (``Query.set_annotation_mask``, the mask ``QuerySet.alias``
+    leaves an alias out of that walk by), so it is split as it is over the same rows
+    unannotated. A name the path starts with is still read as ``query``'s annotation or
+    alias: ``Query.solve_lookup_type`` matches it against ``Query.annotations`` before it
+    walks, and ``FilteredRelation`` aliases are read at the start of the path alone. The
+    first element is the query the answer was walked over, for a caller's later walk.
+    """
+    lookups, field_parts, expression = query.solve_lookup_type(lookup)
+    # An annotation or alias the path starts with is ``expression``: a selected annotation
+    # the walk ends on was read past a relation.
+    if expression is not False or field_parts[-1] not in query.annotation_select:
+        return query, lookups, field_parts, expression
+    unselected = query.clone()
+    unselected.set_annotation_mask(())
+    return unselected, *unselected.solve_lookup_type(lookup)
 
 
 def split_lookup(
@@ -596,15 +635,17 @@ def split_lookup(
 
     ``Query.solve_lookup_type`` divides it into the names walked as a path and the
     transforms and lookup left over. The answer is the names the path is spelled with (a
-    relation hop and a name ``query`` annotates or aliases included), what
-    ``Query.build_lookup`` applies the leftover to, and the leftover. That start is the
-    expression an annotation or alias names, else the final field ``Query.names_to_path``
-    (the walk ``Query.setup_joins`` runs) ends on, the output field of the column Django
-    builds: the relation's own field where the path ends on a relation (a reverse
-    relation's ``ForeignObjectRel``, a many-to-many's through key onto its target).
-    Raises ``FieldError`` where Django refuses the path.
+    relation hop and a name ``query`` annotates or aliases at the start of the path
+    included; a name past a relation is a name of the related model, never ``query``'s
+    annotation, ``_solve_lookup_type``), what ``Query.build_lookup`` applies the
+    leftover to, and the leftover. That start is the expression an annotation or alias
+    names, else the final field ``Query.names_to_path`` (the walk ``Query.setup_joins``
+    runs) ends on, the output field of the column Django builds: the relation's own
+    field where the path ends on a relation (a reverse relation's ``ForeignObjectRel``,
+    a many-to-many's through key onto its target). Raises ``FieldError`` where Django
+    refuses the path.
     """
-    lookups, field_parts, expression = query.solve_lookup_type(lookup)
+    query, lookups, field_parts, expression = _solve_lookup_type(query, lookup)
     names = lookup.split(LOOKUP_SEP)
     start = (
         expression

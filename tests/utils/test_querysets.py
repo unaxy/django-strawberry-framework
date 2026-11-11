@@ -194,6 +194,7 @@ from django_strawberry_framework.utils.querysets import (
     initial_queryset,
     is_async_only_iterable,
     linkable_rows,
+    lookup_target_fields,
     normalize_query_source,
     normalized_row_source,
     pks_all_present,
@@ -202,6 +203,7 @@ from django_strawberry_framework.utils.querysets import (
     reject_awaitable_sync_source,
     related_queryset,
     run_in_one_sync_boundary,
+    split_lookup,
     truncates_to_integer,
     visible_related_object,
     visible_related_objects,
@@ -9675,3 +9677,34 @@ def test_member_prefetch_path_resolves_the_relation_target_guard() -> None:
     assert defect[1].startswith(
         "X prefetch 'genres' queryset is over Shelf rows, but the 'genres' relation targets Genre",
     )
+
+
+def _doubled() -> Value:
+    return Value(2, output_field=models.IntegerField())
+
+
+@pytest.mark.parametrize(
+    "lookup",
+    [
+        "shelf__twice",
+        "shelf__twice__gt",
+        "shelf__branch__twice",
+        "vshelf__twice",
+    ],
+)
+def test_a_name_past_a_relation_splits_as_over_the_rows_annotating_none(lookup: str) -> None:
+    """A name past a relation is the related model's, never the rows' own annotation.
+
+    Django's ``Query.names_to_path`` falls back to a selected annotation of the query for a
+    name the related model lacks; the package splits the path, and reads its target
+    fields, as it does over the same rows annotating nothing, ``FilteredRelation`` alias
+    included, and leaves the annotated query selecting its annotation.
+    """
+    plain = Book.objects.alias(vshelf=FilteredRelation("shelf"))
+    annotated = plain.annotate(twice=_doubled())
+    assert split_lookup(annotated.query, lookup) == split_lookup(plain.query, lookup)
+    assert lookup_target_fields(annotated.query, lookup) == lookup_target_fields(
+        plain.query,
+        lookup,
+    )
+    assert list(annotated.query.annotation_select) == ["twice"]

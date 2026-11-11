@@ -11,9 +11,11 @@ A set declaring no ``Meta.model`` refuses a leaf by naming the missing model, ma
 under the default error policy, while its ``RelatedFilter`` branches still apply.
 A list or range criterion over a duration or integer annotation of the queryset handed to
 the set, or of a branch's target type's ``get_queryset``, is cleaned and compared as the
-annotation's output field under ``apply_sync`` and ``apply_async`` alike. Complete fields
-and values added by consumer cleaning acquire bind-only owners after the whole native
-logical domain succeeds; only missing package inner parsers prepare before cleaning.
+annotation's output field under ``apply_sync`` and ``apply_async`` alike; a name past a declared
+or scoped relation is the related rows' own, an annotation of their type's ``get_queryset``
+included, never the handed rows' or a ``filter_queryset`` override's annotation of that name.
+Complete fields and values added by consumer cleaning acquire bind-only owners after the
+whole native logical domain succeeds; only missing package inner parsers prepare before cleaning.
 Raw ``.qs`` keeps safe sibling filtering on the same form when native errors suppress
 uncached bind-only hooks. Permission gates precede annotation parser and bind preparation;
 each owner is cached.
@@ -2325,6 +2327,230 @@ def test_a_branch_criterion_over_its_target_types_annotation_is_cleaned_as_it_co
         "Invalid filter input",
         extensions={"code": "FILTER_INVALID", "errors": answer},
     )
+
+
+def _with_own_lag(rows: QuerySet[Model]) -> QuerySet[Model]:
+    """Handed rows annotating their own ``lag``, the name the partner's type annotates."""
+    return rows.annotate(
+        lag=django_models.ExpressionWrapper(
+            django_models.F("occurred_at") - django_models.F("occurred_at"),
+            output_field=django_models.DurationField(),
+        ),
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("filterset", "where"),
+    [
+        pytest.param(
+            _UndeclaredAnnotationCriteriaSet,
+            {"lag_among": {"in_": ["1 00:00:00"]}},
+            id="undeclared",
+        ),
+        pytest.param(
+            _PartnerAnnotationCriteriaSet,
+            {"partner__lag_among": {"in_": ["1 00:00:00"]}},
+            id="flat-copy",
+        ),
+        pytest.param(
+            _PartnerAnnotationCriteriaSet,
+            {"partner": {"lag_among": {"in_": ["1 00:00:00"]}}},
+            id="nested-twin",
+        ),
+    ],
+)
+def test_a_name_past_a_hop_is_the_hop_rows_annotation_when_the_handed_rows_annotate_it_too(
+    transport: str,
+    filterset: type[FilterSet],
+    where: JSONObject,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """``partner__lag`` reads the partner type's ``lag``, never the handed rows' own ``lag``.
+
+    The handed ``NullableScalarSpecimen`` rows annotate a ``lag`` of their own; a name past
+    the ``partner`` hop is a name of the rows that hop reaches, so the undeclared leaf and the
+    flat copy of the declared child answer the nested twin's rows, in one statement.
+    """
+    kept = cleaned_specimen("kept", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = kept
+    child.occurred_at = kept.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-kept", partner=kept)
+    scalar_models.NullableScalarSpecimen.objects.create(label="of-child", partner=child)
+    target = make_django_type(
+        "OwnLagPartnerTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        namespace_extra={"get_queryset": classmethod(_annotating_target)},
+    )
+    schema = _schema(
+        filterset,
+        scalar_models.NullableScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+        annotated=_with_own_lag,
+    )
+    recorded = record_compiled_sql()
+    payload = _post(schema, where, transport=transport, selection="label")
+    assert payload == {"data": {"rows": [{"label": "of-child"}]}}, payload
+    assert len(recorded) == 1, recorded
+
+
+def _doubling_target(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+    """A parent type's ``get_queryset`` annotating ``twice``, double the parent's integer."""
+    del cls, info
+    return rows.annotate(twice=django_models.F("signed_big") * 2)
+
+
+def _tripling(rows: QuerySet[Model]) -> QuerySet[Model]:
+    """Handed rows annotating a ``twice`` of their own, triple their own integer."""
+    return rows.annotate(twice=django_models.F("signed_big") * 3)
+
+
+class _ParentTwiceSet(FilterSet):
+    twice_at = NumberFilter(field_name="parent__twice")
+    twice_below = NumberFilter(field_name="parent__twice", lookup_expr="lt")
+    twice_among = ListFilter(field_name="parent__twice", lookup_expr="in")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = []
+
+
+class _LateParentTwiceSet(_ParentTwiceSet):
+    """``_ParentTwiceSet`` whose own ``filter_queryset`` annotates the rows' ``twice``."""
+
+    @override
+    def filter_queryset(self, queryset: QuerySet[Model]) -> QuerySet[Model]:
+        return super().filter_queryset(_tripling(queryset))
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize("late", [False, True], ids=["handed", "filter-queryset"])
+@pytest.mark.parametrize(
+    ("where", "labels"),
+    [
+        pytest.param({"twice_at": {"exact": 14}}, ["kept-child"], id="number"),
+        pytest.param({"twice_among": {"in_": ["14", "21"]}}, ["kept-child"], id="members"),
+        pytest.param(
+            {"twice_below": {"lt": str(2**63)}},
+            ["kept-child", "gone-child"],
+            id="past-range",
+        ),
+    ],
+)
+def test_a_self_relation_hop_reads_its_types_annotation_beside_the_rows_own(
+    transport: str,
+    where: JSONObject,
+    labels: list[str],
+    record_compiled_sql: RecordCompiledSql,
+    *,
+    late: bool,
+) -> None:
+    """``parent__twice`` over a self relation reads the parent type's ``twice``.
+
+    The specimen type's ``get_queryset`` doubles ``signed_big`` as ``twice``; the rows the set
+    filters triple it under the same name, handed or added by the set's ``filter_queryset``.
+    The parent's ``twice`` answers (``14`` for the kept parent, never the child's own ``21``),
+    a bound past any integer is held past the column's range, and one statement runs.
+    """
+    kept = cleaned_specimen("kept", kept=True)
+    gone = cleaned_specimen("gone", kept=False)
+    for label, parent in (("kept-child", kept), ("gone-child", gone)):
+        child = cleaned_specimen(label, kept=True)
+        child.parent = parent
+        child.save(update_fields=["parent"])
+    target = make_django_type(
+        "DoublingSpecimenTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        meta_extra={"primary": True},
+        namespace_extra={"get_queryset": classmethod(_doubling_target)},
+    )
+    schema = _schema(
+        _LateParentTwiceSet if late else _ParentTwiceSet,
+        scalar_models.ScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+        annotated=None if late else _tripling,
+    )
+    recorded = record_compiled_sql()
+    payload = _post(schema, where, transport=transport, selection="label")
+    assert payload == {"data": {"rows": [{"label": label} for label in labels]}}, payload
+    assert len(recorded) == 1, recorded
+
+
+def _keyed_target(cls: type[object], rows: QuerySet[Model], info: object) -> QuerySet[Model]:
+    """A parent type's ``get_queryset`` naming its key ``a``."""
+    del cls, info
+    return rows.annotate(a=django_models.F("pk"))
+
+
+class _ParentKeySet(FilterSet):
+    a_among = ListFilter(field_name="parent__a", lookup_expr="in")
+
+    class Meta:
+        model = scalar_models.ScalarSpecimen
+        fields = []
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+def test_a_member_past_a_hop_is_cleaned_as_the_hop_column_not_the_rows_own_column(
+    transport: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """``parent__a`` cleans a member as the parent type's ``a``, an integer key.
+
+    The rows the set filters name their text ``label`` ``a``: a text member would clean as
+    that column and match nothing, but past the hop ``a`` is the parent's key, so ``"abc"`` is
+    ``FILTER_INVALID`` before any statement.
+    """
+    parent = cleaned_specimen("parent", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = parent
+    child.save(update_fields=["parent"])
+    target = make_django_type(
+        "KeyedSpecimenTarget",
+        scalar_models.ScalarSpecimen,
+        ("label",),
+        node=False,
+        meta_extra={"primary": True},
+        namespace_extra={"get_queryset": classmethod(_keyed_target)},
+    )
+    schema = _schema(
+        _ParentKeySet,
+        scalar_models.ScalarSpecimen,
+        transport=transport,
+        fields=("label",),
+        targets=(target,),
+        annotated=lambda rows: rows.annotate(a=django_models.F("label")),
+    )
+    recorded = record_compiled_sql()
+    _refused(
+        _post(schema, {"a_among": {"in_": ["abc"]}}, transport=transport, selection="label"),
+        "Invalid filter input",
+        extensions={
+            "code": "FILTER_INVALID",
+            "errors": {"a_among": [{"message": "Enter a number.", "code": "invalid"}]},
+        },
+    )
+    assert recorded == [], recorded
+    accepted = _post(
+        schema,
+        {"a_among": {"in_": [str(saved_pk(parent))]}},
+        transport=transport,
+        selection="label",
+    )
+    assert accepted == {"data": {"rows": [{"label": "child"}]}}, accepted
 
 
 @pytest.mark.django_db(transaction=True)

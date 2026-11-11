@@ -41,6 +41,8 @@ the content type key beside a ``GenericForeignKey`` or on the ``GenericRelation`
 answers its rows.
 A raw key starting at a ``FilteredRelation`` alias the set's ``filter_queryset`` adds reads
 the visibility of the shelf the alias joins and of the branch past it, under every driver.
+A raw key past a self relation reads the parent type's annotation of its name while the set's
+``filter_queryset`` annotates the same name on the rows it filters, under every driver.
 """
 
 import contextlib
@@ -471,6 +473,25 @@ def _late_annotated_set() -> type[FilterSet]:
     return LateAnnotationSet
 
 
+class _LateParentTwiceSet(FilterSet):
+    """Members and a bound over ``parent__twice``; its ``filter_queryset`` annotates ``twice``.
+
+    The rows it filters name their own tripled ``signed_big`` ``twice``, the name the parent's
+    type annotates (``_register_doubling_type``).
+    """
+
+    twice_among = ListFilter(field_name="parent__twice", lookup_expr="in")
+    twice_below = django_filters.NumberFilter(field_name="parent__twice", lookup_expr="lt")
+
+    class Meta:
+        model = models.ScalarSpecimen
+        fields = ()
+
+    @override
+    def filter_queryset(self, queryset: QuerySet[Model]) -> QuerySet[Model]:
+        return super().filter_queryset(queryset.annotate(twice=F("signed_big") * 3))
+
+
 #: The raw sets the driver routes build, by route name.
 _RAW_SETS: dict[str, type[FilterSet]] = {
     "book-filter": BookFilter,
@@ -495,6 +516,7 @@ _RAW_SETS: dict[str, type[FilterSet]] = {
     "model-choice-with-no-queryset": _QuerysetlessChoiceSet,
     "filter-override-with-no-queryset": _QuerysetlessOverrideSet,
     "late-annotation": _late_annotated_set(),
+    "late-parent-twice": _LateParentTwiceSet,
 }
 
 
@@ -3223,6 +3245,68 @@ def test_a_raw_set_no_type_names_answers_a_walked_key_as_book_filter(
 
     assert _raw_set_ids(client, driver, name, query) == expected
     assert _raw_set_ids(client, driver, "book-filter", query) == expected
+
+
+def _register_doubling_type() -> None:
+    """Register the specimen type whose ``get_queryset`` doubles ``signed_big`` as ``twice``."""
+
+    class DoublingSpecimenType(DjangoType):
+        class Meta:
+            model = models.ScalarSpecimen
+            fields = ("id", "label")
+            primary = True
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[models.ScalarSpecimen],
+            info: object,
+            **kwargs: object,
+        ) -> QuerySet[models.ScalarSpecimen]:
+            del info, kwargs
+            return queryset.annotate(twice=F("signed_big") * 2)
+
+    del DoublingSpecimenType
+    finalize_django_types()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query", "labels"),
+    [
+        pytest.param({"twice_among": "14,21"}, ["kept-child"], id="members"),
+        pytest.param({"twice_among": f"14,{2**63}"}, ["kept-child"], id="member-past-range"),
+        pytest.param(
+            {"twice_below": str(2**63)},
+            ["kept-child", "gone-child"],
+            id="bound-past-range",
+        ),
+    ],
+)
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_name_past_a_self_relation_reads_the_parent_types_annotation(
+    driver: str,
+    query: dict[str, str],
+    labels: list[str],
+) -> None:
+    """``parent__twice`` reads the parent type's ``twice``, never the rows' own ``twice``.
+
+    The set's ``filter_queryset`` annotates ``twice`` (triple ``signed_big``) on the rows it
+    filters, and the specimen type's ``get_queryset`` annotates it double: past the
+    ``parent`` hop the name is the parent's, so ``14`` matches the kept parent's child and a
+    number past any integer is held past the column's range, under a consumer's own
+    construction, DRF's ``DjangoFilterBackend`` and django-filter's ``FilterView`` alike.
+    """
+    kept = cleaned_specimen("kept", kept=True)
+    gone = cleaned_specimen("gone", kept=False)
+    for label, parent in (("kept-child", kept), ("gone-child", gone)):
+        child = cleaned_specimen(label, kept=True)
+        child.parent = parent
+        child.save(update_fields=["parent"])
+    _register_doubling_type()
+    expected = [saved_pk(models.ScalarSpecimen.objects.get(label=label)) for label in labels]
+    assert _raw_set_ids(Client(), driver, "late-parent-twice", query) == expected
 
 
 #: (raw key over the alias and value, the titles each viewer's request answers)

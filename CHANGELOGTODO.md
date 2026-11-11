@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 225 to do.
+Progress: 0 done, 226 to do.
 
 ## From dry-0_0_15_3
 
@@ -1082,6 +1082,11 @@ Progress: 0 done, 225 to do.
   another type is a type mismatch instead of filtering rows by its number, an encode-only or non-Relay target answers
   `GLOBALID_UNVALIDATABLE` per request, and a bad key under an alias a `filter_queryset` override adds answers
   `GLOBALID_INVALID` instead of a raw error
+- [ ] 913. CHANGELOG entry for item 779: a filter path crossing a relation to a name the related type's `get_queryset`
+  annotates now answers when the filtered queryset annotates the same name (a self relation such as `parent__twice`
+  under an annotating type, a handed annotated queryset, a `filter_queryset` that annotates), where it failed every
+  filter of the set with a masked `AttributeError` or cleaned the value as the outer column; undeclared leaves and
+  flat copies of declared children answer as their nested spelling
 
 ## From dry-upstream-0_0_15
 

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 491 done, 117 to do. The CHANGELOG entries filed here moved to
+Progress: 492 done, 117 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2742,6 +2742,28 @@ Progress: 491 done, 117 to do. The CHANGELOG entries filed here moved to
   `::test_a_consumer_decoder_over_a_filtered_relation_alias_reads_its_own_value`) and
   `examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_global_id_over_an_alias_of_a_typed_relation_answers_as_that_relation`.
   Filed 911. CHANGELOGTODO 912
+- [x] 779. A name past a relation the filtered rows also annotate is read as the related model's name, never as the
+  rows' own annotation: a `NumberFilter` / `ListFilter` / `RangeFilter` over `parent__twice` (an undeclared leaf over
+  a hop whose target type's `get_queryset` scopes it, or the flat copy of a declared child) raised a masked
+  `AttributeError` ("'IntegerField' object has no attribute 'model'") when the rows filtered annotate a `twice` of
+  their own (a self relation under an annotating type, a handed annotated queryset, a `filter_queryset` override, two
+  types annotating one name), at form build (failing every filter of the set) and at apply
+  (`filters/sets.py::_held_integer_value`), and an `F(<column>)` outer annotation cleaned values as that column; the
+  item's own wording (undeclared only, the target type's annotation alone) did not reproduce. Django's
+  `Query.names_to_path` reads a name past a relation as the outer query's selected annotation of that name;
+  `utils/querysets.py::_solve_lookup_type` re-walks such a split over a clone with `set_annotation_mask(())` (the mask
+  `QuerySet.alias` uses), and `::split_lookup` and `::lookup_target_fields` go through it, so both spellings answer
+  the nested twin's rows and refusals on `apply_sync`, `apply_async`, raw, DRF and `FilterView` in one statement.
+  Grid: 8400 cells, B 880 to 1400, D 650 to 1400, E 490 to 980, F 540 to 980 matching the unannotated reference, 0
+  narrowed; the rest is item 914. README, spec-027 (Decision 8 step 3, slice checklist, Edge cases, Test plan, DoD
+  35), the test README and GLOSSARY `FilterSet` (pk 463) follow. Pinned by
+  `examples/fakeshop/test_query/test_filter_apply_arguments_api.py`
+  (`::test_a_name_past_a_hop_is_the_hop_rows_annotation_when_the_handed_rows_annotate_it_too`,
+  `::test_a_self_relation_hop_reads_its_types_annotation_beside_the_rows_own`,
+  `::test_a_member_past_a_hop_is_cleaned_as_the_hop_column_not_the_rows_own_column`),
+  `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_name_past_a_self_relation_reads_the_parent_types_annotation`
+  and `tests/utils/test_querysets.py::test_a_name_past_a_relation_splits_as_over_the_rows_annotating_none` (the
+  `lookup_target_fields` route, equivalent on the wire). CHANGELOG: item 913
 
 ## To do: found along the way
 
@@ -2781,11 +2803,6 @@ Progress: 491 done, 117 to do. The CHANGELOG entries filed here moved to
   moves pinned behaviour. A plain `AllValuesMultipleFilter(lookup_expr="year")` is the same class: it publishes the
   transform's `[Int!]` while its choices are the column's dates (`invalid_choice` for every year; from 733). Found
   fixing 708
-- [ ] 779. A `NumberFilter(field_name="parent__twice")` past an undeclared hop whose target type's `get_queryset`
-  annotates `twice` answers a masked `AttributeError: 'IntegerField' object has no attribute 'model'`
-  (`filters/sets.py::_held_integer_value` -> `_queryset_integer_column` -> `utils/relations.py::_walk_lookup_expr`
-  reads `cached_col` on the annotation's unbound `output_field`); the same name past a declared `RelatedFilter` hop
-  answers. Found researching 776
 - [ ] 783. (robustness) A declared `MultipleChoiceFilter` / `ModelMultipleChoiceFilter` (`exact`) with a lazy
   `field_name` (`gettext_lazy("children__label")`) gives one declaration two answers: unwalked, django-filter's
   `MultipleChoiceFilter.get_filter_predicate` keys the predicate by the lazy object and the request raises
@@ -3441,6 +3458,16 @@ Progress: 491 done, 117 to do. The CHANGELOG entries filed here moved to
   to the one Relay type the executing schema publishes over its model, so a secondary-only schema can refetch the ids it
   emits? That changes the model-label decode contract (README secondary blockquote, spec-031) for mutations and filters
   too, and is ambiguous with several published secondaries. Found fixing 757
+- [ ] 914. Decide: an undeclared leaf over a hop whose target type keeps the default `get_queryset` (or no type) is
+  handed to Django untouched, so over rows annotating the same name Django's `Query.names_to_path` fallback reads the
+  outer annotation: `NumberFilter(field_name="shelf__a")` over a root annotating `a` raises Django's masked
+  `AttributeError` or answers rows read off the outer annotation (`parent__p` over a root annotating `p=F("parent")`
+  compiles to `WHERE parent_id = ...`), while a `RangeFilter` on the same path is now refused
+  (`LookupValidationError`, as over plain rows) and the same path over plain rows is Django's `FieldError`. `OrderSet`
+  refuses such terms at build; a consumer `order_by("shelf__a")` reaches Django's compiler the same way. Refuse, at
+  build, a name past an unscoped undeclared hop that the target model lacks (a new contract, which also moves today's
+  plain-rows `FieldError`), or leave it to Django? Optionally file the fallback with Django (a ticket draft from the
+  779 evidence). Found fixing 779
 
 ## Hunt not finished in t3
 
