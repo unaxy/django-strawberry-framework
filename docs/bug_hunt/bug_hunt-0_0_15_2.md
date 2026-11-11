@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 506 done, 104 to do. The CHANGELOG entries filed here moved to
+Progress: 507 done, 103 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2875,13 +2875,30 @@ Progress: 506 done, 104 to do. The CHANGELOG entries filed here moved to
   masked over a resolver; `filters/inputs.py::refuse_joinless_relation` judges only a path ending on one. Found
   researching 877. Closed with no change (maintainer, 2026-11-11: items not worth completing): upstream-matching.
   Django itself cannot traverse a `GenericForeignKey`, and its `FieldError` is stock django-filter's answer too.
+- [x] 762. An `in` over a nested `ArrayField` holds each member to the column's depth: `filters/base.py::_ElementField`
+  carries the depth `utils/_array_field.py::array_leaf_field` returns (no longer a nests flag) at every fill site
+  (`_ElementCleanedFilter._hand_column_field`, `install_comparison_cleaner`,
+  `filters/sets.py::FilterSet._install_source_comparison`), and `_ElementField._cleaned` walks exactly the levels
+  Django's `ArrayField.get_db_prep_value` walks. A member, or a row of one, that is no list is `invalid_list`; each
+  element at the innermost level, a list included, is the leaf form field's to clean, so over a numeric leaf a ragged
+  member (`[[[1, [2]]]]`) or one deeper than the column answers `FILTER_INVALID` "Enter a number." from `apply_sync`,
+  `apply_async`, `is_valid()` / `errors` and `qs` where a `TypeError` escaped, and a member shallower than the column
+  or a leaf beside a row (`[[[1], 2]]`) answers "Enter a list of values.". `exact`, `contains`, `contained_by` and
+  `overlap` keep the any-depth descent. spec-027 restated (Slice 1, Decision 4, Edge cases, Test plan, DoD 3). Pinned
+  by `tests/filters/test_sets.py::test_a_nested_array_in_member_is_held_to_the_columns_depth` (both parents),
+  `::test_a_nested_array_in_member_off_the_columns_depth_is_filter_invalid`,
+  `::test_a_flat_copy_of_a_nested_array_in_over_a_child_annotation_holds_the_columns_depth` (raw form over a child
+  type's `get_queryset` annotation) and
+  `tests/filters/test_base.py::test_an_array_in_field_holds_each_member_to_the_columns_depth`; PostgreSQL-tier live
+  params in `examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::test_nested_array_members_are_cleaned_as_the_innermost_column`
+  (unverified until `postgres.yml` runs). Not filed, upstream-matching: a text leaf reads a list as text
+  (`CharField.to_python`); a temporal leaf raises Django's own `AttributeError` on a list
+  (`BaseTemporalField.to_python`, as on a flat array, a plain `in` and stock django-filter); unequal sibling lengths,
+  a leaf-and-list value under the containment lookups and `None` where a row is due stay with PostgreSQL's array
+  parser, as on a plain queryset.
 
 ## To do: found along the way
 
-- [ ] 762. (robustness) A ragged or over-deep member of an `in` over a nested `ArrayField` (`[[[1, [2]]]]` through an
-  `apply_sync` JSON `where`, or raw form data) raises an unmasked `TypeError` ("Field 'igrid' expected a number") from
-  `.qs` and `apply_sync` instead of a field-keyed `FILTER_INVALID`; the same at the parent of 692. PostgreSQL refuses
-  ragged arrays anyway. Found verifying 692
 - [ ] 764. (robustness) `utils/write_values.py::attempted_saves` connects `sender=model` exactly, so a serializer
   `create()` / `update()` saving a proxy or subclass row of the backing model leaves no record and a refused save of
   it answers the envelope where its `None` column's `null` applies (spec-039 Decision 8). Envelope at the parent and

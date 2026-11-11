@@ -1977,52 +1977,52 @@ def test_declared_range_or_list_naming_a_relation_valued_key_by_name_is_refused_
 @pytest.mark.parametrize(
     (
         "element_field",
-        "nests",
+        "depth",
         "value",
         "cleaned",
     ),
     [
-        pytest.param(DecimalField(), False, ["1.5", None], [Decimal("1.5"), None], id="none-kept"),
-        pytest.param(DecimalField(), False, "1.5", "1.5", id="not-a-list-passes-through"),
-        pytest.param(None, False, ["NaN"], ["NaN"], id="no-element-field-passes-through"),
+        pytest.param(DecimalField(), 0, ["1.5", None], [Decimal("1.5"), None], id="none-kept"),
+        pytest.param(DecimalField(), 0, "1.5", "1.5", id="not-a-list-passes-through"),
+        pytest.param(None, 0, ["NaN"], ["NaN"], id="no-element-field-passes-through"),
         pytest.param(
             DecimalField(),
-            True,
+            2,
             [["1.5", None], ["2"]],
             [[Decimal("1.5"), None], [Decimal(2)]],
             id="nested-members-descended",
         ),
         pytest.param(
             DecimalField(),
-            True,
+            2,
             ["1.5", "2"],
             [Decimal("1.5"), Decimal(2)],
             id="nested-flat-list-of-leaves",
         ),
         pytest.param(
             DecimalField(),
-            True,
+            2,
             [[["1"]]],
             [[[Decimal(1)]]],
             id="nested-deeper-than-the-column",
         ),
         pytest.param(
             DecimalField(),
-            True,
+            2,
             (("1",), None),
             [[Decimal(1)], None],
             id="nested-tuples-read-as-lists",
         ),
         pytest.param(
             CharField(required=False),
-            True,
+            2,
             [["  ab  ", None]],
             [["ab", None]],
             id="nested-none-kept-at-a-text-leaf",
         ),
         pytest.param(
             None,
-            True,
+            2,
             [["NaN"]],
             [["NaN"]],
             id="nested-no-element-field-passes-through",
@@ -2031,21 +2031,58 @@ def test_declared_range_or_list_naming_a_relation_valued_key_by_name_is_refused_
 )
 def test_list_filter_field_cleans_each_element_with_its_element_field(
     element_field: Field | None,
-    nests: bool,  # noqa: FBT001
+    depth: int,
     value: object,
     cleaned: object,
 ) -> None:
     """A ``None`` element stays ``None``; a non-list, or a field with no column, passes through.
 
-    Over an array of arrays (``element_nests``) a list or tuple member is descended at any
-    depth, a ``None`` at any depth stays ``None`` and every other member is cleaned by
-    ``element_field``. A non-list reaches ``ListFilter.filter``, whose list-shape gate
-    refuses it. Live refusal of an element the column cannot hold:
+    Over an array of arrays (``depth`` past 1), outside an ``in`` over it, a list or tuple
+    member is descended at any depth, a ``None`` at any depth stays ``None`` and every other
+    member is cleaned by ``element_field``. A non-list reaches ``ListFilter.filter``, whose
+    list-shape gate refuses it. Live refusal of an element the column cannot hold:
     ``test_scalars_filter_api.py::test_price_among_element_the_column_cannot_hold_is_filter_invalid``.
     """
     assert ListFilter.field_class is ArrayFilter.field_class is _ElementField
-    field = _ElementField(required=False, element_field=element_field, element_nests=nests)
+    field = _ElementField(required=False, element_field=element_field, depth=depth)
     assert field.clean(value) == cleaned
+
+
+@pytest.mark.parametrize(
+    ("depth", "value", "outcome"),
+    [
+        pytest.param(1, [["1", None], []], [[Decimal(1), None], []], id="flat-members"),
+        pytest.param(2, [[["1"], None, []]], [[[Decimal(1)], None, []]], id="grid-members"),
+        pytest.param(3, [[[["1"]]], [[None]]], [[[[Decimal(1)]]], [[None]]], id="cube-members"),
+        pytest.param(3, [[[["1", ["2"]]]]], "invalid", id="cube-ragged"),
+        pytest.param(3, [[[[["1"]]]]], "invalid", id="cube-deeper"),
+        pytest.param(3, [[["1"]]], "invalid_list", id="cube-shallower"),
+        pytest.param(3, [[[["1"]], "2"]], "invalid_list", id="cube-plane-beside-a-leaf"),
+        pytest.param(2, [[["1"]], "1"], "invalid_list", id="grid-scalar-member"),
+    ],
+)
+def test_an_array_in_field_holds_each_member_to_the_columns_depth(
+    depth: int,
+    value: object,
+    outcome: object,
+) -> None:
+    """An ``in`` member of a ``depth``-deep column holds lists exactly ``depth`` levels deep.
+
+    A ``None`` stays ``None`` at any level; a list where a leaf is due is the decimal leaf's
+    to clean, its ``invalid`` error, and a non-list where a list is due ``invalid_list``.
+    """
+    field = _ElementField(
+        required=False,
+        element_field=DecimalField(),
+        depth=depth,
+        members_are_arrays=True,
+    )
+    if isinstance(outcome, str):
+        with pytest.raises(ValidationError) as excinfo:
+            field.clean(value)
+        assert excinfo.value.code == outcome
+        return
+    assert field.clean(value) == outcome
 
 
 @pytest.mark.parametrize(

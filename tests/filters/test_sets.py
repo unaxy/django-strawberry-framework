@@ -8268,11 +8268,12 @@ def test_nested_array_leaf_is_cleaned_as_its_innermost_column(
 ) -> None:
     """Every member of a nested ``ArrayField`` value is cleaned as the innermost column.
 
-    A list or tuple member is descended at any depth, so a flat list of leaves, a value
-    nested deeper than the column and an ``in`` whose members are nested arrays clean
-    alike; a ``None`` stays ``None`` at any depth, inside an ``in`` member too; under the
-    package ``FilterSet`` and a plain django-filter one. The filtered queryset builds over
-    the cleaned value.
+    Under a whole-array lookup a list or tuple member is descended at any depth, so a flat
+    list of leaves and a value nested deeper than the column clean alike; each member of an
+    ``in`` is one value of the column, held to its depth
+    (``test_a_nested_array_in_member_is_held_to_the_columns_depth``); a ``None`` stays
+    ``None`` at any depth, inside an ``in`` member too; under the package ``FilterSet`` and
+    a plain django-filter one. The filtered queryset builds over the cleaned value.
     """
     patch_array_field(monkeypatch)
     filterset = _gridded_shelf_filterset(parent, {form_key: value})
@@ -8358,6 +8359,151 @@ def test_an_array_in_member_that_is_no_array_is_invalid_list(
     filterset = _gridded_shelf_filterset(parent, data)
     assert filterset.form.errors.get_json_data() == {form_key: _INVALID_LIST}
     assert "WHERE" not in str(filterset.qs.query)
+
+
+#: The integer leaf's own error for a value that is no number.
+_NOT_A_NUMBER = [{"message": "Enter a number.", "code": "invalid"}]
+
+
+@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize(
+    ("value", "errors"),
+    [
+        pytest.param([[[1, [2]]]], _NOT_A_NUMBER, id="ragged-member"),
+        pytest.param([[[[1]]]], _NOT_A_NUMBER, id="member-deeper-than-the-column"),
+        pytest.param([[[1]], [[[2]]]], _NOT_A_NUMBER, id="second-member-deeper"),
+        pytest.param([[[1], 2]], _INVALID_LIST, id="row-beside-a-leaf"),
+        pytest.param([[1]], _INVALID_LIST, id="member-shallower-than-the-column"),
+    ],
+)
+def test_a_nested_array_in_member_is_held_to_the_columns_depth(
+    monkeypatch: pytest.MonkeyPatch,
+    parent: str,
+    value: object,
+    errors: list[dict[str, str]],
+) -> None:
+    """Each member of an ``in`` over a nested ``ArrayField`` holds exactly its column's levels.
+
+    A list at the leaf level (a ragged member, one deeper than the column) is the leaf
+    form field's to clean, as Django's own form field cleans any value: the integer leaf
+    refuses it with its ``invalid`` error; a member that is no list where the column holds
+    a row is ``invalid_list``. The filtered
+    queryset builds with no clause, under the package and a plain django-filter parent.
+    """
+    patch_array_field(monkeypatch)
+    filterset = _gridded_shelf_filterset(parent, {"grid_among": value})
+    assert filterset.form.errors.get_json_data() == {"grid_among": errors}
+    assert "WHERE" not in str(filterset.qs.query)
+
+
+@pytest.mark.parametrize(
+    ("value", "errors"),
+    [
+        pytest.param([[[1, [2]]]], _NOT_A_NUMBER, id="ragged-member"),
+        pytest.param([[[1], 2]], _INVALID_LIST, id="row-beside-a-leaf"),
+    ],
+)
+def test_a_nested_array_in_member_off_the_columns_depth_is_filter_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+    value: object,
+    errors: list[dict[str, str]],
+) -> None:
+    """``_validate_form_or_raise`` (``apply_sync``, ``apply_async``) is ``FILTER_INVALID``."""
+    patch_array_field(monkeypatch)
+    shelf_filter, _plain = _gridded_shelf_filter_classes()
+    filterset = shelf_filter(data={"grid_among": value}, queryset=_GriddedShelf.objects.all())
+    with pytest.raises(GraphQLError) as excinfo:
+        shelf_filter._validate_form_or_raise(filterset)
+    assert excinfo.value.extensions == {"code": "FILTER_INVALID", "errors": {"grid_among": errors}}
+
+
+class _GriddedBin(django_models.Model):
+    """A row on a ``_GriddedShelf``, reaching it through a ``RelatedFilter``.
+
+    Query-build only (``managed = False``), as ``_GriddedShelf`` is.
+    """
+
+    shelf: _FK[_GriddedShelf] = django_models.ForeignKey(
+        _GriddedShelf,
+        on_delete=django_models.CASCADE,
+    )
+
+    class Meta:
+        managed = False
+        app_label = "test_nested_array_leaf"
+
+
+@pytest.mark.usefixtures("isolate_global_registry")
+@pytest.mark.parametrize(
+    ("value", "errors", "cleaned"),
+    [
+        pytest.param(
+            [[[1, 2]]],
+            None,
+            [[[Decimal(1), Decimal(2)]]],
+            id="member-of-the-columns-depth",
+        ),
+        pytest.param([[[1, [2]]]], _NOT_A_NUMBER, None, id="ragged-member"),
+        pytest.param([[[[1]]]], _NOT_A_NUMBER, None, id="member-deeper-than-the-column"),
+        pytest.param([[1]], _INVALID_LIST, None, id="member-shallower-than-the-column"),
+    ],
+)
+def test_a_flat_copy_of_a_nested_array_in_over_a_child_annotation_holds_the_columns_depth(
+    monkeypatch: pytest.MonkeyPatch,
+    value: object,
+    errors: list[dict[str, str]] | None,
+    cleaned: object,
+) -> None:
+    """A flat copy's ``in`` over a child type's nested-array annotation holds its depth.
+
+    ``grid_alias`` exists only on the rows the child type's ``get_queryset`` hands over, so
+    raw form data on the root set takes the copy's cleaner, its depth included, from that
+    queryset (``filters/sets.py::FilterSet._install_source_comparison``): a member of the
+    column's depth is cleaned, a ragged member or one deeper than the column is the integer
+    leaf's error and one shallower ``invalid_list``.
+    """
+    patch_array_field(monkeypatch)
+
+    class AliasedGridShelfFilter(FilterSet):
+        grid_among = ListFilter(field_name="grid_alias", lookup_expr="in")
+
+        class Meta:
+            model = _GriddedShelf
+            fields = []
+
+    class GriddedBinFilter(FilterSet):
+        shelf = RelatedFilter(AliasedGridShelfFilter, field_name="shelf")
+
+        class Meta:
+            model = _GriddedBin
+            fields = []
+
+    class AliasedGridShelfType(DjangoType):
+        class Meta:
+            model = _GriddedShelf
+            fields = ("id",)
+            filterset_class = AliasedGridShelfFilter
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[_GriddedShelf],
+            info: object,
+        ) -> QuerySet[_GriddedShelf]:
+            return queryset.annotate(grid_alias=django_models.F("grid"))
+
+    assert registry.get(_GriddedShelf) is AliasedGridShelfType
+    finalize_django_types()
+    form = GriddedBinFilter(
+        data={"shelf__grid_among": value},
+        queryset=_GriddedBin.objects.all(),
+    ).form
+    if errors is None:
+        assert form.is_valid(), form.errors
+        assert form.cleaned_data["shelf__grid_among"] == cleaned
+        return
+    assert form.errors.get_json_data() == {"shelf__grid_among": errors}
 
 
 @pytest.mark.parametrize(

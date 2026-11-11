@@ -4169,7 +4169,7 @@ class FilterSet(
         if element:
             target = _ElementField(
                 element_field=field,
-                element_nests=depth > 1,
+                depth=depth,
                 members_are_arrays=is_array_in_lookup(operand.lookup),
             )
             target.bounds = truth.is_subclass(operand.lookup, models.lookups.Range)

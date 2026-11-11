@@ -1465,17 +1465,25 @@ class _ElementField(Field):
     ``base_field``'s for an array column, a relation's key column, ``_compared_value_column``),
     so an element that value cannot hold is a form error rather than a value handed to the
     ORM, a text element is stripped and a naive datetime element made aware, under any
-    django-filter ``FilterSet`` parent. Over an ``ArrayField`` of arrays (``element_nests``)
-    a list or tuple element is descended at any depth and each member that is no list is
-    cleaned the same way: Django's ``ArrayRHSMixin`` prepares only the outermost members of
-    such a value, through an inner ``ArrayField`` that prepares nothing, and PostgreSQL's
-    containment and overlap read a multidimensional array's elements whatever its
-    dimensions, so a flat list of leaves compares as the nested one does. Under an ``in``
-    whose members are whole array values (``members_are_arrays``: the column's own ``in`` is
-    Django's ``ArrayInLookup``, flat or nested) each member is one value of the column: a
-    list or tuple member is cleaned as that array is, and any other member, ``None``
-    included, is the field's error with ``MultipleChoiceField``'s ``invalid_list`` message,
-    never a leaf, since ``ArrayInLookup`` turns each member into a tuple.
+    django-filter ``FilterSet`` parent. Over an ``ArrayField`` of arrays (``depth``, the
+    column's levels, ``utils/_array_field.py::array_leaf_field``) a list or tuple element of a
+    whole-array lookup's value (``exact``, ``contains``, ``contained_by``, ``overlap``) is
+    descended at any depth and each member that is no list is cleaned the same way: Django's
+    ``ArrayRHSMixin`` prepares only the outermost members of such a value, through an inner
+    ``ArrayField`` that prepares nothing, and PostgreSQL's containment and overlap read a
+    multidimensional array's elements whatever its dimensions, so a flat list of leaves
+    compares as the nested one does, and ``exact`` finds a value of other dimensions equal to
+    no row of the column's. Under an ``in`` whose members are whole array values
+    (``members_are_arrays``: the column's own ``in`` is Django's ``ArrayInLookup``, flat or
+    nested) each member is one value of the column, held to its ``depth``, the levels Django's
+    ``ArrayField.get_db_prep_value`` walks before it hands an element to the innermost column:
+    a member, and each element of it above the innermost level, is descended when it is a list
+    or tuple, and any other one, a member that is ``None`` included, is the field's error with
+    ``MultipleChoiceField``'s ``invalid_list`` message (a member is never a leaf, since
+    ``ArrayInLookup`` turns each member into a tuple); each element at the innermost level, a
+    list included, is ``element_field``'s to clean, as Django's own form field cleans any
+    value, since Django hands it to that column's ``get_prep_value``: a numeric leaf refuses a
+    list with its ``invalid`` error and a text leaf reads it as text (``CharField.to_python``).
     The value is read on the parent's model, or, for a path its model names no field for,
     over the queryset the parent was handed (``_bound_value_field``: a queryset annotation
     or alias, a ``FilteredRelation`` alias and the columns past it, each typed ``String``
@@ -1505,13 +1513,13 @@ class _ElementField(Field):
         self,
         *,
         element_field: Field | None = None,
-        element_nests: bool = False,
+        depth: int = 0,
         members_are_arrays: bool = False,
         **kwargs: Unpack[_FieldOptions],
     ) -> None:
         super().__init__(**kwargs)
         self.element_field: Field | None = element_field
-        self.element_nests: bool = element_nests
+        self.depth: int = depth
         self.members_are_arrays: bool = members_are_arrays
         self.bounds: bool = False
 
@@ -1522,8 +1530,11 @@ class _ElementField(Field):
         if element_field is None or not is_list_or_tuple(value):
             return value
         if self.members_are_arrays:
-            return [self._cleaned(element_field, _array_value(member)) for member in value]
-        return self._cleaned(element_field, value)
+            return [
+                self._cleaned(element_field, _array_value(member), self.depth - 1)
+                for member in value
+            ]
+        return self._cleaned(element_field, value, None if self.depth > 1 else 0)
 
     @override
     def validate(self, value: object) -> None:
@@ -1544,20 +1555,27 @@ class _ElementField(Field):
         self,
         element_field: Field,
         elements: list[object] | tuple[object, ...],
+        below: int | None,
     ) -> list[object]:
-        """Return ``elements`` cleaned, a list or tuple one descended over an array of arrays."""
+        """Return ``elements`` cleaned, each holding ``below`` list levels (``None``: any number).
+
+        An element at a level that holds lists is one array (``_array_value``); one at the
+        leaf level is ``element_field``'s to clean, a list included.
+        """
         return [
             None
             if element is None
-            else self._cleaned(element_field, element)
-            if self.element_nests and is_list_or_tuple(element)
+            else self._cleaned(element_field, element, None)
+            if below is None and is_list_or_tuple(element)
+            else self._cleaned(element_field, _array_value(element), below - 1)
+            if below
             else element_field.clean(element)
             for element in elements
         ]
 
 
 def _array_value(member: object) -> list[object] | tuple[object, ...]:
-    """Return ``member``, one whole array value; any other member is ``invalid_list``.
+    """Return ``member``, an array value or one of its rows; anything else is ``invalid_list``.
 
     The message is Django's own for a value that is no list (``MultipleChoiceField``).
     """
@@ -1581,7 +1599,7 @@ class _ElementCleanedFilter(_ColumnCleanedFilter):
             operand = _bound_lookup_operand(self, query)
             lookup = operand.lookup
             field.element_field = _column_form_field(self, element=True, query=query)
-            field.element_nests = array_leaf_field(operand.field)[1] > 1
+            field.depth = array_leaf_field(operand.field)[1]
             field.members_are_arrays = is_array_in_lookup(lookup)
             field.bounds = truth.is_subclass(lookup, models.lookups.Range)
 
@@ -2020,7 +2038,7 @@ def install_comparison_cleaner(owned: Field, target: Field) -> bool:
         if target.element_field is None:
             return False
         owned.element_field = target.element_field
-        owned.element_nests = target.element_nests
+        owned.depth = target.depth
         owned.members_are_arrays = target.members_are_arrays
         owned.bounds = target.bounds
         return True

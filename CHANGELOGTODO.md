@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 227 to do.
+Progress: 0 done, 228 to do.
 
 ## From dry-0_0_15_3
 
@@ -706,14 +706,14 @@ Progress: 0 done, 227 to do.
   mutations: `createScalarSpecimenViaDayInstantForm` / `updateScalarSpecimenViaDayInstantForm`
 - [ ] 763. CHANGELOG entry for item 692: a declared `ListFilter` / `ArrayFilter` over an `ArrayField` (reachable by a
   JSON `where` handed to `apply_sync` / `apply_async` or by raw form data) now cleans every member as the innermost
-  column, at any depth over an array of arrays: a member the column cannot hold answers `FILTER_INVALID` with the
-  column's form error, and an integer member past the column's range answers `FILTER_INVALID` ("Enter a value the
-  database can represent."), where the database's error surfaced before. An `in` over an array column takes each
-  member as one whole array value: a list member is cleaned and applied (a flat `[[1, 2]]` was refused), and a member
-  that is no list, `null` and a raw `?name=1,2` included, answers `FILTER_INVALID` "Enter a list of values." where the
-  queryset raised `TypeError` or bound the text split into characters. Members bind as the cleaned values (an integer
-  leaf as a `Decimal`, a text leaf stripped, a naive datetime made aware). The source distribution and wheel now
-  include Django's license (`LICENSE.django`)
+  column, at any depth over an array of arrays under `exact`, `contains`, `contained_by` and `overlap`: a member the
+  column cannot hold answers `FILTER_INVALID` with the column's form error, and an integer member past the column's
+  range answers `FILTER_INVALID` ("Enter a value the database can represent."), where the database's error surfaced
+  before. An `in` over an array column takes each member as one whole array value: a list member is cleaned and applied
+  (a flat `[[1, 2]]` was refused), and a member that is no list, `null` and a raw `?name=1,2` included, answers
+  `FILTER_INVALID` "Enter a list of values." where the queryset raised `TypeError` or bound the text split into
+  characters. Members bind as the cleaned values (an integer leaf as a `Decimal`, a text leaf stripped, a naive datetime
+  made aware). The source distribution and wheel now include Django's license (`LICENSE.django`)
 - [ ] 765. CHANGELOG entry for item 695: a save-time `IntegrityError` names a `blank=True, null=False` input column's
   `null` error only when the row's own save raised it, or consumer code raised an exception over that refusal: `from`
   it, without `from` (or `from None`) in the handler itself, or a database error raised without `from` by a helper or
@@ -1092,6 +1092,11 @@ Progress: 0 done, 227 to do.
   longer drops rows when the term reads past that relation (`shelf__code`, a second `to_field` hop, a `to_field` onto
   a one-to-one key): a row whose key names no related row stays listed and sorts as missing, as plain `order_by` keeps
   it, and a connection's `totalCount` matches its edges. The fakeshop `ShelfLabelOrderInputType` gains `shelfRow`
+- [ ] 917. CHANGELOG entry for item 762: a declared `ListFilter` / `ArrayFilter` `in` over an array of arrays
+  (reachable by a JSON `where` handed to `apply_sync` / `apply_async` or by raw form data) holds each member to the
+  column's depth: over a numeric leaf a ragged member or one deeper than the column answers `FILTER_INVALID` with the
+  leaf's form error ("Enter a number.") where the queryset raised `TypeError`, and a member shallower than the column
+  or a leaf beside a row answers `FILTER_INVALID` "Enter a list of values."
 
 ## From dry-upstream-0_0_15
 

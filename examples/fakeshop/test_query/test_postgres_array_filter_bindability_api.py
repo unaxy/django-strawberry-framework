@@ -5,9 +5,10 @@ list-valued driver parameters require real PostgreSQL ArrayField columns. A func
 consumer model and table retain those declarations without installing a PostgreSQL-only
 model in the backend-neutral example app. Ordinary JSON arguments carry raw numeric search
 values; Time and DateTime list arguments retain their scalar's real aware Python values.
-A nested array's members are cleaned as its innermost column at any depth. A
-``Meta.filter_overrides`` route listing the four whole-array lookups is served through the
-output type's ``filterset_class`` and answers each lookup over the real columns.
+A nested array's members are cleaned as its innermost column, an ``in`` member held to
+the column's depth. A ``Meta.filter_overrides`` route listing the four whole-array lookups
+is served through the output type's ``filterset_class`` and answers each lookup over the
+real columns.
 """
 
 import datetime
@@ -54,6 +55,8 @@ _INVALID_LIST = {
     "message": str(forms.MultipleChoiceField.default_error_messages["invalid_list"]),
     "code": "invalid_list",
 }
+#: The integer leaf's own error for a value that is no number.
+_NOT_A_NUMBER = {"message": "Enter a number.", "code": "invalid"}
 
 
 @wraps(DjangoGraphQLView.as_view())
@@ -435,6 +438,10 @@ def test_numeric_array_members_check_the_real_binding_type_and_keep_non_element_
         pytest.param("counts_among", [1], _INVALID_LIST, id="flat-in-scalar-member"),
         pytest.param("counts_among", [[1, 2]], ["Match"], id="flat-in"),
         pytest.param("matrix_among", [None], _INVALID_LIST, id="nested-in-none-member"),
+        pytest.param("matrix_among", [[[1, [2]]]], _NOT_A_NUMBER, id="nested-in-ragged-member"),
+        pytest.param("matrix_among", [[[[1]]]], _NOT_A_NUMBER, id="nested-in-member-too-deep"),
+        pytest.param("matrix_among", [[[1], 2]], _INVALID_LIST, id="nested-in-row-beside-a-leaf"),
+        pytest.param("matrix_among", [[1]], _INVALID_LIST, id="nested-in-member-too-shallow"),
         pytest.param("counts_among", [[1], None], _INVALID_LIST, id="flat-in-none-member"),
         pytest.param(
             "grid_contain",
@@ -457,14 +464,16 @@ def test_nested_array_members_are_cleaned_as_the_innermost_column(
     answer: list[str] | dict[str, str] | None,
     record_compiled_sql: RecordCompiledSql,
 ) -> None:
-    """A nested array's members are cleaned and asked as its innermost column at any depth.
+    """A nested array's members are cleaned and asked as its innermost column.
 
     A JSON ``where`` reaches a nested column the GraphQL input refuses at build. A member
     the leaf cannot hold is the leaf form field's error, one past an integer leaf's range
     is unbindable, and a flat list of leaves or a deeper nest compares as PostgreSQL's
     dimension-blind containment reads it. Each member of an ``in`` over an array column,
-    flat or nested, is one whole array value: one that is no list, ``None`` included, is
-    ``invalid_list``.
+    flat or nested, is one whole array value held to the column's depth: one that is no
+    list, ``None`` included, and a leaf beside a row or a member shallower than the
+    column, is ``invalid_list``; a ragged member or one deeper than the column is the
+    integer leaf's to clean, its ``invalid`` error, before any statement.
     """
     statements = record_compiled_sql(array_consumer.table)
     payload = _post(
