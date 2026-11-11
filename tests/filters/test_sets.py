@@ -205,7 +205,7 @@ from django_strawberry_framework.utils.permissions import (
     UndeclaredHop,
     relation_path_gates,
 )
-from django_strawberry_framework.utils.querysets import SyncMisuseError
+from django_strawberry_framework.utils.querysets import SyncMisuseError, joinless_relation_on
 from django_strawberry_framework.utils.relations import ClassifiedPath, classify_path
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.widgets import multi_widget_keys
@@ -9579,7 +9579,7 @@ def test_an_exact_list_on_a_generic_foreign_key_is_refused_for_the_relation(
         ),
     ],
 )
-def test_a_shipped_filter_past_a_generic_foreign_key_is_refused_by_the_key_reached(
+def test_a_shipped_filter_past_a_generic_foreign_key_is_refused_by_the_key_reached_when_it_applies(
     model: type[models.Model],
     field_name: str,
     lookup_expr: str,
@@ -9587,8 +9587,10 @@ def test_a_shipped_filter_past_a_generic_foreign_key_is_refused_by_the_key_reach
 ) -> None:
     """The key Django's walk of the filter's argument reaches is the one the refusal names.
 
-    An MTI child walks onto the key its parent declares, by its own name or past the parent
-    link, and a lazy ``field_name`` or ``lookup_expr`` is walked as the text it renders.
+    The set publishes the leaf (rows the set is handed may annotate its path) and cleans its
+    value; applied over rows annotating none, Django's ``FieldError`` is restated naming the
+    key. An MTI child walks onto the key its parent declares, by its own name or past the
+    parent link, and a lazy ``field_name`` or ``lookup_expr`` is walked as the text it renders.
     """
     target = model
     leaf = django_filters.CharFilter(field_name=field_name, lookup_expr=lookup_expr)
@@ -9600,11 +9602,52 @@ def test_a_shipped_filter_past_a_generic_foreign_key_is_refused_by_the_key_reach
             model = target
             fields = []
 
+    assert list(PastGenericSet.get_filters()) == ["f"]
+    filterset = PastGenericSet(data={"f": "1"}, queryset=model._default_manager.all())
+    assert filterset.is_valid(), filterset.errors
     with pytest.raises(ConfigurationError) as refused:
-        _ = PastGenericSet.get_filters()
+        _ = filterset.qs
     assert str(refused.value).startswith(
         f"{expected}, a GenericForeignKey: Django filters no queryset through it",
     ), refused.value
+    assert str(refused.value).endswith(", or a filter_queryset override)."), refused.value
+    assert type(refused.value.__cause__) is FieldError, refused.value.__cause__
+
+
+class _TagPredicate(MultipleChoiceFilter):
+    """A consumer predicate: each value keeps the tags carrying it, whatever the path."""
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        return {"tag": v}
+
+
+@pytest.mark.django_db
+def test_a_consumer_predicate_is_not_judged_by_its_lookup_when_its_set_publishes() -> None:
+    """A ``MultipleChoiceFilter`` whose ``get_filter_predicate`` is the consumer's builds its own.
+
+    Its ``lookup_expr`` is never handed to Django, so a lookup Django resolves nowhere is not
+    refused when the set publishes, and the set keeps the tags whose ``tag`` is the value sent.
+    """
+    branch = library_models.Branch.objects.create(name="Target", city="Boston")
+    tags = [
+        library_models.TaggedItem.objects.create(content_object=branch, tag=tag)
+        for tag in ("kept", "dropped")
+    ]
+
+    class BogusLookupPredicateSet(FilterSet):
+        f = _TagPredicate(field_name="tag", lookup_expr="bogus", choices=[("kept", "kept")])
+
+        class Meta:
+            model = library_models.TaggedItem
+            fields = []
+
+    filterset = BogusLookupPredicateSet(
+        data={"f": ["kept"]},
+        queryset=library_models.TaggedItem.objects.order_by("pk"),
+    )
+    assert filterset.is_valid(), filterset.errors
+    assert list(filterset.qs) == tags[:1]
 
 
 @pytest.mark.parametrize(
@@ -9614,15 +9657,18 @@ def test_a_shipped_filter_past_a_generic_foreign_key_is_refused_by_the_key_reach
         pytest.param("notes", "content_object__icontains", id="key-in-the-lookup-expr"),
     ],
 )
-def test_a_shipped_filter_past_an_inherited_column_publishes_a_key_named_as_a_generic_key(
+def test_the_joinless_walk_stops_at_an_inherited_column_holding_a_key_named_as_a_generic_key(
     field_name: str,
     lookup_expr: str,
 ) -> None:
     """Django's walk ends on a column an MTI parent declares: the names past it are transforms.
 
     A JSON key named as the ``GenericForeignKey`` the parent declares is a key of the column
-    the child inherits, never the parent's relation, so the set publishes the leaf.
+    the child inherits, never the parent's relation: the walk reaches no such key, and the set
+    publishes the leaf.
     """
+    argument = f"{field_name}__{lookup_expr}"
+    assert joinless_relation_on(_CrHeldNoteCopy, argument) is None
     leaf = django_filters.CharFilter(field_name=field_name, lookup_expr=lookup_expr)
 
     class InheritedJSONKeySet(FilterSet):

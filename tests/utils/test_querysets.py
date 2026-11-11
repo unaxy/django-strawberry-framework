@@ -39,6 +39,8 @@ from apps.library.models import (
     Annotation,
     Book,
     Branch,
+    CirculationDesk,
+    DeskShift,
     LendingDesk,
     Loan,
     OpenVenue,
@@ -193,6 +195,7 @@ from django_strawberry_framework.utils.querysets import (
     identity_key,
     initial_queryset,
     is_async_only_iterable,
+    joinless_relation_on,
     linkable_rows,
     lookup_target_fields,
     normalize_query_source,
@@ -9782,3 +9785,32 @@ def test_a_name_past_a_relation_splits_as_over_the_rows_annotating_none(lookup: 
         lookup,
     )
     assert list(annotated.query.annotation_select) == ["twice"]
+
+
+@pytest.mark.parametrize(
+    ("model", "lookup"),
+    [
+        pytest.param(TaggedItem, "tag__exact", id="a-column"),
+        pytest.param(DeskShift, "desk__branch", id="a-relation-django-joins"),
+        pytest.param(Book, "shelf__branch", id="two-relations-django-joins"),
+        pytest.param(TaggedItem, "bogus__exact", id="a-name-the-model-lacks"),
+    ],
+)
+def test_the_joinless_walk_answers_none_short_of_a_generic_foreign_key(
+    model: type[models.Model],
+    lookup: str,
+) -> None:
+    """A walk ending on a column, a joined relation or a name the model lacks: no such key.
+
+    Django's walk of the path reaches no relation it builds no join for, so the answer is
+    ``None``: past a column the names are its transforms and lookup, never fields.
+    """
+    assert joinless_relation_on(model, lookup) is None
+
+
+def test_the_joinless_walk_answers_the_generic_foreign_key_and_the_names_past_it() -> None:
+    """Past a key onto a ``GenericForeignKey``: the key, read on the model the walk reached."""
+    assert joinless_relation_on(DeskShift, "desk__content_object__id__exact") == (
+        CirculationDesk._meta.get_field("content_object"),
+        ("id", "exact"),
+    )

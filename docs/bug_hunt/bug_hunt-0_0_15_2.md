@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 508 done, 103 to do. The CHANGELOG entries filed here moved to
+Progress: 508 done, 104 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2869,29 +2869,24 @@ Progress: 508 done, 103 to do. The CHANGELOG entries filed here moved to
   the absent-queryset shape is refused when its set publishes (756). Stock django-filter fails the same way. Found
   verifying 756. Closed with no change (maintainer, 2026-11-11: items not worth completing): consumer
   misconfiguration. An explicit `queryset=None` fails the same way in stock django-filter.
-- [x] 881. A filter running shipped code whose path continues past a `GenericForeignKey` is refused when its set
-  publishes (reopened by the maintainer 2026-11-11 after closing it with no change):
-  `filters/inputs.py::refuse_joinless_relation` keeps 877's ending-on branch first, then walks django-filter's argument
-  `field_name__lookup_expr` (lazy parts read as text) through the new `utils/querysets.py::joinless_relation_on`,
-  Django's `names_to_path` asked one name at a time, stopping at any column (an inherited one included) and, on its
-  `FieldError`, asking `Options.get_field`'s `is_relation and not related_model`. `content_object__name`,
-  `desk__content_object__id`, `tags__content_object__pk`, a key a multi-table child inherits (by its own name or past
-  the parent link), a `lookup_expr` carrying a key's path onto one (`field_name="desk",
-  lookup_expr="content_object__name"`) and a `RelatedFilter` child's such leaf answer a `ConfigurationError` naming the
-  key ("continues past" it, or "reads" it when the `lookup_expr` carries the path) at schema build for a served set and
-  at first use for an unbound one (raw construction, `DjangoFilterBackend`, `FilterView`), where every request carrying
-  a value failed with Django's masked `FieldError`. A `method=` filter, a `filter` override (GlobalID included), a set
-  declaring no `Meta.model` and a name past a relation the related model lacks (`parent__bogus`, `desk__bogus`,
-  `partner__twice`) are unchanged. spec-027 (Decision 4, Edge cases, checklist, Test plan, DoD 23 / 26), docs/README.md
-  and GLOSSARY `FilterSet` restated. Pinned by
-  `examples/fakeshop/test_query/test_raw_filter_forms_api.py::test_a_raw_set_declaring_a_refused_filter_is_refused_at_its_first_construction`
-  (six past-key sets, each driver), `::test_a_raw_set_naming_a_name_past_a_relation_its_model_lacks_publishes`,
-  `examples/fakeshop/test_query/test_globalid_filter_strategies_api.py::test_a_shipped_filter_on_a_generic_foreign_key_is_refused_when_the_schema_builds`,
-  `::test_an_unserved_column_filter_on_a_generic_foreign_key_is_refused_at_first_use`,
-  `::test_a_column_filter_past_a_generic_foreign_key_filters_through_consumer_code`,
-  `tests/filters/test_sets.py::test_a_shipped_filter_past_a_generic_foreign_key_is_refused_by_the_key_reached`,
-  `::test_a_shipped_filter_past_an_inherited_column_publishes_a_key_named_as_a_generic_key` and
-  `::test_a_set_declaring_no_meta_model_publishes_a_path_past_a_generic_foreign_key`. Filed 920.
+- [x] 881. A filter running shipped code whose path continues past a `GenericForeignKey` filters by a queryset
+  annotation of its path and, over rows annotating none, answers a `ConfigurationError` naming the key when it applies
+  (reopened by the maintainer 2026-11-11; 21cc9c7f refused it at publish, an external review found that narrowing).
+  Publishing keeps only 877's ending-on refusal (a bare key cannot be annotated). A path past a key, or a `lookup_expr`
+  carrying onto one, names a value wherever the rows the leaf filters annotate a name of it (Django's
+  `refs_expression`, read before `names_to_path`); over rows annotating none, `filters/sets.py::_joinless_restated`
+  (at `FilterSet._apply_flat_leaves` and `FilterSet._filter_child_rows`) hands Django's `FieldError` to
+  `filters/inputs.py::refuse_unannotated_joinless_relation`, which restates it as the refusal naming the key
+  ("continues past" / "reads", `utils/querysets.py::joinless_relation_on`) with the annotation as a remedy: masked and
+  logged when served, raised by a raw `.qs`; an annotation's own refusal of the lookup stays Django's.
+  `_runs_shipped_filter` reads a consumer `get_filter_predicate` as consumer code per class (`_PREDICATE_HOOKS`:
+  `MultipleChoiceFilter`, and `GlobalIDMultipleChoiceFilter` for any lookup but `in`), which also fixes 877's ending-on
+  gate; a walked key's shipped comparison binds the shipped predicate on its copy (`_with_shipped_predicate`, and
+  `filters/base.py::_predicate_copy` for the GlobalID rebinding copy), creating no class and touching no consumer
+  class state. spec-027, docs/README.md, GLOSSARY `FilterSet` and the test_query README restated. Pinned by the rows
+  the spec-027 Test plan lists for 881 (raw annotation-held / unannotated / route rows, served annotation and
+  per-request refusal rows, consumer-predicate rows incl. off-key NodeID and class-state recording rows, the walker
+  rows in `tests/utils/test_querysets.py`). Filed 920, 921.
 - [x] 762. An `in` over a nested `ArrayField` holds each member to the column's depth: `filters/base.py::_ElementField`
   carries the depth `utils/_array_field.py::array_leaf_field` returns (no longer a nests flag) at every fill site
   (`_ElementCleanedFilter._hand_column_field`, `install_comparison_cleaner`,
@@ -3065,6 +3060,12 @@ Progress: 508 done, 103 to do. The CHANGELOG entries filed here moved to
   `TypeError: sequence item 0: expected str instance, __proxy__ found`: `filters/inputs.py::_build_range_input_class`
   reaches `filters/base.py::_filterset_lookup_lhs_path` / `_query_lookup_lhs_path`, which join the raw lazy
   `field_name`; the same set unserved builds. Same before 881. Found researching 881
+- [ ] 921. (robustness) `filters/base.py::refuse_unresolvable_lookup` and 877's `lookup_expr` branch of
+  `filters/inputs.py::refuse_joinless_relation` refuse, when the set publishes, an argument an annotation named for the
+  lookup could hold: `CharFilter(field_name="content_object", lookup_expr="name")` over
+  `annotate(content_object__name=...)`, `CharFilter(field_name="tag", lookup_expr="bogus")` over
+  `annotate(tag__bogus=...)` (Django reads the annotation first, `Query.solve_lookup_type`). Same before 881. Found
+  fixing the review of 881
 
 ## To do: holes found re-checking the fixes
 

@@ -13,9 +13,11 @@ a text annotation) it serves rows. So is any other filter running shipped code o
 column-typed, choice or null-test filter, a ``RelatedFilter`` child's naming the child),
 while a ``method`` or a ``filter`` override of its own answers rows unserved and, served,
 is refused by the input build no scalar types. A shipped filter whose path continues past
-one (``content_object__name``, past a ``GenericRelation`` or from a ``RelatedFilter``
-child) is refused alike, naming the key it continues past, while a ``method`` or a
-``filter`` override over such a path answers rows served and unserved.
+one (``content_object__name``) filters by a ``get_queryset`` annotation of the path and,
+over rows annotating none, is refused per request naming the key, while a ``method``, a
+``filter`` override or a consumer ``get_filter_predicate`` over such a path answers rows
+served and unserved, and the annotation's own refusal of a lookup stays Django's
+``FieldError``.
 A relation key whose hops re-enter its own set's table takes the id the type registered
 for the relation's target mints, under its published name, whichever type the set or the
 walk's target rows answer for, and so does a consumer leaf ending on the re-entry's
@@ -38,7 +40,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import wraps
-from typing import NamedTuple, TypeVar
+from typing import ClassVar, NamedTuple, TypeVar
 
 import pytest
 import strawberry
@@ -47,8 +49,19 @@ from apps.library.filters import ModelChoiceInFilter
 from asgiref.sync import sync_to_async
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import FieldError
 from django.db import connection
-from django.db.models import CharField, F, FilteredRelation, Model, Q, QuerySet, Value
+from django.db.models import (
+    CharField,
+    F,
+    FilteredRelation,
+    Model,
+    OuterRef,
+    Q,
+    QuerySet,
+    Subquery,
+    Value,
+)
 from django.db.models.functions import Cast, Concat
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
@@ -61,6 +74,7 @@ from django_filters import (
     Filter,
     ModelChoiceFilter,
     ModelMultipleChoiceFilter,
+    MultipleChoiceFilter,
     NumberFilter,
 )
 from graphql import GraphQLError
@@ -103,6 +117,7 @@ from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import (
     is_list_or_tuple,
     is_queryset,
+    is_str,
     require,
     require_instance,
 )
@@ -719,8 +734,14 @@ def _model_choice_set(
     return filterset
 
 
-def _served_schema(filterset: type[FilterSet]) -> DjangoSchema:
-    """``filterset``'s model on a type serving it, so the schema build publishes the set."""
+def _served_schema(
+    filterset: type[FilterSet],
+    get_queryset: Callable[..., QuerySet[Model]] | None = None,
+) -> DjangoSchema:
+    """``filterset``'s model on a type serving it, so the schema build publishes the set.
+
+    ``get_queryset`` is the type's hook, when given.
+    """
     model = filterset._meta.model
     assert model is not None
     registry.clear()
@@ -733,6 +754,9 @@ def _served_schema(filterset: type[FilterSet]) -> DjangoSchema:
                 model,
                 ("id",),
                 meta_extra={"filterset_class": filterset},
+                namespace_extra=(
+                    None if get_queryset is None else {"get_queryset": classmethod(get_queryset)}
+                ),
             ),
         )
 
@@ -1092,6 +1116,15 @@ def _column_generic_set(leaf: Filter) -> type[FilterSet]:
             del name
             return queryset.filter(object_id=value)
 
+        def by_name(
+            self,
+            queryset: QuerySet[models.TaggedItem],
+            name: str,
+            value: object,
+        ) -> QuerySet[models.TaggedItem]:
+            del name
+            return queryset.filter(content_object__name=value)
+
     return ColumnGenericSet
 
 
@@ -1208,11 +1241,11 @@ def test_a_column_filter_past_a_generic_foreign_key_filters_through_consumer_cod
     assert _node_pks(payload, "tags") == tags[1:], payload
 
 
-def _desk_route_parent(field_name: str = "content_object") -> type[FilterSet]:
-    """A ``Branch`` set reaching a desk set's ``CharFilter`` on or past its ``GenericForeignKey``."""
+def _desk_route_parent() -> type[FilterSet]:
+    """A ``Branch`` set reaching a desk set's ``CharFilter`` on its ``GenericForeignKey``."""
 
     class DeskGenericChild(FilterSet):
-        held = CharFilter(field_name=field_name)
+        held = CharFilter(field_name="content_object")
 
         class Meta:
             model = models.CirculationDesk
@@ -1228,31 +1261,8 @@ def _desk_route_parent(field_name: str = "content_object") -> type[FilterSet]:
     return DeskRouteParent
 
 
-def _with_callable_queryset(leaf: ModelChoiceFilter) -> ModelChoiceFilter:
-    """``leaf`` holding ``_branch_rows`` uncalled, as django-filter's callable ``queryset``.
-
-    The stubs type ``queryset`` as a ``QuerySet``; django-filter calls a callable one with the
-    request when it builds the form field.
-    """
-    vars(leaf)["queryset"] = _branch_rows
-    return leaf
-
-
-def _tags_past_generic_set() -> type[FilterSet]:
-    """A ``Branch`` set past its ``GenericRelation``, then past the key it reverses."""
-
-    class BranchTagsPastSet(FilterSet):
-        tag_object = NumberFilter(field_name="tags__content_object__id")
-
-        class Meta:
-            model = models.Branch
-            fields = []
-
-    return BranchTagsPastSet
-
-
-#: Each shipped leaf ending on, or continuing past, a ``GenericForeignKey`` a served set
-#: publishes, and the words its refusal starts with.
+#: Each shipped leaf ending on a ``GenericForeignKey`` a served set publishes, and the
+#: words its refusal starts with.
 _SERVED_GENERIC_COLUMNS: dict[str, tuple[Callable[[], type[FilterSet]], str]] = {
     "choice": (
         lambda: _column_generic_set(
@@ -1265,36 +1275,6 @@ _SERVED_GENERIC_COLUMNS: dict[str, tuple[Callable[[], type[FilterSet]], str]] = 
             BooleanFilter(field_name="content_object", lookup_expr="isnull"),
         ),
         _COLUMN_GENERIC_SUBJECT.format(kind="BooleanFilter"),
-    ),
-    "choice-past": (
-        lambda: _column_generic_set(
-            ChoiceFilter(choices=[("a", "a")], field_name="content_object__name"),
-        ),
-        _PAST_GENERIC_SUBJECT.format(kind="ChoiceFilter"),
-    ),
-    "callable-model-choice-past": (
-        lambda: _column_generic_set(
-            _with_callable_queryset(
-                ModelChoiceFilter(field_name="content_object__name", queryset=_branch_rows()),
-            ),
-        ),
-        _PAST_GENERIC_SUBJECT.format(kind="ModelChoiceFilter"),
-    ),
-    "past-a-generic-relation": (
-        _tags_past_generic_set,
-        (
-            "BranchTagsPastSet: NumberFilter on 'tags__content_object__id' continues past "
-            "TaggedItem.content_object, a GenericForeignKey: Django filters no queryset "
-            "through it, so no input can carry its value"
-        ),
-    ),
-    "related-filter-route-past": (
-        lambda: _desk_route_parent("content_object__name"),
-        (
-            "DeskGenericChild: CharFilter on 'content_object__name' continues past "
-            "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
-            "through it, so no input can carry its value"
-        ),
     ),
     "related-filter-route": (
         _desk_route_parent,
@@ -1334,10 +1314,11 @@ def test_an_unserved_column_filter_on_a_generic_foreign_key_is_refused_at_first_
     caplog: pytest.LogCaptureFixture,
     field_name: str,
 ) -> None:
-    """Applied unbound, the set publishes at its first use: the input build's refusal, logged.
+    """Applied unbound, the set's first use with a value is refused, logged.
 
-    The request answers the masked error and the server log carries the
-    ``ConfigurationError``, never a ``FieldError`` from the query.
+    On the key, publishing gives the input build's refusal; past it, over rows annotating
+    no name of the path, applying the value restates Django's ``FieldError``. The request
+    answers the masked error and the server log carries the ``ConfigurationError``.
     """
     branch = models.Branch.objects.create(name="Target", city="Boston")
     _ = models.TaggedItem.objects.create(content_object=branch, tag="t")
@@ -1368,6 +1349,694 @@ def test_an_unserved_column_filter_on_a_generic_foreign_key_is_refused_at_first_
     assert type(exc_info[1]) is ConfigurationError, exc_info[1]
     subject = _COLUMN_GENERIC_SUBJECT if field_name == "content_object" else _PAST_GENERIC_SUBJECT
     assert str(exc_info[1]).startswith(subject.format(kind="CharFilter")), exc_info[1]
+
+
+def _tags_naming_their_branch(
+    _cls: type[DjangoType],
+    queryset: QuerySet[Model],
+    _info: object,
+    **_kwargs: object,
+) -> QuerySet[Model]:
+    """The tags, annotating the name and key of the branch each tags under the path past it."""
+    return queryset.annotate(
+        content_object__name=Subquery(
+            models.Branch.objects.filter(pk=OuterRef("object_id")).values("name")[:1],
+        ),
+        content_object__id=F("object_id"),
+    )
+
+
+def _branches_keying_their_tag_object(
+    _cls: type[DjangoType],
+    queryset: QuerySet[Model],
+    _info: object,
+    **_kwargs: object,
+) -> QuerySet[Model]:
+    """The branches, annotating the object id of their tag under the path past the key."""
+    return queryset.annotate(tags__content_object__id=F("tags__object_id"))
+
+
+def _branch_tags_past_generic_set() -> type[FilterSet]:
+    """A ``Branch`` set past its ``GenericRelation``, then past the key it reverses."""
+
+    class BranchTagsPastSet(FilterSet):
+        tagged = NumberFilter(field_name="tags__content_object__id")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+
+    return BranchTagsPastSet
+
+
+def _branch_name_literal(branch: models.Branch) -> str:
+    """``branch``'s name as a GraphQL string literal."""
+    return json.dumps(branch.name)
+
+
+def _branch_key_literal(branch: models.Branch) -> str:
+    """``branch``'s key as a GraphQL integer literal."""
+    return str(saved_pk(branch))
+
+
+class _ServedPastGeneric(NamedTuple):
+    """A served set filtering past the ``GenericForeignKey`` and how a request reads it."""
+
+    #: Builds the set; its model's rows are the ones a request answers.
+    build: Callable[[], type[FilterSet]]
+    #: The type's ``get_queryset`` annotating the path.
+    annotating: Callable[..., QuerySet[Model]]
+    #: The value naming ``Sibling``, as a GraphQL literal.
+    literal: Callable[[models.Branch], str]
+    #: The words the refusal starts with over unannotated rows.
+    subject: str
+
+
+#: Each shipped leaf past the ``GenericForeignKey`` a served set publishes.
+_SERVED_PAST_GENERIC: dict[str, _ServedPastGeneric] = {
+    "char": _ServedPastGeneric(
+        lambda: _column_generic_set(CharFilter(field_name="content_object__name")),
+        _tags_naming_their_branch,
+        _branch_name_literal,
+        _PAST_GENERIC_SUBJECT.format(kind="CharFilter"),
+    ),
+    "number": _ServedPastGeneric(
+        lambda: _column_generic_set(NumberFilter(field_name="content_object__id")),
+        _tags_naming_their_branch,
+        _branch_key_literal,
+        (
+            "ColumnGenericSet: NumberFilter on 'content_object__id' continues past "
+            "TaggedItem.content_object, a GenericForeignKey: Django filters no queryset through "
+            "it, so no input can carry its value"
+        ),
+    ),
+    "past-a-generic-relation": _ServedPastGeneric(
+        _branch_tags_past_generic_set,
+        _branches_keying_their_tag_object,
+        _branch_key_literal,
+        (
+            "BranchTagsPastSet: NumberFilter on 'tags__content_object__id' continues past "
+            "TaggedItem.content_object, a GenericForeignKey: Django filters no queryset through "
+            "it, so no input can carry its value"
+        ),
+    ),
+}
+
+
+def _served_rows(filterset: type[FilterSet], tags: list[int]) -> list[int]:
+    """Every row ``filterset``'s model answers: the two tags, or the two tagged branches."""
+    if filterset._meta.model is models.TaggedItem:
+        return tags
+    return [saved_pk(branch) for branch in models.Branch.objects.order_by("pk")]
+
+
+def _tagged_branches() -> tuple[models.Branch, list[int]]:
+    """``Target`` and ``Sibling``, each tagged; ``Sibling`` and the two tags' keys."""
+    target = models.Branch.objects.create(name="Target", city="Boston")
+    sibling = models.Branch.objects.create(name="Sibling", city="Boston")
+    tags = [
+        saved_pk(models.TaggedItem.objects.create(content_object=branch, tag=branch.name.lower()))
+        for branch in (target, sibling)
+    ]
+    return sibling, tags
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", sorted(_SERVED_PAST_GENERIC))
+def test_a_served_filter_past_a_generic_foreign_key_reads_the_types_annotation(
+    name: str,
+) -> None:
+    """A path past the key names the annotation the served type's ``get_queryset`` adds.
+
+    Django reads the annotation before it walks a field, so the schema builds and the
+    request keeps the tag whose annotated name or key is the value sent.
+    """
+    sibling, tags = _tagged_branches()
+    served = _SERVED_PAST_GENERIC[name]
+    filterset = served.build()
+    schema = _served_schema(filterset, served.annotating)
+
+    payload = _post(
+        schema,
+        f"{{ rows(filter: {{ tagged: {{ exact: {served.literal(sibling)} }} }}) "
+        "{ edges { node { id } } } }",
+    )
+
+    edges = json_list(json_object(payload, "data", "rows"), "edges")
+    found = [int(relay.GlobalID.from_id(json_str(edge, "node", "id")).node_id) for edge in edges]
+    assert found == _served_rows(filterset, tags)[1:], payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", sorted(_SERVED_PAST_GENERIC))
+def test_a_served_filter_past_a_generic_foreign_key_over_unannotated_rows_is_refused_per_request(
+    caplog: pytest.LogCaptureFixture,
+    name: str,
+) -> None:
+    """Over rows annotating no name of the path, a request sending a value is refused.
+
+    The schema builds and a request sending no value answers every tag; one sending a value
+    answers the masked error, the server log carrying the ``ConfigurationError`` naming the
+    key, restated from Django's ``FieldError``.
+    """
+    sibling, tags = _tagged_branches()
+    served = _SERVED_PAST_GENERIC[name]
+    filterset = served.build()
+    schema = _served_schema(filterset)
+    unfiltered = _post(schema, "{ rows(filter: {}) { edges { node { id } } } }")
+    edges = json_list(json_object(unfiltered, "data", "rows"), "edges")
+    found = [int(relay.GlobalID.from_id(json_str(edge, "node", "id")).node_id) for edge in edges]
+    assert found == _served_rows(filterset, tags), unfiltered
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+
+    payload = _post(
+        schema,
+        f"{{ rows(filter: {{ tagged: {{ exact: {served.literal(sibling)} }} }}) "
+        "{ edges { node { id } } } }",
+    )
+
+    assert payload["data"] is None, payload
+    assert json_at(payload, "errors", 0, "message") == "An unexpected error occurred.", payload
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert len(records) == 1, caplog.records
+    exc_info = records[0].exc_info
+    assert exc_info is not None
+    assert type(exc_info[1]) is ConfigurationError, exc_info[1]
+    expected = f"{served.subject}; filter through the GenericRelation"
+    assert str(exc_info[1]).startswith(expected), exc_info[1]
+    assert str(exc_info[1]).endswith(
+        ", or annotate a name of the path on the queryset the set filters (a type's "
+        "get_queryset, the queryset handed to the set, or a filter_queryset override).",
+    ), exc_info[1]
+
+
+@pytest.mark.django_db
+def test_a_served_lookup_an_annotation_past_a_generic_foreign_key_refuses_stays_djangos(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Where the type annotates the path, Django's refusal of the lookup is the one logged.
+
+    The annotation holds the name, so the ``year`` lookup Django refuses on the annotation's
+    text output is Django's ``FieldError``, never restated as the ``GenericForeignKey``.
+    """
+    sibling, _tags = _tagged_branches()
+    del sibling
+    leaf = CharFilter(field_name="content_object__name", lookup_expr="year")
+    schema = _served_schema(_column_generic_set(leaf), _tags_naming_their_branch)
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+
+    payload = _post(
+        schema,
+        '{ rows(filter: { tagged: { year: "2020" } }) { edges { node { id } } } }',
+    )
+
+    assert payload["data"] is None, payload
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert len(records) == 1, caplog.records
+    exc_info = records[0].exc_info
+    assert exc_info is not None
+    assert type(exc_info[1]) is FieldError, exc_info[1]
+    assert str(exc_info[1]).startswith("Unsupported lookup 'year' for TextField"), exc_info[1]
+
+
+class _TagPredicate(MultipleChoiceFilter):
+    """A consumer predicate: each value keeps the tags carrying it, whatever the path."""
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        return {"tag": v}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("served", [True, False], ids=["served", "unserved"])
+@pytest.mark.parametrize("field_name", ["content_object", "content_object__name"])
+def test_a_consumer_predicate_on_or_past_a_generic_foreign_key_filters(
+    field_name: str,
+    *,
+    served: bool,
+) -> None:
+    """A ``MultipleChoiceFilter`` whose ``get_filter_predicate`` is the consumer's: rows.
+
+    The predicate, path included, is the consumer's, so its path is not judged when the set
+    publishes or applies, and the set keeps the tags whose ``tag`` is the value sent. Served
+    on the key itself, its input finds no scalar, as a ``filter`` override's does: the input
+    build refuses it.
+    """
+    _sibling, tags = _tagged_branches()
+    leaf = _TagPredicate(field_name=field_name, choices=[("target", "t"), ("sibling", "s")])
+    if served and field_name == "content_object":
+        with pytest.raises(ConfigurationError) as exc_info:
+            _ = _tagged_item_schema(_column_generic_set(leaf), served=served)
+        expected = _COLUMN_GENERIC_SUBJECT.format(kind="_TagPredicate")
+        assert str(exc_info.value).startswith(expected), exc_info
+        return
+    schema = _tagged_item_schema(_column_generic_set(leaf), served=served)
+
+    payload = _post(
+        schema,
+        "query($where: JSON!) { tags(where: $where) { id } }",
+        {"where": {"tagged": ["sibling"]}},
+    )
+
+    assert _node_pks(payload, "tags") == tags[1:], payload
+
+
+class _BranchKeyPredicate(GlobalIDMultipleChoiceFilter):
+    """A consumer predicate on the GlobalID filter: each decoded id keeps its branch's shifts."""
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        return {"desk__branch": v}
+
+
+def _desks_but_closed(
+    _cls: type[DjangoType],
+    queryset: QuerySet[Model],
+    _info: object,
+    **_kwargs: object,
+) -> QuerySet[Model]:
+    """The desks but a closed one: a hook scoping the hop a walked key crosses."""
+    return queryset.exclude(name="desk-closed")
+
+
+def _shift_schema(
+    leaf: Filter,
+    *,
+    isil_node_id: bool = False,
+) -> tuple[DjangoSchema, type[FilterSet], type[DjangoType]]:
+    """Shifts served with ``leaf``, desks a hook scopes, branches as Relay nodes.
+
+    Answers the schema, the shift set and the branch type, whose ids the leaf decodes: the
+    branch's key, or with ``isil_node_id`` its ``isil``, a ``NodeID`` off the primary key.
+    """
+    registry.clear()
+
+    class ShiftKeySet(FilterSet):
+        held = leaf
+
+        class Meta:
+            model = models.DeskShift
+            fields = []
+
+    @strawberry.type
+    class Query:
+        shifts = DjangoConnectionField(
+            make_django_type(
+                "PredicateShiftNode",
+                models.DeskShift,
+                ("id", "name"),
+                meta_extra={"filterset_class": ShiftKeySet},
+            ),
+        )
+
+    _ = make_django_type(
+        "PredicateDeskNode",
+        models.CirculationDesk,
+        ("id", "name"),
+        namespace_extra={"get_queryset": classmethod(_desks_but_closed)},
+    )
+    branch_type = make_django_type(
+        "PredicateBranchNode",
+        models.Branch,
+        ("id", "name", "isil") if isil_node_id else ("id", "name"),
+        namespace_extra=(
+            {"__annotations__": {"isil": relay.NodeID[str]}} if isil_node_id else None
+        ),
+    )
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config()), ShiftKeySet, branch_type
+
+
+def _branch_shifts() -> dict[str, int]:
+    """``Target`` and ``Sibling``, each with a desk and a shift; the branches' keys by name."""
+    branches: dict[str, int] = {}
+    for name in ("Target", "Sibling"):
+        branch = models.Branch.objects.create(name=name, city="Boston")
+        branches[name] = saved_pk(branch)
+        desk = models.CirculationDesk.objects.create(
+            name=f"desk-{name}",
+            branch=branch,
+            shelf=models.Shelf.objects.create(code=name, branch=branch),
+        )
+        _ = models.DeskShift.objects.create(name=f"shift-{name}", desk=desk)
+    return branches
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("driver", ["live", "form"])
+def test_a_consumer_predicate_on_a_globalid_multiple_choice_filter_filters_its_walked_key(
+    driver: str,
+) -> None:
+    """Off its ``in`` arm the GlobalID filter builds each predicate through the consumer's.
+
+    The decoded ids reach ``get_filter_predicate``, which names the path itself, so the leaf
+    runs as declared over the shifts, never rebound onto the target of the key it walks
+    through the scoped desks; the key rows its value names are read by the shipped
+    comparison, the package's own predicate: the shift at the branch sent.
+    """
+    branches = _branch_shifts()
+    schema, filterset, branch_type = _shift_schema(
+        _BranchKeyPredicate(field_name="desk__branch", lookup_expr="exact"),
+    )
+    value = global_id_for(branch_type, branches["Sibling"])
+
+    if driver == "form":
+        bound = filterset(data={"held": [value]}, queryset=models.DeskShift.objects.all())
+        rows = require(bound.qs, is_queryset)
+        names = [require_instance(row, models.DeskShift).name for row in rows]
+    else:
+        payload = _post(
+            schema,
+            f"{{ shifts(filter: {{ held: {{ exact: {json.dumps([value])} }} }}) "
+            "{ edges { node { name } } } }",
+        )
+        edges = json_list(json_object(payload, "data", "shifts"), "edges")
+        names = [json_str(edge, "node", "name") for edge in edges]
+    assert names == ["shift-Sibling"]
+
+
+#: The classes declared under a recording predicate (its ``__init_subclass__`` registry).
+_RECORDED_SUBCLASSES: list[type[Filter]] = []
+
+
+class _RecordingKeyPredicate(GlobalIDMultipleChoiceFilter):
+    """A consumer GlobalID predicate recording its subclasses and counting its own calls.
+
+    ``calls`` is class-level state the predicate counts on the class it runs as
+    (``type(self)``).
+    """
+
+    calls: ClassVar[int] = 0
+
+    @override
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        _RECORDED_SUBCLASSES.append(cls)
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        type(self).calls += 1
+        return {"desk__branch": v}
+
+
+class _RecordingChoicePredicate(MultipleChoiceFilter):
+    """A consumer choice predicate recording its subclasses and counting its own calls."""
+
+    calls: ClassVar[int] = 0
+
+    @override
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        _RECORDED_SUBCLASSES.append(cls)
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        type(self).calls += 1
+        return {"desk__branch": v}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("kind", ["globalid", "choice"])
+def test_a_consumer_predicate_on_a_walked_key_keeps_its_class_and_class_state(kind: str) -> None:
+    """The shipped comparison of a consumer predicate's walked key creates no class.
+
+    Reading the key rows the value names with the shipped predicate binds that predicate on
+    a copy of the leaf, never a subclass of the consumer's class: no ``__init_subclass__``
+    fires, and the consumer's predicate, run once as declared, counts on its own class.
+    """
+    _RECORDED_SUBCLASSES.clear()
+    branches = _branch_shifts()
+    if kind == "globalid":
+        _RecordingKeyPredicate.calls = 0
+        _schema, filterset, branch_type = _shift_schema(
+            _RecordingKeyPredicate(field_name="desk__branch", lookup_expr="exact"),
+        )
+        value = global_id_for(branch_type, branches["Sibling"])
+    else:
+        _RecordingChoicePredicate.calls = 0
+        _ = _shift_schema(CharFilter(field_name="name"))
+        keys = [(str(pk), name) for name, pk in branches.items()]
+
+        class RecordingChoiceSet(FilterSet):
+            held = _RecordingChoicePredicate(field_name="desk__branch", choices=keys)
+
+            class Meta:
+                model = models.DeskShift
+                fields = []
+
+        filterset = RecordingChoiceSet
+        value = str(branches["Sibling"])
+
+    bound = filterset(data={"held": [value]}, queryset=models.DeskShift.objects.all())
+    rows = require(bound.qs, is_queryset)
+
+    assert [require_instance(row, models.DeskShift).name for row in rows] == ["shift-Sibling"]
+    assert _RECORDED_SUBCLASSES == []
+    recorder = _RecordingKeyPredicate if kind == "globalid" else _RecordingChoicePredicate
+    assert recorder.calls == 1
+
+
+class _BranchIsilPredicate(GlobalIDMultipleChoiceFilter):
+    """A consumer predicate naming the path itself: each decoded ``isil`` keeps its shifts."""
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        return {"desk__branch__isil": v}
+
+
+#: The paths a ``_SelfPathPredicate`` built its predicates on.
+_PREDICATE_PATHS: list[str] = []
+
+
+class _SelfPathPredicate(GlobalIDMultipleChoiceFilter):
+    """A consumer predicate building on the path it reads from itself, recording it."""
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        path = require(self.field_name, is_str)
+        _PREDICATE_PATHS.append(path)
+        return {f"{path}__iexact": v}
+
+
+def _isil_branch_shifts() -> None:
+    """``Target`` and ``Sibling`` with an ``isil``, each with a desk and a shift."""
+    for name in ("Target", "Sibling"):
+        branch = models.Branch.objects.create(name=name, city="Boston", isil=f"ISIL-{name}")
+        desk = models.CirculationDesk.objects.create(
+            name=f"desk-{name}",
+            branch=branch,
+            shelf=models.Shelf.objects.create(code=name, branch=branch),
+        )
+        _ = models.DeskShift.objects.create(name=f"shift-{name}", desk=desk)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("predicate", ["named-path", "self-path"])
+@pytest.mark.parametrize("driver", ["live", "form"])
+def test_a_consumer_predicate_on_a_walked_key_into_an_off_key_node_id_filters(
+    driver: str,
+    predicate: str,
+) -> None:
+    """Past a walked key whose target's ``NodeID`` is no primary key, the shipped comparison reads.
+
+    The GlobalID filter builds its predicates on a copy carrying the path to the target's
+    id column (``desk__branch__isil``); the shipped predicate the key rows are read with is
+    bound to that copy too, so it reads the copy's path. The consumer's predicate, run once
+    as declared, sees the same path: the shift at the branch sent.
+    """
+    _PREDICATE_PATHS.clear()
+    _isil_branch_shifts()
+    leaf_class = _BranchIsilPredicate if predicate == "named-path" else _SelfPathPredicate
+    schema, filterset, branch_type = _shift_schema(
+        leaf_class(field_name="desk__branch", lookup_expr="exact"),
+        isil_node_id=True,
+    )
+    value = global_id_for(branch_type, "ISIL-Sibling")
+
+    if driver == "form":
+        bound = filterset(data={"held": [value]}, queryset=models.DeskShift.objects.all())
+        rows = require(bound.qs, is_queryset)
+        names = [require_instance(row, models.DeskShift).name for row in rows]
+    else:
+        payload = _post(
+            schema,
+            f"{{ shifts(filter: {{ held: {{ exact: {json.dumps([value])} }} }}) "
+            "{ edges { node { name } } } }",
+        )
+        edges = json_list(json_object(payload, "data", "shifts"), "edges")
+        names = [json_str(edge, "node", "name") for edge in edges]
+    assert names == ["shift-Sibling"]
+    expected = ["desk__branch__isil"] if predicate == "self-path" else []
+    assert expected == _PREDICATE_PATHS
+
+
+class _BranchKeyChoicePredicate(MultipleChoiceFilter):
+    """A consumer predicate on a choice filter: each raw key keeps its branch's shifts."""
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        return {"desk__branch": v}
+
+
+@pytest.mark.django_db
+def test_a_consumer_predicate_on_a_multiple_choice_filter_filters_its_walked_key() -> None:
+    """A raw key sent to a consumer predicate on a walked key: the shipped comparison's rows.
+
+    An unserved set (a served one's input finds no scalar for the relation). The key rows
+    the value names are read by ``MultipleChoiceFilter``'s own predicate on the scoped
+    desks' branch key, never the consumer's, and the leaf runs as declared over the shifts:
+    the shift at the branch sent.
+    """
+    branches = _branch_shifts()
+    keys = [(str(pk), name) for name, pk in branches.items()]
+    _ = _shift_schema(CharFilter(field_name="name"))
+
+    class ChoiceKeySet(FilterSet):
+        held = _BranchKeyChoicePredicate(field_name="desk__branch", choices=keys)
+
+        class Meta:
+            model = models.DeskShift
+            fields = []
+
+    bound = ChoiceKeySet(
+        data={"held": [str(branches["Sibling"])]},
+        queryset=models.DeskShift.objects.all(),
+    )
+
+    rows = require(bound.qs, is_queryset)
+    assert [require_instance(row, models.DeskShift).name for row in rows] == ["shift-Sibling"]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("served", [True, False], ids=["served", "unserved"])
+def test_a_consumer_predicate_on_a_globalid_multiple_choice_filter_publishes_any_lookup(
+    *,
+    served: bool,
+) -> None:
+    """Off its ``in`` arm the consumer's predicate names the lookup: one Django lacks publishes.
+
+    Its ``lookup_expr`` is never handed to Django by shipped code building the predicate,
+    so the set publishes, served at schema build or unbound at its first construction.
+    """
+    leaf = _BranchKeyPredicate(field_name="desk__branch", lookup_expr="bogus")
+    if served:
+        _schema, filterset, _branch_type = _shift_schema(leaf)
+    else:
+
+        class UnservedKeySet(FilterSet):
+            held = leaf
+
+            class Meta:
+                model = models.DeskShift
+                fields = []
+
+        filterset = UnservedKeySet
+    assert list(filterset.get_filters()) == ["held"]
+
+
+#: A GlobalID filter's ``in`` arm a consumer predicate never reaches, refused by the
+#: shipped-only lookup gate: (the model, its ``field_name``, the refusal's start).
+_GLOBALID_IN_UNRESOLVABLE: dict[str, tuple[type[Model], str, str]] = {
+    "tagged-item-slug": (
+        models.TaggedItem,
+        "tag__bogus",
+        (
+            "has field_name 'tag__bogus' and lookup_expr 'in', but Django resolves no transform "
+            "or lookup 'bogus'"
+        ),
+    ),
+    "shift-text": (
+        models.DeskShift,
+        "name__bogus",
+        (
+            "has field_name 'name__bogus' and lookup_expr 'in', but Django resolves no transform "
+            "or lookup 'bogus'"
+        ),
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", sorted(_GLOBALID_IN_UNRESOLVABLE))
+def test_a_consumer_predicate_on_a_globalid_in_lookup_is_still_judged(name: str) -> None:
+    """The ``in`` arm applies the decoded ids in the package's own predicate: still judged.
+
+    A consumer ``get_filter_predicate`` is never called there, so a path Django resolves
+    on no queryset is refused when the set publishes, as for the shipped filter.
+    """
+    target, field_name, expected = _GLOBALID_IN_UNRESOLVABLE[name]
+
+    class InPredicateSet(FilterSet):
+        held = _BranchKeyPredicate(field_name=field_name, lookup_expr="in")
+
+        class Meta:
+            model = target
+            fields = []
+
+    with pytest.raises(ConfigurationError) as refused:
+        _ = InPredicateSet.get_filters()
+    assert expected in str(refused.value), refused.value
+
+
+class _NamedObjectCharFilter(CharFilter):
+    """A ``filter`` override handing Django the path past the key itself."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        if value in (None, ""):
+            return qs
+        return qs.filter(content_object__name=value)
+
+
+#: Each leaf whose own code hands Django a path past the key.
+_CONSUMER_PAST_GENERIC_ERRORS: dict[str, Callable[[], Filter]] = {
+    "char-method": lambda: CharFilter(field_name="content_object__name", method="by_name"),
+    "char-filter-override": lambda: _NamedObjectCharFilter(field_name="content_object__name"),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", sorted(_CONSUMER_PAST_GENERIC_ERRORS))
+def test_consumer_code_handing_django_a_path_past_a_generic_foreign_key_keeps_djangos_error(
+    caplog: pytest.LogCaptureFixture,
+    name: str,
+) -> None:
+    """A ``method`` or a ``filter`` override past the key raises what Django raises: unrestated.
+
+    The query is the consumer's, so the ``FieldError`` its unannotated path raises is the one
+    logged, never the package's refusal of a shipped filter.
+    """
+    _sibling, _tags = _tagged_branches()
+    schema = _tagged_item_schema(
+        _column_generic_set(_CONSUMER_PAST_GENERIC_ERRORS[name]()),
+        served=False,
+    )
+    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
+
+    payload = _post(
+        schema,
+        "query($where: JSON!) { tags(where: $where) { id } }",
+        {"where": {"tagged": "Sibling"}},
+    )
+
+    assert payload["data"] is None, payload
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_strawberry_framework" and record.exc_info is not None
+    ]
+    assert len(records) == 1, caplog.records
+    exc_info = records[0].exc_info
+    assert exc_info is not None
+    assert type(exc_info[1]) is FieldError, exc_info[1]
 
 
 def _annotated_desks(

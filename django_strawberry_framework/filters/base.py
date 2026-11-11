@@ -35,7 +35,7 @@ import copy
 from dataclasses import dataclass, replace
 from functools import cache
 from itertools import takewhile
-from types import MappingProxyType
+from types import FunctionType, MappingProxyType, MethodType
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
 from django.core.exceptions import FieldError, ValidationError
@@ -236,6 +236,7 @@ else:
     _UploadedFileAny = UploadedFile
 
 _M = TypeVar("_M", bound=models.Model)
+_MultipleT = TypeVar("_MultipleT", bound=MultipleChoiceFilter)
 
 
 class TypedFilter(Filter):
@@ -3258,6 +3259,27 @@ class _GlobalIDMultipleChoiceField(MultipleChoiceField):
         super().validate(value)
 
 
+def _predicate_copy(filter_instance: _MultipleT, field_name: str, lookup_expr: str) -> _MultipleT:
+    """Copy ``filter_instance`` to build its predicates on ``field_name`` and ``lookup_expr``.
+
+    A ``get_filter_predicate`` the instance holds bound to itself (the shipped hook the
+    walked-key comparison binds, ``filters/sets.py::_with_shipped_predicate``) is re-bound
+    to the copy, so the predicate reads the copy's path, as the class's own hook would.
+    """
+    rebound = copy.copy(filter_instance)
+    rebound.field_name = field_name
+    rebound.lookup_expr = lookup_expr
+    held = (truth.instance_dict(rebound) or {}).get("get_filter_predicate")
+    function = truth.stored_function(held)
+    if (
+        truth.is_exact(held, MethodType)
+        and truth.is_instance(function, FunctionType)
+        and held == MethodType(function, filter_instance)
+    ):
+        rebound.get_filter_predicate = MethodType(function, rebound)
+    return rebound
+
+
 class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
     """Multi-value sibling of `GlobalIDFilter`.
 
@@ -3339,9 +3361,7 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
                 return super().filter(qs, node_ids)
             # Upstream's per-element predicates read ``field_name`` and ``lookup_expr``; a copy
             # carries the path and the lookup applied where it ends.
-            rebound = copy.copy(self)
-            rebound.field_name = path
-            rebound.lookup_expr = lookup_expr
+            rebound = _predicate_copy(self, path, lookup_expr)
             return super(GlobalIDMultipleChoiceFilter, rebound).filter(qs, node_ids)
         # ``_globalid_predicate_path`` DERIVES the path from the LIVE ``field_name``
         # (immune to ``_expand_related_filter`` rebasing): the target's id column for a
@@ -3710,9 +3730,10 @@ def refuse_identityless_relation(
     dispatches it to that method, which filters as it chooses (the content type and
     object id columns, say), never through the relation its ``field_name`` names. A
     model-choice filter is asked only when its ``filter`` is ``shipped`` code
-    (``filters/sets.py::_runs_shipped_filter``): a ``filter`` override of its own filters
-    as it chooses too, while a GlobalID filter's override still holds the node-id
-    comparison it would reach through ``super()``.
+    (``filters/sets.py::_runs_shipped_filter``): a ``filter`` override of its own, or a
+    ``get_filter_predicate`` of its own under django-filter's ``filter``, filters as it
+    chooses too, while a GlobalID filter's override still holds the node-id comparison it
+    would reach through ``super()``.
     """
     if not isinstance(filter_instance, (GlobalIDFilter, GlobalIDMultipleChoiceFilter)) and not (
         shipped and isinstance(filter_instance, (ModelChoiceFilter, ModelMultipleChoiceFilter))
@@ -3853,13 +3874,14 @@ def refuse_unresolvable_lookup(
     ``FilteredRelation`` alias, which only the queryset a filter runs on holds: Django's
     ``FieldError`` at the split), and a name past a relation the related model does not
     carry (a walked hop reads it on rows a type's ``get_queryset`` shapes,
-    ``filters/sets.py::FilterSet._leaf_chain``). A name past a ``GenericForeignKey`` is
-    no such name: no hop walks one and no queryset can annotate a name it holds, and
-    ``filters/inputs.py::refuse_joinless_relation`` refuses it first. A set declaring no
-    ``Meta.model`` has no model to resolve a path on and is not asked: a type refuses it
-    when it binds (``types/finalizer.py::_bind_filterset_owner``), and applied unbound it
-    refuses a leaf naming the missing ``Meta.model``
-    (``filters/sets.py::FilterSet._leaf_form_entries``).
+    ``filters/sets.py::FilterSet._leaf_chain``). A name past a ``GenericForeignKey``
+    (``content_object__name``) is one only a queryset holds, an annotation named by the
+    path, which Django reads before it walks a field: where the queryset a leaf applies to
+    holds none, ``filters/inputs.py::refuse_unannotated_joinless_relation`` restates
+    Django's refusal. A set declaring no ``Meta.model`` has no model to resolve a path on
+    and is not asked: a type refuses it when it binds
+    (``types/finalizer.py::_bind_filterset_owner``), and applied unbound it refuses a leaf
+    naming the missing ``Meta.model`` (``filters/sets.py::FilterSet._leaf_form_entries``).
     """
     model = _filterset_model(filterset_cls)
     if model is None:

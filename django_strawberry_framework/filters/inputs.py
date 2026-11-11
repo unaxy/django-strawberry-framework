@@ -31,10 +31,11 @@ from typing import TYPE_CHECKING, Annotated
 
 import strawberry
 from django import forms
-from django.core.exceptions import ValidationError
+from django.core.exceptions import FieldError, ValidationError
 from django.db import models
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.lookups import FieldGetDbPrepValueMixin
+from django.db.models.query_utils import refs_expression
 from django.utils.choices import flatten_choices
 from django_filters import (
     ChoiceFilter,
@@ -417,50 +418,78 @@ def _scalar_from_model_field(
 
 
 def refuse_joinless_relation(filterset_cls: type[FilterSet], filter_instance: Filter) -> None:
-    """Refuse a leaf whose path ends on, or continues past, a relation Django builds no join for.
+    """Refuse a leaf whose ``field_name`` names a relation Django builds no join for.
 
     A ``GenericForeignKey`` (a content type and an object id, no one target model) has no
     column a value compares on (``filters/base.py::_compared_columns`` answers none), and
     Django refuses every queryset filter through it with ``FieldError`` whatever the lookup
-    (``Query.names_to_path``), so the filter could answer no request carrying a value. A
-    ``field_name`` naming one is refused as the field it reads. One whose path reaches one
-    only through Django's walk of the filter's argument (``field_name__lookup_expr``,
-    ``utils/querysets.py::joinless_relation_on``) is refused by the relation reached: as
-    one ``field_name`` continues past where names of the ``field_name`` follow it
-    (``content_object__name``, ``desk__content_object__id``,
-    ``tags__content_object__pk``), else as one the leaf reads (a ``lookup_expr`` carrying
-    the path onto it, ``field_name="desk", lookup_expr="content_object__name"``). No
-    queryset holds a name past one: Django refuses an annotation or alias named as a field,
-    so no hop's rows could read it, as they can a name past a relation the related model
-    lacks (``filters/base.py::refuse_unresolvable_lookup``).
+    (``Query.names_to_path``), so the filter could answer no request carrying a value: no
+    queryset holds the name, since Django refuses an annotation or alias named as a field.
     ``filters/sets.py::FilterSet._publish_filters`` asks this of every leaf a set publishes
     whose ``filter`` is shipped code (``filters/sets.py::_runs_shipped_filter``: never a
-    ``method=`` filter or a class-level ``filter`` override, which filter as they choose),
-    after ``filters/base.py::refuse_identityless_relation`` refuses a GlobalID or model-choice
+    ``method=`` filter, a class-level ``filter`` override or a consumer
+    ``get_filter_predicate``, which filter as they choose and are not judged by their path
+    when the set publishes or applies), after
+    ``filters/base.py::refuse_identityless_relation`` refuses a GlobalID or model-choice
     filter there: a set a type serves refuses it when the schema builds, an unserved set at
     its first use (its first construction, ``FilterSet.__init__``, or the package's first
     read of its table) and at every construction after until it is fixed. The refusal is the
     one the set's input build gives the leaf (``_unscalared_field_refusal``), naming the
     filter as the set declaring it holds it. The relation's content type and object id
     columns, and a ``GenericRelation`` reversing it, are joined as any relation is and are
-    not refused.
+    not refused. A path continuing past one (``content_object__name``), or a ``lookup_expr``
+    carrying the path onto one, is the queryset's to hold (an annotation named by the path,
+    which Django reads before it walks a field): ``refuse_unannotated_joinless_relation``
+    answers it when the leaf applies.
     """
     field = _filterset_model_field(filterset_cls, filter_instance)
     if field is not None and not _compared_columns(filter_instance, field):
         raise _unscalared_field_refusal(filter_instance, field, filterset_cls)
-    model = _filterset_model(filterset_cls)
-    if model is None:
-        return
+
+
+def refuse_unannotated_joinless_relation(
+    filterset_cls: type[FilterSet],
+    filter_instance: Filter,
+    queryset: models.QuerySet[models.Model],
+    refusal: FieldError,
+) -> None:
+    """Restate Django's ``refusal`` of a leaf whose path it walked into a joinless relation.
+
+    ``refusal`` is the ``FieldError`` Django raised applying the leaf's shipped ``filter``
+    over ``queryset``, the rows the leaf filters (a hop's rows for a leaf walked past a
+    ``RelatedFilter``, its ``field_name`` read on their model). Django reads an annotation
+    or alias the queryset holds under any leading part of the filter's argument
+    (``field_name__lookup_expr``) before it walks a field (``Query.solve_lookup_type``,
+    ``refs_expression``), so a path continuing past a ``GenericForeignKey``
+    (``content_object__name``) names a value wherever the queryset annotates it. Where none
+    does (``refs_expression`` over ``queryset``'s annotations) and Django's walk of the
+    argument reaches one (``utils/querysets.py::joinless_relation_on``), the refusal is the
+    one ``refuse_joinless_relation`` gives a leaf naming it, naming the relation reached:
+    "continues past" where names of the ``field_name`` follow it, else "reads" (a
+    ``lookup_expr`` carrying the path onto it), its remedy adding the annotation. Anything
+    else returns, and the caller re-raises Django's own ``refusal``.
+    """
     # django-filter's ``Filter.filter`` hands Django ``field_name__lookup_expr``; a lazy part
     # is read as the text it renders.
     lookup_expr = truth.text(filter_instance.lookup_expr)
     argument = LOOKUP_SEP.join((truth.text(_declared_field_name(filter_instance)), lookup_expr))
-    reached = joinless_relation_on(model, argument)
+    # The name of the annotation claiming a leading part, or a false value for none (the
+    # stubs type it as the expression an older Django returned).
+    claimed, _rest = refs_expression(argument.split(LOOKUP_SEP), queryset.query.annotations)
+    if claimed:
+        return
+    reached = joinless_relation_on(queryset.model, argument)
     if reached is None:
         return
     relation, past = reached
     crossed = len(past) > len(lookup_expr.split(LOOKUP_SEP))
-    raise _unscalared_field_refusal(filter_instance, relation, filterset_cls, crossed=crossed)
+    raise _unscalared_field_refusal(
+        filter_instance,
+        relation,
+        filterset_cls,
+        crossed=crossed,
+        unannotated=True,
+    ) from refusal
 
 
 def _unscalared_field_refusal(
@@ -470,6 +499,7 @@ def _unscalared_field_refusal(
     *,
     generated_issue: str | None = None,
     crossed: bool = False,
+    unannotated: bool = False,
 ) -> ConfigurationError:
     """Build the refusal for a leaf typed from a model field no ``SCALAR_MAP`` entry covers.
 
@@ -485,8 +515,10 @@ def _unscalared_field_refusal(
     none), through the ``GenericRelation`` reversing it or the two columns it reads. A
     ``CompositePrimaryKey`` holds no one value, so its columns are named one by one. Any
     other column takes a ``SCALAR_MAP`` entry for its class. ``crossed`` is a
-    ``GenericForeignKey`` the leaf's path continues past rather than reads
-    (``refuse_joinless_relation``), with the same remedy.
+    ``GenericForeignKey`` the leaf's path continues past rather than reads, with the same
+    remedy; ``unannotated`` is one Django's walk reached applying the leaf over rows
+    annotating no name of its path (``refuse_unannotated_joinless_relation``), whose
+    remedy adds that annotation.
     """
     declaration = _declaration_of(filter_instance, filterset_cls)
     reads = "continues past" if crossed else "reads"
@@ -519,10 +551,16 @@ def _unscalared_field_refusal(
         )
     compared = _compared_columns(filter_instance, model_field)
     if not compared:
+        annotate = (
+            ", or annotate a name of the path on the queryset the set filters (a type's "
+            "get_queryset, the queryset handed to the set, or a filter_queryset override)"
+            if unannotated
+            else ""
+        )
         return ConfigurationError(
             f"{subject}: Django filters no queryset through it, so no input can carry its "
             "value; filter through the GenericRelation that reverses it on the related "
-            "model, or on the content type and object id columns it reads.",
+            f"model, or on the content type and object id columns it reads{annotate}.",
         )
     if len(compared) > 1:
         return ConfigurationError(
@@ -875,9 +913,10 @@ def _refuse_kind_json_cannot_encode(
     the class does not name (an arbitrary ``coerce``, a consumer field, a subclass
     overriding how its class cleans) is not refused. A text
     lookup (a key's ``icontains``, ``has_key``) renders the value as text and never reaches
-    the encoder, and a declared encoder is trusted. A ``method=`` filter or a consumer
-    ``filter`` override (``filters/sets.py::_runs_shipped_filter``) owns what its value
-    means. The refusal names the filter as declared (``_declaration_of``).
+    the encoder, and a declared encoder is trusted. A ``method=`` filter, a consumer
+    ``filter`` override or a consumer ``get_filter_predicate``
+    (``filters/sets.py::_runs_shipped_filter``) owns what its value means. The refusal
+    names the filter as declared (``_declaration_of``).
     """
     from .sets import _runs_shipped_filter  # noqa: PLC0415 - import cycle
 
@@ -1248,15 +1287,15 @@ def _refuse_form_serving_no_value(
     child set). Only a consumer's declaration is asked: a declared filter and a
     ``Meta.filter_overrides`` selection (``filters/sets.py::filter_generation_provenance``),
     never a generated leaf, whose class django-filter selects for the column. A ``method=``
-    filter or a consumer ``filter`` override (``filters/sets.py::_runs_shipped_filter``) owns
-    what its value means, a form field any consumer class or ``coerce`` cleans
-    (``_cleans_in_shipped_code``) is a consumer's parser, a model-choice form field cleans
-    by querying its queryset (the probe runs no query), and a column converting in its own
-    ``to_python`` / ``get_prep_value`` (a relation's target key included,
-    ``_django_converts``) or a lookup preparing in its own ``get_prep_lookup``
-    (``_django_resolves``) is consumer code bounding which values pass, so none is asked. A
-    transform, a column holding values as given, a package column-cleaned filter and a null
-    test type their leaf on other arms.
+    filter, a consumer ``filter`` override or a consumer ``get_filter_predicate``
+    (``filters/sets.py::_runs_shipped_filter``) owns what its value means, a form field any
+    consumer class or ``coerce`` cleans (``_cleans_in_shipped_code``) is a consumer's
+    parser, a model-choice form field cleans by querying its queryset (the probe runs no
+    query), and a column converting in its own ``to_python`` / ``get_prep_value`` (a
+    relation's target key included, ``_django_converts``) or a lookup preparing in its own
+    ``get_prep_lookup`` (``_django_resolves``) is consumer code bounding which values pass,
+    so none is asked. A transform, a column holding values as given, a package
+    column-cleaned filter and a null test type their leaf on other arms.
     """
     from .sets import (  # noqa: PLC0415 - import cycle
         _FRAMEWORK_GENERATED_ORIGINS,
@@ -1401,12 +1440,13 @@ def _refuse_unsealable_served_leaves(served: Iterable[type[FilterSet]]) -> None:
     (``filters/sets.py::_expansion_record``), so every leaf is judged once, on the set that
     declares it, and named there with the ``RelatedFilter`` path it was reached through. A
     leaf whose ``filter`` is consumer code on its own set (a ``method=`` filter, a
-    ``filter`` override, a ``filter`` held on the instance:
-    ``filters/sets.py::_runs_shipped_filter``) owns its query, and a path the model alone
-    cannot resolve (a queryset annotation) has no walk; the seal judges both per request. A
-    predicate Django resolves on no queryset never reaches here: its set refused it when it
-    published (``filters/base.py::refuse_unresolvable_lookup``). A set no connection serves,
-    applied from the project's own resolver, is never sealed and is not asked.
+    ``filter`` override, a ``filter`` held on the instance, a ``get_filter_predicate``
+    override: ``filters/sets.py::_runs_shipped_filter``) owns its query, and a path the
+    model alone cannot resolve (a queryset annotation) has no walk; the seal judges both
+    per request. A predicate Django resolves on no queryset never reaches here: its set
+    refused it when it published (``filters/base.py::refuse_unresolvable_lookup``). A set
+    no connection serves, applied from the project's own resolver, is never sealed and is
+    not asked.
     """
     from django_strawberry_framework.utils.querysets import (  # noqa: PLC0415 - import cycle
         _type_is_genuinely_django,

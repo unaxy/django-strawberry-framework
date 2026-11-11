@@ -1104,14 +1104,14 @@ Progress: 0 done, 230 to do.
   whose form `save()` rebinds `form.instance` to such a row answers the same `null`. An update whose `update()` saves
   a multi-table child over the located row is refused as never UPDATED, never answered as `conflict`
 - [ ] 919. CHANGELOG entry for item 881: a `FilterSet` filter running shipped code whose `field_name` continues past a
-  `GenericForeignKey` (`content_object__name`, `desk__content_object__id`, `tags__content_object__pk`, a key a
-  multi-table child inherits), or whose `lookup_expr` carries the path onto one (`field_name="desk",
-  lookup_expr="content_object__name"`), is now refused with a `ConfigurationError` naming the set, the filter and the
-  key when its set publishes (at schema build for a served set, at first use for an unbound one, a raw construction,
-  `DjangoFilterBackend` and `FilterView` included), where it built and then failed every request carrying a value with
-  Django's masked `FieldError`; a `method=` filter or a `filter` override over such a path still builds and filters as
-  it chooses
-
+  `GenericForeignKey` (`content_object__name`, `desk__content_object__id`, `tags__content_object__id`, a key a
+  multi-table child inherits), or whose `lookup_expr` carries the path onto one, filters by a queryset annotation of
+  the path (a type's `get_queryset`, the queryset handed to the set, a `filter_queryset` override); over rows
+  annotating none, a request sending a value answers a `ConfigurationError` naming the set, the filter and the key,
+  with the annotation as a remedy, where it answered Django's masked `FieldError`. A `MultipleChoiceFilter` whose
+  `get_filter_predicate` the consumer overrides, and a `GlobalIDMultipleChoiceFilter` doing so for any lookup but
+  `in`, is no longer judged by its path or lookup when its set publishes or applies, and on a key walked through a
+  scoped hop it answers rows where it raised `FieldError`
 ## From dry-upstream-0_0_15
 
 - [ ] 101. CHANGELOG entry for item 22: the debug-toolbar middleware and its GraphiQL bridge template are adapted from

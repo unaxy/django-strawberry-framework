@@ -22,7 +22,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from functools import cache, partial
-from types import MappingProxyType
+from types import FunctionType, MappingProxyType, MethodType
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -268,6 +268,7 @@ from .inputs import (
     normalize_input_value,
     publishes_json_value,
     refuse_joinless_relation,
+    refuse_unannotated_joinless_relation,
 )
 
 # Python-attr tokens of the logical operator keys (``and_`` / ``or_`` / ``not_``),
@@ -2357,10 +2358,11 @@ class _KeyMatch:
     ``to_field``); ``relation`` is the relation reaching the target, against which
     Django decides which instances its lookup accepts; ``terminal`` is the leaf re-bound
     to that column over the last hop's target rows, positive, whose class's shipped
-    comparison (``_shipped_filter_class``) reads any other value. The consumer's
-    ``filter`` never runs a second time. A value naming no row runs the leaf on its
-    chain's ``fallback`` instead (``_LeafChain.view`` for a to-many key); a forward head's
-    null value reads its chain's ``null_view`` before this is asked.
+    comparison (``_shipped_filter_class``, building its predicate through the shipped
+    ``get_filter_predicate``, ``_with_shipped_predicate``) reads any other value. The
+    consumer's ``filter`` never runs a second time. A value naming no row runs the leaf
+    on its chain's ``fallback`` instead (``_LeafChain.view`` for a to-many key); a
+    forward head's null value reads its chain's ``null_view`` before this is asked.
     """
 
     hop: RelationHop
@@ -2400,7 +2402,11 @@ class _KeyMatch:
         members = _model_choice_members(value)
         if members is None:
             try:
-                kept = _shipped_filter_class(self.terminal).filter(self.terminal, rows, value)
+                kept = _shipped_filter_class(self.terminal).filter(
+                    _with_shipped_predicate(self.terminal),
+                    rows,
+                    value,
+                )
             except _SHIPPED_COMPARISON_REFUSALS:
                 # The shipped comparison cannot read the value, so it names no row; the
                 # consumer's ``filter`` answers it on the chain's ``fallback``.
@@ -2992,6 +2998,54 @@ _SHIPPED_FILTER_PACKAGES = frozenset(
 )
 
 
+def _multiple_choice_predicate_hook(filter_instance: Filter) -> str | None:
+    """``get_filter_predicate``, whatever the filter's lookup.
+
+    django-filter's ``MultipleChoiceFilter.filter`` builds every value's predicate there,
+    its documented custom-predicate seam reading each value's lookup and operand.
+    """
+    del filter_instance
+    return "get_filter_predicate"
+
+
+def _globalid_predicate_hook(filter_instance: Filter) -> str | None:
+    """``get_filter_predicate`` for a lookup other than ``in``; ``None`` for ``in``.
+
+    ``GlobalIDMultipleChoiceFilter.filter`` hands the decoded ids of any lookup but ``in``
+    to ``MultipleChoiceFilter.filter``, which builds each predicate through the hook; an
+    ``in`` it applies itself, in one package predicate
+    (``filters/base.py::_apply_lookup_predicate``). The lookup read is the one applied
+    where the path ends (``filters/base.py::_bound_lookup_expr``), as the filter reads it.
+    """
+    return None if _bound_lookup_expr(filter_instance) == "in" else "get_filter_predicate"
+
+
+#: Each shipped ``filter`` that builds its predicate through a method a subclass may override,
+#: and the reading naming that method for a filter (``None`` where the ``filter`` builds the
+#: predicate itself): django-filter's ``MultipleChoiceFilter.filter`` and the package's
+#: ``GlobalIDMultipleChoiceFilter.filter`` off its ``in`` arm.
+_PREDICATE_HOOKS: Mapping[object, Callable[[Filter], str | None]] = MappingProxyType(
+    {
+        truth.class_dict(MultipleChoiceFilter)["filter"]: _multiple_choice_predicate_hook,
+        truth.class_dict(GlobalIDMultipleChoiceFilter)["filter"]: _globalid_predicate_hook,
+    },
+)
+
+
+def _predicate_hook(filter_instance: Filter, method: object) -> str | None:
+    """Return the overridable method the shipped ``method`` builds the predicate through.
+
+    ``None`` where ``method`` builds the predicate itself (``_PREDICATE_HOOKS``).
+    """
+    reading = _PREDICATE_HOOKS.get(method)
+    return None if reading is None else reading(filter_instance)
+
+
+def _is_shipped_function(function: object) -> bool:
+    """Whether ``function`` is defined in django-filter or this package (``_SHIPPED_FILTER_PACKAGES``)."""
+    return truth.module(function).partition(".")[0] in _SHIPPED_FILTER_PACKAGES
+
+
 def _runs_shipped_filter(filter_instance: Filter) -> bool:
     """Whether the ``filter`` ``filter_instance`` runs is django-filter's or this package's own code.
 
@@ -3001,12 +3055,45 @@ def _runs_shipped_filter(filter_instance: Filter) -> bool:
     MRO resolves (``utils/truth.py::mro_attr``, unwrapped by ``stored_function``), read
     for the module that defines it, so a consumer subclass that keeps an upstream or
     package ``filter`` runs shipped code, and one that overrides ``filter`` (a
-    class-level override) runs its own. Nothing consumer-defined runs.
+    class-level override) runs its own. A shipped ``filter`` that builds its predicate
+    through an overridable method (``_PREDICATE_HOOKS``: ``MultipleChoiceFilter``'s
+    ``get_filter_predicate``, which ``GlobalIDMultipleChoiceFilter`` calls through it for
+    any lookup but ``in``) runs consumer code where the class resolves that method to a
+    function neither django-filter nor this package defines: the predicate, path
+    included, is the override's. Nothing consumer-defined runs.
     """
     if _own_filter(filter_instance) is not None:
         return False
-    method = truth.stored_function(truth.mro_attr(truth.class_of(filter_instance), "filter"))
-    return truth.module(method).partition(".")[0] in _SHIPPED_FILTER_PACKAGES
+    klass = truth.class_of(filter_instance)
+    method = truth.stored_function(truth.mro_attr(klass, "filter"))
+    if not _is_shipped_function(method):
+        return False
+    hook = _predicate_hook(filter_instance, method)
+    return hook is None or _is_shipped_function(
+        truth.stored_function(truth.mro_attr(klass, hook)),
+    )
+
+
+@contextmanager
+def _joinless_restated(
+    filterset_cls: type[FilterSet],
+    filter_instance: Filter,
+    rows: models.QuerySet[models.Model],
+) -> Generator[None]:
+    """Run ``filter_instance``'s ``filter`` over ``rows``, a joinless path's ``FieldError`` restated.
+
+    A shipped leaf whose path continues past a ``GenericForeignKey`` filters wherever
+    ``rows`` annotates a name of it; where none does, Django's ``FieldError`` is restated
+    as the refusal naming the relation reached
+    (``filters/inputs.py::refuse_unannotated_joinless_relation``). Anything else, and any
+    ``FieldError`` of consumer code, propagates as raised.
+    """
+    try:
+        yield
+    except FieldError as refusal:
+        if _runs_shipped_filter(filter_instance):
+            refuse_unannotated_joinless_relation(filterset_cls, filter_instance, rows, refusal)
+        raise
 
 
 def _shipped_filter_class(filter_instance: Filter) -> type[Filter]:
@@ -3021,6 +3108,37 @@ def _shipped_filter_class(filter_instance: Filter) -> type[Filter]:
         for klass in truth.mro(truth.class_of(filter_instance))
         if truth.is_subclass(klass, Filter) and _defines_shipped_filter(klass)
     )
+
+
+def _with_shipped_predicate(filter_instance: Filter) -> Filter:
+    """``filter_instance``, or a copy whose predicate hook is the nearest shipped one.
+
+    The shipped comparison of a leaf's class (``_shipped_filter_class``) builds a predicate
+    through ``get_filter_predicate`` where its ``filter`` reads one (``_PREDICATE_HOOKS``);
+    a consumer override of that hook would put its own predicate in the comparison, so the
+    comparison runs on a copy holding the nearest hook django-filter or this package
+    defines, bound to the copy, keeping the leaf's class and every other attribute: no
+    class is created and no consumer hook or class-level state is touched. A leaf whose
+    hook is shipped, or whose ``filter`` reads none, is returned as it is.
+    """
+    klass = truth.class_of(filter_instance)
+    method = truth.stored_function(
+        truth.class_dict(_shipped_filter_class(filter_instance))["filter"],
+    )
+    hook = _predicate_hook(filter_instance, method)
+    if hook is None or _is_shipped_function(truth.stored_function(truth.mro_attr(klass, hook))):
+        return filter_instance
+    function = next(
+        stored
+        for base in truth.mro(klass)
+        if (stored := truth.stored_function(truth.class_dict(base).get(hook))) is not None
+        and _is_shipped_function(stored)
+    )
+    comparer = copy.copy(filter_instance)
+    # An instance attribute shadows the class's function: the shipped filter's
+    # ``self.<hook>(...)`` reads the shipped hook, bound to this copy.
+    setattr(comparer, hook, MethodType(require_instance(function, FunctionType), comparer))
+    return comparer
 
 
 def _defines_shipped_filter(klass: type) -> bool:
@@ -3359,54 +3477,51 @@ def _unbindable_value_errors(
 
     Each cleaned value a filter applies to a temporal or decimal column (a ``DateField``,
     ``DateTimeField``, ``TimeField``, ``DurationField`` or ``DecimalField`` its
-    ``field_name`` reaches over the actual terminal filter's queryset, as Django
-    resolves the path,
-    ``utils/querysets.py::lookup_target_fields``: a queryset annotation's output field, a
-    ``FilteredRelation`` alias and ``pk`` included, or an ``ArrayField`` whose innermost
-    elements are stored through one, ``utils/_array_field.py::array_leaf_field``), or to an
-    ``ArrayField`` whose innermost elements are stored through an ``IntegerField``, is asked
-    of Django (``_unbindable_predicate``): the filter's own ``filter`` builds the predicate
-    and it is compiled on the database the filterset's queryset runs on (``queryset.db``,
-    resolved only for such a leaf). A transform of a temporal column (``year``, ``month``)
-    binds integers, and a duration binds its microsecond count on a backend without a
-    native interval, so the integers those leaves bind are asked too, and so is every
-    leaf whose lookup reads an integer transform's output whatever its column
-    (``filters/base.py::_reads_integer_transform``: an ``ArrayField``'s ``len``, a
-    transform a project registers with an ``IntegerField`` output). Every filter family
-    also asks a named queryset ``Transform`` alias such as ``ExtractYear`` or
-    ``ExtractMonth`` through that transform's actual output; a ``Count`` or ``F``
-    alias keeps its ordinary integer member behavior. The filter's shipped
-    predicate and Django's selected lookup/compiler still own the bind verdict,
-    including a package range's emitted ``gte`` / ``lte`` year bounds. The actual
-    terminal source Query, which can be scoped visible child rows rather than the
-    synthetic terminal parent's nonexistent queryset, owns transform eligibility.
+    ``field_name`` reaches over the actual terminal filter's queryset, as Django resolves
+    the path, ``utils/querysets.py::lookup_target_fields``: a queryset annotation's output
+    field, a ``FilteredRelation`` alias and ``pk`` included, or an ``ArrayField`` whose
+    innermost elements are stored through one, ``utils/_array_field.py::array_leaf_field``),
+    or to an ``ArrayField`` whose innermost elements are stored through an ``IntegerField``,
+    is asked of Django (``_unbindable_predicate``): the filter's own ``filter`` builds the
+    predicate and it is compiled on the database the filterset's queryset runs on
+    (``queryset.db``, resolved only for such a leaf). A transform of a temporal column
+    (``year``, ``month``) binds integers, and a duration binds its microsecond count on a
+    backend without a native interval, so the integers those leaves bind are asked too, and
+    so is every leaf whose lookup reads an integer transform's output whatever its column
+    (``filters/base.py::_reads_integer_transform``: an ``ArrayField``'s ``len``, a transform
+    a project registers with an ``IntegerField`` output). Every filter family also asks a
+    named queryset ``Transform`` alias such as ``ExtractYear`` or ``ExtractMonth`` through
+    that transform's actual output; a ``Count`` or ``F`` alias keeps its ordinary integer
+    member behavior. The filter's shipped predicate and Django's selected lookup/compiler
+    still own the bind verdict, including a package range's emitted ``gte`` / ``lte`` year
+    bounds. The actual terminal source Query, which can be scoped visible child rows rather
+    than the synthetic terminal parent's nonexistent queryset, owns transform eligibility.
     It reaches every filter family whatever value kind its form cleans to: a datetime on a
-    ``DateField`` or
-    through a ``date`` transform, a date on a ``DateTimeField``, an integer transform's
-    bound or member, a duration, each member of a list and each bound of a range,
-    as the filter applies them, and on an ``ArrayField`` each element a whole-array lookup
-    binds, the element an index or slice reaches and an array's length (an integer held
-    to its range), on an integer ``ArrayField`` each integer element it binds (held to the
-    element column's range), and on a decimal column each decimal it binds, whose spelling
-    PostgreSQL ``numeric``'s format holds whatever the column's ``max_digits`` (a
+    ``DateField`` or through a ``date`` transform, a date on a ``DateTimeField``, an integer
+    transform's bound or member, a duration, each member of a list and each bound of a
+    range, as the filter applies them, and on an ``ArrayField`` each element a whole-array
+    lookup binds, the element an index or slice reaches and an array's length (an integer
+    held to its range), on an integer ``ArrayField`` each integer element it binds (held to
+    the element column's range), and on a decimal column each decimal it binds, whose
+    spelling PostgreSQL ``numeric``'s format holds whatever the column's ``max_digits`` (a
     ``NumberFilter`` caps only a positive value, at ``1e50``). Only a ``filter``
-    django-filter or this package ships is run (``_runs_shipped_filter``): a ``filter``
-    of the filter's own (a ``method=`` included, ``_own_filter``) or a class-level
-    ``filter`` override is consumer code, which owns what its value means and is not
-    asked. A projected copy is asked through the child filter it runs, over its child
-    filter set's queryset; a flat
-    leaf walking a scoped target's annotation is asked through its rebound terminal and
-    visible rows (``filters/sets.py::_bind_ask_terminal_source``). A plain integer column
-    is not asked: its generated ``in`` drops a member past the column's range
+    django-filter or this package ships is run (``_runs_shipped_filter``): a ``filter`` of
+    the filter's own (a ``method=`` included, ``_own_filter``), a class-level ``filter``
+    override or a ``get_filter_predicate`` override is consumer code, which owns what its
+    value means and is not asked. A projected copy is asked through the child filter it
+    runs, over its child filter set's queryset; a flat leaf walking a scoped target's
+    annotation is asked through its rebound terminal and visible rows
+    (``filters/sets.py::_bind_ask_terminal_source``). A plain integer column is not asked:
+    its generated ``in`` drops a member past the column's range
     (``filters/base.py::_identifying_members``), and its comparisons are Django's own
-    range-aware ones. Every value asked is first held to its
-    integer column's range (``_held_integer_value``), so a decimal past it is asked as the
-    integer one past that end, never converted. The bound filter form runs it over its
-    ``cleaned_data`` once it cleans (``filters/form_binding.py::BindAskingFilterForm``), so
-    the refusal is a form error every driver reads, the raw ones included. ``rows`` and
-    ``names`` ask only the named values over the queryset ``filter_queryset`` receives, for
-    a value only that queryset resolves (``FilterSet._clean_late_comparisons``), so it is
-    asked as one over the queryset the set was handed is.
+    range-aware ones. Every value asked is first held to its integer column's range
+    (``_held_integer_value``), so a decimal past it is asked as the integer one past that
+    end, never converted. The bound filter form runs it over its ``cleaned_data`` once it
+    cleans (``filters/form_binding.py::BindAskingFilterForm``), so the refusal is a form
+    error every driver reads, the raw ones included. ``rows`` and ``names`` ask only the
+    named values over the queryset ``filter_queryset`` receives, for a value only that
+    queryset resolves (``FilterSet._clean_late_comparisons``), so it is asked as one over
+    the queryset the set was handed is.
     """
     # django-filter's ``BaseFilterSet.__init__`` stores the model's default queryset when
     # handed none; its stub types the attribute ``QuerySet[Any] | None``.
@@ -4710,10 +4825,9 @@ class FilterSet(
         refused first (``_reject_foreign_projection``), and so are a GlobalID or
         model-choice filter on a relation no row identity is compared on
         (``filters/base.py::refuse_identityless_relation``) and a leaf running a shipped
-        ``filter`` (``_runs_shipped_filter``) whose path ends on, or continues past, a
-        relation Django builds no join for
-        (``filters/inputs.py::refuse_joinless_relation``), whose ``field_name`` and
-        ``lookup_expr`` Django resolves on no queryset
+        ``filter`` (``_runs_shipped_filter``) whose ``field_name`` names a relation Django
+        builds no join for (``filters/inputs.py::refuse_joinless_relation``), whose
+        ``field_name`` and ``lookup_expr`` Django resolves on no queryset
         (``filters/base.py::refuse_unresolvable_lookup``) or, on a ``ListFilter`` /
         ``ArrayFilter``, whose lookup compares one value where the filter applies a list
         (``filters/base.py::refuse_listless_lookup``), and a model-choice filter with no
@@ -7964,7 +8078,8 @@ class FilterSet(
         Distinct-free (``_invoke_suppressing_framework_distinct``), with the
         ``QuerySet`` return assertion ``BaseFilterSet.filter_queryset`` makes.
         """
-        result = self._invoke_suppressing_framework_distinct(filter_instance, rows, value)
+        with _joinless_restated(type(self), filter_instance, rows):
+            result = self._invoke_suppressing_framework_distinct(filter_instance, rows, value)
         assert truth.is_instance(result, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
             f"Expected '{truth.kind(self)}' filter {filter_instance.field_name!r} "
             f"to return a QuerySet, but got a {truth.kind(result)} instead."
@@ -8052,14 +8167,14 @@ class FilterSet(
 
         A ``ProjectedChildFilter`` reads its projection's hop, then whatever its child filter
         reads in the child set (its own hops, or none: the child filter itself runs over the
-        hop's visible rows). A walked leaf reads its walk's hops (``_flat_leaf_walk``,
-        declared and undeclared) and runs, as a filter of the last hop's target set (or of the
-        face an undeclared hop's rows offer, ``_UndeclaredHopSet``), over the path left on
-        that target. A relation-key leaf compares the last hop's key, re-read so the
-        comparison sees only rows the hop shows: an ``isnull`` leaf tests the target's primary
-        key (a visible row's key is never ``NULL``, so only "no visible related row" matches
-        ``True``); a GlobalID leaf decoding its value as shipped (``_decodes_before_binding``)
-        whose target's id an annotation of the target type's ``get_queryset`` holds
+        hop's visible rows). A walked leaf reads its walk's hops (``_flat_leaf_walk``, declared
+        and undeclared) and runs, as a filter of the last hop's target set (or of the face an
+        undeclared hop's rows offer, ``_UndeclaredHopSet``), over the path left on that target.
+        A relation-key leaf compares the last hop's key, re-read so the comparison sees only
+        rows the hop shows: an ``isnull`` leaf tests the target's primary key (a visible row's
+        key is never ``NULL``, so only "no visible related row" matches ``True``); a GlobalID
+        leaf decoding its value as shipped (``_decodes_before_binding``) whose target's id an
+        annotation of the target type's ``get_queryset`` holds
         (``filters/base.py::_compares_target_annotation``) runs as its trailing-pk twin does,
         forward or to-many: re-bound to the target's primary key over the last hop's visible
         rows, which carry the annotation, with no predicate built first and no stored key
@@ -8069,22 +8184,23 @@ class FilterSet(
         column, the column Django's relation lookup compares (``_relation_key_value`` reads
         model-choice values there), once Django builds the leaf's predicate as declared
         (``_LeafChain.terminal_value``), so the column answers only the lookups and values the
-        relation accepts. A relation-key leaf running consumer code (``_runs_shipped_filter``:
-        a class-level ``filter`` override) on a to-many path, or on a forward path two or more
-        hops long, runs once as declared (its own ``field_name``, the value its form cleaned,
-        the rows of this set) when its value names rows of the relation's target, and a row it
-        keeps must reach, through each hop's visible rows, a visible last-hop row its value
-        names (``_LeafChain.key_match``), compared on the column Django's relation lookup
-        compares; its chain carries, as ``fallback``, the chain a value naming no row runs
-        (``FilterSet._request_chain``): on a forward path the leaf comparing the stored key it
-        holds (``_folded_key_chain``), on a to-many path the leaf as declared over the rows of
-        this set, its ``field_name`` bound to its relation joined through each hop's visible
-        rows (``_LeafChain.view``, ``_relation_view``), or, where a many-to-many on the path
-        names no through key (``_names_every_through``), the leaf re-bound to the target key
-        over the visible target rows. A forward ``RelatedFilter`` head running consumer code,
-        one hop or more, carries as ``null_view`` the chain its own ``null_value`` reads
-        (``_head_null_view``). Every declared hop's target set resolves: a caller derives the
-        hops first, or checks ``_walks_unresolved_hop`` and leaves such a leaf alone.
+        relation accepts. A relation-key leaf running consumer code (``_runs_shipped_filter``: a
+        class-level ``filter`` or ``get_filter_predicate`` override) on a to-many path, or on a
+        forward path two or more hops long, runs once as declared (its own ``field_name``, the
+        value its form cleaned, the rows of this set) when its value names rows of the
+        relation's target, and a row it keeps must reach, through each hop's visible rows, a
+        visible last-hop row its value names (``_LeafChain.key_match``), compared on the column
+        Django's relation lookup compares; its chain carries, as ``fallback``, the chain a value
+        naming no row runs (``FilterSet._request_chain``): on a forward path the leaf comparing
+        the stored key it holds (``_folded_key_chain``), on a to-many path the leaf as declared
+        over the rows of this set, its ``field_name`` bound to its relation joined through each
+        hop's visible rows (``_LeafChain.view``, ``_relation_view``), or, where a many-to-many
+        on the path names no through key (``_names_every_through``), the leaf re-bound to the
+        target key over the visible target rows. A forward ``RelatedFilter`` head running
+        consumer code, one hop or more, carries as ``null_view`` the chain its own
+        ``null_value`` reads (``_head_null_view``). Every declared hop's target set resolves: a
+        caller derives the hops first, or checks ``_walks_unresolved_hop`` and leaves such a
+        leaf alone.
         """
         if isinstance(filter_instance, ProjectedChildFilter):
             projection = filter_instance._projection
@@ -9275,7 +9391,8 @@ class FilterSet(
                 continue
             routed = candidate is not None and candidate.routable
             if not routed:
-                queryset = filter_instance.filter(queryset, value)
+                with _joinless_restated(type(self), filter_instance, queryset):
+                    queryset = filter_instance.filter(queryset, value)
                 assert truth.is_instance(queryset, models.QuerySet), (  # noqa: S101 - same assertion as django-filter's filter_queryset
                     f"Expected '{truth.kind(self)}.{name}' to return a QuerySet, "
                     f"but got a {truth.kind(queryset)} instead."

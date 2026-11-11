@@ -35,12 +35,15 @@ filter table at its first construction, under a consumer's own call, DRF's
 ``DjangoFilterBackend`` and django-filter's ``FilterView`` alike: a walked key one or two hops
 deep answers ``BookFilter``'s rows as each viewer sees them, and a declaration Django answers
 no request for (a ``range`` over a relation, a GlobalID, model-choice, column-typed, choice or
-null-test filter over a ``GenericForeignKey`` or whose path continues past one
-(``content_object__name``, past a key, past a ``GenericRelation``, a ``lookup_expr`` carrying a
-key's path onto one), a model-choice filter with no queryset, declared or selected by
-``Meta.filter_overrides``) is refused at every construction, while a name past a key the
-related model lacks (``desk__bogus``) publishes and a filter on the content type key beside a
-``GenericForeignKey`` or on the ``GenericRelation`` reversing it answers its rows.
+null-test filter over a ``GenericForeignKey``, a model-choice filter with no queryset, declared
+or selected by ``Meta.filter_overrides``) is refused at every construction, while a name past a
+key the related model lacks (``desk__bogus``) publishes and a filter on the content type key
+beside a ``GenericForeignKey`` or on the ``GenericRelation`` reversing it answers its rows. A
+filter whose path continues past one (``content_object__name``, past a key, a ``lookup_expr``
+carrying a key's path onto one, from a ``RelatedFilter`` child) answers a queryset annotation
+of the path on every driver and, over rows annotating none, a ``ConfigurationError`` naming the
+key when it applies, while the annotation's own refusal of a lookup stays Django's
+``FieldError``.
 A raw key starting at a ``FilteredRelation`` alias the set's ``filter_queryset`` adds reads
 the visibility of the shelf the alias joins and of the branch past it, under every driver.
 A raw key past a self relation reads the parent type's annotation of its name while the set's
@@ -78,7 +81,10 @@ from django.db.models import (
     IntegerField,
     Lookup,
     Model,
+    OuterRef,
     QuerySet,
+    Subquery,
+    Value,
 )
 from django.db.models.functions import Upper
 from django.db.models.sql.compiler import SQLCompiler
@@ -406,6 +412,72 @@ class _NamePastRelationItLacksSet(FilterSet):
         fields = ("name",)
 
 
+class _YearPastGenericSet(FilterSet):
+    """A ``year`` lookup past the ``GenericForeignKey``: the annotation it names is text."""
+
+    object_year = django_filters.CharFilter(field_name="content_object__name", lookup_expr="year")
+
+    class Meta:
+        model = library_models.TaggedItem
+        fields = ("tag",)
+
+
+class _DeskPastGenericChild(FilterSet):
+    """A desk set filtering past its ``GenericForeignKey``, a text name and a number."""
+
+    held = django_filters.CharFilter(field_name="content_object__name")
+    held_id = django_filters.NumberFilter(field_name="content_object__id")
+
+    class Meta:
+        model = library_models.CirculationDesk
+        fields = ("name",)
+
+
+class _DeskPastGenericRouteSet(FilterSet):
+    """A ``Branch`` set reaching ``_DeskPastGenericChild`` through its desks."""
+
+    circulation_desks = RelatedFilter(_DeskPastGenericChild, field_name="circulation_desks")
+
+    class Meta:
+        model = library_models.Branch
+        fields = ("name",)
+
+
+def _object_branch_name(object_id: str) -> Subquery:
+    """The name of the branch whose key the ``object_id`` path holds: the tagged object's."""
+    return Subquery(
+        library_models.Branch.objects.filter(pk=OuterRef(object_id)).values("name")[:1],
+    )
+
+
+def _tags_naming_their_branch() -> QuerySet[Model]:
+    """The tags, annotating ``content_object__name`` as the name of the branch each tags."""
+    return library_models.TaggedItem.objects.annotate(
+        content_object__name=_object_branch_name("object_id"),
+    ).order_by("pk")
+
+
+def _tags_naming_a_constant() -> QuerySet[Model]:
+    """The tags, annotating ``content_object__name`` as the one text ``"visible"``."""
+    return library_models.TaggedItem.objects.annotate(
+        content_object__name=Value("visible"),
+    ).order_by("pk")
+
+
+def _shifts_keying_their_desk_object() -> QuerySet[Model]:
+    """The shifts, annotating ``desk__content_object__id`` as their desk's object id."""
+    return library_models.DeskShift.objects.annotate(
+        desk__content_object__id=F("desk__object_id"),
+    ).order_by("pk")
+
+
+def _shifts_naming_their_desk_object() -> QuerySet[Model]:
+    """The shifts, annotating ``desk__content_object__name`` as their desk's branch name."""
+    return library_models.DeskShift.objects.annotate(
+        desk__content_object__name=_object_branch_name("desk__object_id"),
+    ).order_by("pk")
+
+
 class _ContentTypeColumnSet(FilterSet):
     """A ``NumberFilter`` on the content type key a ``GenericForeignKey`` reads: a column."""
 
@@ -611,6 +683,12 @@ _RAW_SETS: dict[str, type[FilterSet]] = {
     "lazy-field-name-past-a-generic-key": _LazyPastGenericSet,
     "lazy-lookup-expr-onto-a-generic-key": _LazyLookupExprOntoGenericSet,
     "name-past-a-relation-its-model-lacks": _NamePastRelationItLacksSet,
+    "char-past-a-generic-key-annotated": _CharPastGenericSet,
+    "char-past-a-generic-key-held-as-a-constant": _CharPastGenericSet,
+    "number-past-a-key-past-a-generic-key-annotated": _NumberPastKeyPastGenericSet,
+    "lookup-expr-past-a-key-onto-a-generic-key-annotated": _LookupExprOntoGenericSet,
+    "year-past-a-generic-key-held-as-a-constant": _YearPastGenericSet,
+    "route-past-a-generic-key": _DeskPastGenericRouteSet,
     "content-type-column": _ContentTypeColumnSet,
     "generic-relation": _GenericRelationSet,
     "model-choice-with-no-queryset": _QuerysetlessChoiceSet,
@@ -620,8 +698,22 @@ _RAW_SETS: dict[str, type[FilterSet]] = {
 }
 
 
-def _raw_set_rows(filterset_class: type[FilterSet]) -> QuerySet[Model]:
-    model = filterset_class._meta.model
+#: The rows a driver route hands its set in place of the model's own, by route name: each
+#: annotates a name of the path its filter continues past a ``GenericForeignKey`` on.
+_ANNOTATED_ROWS: dict[str, Callable[[], QuerySet[Model]]] = {
+    "char-past-a-generic-key-annotated": _tags_naming_their_branch,
+    "char-past-a-generic-key-held-as-a-constant": _tags_naming_a_constant,
+    "number-past-a-key-past-a-generic-key-annotated": _shifts_keying_their_desk_object,
+    "lookup-expr-past-a-key-onto-a-generic-key-annotated": _shifts_naming_their_desk_object,
+    "year-past-a-generic-key-held-as-a-constant": _tags_naming_a_constant,
+}
+
+
+def _raw_set_rows(name: str) -> QuerySet[Model]:
+    annotated = _ANNOTATED_ROWS.get(name)
+    if annotated is not None:
+        return annotated()
+    model = _RAW_SETS[name]._meta.model
     assert model is not None
     return model._default_manager.order_by("pk")
 
@@ -635,7 +727,7 @@ def _direct_rows(request: HttpRequest, name: str) -> JsonResponse:
     filterset_class = _RAW_SETS[name]
     filterset = filterset_class(
         data=request.GET,
-        queryset=_raw_set_rows(filterset_class),
+        queryset=_raw_set_rows(name),
         request=request,
     )
     return _row_ids(require(filterset.qs, is_queryset))
@@ -680,14 +772,14 @@ urlpatterns = [
                 f"raw-sets/backend/{name}/",
                 _BackendRowsView.as_view(
                     filterset_class=filterset_class,
-                    queryset=_raw_set_rows(filterset_class),
+                    queryset=_raw_set_rows(name),
                 ),
             ),
             path(
                 f"raw-sets/filter-view/{name}/",
                 _ListedRowsView.as_view(
                     filterset_class=filterset_class,
-                    queryset=_raw_set_rows(filterset_class),
+                    queryset=_raw_set_rows(name),
                 ),
             ),
         )
@@ -3557,38 +3649,6 @@ _REFUSED_SETS = {
         "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
         "through it, so no input can carry its value"
     ),
-    "char-past-a-generic-key": (
-        "_CharPastGenericSet: CharFilter on 'content_object__name' continues past "
-        "TaggedItem.content_object, a GenericForeignKey: Django filters no queryset through "
-        "it, so no input can carry its value; filter through the GenericRelation that "
-        "reverses it on the related model, or on the content type and object id columns it "
-        "reads."
-    ),
-    "number-past-a-key-past-a-generic-key": (
-        "_NumberPastKeyPastGenericSet: NumberFilter on 'desk__content_object__id' continues "
-        "past CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
-        "through it, so no input can carry its value"
-    ),
-    "global-id-past-a-generic-relation-past-a-generic-key": (
-        "_GlobalIDPastGenericRelationSet: GlobalIDFilter on 'tags__content_object__pk' "
-        "continues past TaggedItem.content_object, a GenericForeignKey: Django filters no "
-        "queryset through it, so no input can carry its value"
-    ),
-    "lookup-expr-past-a-key-onto-a-generic-key": (
-        "_LookupExprOntoGenericSet: CharFilter on 'desk' reads CirculationDesk.content_object, "
-        "a GenericForeignKey: Django filters no queryset through it, so no input can carry its "
-        "value"
-    ),
-    "lazy-field-name-past-a-generic-key": (
-        "_LazyPastGenericSet: CharFilter on 'desk__content_object__name' continues past "
-        "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
-        "through it, so no input can carry its value"
-    ),
-    "lazy-lookup-expr-onto-a-generic-key": (
-        "_LazyLookupExprOntoGenericSet: NumberFilter on 'desk' reads "
-        "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
-        "through it, so no input can carry its value"
-    ),
     "model-choice-with-no-queryset": (
         "FilterSet _QuerysetlessChoiceSet: ModelChoiceFilter 'branch_is' has field_name 'branch' "
         "and no queryset, so the model-choice form field it builds has no rows to look a value "
@@ -3683,9 +3743,10 @@ def test_a_raw_set_filtering_the_columns_beside_a_generic_key_answers_their_rows
 def test_a_raw_set_naming_a_name_past_a_relation_its_model_lacks_publishes(driver: str) -> None:
     """A name past a key the related model lacks is left to the request: the set publishes.
 
-    Unlike a name past a ``GenericForeignKey``, a hop's rows could hold it (a type's
-    ``get_queryset`` annotating it), so its set publishes and a request sending no value
-    answers every row on every driver.
+    A hop's rows could hold it (a type's ``get_queryset`` annotating it), so its set
+    publishes and a request sending no value answers every row on every driver; over rows
+    holding none, a value answers Django's own ``FieldError``, which names no
+    ``GenericForeignKey`` to restate.
     """
     create_users(1)
     branch = library_models.Branch.objects.create(name="desk-branch")
@@ -3701,6 +3762,281 @@ def test_a_raw_set_naming_a_name_past_a_relation_its_model_lacks_publishes(drive
         saved_pk(shift),
     ]
     assert _RAW_SETS["name-past-a-relation-its-model-lacks"]._expansion_snapshot() is not None
+    with pytest.raises(FieldError) as refused:
+        _ = _raw_set_ids(
+            client,
+            driver,
+            "name-past-a-relation-its-model-lacks",
+            {"desk_bogus": "x"},
+        )
+    assert str(refused.value).startswith("Unsupported lookup 'bogus__exact' for ForeignKey"), (
+        refused.value
+    )
+
+
+class _TaggedWorld(NamedTuple):
+    """Two branches, a tag and a desk on each, and a shift at each desk, by branch name."""
+
+    branches: dict[str, int]
+    tags: dict[str, int]
+    shifts: dict[str, int]
+
+
+def _tagged_world() -> _TaggedWorld:
+    """``Target`` and ``Sibling``, each tagged and the content object of a desk with a shift."""
+    branch_type = ContentType.objects.get_for_model(library_models.Branch)
+    branches: dict[str, int] = {}
+    tags: dict[str, int] = {}
+    shifts: dict[str, int] = {}
+    for name in ("Target", "Sibling"):
+        branch = library_models.Branch.objects.create(name=name, city="Boston")
+        branches[name] = saved_pk(branch)
+        tags[name] = saved_pk(
+            library_models.TaggedItem.objects.create(content_object=branch, tag=name.lower()),
+        )
+        desk = library_models.CirculationDesk.objects.create(
+            name=f"desk-{name}",
+            branch=branch,
+            shelf=library_models.Shelf.objects.create(code=f"s-{name}", branch=branch),
+            content_type=branch_type,
+            object_id=saved_pk(branch),
+        )
+        shifts[name] = saved_pk(
+            library_models.DeskShift.objects.create(name=f"shift-{name}", desk=desk),
+        )
+    return _TaggedWorld(branches, tags, shifts)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_set_filtering_past_a_generic_key_reads_the_queryset_annotation(
+    driver: str,
+) -> None:
+    """A path past a ``GenericForeignKey`` names the annotation of the rows the set is handed.
+
+    Django reads an annotation under the path before it walks a field, so the set publishes
+    and each driver answers the rows the annotation keeps: a ``Subquery`` naming the tagged
+    branch, a constant every tag holds, a key past the desk's key, and a ``lookup_expr``
+    carrying a key's path onto one.
+    """
+    create_users(1)
+    world = _tagged_world()
+    client = _raw_set_client("anonymous")
+
+    by_name = {"object_name": "Target"}
+    assert _raw_set_ids(client, driver, "char-past-a-generic-key-annotated", by_name) == [
+        world.tags["Target"],
+    ]
+    constant = "char-past-a-generic-key-held-as-a-constant"
+    assert _raw_set_ids(client, driver, constant, {"object_name": "visible"}) == [
+        world.tags["Target"],
+        world.tags["Sibling"],
+    ]
+    assert _raw_set_ids(client, driver, constant, by_name) == []
+    by_key = {"desk_object": str(world.branches["Sibling"])}
+    assert _raw_set_ids(
+        client,
+        driver,
+        "number-past-a-key-past-a-generic-key-annotated",
+        by_key,
+    ) == [
+        world.shifts["Sibling"],
+    ]
+    carried = "lookup-expr-past-a-key-onto-a-generic-key-annotated"
+    assert _raw_set_ids(client, driver, carried, {"desk_object": "targ"}) == [
+        world.shifts["Target"],
+    ]
+
+
+_UNANNOTATED_REMEDY = (
+    ": Django filters no queryset through it, so no input can carry its value; filter through "
+    "the GenericRelation that reverses it on the related model, or on the content type and "
+    "object id columns it reads, or annotate a name of the path on the queryset the set "
+    "filters (a type's get_queryset, the queryset handed to the set, or a filter_queryset "
+    "override)."
+)
+
+#: Each set filtering past a ``GenericForeignKey`` over rows annotating no name of the path:
+#: (the key and value its request sends, the refusal's subject).
+_UNANNOTATED_PAST_SETS: dict[str, tuple[dict[str, str], str]] = {
+    "char-past-a-generic-key": (
+        {"object_name": "Target"},
+        (
+            "_CharPastGenericSet: CharFilter on 'content_object__name' continues past "
+            "TaggedItem.content_object, a GenericForeignKey"
+        ),
+    ),
+    "number-past-a-key-past-a-generic-key": (
+        {"desk_object": "1"},
+        (
+            "_NumberPastKeyPastGenericSet: NumberFilter on 'desk__content_object__id' continues "
+            "past CirculationDesk.content_object, a GenericForeignKey"
+        ),
+    ),
+    "lookup-expr-past-a-key-onto-a-generic-key": (
+        {"desk_object": "targ"},
+        (
+            "_LookupExprOntoGenericSet: CharFilter on 'desk' reads "
+            "CirculationDesk.content_object, a GenericForeignKey"
+        ),
+    ),
+    "global-id-past-a-generic-relation-past-a-generic-key": (
+        {"tag_object": str(strawberry.relay.GlobalID("BranchType", "1"))},
+        (
+            "_GlobalIDPastGenericRelationSet: GlobalIDFilter on 'tags__content_object__pk' "
+            "continues past TaggedItem.content_object, a GenericForeignKey"
+        ),
+    ),
+    "lazy-field-name-past-a-generic-key": (
+        {"desk_object": "Target"},
+        (
+            "_LazyPastGenericSet: CharFilter on 'desk__content_object__name' continues past "
+            "CirculationDesk.content_object, a GenericForeignKey"
+        ),
+    ),
+    "lazy-lookup-expr-onto-a-generic-key": (
+        {"desk_object": "1"},
+        (
+            "_LazyLookupExprOntoGenericSet: NumberFilter on 'desk' reads "
+            "CirculationDesk.content_object, a GenericForeignKey"
+        ),
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("name", sorted(_UNANNOTATED_PAST_SETS))
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_set_filtering_past_a_generic_key_over_unannotated_rows_is_refused_when_it_applies(
+    driver: str,
+    name: str,
+) -> None:
+    """Over rows annotating no name of its path, the filter is refused when a value applies.
+
+    The set publishes (a request sending no value answers every row), and its form cleans
+    the value; applying it, Django's ``FieldError`` is restated as the refusal naming the key
+    the path continues past (or reads), with the annotation as a remedy, at every request.
+    """
+    create_users(1)
+    world = _tagged_world()
+    client = _raw_set_client("anonymous")
+    query, subject = _UNANNOTATED_PAST_SETS[name]
+    model = _RAW_SETS[name]._meta.model
+    assert model is not None
+    rows_of: dict[type[Model], dict[str, int]] = {
+        library_models.TaggedItem: world.tags,
+        library_models.DeskShift: world.shifts,
+        library_models.Branch: world.branches,
+    }
+    every = rows_of[model]
+
+    assert _raw_set_ids(client, driver, name, {}) == list(every.values())
+    for _ in range(2):
+        with pytest.raises(ConfigurationError) as refused:
+            _ = _raw_set_ids(client, driver, name, query)
+        assert str(refused.value) == f"{subject}{_UNANNOTATED_REMEDY}"
+        assert type(refused.value.__cause__) is FieldError, refused.value.__cause__
+    filterset = _RAW_SETS[name](data=query, queryset=_raw_set_rows(name))
+    assert filterset.is_valid(), filterset.errors
+    with pytest.raises(ConfigurationError):
+        _ = filterset.qs
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_set_past_a_generic_key_whose_annotation_refuses_the_lookup_raises_djangos_error(
+    driver: str,
+) -> None:
+    """Where the rows annotate the path, Django's own refusal of the lookup stands.
+
+    The annotation holds the name, so the ``year`` lookup Django refuses on its text output is
+    Django's ``FieldError``, never restated as the ``GenericForeignKey`` the path names.
+    """
+    create_users(1)
+    _ = _tagged_world()
+    client = _raw_set_client("anonymous")
+    name = "year-past-a-generic-key-held-as-a-constant"
+
+    assert len(_raw_set_ids(client, driver, name, {})) == 2
+    with pytest.raises(FieldError) as refused:
+        _ = _raw_set_ids(client, driver, name, {"object_year": "2020"})
+    assert str(refused.value).startswith("Unsupported lookup 'year' for CharField"), refused.value
+
+
+def _register_desk_type(*, annotated: bool) -> None:
+    """Serve desks through a type whose ``get_queryset`` annotates their object's name and key."""
+
+    class PastGenericDeskType(DjangoType):
+        class Meta:
+            model = library_models.CirculationDesk
+            fields = ("id", "name")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[library_models.CirculationDesk],
+            info: Info,
+        ) -> QuerySet[library_models.CirculationDesk]:
+            if not annotated:
+                return queryset
+            return queryset.annotate(
+                content_object__name=_object_branch_name("object_id"),
+                content_object__id=F("object_id"),
+            )
+
+    del PastGenericDeskType
+    finalize_django_types()
+
+
+_ROUTE_SUBJECT = (
+    "_DeskPastGenericChild.{name}: {kind} on {path!r} (reached through "
+    "_DeskPastGenericRouteSet.circulation_desks) continues past CirculationDesk.content_object, "
+    "a GenericForeignKey"
+)
+
+
+#: Each leaf of ``_DeskPastGenericChild``: its class, its path and the branch its value names.
+_ROUTE_PAST_LEAVES: dict[str, tuple[str, str, str]] = {
+    "held": ("CharFilter", "content_object__name", "Target"),
+    "held_id": ("NumberFilter", "content_object__id", "Sibling"),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("annotated", [True, False], ids=["annotated", "plain"])
+@pytest.mark.parametrize("leaf", sorted(_ROUTE_PAST_LEAVES))
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_route_past_a_generic_key_reads_the_target_types_annotation(
+    driver: str,
+    leaf: str,
+    *,
+    annotated: bool,
+) -> None:
+    """A flat key reaching a child's filter past the key reads the desk type's annotation.
+
+    The child's copy filters the desks the branch restriction reads, the rows the desk type
+    answers: where its ``get_queryset`` annotates the path, the branch whose desk's object
+    the value names; where it annotates none, the refusal naming the child's filter and the
+    route reaching it.
+    """
+    create_users(1)
+    world = _tagged_world()
+    _register_desk_type(annotated=annotated)
+    client = _raw_set_client("anonymous")
+    name = "route-past-a-generic-key"
+    kind, path, branch = _ROUTE_PAST_LEAVES[leaf]
+    value = branch if leaf == "held" else str(world.branches[branch])
+    query = {f"circulation_desks__{leaf}": value}
+
+    assert _raw_set_ids(client, driver, name, {}) == list(world.branches.values())
+    if annotated:
+        assert _raw_set_ids(client, driver, name, query) == [world.branches[branch]]
+        return
+    with pytest.raises(ConfigurationError) as refused:
+        _ = _raw_set_ids(client, driver, name, query)
+    subject = _ROUTE_SUBJECT.format(name=leaf, kind=kind, path=path)
+    assert str(refused.value) == f"{subject}{_UNANNOTATED_REMEDY}", refused.value
 
 
 #: (raw key and value, the titles each viewer's request answers, by set)
