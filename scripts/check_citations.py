@@ -197,6 +197,7 @@ SYNTHETIC_SOURCES = frozenset(
         "tests/test_prove_failability.py",
         "tests/test_review_changed_python_diffs.py",
         "tests/test_review_inspect.py",
+        "tests/test_typing_delta.py",
     },
 )
 

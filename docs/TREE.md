@@ -576,6 +576,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_shared_checkout_guard.py # Tests for ``scripts/shared_checkout_guard.py``: the Claude edit hook and the pytest guard.
 ├── test_sqlite_rows.py           # Script tests for ``scripts/_sqlite_rows.py``, the row-level merge ``work.py land`` runs.
 ├── test_strawberry_patches.py    # Tests for the Strawberry request-body and Relay patches.
+├── test_typing_delta.py          # Script tests for the typing-change report in ``scripts/typing_delta.py``.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
 ├── test_work.py                  # Repo-tooling tests for the private-working-copy manager's names, copies, pins, landing and cleanup.
@@ -963,6 +964,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_shared_checkout_guard.py # Tests for ``scripts/shared_checkout_guard.py``: the Claude edit hook and the pytest guard.
 ├── test_sqlite_rows.py           # Script tests for ``scripts/_sqlite_rows.py``, the row-level merge ``work.py land`` runs.
 ├── test_strawberry_patches.py    # Tests for the Strawberry request-body and Relay patches.
+├── test_typing_delta.py          # Script tests for the typing-change report in ``scripts/typing_delta.py``.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
 ├── test_work.py                  # Repo-tooling tests for the private-working-copy manager's names, copies, pins, landing and cleanup.
