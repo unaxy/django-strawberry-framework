@@ -153,7 +153,7 @@ is the audit ledger. Load-bearing entries:
   `allLibraryGenresConnection`) plus the reverse-FK acceptance surface
   (`LoanType.Meta.search_fields = ("note", "book__loans__patron__email")`
   over an acceptance-only `DjangoConnectionField(LoanType)` — the shared
-  Customer reproduction fixture, Decision 7), live HTTP tests under
+  production reproduction fixture, Decision 7), live HTTP tests under
   `examples/fakeshop/test_query/` covering the required-live-case list in
   the Test plan (to-many row preservation, the Category permission gate,
   related-row visibility, the walked `queryset=` scope, undeclared hops,
@@ -823,9 +823,9 @@ would be a second visibility mechanism
 Two to-many search-path categories are proven independently (neither test
 subsumes the other):
 
-- **a reverse FK after a to-one prefix**, matching the Customer
+- **a reverse FK after a to-one prefix**, matching the
   production topology — earned through the shared reproduction fixture
-  (`examples/fakeshop/test_query/test_library_api.py::_seed_customer_loan_graph`:
+  (`examples/fakeshop/test_query/test_library_api.py::_seed_reproduction_loan_graph`:
   `Loan.book -> Book.loans -> Loan.patron -> Patron.email` with its four
   named loans and ordered-sequence oracle). This card's integration use: declare
   `LoanType.Meta.search_fields = ("note", "book__loans__patron__email")`
@@ -861,7 +861,7 @@ Why the reverse-FK fixture exists: NOT because Django cannot detect
 reverse-FK fan-out — at the compatibility
 floor Django's own `PathInfo.m2m` flags an ordinary non-unique reverse FK
 as multiplying, and admin's `lookup_spawns_duplicates()` returns `True`
-for the complete Customer path. Detecting possible fan-out is
+for the complete production path. Detecting possible fan-out is
 insufficient: the package must compile the correct row-preserving query
 and prove its observable GraphQL cardinality (exact ordered IDs,
 `totalCount`, page boundaries). Accordingly, search consumes the frozen
@@ -1269,7 +1269,7 @@ ship-it-today-defer-the-real-fix shape [`AGENTS.md`][agents] forbids.
 
 ### Decision 14 — Search scope is type-definition-wide and immutable
 
-The Customer production reproduction surfaces a second application concern beyond
+The production reproduction surfaces a second application concern beyond
 cardinality: the same DRF viewset intentionally exposes group-name search
 on one action and withholds it from three others, via
 `SearchFilter.get_search_fields(view, request)` action/request dynamism.
@@ -1299,8 +1299,8 @@ separately demonstrated GraphQL use case — adding one now would work
 against the Meta-first, nothing-hand-rolled north star
 ([`GOAL.md`][goal]).
 
-Representing a DRF action-dependent policy (the Customer
-Rotations-vs-Academic-Progress split) therefore takes distinct type
+Representing a DRF action-dependent policy (one viewset's
+list-vs-detail split) therefore takes distinct type
 definitions — one per scope — and the migration documentation states the
 mechanics plainly rather than implying a transparent port: both types
 register over one model, so one must set `Meta.primary = True`; Relay
@@ -1633,7 +1633,7 @@ library cases in `test_library_api.py`, inline creates):
   different fields — a case term-AND would pass but phrase semantics
   reject); `%`, `_`, and quotes as literals; the over-cap abuse case and
   its typed error shape.
-- **The reverse-FK Customer reproduction** (library, the shared
+- **The reverse-FK production reproduction** (library, the shared
   Part 1 fixture — Decision 7):
   `LoanType.Meta.search_fields = ("note", "book__loans__patron__email")`
   over the acceptance-only `allLibraryLoansConnection` — exact
@@ -1704,7 +1704,7 @@ library cases in `test_library_api.py`, inline creates):
   in the example schema.
 - Nested-connection search: correct results under the per-parent
   fallback, no dead cached window, strictness reporting behavior.
-- Compatibility floor: the live Customer-shaped search reproduction runs
+- Compatibility floor: the live production-shaped search reproduction runs
   under **Python 3.10 with an exact `Django==5.2.16` pin** (isolated venv
   per the matrix-testing rule — `Django>=5.2.16` resolves to the newest
   compatible release and proves nothing about the floor), through the real
@@ -1893,7 +1893,7 @@ compiler shape.
   `_bind_filtersets`, and the cycle-safe `utils/connections.py` home for
   `active_search` (lazy-subpackage import pin extended).
 - [ ] Search scope is immutable and type-definition-wide (Decision 14);
-  the reverse-FK Customer reproduction (shared Part 1 fixture) and
+  the reverse-FK production reproduction (shared Part 1 fixture) and
   the row-boundary phrase oracle pass live with exact ordered IDs,
   `totalCount`, and page boundaries; the borrowing docs state both DRF
   `SearchFilter` divergences together.
@@ -1913,7 +1913,7 @@ compiler shape.
   set or adding a selected column (every arm's `EXISTS` is a `WHERE`
   condition).
 - [ ] The non-gating PostgreSQL plan-evidence artifact is retained.
-- [ ] The exact compatibility floor is proven: the live Customer-shaped
+- [ ] The exact compatibility floor is proven: the live production-shaped
   search reproduction passes under Python 3.10 + `Django==5.2.16`, and
   the latest-Django job stays green.
 - [ ] Slice 5 card-local docs updated; GLOSSARY moves to the precise

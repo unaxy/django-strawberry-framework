@@ -2900,7 +2900,7 @@ def test_postgres_finds_the_fakeshop_container_by_identity_not_port(
         {
             "Id": "aaaaaaaaaaaa1111",
             "Config": {
-                "Env": ["POSTGRES_USER=customer", "POSTGRES_DB=customer"],
+                "Env": ["POSTGRES_USER=otherapp", "POSTGRES_DB=otherapp"],
                 "Labels": dict[str, str](),
             },
             "NetworkSettings": {"Ports": {"5432/tcp": [{"HostPort": "2345"}]}},

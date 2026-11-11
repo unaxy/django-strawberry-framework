@@ -31,12 +31,12 @@ pattern = '\]\((?!https?://|mailto:|#)([^)\s]+)\)'
 replacement = '](https://github.com/unaxy/django-strawberry-framework/blob/main/\1)'
 
 [tool.hatch.build.targets.sdist]
-# Ship the package, tests, and key metadata only. Without this, hatchling's default
-# sdist tars the whole tree — internal docs/SPECS, examples/ (with sqlite DBs), and
-# any local .claude/ state — into a ~7 MB archive.
+# Ship the package and key metadata only. Without this, hatchling's default sdist
+# tars the whole tree — internal docs/SPECS, examples/ (with sqlite DBs), and any
+# local .claude/ state — into a ~7 MB archive. tests/ stays out: it needs examples/
+# and scripts/, so it cannot run from an unpacked sdist.
 include = [
     "/django_strawberry_framework",
-    "/tests",
     "/README.md",
     "/LICENSE",
     "/LICENSE.django",

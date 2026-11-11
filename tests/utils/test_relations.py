@@ -672,7 +672,7 @@ def test_classify_path_reverse_o2o_is_row_preserving() -> None:
 
 
 def test_classify_path_named_reverse_fk_behind_to_one_prefix() -> None:
-    """The named Customer category: a reverse FK behind a to-one prefix.
+    """The named production category: a reverse FK behind a to-one prefix.
 
     ``Loan.book -> Book.loans -> Loan.patron -> Patron.email`` contains NO
     ``ManyToManyField``; the row-multiplying hop is the mid-path reverse FK, so

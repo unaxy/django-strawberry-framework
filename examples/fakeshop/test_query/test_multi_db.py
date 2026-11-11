@@ -1041,7 +1041,7 @@ def _seed_loan_relation_graph_on_shard_b() -> dict[str, int]:
     the captured pks (``unique_open_loan_per_book_patron`` forbids repeating a
     ``(book, patron)`` pair, so patrons are distinct per loan).
     """
-    branch = models.Branch.objects.using("shard_b").create(name="Shard Customer", city="Boston")
+    branch = models.Branch.objects.using("shard_b").create(name="Shard Central", city="Boston")
     shelf = models.Shelf.objects.using("shard_b").create(
         code="SHARD-MED-1",
         topic="ward",

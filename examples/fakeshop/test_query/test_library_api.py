@@ -218,8 +218,8 @@ def _seed_branch_with_two_shelves(name: str = "Override") -> None:
     models.Shelf.objects.create(code="B-2", topic="Second floor", branch=branch)
 
 
-class _CustomerLoanGraph(NamedTuple):
-    """Captured pks of the four root loans seeded by ``_seed_customer_loan_graph``.
+class _ReproductionLoanGraph(NamedTuple):
+    """Captured pks of the four root loans seeded by ``_seed_reproduction_loan_graph``.
 
     The four-loan graph separates related-path and direct-note matches.
     Pks are captured at creation time; assertions compare against these
@@ -232,8 +232,8 @@ class _CustomerLoanGraph(NamedTuple):
     unrelated: int
 
 
-def _seed_customer_loan_graph() -> _CustomerLoanGraph:
-    """Seed the shared Customer reproduction graph on the library models.
+def _seed_reproduction_loan_graph() -> _ReproductionLoanGraph:
+    """Seed the shared production reproduction graph on the library models.
 
     Four root loans over three books and four patrons (distinct patrons per loan
     - ``unique_open_loan_per_book_patron`` forbids repeating a ``(book, patron)``
@@ -249,7 +249,7 @@ def _seed_customer_loan_graph() -> _CustomerLoanGraph:
     - ``unrelated``: on ``third_book``, note "routine checkout", patron email
       "Ortho" (matches neither leaf).
     """
-    branch = models.Branch.objects.create(name="Customer Central", city="Boston")
+    branch = models.Branch.objects.create(name="Central Branch", city="Boston")
     shelf = models.Shelf.objects.create(branch=branch, code="MED-1", topic="ward")
     shared_book = models.Book.objects.create(shelf=shelf, title="Shared Ward Manual")
     second_book = models.Book.objects.create(shelf=shelf, title="Second Manual")
@@ -281,7 +281,7 @@ def _seed_customer_loan_graph() -> _CustomerLoanGraph:
         note="routine checkout",
     )
 
-    return _CustomerLoanGraph(
+    return _ReproductionLoanGraph(
         relation_and_direct=saved_pk(relation_and_direct.pk),
         relation_only=saved_pk(relation_only.pk),
         direct_only=saved_pk(direct_only.pk),
@@ -2400,7 +2400,7 @@ def test_library_branches_filter_by_name_icontains() -> None:
 
 @pytest.mark.django_db
 def test_library_loans_filter_by_deep_to_many_email_is_row_preserving_over_http() -> None:
-    """The Customer deep to-many leaf is row-preserving over ``/graphql/`` (spec-062 Part 1).
+    """The production deep to-many leaf is row-preserving over ``/graphql/`` (spec-062 Part 1).
 
     ``LoanFilter`` gained the generated deep path ``book__loans__patron__email``
     (spelled ``bookLoansPatronEmail`` on the wire). Filtering the loans list on
@@ -2410,7 +2410,7 @@ def test_library_loans_filter_by_deep_to_many_email_is_row_preserving_over_http(
     with no Cardio-patron loan) is excluded: the note-OR belongs to the
     (unshipped) search surface, not this relational filter.
     """
-    branch = models.Branch.objects.create(name="Customer Central", city="Boston")
+    branch = models.Branch.objects.create(name="Central Branch", city="Boston")
     shelf = models.Shelf.objects.create(branch=branch, code="MED-1", topic="ward")
     shared_book = models.Book.objects.create(shelf=shelf, title="Shared Ward Manual")
     second_book = models.Book.objects.create(shelf=shelf, title="Second Manual")
@@ -10598,7 +10598,7 @@ def test_library_loans_deep_leaf_sql_shape_is_row_preserving() -> None:
     ``BookType.get_queryset``'s anonymous predicate. Row preservation is read off
     the payload too - both seeded loans come back, each exactly once.
     """
-    branch = models.Branch.objects.create(name="Customer Central", city="Boston")
+    branch = models.Branch.objects.create(name="Central Branch", city="Boston")
     shelf = models.Shelf.objects.create(branch=branch, code="MED-1", topic="ward")
     shared_book = models.Book.objects.create(shelf=shelf, title="Shared Ward Manual")
     patron_a = models.Patron.objects.create(name="Patron A", email="Cardio A")
@@ -10638,7 +10638,7 @@ def test_library_loans_mixed_direct_and_relational_or_is_row_preserving_over_htt
     The central production oracle: ``note icontains "Cardio" OR
     book__loans__patron__email icontains "Cardio"`` unions a DIRECT scalar leaf
     with a DEEP relational leaf whose declared hops each compile to a subquery.
-    Over the Customer graph the result is EXACTLY
+    Over the reproduction graph the result is EXACTLY
     ``[relation_and_direct, relation_only, direct_only]`` (id-ordered, each once):
 
     - ``relation_and_direct`` + ``relation_only`` match the relational leaf via the
@@ -10653,7 +10653,7 @@ def test_library_loans_mixed_direct_and_relational_or_is_row_preserving_over_htt
     arm's walk lives inside its subqueries, its ``book`` hop scoped by
     ``BookType.get_queryset``).
     """
-    graph = _seed_customer_loan_graph()
+    graph = _seed_reproduction_loan_graph()
 
     with CaptureQueriesContext(connection) as captured:
         response = _post_graphql(
@@ -10722,7 +10722,7 @@ def test_library_loans_connection_mixed_or_paginates_row_preserved_roots_over_ht
 
     with override_settings(FAKESHOP_TEST_LOAN_CONNECTION=True):
         project_schema_override()
-        graph = _seed_customer_loan_graph()
+        graph = _seed_reproduction_loan_graph()
 
         filter_body = (
             "{ or: ["
