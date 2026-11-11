@@ -545,6 +545,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
 ├── test_fleet.py                 # Script tests for ``docs/fleet/scripts/fleet.py``, the machine list's one reader.
+├── test_fleet_personal.py        # Script tests for ``docs/fleet/scripts/setup/ubuntu/personal.py``, the CLI-only personalization.
 ├── test_fleet_setup.py           # Script tests for ``docs/fleet/scripts/fleet_setup.py``, the one-command setup of a new fleet machine.
 ├── test_fleet_stop.py            # Script tests for ``docs/fleet/scripts/fleet_stop.py``, the one-command stop of fleet syncing.
 ├── test_fleet_sync.py            # Repo-tooling tests for the fleet sync of private working copies, pins, evidence and main.
@@ -938,6 +939,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
 ├── test_fleet.py                 # Script tests for ``docs/fleet/scripts/fleet.py``, the machine list's one reader.
+├── test_fleet_personal.py        # Script tests for ``docs/fleet/scripts/setup/ubuntu/personal.py``, the CLI-only personalization.
 ├── test_fleet_setup.py           # Script tests for ``docs/fleet/scripts/fleet_setup.py``, the one-command setup of a new fleet machine.
 ├── test_fleet_stop.py            # Script tests for ``docs/fleet/scripts/fleet_stop.py``, the one-command stop of fleet syncing.
 ├── test_fleet_sync.py            # Repo-tooling tests for the fleet sync of private working copies, pins, evidence and main.

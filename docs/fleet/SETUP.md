@@ -118,6 +118,28 @@ The save-sync timer comes last, once sync testing on the machine has passed:
 cd ~/projects/django-strawberry-framework && uv run python docs/fleet/scripts/fleet_sync.py schedule --install
 ```
 
+## 5a. Personalize (optional): `setup/ubuntu/personal.py`
+
+The core above makes a fleet member. [personal.py][personal] adds the layer `rio-ubu` carries,
+CLI only (no GUI application, no desktop setting):
+
+```sh
+python3 docs/fleet/scripts/setup/ubuntu/personal.py apply <host> --check   # what <host> lacks
+python3 docs/fleet/scripts/setup/ubuntu/personal.py apply <host>           # install it; sudo asks once
+```
+
+It copies its folder to `~/.cache/dsf-fleet-setup/setup/ubuntu/` on the target and runs the same
+checked, resumable steps: apt CLIs (build-essential, fd, btop, stress-ng, lm-sensors, `gh` from
+GitHub's apt repository), `tailscale set --operator`, a silent `PATH` block at the top of
+`~/.bashrc` (so `ssh <host> codex ...` finds the agent CLIs), tmux auto-attach and the shared-box
+banner for interactive logins, `~/.tmux.conf`, git's `init.defaultBranch` and the identity of the
+machine running `apply`, the house tools `heavy` / `pressure` / `agent-status` / `git-autosync`
+(rendered for the target's threads and RAM; `git-autosync` takes `.work/land.lock` across its
+fast-forward) with its 3-minute timer, OpenCode, Muse, grok, Antigravity (`agy`) and osv-scanner,
+and the agent rules file `~/MACHINE.md` rendered from the target's measured facts. The logins
+(`gh auth login`, `opencode auth login`, then `muse`, `grok` and `agy` once each) stay by hand.
+Rootless Docker is left out.
+
 ## 6. Verify
 
 ```sh
@@ -147,6 +169,7 @@ with System Settings' Remote Login in place of openssh-server, Homebrew's `diren
 [load-balancing]: scripts/load_balancing.py
 [machines]: MACHINES.md
 [machines-json]: machines.json
+[personal]: scripts/setup/ubuntu/personal.py
 
 <!-- docs/SPECS/ -->
 

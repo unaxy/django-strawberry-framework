@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# git-autosync - keep every repo in ~/projects on the latest origin, SAFELY.
+# Runs every few minutes from a systemd user timer (git-autosync.timer). For each repo it fetches, then
+# fast-forwards the checked-out branch ONLY if all of these hold; otherwise it skips and logs why:
+#   - on a branch that has an upstream, and the branch is purely behind it (never ahead/diverged)
+#   - working tree clean (no staged, unstaged or untracked changes)
+#   - no merge/rebase/cherry-pick/bisect in progress
+#   - no `heavy` job (test suite, build) currently running inside that repo
+#   - no `work.py land` or `fleet_sync.py` fast-forward running in it (a repo with a `.work/`
+#     folder: its `.work/land.lock` is taken, without waiting, for the whole fast-forward)
+# It never stashes, rebases, merges, resets or pushes. Conflicts are left for a human/agent to resolve.
+# Usage: git-autosync            sync now (what the timer runs)
+#        git-autosync --status   last result per repo + recent log
+set -uo pipefail
+ROOT=${GIT_AUTOSYNC_ROOT:-$HOME/projects}
+STATE=$HOME/.cache/git-autosync; mkdir -p "$STATE"
+LOG=$STATE/log
+
+if [ "${1:-}" = --status ]; then
+  for f in "$STATE"/last.*; do [ -f "$f" ] && cat "$f"; done
+  echo; echo "recent log ($LOG):"; tail -15 "$LOG" 2>/dev/null
+  echo; systemctl --user list-timers git-autosync.timer --no-pager 2>/dev/null | head -2
+  exit 0
+fi
+case "${1:-}" in -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0;; esac
+
+exec 9>"$STATE/lock"; flock -n 9 || exit 0   # one sync at a time
+
+log() { # log <repo> <result>   (routine "OK" results only update last.<repo>, not the log)
+  local line; line="$(date '+%F %T') $(basename "$1"): $2"
+  case "$2" in OK*) ;; *) echo "$line" >> "$LOG";; esac
+  echo "$line"; echo "$line" > "$STATE/last.$(basename "$1")"
+}
+
+busy_with_heavy() { # is a heavy job running with its cwd inside $1?
+  local j pid _s cwd
+  for j in "$HOME"/.cache/heavy/slot*.job; do
+    [ -f "$j" ] || continue
+    read -r pid _s cwd _ < "$j"
+    kill -0 "$pid" 2>/dev/null && case "$cwd/" in "$1"/*) return 0;; esac
+  done
+  return 1
+}
+
+for gitdir in "$ROOT"/*/.git; do
+  [ -e "$gitdir" ] || continue
+  repo=$(dirname "$gitdir")
+  cd "$repo" || continue
+
+  if ! timeout 60 git fetch --quiet --prune origin 2>"$STATE/fetch.err"; then
+    log "$repo" "SKIP fetch failed: $(head -1 "$STATE/fetch.err")"; continue
+  fi
+  branch=$(git symbolic-ref --quiet --short HEAD) || { log "$repo" "SKIP detached HEAD"; continue; }
+  upstream=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) \
+    || { log "$repo" "SKIP $branch has no upstream"; continue; }
+  read -r ahead behind < <(git rev-list --left-right --count "HEAD...@{u}")
+  if [ "$behind" -eq 0 ]; then
+    [ "$ahead" -eq 0 ] && log "$repo" "OK $branch up to date ($(git rev-parse --short HEAD))" \
+                       || log "$repo" "OK $branch is $ahead ahead of $upstream (nothing to pull; not pushing)"
+    continue
+  fi
+  [ "$ahead" -gt 0 ] && { log "$repo" "SKIP $branch diverged ($ahead ahead, $behind behind $upstream) - resolve manually"; continue; }
+  gd=$(git rev-parse --git-dir)
+  for op in MERGE_HEAD rebase-merge rebase-apply CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG; do
+    [ -e "$gd/$op" ] && { log "$repo" "SKIP $behind behind, but $op in progress"; continue 2; }
+  done
+  [ -n "$(git status --porcelain -- . ':(exclude)FLEET.md')" ] && { log "$repo" "SKIP $behind behind, but working tree has local changes"; continue; }
+  busy_with_heavy "$repo" && { log "$repo" "SKIP $behind behind, but a heavy job is running in it (retry next tick)"; continue; }
+
+  if [ -d "$repo/.work" ]; then
+    exec 8>>"$repo/.work/land.lock"
+    flock -n 8 || { exec 8>&-; log "$repo" "SKIP $behind behind, but work.py land or fleet_sync holds .work/land.lock"; continue; }
+  fi
+  old=$(git rev-parse --short HEAD)
+  if git merge --ff-only --quiet "@{u}" 2>"$STATE/merge.err"; then
+    log "$repo" "PULLED $branch $old -> $(git rev-parse --short HEAD) ($behind commits)"
+  else
+    log "$repo" "SKIP fast-forward failed: $(head -1 "$STATE/merge.err")"
+  fi
+  exec 8>&-
+done
+
+# keep the log small
+[ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 5000 ] && { tail -2000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"; }
+exit 0

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# heavy - run a CPU/RAM-heavy command (build, full test suite, big install, browser tests) safely on @HOST@.
+# - At most @SLOTS@ heavy job(s) run at once machine-wide; extra jobs WAIT for a free slot (queue, don't fail).
+# - Waits until >= @MIN_FREE_GIB@ GiB RAM is available before starting.
+# - Runs at low CPU/disk priority so interactive sessions stay responsive.
+# Usage: heavy <command> [args...]      e.g. heavy npm test    heavy npm run build
+#        heavy --status                 show running heavy jobs
+set -uo pipefail
+SLOTS=@SLOTS@
+MIN_FREE_KB=$((@MIN_FREE_GIB@ * 1048576))
+DIR="$HOME/.cache/heavy"; mkdir -p "$DIR"
+
+status() {
+  local any=0
+  for j in "$DIR"/slot*.job; do
+    [ -f "$j" ] || continue
+    read -r pid started cwd cmd < "$j"
+    if kill -0 "$pid" 2>/dev/null; then
+      any=1; printf 'heavy slot %s: pid %s, running %ss, in %s\n    %s\n' \
+        "$(basename "$j" .job | tr -dc 0-9)" "$pid" "$(( $(date +%s) - started ))" "$cwd" "$cmd"
+    fi
+  done
+  [ $any -eq 1 ] || echo "heavy: no heavy jobs running (0/$SLOTS slots used)"
+}
+
+case "${1:-}" in
+  ""|-h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+  --status) status; exit 0;;
+esac
+
+slot=""; waited=0
+while [ -z "$slot" ]; do
+  for i in $(seq 1 $SLOTS); do
+    exec {fd}>"$DIR/slot$i.lock"
+    if flock -n "$fd"; then slot=$i; break; fi
+    exec {fd}>&-
+  done
+  if [ -z "$slot" ]; then
+    [ $waited -eq 0 ] && { echo "heavy: all $SLOTS slots busy, queued. Waiting for one to free up:" >&2; status >&2; }
+    waited=1; sleep 5
+  fi
+done
+
+announced=0
+while [ "$(awk '/MemAvailable/{print $2}' /proc/meminfo)" -lt $MIN_FREE_KB ]; do
+  [ $announced -eq 0 ] && { echo "heavy: < @MIN_FREE_GIB@ GiB RAM available, waiting..." >&2; announced=1; }
+  sleep 5
+done
+
+job="$DIR/slot$slot.job"
+echo "$$ $(date +%s) $PWD $*" > "$job"
+trap 'rm -f "$job"' EXIT
+[ $waited -eq 1 ] && echo "heavy: got slot $slot, starting: $*" >&2
+
+# Run with the lock fd closed in the child so stray background processes can't hold the slot forever.
+nice -n 10 ionice -c2 -n7 "$@" {fd}>&-
+exit $?

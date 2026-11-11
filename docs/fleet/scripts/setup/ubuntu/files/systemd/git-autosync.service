@@ -1,0 +1,7 @@
+[Unit]
+Description=Fast-forward ~/projects repos to origin (safe: skips dirty/diverged/busy repos)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/git-autosync
+Nice=5

@@ -51,7 +51,7 @@ has the capacity, not whichever has the tool.
 | OS | Ubuntu Desktop 26.04 LTS. |
 | Availability | Not yet established; treat it as offline when it does not answer. |
 | Reach it as | `rio-bee`, from the other three. |
-| Expect | Light work only: four slow cores and 7 GiB cannot carry a full suite or a heavy flow (`load_balancing.py` weights it low). No passwordless `sudo` (stop and hand root commands to the maintainer). `/tmp` is a 3.6 GiB tmpfs that every reboot empties, so a `workspace.py` pool there is small and short-lived. It has none of `rio-ubu`'s house tools (`heavy`, `pressure`, `~/MACHINE.md`). Set up by [docs/fleet/scripts/fleet_setup.py][fleet-setup] ([SETUP.md][setup]). |
+| Expect | Light work only: four slow cores and 7 GiB cannot carry a full suite or a heavy flow (`load_balancing.py` weights it low). No passwordless `sudo` (stop and hand root commands to the maintainer). `/tmp` is a 3.6 GiB tmpfs that every reboot empties, so a `workspace.py` pool there is small and short-lived. Carries `rio-ubu`'s CLI layer (`heavy` with 1 slot, `pressure`, `git-autosync`, `~/MACHINE.md`) from [personal.py][personal]. Set up by [docs/fleet/scripts/fleet_setup.py][fleet-setup] ([SETUP.md][setup]). |
 
 Connection details (transport, addresses, credentials) are kept in each machine's private
 configuration, never in this repo. If a "reach it as" name does not answer from where you are,
@@ -68,8 +68,8 @@ something an agent installs on its own.
 | Claude Desktop | yes | yes | yes | no |
 | Codex CLI | yes | yes (npm global under nvm) | yes | yes (npm global under nvm) |
 | ChatGPT / Codex desktop | yes | yes | yes | no |
-| Muse Code (`muse`) | yes | yes | yes | no |
-| OpenCode (CLI) | yes | yes | no | no |
+| Muse Code (`muse`) | yes | yes | yes | yes |
+| OpenCode (CLI) | yes | yes | no | yes |
 | OpenCode Desktop | yes | yes | yes | no |
 | Cursor | yes | yes | no | no |
 | Antigravity | yes | no | yes | no |
@@ -156,6 +156,7 @@ evidence and main's commits in step (each copy edited on its home machine only; 
 [load-balancing]: scripts/load_balancing.py
 [machines-json]: machines.json
 [muse]: MUSE.md
+[personal]: scripts/setup/ubuntu/personal.py
 [setup]: SETUP.md
 <!-- docs/SPECS/ -->
 <!-- docs/builder/ -->

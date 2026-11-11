@@ -415,7 +415,7 @@ classmethod-decorators = ["django.utils.decorators.classonlymethod"]
 # PLR2004: CLI and report scripts compare against literal expected values.
 # docs/fleet/scripts/ holds the fleet scripts, the same kind of tooling.
 "scripts/**/*.py" = ["PERF", "T201", "INP001", "S603", "S607", "PLR2004"]
-"docs/fleet/scripts/*.py" = ["PERF", "T201", "INP001", "S603", "S607", "PLR2004"]
+"docs/fleet/scripts/**/*.py" = ["PERF", "T201", "INP001", "S603", "S607", "PLR2004"]
 "line_count.py" = ["T201"]
 "docs/dry/export_dry_review.py" = ["T201", "INP001"]
 "examples/fakeshop/*.py" = ["INP001"]

@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# pressure - live load check for @HOST@ (@THREADS@ threads, @CPU@, @RAM_GIB@ GiB RAM). Run BEFORE heavy work.
+# Verdict + exit code:  GREEN=0 (heavy work OK)  YELLOW=1 (light work only)  RED=2 (wait)
+# Usage: pressure            full report
+#        pressure --short    one line
+#        pressure --wait [S] block until GREEN (default timeout 1800s); exit 0 when GREEN, 2 on timeout
+set -uo pipefail
+
+psi() { awk -v k="$2" -v f="$3" '$1==k { for (i=2;i<=NF;i++) { split($i,a,"="); if (a[1]==f) print a[2] } }' "/proc/pressure/$1"; }
+gt()  { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a>b)}'; }
+lt()  { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a<b)}'; }
+
+measure() {
+  LOAD1=$(cut -d' ' -f1 /proc/loadavg)
+  MEM_AVAIL_GIB=$(awk '/MemAvailable/{printf "%.1f", $2/1048576}' /proc/meminfo)
+  SWAP_USED_MIB=$(awk '/SwapTotal/{t=$2} /SwapFree/{f=$2} END{printf "%d", (t-f)/1024}' /proc/meminfo)
+  CPU_SOME=$(psi cpu some avg10)
+  MEM_SOME=$(psi memory some avg10); MEM_FULL=$(psi memory full avg10)
+  IO_SOME=$(psi io some avg10)
+  HEAVY_RUNNING=0
+  for j in "$HOME"/.cache/heavy/slot*.job; do [ -f "$j" ] && kill -0 "$(cut -d' ' -f1 "$j")" 2>/dev/null && HEAVY_RUNNING=$((HEAVY_RUNNING+1)); done
+
+  REASONS=(); LEVEL=0
+  red()    { REASONS+=("RED: $1");    LEVEL=2; }
+  yellow() { REASONS+=("YELLOW: $1"); [ $LEVEL -lt 1 ] && LEVEL=1; }
+  lt "$MEM_AVAIL_GIB" @MIN_FREE_GIB@ && red "only ${MEM_AVAIL_GIB} GiB RAM available (need >= @MIN_FREE_GIB@)"
+  gt "$MEM_FULL" 5        && red "memory thrashing (memory full avg10=${MEM_FULL}%)"
+  gt "$CPU_SOME" 60       && red "CPU saturated (tasks waiting on CPU ${CPU_SOME}% of the time)"
+  gt "$LOAD1" @LOAD_RED@ && red "load ${LOAD1} on @THREADS@ threads"
+  [ "$HEAVY_RUNNING" -ge @SLOTS@ ] && red "all @SLOTS@ heavy slots in use (see: heavy --status)"
+  if [ $LEVEL -lt 2 ]; then
+    lt "$MEM_AVAIL_GIB" @YELLOW_FREE_GIB@ && yellow "RAM getting low (${MEM_AVAIL_GIB} GiB available)"
+    gt "$CPU_SOME" 25     && yellow "CPU contended (cpu some avg10=${CPU_SOME}%)"
+    gt "$LOAD1" @LOAD_YELLOW@ && yellow "load ${LOAD1} on @THREADS@ threads"
+    gt "$IO_SOME" 30      && yellow "disk busy (io some avg10=${IO_SOME}%)"
+    gt "$MEM_SOME" 10     && yellow "memory pressure (memory some avg10=${MEM_SOME}%)"
+    [ "$SWAP_USED_MIB" -gt 1024 ] && yellow "${SWAP_USED_MIB} MiB swapped out"
+  fi
+  case $LEVEL in 0) VERDICT=GREEN;; 1) VERDICT=YELLOW;; 2) VERDICT=RED;; esac
+}
+
+advice() {
+  case $VERDICT in
+    GREEN)  echo "OK to start heavy work (builds, test suites, installs). Run it via: heavy <command>";;
+    YELLOW) echo "Busy. Light work only (edits, git, rg, a single test file). Queue heavy work with: heavy <command>";;
+    RED)    echo "Saturated. Do NOT start builds/test suites/installs/browsers. Wait: pressure --wait";;
+  esac
+}
+
+line() { printf '[%s] load %s/@THREADS@ | cpu-wait %s%% | RAM free %s GiB | swap %s MiB | io-wait %s%% | heavy jobs %s/@SLOTS@\n' \
+  "$VERDICT" "$LOAD1" "$CPU_SOME" "$MEM_AVAIL_GIB" "$SWAP_USED_MIB" "$IO_SOME" "$HEAVY_RUNNING"; }
+
+case "${1:-}" in
+  --short) measure; line; exit $LEVEL;;
+  --wait)
+    timeout=${2:-1800}; start=$(date +%s); announced=0
+    while :; do
+      measure
+      [ "$VERDICT" = GREEN ] && { line; exit 0; }
+      [ $announced -eq 0 ] && { echo "pressure: $VERDICT, waiting for GREEN (timeout ${timeout}s)..."; line; announced=1; }
+      [ $(( $(date +%s) - start )) -ge "$timeout" ] && { echo "pressure: still $VERDICT after ${timeout}s"; line; exit 2; }
+      sleep 10
+    done;;
+  -h|--help) sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+  *)
+    measure
+    echo "=== @HOST@ pressure: $VERDICT ==="
+    line
+    for r in "${REASONS[@]}"; do echo "  - $r"; done
+    advice
+    if [ "$HEAVY_RUNNING" -gt 0 ]; then echo; "$HOME/.local/bin/heavy" --status; fi
+    exit $LEVEL;;
+esac

@@ -1,0 +1,9 @@
+#!/bin/bash
+# One line: can I start another agent? (also usable as a GNOME Executor top-bar badge)
+#   ● colour = `pressure` verdict (green/yellow/red), then running agent CLIs, heavy slots, free RAM.
+out=$("$HOME/.local/bin/pressure" --short 2>/dev/null); rc=$?
+case $rc in 0) c="#57e389"; t="GO";; 1) c="#f6d32d"; t="EASY";; *) c="#ff7b7b"; t="WAIT";; esac
+agents=$(pgrep -u "$USER" -x "claude|codex|opencode|muse" | wc -l)
+heavy=$(sed -n "s/.*heavy jobs \([0-9]*\/[0-9]*\).*/\1/p" <<<"$out")
+ram=$(sed -n "s/.*RAM free \([0-9.]*\) GiB.*/\1/p" <<<"$out")
+printf "<executor.markup.true> <span foreground=\"%s\">●</span> %s · %s agents · %s heavy · %.0fG free\n" "$c" "$t" "$agents" "${heavy:-?}" "${ram:-0}"
