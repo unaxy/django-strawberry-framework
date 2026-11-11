@@ -1743,18 +1743,21 @@ def test_rm_refuses_a_copy_holding_workspace_or_prover_state(
 
 
 @pytest.mark.usefixtures("repo")
-def test_rm_under_an_interpreter_without_tomli_names_tomli(
+def test_rm_under_an_interpreter_without_tomli_names_tomli_and_uv_run_in_one_line(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """A bare ``python3`` lacks ``tomli``, which ``rm`` reads through workspace.py."""
     path = _new("spike-no-tomli")
     _age(path)
     monkeypatch.setattr(sys, "path", [str(Path(work.__file__).parent), *sys.path])
     monkeypatch.delitem(sys.modules, "workspace", raising=False)
     monkeypatch.setitem(sys.modules, "tomli", None)
     monkeypatch.setitem(sys.modules, "scripts", None)
-    with pytest.raises(ModuleNotFoundError) as caught:
-        _ = work.main(["rm", "spike-no-tomli"])
-    assert caught.value.name == "tomli"
+    _ = capsys.readouterr()
+    assert work.main(["rm", "spike-no-tomli"]) == 1
+    error = capsys.readouterr().err
+    assert error.splitlines() == [f"work: {sys.executable} lacks the module tomli; {work.RUN_AS}"]
     assert path.is_dir()
 
 
@@ -2260,6 +2263,30 @@ def test_an_evidence_deletion_on_a_replica_is_refused_and_removes_nothing(
     assert _evidence_entries(repo, "spike-mirror") == []
     assert work.main(["rm", "spike-mirror", "--discard"]) == 0
     assert proof.is_file()
+
+
+def test_an_evidence_deletion_refuses_the_pins_a_discarded_replica_left(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Pins left under a replica's name are its home's: this machine cannot vouch for them."""
+    path = _new("spike-left")
+    _ = _write(path / "new.txt", "the home's save\n")
+    assert work.main(["save", "spike-left"]) == 0
+    _make_replica(path)
+    _age(path)
+    proof = _write(_evidence(repo, "spike-left") / "proof.txt", "proof\n")
+    assert work.main(["rm", "spike-left", "--discard"]) == 0
+    assert set(_pins(repo)["spike-left"]) == {"save-1"}
+    _ = capsys.readouterr()
+    for argv in (["rm", "spike-left", "--evidence"], ["evidence-rm", "spike-left"]):
+        assert work.main(argv) == 1
+        error = capsys.readouterr().err
+        assert "spike-left here is a replica of another machine's copy" in error, argv
+        assert "evidence is deleted from the copy's home: run it there" in error, argv
+    assert proof.is_file()
+    assert set(_pins(repo)["spike-left"]) == {"save-1"}
+    assert work.evidence_tombstones(repo) == []
 
 
 def test_evidence_restore_moves_the_files_back_with_a_fresh_mtime_no_record_holds(
@@ -2960,6 +2987,61 @@ def test_run_uses_the_copy_its_venv_and_a_scrubbed_environment(
     assert "work: run" not in captured.out
 
 
+@pytest.mark.parametrize("form", [[], ["--worktree"]], ids=["clone", "worktree"])
+def test_a_copys_own_work_py_runs_on_the_shared_checkout_and_refuses_what_writes_it(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    form: list[str],
+) -> None:
+    """``uv run python scripts/work.py`` from inside a copy: its root is the copy's, not the registry's."""
+    path = _new("bench-inside", *form)
+    _fake_venv(path)
+    _age(path)
+    monkeypatch.setattr(work, "REPO_ROOT", path)
+    assert (
+        work.main(
+            [
+                "run",
+                "bench-inside",
+                "--",
+                "python",
+                "-c",
+                "print('ran here')",
+            ],
+        )
+        == 0
+    )
+    assert "ran here" in capfd.readouterr().out
+    assert work.main(["list"]) == 0
+    assert "bench-inside" in capfd.readouterr().out
+    assert work.main(["rm", "bench-inside"]) == 1
+    assert f"run work.py from the shared checkout {repo}" in capfd.readouterr().err
+    assert path.is_dir()
+    assert not (path / ".work").exists()
+
+
+def test_work_py_below_python_3_10_is_one_line_naming_uv_run() -> None:
+    """The module needs 3.10 to load: macOS's ``/usr/bin/python3`` (3.9) stops before it."""
+    script = Path(work.__file__).resolve()
+    old = (
+        "import runpy, sys; sys.hexversion = 0x030906F0; "
+        "sys.argv = ['work.py', 'check-name', 'spike-x']; "
+        f"runpy.run_path({str(script)!r}, run_name='__main__')"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", old],
+        cwd=script.parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 1
+    assert completed.stderr.splitlines() == [
+        f"work: {sys.executable} is Python {sys.version.split()[0]}; {work.RUN_AS}",
+    ]
+
+
 @pytest.mark.parametrize(
     ("argv", "pytest_run"),
     [
@@ -3591,6 +3673,43 @@ def test_a_restored_save_registers_its_new_source_paths(repo: Path, form: list[s
     )
     assert _git_out(restored, "diff", "--cached", "--name-only") == ""
     assert _git_out(restored, "rev-parse", "HEAD") == _git_out(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("leaf", ["landed", "landed-copy"])
+def test_a_restored_landing_holds_the_work_uncommitted_on_main(repo: Path, leaf: str) -> None:
+    """A landing pin is content on a main commit, restored as a save is."""
+    path = _new("fix-landed")
+    _ = _write(path / "gone.txt", "landed work\n")
+    assert work.main(["land", "fix-landed"]) == 0
+    restored = _new("verify-landed", "--from", f"refs/work/fix-landed/{leaf}")
+    assert _git_out(restored, "rev-parse", "HEAD") == _git_out(repo, "rev-parse", "HEAD")
+    assert (restored / "gone.txt").read_text(encoding="utf-8") == "landed work\n"
+    assert _git_out(restored, "status", "--porcelain").strip() == "M gone.txt"
+    assert work.main(["land", "verify-landed", "--dry-run"]) == 0
+
+
+def test_new_refuses_a_pin_whose_parent_is_not_on_main(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A save on a commit the copy made could never land from a new copy either."""
+    path = _new("spike-off-main")
+    _ = _write(path / "gone.txt", "committed in the copy\n")
+    _ = _git_out(path, "commit", "-q", "-am", "a copy commit")
+    _ = _write(path / "new.txt", "saved on it\n")
+    assert work.main(["save", "spike-off-main"]) == 0
+    _ = capsys.readouterr()
+    argv = [
+        "new",
+        "spike-from-off",
+        "--no-setup",
+        "--from",
+        "refs/work/spike-off-main/save-1",
+    ]
+    assert work.main(argv) == 1
+    assert "which is not on the shared main" in capsys.readouterr().err
+    assert not (repo / ".work" / "clones" / "spike-from-off").exists()
+    assert not (repo / ".work" / "names" / "spike-from-off").exists()
 
 
 @pytest.mark.parametrize("store", [False, True], ids=["no-store", "store-without-that-pin"])

@@ -168,7 +168,10 @@ compare-and-swap (``update-ref`` against the value read before), so a racing
 landing is never overwritten. A
 pinned commit survives its copy. Restore one with ``new <name> --from
 refs/work/<old>/save-N``: the new copy starts at the save's parent and holds
-the saved content as uncommitted work, so it lands like any other copy.
+the saved content as uncommitted work, so it lands like any other copy;
+``landed`` and ``landed-copy`` restore the same way. Such a pin whose parent is not
+on the shared main is refused (its copy could never land); ``--from`` a ``start``
+pin starts at that commit itself.
 
 A copy's content (what ``save`` pins, ``land`` applies and ``rm`` checks) is
 read into a fresh private index from ``HEAD``, so the copy index's
@@ -310,7 +313,10 @@ Commands
         refusing with nothing removed), records an evidence tombstone and moves
         the folder to ``.work/trash/evidence-<stem>-<seconds>-kept``, in that
         order, as ``evidence-rm`` does. ``--evidence`` on a replica is refused with
-        nothing removed: evidence is deleted from the copy's home.
+        nothing removed: evidence is deleted from the copy's home. So is a name
+        holding pins alone whose pins this machine cannot vouch it published (no
+        tombstone of its own removal of that copy, made after every pin under the
+        name: a replica's ``rm --discard`` leaves the home's pins and no tombstone).
         On the copy's home (``--discard`` included) it leaves a tombstone; on a
         replica (``--discard``) it removes this machine's replica alone and keeps
         it in ``.work/trash/<name>-<seconds>-kept`` for 7 days (a replica may be
@@ -435,7 +441,13 @@ Standard library and ``scripts/_git.py`` only for the git and copy work;
 ``scripts/workspace.py`` and ``scripts/prove_failability.py`` are read only to
 find their state folders for a copy, so the two scripts and this one name the
 same paths. Run from the shared checkout as ``uv run python scripts/work.py
-...``.
+...``. A ``work.py`` started inside a copy (``.work/clones/<name>``,
+``.work/worktrees/<name>``) works on the shared checkout around it for ``list``,
+``save``, ``run`` and ``check-name``, and refuses every other command (``run work.py
+from the shared checkout <path>``): those write the shared tree or other copies, never
+from a copy's own, perhaps edited, script. Another interpreter is refused in one line
+naming ``uv run python``: below Python 3.10 before anything runs, and one lacking a
+module a command reads (a bare ``python3`` has no ``tomli``) once it needs it.
 """
 
 from __future__ import annotations
@@ -478,6 +490,12 @@ if TYPE_CHECKING:
 _loads: Callable[[str], object] = json.loads
 
 REPO_ROOT = _git_runner.CHECKOUT_ROOT
+#: How work.py runs: ``uv run`` gives it the project's Python and every module it reads.
+RUN_AS = "run work.py as `uv run python scripts/work.py ...`"
+# ``requires-python``: the module below needs 3.10 to load. ``hexversion``, since the checkers
+# take that floor as given and read a ``version_info`` test as dead code; a bare ``python3`` does not.
+if sys.hexversion < 0x030A0000:
+    raise SystemExit(f"work: {sys.executable} is Python {sys.version.split()[0]}; {RUN_AS}")
 WORK_DIR = ".work"
 CLONES = "clones"
 WORKTREES = "worktrees"
@@ -2739,7 +2757,7 @@ def clean_env(copy_root: Path, name: str, base: Mapping[str, str] | None = None)
     }
     foreign = {
         str(_bin_dir(Path(source["VIRTUAL_ENV"]))) if "VIRTUAL_ENV" in source else "",
-        str(_bin_dir(REPO_ROOT / ".venv")),
+        str(_bin_dir(shared_root(REPO_ROOT) / ".venv")),
     }
     venv = copy_root / ".venv"
     entries = [
@@ -3434,10 +3452,15 @@ class Start:
 
 
 def resolve_start(repo: Path, rev: str) -> Start:
-    """Resolve ``--from``: a shared revision, or a pin (a save or landing restores content).
+    """Resolve ``--from``: a shared revision, or a pin.
+
+    A ``start`` pin is a commit to start at. Every other pin (``save-N``, ``landed``,
+    ``landed-copy``) is content on its parent: the copy starts at that parent with the
+    pinned content as uncommitted work, so the parent must be on the shared main.
 
     Raises:
-        WorkError: ``rev`` names no commit, or a pin's parent cannot be found.
+        WorkError: ``rev`` names no commit, or a pin's parent cannot be found or is not
+            on the shared main.
 
     """
     if rev.startswith(PIN_PREFIX):
@@ -3446,15 +3469,28 @@ def resolve_start(repo: Path, rev: str) -> Start:
         if not commit or store is None:
             msg = f"{rev!r} names no pin"
             raise WorkError(msg)
-        fetch_pinned(repo, repo, commit)
         leaf = rev.rsplit("/", 1)[-1]
-        if leaf == LANDED_PIN or SAVE_PIN.fullmatch(leaf):
-            base = _resolve_commit(store, f"{commit}^")
-            if not base:
-                msg = f"{rev!r} has no parent commit to start from"
-                raise WorkError(msg)
-            return Start(base, commit)
-        return Start(commit, None)
+        if leaf == START_PIN:
+            fetch_pinned(repo, repo, commit)
+            return Start(commit, None)
+        base = _resolve_commit(store, f"{commit}^")
+        if not base:
+            msg = f"{rev!r} has no parent commit to start from"
+            raise WorkError(msg)
+        on_main = _git_ok(repo, "cat-file", "-e", f"{base}^{{commit}}") and _is_ancestor(
+            repo,
+            base,
+            LANDING_BRANCH,
+        )
+        if not on_main:
+            msg = (
+                f"{rev!r} is content pinned on {base[:12]}, which is not on the shared "
+                "main, so a copy started there could never land; start from a save or "
+                "landing pinned on main"
+            )
+            raise WorkError(msg)
+        fetch_pinned(repo, repo, commit)
+        return Start(base, commit)
     commit = _resolve_commit(repo, rev)
     if not commit:
         msg = f"{rev!r} names no commit in {repo}"
@@ -3884,7 +3920,7 @@ def _listed_pins(repo: Path, copy: Copy, held: Mapping[str, str]) -> tuple[str, 
 
 def cmd_list(args: _Args) -> int:
     """Print every known copy."""
-    repo = REPO_ROOT
+    repo = args.repo
     all_pins = pins(repo)
     rows: list[dict[str, str]] = []
     for name, copy in sorted(discover(repo).items()):
@@ -3944,9 +3980,9 @@ def save(repo: Path, copy: Copy) -> str | None:
 
 def cmd_save(args: _Args) -> int:
     """Pin a copy's uncommitted content."""
-    copy = locate(REPO_ROOT, args.name)
+    copy = locate(args.repo, args.name)
     refuse_replica(copy, "save")
-    ref = save(REPO_ROOT, copy)
+    ref = save(args.repo, copy)
     if ref is None:
         _say(f"{args.name}: nothing to save (content equals its start commit)")
         return 0
@@ -5126,7 +5162,7 @@ def cmd_rm(args: _Args) -> int:
         raise WorkError(msg)
     stem = stem_of(copy.name)
     if args.evidence:
-        refuse_replica_evidence(stem, [copy])
+        refuse_replica_evidence(repo, stem, [copy])
     if not args.discard:
         refuse_replica(copy, "remove (or `rm --discard`, which drops the replica alone)")
     with fleet_lock(repo) if args.evidence else contextlib.nullcontext():
@@ -5156,10 +5192,12 @@ def _rm_evidence(repo: Path, stem: str, removed: str) -> None:
         print(_discarded(grave, entry))
 
 
-def refuse_replica_evidence(stem: str, copies: Iterable[Copy]) -> None:
+def refuse_replica_evidence(repo: Path, stem: str, copies: Iterable[Copy]) -> None:
     """Refuse deleting ``stem``'s evidence while this machine holds its copies as replicas alone.
 
-    ``copies`` are the stem's users here; a name holding pins alone is no copy. Evidence is
+    ``copies`` are the stem's users here. A name holding pins alone counts as a replica
+    unless this machine published its pins (:func:`pins_published_here`): the pins a
+    replica's ``rm --discard`` left, or a sync carried in, are another home's. Evidence is
     deleted fleet-wide from the copy's home: a replica's ``whole`` record would trash files
     the home still writes, and a home skips a stem its copy uses on every full sync.
 
@@ -5167,17 +5205,54 @@ def refuse_replica_evidence(stem: str, copies: Iterable[Copy]) -> None:
         WorkError: every copy among ``copies`` (one at least) is a replica; nothing is removed.
 
     """
-    held = [copy for copy in copies if copy.form != "pins"]
-    replicas = [copy for copy in held if is_replica(copy.note)]
+    held = [
+        copy for copy in copies if copy.form != "pins" or not pins_published_here(repo, copy.name)
+    ]
+    replicas = [copy for copy in held if copy.form == "pins" or is_replica(copy.note)]
     if not replicas or len(replicas) < len(held):
         return
+    here = machine_id()
+    graves = [grave for grave in tombstones(repo) if not grave.identity.startswith("pins@")]
+    homes = {home_of(copy.note) for copy in replicas if copy.form != "pins"}
+    for copy in replicas:
+        if copy.form == "pins":
+            named = {canonical(grave.home) for grave in graves if grave.name == copy.name}
+            homes |= (named - {here}) or {"another machine"}
     names = ", ".join(copy.name for copy in replicas)
-    homes = ", ".join(sorted({home_of(copy.note) for copy in replicas}))
     msg = (
-        f"evidence {stem}: {names} here is a replica of {homes}'s copy; evidence is deleted "
-        "from the copy's home: run it there"
+        f"evidence {stem}: {names} here is a replica of {', '.join(sorted(homes))}'s copy; "
+        "evidence is deleted from the copy's home: run it there"
     )
     raise WorkError(msg)
+
+
+def pins_published_here(repo: Path, name: str) -> bool:
+    """Return whether this machine published the pins the name holding them alone keeps.
+
+    The copy's note, which recorded them, went with the copy; what remains is the tombstone
+    its home's ``rm`` or ``gc`` left (a replica's removal leaves none). One whose home and
+    remover are this machine, of a copy (not ``pins@``) and made no earlier than every pin
+    under the name, vouches for them: a later copy reusing the name pins only after it.
+    """
+    here = machine_id()
+    store = pin_store(repo)
+    if store is None:
+        return False
+    listing = _git(
+        store,
+        "for-each-ref",
+        "--format=%(committerdate:unix)",
+        f"{PIN_PREFIX}{name}/",
+    )
+    stamps = [int(stamp) for stamp in listing.split() if stamp.isdigit()]
+    return any(
+        grave.name == name
+        and not grave.identity.startswith("pins@")
+        and canonical(grave.home) == here
+        and canonical(grave.removed_by) == here
+        and all(stamp <= grave.removed_at for stamp in stamps)
+        for grave in tombstones(repo)
+    )
 
 
 def _discarded(grave: EvidenceTombstone, entry: Path | None) -> str:
@@ -5211,7 +5286,7 @@ def cmd_evidence_rm(args: _Args) -> int:
         users = evidence_users(repo, stem)
         if users:
             found = discover(repo)
-            refuse_replica_evidence(stem, [found[name] for name in users if name in found])
+            refuse_replica_evidence(repo, stem, [found[name] for name in users if name in found])
             msg = (
                 f"evidence {stem}: {', '.join(users)} still use it (a name holding pins alone "
                 "too); `work.py rm <name> --evidence` removes a copy with its evidence"
@@ -5747,7 +5822,7 @@ def cmd_run(args: _Args) -> int:
     if not args.tail:
         msg = "run needs a command after --"
         raise WorkError(msg)
-    copy = locate(REPO_ROOT, args.name)
+    copy = locate(args.repo, args.name)
     copy_root = _live(copy).resolve()
     stale = _git_path(copy_root, VENV_STALE)
     if stale.exists():
@@ -5763,7 +5838,7 @@ def cmd_run(args: _Args) -> int:
     _say(f"run {copy.name} in {copy_root} (.venv {env['VIRTUAL_ENV']})")
     no_hold: dict[str, str] = {}
     serialise = (
-        _pytest_lock_held(REPO_ROOT, f"{copy.name} {copy.note.get('owner') or '-'}")
+        _pytest_lock_held(args.repo, f"{copy.name} {copy.note.get('owner') or '-'}")
         if is_pytest(args.tail)
         else contextlib.nullcontext(no_hold)
     )
@@ -5781,6 +5856,47 @@ def cmd_run(args: _Args) -> int:
 # --------------------------------------------------------------------------------------------
 # Command line
 # --------------------------------------------------------------------------------------------
+
+
+#: The commands a copy's own ``work.py`` runs on the shared checkout around it: they read, pin
+#: create-only or run in a copy. The rest write the shared tree or other copies, so they run
+#: only from the shared checkout's own ``work.py``, never a copy's (perhaps edited) one.
+FROM_COPY_COMMANDS = frozenset(
+    {
+        "list",
+        "save",
+        "run",
+        "check-name",
+    },
+)
+
+
+def shared_root(root: Path) -> Path:
+    """Return the shared checkout whose copy ``root`` is, else ``root`` itself.
+
+    A copy is ``.work/clones/<name>`` or ``.work/worktrees/<name>`` of a checkout, so a
+    ``work.py`` started from inside one finds the registry, the pins and the locks there.
+    """
+    work = root.parent.parent
+    in_copy = root.parent.name in {CLONES, WORKTREES} and work.name == WORK_DIR
+    return work.parent if in_copy and (work.parent / ".git").exists() else root
+
+
+def checkout_for(command: str) -> Path:
+    """Return the shared checkout ``command`` works on (:func:`shared_root` of this script's).
+
+    Raises:
+        WorkError: this script is a copy's and ``command`` is not in :data:`FROM_COPY_COMMANDS`.
+
+    """
+    repo = shared_root(REPO_ROOT)
+    if repo != REPO_ROOT and command not in FROM_COPY_COMMANDS:
+        msg = (
+            f"{command} from the work.py of the copy {REPO_ROOT} is refused; run work.py "
+            f"from the shared checkout {repo}"
+        )
+        raise WorkError(msg)
+    return repo
 
 
 class _Args(argparse.Namespace):
@@ -5805,6 +5921,7 @@ class _Args(argparse.Namespace):
     evidence: bool
     file: list[str]
     adopt_missing: bool
+    repo: Path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -5927,8 +6044,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Dispatch one command; a refusal prints its reason and exits 1 (``run``: 125).
 
     An operating-system error no command turned into a refusal (an unreadable folder
-    under ``.work``) is printed the same way, never as a traceback; the command has
-    already stopped, so this only formats the error and decides nothing.
+    under ``.work``), and a module the interpreter lacks (``tomli`` outside ``uv run``), is
+    printed the same way, never as a traceback; the command has already stopped, so this
+    only formats the error and decides nothing. A ``work.py`` inside a copy works on the
+    shared checkout around it (:func:`shared_root`) for :data:`FROM_COPY_COMMANDS` alone.
     """
     words = list(sys.argv[1:] if argv is None else argv)
     tail: list[str] = []
@@ -5942,11 +6061,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(f"{args.command} takes nothing after --")
     try:
         refuse_locating_env()
+        args.repo = checkout_for(args.command)
         if args.command != "check-name":
-            check_layout(REPO_ROOT)
+            check_layout(args.repo)
         return args.handler(args)
     except (WorkError, OSError) as error:
         print(f"work: {error}", file=sys.stderr)
+        return REFUSED if args.command == "run" else 1
+    except ModuleNotFoundError as error:
+        print(f"work: {sys.executable} lacks the module {error.name}; {RUN_AS}", file=sys.stderr)
         return REFUSED if args.command == "run" else 1
 
 
