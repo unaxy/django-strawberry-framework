@@ -79,7 +79,7 @@ def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         '[tool.ruff]\nline-length = 99\nextend-exclude = ["hunt-ws"]\n',
     )
     for name in check_citations.SOURCE_TREES:
-        (tmp_path / name).mkdir()
+        (tmp_path / name).mkdir(parents=True)
     _write(tmp_path, "django_strawberry_framework/widgets.py", MODULE)
     _write(tmp_path, "KANBAN.md", "# Board\n")
     _write(tmp_path, "docs/SPECS/spec-000-fixture.md", "# Spec\n")

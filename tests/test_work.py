@@ -3022,10 +3022,13 @@ def test_a_copys_own_work_py_runs_on_the_shared_checkout_and_refuses_what_writes
 
 
 def test_work_py_below_python_3_10_is_one_line_naming_uv_run() -> None:
-    """The module needs 3.10 to load: macOS's ``/usr/bin/python3`` (3.9) stops before it."""
+    """The module needs 3.10 to load: macOS's ``/usr/bin/python3`` (3.9) stops before it.
+
+    ``sys.path[0]`` is the script's folder, as ``python3 scripts/work.py`` sets it.
+    """
     script = Path(work.__file__).resolve()
     old = (
-        "import runpy, sys; sys.hexversion = 0x030906F0; "
+        f"import runpy, sys; sys.path[0] = {str(script.parent)!r}; sys.hexversion = 0x030906F0; "
         "sys.argv = ['work.py', 'check-name', 'spike-x']; "
         f"runpy.run_path({str(script)!r}, run_name='__main__')"
     )
