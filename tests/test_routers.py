@@ -1609,15 +1609,15 @@ def test_construction_requires_the_django_application_argument() -> None:
 def test_construction_rejects_an_unusable_django_application(unusable: object) -> None:
     """An unusable HTTP application receives the actionable deployment configuration error.
 
-    This constructor-time refusal names the removed routing mode and both halves
-    of the repair. Fakeshop has no WebSocket mount (rungs 1-3); HTTP behavior
+    This constructor-time refusal names the middleware stack the HTTP branch must
+    run inside and both halves of the setup. Fakeshop has no WebSocket mount (rungs 1-3); HTTP behavior
     lives in ``examples/fakeshop/test_query/test_transport_api.py``.
     """
     with pytest.raises(ConfigurationError) as exc_info:
         _router(django_application=unusable)
     message = str(exc_info.value)
     assert "ALLOWED_HOSTS" in message
-    assert "REMOVED" in message
+    assert "CSRF" in message
     assert "get_asgi_application" in message
     # Both mounts, each by its resolver shape; a word boundary keeps the async view's
     # name from satisfying the sync view's row.

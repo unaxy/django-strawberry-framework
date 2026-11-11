@@ -11,6 +11,8 @@ pip install django-strawberry-framework
 uv add django-strawberry-framework
 ```
 
+Requires Python 3.10-3.14 and Django 5.2.16 or later (5.2, 6.0 and 6.1 are tested). pip pulls in `strawberry-graphql>=0.328.0`, `graphql-core>=3.3.1,<3.4`, `django-filter>=25.2` and `typing-extensions>=4.14.0`. Four optional packages are never installed for you, and each enables one feature: `channels>=4.3.2` the WebSocket router (`DjangoGraphQLProtocolRouter`), `djangorestframework>=3.17.0` `SerializerMutation`, `cryptography>=44.0.0` `Meta.cursor_field` keyset cursors, and `django-debug-toolbar>=7.0.0` the toolbar middleware.
+
 Add `"django_strawberry_framework"` to `INSTALLED_APPS`: the package's `AppConfig.ready()` applies its upstream-bug patches (all gated by the `APPLY_UPSTREAM_PATCHES` setting), and app registration is what makes the `inspect_django_type` / `export_schema` management commands and the debug-toolbar middleware's app template resolve.
 
 The package ships type information (`py.typed`) for a static checker. At runtime it needs no `django-stubs-ext` patch: every module imports on every supported Python, and no annotation subscripts a Django class that only the stubs make generic. Evaluating its annotations yourself with `typing.get_type_hints` is not supported, the same as on the Strawberry and graphql-core classes many of its types subclass: an annotation may name a type imported only for the checker, which raises `NameError`. `OptimizerHint` is the one exception; its annotations resolve, so a runtime validator can read the hints you build.
@@ -239,8 +241,7 @@ from django_strawberry_framework import DjangoConnection, DjangoConnectionField
 
 @strawberry.type
 class Query:
-    all_categories: DjangoConnection[CategoryType] = DjangoConnectionField(CategoryType)
-    all_items: DjangoConnection[ItemType] = DjangoConnectionField(ItemType)
+    all_categories: DjangoConnection[CategoryNode] = DjangoConnectionField(CategoryNode)
 ```
 
 No hand-written list resolver, no parallel argument declarations. `totalCount` is opt-in per type with `Meta.connection = {"total_count": True}`, counted on the post-filter, pre-slice queryset and gated on selection. The pipeline is `get_queryset` visibility, `filter`, `orderBy`, a deterministic pk tiebreaker, the optimizer plan, then the cursor slice; keyset cursors come from `Meta.cursor_field`. As on the list field, the entry point you called picks the path for every connection whose `resolver=` is not `async def`: under `execute_sync` the pipeline runs synchronously, and under `await schema.execute` (the async view) every such connection, the default one, a plain `def` `resolver=` and each `<field>Connection` sibling included, runs it asynchronously, so the filter and order sets validate their input and run their permission checks off the event loop, and a root connection awaits an `async def get_queryset`. An `async def` `resolver=` always runs the asynchronous pipeline and needs `await schema.execute`. See [`GLOSSARY.md#djangoconnectionfield`][glossary-djangoconnectionfield].
@@ -508,8 +509,8 @@ repeated cancellation still waits for it. Nullable failures keep surviving sibli
 running under upstream semantics. This ownership is per execution context and mutation
 window; ordinary queries, unmarked mutations and application-created background tasks
 retain upstream behavior. The mandatory boundary is independent of
-`APPLY_UPSTREAM_PATCHES`, which still gates only the optional QuerySet/AsyncIterable
-adapter. Its upstream-method audit runs lazily when an async generated-mutation window
+`APPLY_UPSTREAM_PATCHES`, which gates only the package's upstream-bug workarounds, never
+this boundary. Its upstream-method audit runs lazily when an async generated-mutation window
 opens and ignores docstrings, comments and formatting. Wrapped methods, unavailable
 source and unaudited executable changes refuse that window with an explicit runtime
 error; package imports, queries and synchronous execution do not require the audit.
@@ -650,23 +651,11 @@ from myproject.schema import schema
 application = DjangoGraphQLProtocolRouter(
     schema,
     django_asgi_app,
-    websocket_url_pattern=r"^graphql/?$",  # the default; shown for the rename
+    websocket_url_pattern=r"^graphql/?$",  # the default
 )
 ```
 
 `channels` is a soft dependency: importing the package or the submodule stays channels-free, and only symbol access raises the install-hint `ImportError`. See [`GLOSSARY.md#djangographqlprotocolrouter`][glossary-djangographqlprotocolrouter].
-
-#### Migrating from `0.0.14`
-
-The `0.0.14` router constructor is deliberately broken in three ways, because the API freeze begins at `1.0.0` and correcting a security-boundary error during alpha beats preserving an unsafe migration convenience.
-
-| `0.0.14` | now | what a migrant hits |
-|---|---|---|
-| `django_application=None`, optional | `django_application`, **required** | omitting it is a `TypeError`; passing `None` (or any non-callable) is a `ConfigurationError` whose message names this migration |
-| `url_pattern="^graphql"` — a prefix, applied to **both** protocols | `websocket_url_pattern=r"^graphql/?$"` — exact at both ends, **WebSocket only** | the keyword is renamed; the default no longer matches `/graphql-admin`, `/graphqlanything`, or `/graphql/extra` |
-| the router served GraphQL over HTTP through Strawberry's `GraphQLHTTPConsumer`, with `django_application` behind it as a `^` fallback | the router's `"http"` value **is** your Django ASGI application, dispatched directly | nothing serves GraphQL over HTTP until you add the `urlpatterns` entry above — the step with no automatic equivalent |
-
-Neither `DjangoGraphQLProtocolRouter(schema)` nor `DjangoGraphQLProtocolRouter(schema, django_asgi_app, url_pattern=r"^graphql")` — both valid `0.0.14` spellings — works now.
 
 ### Deployment guidance
 
@@ -698,7 +687,7 @@ For a `multipart/form-data` POST the bound is only the **declared** `Content-Len
 
 **One UTF-8 wire.** A package view accepts UTF-8 and only UTF-8; UTF-16 / UTF-32 and a leading UTF-8 BOM get the same controlled `400` a malformed body gets, and the contract reaches the two multipart control fields (`operations` and `map`) too.
 
-**Cache and headers.** An authenticated response must never be served from a shared cache to a different actor: Django patches `Vary: Cookie` once the session is read, but a proxy or CDN has to honor it, so mark the location uncacheable at the edge. `SecurityMiddleware`'s headers now apply to the route because it is a Django view; under `0.0.14`'s Channels HTTP branch they did not, so verify yours land after migrating.
+**Cache and headers.** An authenticated response must never be served from a shared cache to a different actor: Django patches `Vary: Cookie` once the session is read, but a proxy or CDN has to honor it, so mark the location uncacheable at the edge. `SecurityMiddleware`'s headers apply to the route because it is a Django view.
 
 **WebSocket handshakes are validated on `Host` and on `Origin`.** Two separate router-owned checks, neither substituting for the other. `Origin` is Channels' `AllowedHostsOriginValidator`; `Host` is the package's own private validator, composed outermost, which hands the handshake's `Host` / `X-Forwarded-Host` headers and server address to Django's own ASGI request and calls `request.get_host()`, so your existing `ALLOWED_HOSTS` and `USE_X_FORWARDED_HOST` govern a handshake exactly as they govern an HTTP request. **No new setting exists.** Only a `DisallowedHost` becomes a denial, and it precedes authentication and consumer construction. A Channels consumer runs no `CsrfViewMiddleware`, so these two checks are that protocol's handshake defence rather than a token. Strawberry's consumer-side Origin check defers to Channels' verdict in the package consumer; an injected consumer keeps Strawberry's own.
 
@@ -745,6 +734,7 @@ Verify these on the deployed endpoint rather than configuring them; the two SDL 
 ### The production GraphQL mount
 
 ```python
+from django.urls import path
 from graphql import NoSchemaIntrospectionCustomRule
 from strawberry.extensions import AddValidationRules
 
@@ -797,6 +787,7 @@ With `multipart_uploads_enabled=True` the package bounds the declared multipart 
 `login_mutation()` / `register_mutation()` default to `AllowAny` and the framework adds no brute-force protection. Throttling is consumer-owned; the smallest real gate is a permission class over Django's cache:
 
 ```python
+import strawberry
 from django.core.cache import cache
 
 from django_strawberry_framework.auth import login_mutation
@@ -811,6 +802,7 @@ class LoginAttemptThrottle:
         return cache.incr(key) <= 5
 
 
+@strawberry.type
 class Mutation:
     login = login_mutation(permission_classes=[LoginAttemptThrottle])
 ```
@@ -849,7 +841,7 @@ Never enable it on an internet-facing schema: it returns interpolated SQL values
 ```python
 from debug_toolbar.toolbar import debug_toolbar_urls
 
-INSTALLED_APPS += ["django.contrib.staticfiles", "debug_toolbar", "django_strawberry_framework"]
+INSTALLED_APPS += ["debug_toolbar"]  # beside django.contrib.staticfiles and django_strawberry_framework, already listed
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",

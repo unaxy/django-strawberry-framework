@@ -81,7 +81,7 @@ class CreateItemViaSerializer(SerializerMutation):
 - **N+1 detection.** `DjangoOptimizerExtension(strictness="raise")` turns an unplanned lazy load into an error, so N+1 fails CI instead of surprising production.
 - **Visibility that cascades.** Override `get_queryset` as you already do; `apply_cascade_permissions` pushes it across FK / OneToOne edges with zero extra queries.
 - **Write permissions by default.** Generated mutations deny unless `DjangoModelPermission` (Django's `add` / `change` / `delete`) or your own class says yes.
-- **Production defaults.** `DjangoSchema` masks unexpected exceptions behind a `correlationId`, `DjangoGraphQLView` / `AsyncDjangoGraphQLView` cap request bodies, and file output hides the server's filesystem path by default (`Meta.filesystem_path_fields` restores it per field). Build on plain Strawberry's schema or view and you keep none of these.
+- **Production defaults.** `DjangoSchema` masks unexpected exceptions behind a `correlationId` and enforces an execution resource budget (`ResourcePolicy`: document size, depth, aliases, list rows, uploads), `DjangoGraphQLView` / `AsyncDjangoGraphQLView` cap request bodies, and file output hides the server's filesystem path by default (`Meta.filesystem_path_fields` restores it per field). Build on plain Strawberry's schema or view and you keep none of these.
 - **Session auth.** Opt-in `login` / `logout` / `register` mutations and a `current_user` query.
 - **Tooling.** `TestClient` for in-process GraphQL tests, `DjangoDebugExtension` for SQL in `extensions.debug`, django-debug-toolbar integration, and a Channels router for subscriptions.
 

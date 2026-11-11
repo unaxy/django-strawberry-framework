@@ -4,9 +4,10 @@
 
 `django-strawberry-framework` is in pre-1.0 development. Only the latest released version on `main` is supported with security fixes.
 
-| Version  | Supported          |
-| -------- | ------------------ |
-| `0.x`    | :white_check_mark: |
+| Version    | Supported          |
+| ---------- | ------------------ |
+| `0.0.15`   | :white_check_mark: |
+| `< 0.0.15` | :x:                |
 
 The table is about *this* package. Its dependency floors are a separate question: `pyproject.toml` declares `Django>=5.2.16`, and Django `5.2.0`-`5.2.15` are not supported at all. Which Django releases carry security fixes is Django's own policy to state, not this project's.
 

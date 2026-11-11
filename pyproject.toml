@@ -55,7 +55,7 @@ name = "django-strawberry-framework"
 # Read from ``django_strawberry_framework/__init__.py`` by ``[tool.hatch.version]``.
 # ``readme`` is built by the fancy-pypi-readme hook above.
 dynamic = ["version", "readme"]
-description = "A DRF-inspired Django integration framework for Strawberry GraphQL — filtering, ordering, aggregation, and permissions"
+description = "A DRF-inspired Django integration framework for Strawberry GraphQL — filtering, ordering, mutations, and permissions"
 license = "MIT"
 license-files = [
     "LICENSE",
@@ -99,9 +99,11 @@ dependencies = [
     # Strawberry's own; ``_completion.py`` audits each release's completion source.
     "graphql-core>=3.3.1,<3.4",
     "django-filter>=25.2",
-    # ``typing_extensions.override`` marks every method that overrides a base
-    # (``typing.override`` is 3.12+); 4.4.0 is the release that added it.
-    "typing-extensions>=4.4.0",
+    # Imported at runtime: ``override`` (4.4.0) marks every method that overrides a
+    # base, and ``TypeIs`` (4.10.0) is a module-level import of
+    # ``management/commands/inspect_django_type.py``. The floor is 4.14.0 because
+    # strawberry-graphql 0.328.0, the Strawberry floor, itself requires it.
+    "typing-extensions>=4.14.0",
 ]
 
 [project.urls]

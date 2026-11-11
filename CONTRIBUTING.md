@@ -4,9 +4,9 @@ Thanks for your interest in contributing to `django-strawberry-framework`. The p
 
 ## Where things live
 
-- **Package layout & test placement** — [`docs/TREE.md`][tree] is the canonical layout reference: upstream tree comparisons, the current on-disk shape, the target shape with `[alpha]` / `[beta]` / `[stable]` milestone tags, and the test-placement rules across the package and example-project test trees.
+- **Package layout & test placement** — [`docs/TREE.md`][tree] is the canonical layout reference: upstream tree comparisons, the current on-disk shape, the target shape (each planned row marked "planned by <card id>"), and the test-placement rules across the package and example-project test trees.
 - **Capability catalog** — [`docs/GLOSSARY.md`][glossary] is the source of truth for what's shipped / planned / deferred plus the `0.1.0` / `1.0.0` milestone framing.
-- **Per-card sequencing** — [`KANBAN.md`][kanban] tracks all planned work as `TODO-ALPHA-*`, `TODO-BETA-*`, `BLOCKED-*`, and `DONE-*` cards with version pins.
+- **Per-card sequencing** — [`KANBAN.md`][kanban] tracks all planned work as `TODO-ALPHA-*`, `TODO-BETA-*`, `TODO-STABLE-*`, `WIP-*`, and `DONE-*` cards with version pins; blocking is not a status but a derived badge on a card with unfinished blockers.
 - **Strategic differentiation roadmap** — [`BACKLOG.md`][backlog] holds post-`1.0.0` items that aren't on the milestone roadmap. Items graduate to `KANBAN.md` cards when scheduled.
 - **In-flight design work** — the one spec being built lives at `docs/spec-<NNN>-<topic>-<0_0_X>.md` (NNN is the 3-digit KANBAN card number; naming and slice mechanics are in [`docs/builder/BUILD.md`][build]). When the next spec is authored, every prior spec moves to [`docs/SPECS/`][specs] and its `-terms.csv` / `-rationale.md` companions to `docs/SPECS/appx/`, so `docs/SPECS/` is the archive and `docs/` holds exactly one spec at a time.
 - **Tutorial through the example project** — [`examples/fakeshop/README.md`][fakeshop-readme] walks the shipped surface end to end with live queries; it is the seed of the full documentation.
@@ -64,7 +64,7 @@ docker compose -f docker-compose.postgres.yml up -d
 FAKESHOP_PG_DSN=postgres://fakeshop:fakeshop@127.0.0.1:5432/fakeshop uv run --group pg pytest
 ```
 
-CI runs the SQLite tiers on every push and pull request, at the exact dependency floor and at latest. The Postgres workflow is manual dispatch.
+CI runs the SQLite tiers on every push and pull request, at the exact dependency floor and at latest; the full `django.yml` matrix runs on manual dispatch and weekly. The Postgres workflow (`postgres.yml`) runs on manual dispatch and weekly.
 
 ## Linting, formatting, and pre-commit
 
@@ -84,6 +84,7 @@ The hooks in `.pre-commit-config.yaml` run in this order, and CI's lint job runs
 - **check-type-suppressions** refuses an ignore on a locked rule and any file-level directive, and holds the ignore and `typing.cast` counts of every site (`path::QualifiedName`) to the generated ledger `scripts/type_suppressions.toml`: `--write` lowers it after a fix, `--write --allow-new` records a deliberate new or moved suppression. In CI, a commit that raises a total (casts, or one rule's ignores) also needs a `Suppression-Growth-Approved: <reason>` trailer, the maintainer's consent.
 - **check-public-types** builds the package into its own environment and requires `basedpyright --verifytypes` at 100% on the public API.
 - **truthful-reads** keeps identity reads of consumer objects off dunder attribute lookups and refuses a handler that swallows `BaseException`.
+- **annotation-subscripts** refuses a package annotation that subscripts a class without a runtime `__class_getitem__` (Django's `Options`, `Field`, `ModelForm`, ...) wherever anything can evaluate it, so the package imports without `django-stubs-ext`.
 - **check-kanban-anchors** refuses colliding card and glossary anchors.
 - **import-spec-terms-check** requires every done card's glossary rows to equal its spec terms CSV.
 - **check-spec-glossaries** runs `scripts/check_spec_glossary.py` over every spec: each terms CSV row must name a `docs/GLOSSARY.md` heading the spec links, and every terms CSV must belong to a spec.
@@ -111,7 +112,7 @@ Every `.md` file with cross-file links uses reference style: `[text][ref-id]` in
 
 ## Updating the package version
 
-The version is single-sourced: `__version__` in `django_strawberry_framework/__init__.py`. `pyproject.toml` declares `version` as dynamic and hatchling reads it from there, so a release bump touches that one literal. `tests/base/test_init.py` pins the expected string, so update the test in the same change.
+The version is single-sourced: `__version__` in `django_strawberry_framework/__init__.py`. `pyproject.toml` declares `version` as dynamic and hatchling reads it from there, so a release bump touches that one literal. `tests/base/test_init.py::test_version` pins no string; it checks that the built distribution metadata equals `__version__`.
 
 ## Building
 
@@ -126,9 +127,11 @@ uv build
 Releases publish from CI through PyPI Trusted Publishing; no PyPI API token exists. Land the version bump on `main`, then tag that commit and push the tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.0.15
+git push origin v0.0.15
 ```
+
+Release tags carry the `v` prefix that the `0.0.7`-`0.0.14` tags lack; `publish.yml` triggers only on `v*`.
 
 The tag starts `.github/workflows/publish.yml`. Its build job runs `uv build` on the tagged tree and refuses a tag that does not match `__version__`; its publish job waits for the maintainer's approval on the `pypi` environment, then uploads the sdist and wheel with attestations. The PyPI trusted publisher is bound to owner `unaxy`, repository `django-strawberry-framework`, workflow `publish.yml`, environment `pypi`, so renaming the workflow file or the environment breaks publishing.
 

@@ -88,7 +88,7 @@ Each top-level item maps to one commit / PR.
         ([Decision 2](#decision-2--http-dispatches-directly-to-a-required-consumer-supplied-django-asgi-application)).
   - [ ] `django_application` is a **required** constructor parameter; `None` or a
         non-callable raises [`ConfigurationError`][glossary-configurationerror] naming the
-        migration
+        requirement and its setup
         ([Decision 3](#decision-3--django_application-is-required-omission-fails-at-construction-with-no-compatibility-fallback)).
   - [ ] `websocket_url_pattern`, keyword-only, default `r"^graphql/?$"` (exact, both-ends
         anchored), governs the WebSocket branch only and is validated at construction
@@ -678,13 +678,12 @@ DJANGO_STRAWBERRY_FRAMEWORK = {
   binding, naming the missing parameter. Deliberate: a required parameter should fail as
   a required parameter.
 - **`django_application=None` or a non-callable** — [`ConfigurationError`][glossary-configurationerror]
-  at construction, naming the security reason and the fix: that a deployment
-  which passed `None` (or omitted it) was serving GraphQL HTTP outside Django's
-  middleware, that the mode is removed, and that the repair is
+  at construction, naming the requirement and its security reason: that the `http`
+  branch must be a Django ASGI application so GraphQL HTTP runs inside Django's middleware
+  (host check, CSRF, security headers), and that the setup is
   `get_asgi_application()` plus the `urlpatterns` entry, naming `AsyncDjangoGraphQLView` for
   `async def` resolvers and `DjangoGraphQLView` for plain `def` ones. The explicit-`None` branch
-  exists precisely so a migrant who kept the old keyword gets prose instead of a
-  `TypeError`.
+  exists so a caller passing `None` gets that prose instead of a `TypeError`.
 - **Body over the cap** — `413` with reason `"Request body exceeded the configured
   GraphQL request-body limit."`, produced by the view before any parse. Distinct from
   Django's own rejection when the consumer's `DATA_UPLOAD_MAX_MEMORY_SIZE` is the lower

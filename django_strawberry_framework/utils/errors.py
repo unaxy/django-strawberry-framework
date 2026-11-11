@@ -954,9 +954,10 @@ def _fits_numeric(connection: BaseDatabaseWrapper, number: Decimal) -> bool:
     """Whether ``number``'s spelling stays within PostgreSQL ``numeric``'s format."""
     exponent = number.adjusted() - len(number.as_tuple().digits) + 1
     if number.is_zero():
-        # PostgreSQL src/backend/utils/adt/numeric.c::set_var_from_str accepts this
-        # endpoint from version 16; versions 14 and 15 reject equality. The server has
-        # no numeric parser preflight API, so ask Django for its version at equality.
+        # PostgreSQL src/backend/utils/adt/numeric.c::set_var_from_str (PostgreSQL
+        # License; LICENSE.postgresql) accepts this endpoint from version 16; versions
+        # 14 and 15 reject equality. The server has no numeric parser preflight API, so
+        # ask Django for its version at equality.
         return exponent >= -_POSTGRESQL_NUMERIC_FRACTION_DIGITS and (
             exponent < _POSTGRESQL_NUMERIC_EXPONENT_LIMIT
             or (

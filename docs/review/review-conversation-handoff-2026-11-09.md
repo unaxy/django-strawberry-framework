@@ -18,7 +18,7 @@ current branch; creating or switching branches is not authorized.
 
 ## Review scope and exact starting state
 
-Repository: `/Users/riordenweber/projects/django-strawberry-framework`.
+Repository: `.` (the repository root).
 Branch: `main`. HEAD: `3714f49565dcb6ff33fe2be36a7f3b505d573ea1`.
 
 Before adding this handoff, the checkout contained **59 dirty paths: 32 modified tracked files
