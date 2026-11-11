@@ -9,22 +9,25 @@ copies"). Two entry points enforce it:
   (``.claude/settings.json`` runs this file before each ``Edit``, ``MultiEdit``,
   ``Write`` and ``NotebookEdit``; :func:`main` reads the hook payload on stdin). It
   denies a write whose target lies in the shared checkout outside ``.work/``, unless
-  the target is git-ignored or on :data:`EDITED_IN_PLACE`. It covers every Claude
-  session and subagent; other harnesses meet :func:`pytest_refusal` and AGENTS.md.
-- :func:`pytest_refusal`, called by the repo-root ``conftest.py``: a pytest run whose
-  root is the shared checkout stops with the copy command unless a person started it
-  at a terminal. The shared tree is concurrently dirty, so a result there measures
-  other sessions' unfinished work, and its ``db.sqlite3`` and caches are shared.
+  the target is an untracked git-ignored file or :func:`edited_in_place`. It covers
+  every Claude session and subagent; other harnesses meet :func:`pytest_refusal` and
+  AGENTS.md.
+- :func:`pytest_refusal`, called by the repo-root ``conftest.py`` with its own folder:
+  a pytest run that loads the shared checkout's conftest (whatever ``--rootdir`` or
+  ``-c`` says) stops with the copy command. A terminal proves nothing (``ssh -t``
+  gives an agent one), so only the override lets it run. The shared tree is
+  concurrently dirty, so a result there measures other sessions' unfinished work, and
+  its ``db.sqlite3`` and caches are shared.
 
 The shared checkout is the nearest folder holding a real ``.work`` directory and a
 ``.git`` entry: ``.work`` is git-ignored, so no clone or worktree carries one, and a
 path under ``<shared>/.work/`` (a copy, its evidence) is always allowed. CI's checkout
 has no ``.work`` either. ``DSF_SHARED_EDIT=1`` / ``DSF_SHARED_PYTEST=1`` in the
-environment lift each guard (a maintainer's own session).
+environment lift each guard (the maintainer's own session).
 
 Stdlib only, Python 3.9+: the hook runs on the system ``python3``, once per write, and
-fails open (an unreadable payload or an unexpected error allows the write and says so
-on stderr) so a broken guard never wedges a session.
+fails closed: an unreadable payload or an error classifying the target (git missing, a
+failed lookup) denies the write, names the error, and points at ``DSF_SHARED_EDIT=1``.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -51,18 +54,15 @@ GUARDED_TOOLS = frozenset(
     },
 )
 
-#: Shared-checkout paths (POSIX, relative to its root) the FIX coordinator edits in
-#: place by design (docs/bug_hunt/FIX.md phase 8); a trailing ``/`` covers a folder.
-EDITED_IN_PLACE = ("docs/bug_hunt/", "CHANGELOGTODO.md")
+#: Shared-checkout files (POSIX, relative to its root) the FIX coordinator edits in
+#: place by design (docs/bug_hunt/FIX.md phase 8).
+EDITED_IN_PLACE = frozenset({"CHANGELOGTODO.md"})
+#: The folder whose own ``*.md`` files (not its subfolders') are edited in place too.
+EDITED_IN_PLACE_FOLDER = "docs/bug_hunt"
 
 #: Environment variables that lift the edit guard and the pytest guard.
 EDIT_OVERRIDE_ENV = "DSF_SHARED_EDIT"
 PYTEST_OVERRIDE_ENV = "DSF_SHARED_PYTEST"
-
-#: Environment variables an agent harness sets in the shells it runs commands in.
-AGENT_ENV_MARKERS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
-#: Prefixes of environment variables an agent harness sets.
-AGENT_ENV_PREFIXES = ("CODEX_",)
 
 #: ``json.loads``, its result typed ``object`` for the caller to narrow.
 _loads: Callable[[str], object] = json.loads
@@ -95,36 +95,44 @@ def shared_root(path: Path) -> Path | None:
     return None
 
 
-def has_terminal() -> bool:
-    """Return whether this process has a controlling terminal (a person at a shell).
-
-    Asked of ``/dev/tty`` rather than of stdin, which pytest's capture replaces while
-    conftests load; an agent harness runs commands with no controlling terminal.
-    """
-    try:
-        descriptor = os.open("/dev/tty", os.O_RDONLY)
-    except OSError:
-        return False
-    os.close(descriptor)
-    return True
+def edited_in_place(relative: str) -> bool:
+    """Return whether ``relative`` is a file the FIX coordinator edits in the shared tree."""
+    path = PurePosixPath(relative)
+    return relative in EDITED_IN_PLACE or (
+        path.parent.as_posix() == EDITED_IN_PLACE_FOLDER and path.suffix == ".md"
+    )
 
 
-def is_ignored(root: Path, relative: str) -> bool:
-    """Return whether git ignores ``relative`` in the checkout at ``root`` (a tracked file never is)."""
-    completed = subprocess.run(
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
         [
             "git",
             "-C",
             str(root),
-            "check-ignore",
-            "-q",
-            "--",
-            relative,
+            *args,
         ],
         capture_output=True,
         check=False,
     )
-    return completed.returncode == 0
+
+
+def is_ignored(root: Path, relative: str) -> bool:
+    """Return whether git ignores ``relative`` and tracks no file of that name in any case.
+
+    A case-insensitive filesystem (APFS) reaches a tracked ``kept.local.json`` as
+    ``KEPT.LOCAL.JSON`` too, which ``check-ignore`` alone would call ignored.
+
+    Raises:
+        OSError: the ``git`` lookup failed, so the caller cannot tell.
+
+    """
+    if _git(root, "check-ignore", "-q", "--", relative).returncode != 0:
+        return False
+    tracked = _git(root, "ls-files", "-z", "--", f":(icase,literal){relative}")
+    if tracked.returncode != 0:
+        msg = f"git ls-files failed: {tracked.stderr.decode(errors='replace').strip()}"
+        raise OSError(msg)
+    return not tracked.stdout
 
 
 def edit_refusal(payload: Mapping[str, object], environ: Mapping[str, str]) -> str | None:
@@ -148,12 +156,7 @@ def edit_refusal(payload: Mapping[str, object], environ: Mapping[str, str]) -> s
     relative = target.relative_to(root).as_posix()
     if relative.startswith(".work/"):
         return None
-    if any(
-        relative == entry or (entry.endswith("/") and relative.startswith(entry))
-        for entry in EDITED_IN_PLACE
-    ):
-        return None
-    if is_ignored(root, relative):
+    if edited_in_place(relative) or is_ignored(root, relative):
         return None
     return (
         f"Refused: {relative} is in the shared checkout ({root}), which no agent edits directly. "
@@ -161,46 +164,57 @@ def edit_refusal(payload: Mapping[str, object], environ: Mapping[str, str]) -> s
     )
 
 
-def runs_under_agent(environ: Mapping[str, str]) -> bool:
-    """Return whether ``environ`` carries an agent harness's marker."""
-    return any(name in environ for name in AGENT_ENV_MARKERS) or any(
-        name.startswith(AGENT_ENV_PREFIXES) for name in environ
-    )
+def pytest_refusal(checkout: Path, environ: Mapping[str, str]) -> str | None:
+    """Return why a pytest run loading the conftest in ``checkout`` is refused, else ``None``.
 
-
-def pytest_refusal(rootdir: Path, environ: Mapping[str, str], *, interactive: bool) -> str | None:
-    """Return why a pytest run rooted at ``rootdir`` is refused, else ``None``.
-
-    Refused when ``rootdir`` is the shared checkout and the run is not a person's at a
-    terminal (``interactive`` false, :func:`has_terminal` in production, or an agent
-    harness's environment) and
-    ``DSF_SHARED_PYTEST=1`` is unset.
+    Refused when ``checkout`` is in the shared checkout and ``DSF_SHARED_PYTEST=1`` is
+    unset. The root ``conftest.py`` passes its own folder, not ``config.rootpath``,
+    which ``--rootdir`` and ``-c`` move while the shared tests and conftest still load.
     """
     if environ.get(PYTEST_OVERRIDE_ENV) == "1":
         return None
-    root = shared_root(Path(os.path.realpath(rootdir)))
-    if root is None or (interactive and not runs_under_agent(environ)):
+    root = shared_root(Path(os.path.realpath(checkout)))
+    if root is None:
         return None
     return (
-        f"Refused: pytest rooted at the shared checkout ({root}). Its tree is concurrently "
+        f"Refused: pytest in the shared checkout ({root}). Its tree is concurrently "
         f"dirty and its database shared, so a run there measures other sessions' work. "
         f"{_COPY_HOWTO} To test a commit (after a landing, or a parent), use "
-        "`work.py new carve-<id>-<slug> --worktree --from <sha>`."
+        "`work.py new carve-<id>-<slug> --worktree --from <sha>`. The maintainer's own run: "
+        f"`{PYTEST_OVERRIDE_ENV}=1 pytest ...`."
     )
+
+
+def _payload(text: str) -> dict[str, object]:
+    """Return the hook payload ``text`` decodes to.
+
+    Raises:
+        ValueError: ``text`` is not JSON.
+        TypeError: it is not a JSON object.
+
+    """
+    payload = _loads(text)
+    if not is_json_object(payload):
+        msg = f"the hook payload is a {type(payload).__name__}, not an object"
+        raise TypeError(msg)
+    return payload
 
 
 def main() -> int:
     """Run as the ``PreToolUse`` hook: print a deny decision when the write is refused.
 
     An unreadable payload (``ValueError``), an unexpected shape (``TypeError``) or a
-    failed path or git lookup (``OSError``) allows the write and says so on stderr.
+    failed path or git lookup (``OSError``) denies the write, naming the error.
     """
-    try:
-        payload = _loads(sys.stdin.read())
-        reason = edit_refusal(payload, os.environ) if is_json_object(payload) else None
-    except (ValueError, TypeError, OSError) as error:
-        print(f"shared_checkout_guard: allowing after an error: {error!r}", file=sys.stderr)
+    if os.environ.get(EDIT_OVERRIDE_ENV) == "1":
         return 0
+    try:
+        reason = edit_refusal(_payload(sys.stdin.read()), os.environ)
+    except (ValueError, TypeError, OSError) as error:
+        reason = (
+            f"Refused: shared_checkout_guard could not classify this write ({error!r}), so it "
+            f"denies it. Fix the cause, or set {EDIT_OVERRIDE_ENV}=1 in the maintainer's own session."
+        )
     if reason is not None:
         decision = {
             "hookSpecificOutput": {

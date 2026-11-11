@@ -51,6 +51,7 @@ import inspect
 import json
 import os
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import pytest
@@ -263,15 +264,11 @@ def _skip_pg_tests_off_postgres(items: list[pytest.Item]) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Stop a run rooted at the shared checkout that no person started at a terminal."""
+    """Stop a run that loads this conftest from the shared checkout (``--rootdir`` aside)."""
     if hasattr(config, "workerinput"):
         return
     # The module, not its names: pluggy reads every ``pytest_*`` name in a conftest as a hook.
-    reason = shared_checkout_guard.pytest_refusal(
-        config.rootpath,
-        os.environ,
-        interactive=shared_checkout_guard.has_terminal(),
-    )
+    reason = shared_checkout_guard.pytest_refusal(Path(__file__).parent, os.environ)
     if reason is not None:
         pytest.exit(reason, returncode=pytest.ExitCode.USAGE_ERROR)
 
