@@ -1,6 +1,6 @@
 """Repo-root pytest hooks shared by every test tree in ``testpaths``.
 
-Owns four concerns, all repo-root because each spans every test tree -
+Owns five concerns, all repo-root because each spans every test tree -
 ``tests/``, ``examples/fakeshop/test_query/``, per-app
 ``examples/fakeshop/apps/*/tests/`` - while ``tests/conftest.py`` loads only
 when ``tests/`` is collected:
@@ -37,6 +37,11 @@ when ``tests/`` is collected:
 4. Model-registry restoration, installed through ``tests/_app_registry.py`` as
    an autouse plugin so function-local model declarations in every test tree
    are removed before later tests inspect Django's relation graph.
+
+5. The shared-checkout guard. A run rooted at the shared checkout (the folder that
+   holds ``.work/``) stops before collection unless a person started it at a
+   terminal: agents test in a private copy through ``scripts/work.py run``
+   (``scripts/shared_checkout_guard.py::pytest_refusal``).
 """
 
 import asyncio
@@ -44,6 +49,7 @@ import contextlib
 import copy
 import inspect
 import json
+import os
 import threading
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
@@ -51,6 +57,8 @@ import pytest
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connection
 from django.test import SimpleTestCase
+
+from scripts import shared_checkout_guard
 
 pytest_plugins = ["tests._app_registry", "tests._db_connections"]
 
@@ -252,6 +260,20 @@ def _skip_pg_tests_off_postgres(items: list[pytest.Item]) -> None:
     for item in items:
         if "pg" in item.keywords:
             item.add_marker(skip_pg)
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Stop a run rooted at the shared checkout that no person started at a terminal."""
+    if hasattr(config, "workerinput"):
+        return
+    # The module, not its names: pluggy reads every ``pytest_*`` name in a conftest as a hook.
+    reason = shared_checkout_guard.pytest_refusal(
+        config.rootpath,
+        os.environ,
+        interactive=shared_checkout_guard.has_terminal(),
+    )
+    if reason is not None:
+        pytest.exit(reason, returncode=pytest.ExitCode.USAGE_ERROR)
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

@@ -573,6 +573,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_scalars.py               # Scalar tests for BigInt, Upload, and the framework StrawberryConfig helper.
 ├── test_schema.py                # Permanent behavioral tests for django_strawberry_framework.schema.
 ├── test_sets_mixins.py           # Pins for set-family mixins shared by ``FilterSet`` and ``OrderSet``.
+├── test_shared_checkout_guard.py # Tests for ``scripts/shared_checkout_guard.py``: the Claude edit hook and the pytest guard.
 ├── test_strawberry_patches.py    # Tests for the Strawberry request-body and Relay patches.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.
@@ -958,6 +959,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_scalars.py               # Scalar tests for BigInt, Upload, and the framework StrawberryConfig helper.
 ├── test_schema.py                # Permanent behavioral tests for django_strawberry_framework.schema.
 ├── test_sets_mixins.py           # Pins for set-family mixins shared by ``FilterSet`` and ``OrderSet``.
+├── test_shared_checkout_guard.py # Tests for ``scripts/shared_checkout_guard.py``: the Claude edit hook and the pytest guard.
 ├── test_strawberry_patches.py    # Tests for the Strawberry request-body and Relay patches.
 ├── test_views.py                 # Package-tier contracts for the package's Django GraphQL views.
 ├── test_views_async_callback.py  # The async package view's ``as_view`` returns a coroutine view callback, or refuses.

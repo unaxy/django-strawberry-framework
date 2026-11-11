@@ -165,6 +165,7 @@ poetry.toml
 # agents/ is the exception: the tracked agentflow subagent definitions.
 .claude/*
 !.claude/agents/
+!.claude/settings.json
 **/.claude/settings.local.json
 
 # Private working copies: clones, worktrees and their evidence, all under one

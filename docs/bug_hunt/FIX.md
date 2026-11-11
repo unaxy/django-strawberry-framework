@@ -63,7 +63,8 @@ Each phase finishes completely (every agent it dispatched has reported) before t
    A docs-only last fix may be checked by the coordinator instead of a new verifier round.
 8. **Land.** `work.py land fix-i<N>-<slug>` applies the copy's content to the shared working tree as one
    `git diff --binary` (new files included); it refuses unless the patch applies cleanly and every path it touches
-   is clean there or already identical, and it never touches the shared index. Edit the tracker in the same working tree: move the item to the end of
+   is clean there or already identical, and it never touches the shared index. Tests of the landed result run in `work.py new carve-<id>-<slug>
+   --worktree --from <commit>`, never in the shared checkout. Edit the tracker in the same working tree: move the item to the end of
    "Done", ticked, with an outcome stating the new behaviour, the symbols it changed and the tests that pin it;
    update the Progress counts; add out-of-scope questions under "Waiting on you" (an out-of-scope finding becomes a
    new item only if it passes the phase 1 gate; otherwise it is a robustness row or a new card); new items and
@@ -93,8 +94,9 @@ Each phase finishes completely (every agent it dispatched has reported) before t
 
 - Downloads only PyPI wheels into a fresh empty dir; read them, never run them; Python reading them runs with `-I`.
 - No commits, branches or stash in any clone. Delete only files you created.
-- A probe kept outside the clone's tree runs pytest with `--rootdir <tree> -c <tree>/pytest.ini`. A run at the parent
-  commit uses a `git archive` copy driven by the clone's venv python. A floor venv pins pytest and pytest-asyncio to
+- A probe kept outside the clone's tree runs pytest with `--rootdir <tree> -c <tree>/pytest.ini`, `<tree>` the clone,
+  never the shared checkout (its root `conftest.py` refuses an agent's run). A run at the parent commit uses a
+  `git archive` copy under `.work/evidence/<stem>/`, driven by the clone's venv python. A floor venv pins pytest and pytest-asyncio to
   their `uv.lock` versions.
 - The tracker and CHANGELOGTODO.md are the coordinator's at landing: an agent drafts its entry in its report.
 - Reports are text in the final message: numbered FACTS with `path::Symbol` or command evidence and counts, then
