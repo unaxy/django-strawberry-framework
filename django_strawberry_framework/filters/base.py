@@ -3860,10 +3860,13 @@ def refuse_unresolvable_lookup(
     ``FilteredRelation`` alias, which only the queryset a filter runs on holds: Django's
     ``FieldError`` at the split), and a name past a relation the related model does not
     carry (a walked hop reads it on rows a type's ``get_queryset`` shapes,
-    ``filters/sets.py::FilterSet._leaf_chain``). A set declaring no ``Meta.model`` has no
-    model to resolve a path on and is not asked: a type refuses it when it binds
-    (``types/finalizer.py::_bind_filterset_owner``), and applied unbound it refuses a leaf
-    naming the missing ``Meta.model`` (``filters/sets.py::FilterSet._leaf_form_entries``).
+    ``filters/sets.py::FilterSet._leaf_chain``). A name past a ``GenericForeignKey`` is
+    no such name: no hop walks one and no queryset can annotate a name it holds, and
+    ``filters/inputs.py::refuse_joinless_relation`` refuses it first. A set declaring no
+    ``Meta.model`` has no model to resolve a path on and is not asked: a type refuses it
+    when it binds (``types/finalizer.py::_bind_filterset_owner``), and applied unbound it
+    refuses a leaf naming the missing ``Meta.model``
+    (``filters/sets.py::FilterSet._leaf_form_entries``).
     """
     model = _filterset_model(filterset_cls)
     if model is None:

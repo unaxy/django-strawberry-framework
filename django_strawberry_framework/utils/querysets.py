@@ -675,6 +675,47 @@ def split_lookup(
     return tuple(names[: len(names) - len(lookups)]), start, tuple(lookups)
 
 
+def joinless_relation_on(
+    model: type[models.Model],
+    lookup: str,
+) -> tuple[ModelField, tuple[str, ...]] | None:
+    """Return the relation Django builds no join for that a filter on ``lookup`` reaches; ``None``.
+
+    ``lookup`` is walked name by name as ``Query.names_to_path`` walks a filter argument
+    (the walk ``Query.setup_joins`` runs), each name read on the model the hop before it
+    reaches: ``pk`` as the primary key, a field a concrete parent declares through the
+    parent hop. The walk refuses a name naming a relation with no ``related_model`` (a
+    ``GenericForeignKey``, whose target is no one model) wherever it stands, with
+    ``FieldError``, before it reads any name past it; the answer is that name's field on
+    the model the walk stands on (``Options.get_field``), held to the walk's own test
+    (``is_relation and not related_model``), with the names ``lookup`` spells past it.
+    ``None`` where the walk reaches a column, one a concrete parent declares included (the
+    names left are its transforms and lookup, a JSON key named as a relation among them), a
+    name the model does not carry (a queryset's annotation or alias, a typo, a lookup), or
+    the end of ``lookup`` on a relation Django joins.
+    """
+    query = sql.Query(model)
+    opts: _OptionsAny = model._meta
+    names = lookup.split(LOOKUP_SEP)
+    for position, name in enumerate(names):
+        try:
+            # One name: Django answers its hops, or raises for a name it cannot walk.
+            steps, reached, _targets, _rest = _names_to_path(query, [name], opts)
+        except FieldError:
+            try:
+                field = opts.get_field(name)
+            except FieldDoesNotExist:
+                return None
+            joinless = field.is_relation and not field.related_model
+            return (field, tuple(names[position + 1 :])) if joinless else None
+        # A column ends the walk, a parent's inherited one included (its steps are the parent
+        # hop): the names past it are its transforms and lookup, never fields.
+        if not reached.is_relation:
+            return None
+        opts = steps[-1].to_opts
+    return None
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class ResolvedOrderName:
     """An order name as ``Query.setup_joins`` resolves it (``resolve_order_name``).

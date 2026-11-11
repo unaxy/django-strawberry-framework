@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 229 to do.
+Progress: 0 done, 230 to do.
 
 ## From dry-0_0_15_3
 
@@ -1103,6 +1103,14 @@ Progress: 0 done, 229 to do.
   payload, where it was refused as never saved ("never observed being INSERTED/UPDATED"); a `DjangoModelFormMutation`
   whose form `save()` rebinds `form.instance` to such a row answers the same `null`. An update whose `update()` saves
   a multi-table child over the located row is refused as never UPDATED, never answered as `conflict`
+- [ ] 919. CHANGELOG entry for item 881: a `FilterSet` filter running shipped code whose `field_name` continues past a
+  `GenericForeignKey` (`content_object__name`, `desk__content_object__id`, `tags__content_object__pk`, a key a
+  multi-table child inherits), or whose `lookup_expr` carries the path onto one (`field_name="desk",
+  lookup_expr="content_object__name"`), is now refused with a `ConfigurationError` naming the set, the filter and the
+  key when its set publishes (at schema build for a served set, at first use for an unbound one, a raw construction,
+  `DjangoFilterBackend` and `FilterView` included), where it built and then failed every request carrying a value with
+  Django's masked `FieldError`; a `method=` filter or a `filter` override over such a path still builds and filters as
+  it chooses
 
 ## From dry-upstream-0_0_15
 

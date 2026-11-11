@@ -257,6 +257,7 @@ if TYPE_CHECKING:
         float | int | str | Combinable,
         int,
     ]
+    _JSON: TypeAlias = django_models.JSONField[object, object]
 
 
 def _is_model_choice_field(field: object) -> TypeIs[ModelChoiceField[django_models.Model]]:
@@ -431,6 +432,28 @@ class _CrNoteDesk(_CrNoteRoot):
     """An MTI child whose ``GenericRelation`` makes ``_CrDeskNote.note_desk`` a visible field."""
 
     notes = GenericRelation(_CrDeskNote, related_query_name="note_desk")
+
+    class Meta(_CrUnmanagedModel.Meta):
+        pass
+
+
+class _CrHeldNote(_CrUnmanagedModel):
+    """An MTI root declaring a ``GenericForeignKey`` over its content type and object id."""
+
+    # DO_NOTHING, not CASCADE: this unmanaged model has no table, so a cascade would make
+    # every ContentType delete in the session query a missing table.
+    content_type: _FK[ContentType] = django_models.ForeignKey(
+        ContentType,
+        on_delete=django_models.DO_NOTHING,
+        related_name="+",
+    )
+    object_id: _PositiveInt = django_models.PositiveIntegerField()
+    content_object = GenericForeignKey("content_type", "object_id")
+    notes: _JSON = django_models.JSONField(default=dict)
+
+
+class _CrHeldNoteCopy(_CrHeldNote):
+    """An MTI child inheriting the ``GenericForeignKey`` its root declares."""
 
     class Meta(_CrUnmanagedModel.Meta):
         pass
@@ -9496,6 +9519,132 @@ def test_an_exact_list_on_a_generic_foreign_key_is_refused_for_the_relation(
     assert str(refused.value) == _GENERIC_KEY_REFUSAL.format(
         subject=f"ListExactGenericSet: {filter_class.__name__}",
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "field_name",
+        "lookup_expr",
+        "expected",
+    ),
+    [
+        pytest.param(
+            _CrHeldNoteCopy,
+            "content_object__name",
+            "exact",
+            "PastGenericSet: CharFilter on 'content_object__name' continues past "
+            "_CrHeldNoteCopy.content_object",
+            id="inherited-by-an-mti-child",
+        ),
+        pytest.param(
+            _CrHeldNoteCopy,
+            "_crheldnote_ptr__content_object__id",
+            "exact",
+            "PastGenericSet: CharFilter on '_crheldnote_ptr__content_object__id' continues past "
+            "_CrHeldNote.content_object",
+            id="past-the-mti-parent-link",
+        ),
+        pytest.param(
+            library_models.TaggedItem,
+            gettext_lazy("content_object__name"),
+            "exact",
+            "PastGenericSet: CharFilter on 'content_object__name' continues past "
+            "TaggedItem.content_object",
+            id="lazy-field-name",
+        ),
+        pytest.param(
+            library_models.DeskShift,
+            "desk",
+            gettext_lazy("content_object__id"),
+            "PastGenericSet: CharFilter on 'desk' reads CirculationDesk.content_object",
+            id="lazy-lookup-expr-onto-the-key",
+        ),
+        pytest.param(
+            library_models.DeskShift,
+            gettext_lazy("desk__content_object__pk"),
+            "exact",
+            "PastGenericSet: CharFilter on 'desk__content_object__pk' continues past "
+            "CirculationDesk.content_object",
+            id="lazy-field-name-past-a-key",
+        ),
+        pytest.param(
+            library_models.TaggedItem,
+            "content_object__name",
+            gettext_lazy("icontains"),
+            "PastGenericSet: CharFilter on 'content_object__name' continues past "
+            "TaggedItem.content_object",
+            id="lazy-lookup-expr-past-the-key",
+        ),
+    ],
+)
+def test_a_shipped_filter_past_a_generic_foreign_key_is_refused_by_the_key_reached(
+    model: type[models.Model],
+    field_name: str,
+    lookup_expr: str,
+    expected: str,
+) -> None:
+    """The key Django's walk of the filter's argument reaches is the one the refusal names.
+
+    An MTI child walks onto the key its parent declares, by its own name or past the parent
+    link, and a lazy ``field_name`` or ``lookup_expr`` is walked as the text it renders.
+    """
+    target = model
+    leaf = django_filters.CharFilter(field_name=field_name, lookup_expr=lookup_expr)
+
+    class PastGenericSet(FilterSet):
+        f = leaf
+
+        class Meta:
+            model = target
+            fields = []
+
+    with pytest.raises(ConfigurationError) as refused:
+        _ = PastGenericSet.get_filters()
+    assert str(refused.value).startswith(
+        f"{expected}, a GenericForeignKey: Django filters no queryset through it",
+    ), refused.value
+
+
+@pytest.mark.parametrize(
+    ("field_name", "lookup_expr"),
+    [
+        pytest.param("notes__content_object", "exact", id="key-in-the-field-name"),
+        pytest.param("notes", "content_object__icontains", id="key-in-the-lookup-expr"),
+    ],
+)
+def test_a_shipped_filter_past_an_inherited_column_publishes_a_key_named_as_a_generic_key(
+    field_name: str,
+    lookup_expr: str,
+) -> None:
+    """Django's walk ends on a column an MTI parent declares: the names past it are transforms.
+
+    A JSON key named as the ``GenericForeignKey`` the parent declares is a key of the column
+    the child inherits, never the parent's relation, so the set publishes the leaf.
+    """
+    leaf = django_filters.CharFilter(field_name=field_name, lookup_expr=lookup_expr)
+
+    class InheritedJSONKeySet(FilterSet):
+        f = leaf
+
+        class Meta:
+            model = _CrHeldNoteCopy
+            fields = []
+
+    assert list(InheritedJSONKeySet.get_filters()) == ["f"]
+
+
+def test_a_set_declaring_no_meta_model_publishes_a_path_past_a_generic_foreign_key() -> None:
+    """A set with no ``Meta.model`` has no model to walk a path on, so it publishes the leaf.
+
+    A type refuses it when it binds, and applied unbound it refuses a leaf naming the
+    missing ``Meta.model``; publishing judges nothing it cannot walk.
+    """
+
+    class ModelLessPastSet(FilterSet):
+        f = django_filters.CharFilter(field_name="content_object__name")
+
+    assert list(ModelLessPastSet.get_filters()) == ["f"]
 
 
 @pytest.mark.parametrize(

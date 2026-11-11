@@ -30,15 +30,17 @@ Under the package's set the raw form runs the bind ask the typed input runs, as 
 errors: a year comparison past 9999, a duration past the backend's range on every lookup
 and text the package refuses are refused with the typed input's messages, and the bare ``.qs``
 applies the leaves that cleaned.
-A set no type names (a plain subclass of ``BookFilter``, a set of the test's own) publishes
-its filter table at its first construction, under a consumer's own call, DRF's
+A set no type names (a plain subclass of ``BookFilter``, a set of the test's own) publishes its
+filter table at its first construction, under a consumer's own call, DRF's
 ``DjangoFilterBackend`` and django-filter's ``FilterView`` alike: a walked key one or two hops
 deep answers ``BookFilter``'s rows as each viewer sees them, and a declaration Django answers
 no request for (a ``range`` over a relation, a GlobalID, model-choice, column-typed, choice or
-null-test filter over a ``GenericForeignKey``, a model-choice filter with no queryset, declared
-or selected by ``Meta.filter_overrides``) is refused at every construction, while a filter on
-the content type key beside a ``GenericForeignKey`` or on the ``GenericRelation`` reversing it
-answers its rows.
+null-test filter over a ``GenericForeignKey`` or whose path continues past one
+(``content_object__name``, past a key, past a ``GenericRelation``, a ``lookup_expr`` carrying a
+key's path onto one), a model-choice filter with no queryset, declared or selected by
+``Meta.filter_overrides``) is refused at every construction, while a name past a key the
+related model lacks (``desk__bogus``) publishes and a filter on the content type key beside a
+``GenericForeignKey`` or on the ``GenericRelation`` reversing it answers its rows.
 A raw key starting at a ``FilteredRelation`` alias the set's ``filter_queryset`` adds reads
 the visibility of the shelf the alias joins and of the branch past it, under every driver.
 A raw key past a self relation reads the parent type's annotation of its name while the set's
@@ -85,7 +87,8 @@ from django.http import HttpRequest, HttpResponseBase, JsonResponse, QueryDict
 from django.test import Client, override_settings
 from django.test.utils import register_lookup
 from django.urls import path
-from django_filters import CharFilter
+from django.utils.translation import gettext_lazy
+from django_filters import CharFilter, Filter
 from django_filters.filterset import BaseFilterSet
 from django_filters.rest_framework import DjangoFilterBackend
 from django_filters.views import FilterView
@@ -313,6 +316,96 @@ class _ChoicePastKeyOntoGenericSet(FilterSet):
         fields = ("name",)
 
 
+def _respelled(filter_instance: Filter, **values: object) -> Filter:
+    """``filter_instance`` with each of ``values`` set on it as a consumer may set a lazy value.
+
+    The stubs type ``field_name`` and ``lookup_expr`` as ``str``; a project hands Django's lazy
+    text (``gettext_lazy``) where a ``str`` is read.
+    """
+    for name, value in values.items():
+        setattr(filter_instance, name, value)
+    return filter_instance
+
+
+class _CharPastGenericSet(FilterSet):
+    """A ``CharFilter`` whose ``field_name`` continues past a ``GenericForeignKey``."""
+
+    object_name = django_filters.CharFilter(field_name="content_object__name")
+
+    class Meta:
+        model = library_models.TaggedItem
+        fields = ("tag",)
+
+
+class _NumberPastKeyPastGenericSet(FilterSet):
+    """A ``NumberFilter`` past a key onto the desk's ``GenericForeignKey``, then past it."""
+
+    desk_object = django_filters.NumberFilter(field_name="desk__content_object__id")
+
+    class Meta:
+        model = library_models.DeskShift
+        fields = ("name",)
+
+
+class _GlobalIDPastGenericRelationSet(FilterSet):
+    """A GlobalID filter past a ``GenericRelation``, then past the key it reverses."""
+
+    tag_object = GlobalIDFilter(field_name="tags__content_object__pk")
+
+    class Meta:
+        model = library_models.Branch
+        fields = ("name",)
+
+
+class _LookupExprOntoGenericSet(FilterSet):
+    """A ``lookup_expr`` carrying a key's path onto the desk's ``GenericForeignKey``."""
+
+    desk_object = django_filters.CharFilter(
+        field_name="desk",
+        lookup_expr="content_object__name__icontains",
+    )
+
+    class Meta:
+        model = library_models.DeskShift
+        fields = ("name",)
+
+
+class _LazyPastGenericSet(FilterSet):
+    """A lazy ``field_name`` past a key onto the desk's ``GenericForeignKey``, then past it."""
+
+    desk_object = _respelled(
+        django_filters.CharFilter(field_name="desk__content_object__name"),
+        field_name=gettext_lazy("desk__content_object__name"),
+    )
+
+    class Meta:
+        model = library_models.DeskShift
+        fields = ("name",)
+
+
+class _LazyLookupExprOntoGenericSet(FilterSet):
+    """A lazy ``lookup_expr`` carrying a key's path onto the desk's ``GenericForeignKey``."""
+
+    desk_object = _respelled(
+        django_filters.NumberFilter(field_name="desk", lookup_expr="content_object__id"),
+        lookup_expr=gettext_lazy("content_object__id"),
+    )
+
+    class Meta:
+        model = library_models.DeskShift
+        fields = ("name",)
+
+
+class _NamePastRelationItLacksSet(FilterSet):
+    """A name past a key the related model lacks: a hop's rows may hold it, so it builds."""
+
+    desk_bogus = django_filters.CharFilter(field_name="desk__bogus")
+
+    class Meta:
+        model = library_models.DeskShift
+        fields = ("name",)
+
+
 class _ContentTypeColumnSet(FilterSet):
     """A ``NumberFilter`` on the content type key a ``GenericForeignKey`` reads: a column."""
 
@@ -511,6 +604,13 @@ _RAW_SETS: dict[str, type[FilterSet]] = {
     "null-test-over-a-generic-key": _NullTestOverGenericSet,
     "range-past-a-key-onto-a-generic-key": _RangePastKeyOntoGenericSet,
     "choice-past-a-key-onto-a-generic-key": _ChoicePastKeyOntoGenericSet,
+    "char-past-a-generic-key": _CharPastGenericSet,
+    "number-past-a-key-past-a-generic-key": _NumberPastKeyPastGenericSet,
+    "global-id-past-a-generic-relation-past-a-generic-key": _GlobalIDPastGenericRelationSet,
+    "lookup-expr-past-a-key-onto-a-generic-key": _LookupExprOntoGenericSet,
+    "lazy-field-name-past-a-generic-key": _LazyPastGenericSet,
+    "lazy-lookup-expr-onto-a-generic-key": _LazyLookupExprOntoGenericSet,
+    "name-past-a-relation-its-model-lacks": _NamePastRelationItLacksSet,
     "content-type-column": _ContentTypeColumnSet,
     "generic-relation": _GenericRelationSet,
     "model-choice-with-no-queryset": _QuerysetlessChoiceSet,
@@ -3457,6 +3557,38 @@ _REFUSED_SETS = {
         "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
         "through it, so no input can carry its value"
     ),
+    "char-past-a-generic-key": (
+        "_CharPastGenericSet: CharFilter on 'content_object__name' continues past "
+        "TaggedItem.content_object, a GenericForeignKey: Django filters no queryset through "
+        "it, so no input can carry its value; filter through the GenericRelation that "
+        "reverses it on the related model, or on the content type and object id columns it "
+        "reads."
+    ),
+    "number-past-a-key-past-a-generic-key": (
+        "_NumberPastKeyPastGenericSet: NumberFilter on 'desk__content_object__id' continues "
+        "past CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
+        "through it, so no input can carry its value"
+    ),
+    "global-id-past-a-generic-relation-past-a-generic-key": (
+        "_GlobalIDPastGenericRelationSet: GlobalIDFilter on 'tags__content_object__pk' "
+        "continues past TaggedItem.content_object, a GenericForeignKey: Django filters no "
+        "queryset through it, so no input can carry its value"
+    ),
+    "lookup-expr-past-a-key-onto-a-generic-key": (
+        "_LookupExprOntoGenericSet: CharFilter on 'desk' reads CirculationDesk.content_object, "
+        "a GenericForeignKey: Django filters no queryset through it, so no input can carry its "
+        "value"
+    ),
+    "lazy-field-name-past-a-generic-key": (
+        "_LazyPastGenericSet: CharFilter on 'desk__content_object__name' continues past "
+        "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
+        "through it, so no input can carry its value"
+    ),
+    "lazy-lookup-expr-onto-a-generic-key": (
+        "_LazyLookupExprOntoGenericSet: NumberFilter on 'desk' reads "
+        "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
+        "through it, so no input can carry its value"
+    ),
     "model-choice-with-no-queryset": (
         "FilterSet _QuerysetlessChoiceSet: ModelChoiceFilter 'branch_is' has field_name 'branch' "
         "and no queryset, so the model-choice form field it builds has no rows to look a value "
@@ -3505,9 +3637,9 @@ def test_a_raw_set_filtering_the_columns_beside_a_generic_key_answers_their_rows
 ) -> None:
     """The content type key a ``GenericForeignKey`` reads and its ``GenericRelation`` filter rows.
 
-    Only a leaf ending on the ``GenericForeignKey`` itself is refused when its set
-    publishes: a column-typed filter on the content type key, and one on the
-    ``GenericRelation`` reversing the relation on the tagged model, are joined as any
+    Only a leaf whose path ends on, or continues past, the ``GenericForeignKey`` itself is
+    refused when its set publishes: a column-typed filter on the content type key, and one
+    on the ``GenericRelation`` reversing the relation on the tagged model, are joined as any
     relation is and answer their rows on every driver.
     """
     create_users(1)
@@ -3544,6 +3676,31 @@ def test_a_raw_set_filtering_the_columns_beside_a_generic_key_answers_their_rows
         saved_pk(branch),
         saved_pk(other),
     ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_set_naming_a_name_past_a_relation_its_model_lacks_publishes(driver: str) -> None:
+    """A name past a key the related model lacks is left to the request: the set publishes.
+
+    Unlike a name past a ``GenericForeignKey``, a hop's rows could hold it (a type's
+    ``get_queryset`` annotating it), so its set publishes and a request sending no value
+    answers every row on every driver.
+    """
+    create_users(1)
+    branch = library_models.Branch.objects.create(name="desk-branch")
+    desk = library_models.CirculationDesk.objects.create(
+        name="desk",
+        branch=branch,
+        shelf=library_models.Shelf.objects.create(code="s-desk", branch=branch),
+    )
+    shift = library_models.DeskShift.objects.create(name="early", desk=desk)
+    client = _raw_set_client("anonymous")
+
+    assert _raw_set_ids(client, driver, "name-past-a-relation-its-model-lacks", {}) == [
+        saved_pk(shift),
+    ]
+    assert _RAW_SETS["name-past-a-relation-its-model-lacks"]._expansion_snapshot() is not None
 
 
 #: (raw key and value, the titles each viewer's request answers, by set)

@@ -12,7 +12,10 @@ tagged rows, and on a name only the type's queryset holds (a ``FilteredRelation`
 a text annotation) it serves rows. So is any other filter running shipped code on one (a
 column-typed, choice or null-test filter, a ``RelatedFilter`` child's naming the child),
 while a ``method`` or a ``filter`` override of its own answers rows unserved and, served,
-is refused by the input build no scalar types.
+is refused by the input build no scalar types. A shipped filter whose path continues past
+one (``content_object__name``, past a ``GenericRelation`` or from a ``RelatedFilter``
+child) is refused alike, naming the key it continues past, while a ``method`` or a
+``filter`` override over such a path answers rows served and unserved.
 A relation key whose hops re-enter its own set's table takes the id the type registered
 for the relation's target mints, under its published name, whichever type the set or the
 walk's target rows answer for, and so does a consumer leaf ending on the re-entry's
@@ -1099,6 +1102,13 @@ _COLUMN_GENERIC_SUBJECT = (
 )
 
 
+_PAST_GENERIC_SUBJECT = (
+    "ColumnGenericSet: {kind} on 'content_object__name' continues past "
+    "TaggedItem.content_object, a GenericForeignKey: Django filters no queryset through it, so "
+    "no input can carry its value"
+)
+
+
 #: Each column-typed leaf on the ``GenericForeignKey`` consumer code filters.
 _CONSUMER_GENERIC_COLUMNS: dict[str, Callable[[], Filter]] = {
     "number-method": lambda: NumberFilter(field_name="content_object", method="by_object"),
@@ -1158,11 +1168,51 @@ def test_a_served_column_filter_on_a_generic_foreign_key_is_refused_by_its_input
     assert str(exc_info.value).startswith(expected), exc_info
 
 
-def _desk_route_parent() -> type[FilterSet]:
-    """A ``Branch`` set reaching a desk set's ``CharFilter`` on its ``GenericForeignKey``."""
+#: Each column-typed leaf past the ``GenericForeignKey`` consumer code filters.
+_CONSUMER_PAST_GENERIC_COLUMNS: dict[str, Callable[[], Filter]] = {
+    "number-method": lambda: NumberFilter(field_name="content_object__id", method="by_object"),
+    "number-filter-override": lambda: _ObjectIdNumberFilter(field_name="content_object__id"),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("served", [True, False], ids=["served", "unserved"])
+@pytest.mark.parametrize("name", sorted(_CONSUMER_PAST_GENERIC_COLUMNS))
+def test_a_column_filter_past_a_generic_foreign_key_filters_through_consumer_code(
+    name: str,
+    *,
+    served: bool,
+) -> None:
+    """A ``method`` or a ``filter`` override past the key filters as it chooses: rows.
+
+    Neither hands Django the path its ``field_name`` spells, so the set publishes it served
+    or unserved, and each keeps the tags whose object id is the number sent.
+    """
+    target = models.Branch.objects.create(name="Target", city="Boston")
+    sibling = models.Branch.objects.create(name="Sibling", city="Boston")
+    tags = [
+        saved_pk(models.TaggedItem.objects.create(content_object=branch, tag=branch.name.lower()))
+        for branch in (target, sibling)
+    ]
+    schema = _tagged_item_schema(
+        _column_generic_set(_CONSUMER_PAST_GENERIC_COLUMNS[name]()),
+        served=served,
+    )
+
+    payload = _post(
+        schema,
+        "query($where: JSON!) { tags(where: $where) { id } }",
+        {"where": {"tagged": saved_pk(sibling)}},
+    )
+
+    assert _node_pks(payload, "tags") == tags[1:], payload
+
+
+def _desk_route_parent(field_name: str = "content_object") -> type[FilterSet]:
+    """A ``Branch`` set reaching a desk set's ``CharFilter`` on or past its ``GenericForeignKey``."""
 
     class DeskGenericChild(FilterSet):
-        held = CharFilter(field_name="content_object")
+        held = CharFilter(field_name=field_name)
 
         class Meta:
             model = models.CirculationDesk
@@ -1178,8 +1228,31 @@ def _desk_route_parent() -> type[FilterSet]:
     return DeskRouteParent
 
 
-#: Each shipped leaf ending on a ``GenericForeignKey`` a served set publishes, and the
-#: words its refusal starts with.
+def _with_callable_queryset(leaf: ModelChoiceFilter) -> ModelChoiceFilter:
+    """``leaf`` holding ``_branch_rows`` uncalled, as django-filter's callable ``queryset``.
+
+    The stubs type ``queryset`` as a ``QuerySet``; django-filter calls a callable one with the
+    request when it builds the form field.
+    """
+    vars(leaf)["queryset"] = _branch_rows
+    return leaf
+
+
+def _tags_past_generic_set() -> type[FilterSet]:
+    """A ``Branch`` set past its ``GenericRelation``, then past the key it reverses."""
+
+    class BranchTagsPastSet(FilterSet):
+        tag_object = NumberFilter(field_name="tags__content_object__id")
+
+        class Meta:
+            model = models.Branch
+            fields = []
+
+    return BranchTagsPastSet
+
+
+#: Each shipped leaf ending on, or continuing past, a ``GenericForeignKey`` a served set
+#: publishes, and the words its refusal starts with.
 _SERVED_GENERIC_COLUMNS: dict[str, tuple[Callable[[], type[FilterSet]], str]] = {
     "choice": (
         lambda: _column_generic_set(
@@ -1192,6 +1265,36 @@ _SERVED_GENERIC_COLUMNS: dict[str, tuple[Callable[[], type[FilterSet]], str]] = 
             BooleanFilter(field_name="content_object", lookup_expr="isnull"),
         ),
         _COLUMN_GENERIC_SUBJECT.format(kind="BooleanFilter"),
+    ),
+    "choice-past": (
+        lambda: _column_generic_set(
+            ChoiceFilter(choices=[("a", "a")], field_name="content_object__name"),
+        ),
+        _PAST_GENERIC_SUBJECT.format(kind="ChoiceFilter"),
+    ),
+    "callable-model-choice-past": (
+        lambda: _column_generic_set(
+            _with_callable_queryset(
+                ModelChoiceFilter(field_name="content_object__name", queryset=_branch_rows()),
+            ),
+        ),
+        _PAST_GENERIC_SUBJECT.format(kind="ModelChoiceFilter"),
+    ),
+    "past-a-generic-relation": (
+        _tags_past_generic_set,
+        (
+            "BranchTagsPastSet: NumberFilter on 'tags__content_object__id' continues past "
+            "TaggedItem.content_object, a GenericForeignKey: Django filters no queryset "
+            "through it, so no input can carry its value"
+        ),
+    ),
+    "related-filter-route-past": (
+        lambda: _desk_route_parent("content_object__name"),
+        (
+            "DeskGenericChild: CharFilter on 'content_object__name' continues past "
+            "CirculationDesk.content_object, a GenericForeignKey: Django filters no queryset "
+            "through it, so no input can carry its value"
+        ),
     ),
     "related-filter-route": (
         _desk_route_parent,
@@ -1226,8 +1329,10 @@ def test_a_shipped_filter_on_a_generic_foreign_key_is_refused_when_the_schema_bu
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("field_name", ["content_object", "content_object__name"])
 def test_an_unserved_column_filter_on_a_generic_foreign_key_is_refused_at_first_use(
     caplog: pytest.LogCaptureFixture,
+    field_name: str,
 ) -> None:
     """Applied unbound, the set publishes at its first use: the input build's refusal, logged.
 
@@ -1237,7 +1342,7 @@ def test_an_unserved_column_filter_on_a_generic_foreign_key_is_refused_at_first_
     branch = models.Branch.objects.create(name="Target", city="Boston")
     _ = models.TaggedItem.objects.create(content_object=branch, tag="t")
     schema = _tagged_item_schema(
-        _column_generic_set(CharFilter(field_name="content_object")),
+        _column_generic_set(CharFilter(field_name=field_name)),
         served=False,
     )
     unfiltered = _post(schema, "{ tags { tag } }")
@@ -1261,8 +1366,8 @@ def test_an_unserved_column_filter_on_a_generic_foreign_key_is_refused_at_first_
     exc_info = records[0].exc_info
     assert exc_info is not None
     assert type(exc_info[1]) is ConfigurationError, exc_info[1]
-    expected = _COLUMN_GENERIC_SUBJECT.format(kind="CharFilter")
-    assert str(exc_info[1]).startswith(expected), exc_info[1]
+    subject = _COLUMN_GENERIC_SUBJECT if field_name == "content_object" else _PAST_GENERIC_SUBJECT
+    assert str(exc_info[1]).startswith(subject.format(kind="CharFilter")), exc_info[1]
 
 
 def _annotated_desks(

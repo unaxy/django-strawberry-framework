@@ -100,6 +100,7 @@ from django_strawberry_framework.utils.inputs import (
     make_set_input_namespace,
     optional_field_kwargs,
 )
+from django_strawberry_framework.utils.querysets import joinless_relation_on
 from django_strawberry_framework.utils.relations import generated_column_source
 from django_strawberry_framework.utils.strings import flatten_lookup_path, pascal_case_or_raise
 from django_strawberry_framework.utils.typing import object_result
@@ -416,12 +417,22 @@ def _scalar_from_model_field(
 
 
 def refuse_joinless_relation(filterset_cls: type[FilterSet], filter_instance: Filter) -> None:
-    """Refuse a leaf whose ``field_name`` path ends on a relation Django builds no join for.
+    """Refuse a leaf whose path ends on, or continues past, a relation Django builds no join for.
 
     A ``GenericForeignKey`` (a content type and an object id, no one target model) has no
     column a value compares on (``filters/base.py::_compared_columns`` answers none), and
     Django refuses every queryset filter through it with ``FieldError`` whatever the lookup
-    (``Query.names_to_path``), so the filter could answer no request carrying a value.
+    (``Query.names_to_path``), so the filter could answer no request carrying a value. A
+    ``field_name`` naming one is refused as the field it reads. One whose path reaches one
+    only through Django's walk of the filter's argument (``field_name__lookup_expr``,
+    ``utils/querysets.py::joinless_relation_on``) is refused by the relation reached: as
+    one ``field_name`` continues past where names of the ``field_name`` follow it
+    (``content_object__name``, ``desk__content_object__id``,
+    ``tags__content_object__pk``), else as one the leaf reads (a ``lookup_expr`` carrying
+    the path onto it, ``field_name="desk", lookup_expr="content_object__name"``). No
+    queryset holds a name past one: Django refuses an annotation or alias named as a field,
+    so no hop's rows could read it, as they can a name past a relation the related model
+    lacks (``filters/base.py::refuse_unresolvable_lookup``).
     ``filters/sets.py::FilterSet._publish_filters`` asks this of every leaf a set publishes
     whose ``filter`` is shipped code (``filters/sets.py::_runs_shipped_filter``: never a
     ``method=`` filter or a class-level ``filter`` override, which filter as they choose),
@@ -435,9 +446,21 @@ def refuse_joinless_relation(filterset_cls: type[FilterSet], filter_instance: Fi
     not refused.
     """
     field = _filterset_model_field(filterset_cls, filter_instance)
-    if field is None or _compared_columns(filter_instance, field):
+    if field is not None and not _compared_columns(filter_instance, field):
+        raise _unscalared_field_refusal(filter_instance, field, filterset_cls)
+    model = _filterset_model(filterset_cls)
+    if model is None:
         return
-    raise _unscalared_field_refusal(filter_instance, field, filterset_cls)
+    # django-filter's ``Filter.filter`` hands Django ``field_name__lookup_expr``; a lazy part
+    # is read as the text it renders.
+    lookup_expr = truth.text(filter_instance.lookup_expr)
+    argument = LOOKUP_SEP.join((truth.text(_declared_field_name(filter_instance)), lookup_expr))
+    reached = joinless_relation_on(model, argument)
+    if reached is None:
+        return
+    relation, past = reached
+    crossed = len(past) > len(lookup_expr.split(LOOKUP_SEP))
+    raise _unscalared_field_refusal(filter_instance, relation, filterset_cls, crossed=crossed)
 
 
 def _unscalared_field_refusal(
@@ -446,6 +469,7 @@ def _unscalared_field_refusal(
     filterset_cls: type[FilterSet] | None,
     *,
     generated_issue: str | None = None,
+    crossed: bool = False,
 ) -> ConfigurationError:
     """Build the refusal for a leaf typed from a model field no ``SCALAR_MAP`` entry covers.
 
@@ -460,12 +484,15 @@ def _unscalared_field_refusal(
     ``GenericForeignKey``, which Django builds no join for (``_compared_columns`` answers
     none), through the ``GenericRelation`` reversing it or the two columns it reads. A
     ``CompositePrimaryKey`` holds no one value, so its columns are named one by one. Any
-    other column takes a ``SCALAR_MAP`` entry for its class.
+    other column takes a ``SCALAR_MAP`` entry for its class. ``crossed`` is a
+    ``GenericForeignKey`` the leaf's path continues past rather than reads
+    (``refuse_joinless_relation``), with the same remedy.
     """
     declaration = _declaration_of(filter_instance, filterset_cls)
+    reads = "continues past" if crossed else "reads"
     subject = (
-        f"{_declaration_subject(declaration, filterset_cls)} reads {_field_label(model_field)}, "
-        f"a {truth.kind(model_field)}"
+        f"{_declaration_subject(declaration, filterset_cls)} {reads} "
+        f"{_field_label(model_field)}, a {truth.kind(model_field)}"
     )
     if generated_issue == "file":
         return ConfigurationError(

@@ -4710,9 +4710,10 @@ class FilterSet(
         refused first (``_reject_foreign_projection``), and so are a GlobalID or
         model-choice filter on a relation no row identity is compared on
         (``filters/base.py::refuse_identityless_relation``) and a leaf running a shipped
-        ``filter`` (``_runs_shipped_filter``) whose ``field_name`` ends on a relation
-        Django builds no join for (``filters/inputs.py::refuse_joinless_relation``), whose
-        ``field_name`` and ``lookup_expr`` Django resolves on no queryset
+        ``filter`` (``_runs_shipped_filter``) whose path ends on, or continues past, a
+        relation Django builds no join for
+        (``filters/inputs.py::refuse_joinless_relation``), whose ``field_name`` and
+        ``lookup_expr`` Django resolves on no queryset
         (``filters/base.py::refuse_unresolvable_lookup``) or, on a ``ListFilter`` /
         ``ArrayFilter``, whose lookup compares one value where the filter applies a list
         (``filters/base.py::refuse_listless_lookup``), and a model-choice filter with no
