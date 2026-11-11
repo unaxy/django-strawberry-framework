@@ -18,11 +18,12 @@ import contextlib
 import dataclasses
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,8 @@ from scripts import fleet as fleet_rules
 from tests._idioms import json_list, json_loads, json_object
 
 NAME = "spike-fleet-probe"
+#: ``plistlib.loads``, its result typed ``object`` for the caller to narrow.
+_load_plist: Callable[[bytes], object] = plistlib.loads
 SCRIPTS = str(Path(fleet_sync.__file__).resolve().parent)
 
 FAKE_SSH = """\
@@ -1821,3 +1824,101 @@ def test_a_hold_on_a_silent_peer_times_out_with_a_fleet_error(
     ):
         pass
     assert time.monotonic() - started < 10
+
+
+def test_sync_pins_only_carries_saves_both_ways_and_nothing_else(fleet: Fleet) -> None:
+    copy = _new()
+    _ = _write(copy / "saved.txt", "saved on a\n")
+    assert work.main(["save", NAME]) == 0
+    _ = _write(fleet.repo_a / ".work" / "evidence" / NAME / "proof.txt", "evidence\n")
+    fleet.at_b()
+    other = _new("spike-fleet-other")
+    _ = _write(other / "saved.txt", "saved on b\n")
+    assert work.main(["save", "spike-fleet-other"]) == 0
+    head_b = _git_out(fleet.repo_b, "rev-parse", "HEAD").strip()
+    fleet.at_a()
+    _ = _commit(fleet.repo_a, "later.txt", "main moved on a\n")
+    code, document = fleet.run("sync", "--pins-only")
+    assert code == 0, document
+    assert work.pins(fleet.repo_b)[NAME] == work.pins(fleet.repo_a)[NAME]
+    assert (
+        work.pins(fleet.repo_a)["spike-fleet-other"]
+        == work.pins(fleet.repo_b)["spike-fleet-other"]
+    )
+    assert not (fleet.repo_b / ".work" / "clones" / NAME).exists()
+    assert not (fleet.repo_a / ".work" / "clones" / "spike-fleet-other").exists()
+    assert not (fleet.repo_b / ".work" / "evidence" / NAME).exists()
+    assert _git_out(fleet.repo_b, "rev-parse", "HEAD").strip() == head_b
+    code, document = fleet.run("sync", "--pins-only")
+    assert code == 0, document
+    assert not [row for row in _results(document) if row[0] != "skip"]
+
+
+def test_sync_pins_only_and_main_only_cannot_be_combined(fleet: Fleet) -> None:
+    with pytest.raises(SystemExit) as raised:
+        _ = fleet.run("sync", "--pins-only", "--main-only")
+    assert raised.value.code == 2
+
+
+def test_the_macos_schedule_is_a_launchd_agent_running_sync_pins_only(tmp_path: Path) -> None:
+    files = fleet_sync.schedule_files(tmp_path, 120, "darwin")
+    [(path, text)] = files.items()
+    assert path == tmp_path / "Library" / "LaunchAgents" / f"{fleet_sync.SCHEDULE_LABEL}.plist"
+    agent = json_object(_load_plist(text.encode()))
+    assert json_list(agent, "ProgramArguments")[-3:] == ["sync", "--pins-only", "--json"]
+    assert agent["StartInterval"] == 120
+    assert agent["WorkingDirectory"] == str(fleet_sync.REPO_ROOT)
+    commands = fleet_sync.schedule_commands(files, "darwin")
+    assert [command[:2] for command in commands] == [
+        ["launchctl", "bootout"],
+        ["launchctl", "bootstrap"],
+    ]
+
+
+def test_the_linux_schedule_is_a_systemd_user_timer(tmp_path: Path) -> None:
+    files = fleet_sync.schedule_files(tmp_path, 300, "linux")
+    units = tmp_path / ".config" / "systemd" / "user"
+    service = files[units / f"{fleet_sync.SCHEDULE_UNIT}.service"]
+    timer = files[units / f"{fleet_sync.SCHEDULE_UNIT}.timer"]
+    assert "sync --pins-only --json" in service
+    assert "OnUnitActiveSec=300s" in timer
+    assert fleet_sync.schedule_commands(files, "linux")[-1][-2:] == [
+        "--now",
+        f"{fleet_sync.SCHEDULE_UNIT}.timer",
+    ]
+    with pytest.raises(fleet_sync.SetupError, match="not win32"):
+        _ = fleet_sync.schedule_files(tmp_path, 300, "win32")
+
+
+def test_schedule_prints_by_default_and_installs_only_when_asked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ran: list[list[str]] = []
+
+    def record(commands: Sequence[Sequence[str]]) -> None:
+        ran.extend(list(command) for command in commands)
+
+    monkeypatch.setattr(fleet_sync, "load_schedule", record)
+    assert fleet_sync.main(["schedule"]) == 0
+    printed = capsys.readouterr().out
+    assert "--pins-only" in printed
+    assert not list(tmp_path.rglob("*"))
+    assert not ran
+    assert fleet_sync.main(["schedule", "--every", "10"]) == 2
+    assert (
+        fleet_sync.main(
+            [
+                "schedule",
+                "--install",
+                "--every",
+                "60",
+            ],
+        )
+        == 0
+    )
+    written = list(fleet_sync.schedule_files(tmp_path, 60))
+    assert all(path.is_file() for path in written)
+    assert ran == fleet_sync.schedule_commands(fleet_sync.schedule_files(tmp_path, 60))

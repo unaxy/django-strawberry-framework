@@ -216,12 +216,14 @@ Commands
         replicas with freshness (``fresh``, ``stale``, ``changed``, ``syncing``)
         and conflicts; main ahead or behind per machine (commits a peer has and
         this machine lacks read ``unknown`` until a sync fetches them).
-    ``sync [--dry-run] [--machine M]... [--copy NAME]... [--main-only]``
+    ``sync [--dry-run] [--machine M]... [--copy NAME]... [--main-only | --pins-only]``
         Sync with every qualifying peer (or those ``--machine`` names: a row
         name, ssh alias or machine name). ``--copy`` limits the run to those copies
         (their pins and evidence) and leaves main alone; ``--main-only`` syncs
-        main alone. ``--dry-run`` writes nothing but fetches peers' main commits
-        into the object store so it can say what a fast-forward would do.
+        main alone; ``--pins-only`` carries tombstones and pins (every saved copy)
+        both ways and nothing else, so it takes seconds and fits a short timer.
+        ``--dry-run`` writes nothing but fetches peers' main commits into the
+        object store so it can say what a fast-forward would do.
     ``fetch-pins NAME --machine M [--dry-run]``
         Fetch only ``refs/work/NAME/*`` from M's ``.work/pins.git`` into this
         machine's pin store. Existing equal pins stay; different commits are a
@@ -236,6 +238,14 @@ Commands
         refs/work/NAME/save-N --purpose 'review saved work'`` restores the save
         without waiting for a replica. M needs the existing pin agent operations,
         not this new public command; ``--remote-scripts`` applies as above.
+    ``schedule [--every SECONDS] [--install]``
+        Print this machine's timer for ``sync --pins-only --json`` every
+        ``--every`` seconds (default 120, at least 30): a launchd agent on macOS,
+        a systemd user service and timer on Linux, each logging to one file.
+        ``--install`` writes it and loads it (``launchctl bootstrap``,
+        ``systemctl --user enable --now``); run it from the shared checkout, once
+        per machine. The timer's ``PATH`` is the folders git, ssh, rsync and
+        tailscale are found in when it is made.
     ``handoff <name> [--to M] [--force-offline-home]``
         Move a copy's home (above).
     ``--json`` on each prints one document for agents. Exit codes: ``0`` synced
@@ -244,7 +254,9 @@ Commands
     for ``sync``, ``fetch-pins`` and ``handoff`` a host no row names).
 
 Running it periodically
-    Nothing installs a schedule; the maintainer decides. A cron line
+    ``schedule --install`` (above) runs ``sync --pins-only`` every two minutes,
+    so every machine sees every save; the full ``sync`` (replicas, evidence,
+    main) stays the maintainer's to run or time. A cron line
     (``*/10 * * * * cd ~/projects/django-strawberry-framework &&
     .venv/bin/python scripts/fleet_sync.py sync --json >> ~/.cache/fleet-sync.log
     2>&1``), a
@@ -270,6 +282,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import plistlib
 import selectors
 import shlex
 import shutil
@@ -3337,6 +3350,40 @@ def sync_with_peer(
     return [row for row in rows if row.result != "none"]
 
 
+def sync_pins_with_peer(
+    here: Machine,
+    peer: Machine,
+    local_token: str,
+    args: _Args,
+) -> list[Row]:
+    """Carry tombstones and every pin (or ``--copy``'s) both ways with ``peer``, nothing else.
+
+    Saves (``refs/work/<name>/*``) and the tombstones that bury them move create-only as
+    in a full sync; replicas, evidence and main stay as they are, so a run takes
+    seconds and fits a short timer.
+    """
+    rows: list[Row] = []
+    try:
+        mine_end, their_end = _endpoint(here), _endpoint(peer)
+        hold = contextlib.nullcontext("") if args.dry_run else their_end.hold(local_token)
+        with hold as remote_token:
+            tokens = {mine_end.machine: local_token, their_end.machine: remote_token}
+            mine = Inventory.read(mine_end, args.copy)
+            theirs = Inventory.read(their_end, args.copy)
+            rows += sync_tombstones(
+                mine_end,
+                their_end,
+                mine,
+                theirs,
+                tokens,
+                dry_run=args.dry_run,
+            )
+            rows += sync_pins(mine_end, their_end, mine, theirs, tokens, dry_run=args.dry_run)
+    except (FleetError, work.WorkError) as error:
+        rows.append(Row("pins", peer.label, "failed", str(error)))
+    return [row for row in rows if row.result != "none"]
+
+
 def _sync_pair(
     here: Machine,
     peer: Machine,
@@ -3580,11 +3627,15 @@ def cmd_sync(args: _Args) -> int:
     lock = contextlib.nullcontext("") if args.dry_run else holding(REPO_ROOT)
     try:
         with lock as local_token:
-            if not args.main_only:
+            if args.pins_only:
                 for machine in peers:
-                    rows += sync_with_peer(here, machine, local_token, args)
-            if not args.copy:
-                rows += sync_main(peers, dry_run=args.dry_run)
+                    rows += sync_pins_with_peer(here, machine, local_token, args)
+            else:
+                if not args.main_only:
+                    for machine in peers:
+                        rows += sync_with_peer(here, machine, local_token, args)
+                if not args.copy:
+                    rows += sync_main(peers, dry_run=args.dry_run)
     except FleetError as error:
         rows.append(Row("sync", here.label, "skip", str(error)))
     document = {"machines": machine_rows(here, others), "rows": [row.as_json() for row in rows]}
@@ -3653,6 +3704,147 @@ def cmd_fetch_pins(args: _Args) -> int:
         as_json=args.json,
     )
     return 1 if any(row.result in TROUBLE for row in rows) else 0
+
+
+#: The launchd label (macOS) and systemd unit name (Linux) of the save-sync timer.
+SCHEDULE_LABEL = "com.django-strawberry-framework.fleet-pins"
+SCHEDULE_UNIT = "dsf-fleet-pins"
+#: The tools a scheduled run calls; their folders lead the timer's ``PATH``.
+SCHEDULE_TOOLS = (
+    "git",
+    "ssh",
+    "rsync",
+    "tailscale",
+)
+#: Seconds between scheduled ``sync --pins-only`` runs unless ``--every`` says otherwise.
+SCHEDULE_EVERY = 120
+#: The shortest interval ``schedule`` accepts; a run reads every peer's inventory.
+SCHEDULE_SHORTEST = 30
+
+
+def schedule_path() -> str:
+    """Return the ``PATH`` a scheduled run gets: each tool's folder as found now, then the system's."""
+    folders: list[str] = []
+    found = [shutil.which(tool) for tool in SCHEDULE_TOOLS]
+    for folder in [*(str(Path(path).parent) for path in found if path), "/usr/bin", "/bin"]:
+        if folder not in folders:
+            folders.append(folder)
+    return os.pathsep.join(folders)
+
+
+def schedule_files(home: Path, every: int, platform: str = sys.platform) -> dict[Path, str]:
+    """Return the timer files that run ``sync --pins-only --json`` every ``every`` seconds.
+
+    A launchd agent on macOS, a systemd user service and timer on Linux; each runs the
+    checkout's ``.venv`` Python from the checkout and appends to one log file.
+
+    Raises:
+        SetupError: ``platform`` is neither.
+
+    """
+    command = [
+        str(REPO_ROOT / ".venv" / "bin" / "python"),
+        str(REPO_ROOT / "scripts" / "fleet_sync.py"),
+        "sync",
+        "--pins-only",
+        "--json",
+    ]
+    if platform == "darwin":
+        log = home / "Library" / "Logs" / f"{SCHEDULE_UNIT}.log"
+        agent = {
+            "Label": SCHEDULE_LABEL,
+            "ProgramArguments": command,
+            "WorkingDirectory": str(REPO_ROOT),
+            "StartInterval": every,
+            "RunAtLoad": True,
+            "StandardOutPath": str(log),
+            "StandardErrorPath": str(log),
+            "EnvironmentVariables": {"PATH": schedule_path(), "HOME": str(home)},
+        }
+        plist = home / "Library" / "LaunchAgents" / f"{SCHEDULE_LABEL}.plist"
+        return {plist: plistlib.dumps(agent).decode()}
+    if platform.startswith("linux"):
+        log = home / ".cache" / f"{SCHEDULE_UNIT}.log"
+        run = f"{shlex.join(command)} >> {shlex.quote(str(log))} 2>&1"
+        units = home / ".config" / "systemd" / "user"
+        service = (
+            "[Unit]\nDescription=Sync django-strawberry-framework saves across the fleet\n\n"
+            f"[Service]\nType=oneshot\nWorkingDirectory={REPO_ROOT}\n"
+            f"Environment=PATH={schedule_path()}\nExecStart=/bin/sh -c {shlex.quote(run)}\n"
+        )
+        timer = (
+            "[Unit]\nDescription=Sync django-strawberry-framework saves across the fleet\n\n"
+            f"[Timer]\nOnBootSec=2min\nOnUnitActiveSec={every}s\n\n"
+            "[Install]\nWantedBy=timers.target\n"
+        )
+        return {
+            units / f"{SCHEDULE_UNIT}.service": service,
+            units / f"{SCHEDULE_UNIT}.timer": timer,
+        }
+    msg = (
+        f"schedule writes a launchd agent (macOS) or a systemd user timer (Linux), not {platform}"
+    )
+    raise SetupError(msg)
+
+
+def schedule_commands(files: Mapping[Path, str], platform: str = sys.platform) -> list[list[str]]:
+    """Return the commands that (re)load ``files``' timer."""
+    if platform == "darwin":
+        domain = f"gui/{os.getuid()}"
+        plist = str(next(iter(files)))
+        return [
+            [
+                "launchctl",
+                "bootout",
+                domain,
+                plist,
+            ],
+            [
+                "launchctl",
+                "bootstrap",
+                domain,
+                plist,
+            ],
+        ]
+    return [
+        ["systemctl", "--user", "daemon-reload"],
+        [
+            "systemctl",
+            "--user",
+            "enable",
+            "--now",
+            f"{SCHEDULE_UNIT}.timer",
+        ],
+    ]
+
+
+def load_schedule(commands: Sequence[Sequence[str]]) -> None:
+    """Run :func:`schedule_commands`' commands; ``launchctl bootout`` of an unloaded agent may fail."""
+    for command in commands:
+        _ = subprocess.run(command, check=command[1] != "bootout")
+
+
+def cmd_schedule(args: _Args) -> int:
+    """Print (or with ``--install`` write and load) this machine's save-sync timer."""
+    if args.every < SCHEDULE_SHORTEST:
+        msg = f"--every must be at least {SCHEDULE_SHORTEST} seconds"
+        raise SetupError(msg)
+    files = schedule_files(Path.home(), args.every)
+    commands = schedule_commands(files)
+    if not args.install:
+        for path, text in files.items():
+            print(f"# {path}\n{text}")
+        print("# then:")
+        for command in commands:
+            print(shlex.join(command))
+        return 0
+    for path, text in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_text(text, encoding="utf-8")
+        print(f"wrote {path}")
+    load_schedule(commands)
+    print(f"installed: sync --pins-only every {args.every}s")
+    return 0
 
 
 def cmd_handoff(args: _Args) -> int:
@@ -3943,6 +4135,9 @@ class _Args(argparse.Namespace):
     machine: list[str]
     copy: list[str]
     main_only: bool
+    pins_only: bool
+    every: int
+    install: bool
     name: str
     to: str
     force_offline_home: bool
@@ -3988,7 +4183,13 @@ def build_parser() -> argparse.ArgumentParser:
     _ = sync.add_argument("--dry-run", action="store_true")
     _ = sync.add_argument("--machine", action="append", default=[], help="only this peer")
     _ = sync.add_argument("--copy", action="append", default=[], help="only this copy (no main)")
-    _ = sync.add_argument("--main-only", action="store_true", help="main alone")
+    sync_scope = sync.add_mutually_exclusive_group()
+    _ = sync_scope.add_argument("--main-only", action="store_true", help="main alone")
+    _ = sync_scope.add_argument(
+        "--pins-only",
+        action="store_true",
+        help="saves and tombstones alone (seconds; for a timer)",
+    )
 
     fetch = commands.add_parser(
         "fetch-pins",
@@ -3998,6 +4199,19 @@ def build_parser() -> argparse.ArgumentParser:
     _ = fetch.add_argument("name")
     _ = fetch.add_argument("--machine", dest="source", required=True, help="the source peer")
     _ = fetch.add_argument("--dry-run", action="store_true")
+
+    schedule = commands.add_parser(
+        "schedule",
+        parents=[shared],
+        help="print (or --install) this machine's save-sync timer",
+    )
+    _ = schedule.add_argument(
+        "--every",
+        type=int,
+        default=SCHEDULE_EVERY,
+        help="seconds between runs",
+    )
+    _ = schedule.add_argument("--install", action="store_true", help="write the timer and load it")
 
     handoff_parser = commands.add_parser("handoff", parents=[shared], help="move a copy's home")
     _ = handoff_parser.add_argument("name")
@@ -4064,6 +4278,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "status": cmd_status,
         "sync": cmd_sync,
         "fetch-pins": cmd_fetch_pins,
+        "schedule": cmd_schedule,
         "handoff": cmd_handoff,
     }
     try:
