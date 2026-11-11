@@ -506,10 +506,20 @@ def test_related_queryset_keeps_a_model_iterable_subclass(monkeypatch: pytest.Mo
 def test_related_queryset_refuses_a_class_whose_init_stores_a_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A class whose ``__init__`` stores a ``Values*`` iterable yields no model rows: refused."""
+    """A class whose ``__init__`` stores a ``Values*`` iterable yields no model rows: refused.
+
+    The class is project code, so the refusal is a ``ConfigurationError`` naming the model,
+    the class and the iterable it left.
+    """
     _default_manager_of(monkeypatch, _ValuesRowsQuerySet)
 
-    with pytest.raises(TypeError, match=r"^expected the type the source guarantees, got "):
+    with pytest.raises(
+        ConfigurationError,
+        match=(
+            r"^Shelf's default manager returns _ValuesRowsQuerySet, whose __init__ leaves the "
+            r"row iterable ValuesIterable\. .*must keep a ModelIterable row iterable\.$"
+        ),
+    ):
         related_queryset(Shelf)
 
 
