@@ -3226,8 +3226,9 @@ same transport, different app.
     duration beside a `null` partner unheld, holds it under `nulls_distinct=False` and keeps
     DRF's `required` error for an omitted partner;
     `::test_serializer_together_condition_value_is_held_only_where_drf_queries` follows
-    DRF's changed-field decision: a change to a condition-only field on update
-    leaves unchanged constraint fields without a uniqueness query;
+    the installed DRF's changed-field decision, asked by the same write with a fitting
+    duration: an update whose constraint fields are unchanged is held only where that
+    DRF queries for a changed condition-only field;
     `::test_serializer_unique_for_date_value_is_held_only_with_its_date` keeps DRF's
     `required` error for a missing `date_field`;
     `django_strawberry_framework/rest_framework/query_bind.py::guard_query` holds only

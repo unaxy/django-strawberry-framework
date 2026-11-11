@@ -124,7 +124,7 @@ from __future__ import annotations
 import datetime
 import logging
 import uuid
-from collections.abc import Callable, Generator, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from decimal import Decimal
 from functools import wraps
@@ -2474,21 +2474,27 @@ _SECOND_OPENED_TIME = datetime.time(8, 30)
 
 
 class _NestedCell:
-    """One value sent on the second nested specimen: its field, value and outcome per backend."""
+    """One value sent on the second nested specimen: its field, value and outcome per backend.
+
+    ``binds`` counts, per backend, the uniqueness statements binding the sent field's
+    ``column``: one per specimen whose value the database binds.
+    """
 
     def __init__(
         self,
         field: str,
         value: str,
         outcomes: tuple[str, str],
-        queries: tuple[int, int],
+        binds: tuple[int, int],
         *,
+        column: str,
         stored_time: datetime.time = _SECOND_OPENED_TIME,
     ) -> None:
         self.field = field
         self.value = value
         self.outcomes = outcomes
-        self.queries = queries
+        self.binds = binds
+        self.column = column
         self.stored_time = stored_time
 
     def outcome(self) -> str:
@@ -2496,10 +2502,16 @@ class _NestedCell:
         sqlite, postgresql = self.outcomes
         return postgresql if connection.vendor == "postgresql" else sqlite
 
-    def query_count(self) -> int:
-        """The statements the write runs on the database the suite runs on, savepoints included."""
-        sqlite, postgresql = self.queries
+    def bind_count(self) -> int:
+        """The statements binding ``column`` the write runs on the database the suite runs on."""
+        sqlite, postgresql = self.binds
         return postgresql if connection.vendor == "postgresql" else sqlite
+
+    def bound(self, statements: Sequence[str]) -> list[str]:
+        """The SELECTs among ``statements`` comparing the specimen table's ``column``."""
+        quote = connection.ops.quote_name
+        compared = f"{quote(models.UniqueScalarSpecimen._meta.db_table)}.{quote(self.column)}"
+        return [sql for sql in statements if sql.startswith("SELECT ") and compared in sql]
 
 
 _NESTED_CELLS = {
@@ -2507,26 +2519,30 @@ _NESTED_CELLS = {
         "openedAt",
         "9999-12-31T23:30:00",
         (_REFUSED, _STORED),
-        (13, 19),
+        (1, 2),
+        column="opened_at",
     ),
     "hook-unique-together-datetime-in-range": _NestedCell(
         "openedAt",
         "2021-06-15T09:30:00",
         (_STORED, _STORED),
-        (19, 19),
+        (2, 2),
+        column="opened_at",
     ),
     "aware-unique-time": _NestedCell(
         "openedTime",
         "09:30:00+02:00",
         (_STORED, _STORED),
-        (18, 19),
+        (1, 2),
+        column="opened_time",
         stored_time=datetime.time(9, 30),
     ),
     "naive-unique-time": _NestedCell(
         "openedTime",
         "09:30:00",
         (_STORED, _STORED),
-        (19, 19),
+        (2, 2),
+        column="opened_time",
         stored_time=datetime.time(9, 30),
     ),
 }
@@ -2549,7 +2565,9 @@ def test_nested_value_a_uniqueness_validator_cannot_bind_is_the_item_field_error
     query as no duplicate expects (Django's ``ValueError``), so it reaches ``create()``,
     which stores its wall clock with the offset dropped; an in-range instant and a naive
     time are written too. SQLite runs no uniqueness query for the aware time, whose bind
-    Django refuses before the statement.
+    Django refuses before the statement. Only the statements comparing the sent field's
+    column are counted: the validators DRF derives for the model's other constraints (the
+    conditional ``amount`` one) differ between DRF releases.
     """
     cell = _NESTED_CELLS[name]
     document = (
@@ -2596,7 +2614,8 @@ def test_nested_value_a_uniqueness_validator_cannot_bind_is_the_item_field_error
         assert payload == {"data": {root: {"result": {"label": "tag"}, "errors": []}}}
         assert specimens == [("first", datetime.time(8)), ("second", cell.stored_time)]
         assert tags == ["tag"]
-    assert len(queries.captured_queries) == cell.query_count(), queries.captured_queries
+    statements = [query["sql"] for query in queries.captured_queries]
+    assert len(cell.bound(statements)) == cell.bind_count(), statements
 
 
 @pytest.mark.django_db

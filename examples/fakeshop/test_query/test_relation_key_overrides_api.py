@@ -24,6 +24,7 @@ own form.
 """
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import wraps
@@ -1940,11 +1941,18 @@ def test_a_to_many_view_through_a_key_no_round_trip_reaches_keeps_its_inner_join
     assert _answer(payload) == list(rows), payload
     segment = field_name.rsplit("__", 1)[-1]
     assert [(f"{segment}_visible", "QuerySet", model.__name__)] == _CALLS
-    first = f'"{field_name.split("__", 1)[0]}_visible"'
-    joined = [query["sql"] for query in queries.captured_queries if first in query["sql"]]
+    # Read the alias as the JOIN introducing it spells it: Django 5.2's compiler leaves a join
+    # alias bare, Django 6.1's quotes it.
+    alias = f"{field_name.split('__', 1)[0]}_visible"
+    introduced = re.compile(rf'JOIN \S+ ("?{alias}"?) ON ')
+    joined = [
+        (query["sql"], match.group(1))
+        for query in queries.captured_queries
+        if (match := introduced.search(query["sql"])) is not None
+    ]
     assert joined, queries.captured_queries
-    for sql in joined:
-        assert sql.index(f"{first} ON") < sql.index(f"{first}."), sql
+    for sql, spelled in joined:
+        assert sql.index(f"{spelled} ON") < sql.index(f"{spelled}."), sql
 
 
 def _round_trip_model_meta(table: str) -> type[object]:

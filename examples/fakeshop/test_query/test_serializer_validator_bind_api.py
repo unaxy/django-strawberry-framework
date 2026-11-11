@@ -11,7 +11,6 @@ from functools import wraps
 from importlib import import_module
 from typing import TYPE_CHECKING
 
-import django
 import pytest
 import strawberry
 from django.db import connection, models
@@ -20,7 +19,7 @@ from django.db.models.expressions import Combinable
 from django.db.models.lookups import BuiltinLookup
 from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
-from django.test.utils import isolate_apps
+from django.test.utils import CaptureQueriesContext, isolate_apps
 from django.urls import path
 from graphql_client import JSONObject, graphql_payload, json_at
 from rest_framework import serializers
@@ -28,6 +27,7 @@ from rest_framework.validators import (
     UniqueForDateValidator,
     UniqueTogetherValidator,
     UniqueValidator,
+    qs_exists_with_condition,
 )
 from typing_extensions import override
 
@@ -503,6 +503,10 @@ class _NullableCondition(_BaseSerializer):
         ]
 
 
+#: ``_NullableDayCondition``'s condition, which a ``null`` day leaves to DRF's own check.
+_DAY_CONDITION = Q(day__gt=datetime.date(2020, 1, 1))
+
+
 class _NullableDayCondition(_BaseSerializer):
     day = serializers.DateField(allow_null=True, write_only=True)
 
@@ -514,7 +518,7 @@ class _NullableDayCondition(_BaseSerializer):
                 queryset=_Other.objects.all(),
                 fields=("amount",),
                 condition_fields=("day",),
-                condition=Q(day__gt=datetime.date(2020, 1, 1)),
+                condition=_DAY_CONDITION,
             ),
         ]
 
@@ -1075,28 +1079,64 @@ def test_update_instance_value_is_prepared_by_the_other_models_date_field() -> N
     assert fit.label == "fit-after"
 
 
+def _drf_queries_other(schema: DjangoSchema, data: str, *, row_id: int) -> bool:
+    """Whether the update ``data`` on ``row_id`` runs a statement reading ``_Other``'s table.
+
+    Sent with a duration every backend binds, the write leaves the guard nothing to hold,
+    so whether a uniqueness statement runs is the installed DRF validator's own decision.
+    """
+    table = connection.ops.quote_name(_Other._meta.db_table)
+    with CaptureQueriesContext(connection) as queries:
+        payload = _post(schema, data, row_id=row_id)
+    assert json_at(payload, "data", "write", "errors") == [], payload
+    return any(table in query["sql"] for query in queries.captured_queries)
+
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.usefixtures("_tables")
-def test_drf_owns_condition_only_change_and_omitted_null_decisions() -> None:
-    condition_row = _Parent.objects.create(label="condition", amount=1)
-    null_row = _Parent.objects.create(label="nullable", amount=None, rank=1)
-    condition = _post(
-        _schema(_Condition, operation="update"),
-        f'span: "{_HUGE}"',
-        row_id=saved_pk(condition_row),
-    )
-    nullable = _post(
-        _schema(_NullableCondition, operation="update"),
-        f'rank: 2, span: "{_HUGE}"',
-        row_id=saved_pk(null_row),
-    )
-    assert json_at(condition, "data", "write", "errors") == [], condition
-    if connection.vendor == "sqlite":
-        _assert_invalid(nullable, "span")
+@pytest.mark.parametrize(
+    (
+        "serializer_class",
+        "stored",
+        "data",
+        "written",
+    ),
+    [
+        pytest.param(_Condition, {"amount": 1}, 'span: "{}"', {}, id="condition-only-change"),
+        pytest.param(
+            _NullableCondition,
+            {"amount": None, "rank": 1},
+            'rank: 2, span: "{}"',
+            {"rank": 2},
+            id="omitted-null-partner",
+        ),
+    ],
+)
+def test_drf_owns_condition_only_change_and_omitted_null_decisions(
+    serializer_class: type[DRFSerializer],
+    stored: dict[str, int | None],
+    data: str,
+    written: dict[str, int],
+) -> None:
+    """Whether an update changing only a condition value, or omitting a null partner, queries is DRF's.
+
+    The installed DRF decides whether a changed ``condition_fields`` value counts as a change
+    and whether a null constraint value skips the check; the update sent with a fitting
+    duration on a twin row asks it. The same update with a duration past 64 bits of
+    microseconds is held exactly where DRF queries, as ``span``'s ``invalid`` error on SQLite,
+    with nothing written, and is written everywhere else.
+    """
+    schema = _schema(serializer_class, operation="update")
+    twin = _Parent.objects.create(label="twin", **stored)
+    row = _Parent.objects.create(label="row", **stored)
+    queried = _drf_queries_other(schema, data.format(_FIT), row_id=saved_pk(twin))
+    payload = _post(schema, data.format(_HUGE), row_id=saved_pk(row))
+    if queried and connection.vendor == "sqlite":
+        _assert_invalid(payload, "span")
+        assert _Parent.objects.filter(pk=saved_pk(row), **stored).exists()
     else:
-        assert json_at(nullable, "data", "write", "errors") == [], nullable
-        null_row.refresh_from_db()
-        assert null_row.rank == 2
+        assert json_at(payload, "data", "write", "errors") == [], payload
+        assert _Parent.objects.filter(pk=saved_pk(row), **(stored | written)).exists()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -1142,7 +1182,14 @@ def test_nullable_condition_uses_the_installed_django_q_check_body() -> None:
         _schema(_NullableDayCondition),
         'label: "nullable-condition", amount: 1, day: null',
     )
-    if django.VERSION < (6, 1) and connection.features.supports_comparing_boolean_expr:
+    # DRF's own condition check, over the installed Django's ``Q.check``, decides the null
+    # day; the guarded check answers as it does.
+    duplicate = qs_exists_with_condition(
+        _Other.objects.filter(amount=1),
+        _DAY_CONDITION,
+        {"day": None},
+    )
+    if duplicate:
         assert json_at(payload, "data", "write", "result") is None, payload
         assert json_at(payload, "data", "write", "errors") != [], payload
         assert not _Parent.objects.exists()

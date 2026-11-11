@@ -8563,31 +8563,32 @@ def test_serializer_together_value_drf_binds_in_no_query_is_not_held(
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize(
-    ("operation", "amount", "held"),
+    ("operation", "amount"),
     [
-        pytest.param("update", None, False, id="update-unchanged"),
-        pytest.param("update", 1, False, id="update-same"),
-        pytest.param("update", 2, True, id="update-changed"),
-        pytest.param("create", 1, True, id="create"),
+        pytest.param("update", None, id="update-unchanged"),
+        pytest.param("update", 1, id="update-same"),
+        pytest.param("update", 2, id="update-changed"),
+        pytest.param("create", 1, id="create"),
     ],
 )
 def test_serializer_together_condition_value_is_held_only_where_drf_queries(
     operation: str,
     amount: int | None,
-    held: bool,  # noqa: FBT001
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A root ``condition_fields`` value is held only where DRF's update checks a changed value.
+    """A root ``condition_fields`` value is held only where DRF's validator queries.
 
     The root serializer declares a ``UniqueTogetherValidator`` over another model's rows on
-    ``amount``, whose ``condition`` reads the serializer-only ``span``. On an update DRF
-    checks only the values that differ from the instance, so an update omitting ``amount``
-    or sending it as stored runs no query and its consumer ``update()`` writes, the duration unheld; an
-    update changing ``amount``, and a create, bind the condition's ``span``, which on SQLite
-    is ``span``'s ``invalid`` error past 64 bits of microseconds.
+    ``amount``, whose ``condition`` reads the serializer-only ``span``. Which updates DRF
+    checks (an omitted ``amount``, one sent as stored, a changed one, a changed condition
+    value) is the installed DRF's decision; the same write sent with a duration that fits
+    64 bits of microseconds, on a twin row, asks it. Where DRF queries, the condition's
+    ``span`` is bound, which on SQLite is ``span``'s ``invalid`` error past 64 bits of
+    microseconds; elsewhere the consumer ``create()`` / ``update()`` writes, the duration
+    unheld. A create always queries.
     """
     monkeypatch.setitem(SCALAR_MAP, models.DurationField, str)
-    suffix = f"{operation.title()}{'Held' if held else 'Kept'}{amount or 0}"
+    suffix = f"{operation.title()}{amount or 0}"
     parent_model = _nested_parent_model(f"ConditionRootParent{suffix}")
     other_model = _unique_span_model(f"ConditionRootOther{suffix}", "plain")
     validator = UniqueTogetherValidator(
@@ -8620,24 +8621,29 @@ def test_serializer_together_condition_value_is_held_only_where_drf_queries(
         {"create": create, "update": write},
         meta={"validators": [validator]},
     )
-    data: dict[str, object] = {"span": _PAST_64_BITS}
-    if amount is not None:
-        data["amount"] = amount
+    data: dict[str, object] = {} if amount is None else {"amount": amount}
+    connection = connections["default"]
+    other_table = connection.ops.quote_name(other_model._meta.db_table)
     with _synthetic_table(parent_model), _synthetic_table(other_model):
-        row_id = (
-            saved_pk(parent_model._default_manager.create(amount=1))
-            if operation == "update"
-            else None
-        )
         schema, create_input, update_input = _blank_columns_schema(serializer_cls, parent_model)
-        payload = _run_row_write(
-            schema,
-            create_input if row_id is None else update_input,
-            data,
-            row_id,
-        )
+        input_name = create_input if operation == "create" else update_input
 
-    if held and not connections["default"].features.has_native_duration_field:
+        def row() -> object:
+            return (
+                saved_pk(parent_model._default_manager.create(amount=1))
+                if operation == "update"
+                else None
+            )
+
+        twin = row()
+        with CaptureQueriesContext(connection) as probe:
+            fitting = _run_row_write(schema, input_name, {**data, "span": _FITS_64_BITS}, twin)
+        assert json_at(fitting, "errors") == []
+        queried = any(other_table in query["sql"] for query in probe.captured_queries)
+        payload = _run_row_write(schema, input_name, {**data, "span": _PAST_64_BITS}, row())
+
+    assert queried or operation == "update"
+    if queried and not connection.features.has_native_duration_field:
         assert payload == {
             "result": None,
             "errors": [{"field": "span", "messages": _UNREPRESENTABLE, "codes": ["invalid"]}],

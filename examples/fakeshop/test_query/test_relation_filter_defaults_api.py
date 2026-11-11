@@ -470,11 +470,20 @@ def test_a_pipeline_leaf_through_a_forward_placeholder_refuses_only_when_supplie
         _refused(payload, _message(filterset, "shelf"))
     else:
         assert payload == _expected(["alpha"], universe=["alpha", "beta"]), payload
-    # No branch row is ever read. A refusal reads nothing on the sync pipeline; the async
-    # one has already started the sibling ``allRows`` read when ``rows`` refuses.
-    reads = (0 if transport == "sync" else 1) if supplied else 2
-    assert len(sql) == reads, sql
-    assert len(_table_sql(sql, "library_book")) == reads, sql
+    # No branch row is ever read, and a refused ``rows`` reads nothing: every statement is a
+    # book read, the filtered root only when the leaf is absent.
+    assert len(_table_sql(sql, "library_book")) == len(sql), sql
+    filtered = [statement for statement in sql if " WHERE " in statement]
+    universe = [statement for statement in sql if " WHERE " not in statement]
+    assert len(filtered) == (0 if supplied else 1), sql
+    if supplied and transport == "async":
+        # The async pipeline runs the sibling ``allRows`` beside ``rows``; graphql-core's
+        # ``gather_with_cancel`` cancels it when ``rows`` refuses, so whether its worker
+        # thread compiled the universe read first is the event loop's scheduling.
+        assert len(universe) <= 1, sql
+    else:
+        # The sync pipeline stops at the refusal; an absent leaf reads the universe too.
+        assert len(universe) == (0 if supplied else 1), sql
 
 
 @pytest.mark.django_db

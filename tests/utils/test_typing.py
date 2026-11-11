@@ -61,6 +61,7 @@ def test_typing_exports_all() -> None:
         "MAX_TYPE_WRAPPER_DEPTH",
         "MISSING_ATTRIBUTE",
         "call_forwarded",
+        "field_return_type",
         "graphql_fields",
         "graphql_input_fields",
         "graphql_type_of",
