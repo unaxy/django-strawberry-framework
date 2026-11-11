@@ -15,10 +15,12 @@ Machines
     the row (``fleet.canonical``: its name or one of its aliases); it is then
     reached as the row's ``ssh`` alias, else as its MagicDNS name. Every remote
     call is one ssh with the fleet's options (``fleet.ssh_argv``: batch mode, a
-    connect timeout, a keepalive) running the peer's own ``scripts/fleet_sync.py
-    agent`` (its ``.venv`` Python, else ``python3``), so both ends apply the same
-    rules; ``--remote-scripts DIR`` runs the scripts in
-    ``DIR`` on the peer instead, for a peer whose main predates this script. A
+    connect timeout, a keepalive) running the peer's own
+    ``docs/fleet/scripts/fleet_sync.py agent`` (its ``.venv`` Python, else
+    ``python3``), so both ends apply the same rules; ``--remote-scripts DIR`` runs
+    ``DIR/fleet_sync.py`` on the peer instead, for a peer whose main predates this
+    script (``DIR`` is a checkout's ``docs/fleet/scripts``: the script imports
+    ``work.py`` and its plumbing from that checkout's ``scripts/``). A
     peer qualifies when that call answers, its checkout is at
     ``~/projects/django-strawberry-framework`` (a repository elsewhere is reported,
     never synced), it shares this checkout's root commit, its checkout ignores
@@ -27,7 +29,7 @@ Machines
     supported yet" and never half synced: work.py's process census and locks,
     ``sh`` and ``rsync`` are POSIX here. A qualifying peer no row lists is synced
     and reported with a suggested ``machines.json`` row; the list is never written.
-    Machines are named, and stored names read, by ``scripts/fleet.py``'s rule (its
+    Machines are named, and stored names read, by ``docs/fleet/scripts/fleet.py``'s rule (its
     "Identity"): a listed machine is its row's name everywhere, and ``sync``,
     ``fetch-pins`` and ``handoff`` refuse on a host no row names.
 
@@ -283,7 +285,7 @@ Commands
     for ``sync``, ``fetch-pins`` and ``handoff`` a host no row names).
 
 Stopping
-    ``scripts/fleet_stop.py stop --reason TEXT`` writes ``.work/fleet-stop`` on every
+    ``docs/fleet/scripts/fleet_stop.py stop --reason TEXT`` writes ``.work/fleet-stop`` on every
     machine (``resume`` clears it). While it is there the timer's shell line exits
     before any Python, ``sync``, ``fetch-pins`` and ``handoff`` refuse, the agent
     answers only its probe (which carries the reason, so peers skip the machine), and
@@ -295,19 +297,19 @@ Running it periodically
     deleted there); the full ``sync`` (replicas, evidence and its deletions, main)
     stays the maintainer's to run or time. A cron line
     (``*/10 * * * * cd ~/projects/django-strawberry-framework &&
-    .venv/bin/python scripts/fleet_sync.py sync --json >> ~/.cache/fleet-sync.log
+    .venv/bin/python docs/fleet/scripts/fleet_sync.py sync --json >> ~/.cache/fleet-sync.log
     2>&1``), a
     systemd user timer beside ``git-autosync.timer`` on Linux, or a launchd
     agent with ``StartInterval`` on macOS each fit; a run that finds another
     holding the lock skips, so overlapping runs are harmless.
 
-Standard library plus ``scripts/work.py``, ``scripts/fleet.py`` and
-``scripts/_git.py`` for the copy, machine and git rules (``scripts/fleet.py``
+Standard library plus ``scripts/work.py``, ``docs/fleet/scripts/fleet.py`` and
+``scripts/_git.py`` for the copy, machine and git rules (``docs/fleet/scripts/fleet.py``
 owns the machine list and the ssh options, ``scripts/_git.py`` the repository root). Every agent, this
 machine's included, runs on its checkout's ``.venv`` Python (``python3`` when there
 is none): removing a replica goes through work.py's ``remove``, which reads
 ``scripts/workspace.py`` and needs the project's packages. Run it from the
-checkout as ``uv run python scripts/fleet_sync.py``.
+checkout as ``uv run python docs/fleet/scripts/fleet_sync.py``.
 """
 
 from __future__ import annotations
@@ -330,14 +332,16 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, NoReturn
 
-try:
+if __package__:  # imported as ``docs.fleet.scripts.fleet_sync`` (repo root on path)
+    from docs.fleet.scripts import fleet
+    from scripts import _git as _git_runner
+    from scripts import _locks, work
+else:  # run or imported from its own folder: work.py and its plumbing live in scripts/
+    sys.path.insert(1, str(Path(__file__).resolve().parents[3] / "scripts"))
     import _git as _git_runner
     import _locks
     import fleet
     import work
-except ModuleNotFoundError:  # imported as ``scripts.fleet_sync`` (repo root on path)
-    from scripts import _git as _git_runner
-    from scripts import _locks, fleet, work
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
@@ -455,7 +459,7 @@ repo=$HOME/projects/django-strawberry-framework
 scripts=$1
 shift
 case $scripts in
-  "") scripts=$repo/scripts ;;
+  "") scripts=$repo/docs/fleet/scripts ;;
   "~/"*) scripts=$HOME/${scripts#"~/"} ;;
 esac
 [ -f "$scripts/fleet_sync.py" ] || { echo "no fleet_sync.py in $scripts" >&2; exit 104; }
@@ -618,7 +622,7 @@ def _rsync_version() -> str:
     return completed.stdout.splitlines()[0].strip() if completed.stdout else "rsync"
 
 
-#: The stop flag ``scripts/fleet_stop.py`` writes, under a checkout's ``.work/``.
+#: The stop flag ``docs/fleet/scripts/fleet_stop.py`` writes, under a checkout's ``.work/``.
 STOP_FLAG = "fleet-stop"
 
 
@@ -637,7 +641,7 @@ def stop_reason(repo: Path) -> str:
 
 
 def write_stop(repo: Path, reason: str) -> None:
-    """Stop the fleet at ``repo``: write its flag as ``scripts/fleet_stop.py`` does."""
+    """Stop the fleet at ``repo``: write its flag as ``docs/fleet/scripts/fleet_stop.py`` does."""
     flag = work.work_dir(repo) / STOP_FLAG
     flag.parent.mkdir(parents=True, exist_ok=True)
     temporary = flag.with_name(f".{STOP_FLAG}.tmp")
@@ -658,7 +662,7 @@ def refuse_stopped(repo: Path) -> None:
     stopped = stop_reason(repo)
     if stopped:
         msg = (
-            f"the fleet is stopped ({stopped}); `python3 scripts/fleet_stop.py resume` "
+            f"the fleet is stopped ({stopped}); `python3 docs/fleet/scripts/fleet_stop.py resume` "
             "restarts it on every machine"
         )
         raise SetupError(msg)
@@ -2313,7 +2317,8 @@ def qualify(machine: Machine, local: Probe | None) -> None:
         machine.reason = f"no checkout at ~/{CHECKOUT} (a repository elsewhere is never synced)"
     elif completed.returncode == NO_SCRIPT:
         machine.reason = (
-            "lacks scripts/fleet_sync.py (its main predates it); run with --remote-scripts"
+            "lacks docs/fleet/scripts/fleet_sync.py (its main predates it); "
+            "run with --remote-scripts"
         )
     elif completed.returncode != 0:
         machine.reason = f"probe failed: {_last_line(completed.stdout + completed.stderr)}"
@@ -4222,12 +4227,12 @@ def schedule_path() -> str:
 def schedule_line() -> str:
     """Return the shell line a scheduled run executes.
 
-    It checks the stop flag (``scripts/fleet_stop.py``) before any Python starts, so a
+    It checks the stop flag (``docs/fleet/scripts/fleet_stop.py``) before any Python starts, so a
     broken ``fleet_sync.py`` cannot skip it, and kills a run past
     :data:`SCHEDULE_TIME_LIMIT` seconds (``perl``'s ``alarm`` survives the ``exec``).
     """
     python = shlex.quote(str(REPO_ROOT / ".venv" / "bin" / "python"))
-    run = f"{python} scripts/fleet_sync.py sync --pins-only --json"
+    run = f"{python} docs/fleet/scripts/fleet_sync.py sync --pins-only --json"
     limit = f"perl -e 'alarm shift @ARGV; exec @ARGV or die' {SCHEDULE_TIME_LIMIT}"
     return (
         f"cd {shlex.quote(str(REPO_ROOT))} || exit 1; "

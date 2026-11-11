@@ -2,9 +2,9 @@
 
 Usage, from ``~/projects/django-strawberry-framework`` on any fleet machine::
 
-    python3 scripts/fleet_stop.py stop --reason "what went wrong"
-    python3 scripts/fleet_stop.py resume
-    python3 scripts/fleet_stop.py status
+    python3 docs/fleet/scripts/fleet_stop.py stop --reason "what went wrong"
+    python3 docs/fleet/scripts/fleet_stop.py resume
+    python3 docs/fleet/scripts/fleet_stop.py status
 
 ``stop`` writes the stop flag ``.work/fleet-stop`` in this checkout first, then in every
 checkout ``docs/fleet/machines.json`` lists, over plain ``ssh`` (its ``ssh`` name and
@@ -15,7 +15,7 @@ reports each machine's flag. Each machine is reported as ``stopped`` / ``resumed
 
 While the flag is there:
 
-- the save-sync timer (``scripts/fleet_sync.py schedule``) checks it in its own shell
+- the save-sync timer (``docs/fleet/scripts/fleet_sync.py schedule``) checks it in its own shell
   line before it starts any Python, so a broken ``fleet_sync.py`` cannot skip it;
 - ``fleet_sync.py sync``, ``fetch-pins`` and ``handoff`` refuse, naming the reason;
 - the machine's sync agent answers nothing but its probe, which carries the reason, so
@@ -54,11 +54,11 @@ if TYPE_CHECKING:
 
     from typing_extensions import TypeIs
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 MACHINES_FILE = ROOT / "docs" / "fleet" / "machines.json"
-#: The flag, relative to a checkout; ``scripts/fleet_sync.py`` reads the same path.
+#: The flag, relative to a checkout; ``docs/fleet/scripts/fleet_sync.py`` reads the same path.
 FLAG = ".work/fleet-stop"
-#: ``scripts/fleet.py``'s ``SSH_OPTIONS``, repeated (this file imports nothing).
+#: ``docs/fleet/scripts/fleet.py``'s ``SSH_OPTIONS``, repeated (this file imports nothing).
 SSH_OPTIONS = (
     "-o",
     "BatchMode=yes",
@@ -71,7 +71,7 @@ SSH_OPTIONS = (
 )
 #: Seconds one machine's ssh call may take.
 SSH_TIMEOUT = 30
-#: Names this machine instead of its hostname (``scripts/fleet.py``'s ``MACHINE_ENV``).
+#: Names this machine instead of its hostname (``docs/fleet/scripts/fleet.py``'s ``MACHINE_ENV``).
 MACHINE_ENV = "DSF_MACHINE_ID"
 #: A ``repo`` path from the machine list that is safe to put in a remote shell line.
 SAFE_REPO = re.compile(r"~?[A-Za-z0-9_./-]+")
@@ -225,7 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for line in lines:
         print(line)
     if action == "stop":
-        print("resume with: python3 scripts/fleet_stop.py resume")
+        print("resume with: python3 docs/fleet/scripts/fleet_stop.py resume")
     return 0 if reached else 1
 
 

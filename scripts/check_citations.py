@@ -151,6 +151,7 @@ SOURCE_TREES = (
     "tests",
     "examples",
     "scripts",
+    "docs/fleet/scripts",
 )
 PACKAGE_ROOT = "django_strawberry_framework"
 

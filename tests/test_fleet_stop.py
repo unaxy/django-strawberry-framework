@@ -1,4 +1,4 @@
-"""Script tests for ``scripts/fleet_stop.py``, the one-command stop of fleet syncing."""
+"""Script tests for ``docs/fleet/scripts/fleet_stop.py``, the one-command stop of fleet syncing."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from scripts import fleet, fleet_stop
+from docs.fleet.scripts import fleet, fleet_stop
 
 if TYPE_CHECKING:
     from pathlib import Path

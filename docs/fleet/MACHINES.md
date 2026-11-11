@@ -51,7 +51,7 @@ has the capacity, not whichever has the tool.
 | OS | Ubuntu Desktop 26.04 LTS. |
 | Availability | Not yet established; treat it as offline when it does not answer. |
 | Reach it as | `rio-bee`, from the other three. |
-| Expect | Light work only: four slow cores and 7 GiB cannot carry a full suite or a heavy flow (`load_balancing.py` weights it low). No passwordless `sudo` (stop and hand root commands to the maintainer). `/tmp` is a 3.6 GiB tmpfs that every reboot empties, so a `workspace.py` pool there is small and short-lived. It has none of `rio-ubu`'s house tools (`heavy`, `pressure`, `~/MACHINE.md`). Set up by [scripts/fleet_setup.py][fleet-setup] ([SETUP.md][setup]). |
+| Expect | Light work only: four slow cores and 7 GiB cannot carry a full suite or a heavy flow (`load_balancing.py` weights it low). No passwordless `sudo` (stop and hand root commands to the maintainer). `/tmp` is a 3.6 GiB tmpfs that every reboot empties, so a `workspace.py` pool there is small and short-lived. It has none of `rio-ubu`'s house tools (`heavy`, `pressure`, `~/MACHINE.md`). Set up by [docs/fleet/scripts/fleet_setup.py][fleet-setup] ([SETUP.md][setup]). |
 
 Connection details (transport, addresses, credentials) are kept in each machine's private
 configuration, never in this repo. If a "reach it as" name does not answer from where you are,
@@ -102,7 +102,7 @@ machine itself rather than trusting a number written here.
 
 ## 4. Adding a machine
 
-[SETUP.md][setup] is the procedure, most of it one command ([scripts/fleet_setup.py][fleet-setup]
+[SETUP.md][setup] is the procedure, most of it one command ([docs/fleet/scripts/fleet_setup.py][fleet-setup]
 `add <host>`). For the docs: copy a §1 block and fill in role, hardware (cores, RAM, GPU), OS, availability, the name it is
 reached as, and what to expect. Add a column to §2. Keep it public-safe: no addresses, account
 names, keys, or how the connection is made.
@@ -110,14 +110,14 @@ names, keys, or how the connection is made.
 ## 5. Picking a machine
 
 New threads in shared projects start on the machine with the most free CPU and memory, weighted
-by each machine's preference. [scripts/load_balancing.py][load-balancing] answers it; its module
-docstring holds the full rules.
+by each machine's preference. [docs/fleet/scripts/load_balancing.py][load-balancing] answers it;
+its module docstring holds the full rules. Run it from the checkout root.
 
 ```sh
-uv run python scripts/load_balancing.py            # ranked table, light work
-uv run python scripts/load_balancing.py --pick     # just the winning ssh host
-uv run python scripts/load_balancing.py --heavy    # heavy-work weights and floors
-uv run python scripts/load_balancing.py --json     # one document for agents
+uv run python docs/fleet/scripts/load_balancing.py           # ranked table, light work
+uv run python docs/fleet/scripts/load_balancing.py --pick    # just the winning ssh host
+uv run python docs/fleet/scripts/load_balancing.py --heavy   # heavy-work weights and floors
+uv run python docs/fleet/scripts/load_balancing.py --json    # one document for agents
 ```
 
 - The machine list is [machines.json][machines-json]: per machine its ssh host, OS
@@ -143,14 +143,17 @@ uv run python scripts/load_balancing.py --json     # one document for agents
 
 ## 6. Syncing copies across machines
 
-[scripts/fleet_sync.py][fleet-sync] keeps every online machine's private copies, pins, evidence
-and main's commits in step (each copy edited on its home machine only; `handoff` moves it);
+[docs/fleet/scripts/fleet_sync.py][fleet-sync] keeps every online machine's private copies, pins,
+evidence and main's commits in step (each copy edited on its home machine only; `handoff` moves it);
 [START.md][start] "Syncing the fleet" has the rules.
 
 <!-- LINK DEFINITIONS -->
 <!-- Root -->
 [start]: ../../START.md
 <!-- docs/ -->
+[fleet-setup]: scripts/fleet_setup.py
+[fleet-sync]: scripts/fleet_sync.py
+[load-balancing]: scripts/load_balancing.py
 [machines-json]: machines.json
 [muse]: MUSE.md
 [setup]: SETUP.md
@@ -160,8 +163,5 @@ and main's commits in step (each copy edited on its home machine only; `handoff`
 <!-- tests/ -->
 <!-- examples/ -->
 <!-- scripts/ -->
-[fleet-setup]: ../../scripts/fleet_setup.py
-[fleet-sync]: ../../scripts/fleet_sync.py
-[load-balancing]: ../../scripts/load_balancing.py
 <!-- .venv/ -->
 <!-- External -->

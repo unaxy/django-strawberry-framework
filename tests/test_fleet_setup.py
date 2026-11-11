@@ -1,4 +1,4 @@
-"""Script tests for ``scripts/fleet_setup.py``, the one-command setup of a new fleet machine."""
+"""Script tests for ``docs/fleet/scripts/fleet_setup.py``, the one-command setup of a new fleet machine."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from scripts import fleet, fleet_setup, fleet_stop
+from docs.fleet.scripts import fleet, fleet_setup, fleet_stop
 
 if TYPE_CHECKING:
     from collections.abc import Sequence

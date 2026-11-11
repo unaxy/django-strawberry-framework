@@ -544,9 +544,9 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
-├── test_fleet.py                 # Script tests for ``scripts/fleet.py``, the machine list's one reader.
-├── test_fleet_setup.py           # Script tests for ``scripts/fleet_setup.py``, the one-command setup of a new fleet machine.
-├── test_fleet_stop.py            # Script tests for ``scripts/fleet_stop.py``, the one-command stop of fleet syncing.
+├── test_fleet.py                 # Script tests for ``docs/fleet/scripts/fleet.py``, the machine list's one reader.
+├── test_fleet_setup.py           # Script tests for ``docs/fleet/scripts/fleet_setup.py``, the one-command setup of a new fleet machine.
+├── test_fleet_stop.py            # Script tests for ``docs/fleet/scripts/fleet_stop.py``, the one-command stop of fleet syncing.
 ├── test_fleet_sync.py            # Repo-tooling tests for the fleet sync of private working copies, pins, evidence and main.
 ├── test_git.py                   # Repo-tooling tests for the scripts' one git runner and every site that reads through it.
 ├── test_idioms.py                # Smoke tests proving the shared ``tests/_idioms.py`` order helpers hand out what they promise.
@@ -555,7 +555,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_keyset_connection.py     # Package-side keyset connection tests for cursor state, window fallbacks and planner helpers.
 ├── test_lateral_pg_parity.py     # PostgreSQL tests for internal JSON adapters, connection cleanup and EXPLAIN index usability.
 ├── test_list_field.py            # Package-side DjangoListField tests for construction-time validation, helper mechanics and internals.
-├── test_load_balancing.py        # Script tests for ``scripts/load_balancing.py``, the fleet machine picker.
+├── test_load_balancing.py        # Script tests for ``docs/fleet/scripts/load_balancing.py``, the fleet machine picker.
 ├── test_locks.py                 # Script tests for ``scripts/_locks.py``: the shared lock rule and the pytest lock of a checkout.
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
 ├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.
@@ -937,9 +937,9 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
 ├── test_export_dry_review.py     # Repo-tooling tests for the DRY review plan, audit, and check CLI.
-├── test_fleet.py                 # Script tests for ``scripts/fleet.py``, the machine list's one reader.
-├── test_fleet_setup.py           # Script tests for ``scripts/fleet_setup.py``, the one-command setup of a new fleet machine.
-├── test_fleet_stop.py            # Script tests for ``scripts/fleet_stop.py``, the one-command stop of fleet syncing.
+├── test_fleet.py                 # Script tests for ``docs/fleet/scripts/fleet.py``, the machine list's one reader.
+├── test_fleet_setup.py           # Script tests for ``docs/fleet/scripts/fleet_setup.py``, the one-command setup of a new fleet machine.
+├── test_fleet_stop.py            # Script tests for ``docs/fleet/scripts/fleet_stop.py``, the one-command stop of fleet syncing.
 ├── test_fleet_sync.py            # Repo-tooling tests for the fleet sync of private working copies, pins, evidence and main.
 ├── test_git.py                   # Repo-tooling tests for the scripts' one git runner and every site that reads through it.
 ├── test_idioms.py                # Smoke tests proving the shared ``tests/_idioms.py`` order helpers hand out what they promise.
@@ -948,7 +948,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_keyset_connection.py     # Package-side keyset connection tests for cursor state, window fallbacks and planner helpers.
 ├── test_lateral_pg_parity.py     # PostgreSQL tests for internal JSON adapters, connection cleanup and EXPLAIN index usability.
 ├── test_list_field.py            # Package-side DjangoListField tests for construction-time validation, helper mechanics and internals.
-├── test_load_balancing.py        # Script tests for ``scripts/load_balancing.py``, the fleet machine picker.
+├── test_load_balancing.py        # Script tests for ``docs/fleet/scripts/load_balancing.py``, the fleet machine picker.
 ├── test_locks.py                 # Script tests for ``scripts/_locks.py``: the shared lock rule and the pytest lock of a checkout.
 ├── test_model_field_annotations.py  # Model field annotations agree with the fields they annotate.
 ├── test_multipart.py             # Pin for the GraphQL multipart wire vocabulary pair.

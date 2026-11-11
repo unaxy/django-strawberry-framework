@@ -1,4 +1,4 @@
-"""Script tests for ``scripts/fleet.py``, the machine list's one reader.
+"""Script tests for ``docs/fleet/scripts/fleet.py``, the machine list's one reader.
 
 The tracked ``docs/fleet/machines.json`` loads; every schema rule of the list
 refuses with a message naming the entry and the rule; :func:`fleet.machine`
@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from scripts import fleet
+from docs.fleet.scripts import fleet
 
 if TYPE_CHECKING:
     from pathlib import Path

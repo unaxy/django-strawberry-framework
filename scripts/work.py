@@ -91,7 +91,7 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
         cannot be read or written then keeps its entry (and the journal) until a
         later run can undo it.
     ``fleet/``, ``fleet.lock``
-        ``scripts/fleet_sync.py``'s holder token and evidence manifests, and the
+        ``docs/fleet/scripts/fleet_sync.py``'s holder token and evidence manifests, and the
         kernel lock one ``fleet_sync.py`` run (or one remote run's hold) takes.
     ``.git``
         A file holding ``gitdir: /nonexistent/dsf-work-sentinel``. A copy whose
@@ -146,8 +146,8 @@ maintainer to fix by hand.
 
 Every copy has one home machine, the only one that edits it: ``home`` in its note
 (:func:`machine_id`; a note older than ``home`` reads its ``host``); machines are
-named, and stored names read, by ``scripts/fleet.py``'s rule (its "Identity").
-``scripts/fleet_sync.py`` keeps a replica of it on every
+named, and stored names read, by ``docs/fleet/scripts/fleet.py``'s rule (its "Identity").
+``docs/fleet/scripts/fleet_sync.py`` keeps a replica of it on every
 other fleet machine, marked ``replica=true`` with ``home``, ``syncedtree`` (its
 content when last synced), ``syncedhead``, ``syncedfrom`` and ``syncedat``.
 ``save``, ``land`` and ``rm`` refuse a replica and name its home; ``rm
@@ -198,7 +198,7 @@ Commands
         ``.work/clones/<name>`` whose remote is this checkout (a local path) or
         a fleet machine's checkout over SSH (``<host>:<path>`` or
         ``ssh://<host>/<path>``, the host reaching a row of
-        ``docs/fleet/machines.json`` as ``scripts/fleet.py`` reads it (the
+        ``docs/fleet/machines.json`` as ``docs/fleet/scripts/fleet.py`` reads it (the
         row's name, an alias or its ``ssh`` host, any case or domain form); the
         account the one ssh logs in to that host as (``ssh -G``): no user part
         or that login; the port none or 22; the path that row's ``repo`` for
@@ -418,7 +418,7 @@ host and path from ``docs/fleet/machines.json``, then ``git remote set-url
 --push parent no-push``), work
 there, and bring the work back as a patch (``git diff --binary HEAD`` after
 ``git add -N .``) applied here by the coordinator, the same rule ``land``
-follows. ``scripts/fleet_sync.py`` replicates a whole copy (its ``.git`` included)
+follows. ``docs/fleet/scripts/fleet_sync.py`` replicates a whole copy (its ``.git`` included)
 under its own rules (one writer per copy, never while a process works in it);
 never rsync a ``.git`` by hand.
 
@@ -460,14 +460,16 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, NoReturn
 from urllib.parse import urlsplit, urlunsplit
 
-try:
+if __package__:  # imported as ``scripts.work`` (repo root on path)
+    from docs.fleet.scripts import fleet
+    from scripts import _git as _git_runner
+    from scripts import _locks, _sqlite_rows
+else:  # run or imported from its own folder: fleet.py lives in the checkout's docs/fleet/scripts/
+    sys.path.insert(1, str(Path(__file__).resolve().parents[1] / "docs" / "fleet" / "scripts"))
     import _git as _git_runner
     import _locks
     import _sqlite_rows
     import fleet
-except ModuleNotFoundError:  # imported as ``scripts.work`` (repo root on path)
-    from scripts import _git as _git_runner
-    from scripts import _locks, _sqlite_rows, fleet
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
@@ -488,7 +490,8 @@ LAND_JOURNAL = "land-journal.json"
 #: The kernel lock one pytest at a time holds (``scripts/_locks.py``).
 PYTEST_LOCK = _locks.PYTEST_LOCK
 JOURNAL_KEPT = "the journal is kept for the next land or repair"
-#: ``scripts/fleet_sync.py``'s folder (its holder token, evidence manifests) and its lock.
+#: ``docs/fleet/scripts/fleet_sync.py``'s folder (its holder token, evidence manifests) and its
+#: lock.
 FLEET = "fleet"
 FLEET_LOCK = "fleet.lock"
 #: Where a home's removal of a copy leaves its tombstone, the one record a replica is removed by.
@@ -758,7 +761,7 @@ def refuse_replica(copy: Copy, verb: str) -> None:
     home = home_of(copy.note)
     msg = (
         f"{copy.name} is a replica of {home}'s copy: {verb} it on {home}, or move its home "
-        f"here first (`uv run python scripts/fleet_sync.py handoff {copy.name}`)"
+        f"here first (`uv run python docs/fleet/scripts/fleet_sync.py handoff {copy.name}`)"
     )
     raise WorkError(msg)
 
@@ -5042,10 +5045,10 @@ def remove(
     ``rm`` is the request to drop them, and drops them all.
 
     On the copy's home (its note no replica, its ``home`` this machine) a tombstone records
-    the removal for ``scripts/fleet_sync.py`` to carry. A replica (``rm --discard``, or the
-    fleet sync's removal) and ``keep_in_trash`` leave the folder in ``.work/trash`` for ``gc``
-    to delete once :data:`TRASH_RETENTION_SECONDS` pass: a replica may be the last copy of its
-    work.
+    the removal for ``docs/fleet/scripts/fleet_sync.py`` to carry. A replica
+    (``rm --discard``, or the fleet sync's removal) and ``keep_in_trash`` leave the folder
+    in ``.work/trash`` for ``gc`` to delete once :data:`TRASH_RETENTION_SECONDS` pass: a
+    replica may be the last copy of its work.
 
     Raises:
         WorkError: a check refused (the message lists every reason), or the copy, moved

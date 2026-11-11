@@ -1,14 +1,14 @@
 # SETUP.md: adding a machine to the fleet
 
 The procedure for a new machine, from a bare Ubuntu install to a fleet member that
-[scripts/fleet_sync.py][fleet-sync], [scripts/fleet_stop.py][fleet-stop] and
-[scripts/load_balancing.py][load-balancing] reach. [scripts/fleet_setup.py][fleet-setup] does
+[docs/fleet/scripts/fleet_sync.py][fleet-sync], [docs/fleet/scripts/fleet_stop.py][fleet-stop] and
+[docs/fleet/scripts/load_balancing.py][load-balancing] reach. [docs/fleet/scripts/fleet_setup.py][fleet-setup] does
 every step it can; its module docstring is the full rule. What it cannot do (sudo's password,
 logins, the timer) is the maintainer's, marked **by hand** below. The machines themselves are
 in [MACHINES.md][machines]; the North Star in [FLEET.md][fleet].
 
 `<host>` is the new machine's one name: its hostname, its Tailscale name, its ssh alias and its
-[machines.json][machines-json] row's `name` are all this one word (`scripts/fleet.py`
+[machines.json][machines-json] row's `name` are all this one word (`docs/fleet/scripts/fleet.py`
 "Identity"). Run every fleet-side command from `~/projects/django-strawberry-framework` on a
 machine already in the fleet.
 
@@ -40,8 +40,8 @@ ssh -o BatchMode=yes <host> true  # must exit 0
 ## 2. Install everything: `fleet_setup.py add`
 
 ```sh
-python3 scripts/fleet_setup.py add <host> --check   # read-only: what <host> lacks
-python3 scripts/fleet_setup.py add <host>           # install it; sudo asks once
+python3 docs/fleet/scripts/fleet_setup.py add <host> --check   # read-only: what <host> lacks
+python3 docs/fleet/scripts/fleet_setup.py add <host>           # install it; sudo asks once
 ```
 
 `add` checks that `<host>` answers batch-mode ssh and is Ubuntu, copies the script to
@@ -79,8 +79,8 @@ the list.
 ordered pair of machines must reach the other by name.
 
 ```sh
-python3 scripts/fleet_setup.py mesh --check --add <host>   # the matrix, read-only
-python3 scripts/fleet_setup.py mesh --add <host>           # fix every missing pair (by hand: it writes keys and ssh config)
+python3 docs/fleet/scripts/fleet_setup.py mesh --check --add <host>   # the matrix, read-only
+python3 docs/fleet/scripts/fleet_setup.py mesh --add <host>           # fix every missing pair (by hand: it writes keys and ssh config)
 ```
 
 For each missing pair it creates the source's key if absent, adds a `Host` block with the
@@ -92,7 +92,7 @@ below is in `machines.json`.
 ## 4. Register the machine
 
 ```sh
-python3 scripts/fleet_setup.py row <host>
+python3 docs/fleet/scripts/fleet_setup.py row <host>
 ```
 
 prints a `machines.json` row from the machine's cores and memory (weights relative to a
@@ -115,15 +115,15 @@ existence is checked; the file is never read).
 The save-sync timer comes last, once sync testing on the machine has passed:
 
 ```sh
-cd ~/projects/django-strawberry-framework && uv run python scripts/fleet_sync.py schedule --install
+cd ~/projects/django-strawberry-framework && uv run python docs/fleet/scripts/fleet_sync.py schedule --install
 ```
 
 ## 6. Verify
 
 ```sh
-python3 scripts/fleet_setup.py add <host> --check   # every step ok but the hand ones
-python3 scripts/fleet_setup.py mesh --check         # every pair ok
-python3 scripts/fleet_setup.py verify <host>        # fleet_sync.py status here and there, fleet_stop.py status
+python3 docs/fleet/scripts/fleet_setup.py add <host> --check   # every step ok but the hand ones
+python3 docs/fleet/scripts/fleet_setup.py mesh --check         # every pair ok
+python3 docs/fleet/scripts/fleet_setup.py verify <host>        # fleet_sync.py status here and there, fleet_stop.py status
 ```
 
 `verify` is read-only: nothing is synced and no flag is written.
@@ -141,6 +141,10 @@ with System Settings' Remote Login in place of openssh-server, Homebrew's `diren
 
 <!-- docs/ -->
 [fleet]: FLEET.md
+[fleet-setup]: scripts/fleet_setup.py
+[fleet-stop]: scripts/fleet_stop.py
+[fleet-sync]: scripts/fleet_sync.py
+[load-balancing]: scripts/load_balancing.py
 [machines]: MACHINES.md
 [machines-json]: machines.json
 
@@ -155,10 +159,6 @@ with System Settings' Remote Login in place of openssh-server, Homebrew's `diren
 <!-- examples/ -->
 
 <!-- scripts/ -->
-[fleet-setup]: ../../scripts/fleet_setup.py
-[fleet-stop]: ../../scripts/fleet_stop.py
-[fleet-sync]: ../../scripts/fleet_sync.py
-[load-balancing]: ../../scripts/load_balancing.py
 
 <!-- .venv/ -->
 

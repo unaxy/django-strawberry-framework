@@ -1,4 +1,4 @@
-"""Script tests for ``scripts/load_balancing.py``, the fleet machine picker.
+"""Script tests for ``docs/fleet/scripts/load_balancing.py``, the fleet machine picker.
 
 Each OS's probe output is parsed from text captured on a fleet machine (Windows
 from the shape ``ConvertTo-Json -Compress`` prints), then scored and held to
@@ -20,7 +20,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from scripts import fleet, load_balancing, workspace
+from docs.fleet.scripts import fleet, load_balancing
+from scripts import workspace
 
 if TYPE_CHECKING:
     from collections.abc import Callable

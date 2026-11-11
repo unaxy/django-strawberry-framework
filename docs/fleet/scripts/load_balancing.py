@@ -3,7 +3,7 @@
 The rule: a new thread starts on the machine with the most free CPU and memory,
 weighted by that machine's preference, among the machines that clear every hard
 floor. The machines are ``docs/fleet/machines.json``'s, read through
-``scripts/fleet.py`` (its docstring states the list's schema): each entry names
+``docs/fleet/scripts/fleet.py`` (its docstring states the list's schema): each entry names
 the machine, the ssh host it is reached as, its OS, the checkout path the thread
 would work in (``repo``), a preference weight per mode, the hard floors per mode
 and its ``aliases`` (other names its stored records may carry). A machine joins the fleet
@@ -70,7 +70,7 @@ Output
     (the winning machine's ssh host alone). Exit 0 when a machine qualifies, 1
     when none does, 2 for an unreadable machine list.
 
-Standard library plus ``scripts/fleet.py``, so it runs on the oldest supported
+Standard library plus ``docs/fleet/scripts/fleet.py``, so it runs on the oldest supported
 Python with no project environment.
 """
 
@@ -88,10 +88,10 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-try:
+if __package__:  # imported as ``docs.fleet.scripts.load_balancing`` (repo root on path)
+    from docs.fleet.scripts import fleet
+else:  # run or imported from its own folder
     import fleet
-except ModuleNotFoundError:  # imported as ``scripts.load_balancing`` (repo root on path)
-    from scripts import fleet
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence

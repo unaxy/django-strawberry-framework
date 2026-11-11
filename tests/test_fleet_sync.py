@@ -29,8 +29,9 @@ from pathlib import Path
 import pytest
 from typing_extensions import override
 
-from scripts import _git, fleet_sync, work, workspace
-from scripts import fleet as fleet_rules
+from docs.fleet.scripts import fleet as fleet_rules
+from docs.fleet.scripts import fleet_sync
+from scripts import _git, work, workspace
 from tests._idioms import json_list, json_loads, json_object
 
 NAME = "spike-fleet-probe"
@@ -372,7 +373,7 @@ def test_status_names_every_online_machine_and_why_one_is_not_synced(fleet: Flee
 def test_a_peer_without_the_script_or_ignoring_no_work_folder_is_not_synced(fleet: Fleet) -> None:
     code, document = fleet.run("status", scripts=False)
     assert code == 0
-    assert "lacks scripts/fleet_sync.py" in str(_machines(document)["b"]["reason"])
+    assert "lacks docs/fleet/scripts/fleet_sync.py" in str(_machines(document)["b"]["reason"])
     _ = _write(fleet.repo_b / ".gitignore", ".venv/\n")
     _, document = fleet.run("status")
     assert "does not ignore .work/" in str(_machines(document)["b"]["reason"])
@@ -2418,7 +2419,7 @@ def test_the_macos_schedule_is_a_launchd_agent_running_sync_pins_only(tmp_path: 
     agent = json_object(_load_plist(text.encode()))
     program = json_list(agent, "ProgramArguments")
     assert program[:2] == ["/bin/sh", "-c"]
-    assert "scripts/fleet_sync.py sync --pins-only --json" in str(program[2])
+    assert "docs/fleet/scripts/fleet_sync.py sync --pins-only --json" in str(program[2])
     assert agent["StartInterval"] == 120
     assert agent["WorkingDirectory"] == str(fleet_sync.REPO_ROOT)
     assert agent["StandardOutPath"] == str(fleet_sync.REPO_ROOT / ".work" / "fleet-pins.log")

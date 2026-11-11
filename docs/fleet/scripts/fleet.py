@@ -1,8 +1,8 @@
 """Read the fleet's machine list and reach its machines: the one owner of both.
 
 ``docs/fleet/machines.json`` is the one machine list, and this module is its one
-reader: every script that needs a machine (``scripts/load_balancing.py`` picking
-one, ``scripts/work.py`` naming a copy's home, ``scripts/fleet_sync.py`` syncing
+reader: every script that needs a machine (``docs/fleet/scripts/load_balancing.py`` picking
+one, ``scripts/work.py`` naming a copy's home, ``docs/fleet/scripts/fleet_sync.py`` syncing
 copies) takes it from here. This module is also the one place two facts are
 computed: which machine this one is, what name a stored record means and which
 row a host name reaches (:func:`this_machine`, :func:`this_machine_name`,
@@ -26,7 +26,7 @@ The list
     two machines or appears twice (an alias never equals a row's name), and a row
     holds no ``hostnames`` key (other names go in ``aliases``). Every weight and floor is a
     finite number of at least 0. What a weight or a floor means is
-    ``scripts/load_balancing.py``'s rule; this module only checks their shape. A
+    ``docs/fleet/scripts/load_balancing.py``'s rule; this module only checks their shape. A
     list breaking any of this is a :class:`MachineListError`, never a partial
     result.
 
@@ -80,10 +80,11 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-try:
-    import _git as _git_runner
-except ModuleNotFoundError:  # imported as ``scripts.fleet`` (repo root on path)
+if __package__:  # imported as ``docs.fleet.scripts.fleet`` (repo root on path)
     from scripts import _git as _git_runner
+else:  # run or imported from its own folder: ``_git.py`` lives in the checkout's scripts/
+    sys.path.insert(1, str(Path(__file__).resolve().parents[3] / "scripts"))
+    import _git as _git_runner
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence

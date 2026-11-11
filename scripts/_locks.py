@@ -7,7 +7,7 @@ Taking a lock
     raised, never read as a holder. :func:`try_lock` takes an exclusive,
     non-blocking kernel lock by it (``flock``; ``msvcrt.locking`` on Windows):
     ``scripts/work.py`` (``land.lock``, the pytest lock),
-    ``scripts/fleet_sync.py`` (``fleet.lock``) and
+    ``docs/fleet/scripts/fleet_sync.py`` (``fleet.lock``) and
     ``scripts/prove_failability.py`` (its repository-root lock).
     ``scripts/workspace.py`` keeps its own ``flock`` calls (some block, some
     retry on a replaced path) and classifies their errors by

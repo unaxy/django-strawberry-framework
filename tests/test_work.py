@@ -28,7 +28,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts import _git, _locks, fleet, prove_failability, work, workspace
+from docs.fleet.scripts import fleet
+from scripts import _git, _locks, prove_failability, work, workspace
 from tests._idioms import json_at, json_list, json_loads, json_object
 
 #: ``sqlite3.Cursor.fetchall``, its rows typed for the caller.
@@ -4551,7 +4552,7 @@ def test_an_empty_folder_at_a_names_place_still_holds_the_name(repo: Path) -> No
 
 
 # --------------------------------------------------------------------------------------------
-# Homes and replicas (scripts/fleet_sync.py keeps the replicas)
+# Homes and replicas (docs/fleet/scripts/fleet_sync.py keeps the replicas)
 # --------------------------------------------------------------------------------------------
 
 

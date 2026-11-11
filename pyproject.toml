@@ -413,7 +413,9 @@ classmethod-decorators = ["django.utils.decorators.classonlymethod"]
 # INP001: these folders deliberately have no `__init__.py` (plain scripts, pytest rootdir-relative
 # test modules, and fakeshop's top-level modules on `pythonpath`).
 # PLR2004: CLI and report scripts compare against literal expected values.
+# docs/fleet/scripts/ holds the fleet scripts, the same kind of tooling.
 "scripts/**/*.py" = ["PERF", "T201", "INP001", "S603", "S607", "PLR2004"]
+"docs/fleet/scripts/*.py" = ["PERF", "T201", "INP001", "S603", "S607", "PLR2004"]
 "line_count.py" = ["T201"]
 "docs/dry/export_dry_review.py" = ["T201", "INP001"]
 "examples/fakeshop/*.py" = ["INP001"]
@@ -566,10 +568,18 @@ reportUnusedCallResult = "none"
 
 # An environment's root resolves imports first. Scripts run as `python
 # scripts/<name>.py`: sibling imports from the root, plus the repo root (first-party, not
-# the editable install) and fakeshop (resolved statically, never executed).
+# the editable install) and fakeshop (resolved statically, never executed). The fleet
+# scripts run as `python docs/fleet/scripts/<name>.py` and import each other and scripts/
+# by bare name, both ways, so each folder is the other's extra path.
 [[tool.basedpyright.executionEnvironments]]
 root = "scripts"
-extraPaths = ["examples/fakeshop", "."]
+extraPaths = ["docs/fleet/scripts", "examples/fakeshop", "."]
+reportUnannotatedClassAttribute = "error"
+reportUnusedCallResult = "error"
+
+[[tool.basedpyright.executionEnvironments]]
+root = "docs/fleet/scripts"
+extraPaths = ["scripts", "examples/fakeshop", "."]
 reportUnannotatedClassAttribute = "error"
 reportUnusedCallResult = "error"
 

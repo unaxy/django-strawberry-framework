@@ -43,7 +43,7 @@ from scripts import _git
 
 # The repo-wide Python sweep below borrows this repo's existing definition of the
 # first-party source trees rather than re-listing them, so the two cannot drift
-# apart. Its exact scope is the four trees named by ``check_citations``'s
+# apart. Its exact scope is the trees named by ``check_citations``'s
 # ``SOURCE_TREES``, which is NOT literally every first-party .py: three tracked
 # modules (``conftest.py``, ``line_count.py``, ``docs/dry/export_dry_review.py``)
 # sit outside those trees, so ``EXTRA_SOURCE_FILES`` below adds them back and the
@@ -570,7 +570,7 @@ def test_forbidden_optimizer_form_classifier_ignores_the_permitted_shapes(snippe
 
 
 #: Tracked first-party modules that live OUTSIDE ``check_citations``'s source
-#: trees. Without them the sweep would stop at those four trees while claiming
+#: trees. Without them the sweep would stop at those trees while claiming
 #: every first-party module, and the repo-root ``conftest.py`` is a plausible
 #: home for a shared schema fixture. The census below is what keeps this tuple
 #: honest: a new ``.py`` outside the trees fails that row by name instead of
@@ -586,6 +586,7 @@ EXTRA_SOURCE_FILES = ("conftest.py", "docs/dry/export_dry_review.py", "line_coun
 CORPUS_REACH_FILES = (
     "conftest.py",
     "django_strawberry_framework/optimizer/extension.py",
+    "docs/fleet/scripts/fleet_sync.py",
     "examples/fakeshop/strategy_schemas.py",
     "examples/fakeshop/test_query/test_products_visibility_api.py",
     "scripts/check_citations.py",

@@ -2,11 +2,11 @@
 
 Usage, from ``~/projects/django-strawberry-framework`` on any fleet machine::
 
-    python3 scripts/fleet_setup.py add <host>          # install everything on <host>
-    python3 scripts/fleet_setup.py add <host> --check  # read-only: what <host> still lacks
-    python3 scripts/fleet_setup.py mesh [--check]      # ssh both ways between every pair
-    python3 scripts/fleet_setup.py row <host>          # a machines.json row to paste
-    python3 scripts/fleet_setup.py verify <host>       # fleet_sync / fleet_stop status
+    python3 docs/fleet/scripts/fleet_setup.py add <host>          # install everything on <host>
+    python3 docs/fleet/scripts/fleet_setup.py add <host> --check  # read-only: what <host> still lacks
+    python3 docs/fleet/scripts/fleet_setup.py mesh [--check]      # ssh both ways between every pair
+    python3 docs/fleet/scripts/fleet_setup.py row <host>          # a machines.json row to paste
+    python3 docs/fleet/scripts/fleet_setup.py verify <host>       # fleet_sync / fleet_stop status
 
 and on the new machine itself (``add`` copies this file there and runs it)::
 
@@ -42,7 +42,7 @@ Steps
 ``mesh``
     Every ordered pair of machines in ``docs/fleet/machines.json`` (``--add HOST`` adds one
     the list does not hold yet) must reach the other as ``ssh -o BatchMode=yes <name>
-    true``, since ``scripts/fleet_sync.py`` and ``scripts/fleet_stop.py`` call plain ssh
+    true``, since ``docs/fleet/scripts/fleet_sync.py`` and ``docs/fleet/scripts/fleet_stop.py`` call plain ssh
     both ways. For each failing pair ``a -> b`` it makes, in order: ``a``'s own key
     (``ssh-keygen`` when missing), a ``Host <b>`` block in ``a``'s ``~/.ssh/config`` with
     ``User <account>`` when ``ssh -G <b>`` on ``a`` names another account (the account is
@@ -60,8 +60,8 @@ Steps
     The list records no account names, so the row has none.
 
 ``verify``
-    Runs ``scripts/fleet_sync.py status`` here and on the box, and
-    ``scripts/fleet_stop.py status`` here: read-only, nothing synced.
+    Runs ``docs/fleet/scripts/fleet_sync.py status`` here and on the box, and
+    ``docs/fleet/scripts/fleet_stop.py status`` here: read-only, nothing synced.
 
 Standard library only, Python 3.9 (macOS's system ``python3``; Ubuntu ships a newer one),
 so it runs on a box that has nothing else yet. Ubuntu is the only ``box`` OS so far.
@@ -87,9 +87,9 @@ if TYPE_CHECKING:
 
     from typing_extensions import TypeIs
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[3]
 MACHINES_FILE = ROOT / "docs" / "fleet" / "machines.json"
-#: Where every fleet machine keeps the checkout (``scripts/fleet_sync.py`` requires it).
+#: Where every fleet machine keeps the checkout (``docs/fleet/scripts/fleet_sync.py`` requires it).
 REPO = "~/projects/django-strawberry-framework"
 #: The public repository a box clones from; pushes stay the maintainer's.
 REPO_URL = "https://github.com/unaxy/django-strawberry-framework.git"
@@ -114,7 +114,7 @@ APT_PACKAGES = {
 }
 #: Where ``add`` puts this file on the box before the checkout exists.
 REMOTE_COPY = "~/.cache/dsf-fleet-setup/fleet_setup.py"
-#: ``scripts/fleet.py``'s ``SSH_OPTIONS``, repeated (this file imports nothing).
+#: ``docs/fleet/scripts/fleet.py``'s ``SSH_OPTIONS``, repeated (this file imports nothing).
 SSH_OPTIONS = (
     "-o",
     "BatchMode=yes",
@@ -125,7 +125,7 @@ SSH_OPTIONS = (
     "-o",
     "ServerAliveCountMax=3",
 )
-#: The save-sync timer ``scripts/fleet_sync.py schedule --install`` loads on Linux.
+#: The save-sync timer ``docs/fleet/scripts/fleet_sync.py schedule --install`` loads on Linux.
 TIMER_UNIT = "dsf-fleet-pins.timer"
 KINDS = (
     "sudo",
@@ -419,7 +419,7 @@ def _check_timer(box: Box) -> str | None:
 
 def _lines_timer(box: Box) -> list[str]:
     repo = shlex.quote(str(box.repo))
-    return [f"cd {repo} && uv run python scripts/fleet_sync.py schedule --install"]
+    return [f"cd {repo} && uv run python docs/fleet/scripts/fleet_sync.py schedule --install"]
 
 
 STEPS: tuple[Step, ...] = (
@@ -787,9 +787,9 @@ def verify(host: str) -> int:
     """Run ``fleet_sync.py status`` here and on ``host``, and ``fleet_stop.py status`` here."""
     here = shlex.quote(str(ROOT))
     checks = [
-        ("here", None, f"cd {here} && uv run python scripts/fleet_sync.py status"),
-        (host, host, f"cd {REPO} && .venv/bin/python scripts/fleet_sync.py status"),
-        ("here", None, f"cd {here} && python3 scripts/fleet_stop.py status"),
+        ("here", None, f"cd {here} && uv run python docs/fleet/scripts/fleet_sync.py status"),
+        (host, host, f"cd {REPO} && .venv/bin/python docs/fleet/scripts/fleet_sync.py status"),
+        ("here", None, f"cd {here} && python3 docs/fleet/scripts/fleet_stop.py status"),
     ]
     worst = 0
     for label, where, command in checks:
