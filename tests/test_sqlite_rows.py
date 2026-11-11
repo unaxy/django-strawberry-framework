@@ -620,3 +620,27 @@ def test_a_live_journal_is_refused_on_every_input(tmp_path: Path, role: str, mod
         assert not out.exists()
     finally:
         writer.close()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "dangling", "hardlink"])
+def test_an_output_link_is_refused_without_touching_it(tmp_path: Path, kind: str) -> None:
+    base = _run(
+        tmp_path / "base.sqlite3",
+        "CREATE TABLE source (id integer PRIMARY KEY, body text)",
+        "INSERT INTO source VALUES (1, 'one')",
+    )
+    ours = _fork(base, "ours.sqlite3", "UPDATE source SET body = 'ONE'")
+    before = {path: path.read_bytes() for path in (base, ours)}
+    out = tmp_path / "out.sqlite3"
+    missing = tmp_path / "missing.sqlite3"
+    if kind == "hardlink":
+        out.hardlink_to(base)
+    else:
+        out.symlink_to(missing if kind == "dangling" else base)
+    inode = out.lstat().st_ino
+    with pytest.raises(_sqlite_rows.MergeError, match="already exists"):
+        _ = _sqlite_rows.merge(base, ours, base, out)
+    assert out.lstat().st_ino == inode
+    assert out.is_symlink() == (kind != "hardlink")
+    assert not missing.exists()
+    assert {path: path.read_bytes() for path in before} == before
