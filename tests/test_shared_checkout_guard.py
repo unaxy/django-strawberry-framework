@@ -303,3 +303,120 @@ def test_a_moved_rootdir_does_not_hide_the_shared_conftest(shared: Path, tmp_pat
     )
     assert completed.returncode == 4, completed.stdout + completed.stderr
     assert "pytest in the shared checkout" in completed.stdout + completed.stderr
+
+
+def _track(root: Path, name: str, text: str = "{}\n") -> Path:
+    path = root / name
+    path.write_text(text)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "add",
+            "-f",
+            "--",
+            name,
+        ],
+        check=True,
+    )
+    return path
+
+
+@pytest.mark.parametrize(
+    ("tracked", "alias"),
+    [
+        ("kept.local.json", "KEPT.LOCAL.JSON"),
+        ("caf\u00e9.local.json", "CAF\u00c9.local.json"),
+        ("na\u00efve.local.json", "NA\u00cfVE.local.json"),
+    ],
+)
+def test_a_case_or_unicode_alias_of_a_tracked_ignored_file_is_refused(
+    shared: Path,
+    tracked: str,
+    alias: str,
+) -> None:
+    kept = _track(shared, tracked)
+    target = shared / alias
+    if not target.exists() or not target.samefile(kept):
+        pytest.skip("needs a case-insensitive filesystem")
+    assert guard.edit_refusal(_edit(target), _AGENTLESS) is not None
+
+
+def test_an_inherited_private_index_does_not_hide_a_tracked_file(
+    shared: Path,
+    tmp_path: Path,
+) -> None:
+    _ = _track(shared, "kept.local.json")
+    environ = {key: value for key, value in os.environ.items() if key != guard.EDIT_OVERRIDE_ENV}
+    environ["GIT_INDEX_FILE"] = str(tmp_path / "private.index")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(shared),
+            "read-tree",
+            "--empty",
+        ],
+        env=environ,
+        check=True,
+    )
+    completed = subprocess.run(
+        [sys.executable, guard.__file__],
+        input=json.dumps(_edit(shared / "kept.local.json")),
+        env=environ,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert _decision(completed.stdout)["permissionDecision"] == "deny"
+
+
+def test_a_distinct_ignored_file_beside_a_tracked_case_sibling_is_allowed(tmp_path: Path) -> None:
+    """Needs case-sensitive storage: ``DSF_CASE_SENSITIVE_ROOT`` names a folder on one."""
+    parent = Path(os.environ.get("DSF_CASE_SENSITIVE_ROOT", str(tmp_path)))
+    root = _git_init(parent / f"case-{os.getpid()}")
+    (root / ".work").mkdir()
+    (root / ".gitignore").write_text(".work/\n*.local.json\n")
+    kept = _track(root, "kept.local.json", "tracked\n")
+    target = root / "KEPT.local.json"
+    if target.exists():
+        pytest.skip("needs case-sensitive storage; set DSF_CASE_SENSITIVE_ROOT")
+    target.write_text("untracked\n")
+    assert not target.samefile(kept)
+    assert guard.edit_refusal(_edit(target), _AGENTLESS) is None
+
+
+@pytest.mark.parametrize("name", ["[kept].local.json", "*.local.json"])
+def test_a_literal_wildcard_name_is_a_file_name_not_a_pattern(shared: Path, name: str) -> None:
+    _ = _track(shared, "kept.local.json")
+    target = shared / name
+    target.write_text("{}\n")
+    assert guard.edit_refusal(_edit(target), _AGENTLESS) is None
+
+
+def test_a_case_alias_of_a_bug_hunt_markdown_file_keeps_the_exception(shared: Path) -> None:
+    target = shared / "docs" / "bug_hunt" / "FIX.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("fixture\n")
+    alias = shared / "DOCS" / "BUG_HUNT" / "FIX.MD"
+    if not alias.exists() or not alias.samefile(target):
+        pytest.skip("needs a case-insensitive filesystem")
+    assert guard.edit_refusal(_edit(alias), _AGENTLESS) is None
+
+
+def test_canonical_keeps_a_missing_tail_as_given(shared: Path) -> None:
+    (shared / "docs").mkdir()
+    assert (
+        guard.canonical(shared, shared / "docs" / "New" / "File.md")
+        == shared / "docs" / "New" / "File.md"
+    )
+
+
+def test_a_tracked_file_renamed_on_disk_by_case_alone_is_still_refused(shared: Path) -> None:
+    kept = _track(shared, "kept.local.json")
+    renamed = shared / "Kept.local.json"
+    kept.rename(renamed)
+    if not kept.exists():
+        pytest.skip("needs a case-insensitive filesystem")
+    assert guard.edit_refusal(_edit(renamed), _AGENTLESS) is not None

@@ -9,7 +9,10 @@ copies"). Two entry points enforce it:
   (``.claude/settings.json`` runs this file before each ``Edit``, ``MultiEdit``,
   ``Write`` and ``NotebookEdit``; :func:`main` reads the hook payload on stdin). It
   denies a write whose target lies in the shared checkout outside ``.work/``, unless
-  the target is an untracked git-ignored file or :func:`edited_in_place`. It covers
+  the target is an untracked git-ignored file or :func:`edited_in_place`. Each rule
+  reads the target as the filesystem spells it (:func:`canonical`), and "untracked"
+  asks the checkout's own index by file identity (:func:`is_tracked`), so no case or
+  Unicode alias and no inherited ``GIT_*`` variable reaches a tracked file. It covers
   every Claude session and subagent; other harnesses meet :func:`pytest_refusal` and
   AGENTS.md.
 - :func:`pytest_refusal`, called by the repo-root ``conftest.py`` with its own folder:
@@ -36,6 +39,7 @@ import json
 import os
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -103,7 +107,47 @@ def edited_in_place(relative: str) -> bool:
     )
 
 
+def canonical(root: Path, target: Path) -> Path:
+    """Return ``target`` (under ``root``) spelled as the filesystem stores each component.
+
+    On a case-insensitive or normalization-insensitive filesystem ``DOCS/Fix.MD`` names
+    the stored ``docs/FIX.md``; each existing component takes the stored name of the
+    entry with its identity. A missing tail is kept as given.
+    """
+    current = root
+    parts = target.relative_to(root).parts
+    for index, part in enumerate(parts):
+        try:
+            held = (current / part).lstat()
+            names = [entry.name for entry in current.iterdir()]
+        except FileNotFoundError:
+            return current.joinpath(*parts[index:])
+        current = current / (part if part in names else _stored_name(current, names, part, held))
+    return current
+
+
+def _stored_name(
+    folder: Path,
+    names: list[str],
+    part: str,
+    held: os.stat_result,
+) -> str:
+    """Return the entry of ``folder`` with ``held``'s identity (``part`` if none has it)."""
+    for name in names:
+        found = (folder / name).lstat()
+        if (found.st_dev, found.st_ino) == (held.st_dev, held.st_ino):
+            return name
+    return part
+
+
+def _fold(relative: str) -> str:
+    """Return ``relative`` for caseless comparison (Unicode canonical caseless match)."""
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", relative).casefold())
+
+
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """Run git in ``root`` with no inherited ``GIT_*`` variable (no caller's index or dir)."""
+    env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     return subprocess.run(
         [
             "git",
@@ -113,26 +157,54 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
         ],
         capture_output=True,
         check=False,
+        env=env,
     )
 
 
-def is_ignored(root: Path, relative: str) -> bool:
-    """Return whether git ignores ``relative`` and tracks no file of that name in any case.
+def is_tracked(root: Path, relative: str) -> bool:
+    """Return whether ``root``'s index tracks the file ``relative`` names, under any alias.
 
-    A case-insensitive filesystem (APFS) reaches a tracked ``kept.local.json`` as
-    ``KEPT.LOCAL.JSON`` too, which ``check-ignore`` alone would call ignored.
+    A tracked name equal to ``relative`` counts; so does one equal under caseless
+    matching that is the same file on disk. Where neither exists on disk, a caseless
+    match counts too (writing the alias could recreate the tracked file).
 
     Raises:
-        OSError: the ``git`` lookup failed, so the caller cannot tell.
+        OSError: ``git ls-files`` failed, so the caller cannot tell.
 
     """
-    if _git(root, "check-ignore", "-q", "--", relative).returncode != 0:
-        return False
-    tracked = _git(root, "ls-files", "-z", "--", f":(icase,literal){relative}")
-    if tracked.returncode != 0:
-        msg = f"git ls-files failed: {tracked.stderr.decode(errors='replace').strip()}"
+    listed = _git(root, "ls-files", "-z")
+    if listed.returncode != 0:
+        msg = f"git ls-files failed: {listed.stderr.decode(errors='replace').strip()}"
         raise OSError(msg)
-    return not tracked.stdout
+    target = root / relative
+    folded = _fold(relative)
+    for name in os.fsdecode(listed.stdout).split("\0"):
+        if name == relative:
+            return True
+        if not name or _fold(name) != folded:
+            continue
+        tracked = root / name
+        if not tracked.exists():
+            if not target.exists():
+                return True
+        elif target.exists() and tracked.samefile(target):
+            return True
+    return False
+
+
+def is_ignored(root: Path, relative: str) -> bool:
+    """Return whether git ignores ``relative`` and does not track it (:func:`is_tracked`).
+
+    ``check-ignore --no-index`` reads ``relative`` as a name, never matching it against
+    the index (a literal ``*.local.json`` is a file name here).
+
+    Raises:
+        OSError: a ``git`` lookup failed, so the caller cannot tell.
+
+    """
+    if _git(root, "check-ignore", "--no-index", "-q", "--", relative).returncode != 0:
+        return False
+    return not is_tracked(root, relative)
 
 
 def edit_refusal(payload: Mapping[str, object], environ: Mapping[str, str]) -> str | None:
@@ -153,7 +225,7 @@ def edit_refusal(payload: Mapping[str, object], environ: Mapping[str, str]) -> s
     root = shared_root(target.parent)
     if root is None:
         return None
-    relative = target.relative_to(root).as_posix()
+    relative = canonical(root, target).relative_to(root).as_posix()
     if relative.startswith(".work/"):
         return None
     if edited_in_place(relative) or is_ignored(root, relative):
