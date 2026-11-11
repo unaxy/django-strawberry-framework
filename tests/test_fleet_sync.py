@@ -1974,3 +1974,21 @@ def test_the_timer_line_checks_the_stop_flag_before_any_python(
     (tmp_path / ".work" / "fleet-stop").unlink()
     ran = subprocess.run(["/bin/sh", "-c", line], capture_output=True, check=False)
     assert ran.returncode != 0
+
+
+def test_sync_pins_only_leaves_landed_pins_that_moved_alone(fleet: Fleet) -> None:
+    copy = _new()
+    _ = _write(copy / "saved.txt", "saved\n")
+    assert work.main(["save", NAME]) == 0
+    head_a = _git_out(fleet.repo_a, "rev-parse", "HEAD").strip()
+    assert work.publish_pin(fleet.repo_a, copy, head_a, NAME, "landed")
+    fleet.at_b()
+    other = _commit(fleet.repo_b, "b.txt", "b\n")
+    assert work.publish_pin(fleet.repo_b, fleet.repo_b, other, NAME, "landed")
+    fleet.at_a()
+    code, document = fleet.run("sync", "--pins-only")
+    assert code == 0, document
+    assert not [row for row in _results(document) if row[0] == "conflict"]
+    assert "save-1" in work.pins(fleet.repo_b)[NAME]
+    assert work.pins(fleet.repo_b)[NAME]["landed"] == other
+    assert work.pins(fleet.repo_a)[NAME]["landed"] == head_a

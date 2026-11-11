@@ -220,8 +220,9 @@ Commands
         Sync with every qualifying peer (or those ``--machine`` names: a row
         name, ssh alias or machine name). ``--copy`` limits the run to those copies
         (their pins and evidence) and leaves main alone; ``--main-only`` syncs
-        main alone; ``--pins-only`` carries tombstones and pins (every saved copy)
-        both ways and nothing else, so it takes seconds and fits a short timer.
+        main alone; ``--pins-only`` carries tombstones and the pins that never move
+        (``save-N``, ``start``) both ways and nothing else, so it takes seconds and
+        fits a short timer.
         ``--dry-run`` writes nothing but fetches peers' main commits into the
         object store so it can say what a fast-forward would do.
     ``fetch-pins NAME --machine M [--dry-run]``
@@ -3432,6 +3433,22 @@ def sync_with_peer(
     return [row for row in rows if row.result != "none"]
 
 
+def fixed_pin(ref: str) -> bool:
+    """Return whether pin ``ref`` (``<name>/<leaf>``) never moves once made: a save or ``start``.
+
+    ``landed`` and ``landed-copy`` move with every landing at the copy's home, so a
+    create-only copy of one goes stale there and reads as a conflict ever after.
+    """
+    leaf = ref.rpartition("/")[2]
+    return leaf == work.START_PIN or bool(work.SAVE_PIN.fullmatch(leaf))
+
+
+def fixed_pins(inventory: Inventory) -> Inventory:
+    """Return ``inventory`` with only its :func:`fixed_pin` pins."""
+    pins = {ref: commit for ref, commit in inventory.pins.items() if fixed_pin(ref)}
+    return dataclasses.replace(inventory, pins=pins)
+
+
 def sync_pins_with_peer(
     here: Machine,
     peer: Machine,
@@ -3440,9 +3457,9 @@ def sync_pins_with_peer(
 ) -> list[Row]:
     """Carry tombstones and every pin (or ``--copy``'s) both ways with ``peer``, nothing else.
 
-    Saves (``refs/work/<name>/*``) and the tombstones that bury them move create-only as
-    in a full sync; replicas, evidence and main stay as they are, so a run takes
-    seconds and fits a short timer.
+    Saves and ``start`` pins (:func:`fixed_pin`) and the tombstones that bury them move
+    create-only as in a full sync; ``landed`` pins, replicas, evidence and main stay as
+    they are, so a run takes seconds and fits a short timer.
     """
     rows: list[Row] = []
     try:
@@ -3460,7 +3477,14 @@ def sync_pins_with_peer(
                 tokens,
                 dry_run=args.dry_run,
             )
-            rows += sync_pins(mine_end, their_end, mine, theirs, tokens, dry_run=args.dry_run)
+            rows += sync_pins(
+                mine_end,
+                their_end,
+                fixed_pins(mine),
+                fixed_pins(theirs),
+                tokens,
+                dry_run=args.dry_run,
+            )
     except (FleetError, work.WorkError) as error:
         rows.append(Row("pins", peer.label, "failed", str(error)))
     return [row for row in rows if row.result != "none"]

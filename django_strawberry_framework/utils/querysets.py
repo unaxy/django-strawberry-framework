@@ -489,8 +489,7 @@ def related_queryset(
     ``BaseManager.get_queryset`` constructs one (``model``, the alias and the
     manager's ``hints``; the class's own ``__init__`` runs). An ``__init__`` that
     leaves a row iterable other than a ``ModelIterable`` (rows that are no model
-    instances) raises ``ConfigurationError`` naming the model, the class and the
-    iterable. A ``Meta.base_manager_name`` is not read:
+    instances) raises ``TypeError``. A ``Meta.base_manager_name`` is not read:
     Django documents that a base manager must not filter, and the rows here are
     the join's. ``using`` pins the seed to
     a database alias, as :func:`base_queryset`'s does; unpinned, the manager's
@@ -500,14 +499,10 @@ def related_queryset(
     # The manager's override runs (trusted project code) only to name its class and alias.
     supplied = base_queryset(model)
     queryset_class = require(truth.class_of(supplied), _is_queryset_class)
-    rows = queryset_class(model=model, using=using if using is not None else queryset_db(supplied))
-    if not _yields_model_rows(rows):
-        iterable = truth.instance_state(rows).get("_iterable_class")
-        raise ConfigurationError(
-            f"{truth.name(model)}'s default manager returns {truth.name(queryset_class)}, whose "
-            f"__init__ leaves the row iterable {truth.name(iterable)}. A relation's rows are "
-            f"model instances: the QuerySet class must keep a ModelIterable row iterable.",
-        )
+    rows = require(
+        queryset_class(model=model, using=using if using is not None else queryset_db(supplied)),
+        _yields_model_rows,
+    )
     set_queryset_hints(rows, dict(queryset_hints(supplied)))
     return rows
 

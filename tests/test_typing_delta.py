@@ -444,22 +444,6 @@ def test_an_empty_range_reports_nothing_and_exits_zero(capsys: pytest.CaptureFix
     assert capsys.readouterr().out.splitlines()[-1] == "typing-delta HEAD..HEAD: 0 flagged"
 
 
-def test_worktree_reads_the_head_side_without_touching_the_index_or_refs(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """``--worktree`` reports ``base..worktree``; the index, refs and git dir stay as found."""
-    git_dir = td.REPO_ROOT / ".git"
-    index = (git_dir / "index").read_bytes()
-    head = td._commit("HEAD")
-
-    assert td.main(["HEAD", "--worktree"]) == 0
-
-    assert capsys.readouterr().out.splitlines()[-1].startswith("typing-delta HEAD..worktree: ")
-    assert (git_dir / "index").read_bytes() == index
-    assert td._commit("HEAD") == head
-    assert list(git_dir.glob("typing-delta-*.index")) == []
-
-
 def test_fail_on_flags_exits_one_when_a_row_is_flagged(monkeypatch: pytest.MonkeyPatch) -> None:
     """``--fail-on-flags`` turns a flagged report into exit ``1``; without it the exit is ``0``."""
     flagged = td.Report("a", "b", (_PKG,), [td.Section("s", "1", [td.Row("x", flagged=True)])])

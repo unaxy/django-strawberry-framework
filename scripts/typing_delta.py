@@ -67,16 +67,8 @@ Sections, each listing its flagged rows first:
 
 Usage::
 
-    uv run python scripts/typing_delta.py <base-rev> [--head REV | --worktree]
-        [--paths P ...] [--json] [--fail-on-flags]
-
-``--worktree`` reads the head side from the checkout's working tree instead of a
-revision, for a private copy whose work is not committed (copies never commit): git
-records the working tree (tracked files, and untracked ones ``.gitignore`` does not
-hide) as a tree object through a throwaway index file inside the git directory,
-removed after; the checkout's own index, its refs and its files are left as they are.
-Run it in the copy (``work.py run <name> -- python scripts/typing_delta.py HEAD
---worktree``); the head label is ``worktree``.
+    uv run python scripts/typing_delta.py <base-rev> [--head REV] [--paths P ...]
+        [--json] [--fail-on-flags]
 
 The text report ends with one line, ``typing-delta <base>..<head>: N flagged``.
 ``--json`` prints the same report as one JSON object. Exit code ``0`` unless
@@ -91,14 +83,12 @@ import ast
 import copy
 import io
 import json
-import os
 import re
 import subprocess
 import sys
 import tokenize
 from collections import Counter
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 try:
@@ -176,7 +166,6 @@ class _Args(argparse.Namespace):
 
     base: str
     head: str
-    worktree: bool
     paths: list[str]
     json: bool
     fail_on_flags: bool
@@ -1133,27 +1122,6 @@ def _commit(rev: str) -> str:
     ).stdout.strip()
 
 
-def _worktree_tree() -> str:
-    """Return a tree object holding the working tree, written through a throwaway index.
-
-    The index file lives in the git directory under a per-process name and is removed
-    afterwards; no ref moves and the checkout's own index is never read or written.
-
-    Raises:
-        subprocess.CalledProcessError: git cannot record the working tree.
-
-    """
-    git_dir = _git.run_git(REPO_ROOT, "rev-parse", "--absolute-git-dir", check=True).stdout.strip()
-    index = Path(git_dir) / f"typing-delta-{os.getpid()}.index"
-    env = {"GIT_INDEX_FILE": str(index)}
-    try:
-        _ = _git.run_git(REPO_ROOT, "read-tree", "HEAD", env=env, check=True)
-        _ = _git.run_git(REPO_ROOT, "add", "-A", "--", ".", env=env, check=True)
-        return _git.run_git(REPO_ROOT, "write-tree", env=env, check=True).stdout.strip()
-    finally:
-        index.unlink(missing_ok=True)
-
-
 def _blobs(commit: str, paths: Sequence[str]) -> dict[str, str]:
     """Return each ``.py`` file under ``paths`` at ``commit``, path to blob id.
 
@@ -1228,8 +1196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Print the typing report for ``base..head``."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     _ = parser.add_argument("base", help="the revision the range starts from")
-    head = parser.add_mutually_exclusive_group()
-    _ = head.add_argument(
+    _ = parser.add_argument(
         "--head",
         default="HEAD",
         help="the revision it ends at (default HEAD)",
@@ -1240,11 +1207,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=[PACKAGE],
         help=f"the trees to read (default {PACKAGE}); the ledger section always reads the whole ledger",
     )
-    _ = head.add_argument(
-        "--worktree",
-        action="store_true",
-        help="read the head side from the working tree instead of --head",
-    )
     _ = parser.add_argument("--json", action="store_true", help="print the report as JSON")
     _ = parser.add_argument(
         "--fail-on-flags",
@@ -1252,14 +1214,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="exit 1 when any row is flagged",
     )
     args = parser.parse_args(argv, namespace=_Args())
-    head_label = "worktree" if args.worktree else args.head
     try:
-        base_commit = _commit(args.base)
-        head_commit = _worktree_tree() if args.worktree else _commit(args.head)
+        base_commit, head_commit = _commit(args.base), _commit(args.head)
         base_blobs, head_blobs = _blobs(base_commit, args.paths), _blobs(head_commit, args.paths)
         texts = _read_blobs([*base_blobs.values(), *head_blobs.values()])
         report = build_report(
-            (args.base, head_label),
+            (args.base, args.head),
             args.paths,
             (
                 {path: texts[blob] for path, blob in base_blobs.items()},
