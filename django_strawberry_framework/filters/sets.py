@@ -117,6 +117,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_concrete_field,
     is_dict,
     is_list_or_tuple,
+    is_lookup,
     is_queryset,
     is_str,
     is_tuple,
@@ -317,6 +318,9 @@ if TYPE_CHECKING:
     # ``(field_name, related_filter, child_input)`` per active related branch, as
     # ``FilterSet._iter_visibility_steps`` yields it.
     _VisibilityStep: TypeAlias = "tuple[str, RelatedFilter, object]"
+    # A request-wide hop visibility map's key: ``(id(declaration), db)`` for a declared
+    # hop, ``(scope, db)`` for an undeclared one and a multi-relation branch's model.
+    _HopKey: TypeAlias = tuple[int | type[DjangoType], str | None]
     #: Any forward ``ManyToManyField``, as django-stubs parametrizes it.
     _ManyToManyFieldAny: TypeAlias = models.ManyToManyField[models.Model, models.Model]
     #: Any ``ModelChoiceField``, its model parameter solved to ``Model``.
@@ -1850,15 +1854,6 @@ def _new_projected(filter_cls: type[Filter]) -> ProjectedChildFilter:
     return object.__new__(_projected_class_for(filter_cls))
 
 
-def _is_choice_rows(value: object) -> TypeIs[models.QuerySet[models.Model]]:
-    """Whether ``value`` is a ``ModelChoiceField``'s queryset, whose rows are model instances.
-
-    django-filter builds a model-choice form field only over the ``QuerySet`` its filter's
-    ``get_queryset`` answers (``QuerySetRequestMixin.field``), never ``None``.
-    """
-    return is_queryset(value)
-
-
 def _head_null_test(head: RelatedFilter, value: object) -> tuple[Filter, object]:
     """Return the head and value a ``RelatedFilter`` head's walk runs for its cleaned ``value``.
 
@@ -2846,7 +2841,7 @@ class _PipelineConstruction:
     owner: type[object]
     bindings: FilterFormBindings | None
     flat_names: frozenset[str] = _NO_FLAT_NAMES
-    hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None = None
+    hop_visibility: dict[_HopKey, models.QuerySet[models.Model]] | None = None
     info: object = None
 
 
@@ -2886,7 +2881,7 @@ def _pipeline_built(
     bindings: FilterFormBindings | None = None,
     *,
     flat_names: frozenset[str] = _NO_FLAT_NAMES,
-    hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None = None,
+    hop_visibility: dict[_HopKey, models.QuerySet[models.Model]] | None = None,
     info: object = None,
 ) -> Generator[None, None, None]:
     """Mark the next intended metaclass constructor as built by the request pipeline."""
@@ -3182,7 +3177,7 @@ def _bound_value_lookups(query: Query) -> Iterator[tuple[model_lookups.Lookup, Q
         if isinstance(node, Query):
             yield from _bound_value_lookups(node)
             continue
-        if _is_lookup(node) and (
+        if is_lookup(node) and (
             node.rhs_is_direct_value()
             or array_leaf_field(read_attr(read_attr(node, "lhs"), "output_field"))[1] > 0
         ):
@@ -3192,11 +3187,6 @@ def _bound_value_lookups(query: Query) -> Iterator[tuple[model_lookups.Lookup, Q
             pending.extend(
                 source for source in list_of(node.get_source_expressions()) if source is not None
             )
-
-
-def _is_lookup(value: object) -> TypeIs[model_lookups.Lookup]:
-    """Return whether ``value`` is a Django ``Lookup`` instance."""
-    return isinstance(value, model_lookups.Lookup)
 
 
 def _held_integer_value(
@@ -3290,9 +3280,7 @@ def _bind_ask_terminal_source(
     hop = chain.hops[-1]
     visible = filterset_instance._flat_hop_visibility
     if isinstance(hop, UndeclaredHop):
-        key: tuple[object, str | None] | None = (
-            None if hop.scope is None else (hop.scope, queryset.db)
-        )
+        key: _HopKey | None = None if hop.scope is None else (hop.scope, queryset.db)
     else:
         _owner, declaration = _filter_declaration(hop)
         key = (id(declaration), queryset.db)
@@ -3857,9 +3845,7 @@ class FilterSet(
     # sync path derives each entry on first use. ``None`` only on a set built
     # directly, not by the apply pipeline (``_hop_visibility`` creates it on
     # first read).
-    _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]] | None = (
-        None
-    )
+    _flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]] | None = None
 
     # ``ClassBasedTypeNameMixin`` naming suffixes. The root input type keeps
     # the mixin's default ``"InputType"`` (``FooFilter`` -> ``FooFilterInputType``);
@@ -4557,8 +4543,11 @@ class FilterSet(
             if walk is None:
                 continue
             visible = self._hop_visible_rows(walk[0][-1], built.db)
-            choices = require(field.queryset, _is_choice_rows)
-            if not choices.query.is_sliced:
+            choices = field.queryset
+            # django-filter builds the field over its filter's ``get_queryset`` answer
+            # (``QuerySetRequestMixin.field``), never ``None``; a field holding none has no
+            # choices to narrow, and Django's ``ModelChoiceField`` admits no key without one.
+            if choices is not None and not choices.query.is_sliced:
                 field.queryset = choices.filter(pk__in=Subquery(visible.values("pk")))
 
     # ------------------------------------------------------------------
@@ -6752,7 +6741,7 @@ class FilterSet(
         input_value: object,
         info: object,
         *,
-        hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
         parent_db: str | None = None,
         _depth: int = 0,
         _branch_path: str = "",
@@ -6827,7 +6816,7 @@ class FilterSet(
         input_value: object,
         info: object,
         *,
-        hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
         parent_db: str | None = None,
         _depth: int = 0,
         _branch_path: str = "",
@@ -6934,7 +6923,7 @@ class FilterSet(
         input_value: object,
         info: object,
         *,
-        hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
         parent_db: str | None = None,
         _depth: int = 0,
         _branch_path: str = "",
@@ -6976,7 +6965,7 @@ class FilterSet(
         parent_db: str | None = None,
         _depth: int = 0,
         _branch_path: str = "",
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
         aliases: Mapping[str, str] = _NO_ALIASES,
     ) -> dict[int, dict[str, models.QuerySet[models.Model]]]:
         """Pre-walk logical branches and derive each branch's visibility map.
@@ -7430,7 +7419,8 @@ class FilterSet(
         alias = self._annotation_owner_alias()
         for hop in hops:
             if isinstance(hop, UndeclaredHop):
-                key: tuple[object, str | None] = (hop.scope, alias)
+                # A lookup key: a hop no type scopes (``scope`` ``None``) is never a map key.
+                key: tuple[int | type[DjangoType] | None, str] = (hop.scope, alias)
             else:
                 _owner, declaration = _filter_declaration(hop)
                 key = (id(declaration), alias)
@@ -7684,7 +7674,7 @@ class FilterSet(
         cls,
         input_value: object,
         info: object,
-        into: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        into: dict[_HopKey, models.QuerySet[models.Model]],
         *,
         parent_db: str | None,
         aliases: Mapping[str, str] = _NO_ALIASES,
@@ -7760,7 +7750,7 @@ class FilterSet(
         cls,
         hops: Iterable[RelationHop],
         info: object,
-        into: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        into: dict[_HopKey, models.QuerySet[models.Model]],
         *,
         parent_db: str | None,
     ) -> None:
@@ -7821,7 +7811,7 @@ class FilterSet(
         cls,
         related_filter: RelatedFilter,
         info: object,
-        visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        visibility: dict[_HopKey, models.QuerySet[models.Model]],
         parent_db: str | None,
     ) -> tuple[models.QuerySet[models.Model] | None, ...]:
         """Return the rows each intermediate model of a branch of this set may pass through.
@@ -7838,7 +7828,7 @@ class FilterSet(
     def _scoped_rows(
         scope: type[DjangoType],
         info: object,
-        visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        visibility: dict[_HopKey, models.QuerySet[models.Model]],
         parent_db: str | None,
     ) -> models.QuerySet[models.Model]:
         """Return the rows of ``scope``'s model its ``get_queryset`` lets this request see.
@@ -7866,7 +7856,7 @@ class FilterSet(
     async def _await_scoped_rows(
         scope: type[DjangoType] | None,
         info: object,
-        into: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        into: dict[_HopKey, models.QuerySet[models.Model]],
         parent_db: str | None,
     ) -> None:
         """Await ``_scoped_rows``'s rows of ``scope`` into the hop map; nothing for ``None``."""
@@ -7875,7 +7865,7 @@ class FilterSet(
         seed = _scoped_seed_rows(scope, parent_db)
         into[scope, parent_db] = await apply_type_visibility_async(scope, seed, info)
 
-    def _hop_visibility(self) -> dict[tuple[object, str | None], models.QuerySet[models.Model]]:
+    def _hop_visibility(self) -> dict[_HopKey, models.QuerySet[models.Model]]:
         """Return this instance's request-wide hop visibility map, creating it on first read."""
         visibility = self._flat_hop_visibility
         if visibility is None:
@@ -7918,7 +7908,7 @@ class FilterSet(
         declared_attr: str,
         related_filter: RelatedFilter,
         info: object,
-        visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        visibility: dict[_HopKey, models.QuerySet[models.Model]],
         parent_db: str | None,
     ) -> models.QuerySet[models.Model]:
         """Return the rows the target type of this set's branch ``declared_attr`` lets the request see.
@@ -7956,7 +7946,7 @@ class FilterSet(
         declared_attr: str,
         related_filter: RelatedFilter,
         info: object,
-        into: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        into: dict[_HopKey, models.QuerySet[models.Model]],
         parent_db: str | None,
     ) -> models.QuerySet[models.Model]:
         """Async twin of ``_declared_hop_rows``: await the hook into ``into`` unless already there."""
@@ -9415,7 +9405,7 @@ class FilterSet(
         _depth: int = 0,
         _branch_path: str = "",
         _nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None = None,
-        _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        _flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
         _absent_leaf_verdicts: Mapping[str, tuple[object, bool]] = _NO_VERDICTS,
         _probed_arms: Mapping[str, _ProbedArm] = _NO_ARMS,
     ) -> models.Q:
@@ -9490,7 +9480,7 @@ class FilterSet(
         _depth: int = 0,
         _branch_path: str = "",
         _nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None = None,
-        _flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        _flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
         _absent_leaf_verdicts: Mapping[str, tuple[object, bool]] = _NO_VERDICTS,
         _probed_arms: Mapping[str, _ProbedArm] = _NO_ARMS,
     ) -> models.Q:
@@ -9645,7 +9635,7 @@ class FilterSet(
         child_qs_by_branch: Mapping[str, models.QuerySet[models.Model]],
         info: object,
         request: object,
-        hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
     ) -> models.QuerySet[_M]:
         """Constrain `parent_qs` by each active branch's intersected child qs.
 
@@ -9690,7 +9680,7 @@ class FilterSet(
         queryset: models.QuerySet[_M],
         info: object,
         child_qs_by_branch: Mapping[str, models.QuerySet[models.Model]],
-        hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
     ) -> tuple[dict[str, object], object, models.QuerySet[_M], FilterFormBindings]:
         """Return form data, request, constrained rows and widget bindings for both apply paths.
 
@@ -9720,7 +9710,7 @@ class FilterSet(
         request: object,
         info: object,
         nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
         *,
         input_value: object,
         branch_path: str = "",
@@ -9768,7 +9758,7 @@ class FilterSet(
         info: object,
         *,
         nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None = None,
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
         run_permissions: bool = True,
         branch_path: str = "",
         form_bindings: FilterFormBindings | None = None,
@@ -9830,7 +9820,7 @@ class FilterSet(
         info: object,
         *,
         nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
         run_permissions: bool,
         branch_path: str,
         form_bindings: FilterFormBindings | None,
@@ -9867,7 +9857,7 @@ class FilterSet(
         info: object,
         *,
         nested_qs_by_branch_id: dict[int, dict[str, models.QuerySet[models.Model]]] | None,
-        flat_hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]],
+        flat_hop_visibility: dict[_HopKey, models.QuerySet[models.Model]],
         run_permissions: bool,
         branch_path: str,
         form_bindings: FilterFormBindings | None,
@@ -9923,8 +9913,7 @@ class FilterSet(
         run_permissions: bool = True,
         _depth: int = 0,
         _branch_path: str = "",
-        _hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
-        | None = None,
+        _hop_visibility: dict[_HopKey, models.QuerySet[models.Model]] | None = None,
     ) -> models.QuerySet[_M]:
         """Sync resolver entry point (Decision 8).
 
@@ -10007,8 +9996,7 @@ class FilterSet(
         run_permissions: bool = True,
         _depth: int = 0,
         _branch_path: str = "",
-        _hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
-        | None = None,
+        _hop_visibility: dict[_HopKey, models.QuerySet[models.Model]] | None = None,
     ) -> models.QuerySet[_M]:
         """Async sibling of `apply_sync` awaiting every blocking step.
 

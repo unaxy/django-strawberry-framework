@@ -447,9 +447,19 @@ def base_queryset(model: type[_ModelT], *, using: str | None = None) -> models.Q
     return manager.using(using).all() if using is not None else manager.all()
 
 
-def _is_model_queryset_class(value: object) -> TypeIs[type[models.QuerySet[models.Model]]]:
-    """Whether ``value`` is a ``QuerySet`` class by its real MRO (``related_queryset``'s read)."""
-    return truth.is_subclass(value, models.QuerySet)
+def _yields_model_rows(value: object) -> TypeGuard[models.QuerySet[models.Model]]:
+    """Whether ``value`` is a ``QuerySet`` whose own ``_iterable_class`` is a ``ModelIterable``.
+
+    ``QuerySet.__init__`` stores the row iterable on the instance, and a subclass
+    ``__init__`` may store another: django-polymorphic's ``PolymorphicModelIterable`` (a
+    ``ModelIterable``, so model rows), or a projection's ``Values*`` iterable (no model
+    rows). The class alone proves no row type. Read from the instance ``__dict__``, so a
+    class-level property dispatches nothing.
+    """
+    return _is_queryset_class(truth.class_of(value)) and truth.is_subclass(
+        truth.instance_state(value).get("_iterable_class"),
+        ModelIterable,
+    )
 
 
 def related_queryset(
@@ -477,17 +487,22 @@ def related_queryset(
     :func:`base_queryset` hands back, so a hook can call that class's methods.
     The rows are a fresh instance of that class, constructed the way Django's
     ``BaseManager.get_queryset`` constructs one (``model``, the alias and the
-    manager's ``hints``; the class's own ``__init__`` runs). A
-    ``Meta.base_manager_name`` is not read: Django documents that a base manager
-    must not filter, and the rows here are the join's. ``using`` pins the seed to
+    manager's ``hints``; the class's own ``__init__`` runs). An ``__init__`` that
+    leaves a row iterable other than a ``ModelIterable`` (rows that are no model
+    instances) raises ``TypeError``. A ``Meta.base_manager_name`` is not read:
+    Django documents that a base manager must not filter, and the rows here are
+    the join's. ``using`` pins the seed to
     a database alias, as :func:`base_queryset`'s does; unpinned, the manager's
     own alias stands. An abstract model raises :func:`base_queryset`'s
     ``ConfigurationError``.
     """
     # The manager's override runs (trusted project code) only to name its class and alias.
     supplied = base_queryset(model)
-    queryset_class = require(truth.class_of(supplied), _is_model_queryset_class)
-    rows = queryset_class(model=model, using=using if using is not None else queryset_db(supplied))
+    queryset_class = require(truth.class_of(supplied), _is_queryset_class)
+    rows = require(
+        queryset_class(model=model, using=using if using is not None else queryset_db(supplied)),
+        _yields_model_rows,
+    )
     set_queryset_hints(rows, dict(queryset_hints(supplied)))
     return rows
 

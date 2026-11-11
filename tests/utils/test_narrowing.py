@@ -12,6 +12,8 @@ from collections.abc import Callable, Collection, Mapping
 
 import pytest
 from django.db import models
+from django.db.models.lookups import Exact
+from django.db.models.sql.where import WhereNode
 from django.utils.functional import Promise, lazy
 from django.utils.translation import gettext_lazy
 from typing_extensions import override
@@ -24,6 +26,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_exact_list_or_tuple,
     is_exact_set_or_frozenset,
     is_exact_tuple_or_frozenset,
+    is_lookup,
     is_queryset,
     is_real_collection,
     is_real_mapping,
@@ -252,6 +255,15 @@ def test_is_queryset_accepts_a_queryset_and_refuses_a_manager_and_a_list() -> No
     manager: models.Manager[models.Model] = models.Manager()
     assert is_queryset(manager) is False
     assert is_queryset([]) is False
+
+
+def test_is_lookup_accepts_a_lookup_and_refuses_an_expression_and_a_where_node() -> None:
+    """A ``Lookup`` subclass instance passes; an expression or a ``WhereNode`` does not."""
+    column = models.F("name")
+
+    assert is_lookup(Exact(column, "x")) is True
+    assert is_lookup(column) is False
+    assert is_lookup(WhereNode()) is False
 
 
 class _ClaimsMapping(ClaimsClassBase):

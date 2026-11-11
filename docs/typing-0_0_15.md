@@ -13,8 +13,8 @@ giving one up elsewhere. A rule whose last ignore is cleared leaves the ledger a
 total (casts, or one rule's ignores) fails unless it carries a `Suppression-Growth-Approved:` trailer, the
 maintainer's consent.
 
-Progress: 33 done, 6 closed (survey verdicts), 6 open (items 42-45 from the 2026-11-02 review; one waits on
-upstream, one is a behavior change outside typing, carded). Ignore comments: 707 lines (1897 at the start of 0.0.15's
+Progress: 34 done, 6 closed (survey verdicts), 6 open (items 42-45 from the 2026-11-02 review; one waits on
+upstream, one is a behavior change outside typing, carded). Ignore comments: 698 lines (1897 at the start of 0.0.15's
 ignore sweep); `typing.cast` calls: 103 (432 at the start of the cast work).
 
 ## Pre-commit snapshot (`uvx pre-commit run --all-files`, 4ce779e1, clean clone)
@@ -340,6 +340,17 @@ scope and timing.
   pre-commit table is labelled the 4ce779e1 snapshot, its re-measure scheduled after item 45. Accepted gap: no
   clean-CI row covers `_committable_files`'s census filter; removing it fails the census only when a `hunt-ws/` tree
   exists, so a regression is a loud local red, not a silent pass
+- [x] 46. Typing the ledger cannot see. `utils/querysets.py::related_queryset` proves its rows are model
+  instances on the constructed queryset (`_yields_model_rows`: a `QuerySet` whose instance `_iterable_class` is a
+  `ModelIterable`, django-polymorphic's subclass included) and raises `TypeError` for a class whose `__init__` stores
+  a projection's iterable, in place of a class predicate claiming model rows. `utils/_narrowing.py::is_lookup`
+  (`Lookup[object]`) is the one lookup predicate `filters/sets.py` and `rest_framework/query_bind.py` share.
+  `BindAskingFilterForm`'s flags take `False` class defaults and are read as attributes, not through a `getattr`
+  default. The `filters/sets.py` hop visibility map is keyed by its private `_HopKey` alias
+  (`(id(declaration), db)` or `(scope, db)`), not `tuple[object, ...]`. `_scope_supplied_heads` skips a `ModelChoiceField` holding no queryset
+  instead of narrowing through a predicate that only stripped `None`. The GlobalID walk helper in
+  `tests/filters/test_base.py` takes `str | None`; the one hostile row calls the walk with its own ignore (a move,
+  totals unchanged)
 
 ## Rules off
 

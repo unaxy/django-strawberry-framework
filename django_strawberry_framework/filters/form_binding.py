@@ -345,10 +345,11 @@ class BindAskingFilterForm(forms.Form):
     _filter_asks: ClassVar[FilterFormAsks]
     _errors: ErrorDict | None
     cleaned_data: dict[str, object]
-    _filter_asking_active: bool
-    _filter_cleaning_cached: bool
+    # Per-form flags: an immutable class default an instance assignment shadows, never shared state.
+    _filter_asking_active: bool = False
+    _filter_cleaning_cached: bool = False
     _filter_cleaning_route: bool | None
-    _filter_bind_finalized: bool
+    _filter_bind_finalized: bool = False
 
     @override
     def full_clean(self) -> None:
@@ -372,7 +373,7 @@ class BindAskingFilterForm(forms.Form):
 
     def _ask_full_clean(self, clean: Callable[[], None]) -> None:
         """Enclose the actual form's whole clean in exactly one owning pair of asks."""
-        if getattr(self, "_filter_asking_active", False):
+        if self._filter_asking_active:
             # Every generated form in a reuse chain delegates to the current
             # outer owner, including a generated form reused more than once.
             clean()
@@ -427,7 +428,7 @@ class BindAskingFilterForm(forms.Form):
 
     def _finish_binding(self) -> None:
         """Add the current owner's bind refusals once after the entire actual clean."""
-        if getattr(self, "_filter_bind_finalized", False):
+        if self._filter_bind_finalized:
             return
         refusals = self._filter_asks.unbindable_values(self)
         for name, refusal in refusals.items():
@@ -442,7 +443,7 @@ class BindAskingFilterForm(forms.Form):
         a matching form error. The pipeline may ask before ``full_clean``;
         ``_ask_full_clean`` reads the same decision without a second widget read.
         """
-        if getattr(self, "_filter_cleaning_cached", False):
+        if self._filter_cleaning_cached:
             return self._filter_cleaning_route
         route: bool | None = self.is_bound
         if route and self.empty_permitted:

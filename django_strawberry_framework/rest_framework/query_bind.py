@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from django.core.exceptions import EmptyResultSet, FullResultSet
 from django.db import connections, models
-from django.db.models import lookups
 from django.db.models.sql.where import WhereNode
 
 from django_strawberry_framework.utils import truth
@@ -16,6 +15,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_dict,
     is_list,
     is_list_or_tuple,
+    is_lookup,
     is_tuple,
     read_attr,
     require,
@@ -34,20 +34,10 @@ if TYPE_CHECKING:
 
     from django.db.backends.base.base import BaseDatabaseWrapper
     from django.db.models.sql.query import Query
-    from typing_extensions import TypeIs
 
     from django_strawberry_framework.utils.typing import ConcreteField
 
-    _Lookup = lookups.Lookup[object]
-else:
-    _Lookup = lookups.Lookup
-
 _SQL_PAIR_LENGTH = 2
-
-
-def _is_lookup(value: object) -> TypeIs[_Lookup]:
-    """Narrow a compiler node to a Django lookup with a known type parameter."""
-    return isinstance(value, lookups.Lookup)
 
 
 def guard_query(
@@ -86,7 +76,7 @@ def guard_query(
     def _mark(node: object, name: str | None) -> None:
         if name is None:
             return
-        if _is_lookup(node):
+        if is_lookup(node):
             object.__setattr__(node, "_dsf_validator_field", name)
         elif isinstance(node, WhereNode):
             for child in node.children:
@@ -134,14 +124,14 @@ def guard_query(
                 del provenance[start:]
                 raise
             except OverflowError as exc:
-                if not _is_lookup(node) or not isinstance(name, str):
+                if not is_lookup(node) or not isinstance(name, str):
                     raise
                 try:
                     refuse(name)
                 except Exception as refusal:
                     raise refusal from exc
                 raise
-            if _is_lookup(node) and is_tuple(result) and len(result) == _SQL_PAIR_LENGTH:
+            if is_lookup(node) and is_tuple(result) and len(result) == _SQL_PAIR_LENGTH:
                 params = result[1]
                 if is_list_or_tuple(params):
                     lookup_sql = result[0] if isinstance(result[0], str) else ""

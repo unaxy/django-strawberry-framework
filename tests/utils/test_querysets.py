@@ -449,6 +449,70 @@ def test_related_queryset_refuses_an_abstract_model() -> None:
         related_queryset(AbstractShelf)
 
 
+class _PolymorphicRowIterable(django_query.ModelIterable[models.Model]):
+    """django-polymorphic's ``PolymorphicModelIterable`` shape: a ``ModelIterable`` subclass."""
+
+
+class _PolymorphicRowsQuerySet(models.QuerySet[models.Model]):
+    """django-polymorphic's ``PolymorphicQuerySet`` shape: ``__init__`` stores its row iterable."""
+
+    def __init__(
+        self,
+        model: type[models.Model] | None = None,
+        query: SqlQuery | None = None,
+        using: str | None = None,
+        hints: dict[str, models.Model] | None = None,
+    ) -> None:
+        """Construct as ``QuerySet`` does, then store a ``ModelIterable`` subclass."""
+        super().__init__(model=model, query=query, using=using, hints=hints)
+        self._iterable_class = _PolymorphicRowIterable
+
+
+class _ValuesRowsQuerySet(models.QuerySet[models.Model]):
+    """A class whose ``__init__`` stores a ``.values()`` row iterable: its rows are dicts."""
+
+    def __init__(
+        self,
+        model: type[models.Model] | None = None,
+        query: SqlQuery | None = None,
+        using: str | None = None,
+        hints: dict[str, models.Model] | None = None,
+    ) -> None:
+        """Construct as ``QuerySet`` does, then store ``ValuesIterable``."""
+        super().__init__(model=model, query=query, using=using, hints=hints)
+        self._iterable_class = django_query.ValuesIterable
+
+
+def _default_manager_of(
+    monkeypatch: pytest.MonkeyPatch,
+    queryset_class: type[models.QuerySet[models.Model]],
+) -> None:
+    """Make ``queryset_class.as_manager()`` ``Shelf``'s default manager for one test."""
+    manager = queryset_class.as_manager()
+    manager.model = Shelf
+    monkeypatch.setitem(vars(Shelf._meta), "default_manager", manager)
+
+
+def test_related_queryset_keeps_a_model_iterable_subclass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A class whose ``__init__`` stores a ``ModelIterable`` subclass seeds model rows."""
+    _default_manager_of(monkeypatch, _PolymorphicRowsQuerySet)
+
+    rows = related_queryset(Shelf)
+
+    assert truth.class_of(rows) is _PolymorphicRowsQuerySet
+    assert truth.instance_state(rows)["_iterable_class"] is _PolymorphicRowIterable
+
+
+def test_related_queryset_refuses_a_class_whose_init_stores_a_projection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A class whose ``__init__`` stores a ``Values*`` iterable yields no model rows: refused."""
+    _default_manager_of(monkeypatch, _ValuesRowsQuerySet)
+
+    with pytest.raises(TypeError, match=r"^expected the type the source guarantees, got "):
+        related_queryset(Shelf)
+
+
 # ---------------------------------------------------------------------------
 # coerce_field_value_or_none -- the shared "raw literal -> field value" coercion
 # ---------------------------------------------------------------------------

@@ -3451,10 +3451,12 @@ def test_multi_value_filter_forwards_integer_keys_to_upstream_callback(
     assert all(type(key) is int for keys in captured for key in keys)
 
 
-def _walked_target(owner: DjangoTypeDefinition, field_name: object) -> DjangoTypeDefinition | None:
+def _walked_target(
+    owner: DjangoTypeDefinition,
+    field_name: str | None,
+) -> DjangoTypeDefinition | None:
     """The definition ``_resolve_globalid_target`` walks ``field_name`` to from ``owner``, stable registry."""
-    # basedpyright: a non-str field name is the hostile input one row passes; the walk types it str | None
-    resolved = _resolve_globalid_target(owner, owner.model, field_name, stable=True)  # pyright: ignore[reportArgumentType]
+    resolved = _resolve_globalid_target(owner, owner.model, field_name, stable=True)
     return None if resolved is None else resolved[0]
 
 
@@ -3498,7 +3500,8 @@ def test_resolve_globalid_target_walks_multihop_relation_paths() -> None:
     assert _walked_target(owner, "nonexistent") is None
     assert _walked_target(owner, "") is None
     assert _walked_target(owner, None) is None
-    assert _walked_target(owner, 123) is None
+    # basedpyright: a non-str field name is the hostile input; the walk types it str | None
+    assert _resolve_globalid_target(owner, owner.model, 123, stable=True) is None  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.parametrize(

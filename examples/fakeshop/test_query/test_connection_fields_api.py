@@ -442,7 +442,10 @@ def test_connection_resolver_composition_order() -> None:
             run_permissions: bool = True,
             _depth: int = 0,
             _branch_path: str = "",
-            _hop_visibility: dict[tuple[object, str | None], models.QuerySet[models.Model]]
+            _hop_visibility: dict[
+                tuple[int | type[DjangoType], str | None],
+                models.QuerySet[models.Model],
+            ]
             | None = None,
         ) -> models.QuerySet[_M]:
             calls.append("filter")
