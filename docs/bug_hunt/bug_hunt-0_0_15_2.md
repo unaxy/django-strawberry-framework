@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 493 done, 117 to do. The CHANGELOG entries filed here moved to
+Progress: 506 done, 104 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2785,6 +2785,96 @@ Progress: 493 done, 117 to do. The CHANGELOG entries filed here moved to
   `::test_a_hop_scoped_by_an_ancestor_lacking_the_to_field_hides_through_the_related_row` and
   `examples/fakeshop/test_query/test_library_inheritance_api.py::test_shelf_labels_keep_a_label_naming_no_shelf_under_a_term_past_the_relation`.
   CHANGELOG: item 915
+- [x] 768. (robustness) A `DjangoModelFormMutation` create omitting a column with a `db_default` writes `NULL` through
+  Django's own form field (and a checkbox over a `BooleanField(default=True)` writes `False`, Django's checkbox
+  exception in `construct_instance`) where the model flavor writes the default; pinned as Django's answer by
+  `tests/forms/test_resolvers.py::test_modelform_create_omitting_a_nullable_column_with_a_default_keeps_djangos_answer`.
+  Found fixing 704. Closed with no change (maintainer, 2026-11-11: items not worth completing): upstream-matching.
+  Django's own `construct_instance` writes what the form field cleans, and the pinned test already names it Django's
+  answer; the form flavor follows its form.
+- [x] 771. (robustness) A declared `class X(BaseInFilter, BooleanFilter)` answers every value with the masked
+  `TypeError` from django-filter's `BooleanWidget.value_from_datadict` hashing the list the package binds, on every
+  column; the generated `in` (`MembershipInFilter`) answers (`{"cBool": {"in": [true]}}` matches). Found fixing 708.
+  Closed with no change (maintainer, 2026-11-11: items not worth completing): upstream-matching. django-filter's own
+  `BooleanWidget` fails the same way for this declared CSV-of-Boolean combination, and the generated `in` filter
+  serves the need.
+- [x] 772. (robustness) A declared filter past a transform whose own form cleans a kind the transform's lookup cannot
+  prepare (`DateFilter(field_name="occurred_on", lookup_expr="year")`, published `Date`) answers `FILTER_INVALID` for
+  every value; pinned as such by `examples/fakeshop/test_query/test_declared_temporal_bindability_api.py::_REFUSALS`
+  (`year-of-a-date`, `typed-year-of-a-date`, `years-of-csv-dates`, `year-span-of-dates`), so refusing it at build
+  moves pinned behaviour. A plain `AllValuesMultipleFilter(lookup_expr="year")` is the same class: it publishes the
+  transform's `[Int!]` while its choices are the column's dates (`invalid_choice` for every year; from 733). Found
+  fixing 708. Closed with no change (maintainer, 2026-11-11: items not worth completing): upstream-matching. The
+  declaration asks a `Date` form to clean a year, so stock django-filter refuses every value the same way, and the
+  typed `FILTER_INVALID` is pinned.
+- [x] 813. (robustness) On SQLite a stored `GeneratedField` whose `output_field` is a bounded `DecimalField`
+  (`GeneratedField(expression=F("price") * 1000, output_field=DecimalField(20, 4), db_persist=True)`) computes a value
+  its read-back converter refuses (`price` `9999999999999.9999`), and Django's `INSERT ... RETURNING` converters raise
+  `decimal.InvalidOperation` inside `save()`: a masked top-level error on every write flavor. The write rule never
+  asks it (the column is computed, not written); PostgreSQL stores it. Found verifying 726. Closed with no change
+  (maintainer, 2026-11-11: items not worth completing): upstream. The error is Django's own SQLite `RETURNING`
+  converter on a column computed past its own `DecimalField` bounds, not package code, and PostgreSQL stores the
+  value.
+- [x] 822. (robustness) `AllValuesMultipleFilter` inside a CSV wrapper (`class X(BaseInFilter,
+  AllValuesMultipleFilter)`, declared, on a text column) builds and answers `FILTER_INVALID` `invalid_list` ("Enter a
+  list of values.") for every value: its form field is built per request, so the build-time no-value ask
+  (`filters/inputs.py::_refuse_form_serving_no_value`) never sees it. Found fixing 735. Closed with no change
+  (maintainer, 2026-11-11: items not worth completing): consumer misconfiguration. The declaration's own form serves
+  no value, and it answers a typed refusal per request as stock django-filter does; the build-time no-value check is
+  best effort (GOAL "Trust boundary": configuration is trusted once constructed).
+- [x] 823. (robustness) A scalar `TypedChoiceFilter` on a choice column whose `coerce` turns its keys into no value of
+  the column (`TypedChoiceFilter(field_name="condition", choices=[("good", ...), ("1", ...)], coerce=int)` on
+  `Shelf.condition`) builds and serves nothing: the choice arm of
+  `filters/inputs.py::convert_filter_to_input_annotation` never runs the no-value ask, and 538's `valid_value` check
+  accepts `good` before the coerce. Found fixing 735. Closed with no change (maintainer, 2026-11-11: items not worth
+  completing): consumer misconfiguration. The filter's own `coerce` reads none of its keys as a column value, and
+  stock django-filter serves nothing the same way; the build-time no-value check is best effort.
+- [x] 824. (robustness) A `TypedChoiceFilter` (or its CSV wrapper) with `coerce=decimal.Decimal` and a key no decimal
+  spells (`choices=[("all", ...), ("1.5", ...)]` on a `DecimalField`) answers a masked `decimal.InvalidOperation` when
+  a request sends that key: Django's `TypedChoiceField._coerce` turns only `ValueError` / `TypeError` /
+  `ValidationError` into its `invalid_choice`. The schema builds (the key `1.5` answers). Found verifying 735. Closed
+  with no change (maintainer, 2026-11-11: items not worth completing): upstream-matching. Django's
+  `TypedChoiceField._coerce` lets `decimal.InvalidOperation` through for a key the consumer's own `coerce` cannot
+  read; the error is a consumer misconfiguration.
+- [x] 826. (robustness) A CSV `MultipleChoiceFilter` (`class X(BaseInFilter, MultipleChoiceFilter)`) with deferred
+  `choices` (a callable, a `lazy()` promise, a `SimpleLazyObject`, a `QuerySet` or a `CallableChoiceIterator`) on a
+  text column builds and answers `FILTER_INVALID` `invalid_list` for every value: its refusal does not depend on the
+  choices, but the no-value ask (`filters/inputs.py::_refuse_form_serving_no_value`) skips a choice form's keys when
+  they are deferred, and a text column has no scalar samples. Found fixing 738. Closed with no change (maintainer,
+  2026-11-11: items not worth completing): consumer misconfiguration. The declaration's own form serves no value, and
+  it answers a typed refusal per request as stock django-filter does; asking deferred choices at build would evaluate
+  them early.
+- [x] 827. (robustness) A declared filter's `field` override that reads its deferred `choices` as the declared type
+  (`self.extra["choices"].filter(...)` on a `QuerySet`) raises `AttributeError` on the schema build's copy, whose
+  choices are `filters/base.py::_UnreadChoices`; `filters/inputs.py::_declared_form_field` and
+  `filters/sets.py::_widget_keys` read that `AttributeError` as "builds no field", so the build's widget and no-value
+  checks are skipped for the leaf without a word. The schema and every request answer as without the package. Found
+  verifying 738. Closed with no change (maintainer, 2026-11-11: items not worth completing): the schema and every
+  request answer as without the package; only the package's extra build-time checks skip the leaf.
+- [x] 862. (robustness) The `ArrayField` input gate (`filters/inputs.py::_array_element_column` /
+  `_array_column_refusal`) runs only at input build, so on a set no connection serves a `ListFilter` / `ArrayFilter`
+  with `iexact` / `icontains` / `startswith` / `regex` / `isnull` over an `ArrayField` (and a CSV, choice or scalar
+  filter over one) builds and fails per request. Found fixing 716. Closed with no change (maintainer, 2026-11-11:
+  items not worth completing): a set no connection serves has no build step, so the request answers Django's own
+  error, as stock django-filter does.
+- [x] 863. (robustness) A `ListFilter` / `ArrayFilter` whose path ends on an annotation or a `FilteredRelation` alias
+  resolves no lookup when its set publishes, so `filters/base.py::refuse_listless_lookup` does not judge it and a
+  scalar lookup (`exact`) there fails per request; a request-time check through `_bound_lookup_operand` would reach
+  it. Found fixing 716. Closed with no change (maintainer, 2026-11-11: items not worth completing): a scalar lookup on
+  a list filter over an annotation answers Django's own error per request, as stock django-filter does; no published
+  shape is wrong.
+- [x] 879. (robustness) A model-choice filter declared with an explicit `queryset=None` builds its form (its set's
+  other keys answer), then a request supplying it raises a bare `AttributeError` at clean (`'NoneType' object has no
+  attribute 'model'`; a `ModelMultipleChoiceFilter` raises it cleaning an empty value too), masked over GraphQL, where
+  the absent-queryset shape is refused when its set publishes (756). Stock django-filter fails the same way. Found
+  verifying 756. Closed with no change (maintainer, 2026-11-11: items not worth completing): consumer
+  misconfiguration. An explicit `queryset=None` fails the same way in stock django-filter.
+- [x] 881. (robustness) A shipped filter whose `field_name` continues past a `GenericForeignKey`
+  (`CharFilter(field_name="content_object__name")`) builds on a served and an unserved set alike (the input types it
+  `String` from no field) and fails every request carrying a value with Django's `FieldError` (`Query.names_to_path`),
+  masked over a resolver; `filters/inputs.py::refuse_joinless_relation` judges only a path ending on one. Found
+  researching 877. Closed with no change (maintainer, 2026-11-11: items not worth completing): upstream-matching.
+  Django itself cannot traverse a `GenericForeignKey`, and its `FieldError` is stock django-filter's answer too.
 
 ## To do: found along the way
 
@@ -2805,25 +2895,10 @@ Progress: 493 done, 117 to do. The CHANGELOG entries filed here moved to
   (mainly `auth/mutations.py`, `mutations/resolvers.py`, `mutations/fields.py`, `mutations/inputs.py`); a plan-label
   family (565's class): name the behaviour and widen the plan-label row (START.md "Rule w/o gate rots"). Found
   fixing 703
-- [ ] 768. (robustness) A `DjangoModelFormMutation` create omitting a column with a `db_default` writes `NULL`
-  through Django's own form field (and a checkbox over a `BooleanField(default=True)` writes `False`, Django's
-  checkbox exception in `construct_instance`) where the model flavor writes the default; pinned as Django's answer by
-  `tests/forms/test_resolvers.py::test_modelform_create_omitting_a_nullable_column_with_a_default_keeps_djangos_answer`.
-  Found fixing 704
 - [ ] 770. (robustness) A declared non-Boolean filter with `lookup_expr="isnull"` publishes `Boolean`, and its own
   form cleans the bool as its own kind: 205 of 240 grid cells answer every value with an error (96 masked). Django's
   `IsNull` refuses a non-bool only at SQL compile, so 708's probe does not decide it
   (`filters/inputs.py::_catchall_element`'s null test). Found fixing 708
-- [ ] 771. (robustness) A declared `class X(BaseInFilter, BooleanFilter)` answers every value with the masked
-  `TypeError` from django-filter's `BooleanWidget.value_from_datadict` hashing the list the package binds, on every
-  column; the generated `in` (`MembershipInFilter`) answers (`{"cBool": {"in": [true]}}` matches). Found fixing 708
-- [ ] 772. (robustness) A declared filter past a transform whose own form cleans a kind the transform's lookup cannot
-  prepare (`DateFilter(field_name="occurred_on", lookup_expr="year")`, published `Date`) answers `FILTER_INVALID` for
-  every value; pinned as such by `examples/fakeshop/test_query/test_declared_temporal_bindability_api.py::_REFUSALS`
-  (`year-of-a-date`, `typed-year-of-a-date`, `years-of-csv-dates`, `year-span-of-dates`), so refusing it at build
-  moves pinned behaviour. A plain `AllValuesMultipleFilter(lookup_expr="year")` is the same class: it publishes the
-  transform's `[Int!]` while its choices are the column's dates (`invalid_choice` for every year; from 733). Found
-  fixing 708
 - [ ] 783. (robustness) A declared `MultipleChoiceFilter` / `ModelMultipleChoiceFilter` (`exact`) with a lazy
   `field_name` (`gettext_lazy("children__label")`) gives one declaration two answers: unwalked, django-filter's
   `MultipleChoiceFilter.get_filter_predicate` keys the predicate by the lazy object and the request raises
@@ -2849,11 +2924,6 @@ Progress: 493 done, 117 to do. The CHANGELOG entries filed here moved to
   an empty value) reads as constraining, so supplied empty or left out it keeps only the parents that reach a visible
   related row, where unwalked and django-filter keep every row: the identity-as-no-op rule on the rebound rows plus the
   EXISTS fold, not the double run. A to-many key's override answers as unwalked (item 796). Found researching 790
-- [ ] 813. (robustness) On SQLite a stored `GeneratedField` whose `output_field` is a bounded `DecimalField`
-  (`GeneratedField(expression=F("price") * 1000, output_field=DecimalField(20, 4), db_persist=True)`) computes a value
-  its read-back converter refuses (`price` `9999999999999.9999`), and Django's `INSERT ... RETURNING` converters raise
-  `decimal.InvalidOperation` inside `save()`: a masked top-level error on every write flavor. The write rule never asks
-  it (the column is computed, not written); PostgreSQL stores it. Found verifying 726
 - [ ] 816. (robustness) A filter declared over a `GeneratedField` whose `output_field` no filter converts (a consumer
   column class with no `SCALAR_MAP` entry, or a `FileField`) is refused at build with the DjangoType advice
   (`types/converters.py::generated_output_field`: "Add an entry to SCALAR_MAP or exclude this field via Meta.exclude." /
@@ -2866,29 +2936,6 @@ Progress: 493 done, 117 to do. The CHANGELOG entries filed here moved to
   `FilterSet(...).qs`), where the same pin from a target type's `get_queryset` gets a typed `ConfigurationError`
   naming the alias (`utils/querysets.py`). A primary/replica router with `queryset=Model.objects.using("default")`
   while reads route to a replica reaches it. Found researching 818
-- [ ] 822. (robustness) `AllValuesMultipleFilter` inside a CSV wrapper (`class X(BaseInFilter,
-  AllValuesMultipleFilter)`, declared, on a text column) builds and answers `FILTER_INVALID` `invalid_list` ("Enter a
-  list of values.") for every value: its form field is built per request, so the build-time no-value ask
-  (`filters/inputs.py::_refuse_form_serving_no_value`) never sees it. Found fixing 735
-- [ ] 823. (robustness) A scalar `TypedChoiceFilter` on a choice column whose `coerce` turns its keys into no value of
-  the column (`TypedChoiceFilter(field_name="condition", choices=[("good", ...), ("1", ...)], coerce=int)` on
-  `Shelf.condition`) builds and serves nothing: the choice arm of `filters/inputs.py::convert_filter_to_input_annotation`
-  never runs the no-value ask, and 538's `valid_value` check accepts `good` before the coerce. Found fixing 735
-- [ ] 824. (robustness) A `TypedChoiceFilter` (or its CSV wrapper) with `coerce=decimal.Decimal` and a key no decimal
-  spells (`choices=[("all", ...), ("1.5", ...)]` on a `DecimalField`) answers a masked `decimal.InvalidOperation` when
-  a request sends that key: Django's `TypedChoiceField._coerce` turns only `ValueError` / `TypeError` /
-  `ValidationError` into its `invalid_choice`. The schema builds (the key `1.5` answers). Found verifying 735
-- [ ] 826. (robustness) A CSV `MultipleChoiceFilter` (`class X(BaseInFilter, MultipleChoiceFilter)`) with deferred
-  `choices` (a callable, a `lazy()` promise, a `SimpleLazyObject`, a `QuerySet` or a `CallableChoiceIterator`) on a text
-  column builds and answers `FILTER_INVALID` `invalid_list` for every value: its refusal does not depend on the choices,
-  but the no-value ask (`filters/inputs.py::_refuse_form_serving_no_value`) skips a choice form's keys when they are
-  deferred, and a text column has no scalar samples. Found fixing 738
-- [ ] 827. (robustness) A declared filter's `field` override that reads its deferred `choices` as the declared type
-  (`self.extra["choices"].filter(...)` on a `QuerySet`) raises `AttributeError` on the schema build's copy, whose
-  choices are `filters/base.py::_UnreadChoices`; `filters/inputs.py::_declared_form_field` and
-  `filters/sets.py::_widget_keys` read that `AttributeError` as "builds no field", so the build's widget and no-value
-  checks are skipped for the leaf without a word. The schema and every request answer as without the package. Found
-  verifying 738
 - [ ] 829. (robustness) On a set no connection serves (`FilterSet(data, queryset).qs`, `apply_sync`), a
   `Meta.filter_overrides={ArrayField: {"filter_class": ArrayFilter}}` text-pattern leaf over an `ArrayField`
   (`arr__icontains=1`, from a per-field `"__all__"` or listed) cleans its value into a list and compiles a match
@@ -2916,14 +2963,6 @@ Progress: 493 done, 117 to do. The CHANGELOG entries filed here moved to
   django-filter's form builders alike, while README says a `required` filter acts on the form of the set that declares
   it, at that set's root, and a directly built set refuses it
   (`tests/filters/test_sets.py::test_a_directly_built_set_takes_required_from_the_keys_owner`). Found fixing 216
-- [ ] 862. (robustness) The `ArrayField` input gate (`filters/inputs.py::_array_element_column` /
-  `_array_column_refusal`) runs only at input build, so on a set no connection serves a `ListFilter` / `ArrayFilter`
-  with `iexact` / `icontains` / `startswith` / `regex` / `isnull` over an `ArrayField` (and a CSV, choice or scalar
-  filter over one) builds and fails per request. Found fixing 716
-- [ ] 863. (robustness) A `ListFilter` / `ArrayFilter` whose path ends on an annotation or a `FilteredRelation`
-  alias resolves no lookup when its set publishes, so `filters/base.py::refuse_listless_lookup` does not judge it and
-  a scalar lookup (`exact`) there fails per request; a request-time check through `_bound_lookup_operand` would reach
-  it. Found fixing 716
 - [ ] 864. (robustness) The `ArrayField` input gate judges a `method=` filter over an array by its key name: a
   `method=` `ListFilter` with `lookup_expr="in"` over an `ArrayField` is refused, though the method reads the list and
   applies no lookup. Found fixing 716
@@ -2938,16 +2977,6 @@ Progress: 493 done, 117 to do. The CHANGELOG entries filed here moved to
   numbered 100 / 101 through a flat or raw parent key (`filters/sets.py::_LeafChain.terminal_value` /
   `_relation_key_value` re-read the cleaned instances' keys). One declaration, two answers, the 789 family; a forward
   key (`CardItem.card`, `number`) answers `[]` both ways. Found fact-finding 819
-- [ ] 879. (robustness) A model-choice filter declared with an explicit `queryset=None` builds its form (its set's
-  other keys answer), then a request supplying it raises a bare `AttributeError` at clean (`'NoneType' object has no
-  attribute 'model'`; a `ModelMultipleChoiceFilter` raises it cleaning an empty value too), masked over GraphQL, where
-  the absent-queryset shape is refused when its set publishes (756). Stock django-filter fails the same way. Found
-  verifying 756
-- [ ] 881. (robustness) A shipped filter whose `field_name` continues past a `GenericForeignKey`
-  (`CharFilter(field_name="content_object__name")`) builds on a served and an unserved set alike (the input types it
-  `String` from no field) and fails every request carrying a value with Django's `FieldError` (`Query.names_to_path`),
-  masked over a resolver; `filters/inputs.py::refuse_joinless_relation` judges only a path ending on one. Found
-  researching 877
 - [ ] 909. (robustness) A `FilteredRelation` alias a package `FilterSet.filter_queryset` override adds
   (`super().filter_queryset(queryset.alias(kids=FilteredRelation("issues")))`), compared as the relation itself by
   `ListFilter(field_name="kids", lookup_expr="in")` or `RangeFilter(field_name="kids", lookup_expr="exact")`, is not
