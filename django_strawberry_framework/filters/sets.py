@@ -224,6 +224,7 @@ from .base import (
     _declared_field_name,
     _django_prepares,
     _ElementField,
+    _filterset_lookup_operand,
     _filterset_walked_lookup,
     _integer_compared_column,
     _query_lookup_operand,
@@ -3242,7 +3243,10 @@ def _held_integer_value(
     text pattern such as ``contains`` or ``regex``, ``isnull``) never converts it and
     receives it as cleaned, and so does a project lookup
     (``filters/base.py::_django_prepares``), a ``method=`` filter or a consumer ``filter``
-    override. A value holding no such number is returned as it is.
+    override. The lookup read is the declared one: a ``RangeFilter``, which applies
+    ``range`` / ``gte`` / ``lte`` whatever it declares, holds its own bounds over the queryset
+    it is applied to whatever that lookup prepares (``filters/base.py::RangeFilter.filter``,
+    ``_held_column_value``). A value holding no such number is returned as it is.
     """
     if not _holds_decimal(value):
         return value
@@ -3330,7 +3334,11 @@ def _queryset_integer_column(filter_instance: Filter, query: Query) -> ModelFiel
     walk accepts (``FieldError``, ``LookupValidationError``), a lookup that is not Django's
     own preparing its value through the field (``filters/base.py::_django_prepares``:
     ``iexact``, ``contains``, ``regex``, ``isnull``, a project lookup), a relation
-    with no single target column, and an output that is no ``IntegerField``.
+    with no single target column, and an output that is no ``IntegerField``. The lookup is
+    the filter's declared one, so a ``RangeFilter`` declaring one that prepares nothing
+    answers ``None`` here and holds its bounds itself (``filters/base.py::RangeFilter.filter``).
+    The value held is the one ``FilterSet._clean_late_comparisons`` cleaned over the same
+    queryset, so a list or range value reaching here is already of the field's kind.
     """
     operand = _query_lookup_operand(
         query,
@@ -3352,6 +3360,17 @@ def _queryset_integer_column(filter_instance: Filter, query: Query) -> ModelFiel
     return output if isinstance(output, models.IntegerField) else None
 
 
+def _model_value_field(filter_instance: Filter) -> ModelField | None:
+    """Return the field the model's own walk answers for a bound filter's value, else ``None``.
+
+    ``_filterset_lookup_operand`` over the filterset django-filter stamps as
+    ``filter_.parent``: ``None`` for a path only a queryset resolves (an annotation or
+    alias, a ``FilteredRelation`` alias and the columns past it).
+    """
+    parent: filterset.BaseFilterSet | None = getattr(filter_instance, "parent", None)
+    return _filterset_lookup_operand(parent, filter_instance).field
+
+
 def _holds_decimal(value: object) -> bool:
     """Whether ``value`` is a ``Decimal`` or a list or tuple holding one at any depth."""
     if isinstance(value, Decimal):
@@ -3362,6 +3381,8 @@ def _holds_decimal(value: object) -> bool:
 def _unbindable_value_errors(
     filterset_instance: FilterSet,
     form: forms.BaseForm,
+    rows: models.QuerySet[models.Model, object] | None = None,
+    names: Collection[str] | None = None,
 ) -> dict[str, ValidationError]:
     """Return the refusal of each cleaned filter value the queryset's database cannot bind.
 
@@ -3411,15 +3432,20 @@ def _unbindable_value_errors(
     integer column's range (``_held_integer_value``), so a decimal past it is asked as the
     integer one past that end, never converted. The bound filter form runs it over its
     ``cleaned_data`` once it cleans (``filters/form_binding.py::BindAskingFilterForm``), so
-    the refusal is a form error every driver reads, the raw ones included.
+    the refusal is a form error every driver reads, the raw ones included. ``rows`` and
+    ``names`` ask only the named values over the queryset ``filter_queryset`` receives, for
+    a value only that queryset resolves (``FilterSet._clean_late_comparisons``), so it is
+    asked as one over the queryset the set was handed is.
     """
     # django-filter's ``BaseFilterSet.__init__`` stores the model's default queryset when
     # handed none; its stub types the attribute ``QuerySet[Any] | None``.
-    queryset = require(filterset_instance.queryset, is_queryset)
+    queryset = require(filterset_instance.queryset if rows is None else rows, is_queryset)
     copies = filterset_instance._copied_filters
     errors: dict[str, ValidationError] = {}
     for name, value in _cleaned_items(form):
-        if name in filterset_instance._bind_unavailable_names:
+        if name in filterset_instance._bind_unavailable_names or (
+            names is not None and name not in names
+        ):
             continue
         filter_instance = copies.get(name)
         if value is None or filter_instance is None or not _runs_shipped_filter(filter_instance):
@@ -4166,6 +4192,136 @@ class FilterSet(
         else:
             return False
         return install_comparison_cleaner(owned, target)
+
+    def _late_comparison_names(self) -> tuple[str, ...]:
+        """Name each cleaned list or range value whose path only a later queryset resolves.
+
+        A shipped ``ListFilter`` / ``ArrayFilter`` / ``RangeFilter`` whose path names no
+        field of the model (``_model_value_field``: an annotation or alias, a
+        ``FilteredRelation`` alias and the columns past it) and whose parser still lacks the
+        inner cleaner (``_needs_automatic_comparison``): its value was cleaned as sent, for
+        the queryset ``filter_queryset`` receives (a consumer override annotating before it
+        calls ``super()``) to clean (``_clean_late_comparisons``). The parser lacks one
+        either because the queryset the set was handed does not hold the path, or because it
+        does and its output gives no cleaner (a ``JSONField`` annotation); a set overriding
+        ``filter_queryset`` may add or replace the path there, so only such a set builds
+        ``qs`` to read it first (``_settle_late_comparisons``). Read off the actual
+        form's ``cleaned_data`` (``_cleaned_leaf_items``), so the form has cleaned.
+        """
+        fields = self.form.fields
+        names: list[str] = []
+        for name, value in self._cleaned_leaf_items():
+            field = fields.get(name)
+            filter_instance = self._copied_filters.get(name)
+            if (
+                value is None
+                or field is None
+                or not isinstance(filter_instance, _ColumnCleanedFilter)
+                or not _runs_shipped_filter(filter_instance)
+                or not self._needs_automatic_comparison(field)
+                or _model_value_field(filter_instance) is not None
+                or type(self)._walks_unresolved_hop(filter_instance)
+            ):
+                continue
+            names.append(name)
+        return tuple(names)
+
+    def _clean_late_comparisons(self, queryset: models.QuerySet[_M]) -> bool:
+        """Clean each ``_late_comparison_names`` value as ``queryset`` compares it.
+
+        ``queryset`` is the one ``filter_queryset`` receives, the rows the flat leaves
+        apply to: a consumer ``filter_queryset`` annotating before it calls ``super()``
+        adds a path the set's own queryset never held. Each such leaf's parser is given
+        the comparison cleaner that path's output asks for over ``queryset``
+        (``filters/base.py::_column_form_field``) and its value is cleaned again
+        (``Field.clean``), so a bound or member that output cannot hold is the field's form
+        error (``add_error``, which drops it from ``cleaned_data``), and one the database
+        cannot bind is the bind ask's (``_unbindable_value_errors`` over ``queryset``), as
+        each is over the queryset the set was handed. A path whose output gives no cleaner (a
+        ``FilteredRelation`` alias compared as the relation itself, a path ``queryset`` does
+        not hold either) keeps its value as sent for the leaf's own filter. Return whether a
+        refusal was added.
+        """
+        form = self.form
+        refused = False
+        recleaned: list[str] = []
+        for name in self._late_comparison_names():
+            field = form.fields[name]
+            filter_instance = require_instance(self._copied_filters[name], _ColumnCleanedFilter)
+            filter_instance._hand_column_field(field, queryset.query)
+            if not _has_comparison_cleaner(field):
+                continue
+            try:
+                form.cleaned_data[name] = field.clean(form.cleaned_data[name])
+            except ValidationError as error:
+                form.add_error(name, error)
+                refused = True
+            else:
+                recleaned.append(name)
+        if recleaned:
+            for name, refusal in _unbindable_value_errors(self, form, queryset, recleaned).items():
+                form.add_error(name, refusal)
+                refused = True
+        return refused
+
+    def _settle_late_comparisons(self) -> None:
+        """Build ``qs`` first when a cleaned value waits for the queryset ``filter_queryset`` receives.
+
+        A raw driver (``DjangoFilterBackend``, ``FilterView``, a consumer's own
+        ``is_valid()``) asks the form before it reads ``qs``; a value only that queryset can
+        clean (``_late_comparison_names``) is cleaned where it exists
+        (``_apply_flat_leaves``), so ``is_valid()`` and ``errors`` build ``qs`` first and
+        django-filter keeps it for the read that follows. django-filter's own ``qs`` reads
+        ``errors`` before it filters, so a ``qs`` read made before either builds the
+        queryset inside that ``errors`` read and again after it, with the same rows. A
+        pipeline instance refuses inside its own ``qs`` read instead, an unbound one has no
+        value, and a form a native error already refuses is not handed to
+        ``filter_queryset`` here: the drivers answer that error alone (a bare ``.qs`` read
+        still filters, and reports a late refusal beside it). Only a ``filter_queryset``
+        override can add or replace a path before the leaves apply (an annotation, an alias,
+        one shadowing a name the handed queryset holds), so a set that overrides none, its
+        own class or a consumer mixin ahead of ``FilterSet`` (``utils/truth.py::overrides``),
+        builds nothing here: a name it lists was refused no cleaner by the handed queryset
+        itself (a ``JSONField`` annotation's output gives none), and its leaves apply over
+        that same queryset.
+        """
+        if (
+            self._pipeline_constructed
+            or self._settling_late
+            or not self.is_bound
+            or not truth.overrides(type(self), FilterSet, "filter_queryset")
+            or self.form.errors
+            or not self._late_comparison_names()
+        ):
+            return
+        self._settling_late = True
+        try:
+            _ = self.qs
+        finally:
+            self._settling_late = False
+
+    _settling_late: bool = False
+
+    @override
+    def is_valid(self) -> bool:
+        """django-filter's ``is_valid()``, a refusal the queryset ``filter_queryset`` receives included.
+
+        See ``_settle_late_comparisons``. A consumer override calls ``super().is_valid()`` to
+        keep that refusal; the bare ``form.is_valid()`` sees it only once ``qs`` is built.
+        """
+        self._settle_late_comparisons()
+        return super().is_valid()
+
+    @property
+    @override
+    def errors(self) -> dict[str, list[str]]:
+        """django-filter's ``errors``, a refusal the queryset ``filter_queryset`` receives included.
+
+        See ``_settle_late_comparisons``. A consumer override reads ``super().errors`` to keep
+        that refusal; the bare ``form.errors`` holds it only once ``qs`` is built.
+        """
+        self._settle_late_comparisons()
+        return super().errors
 
     def _prepare_raw_form_comparisons(self, form: forms.BaseForm) -> None:
         """Prepare only missing automatic inner parsers before the actual form cleans.
@@ -9105,7 +9261,18 @@ class FilterSet(
         integer column receives a decimal its form cleaned past that range as the integer
         one past the same end, whose verdict is the decimal's and whose conversion is
         immediate.
+
+        Before any leaf applies, each list or range value whose path only ``queryset``
+        resolves is cleaned as ``queryset`` compares it (``_clean_late_comparisons``: an
+        annotation or alias a consumer ``filter_queryset`` adds before it calls ``super()``).
+        A refusal is the form's error: a pipeline instance raises it as ``FILTER_INVALID``
+        (``_validate_form_or_raise``), and on any other the refused value leaves
+        ``cleaned_data`` and its leaf applies nothing, as django-filter's ``qs`` applies the
+        leaves of a form with errors; the set's ``is_valid()`` and ``errors`` build ``qs``
+        first to report it (``_settle_late_comparisons``).
         """
+        if self._clean_late_comparisons(queryset) and self._pipeline_constructed:
+            type(self)._validate_form_or_raise(self)
         snapshot = type(self)._expansion_snapshot()
         candidates: Mapping[str, CandidateFilterMetadata] = (
             snapshot.candidates if snapshot is not None else {}
@@ -9186,6 +9353,11 @@ class FilterSet(
         visibility-scoped and ``RelatedFilter``-constrained queryset, so
         the visibility-before-filter ordering carries through to every recursive
         level by construction.
+
+        A consumer override adding an annotation or alias before it calls ``super()`` hands
+        this method the queryset that holds it: a list or range value over that path is
+        cleaned and bind-asked over it (``_apply_flat_leaves``, ``_clean_late_comparisons``),
+        as one over the queryset handed to the set is when the form cleans.
         """
         # Framework-owned flat-leaf applicator. Replaces the wholesale
         # ``super().filter_queryset(queryset)`` delegation with a loop in

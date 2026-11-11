@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 223 to do.
+Progress: 0 done, 224 to do.
 
 ## From dry-0_0_15_3
 
@@ -1071,6 +1071,12 @@ Progress: 0 done, 223 to do.
   whose own `get_queryset` override contributes only that class there. A filtering or annotating default manager now
   shapes only reads that start at its model (and nested many-side lists and connections); declare what a hop needs,
   row visibility included, in the type's `get_queryset`
+- [ ] 908. CHANGELOG entry for item 847: a `ListFilter`, `ArrayFilter` or `RangeFilter` over an annotation a
+  `FilterSet.filter_queryset` override adds before calling `super()` now cleans each value as that annotation compares
+  it. Junk, a fraction over an integer, an empty range box, an out-of-range decimal or a range list of other than two
+  members is now the form's error (`FILTER_INVALID` over GraphQL, a 400 from `DjangoFilterBackend`) instead of an
+  unhandled `ValueError`, and a junk list member is no longer silently dropped. `FilterSet.is_valid()` / `errors`
+  build `qs` to report it, so a consumer override of either should call `super()`
 
 ## From dry-upstream-0_0_15
 

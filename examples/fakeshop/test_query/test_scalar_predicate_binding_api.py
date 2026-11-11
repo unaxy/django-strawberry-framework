@@ -9,8 +9,10 @@ column past a ``FilteredRelation`` alias answers from the end of the column's ra
 lies past without being converted, an annotation a consumer ``filter_queryset`` adds before
 the leaves included. A declared ``ListFilter`` / ``RangeFilter`` over such a path, the alias
 itself, an alias of the reverse ``children`` relation or a ``year`` of a date annotation
-cleans and compares each value as the queryset does, and a ``GlobalIDFilter`` over the
-alias, the reverse alias or a key annotation coerces its node id through the related key.
+cleans and compares each value as the queryset does, a served set's own ``filter_queryset``
+annotation included under the sync and the async view, its junk ``FILTER_INVALID`` keyed by
+the leaf or its logical arm, and a ``GlobalIDFilter`` over the alias, the reverse alias or a
+key annotation coerces its node id through the related key.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import pytest
 import strawberry
 from apps.library import models as library_models
 from apps.scalars import models as scalar_models
+from asgiref.sync import sync_to_async
 from django.db import connection
 from django.db import models as django_models
 from django.db.backends.base.base import BaseDatabaseWrapper
@@ -48,7 +51,10 @@ from graphql_client import (
     json_at,
     json_list,
     json_object,
+    json_str,
+    response_json,
 )
+from strawberry import relay
 from strawberry.relay import to_base64
 from strawberry.scalars import JSON
 from strawberry.types import Info
@@ -56,6 +62,8 @@ from strawberry.types.base import StrawberryList
 from typing_extensions import override
 
 from django_strawberry_framework import (
+    DjangoConnection,
+    DjangoConnectionField,
     DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
@@ -71,8 +79,9 @@ from django_strawberry_framework.filters import (
     RelatedFilter,
 )
 from django_strawberry_framework.filters.base import _lookup_operand, _model_lookup_operand
+from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils.typing import object_result
-from django_strawberry_framework.views import DjangoGraphQLView
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._cleaned_filter_sets import cleaned_specimen
 from tests._idioms import saved_pk
 
@@ -102,7 +111,17 @@ def _graphql_view(request: HttpRequest) -> HttpResponseBase:
     return DjangoGraphQLView.as_view(schema=schema)(request)
 
 
-urlpatterns = [path("graphql-scalar-predicates/", _graphql_view)]
+@wraps(AsyncDjangoGraphQLView.as_view())
+async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _CURRENT["schema"]
+    assert schema is not None
+    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
+
+
+urlpatterns = [
+    path("graphql-scalar-predicates/", _graphql_view),
+    path("graphql-scalar-predicates-async/", _async_graphql_view),
+]
 
 
 def _holder(
@@ -1240,6 +1259,9 @@ class _LateAnnotationFilter(FilterSet):
     """A consumer ``filter_queryset`` annotating ``late`` before the leaves run."""
 
     late_at_least = django_filters.NumberFilter(field_name="late", lookup_expr="gte")
+    late_span = RangeFilter(field_name="late", lookup_expr="range")
+    late_among = ListFilter(field_name="late", lookup_expr="in")
+    late_pair = ListFilter(field_name="late", lookup_expr="range")
 
     class Meta:
         model = scalar_models.ScalarSpecimen
@@ -1379,6 +1401,143 @@ def test_a_typed_decimal_past_an_annotation_only_the_applied_queryset_holds_is_h
     )
     assert payload == _expected(("kept", "child")), payload
     assert len(_root_sql(sqls, scalar_models.ScalarSpecimen)) == 1, sqls
+
+
+def _served_late_schema() -> DjangoSchema:
+    """``_LateAnnotationFilter`` served on a connection: ``apply_sync`` / ``apply_async`` run it."""
+
+    class LateNode(DjangoType):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = ("id", "label")
+            interfaces = (relay.Node,)
+            filterset_class = _LateAnnotationFilter
+
+    @strawberry.type
+    class Query:
+        rows: DjangoConnection[LateNode] = DjangoConnectionField(LateNode)
+
+    finalize_django_types()
+    return DjangoSchema(query=Query, config=strawberry_config())
+
+
+_SERVED_LATE_ROWS = (
+    "query($where: _LateAnnotationFilterInputType) "
+    "{ rows(filter: $where) { edges { node { label } } } }"
+)
+_NOT_A_NUMBER = [{"message": "Enter a number.", "code": "invalid"}]
+
+
+async def _post_served(schema: DjangoSchema, where: JSONObject, transport: str) -> JSONObject:
+    """Send ``where`` to the served set over the sync view or the async one."""
+    _CURRENT["schema"] = schema
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            if transport == "sync":
+                return await sync_to_async(graphql_payload)(
+                    _SERVED_LATE_ROWS,
+                    variables={"where": where},
+                    url="/graphql-scalar-predicates/",
+                )
+            result = await AsyncTestClient().query(
+                _SERVED_LATE_ROWS,
+                variables={"where": where},
+                assert_no_errors=False,
+                url="/graphql-scalar-predicates-async/",
+            )
+            return response_json(result.response)
+    finally:
+        _CURRENT["schema"] = None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("transport", ["sync", "async"])
+@pytest.mark.parametrize(
+    ("where", "answer"),
+    [
+        pytest.param(
+            {"lateSpan": {"range": {"start": "abc", "end": "8"}}},
+            {"late_span": _NOT_A_NUMBER},
+            id="junk-bound",
+        ),
+        pytest.param(
+            {"lateAmong": {"in": ["7", "abc"]}},
+            {"late_among": _NOT_A_NUMBER},
+            id="junk-member",
+        ),
+        pytest.param(
+            {"or": [{"lateSpan": {"range": {"start": "abc"}}}, {"lateAmong": {"in": ["7"]}}]},
+            {"or_0__late_span": _NOT_A_NUMBER},
+            id="junk-bound-in-an-or-arm",
+        ),
+        pytest.param(
+            {"not": {"lateAmong": {"in": ["abc"]}}},
+            {"not__late_among": _NOT_A_NUMBER},
+            id="junk-member-under-not",
+        ),
+        pytest.param(
+            {"latePair": {"range": ["7"]}},
+            {
+                "late_pair": [
+                    {"message": "Range query expects two values.", "code": "invalid_values"},
+                ],
+            },
+            id="range-list-of-one",
+        ),
+        pytest.param({"latePair": {"range": ["1", "8"]}}, ["kept"], id="range-list"),
+        pytest.param({"lateSpan": {"range": {"start": "1", "end": "8"}}}, ["kept"], id="bounds"),
+        pytest.param({"lateSpan": {"range": {"start": "8"}}}, ["child"], id="one-bound"),
+        pytest.param({"lateSpan": {"range": {}}}, ["kept", "child"], id="no-bound"),
+        pytest.param({"lateAmong": {"in": ["900"]}}, ["child"], id="member"),
+        pytest.param(
+            {"lateAmong": {"in": ["-1e999999999999999999", "7"]}},
+            ["kept"],
+            id="member-past-any-integer-drops",
+        ),
+        pytest.param({"lateAmong": {"in": []}}, [], id="no-member"),
+        pytest.param(
+            {"or": [{"lateSpan": {"range": {"start": "8"}}}, {"lateAmong": {"in": ["7"]}}]},
+            ["kept", "child"],
+            id="or-arms",
+        ),
+        pytest.param({"not": {"lateAmong": {"in": ["7"]}}}, ["child"], id="not-arm"),
+    ],
+)
+async def test_a_served_value_over_an_annotation_filter_queryset_adds_is_cleaned_as_it_compares(
+    transport: str,
+    where: JSONObject,
+    answer: JSONObject | list[str],
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A served list or range over ``late``, which only ``filter_queryset`` adds, cleans its values.
+
+    The connection hands the set unannotated rows, so the form reads no field for ``late``;
+    each bound and member is cleaned over the queryset the override passes on, as
+    ``signed_big``'s integer: junk is ``FILTER_INVALID`` keyed by the leaf, a logical arm's
+    included, before any statement, never a masked error; a member past any integer drops; an
+    empty list matches no row; and the rows answer in one statement, under ``apply_sync`` and
+    ``apply_async`` alike.
+    """
+    await sync_to_async(cleaned_specimen)("kept", kept=True)
+    await sync_to_async(cleaned_specimen)("child", kept=False)
+    schema = await sync_to_async(_served_late_schema)()
+    statements = record_compiled_sql(scalar_models.ScalarSpecimen._meta.db_table)
+
+    payload = await _post_served(schema, where, transport)
+
+    if isinstance(answer, dict):
+        assert payload["data"] is None, payload
+        assert json_at(payload, "errors", 0, "message") == "Invalid filter input"
+        assert json_at(payload, "errors", 0, "extensions") == {
+            "code": "FILTER_INVALID",
+            "errors": answer,
+        }
+        assert statements == []
+    else:
+        edges = json_list(payload, "data", "rows", "edges")
+        assert [json_str(edge, "node", "label") for edge in edges] == answer, payload
+        # An empty list matches no row: Django compiles it to no statement at all.
+        assert len(statements) == (1 if answer else 0), statements
 
 
 _YEAR_INTEGER_REFUSALS: dict[str, tuple[JSONObject, str]] = {

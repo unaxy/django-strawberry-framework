@@ -536,19 +536,23 @@ def _bound_resolved_field(filter_instance: Filter) -> _ResolvedField | None:
     return resolved if field is None else _ResolvedField(field, field_name)
 
 
-def _model_unresolved_query(filter_instance: Filter, operand: _LookupOperand) -> Query | None:
+def _model_unresolved_query(
+    filter_instance: Filter,
+    operand: _LookupOperand,
+    query: Query | None = None,
+) -> Query | None:
     """Return ``_bound_query`` for a per-request filter its model's walk answers no field for.
 
     ``operand`` is the model's answer (``_filterset_lookup_operand``), which reads every
     path a fresh ``Query`` of the model resolves, cached per key; only a path it answers no
     field for (a queryset annotation or alias, a ``FilteredRelation`` alias and the columns
-    past it) is read over the queryset the filter's ``FilterSet`` was handed. ``None`` for
-    every other filter, a ``method=`` filter included (its own method receives the value,
-    so it keeps the model's answer).
+    past it) is read over the queryset the filter's ``FilterSet`` was handed, or over
+    ``query`` when one is given. ``None`` for every other filter, a ``method=`` filter
+    included (its own method receives the value, so it keeps the model's answer).
     """
     if read_attr(filter_instance, "method", None) is not None or operand.field is not None:
         return None
-    return _bound_query(filter_instance)
+    return _bound_query(filter_instance) if query is None else query
 
 
 def _bound_query(filter_instance: Filter) -> Query | None:
@@ -636,19 +640,20 @@ def _query_lookup_operand(
     )
 
 
-def _bound_lookup_operand(filter_instance: Filter) -> _LookupOperand:
+def _bound_lookup_operand(filter_instance: Filter, query: Query | None = None) -> _LookupOperand:
     """Return what one value a per-request filter applies is compared as.
 
     ``_filterset_lookup_operand`` over the filterset django-filter stamps as
     ``filter_.parent``, read on its model; a path the model names no field for (a queryset
     annotation or alias, a ``FilteredRelation`` alias) is read over the queryset that
     filterset was handed (``_bound_query``, ``_query_lookup_operand``), the queryset the
-    filter's predicate is built on. A ``method=`` filter keeps the model's answer: its own
-    method receives the value.
+    filter's predicate is built on, or over ``query`` when one is given: the rows a
+    consumer ``filter_queryset`` passes on (``filters/sets.py::FilterSet._clean_late_comparisons``).
+    A ``method=`` filter keeps the model's answer: its own method receives the value.
     """
     parent: BaseFilterSet | None = getattr(filter_instance, "parent", None)
     operand = _filterset_lookup_operand(parent, filter_instance)
-    query = _model_unresolved_query(filter_instance, operand)
+    query = _model_unresolved_query(filter_instance, operand, query)
     if query is None:
         return operand
     resolved = _query_lookup_operand(query, *_filterset_walked_lookup(parent, filter_instance))
@@ -664,15 +669,15 @@ def _bound_model_field(filter_instance: Filter) -> ModelField | None:
     return None if resolved is None else resolved.field
 
 
-def _bound_value_field(filter_instance: Filter) -> ModelField | None:
+def _bound_value_field(filter_instance: Filter, query: Query | None = None) -> ModelField | None:
     """Return the field each value a per-request filter applies is a value of.
 
     The field of ``_bound_lookup_operand``: ``_filterset_value_field`` over the filterset
     django-filter's ``BaseFilterSet.__init__`` stamps as ``filter_.parent``, and for a path
-    only the queryset that filterset was handed resolves, the output of the lookup's
-    left-hand side read over it.
+    only the queryset that filterset was handed (or ``query``) resolves, the output of the
+    lookup's left-hand side read over it.
     """
-    return _bound_lookup_operand(filter_instance).field
+    return _bound_lookup_operand(filter_instance, query).field
 
 
 def _reads_integer_transform(filter_instance: Filter, query: Query | None = None) -> bool:
@@ -1084,7 +1089,12 @@ def _names_null_test(lookup_expr: str) -> bool:
     return lookup_expr == "isnull"
 
 
-def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Field | None:
+def _column_form_field(
+    filter_instance: Filter,
+    *,
+    element: bool = False,
+    query: Query | None = None,
+) -> Field | None:
     """Return the form field that cleans one value of a bound filter's column for a comparison.
 
     The column is the field each value the filter applies is a value of
@@ -1133,11 +1143,15 @@ def _column_form_field(filter_instance: Filter, *, element: bool = False) -> Fie
     value of its innermost ``base_field``, the column a nested array's leaves are stored
     through (``utils/_array_field.py::array_leaf_field``), any other column's a value of
     the column itself.
+    ``query`` is the query of the rows the filter applies to when it is not the one the
+    parent was handed (``filters/sets.py::FilterSet._clean_late_comparisons``: the
+    queryset a consumer ``filter_queryset`` builds before it calls ``super()``), read as
+    ``_query_lookup_operand`` reads it.
     """
     parent = read_attr(filter_instance, "parent", None)
     if not isinstance(parent, BaseFilterSet):
         return None
-    model_field = _bound_value_field(filter_instance)
+    model_field = _bound_value_field(filter_instance, query)
     if model_field is None:
         return None
     if element:
@@ -1338,8 +1352,12 @@ class _ColumnCleanedFilter(TypedFilter):
     field kept on it would ride every per-request deep copy and clean no value.
     """
 
-    def _hand_column_field(self, _field: Field, /) -> None:
-        """Give the form field this bound filter just built its column's comparison field."""
+    def _hand_column_field(self, _field: Field, _query: Query | None = None, /) -> None:
+        """Give the form field this bound filter just built its column's comparison field.
+
+        The column is read over the queryset the parent was handed, or over the query
+        given (``_column_form_field``).
+        """
         raise NotImplementedError
 
     @property
@@ -1415,7 +1433,10 @@ class _ElementField(Field):
     The value is read on the parent's model, or, for a path its model names no field for,
     over the queryset the parent was handed (``_bound_value_field``: a queryset annotation
     or alias, a ``FilteredRelation`` alias and the columns past it, each typed ``String``
-    on the wire, since no queryset exists when the schema is built).
+    on the wire, since no queryset exists when the schema is built); a path only the queryset
+    the package ``FilterSet``'s own ``filter_queryset`` passes on resolves gets its
+    ``element_field`` there and is cleaned again
+    (``filters/sets.py::FilterSet._clean_late_comparisons``).
     Any other ``None`` element, one inside such a member included, stays ``None``, and a
     value that is not a list or tuple, or a field with no ``element_field`` (a filter bound
     to no ``FilterSet``, a path neither its model nor that queryset resolves, an expression
@@ -1508,12 +1529,13 @@ class _ElementCleanedFilter(_ColumnCleanedFilter):
     field_class: type[Field] = _ElementField
 
     @override
-    def _hand_column_field(self, field: Field, /) -> None:
+    def _hand_column_field(self, field: Field, query: Query | None = None, /) -> None:
         """Fill only a missing comparison cleaner on an owned ``_ElementField``."""
         if isinstance(field, _ElementField) and field.element_field is None:
-            lookup = _bound_lookup_operand(self).lookup
-            field.element_field = _column_form_field(self, element=True)
-            field.element_nests = array_leaf_field(_bound_value_field(self))[1] > 1
+            operand = _bound_lookup_operand(self, query)
+            lookup = operand.lookup
+            field.element_field = _column_form_field(self, element=True, query=query)
+            field.element_nests = array_leaf_field(operand.field)[1] > 1
             field.members_are_arrays = is_array_in_lookup(lookup)
             field.bounds = truth.is_subclass(lookup, models.lookups.Range)
 
@@ -1555,7 +1577,10 @@ class ArrayFilter(_ElementCleanedFilter):
     cannot hold is a form error rather than a value handed to the ORM, a text element is
     stripped and a naive datetime element made aware; over a path only the queryset its
     ``FilterSet`` was handed resolves (a queryset annotation, a ``FilteredRelation`` alias)
-    the value is the one that queryset compares. An ``in`` over an integer column, or a
+    the value is the one that queryset compares, and over one only the queryset the package
+    ``FilterSet``'s own ``filter_queryset`` passes on resolves, the one that queryset
+    compares (``filters/sets.py::FilterSet._clean_late_comparisons``). An ``in`` over an
+    integer column, or a
     relation compared on one, drops each element that names no row as ``ListFilter``'s does
     (``_integer_in_column``). An element of an integer column, a transform's integer output
     or an integer ``ArrayField``'s elements cleaned to a decimal past that column's range on
@@ -1767,7 +1792,10 @@ class RangeField(Field):
     ``bound_field`` cleans each bound that is not ``None`` (``RangeFilter`` passes the
     form field of the ``gte`` filter for the value its range compares, the column's or a
     transform output's), so a bound that value cannot hold is a form error rather than a
-    value handed to the ORM. Without one the bounds pass through as sent.
+    value handed to the ORM. Without one the bounds pass through as sent; over a path only
+    the queryset the package ``FilterSet``'s own ``filter_queryset`` passes on resolves, the
+    set gives the field its ``bound_field`` there and cleans the bounds again
+    (``filters/sets.py::FilterSet._clean_late_comparisons``).
     """
 
     # Class-level defaults ``forms.Field`` reads through the instance and never
@@ -1847,8 +1875,12 @@ class RangeFilter(_ColumnCleanedFilter):
     path only the queryset its ``FilterSet`` was handed resolves (a queryset annotation, a
     ``FilteredRelation`` alias and the columns past it) the value is the one that queryset
     compares, and an integer annotation's ``range`` applies as ``gte`` + ``lte`` as an integer
-    column's does. A relation's lone bound under a lookup Django applies to the relation itself
-    (``gte``, ``exact``) is cleaned as the target column the relation compares on (its
+    column's does; over one only the queryset the package ``FilterSet``'s own
+    ``filter_queryset`` passes on resolves (a consumer override annotating before it calls
+    ``super()``), each bound is cleaned as that queryset compares it, there
+    (``filters/sets.py::FilterSet._clean_late_comparisons``). A relation's lone bound under
+    a lookup Django applies to the relation itself (``gte``, ``exact``) is cleaned as the
+    target column the relation compares on (its
     ``to_field``, else the primary key), as ``<relation>__<that column>``'s is
     (``_compared_value_column``); a ``range`` over a relation, or a ``method=`` filter on one,
     cleans no bound, since Django registers no ``range`` lookup on a relation and a method
@@ -1862,10 +1894,10 @@ class RangeFilter(_ColumnCleanedFilter):
     field_class: type[RangeField] = RangeField
 
     @override
-    def _hand_column_field(self, field: Field, /) -> None:
+    def _hand_column_field(self, field: Field, query: Query | None = None, /) -> None:
         """Fill only a missing bound cleaner on an owned ``RangeField``."""
         if isinstance(field, RangeField) and field.bound_field is None:
-            field.bound_field = _column_form_field(self)
+            field.bound_field = _column_form_field(self, query=query)
 
     @override
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
@@ -2105,7 +2137,10 @@ class ListFilter(_ElementCleanedFilter):
     like any other. Over a path only the queryset its ``FilterSet`` was handed resolves (a
     queryset annotation, a ``FilteredRelation`` alias and the columns past it) the value is
     the one that queryset compares: its annotation's output field, the column past the
-    alias, the alias's target key, an integer one dropping as a column's does.
+    alias, the alias's target key, an integer one dropping as a column's does; over one
+    only the queryset the package ``FilterSet``'s own ``filter_queryset`` passes on resolves
+    (a consumer override annotating before it calls ``super()``), the one that queryset
+    compares, cleaned there (``filters/sets.py::FilterSet._clean_late_comparisons``).
     Over an integer column, or a relation compared on one, an ``in`` drops each element
     outside the column's integer range on the queryset's database: it can identify no row,
     and bound raw it would overflow the backend. A fractional element names no row and is

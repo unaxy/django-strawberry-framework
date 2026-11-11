@@ -85,7 +85,7 @@ from django.db import models as django_models
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.base.operations import BaseDatabaseOperations
 from django.db.backends.sqlite3.operations import DatabaseOperations as SQLiteOperations
-from django.db.models import Lookup, Q, QuerySet
+from django.db.models import Count, Lookup, Q, QuerySet
 from django.db.models.fields.related import ManyToManyRel, ManyToOneRel, OneToOneRel
 from django.db.models.functions import Length, Upper
 from django.forms import ModelChoiceField, ModelMultipleChoiceField
@@ -16678,6 +16678,34 @@ def test_consumer_qs_override_runs_inside_a_logical_arm() -> None:
     )
 
     assert kept == {saved_pk(good)}
+
+
+@pytest.mark.django_db
+def test_an_unbound_set_is_invalid_and_holds_no_error_as_django_filters_is() -> None:
+    """An unbound set answers ``is_valid()`` and ``errors`` without reading a cleaned form.
+
+    The set's ``is_valid()`` and ``errors`` settle a value waiting for the queryset its own
+    ``filter_queryset`` receives (``FilterSet._settle_late_comparisons``) only on a bound
+    form: an unbound one carries no value and its form no ``cleaned_data``. No live driver
+    asks an unbound set (django-filter's ``FilterView`` reads ``is_bound`` first, DRF's
+    backend always binds the query string), so this is a package row.
+    """
+
+    class LateCountFilter(FilterSet):
+        children_span = RangeFilter(field_name="children_count", lookup_expr="range")
+
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = ()
+
+        @override
+        def filter_queryset(self, queryset: QuerySet[_M]) -> QuerySet[_M]:
+            return super().filter_queryset(queryset.annotate(children_count=Count("children")))
+
+    unbound = LateCountFilter(queryset=scalar_models.ScalarSpecimen.objects.all())
+
+    assert unbound.is_valid() is False
+    assert unbound.errors == {}
 
 
 def _book_genre_book_parent(*, customize_child: bool) -> type[FilterSet]:

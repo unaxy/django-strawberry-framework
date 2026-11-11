@@ -17,6 +17,15 @@ truncated value's verdict.
 Raw members and bounds over a duration or integer annotation of the queryset handed to the set
 clean as that annotation's output field under both parents, a ``method=`` twin receiving them
 as sent, and a set handed no queryset leaves the path to Django's ``FieldError``.
+Under the package's set the same values over an annotation its own ``filter_queryset`` adds
+before ``super()`` clean and are bind-asked over the queryset the override passes on:
+``is_valid()`` and ``errors`` build ``qs`` to report a refusal (DRF's 400 body, the strict
+``FilterView``'s empty answer), a bare ``.qs`` applies the leaves that cleaned (running the
+override twice where ``is_valid()`` first runs it once), the bare
+``form.is_valid()`` sees the refusal only once ``.qs`` ran, under ``is_valid()`` a model
+field's own form error answers alone beside it, an override replacing a handed annotation is
+cleaned as its replacement compares, a set overriding no ``filter_queryset`` builds no ``qs``
+to validate, and a path the override does not add is Django's ``FieldError``.
 Under the package's set the raw form runs the bind ask the typed input runs, as its own
 errors: a year comparison past 9999, a duration past the backend's range on every lookup
 and text the package refuses are refused with the typed input's messages, and the bare ``.qs``
@@ -67,6 +76,7 @@ from django.db.models import (
     Model,
     QuerySet,
 )
+from django.db.models.functions import Upper
 from django.db.models.sql.compiler import SQLCompiler
 from django.forms.utils import ErrorDict
 from django.http import HttpRequest, HttpResponseBase, JsonResponse, QueryDict
@@ -355,6 +365,112 @@ class _AliasedShelfBookSet(FilterSet):
         return super().filter_queryset(queryset.alias(vshelf=FilteredRelation("shelf")))
 
 
+def _kids_as_sent(
+    _filterset: BaseFilterSet,
+    queryset: QuerySet[Model],
+    name: str,
+    value: list[object],
+) -> QuerySet[Model]:
+    """A consumer method keeping ``parent`` only when every member arrives as the text sent."""
+    del name
+    return queryset.filter(label="parent" if all(isinstance(v, str) for v in value) else "child")
+
+
+def _annotated_set(parent: str) -> type[BaseFilterSet]:
+    """A set whose list and range filters name two annotations of the queryset it is handed."""
+    base = {"package": FilterSet, "django-filter": django_filters.FilterSet}[parent]
+    declared = type(
+        "RawAnnotationSet",
+        (base,),
+        {
+            "lag_among": ListFilter(field_name="lag", lookup_expr="in"),
+            "lag_span": RangeFilter(field_name="lag", lookup_expr="range"),
+            "kids_among": ListFilter(field_name="kids", lookup_expr="in"),
+            "kids_span": RangeFilter(field_name="kids", lookup_expr="range"),
+            "kids_pair": ListFilter(field_name="kids", lookup_expr="range"),
+            "up_among": ListFilter(field_name="up", lookup_expr="in"),
+            "kids_sent": ListFilter(field_name="kids", lookup_expr="in", method="kids_as_sent"),
+            "par_span": RangeFilter(field_name="par", lookup_expr="signed_big__range"),
+            "par_among": ListFilter(field_name="par", lookup_expr="signed_big__in"),
+            "offspring_among": ListFilter(field_name="offspring", lookup_expr="in"),
+            "offspring_array": ArrayFilter(field_name="offspring", lookup_expr="in"),
+            "signed_among": ListFilter(field_name="signed_big", lookup_expr="in"),
+            "kids_as_sent": _kids_as_sent,
+            "Meta": type("Meta", (), {"model": models.ScalarSpecimen, "fields": ()}),
+        },
+    )
+    assert issubclass(declared, BaseFilterSet)
+    return declared
+
+
+def _annotated_rows(rows: QuerySet[Model]) -> QuerySet[Model]:
+    """``rows`` annotated with the ``lag``, ``kids`` and ``up`` outputs ``_annotated_set`` names."""
+    return rows.annotate(
+        lag=ExpressionWrapper(
+            F("occurred_at") - F("parent__occurred_at"),
+            output_field=DurationField(),
+        ),
+        kids=Count("children"),
+        up=Upper("label"),
+    )
+
+
+class _HandedJsonSet(FilterSet):
+    """A list over ``pj``, a ``JSONField`` annotation of the handed queryset; no ``filter_queryset``.
+
+    The handed queryset resolves ``pj`` and its output gives the list no cleaner, so the value
+    is applied as sent.
+    """
+
+    pj_among = ListFilter(field_name="pj", lookup_expr="in")
+
+    class Meta:
+        model = models.ScalarSpecimen
+        fields = ()
+
+
+class _ShadowedAnnotationSet(FilterSet):
+    """A list over ``n``, handed as ``payload`` and replaced by a ``Count`` in ``filter_queryset``."""
+
+    n_among = ListFilter(field_name="n", lookup_expr="in")
+
+    class Meta:
+        model = models.ScalarSpecimen
+        fields = ()
+
+    @override
+    def filter_queryset(self, queryset: QuerySet[Model]) -> QuerySet[Model]:
+        return super().filter_queryset(queryset.annotate(n=Count("children")))
+
+
+def _shadowed_rows() -> QuerySet[Model]:
+    """Every specimen with ``n`` a ``JSONField`` annotation, as handed to the shadowing set."""
+    return models.ScalarSpecimen.objects.annotate(n=F("payload")).order_by("pk")
+
+
+#: One entry per run of the late set's own ``filter_queryset`` (``_late_annotated_set``).
+_LATE_FILTER_QUERYSET_RUNS: list[None] = []
+
+
+def _late_annotated_set() -> type[FilterSet]:
+    """``_annotated_set("package")`` whose own ``filter_queryset`` annotates before ``super()``.
+
+    Handed unannotated rows, the set's form reads no field for ``lag`` or ``kids``: each such
+    value is cleaned over the queryset the override passes on. Each run of the override is
+    recorded in ``_LATE_FILTER_QUERYSET_RUNS``.
+    """
+    handed = _annotated_set("package")
+    assert issubclass(handed, FilterSet)
+
+    class LateAnnotationSet(handed):
+        @override
+        def filter_queryset(self, queryset: QuerySet[Model]) -> QuerySet[Model]:
+            _LATE_FILTER_QUERYSET_RUNS.append(None)
+            return super().filter_queryset(_annotated_rows(queryset))
+
+    return LateAnnotationSet
+
+
 #: The raw sets the driver routes build, by route name.
 _RAW_SETS: dict[str, type[FilterSet]] = {
     "book-filter": BookFilter,
@@ -378,6 +494,7 @@ _RAW_SETS: dict[str, type[FilterSet]] = {
     "generic-relation": _GenericRelationSet,
     "model-choice-with-no-queryset": _QuerysetlessChoiceSet,
     "filter-override-with-no-queryset": _QuerysetlessOverrideSet,
+    "late-annotation": _late_annotated_set(),
 }
 
 
@@ -452,6 +569,17 @@ urlpatterns = [
                 ),
             ),
         )
+    ),
+    path(
+        "raw-sets/backend/shadowed-annotation/",
+        _BackendRowsView.as_view(
+            filterset_class=_ShadowedAnnotationSet,
+            queryset=_shadowed_rows(),
+        ),
+    ),
+    path(
+        "raw-sets/filter-view/shadowed-annotation/",
+        _ListedRowsView.as_view(filterset_class=_ShadowedAnnotationSet, queryset=_shadowed_rows()),
     ),
 ]
 
@@ -1731,39 +1859,69 @@ _NULL_CHARACTER = [
 ]
 
 
-def _kids_as_sent(
-    _filterset: BaseFilterSet,
-    queryset: QuerySet[Model],
-    name: str,
-    value: list[object],
-) -> QuerySet[Model]:
-    """A consumer method keeping ``parent`` only when every member arrives as the text sent."""
-    del name
-    return queryset.filter(label="parent" if all(isinstance(v, str) for v in value) else "child")
+def _annotation_set(parent: str, query: str, mode: str) -> BaseFilterSet:
+    """The annotation set over ``query`` as ``mode`` builds it.
+
+    ``handed``: the queryset handed to the set holds both annotations (and, for a ``par_`` or
+    ``offspring_`` key, both ``FilteredRelation`` aliases); ``late``: the set is handed
+    unannotated rows and its own ``filter_queryset`` annotates (``_late_annotated_set``);
+    ``unhanded``: no queryset is handed, so the set reads the model's default rows, which
+    hold no annotation.
+    """
+    data = QueryDict(query)
+    rows = models.ScalarSpecimen.objects.order_by("label")
+    if mode == "unhanded":
+        return _annotated_set(parent)(data=data)
+    if mode == "late":
+        assert parent == "package"
+        return _late_annotated_set()(data=data, queryset=rows)
+    queryset = _annotated_rows(rows)
+    if query.startswith(("par_", "offspring_")):
+        queryset = queryset.alias(
+            par=FilteredRelation("parent"),
+            offspring=FilteredRelation("children"),
+        )
+    return _annotated_set(parent)(data=data, queryset=queryset)
 
 
-def _annotated_set(parent: str) -> type[BaseFilterSet]:
-    """A set whose list and range filters name two annotations of the queryset it is handed."""
-    base = {"package": FilterSet, "django-filter": django_filters.FilterSet}[parent]
-    declared = type(
-        "RawAnnotationSet",
-        (base,),
-        {
-            "lag_among": ListFilter(field_name="lag", lookup_expr="in"),
-            "lag_span": RangeFilter(field_name="lag", lookup_expr="range"),
-            "kids_among": ListFilter(field_name="kids", lookup_expr="in"),
-            "kids_span": RangeFilter(field_name="kids", lookup_expr="range"),
-            "kids_sent": ListFilter(field_name="kids", lookup_expr="in", method="kids_as_sent"),
-            "par_span": RangeFilter(field_name="par", lookup_expr="signed_big__range"),
-            "par_among": ListFilter(field_name="par", lookup_expr="signed_big__in"),
-            "offspring_among": ListFilter(field_name="offspring", lookup_expr="in"),
-            "offspring_array": ArrayFilter(field_name="offspring", lookup_expr="in"),
-            "kids_as_sent": _kids_as_sent,
-            "Meta": type("Meta", (), {"model": models.ScalarSpecimen, "fields": ()}),
-        },
-    )
-    assert issubclass(declared, BaseFilterSet)
-    return declared
+def _error_lines(filterset: BaseFilterSet) -> list[str]:
+    return [
+        f"{name}: {message}" for name, messages in filterset.errors.items() for message in messages
+    ]
+
+
+@strawberry.type
+class _AnnotationRead:
+    """What a set reports read in one order: ``form.is_valid()`` before and after ``.qs``."""
+
+    valid_before: bool | None
+    valid_after: bool
+    errors: list[str]
+    rows: list[str]
+
+
+#: The parent set and the way it is given the annotations, by id: handed under both parents,
+#: or added by the package set's own ``filter_queryset`` (``_late_annotated_set``).
+_ANNOTATION_MODES = [
+    pytest.param("package", "handed", id="package"),
+    pytest.param("django-filter", "handed", id="django-filter"),
+    pytest.param("package", "late", id="package-filter-queryset"),
+]
+
+
+def _annotation_family() -> None:
+    """A ``parent`` specimen (``kids`` 1) and its ``child`` (``kids`` 0, ``lag`` one day)."""
+    parent_row = cleaned_specimen("parent", kept=True)
+    child = cleaned_specimen("child", kept=True)
+    child.parent = parent_row
+    child.occurred_at = parent_row.occurred_at + datetime.timedelta(days=1)
+    child.save(update_fields=["parent", "occurred_at"])
+
+
+_ANNOTATION_ROWS = (
+    "query($parent: String!, $query: String!, $mode: String!) { "
+    "annotationRows(parent: $parent, query: $query, mode: $mode) { errors rows } }"
+)
 
 
 def _annotation_schema() -> DjangoSchema:
@@ -1773,48 +1931,83 @@ def _annotation_schema() -> DjangoSchema:
             self,
             parent: str,
             query: str,
-            *,
-            handed: bool,
+            mode: str,
         ) -> _RelationAnswer:
-            if not handed:
-                # No queryset handed: the set reads the model's default rows, which hold no
-                # annotation, so Django refuses the path when the form or ``.qs`` reads it.
-                unhanded = _annotated_set(parent)(data=QueryDict(query))
-                try:
-                    _ = unhanded.is_valid() and list(unhanded.qs)
-                except FieldError as error:
-                    return _RelationAnswer(errors=[str(error).partition(".")[0]], rows=[])
-                return _RelationAnswer(errors=[], rows=[])
-            queryset = models.ScalarSpecimen.objects.annotate(
-                lag=ExpressionWrapper(
-                    F("occurred_at") - F("parent__occurred_at"),
-                    output_field=DurationField(),
-                ),
-                kids=Count("children"),
-            ).order_by("label")
-            if query.startswith(("par_", "offspring_")):
-                queryset = queryset.alias(
-                    par=FilteredRelation("parent"),
-                    offspring=FilteredRelation("children"),
+            filterset = _annotation_set(parent, query, mode)
+            try:
+                if not filterset.is_valid():
+                    return _RelationAnswer(errors=_error_lines(filterset), rows=[])
+                matched: QuerySet[Model] = filterset.qs
+                return _RelationAnswer(errors=[], rows=[str(row) for row in matched])
+            except FieldError as error:
+                # A path no queryset holds: Django refuses it when the form or ``.qs`` reads it.
+                return _RelationAnswer(errors=[str(error).partition(".")[0]], rows=[])
+
+        def _annotation_read(
+            self,
+            query: str,
+            mode: str,
+            order: str,
+        ) -> _AnnotationRead:
+            """Read the set in ``order``: ``qs``, ``form`` or ``valid`` first.
+
+            ``qs`` reads ``.qs`` first, ``form`` the bare ``form.is_valid()``, ``valid`` the
+            set's own ``is_valid()``, which reads no ``.qs`` for an invalid set.
+            """
+            filterset = _annotation_set("package", query, mode)
+            if order == "valid" and not filterset.is_valid():
+                return _AnnotationRead(
+                    valid_before=None,
+                    valid_after=False,
+                    errors=_error_lines(filterset),
+                    rows=[],
                 )
-            filterset = _annotated_set(parent)(data=QueryDict(query), queryset=queryset)
-            if not filterset.is_valid():
-                errors = [
-                    f"{name}: {message}"
-                    for name, messages in filterset.errors.items()
-                    for message in messages
-                ]
-                return _RelationAnswer(errors=errors, rows=[])
+            valid_before = filterset.form.is_valid() if order == "form" else None
             matched: QuerySet[Model] = filterset.qs
-            return _RelationAnswer(errors=[], rows=[str(row) for row in matched])
+            rows = [str(row) for row in matched]
+            return _AnnotationRead(
+                valid_before=valid_before,
+                valid_after=filterset.form.is_valid(),
+                errors=_error_lines(filterset),
+                rows=rows,
+            )
+
+        def _handed_json_builds(self, query: str) -> list[bool]:
+            """Whether ``_HandedJsonSet``'s ``qs`` is built after ``is_valid()``, then after ``.qs``.
+
+            django-filter keeps a built ``qs`` as ``_qs``.
+            """
+            filterset = _HandedJsonSet(
+                data=QueryDict(query),
+                queryset=models.ScalarSpecimen.objects.annotate(pj=F("payload")),
+            )
+            _ = filterset.is_valid()
+            after_is_valid = hasattr(filterset, "_qs")
+            _ = list(filterset.qs)
+            return [after_is_valid, hasattr(filterset, "_qs")]
+
+        def _late_filter_queryset_runs(self, query: str, order: str) -> int:
+            """How often the late set's ``filter_queryset`` runs for ``.qs`` read in ``order``.
+
+            ``qs``: ``.qs`` read first; ``valid``: ``is_valid()`` asked first, then ``.qs``.
+            """
+            filterset = _annotation_set("package", query, "late")
+            _LATE_FILTER_QUERYSET_RUNS.clear()
+            if order == "valid":
+                _ = filterset.is_valid()
+            _ = list(filterset.qs)
+            return len(_LATE_FILTER_QUERYSET_RUNS)
 
         annotation_rows: _RelationAnswer = strawberry.field(resolver=_annotation_rows)
+        annotation_read: _AnnotationRead = strawberry.field(resolver=_annotation_read)
+        late_filter_queryset_runs: int = strawberry.field(resolver=_late_filter_queryset_runs)
+        handed_json_builds: list[bool] = strawberry.field(resolver=_handed_json_builds)
 
     return DjangoSchema(query=Query, config=strawberry_config())
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("parent", ["package", "django-filter"])
+@pytest.mark.parametrize(("parent", "mode"), _ANNOTATION_MODES)
 @pytest.mark.parametrize(
     ("query", "errors", "rows"),
     [
@@ -1853,35 +2046,65 @@ def _annotation_schema() -> DjangoSchema:
             id="integer-bound-junk",
         ),
         pytest.param("kids_sent=1,abc", [], ["parent"], id="method-receives-the-text-sent"),
+        pytest.param("kids_span_0=1&kids_span_1=", [], ["parent"], id="integer-range-empty-box"),
+        pytest.param(
+            f"kids_span_0={_PAST_ANY_INTEGER}&kids_span_1=1",
+            [],
+            ["child", "parent"],
+            id="integer-bound-past-any-integer",
+        ),
+        pytest.param(
+            f"kids_among={_PAST_ANY_INTEGER},1",
+            [],
+            ["parent"],
+            id="integer-member-past-any-integer",
+        ),
+        pytest.param("kids_pair=0,1", [], ["child", "parent"], id="integer-range-list"),
+        pytest.param(
+            "kids_pair=1",
+            ["kids_pair: Range query expects two values."],
+            [],
+            id="integer-range-list-of-one",
+        ),
+        pytest.param("up_among= PARENT ", [], ["parent"], id="text-member-stripped"),
+        pytest.param(
+            "kids_pair=0,1,2",
+            ["kids_pair: Range query expects two values."],
+            [],
+            id="integer-range-list-of-three",
+        ),
     ],
 )
 def test_a_raw_value_over_a_queryset_annotation_is_cleaned_as_the_queryset_compares_it(
     parent: str,
+    mode: str,
     query: str,
     errors: list[str],
     rows: list[str],
+    record_compiled_sql: RecordCompiledSql,
 ) -> None:
-    """Raw members and bounds over annotations clean as the handed queryset's output fields.
+    """Raw members and bounds over annotations clean as the queryset's output fields.
 
     ``lag`` is a ``DurationField`` expression and ``kids`` a ``Count``, neither a field of
     the model: each value is cleaned by the form field django-filter's ``gte`` filter
     builds for that output, under the package's set and a plain django-filter one alike,
-    so junk is the form's error, an integer member naming no row drops and a range bound
-    past the column widens, never Django's ``ValueError`` or ``AttributeError``. A
-    ``method=`` filter over an annotation receives each member as sent: its method, not a
-    lookup of the filter's, reads the value.
+    so junk is the form's error, an empty box leaves its side open, an integer member
+    naming no row or past any integer drops and a range bound past the column widens, never
+    Django's ``ValueError``, ``ValidationError`` or ``AttributeError``. The package's set
+    answers alike when its own ``filter_queryset`` adds the annotations to unannotated rows
+    before it calls ``super()`` (``late``): each value is cleaned over the queryset the
+    override passes on, its refusal read by ``is_valid()``. A ``method=`` filter over an
+    annotation receives each member as sent: its method, not a lookup of the filter's, reads
+    the value. A refused value runs no statement; rows run one.
     """
-    parent_row = cleaned_specimen("parent", kept=True)
-    child = cleaned_specimen("child", kept=True)
-    child.parent = parent_row
-    child.occurred_at = parent_row.occurred_at + datetime.timedelta(days=1)
-    child.save(update_fields=["parent", "occurred_at"])
+    _annotation_family()
+    statements = record_compiled_sql(models.ScalarSpecimen._meta.db_table)
     assert _post(
         _annotation_schema(),
-        "query($parent: String!, $query: String!) { "
-        "annotationRows(parent: $parent, query: $query, handed: true) { errors rows } }",
-        {"parent": parent, "query": query},
+        _ANNOTATION_ROWS,
+        {"parent": parent, "query": query, "mode": mode},
     ) == {"data": {"annotationRows": {"errors": errors, "rows": rows}}}
+    assert len(statements) == (0 if errors else 1), statements
 
 
 @pytest.mark.django_db
@@ -1929,9 +2152,8 @@ def test_raw_filters_under_both_parents_clean_continued_and_reverse_alias_values
     child.save(update_fields=["parent"])
     payload = _post(
         _annotation_schema(),
-        "query($parent: String!, $query: String!) { "
-        "annotationRows(parent: $parent, query: $query, handed: true) { errors rows } }",
-        {"parent": parent, "query": query.format(child=saved_pk(child))},
+        _ANNOTATION_ROWS,
+        {"parent": parent, "query": query.format(child=saved_pk(child)), "mode": "handed"},
     )
     assert payload == {"data": {"annotationRows": {"errors": [], "rows": rows}}}, payload
 
@@ -1952,14 +2174,347 @@ def test_a_raw_set_handed_no_queryset_leaves_an_annotation_path_to_django(
     cleaned_specimen("parent", kept=True)
     assert _post(
         _annotation_schema(),
-        "query($parent: String!, $query: String!) { "
-        "annotationRows(parent: $parent, query: $query, handed: false) { errors rows } }",
-        {"parent": parent, "query": query},
+        _ANNOTATION_ROWS,
+        {"parent": parent, "query": query, "mode": "unhanded"},
     ) == {
         "data": {
             "annotationRows": {"errors": ["Cannot resolve keyword 'kids' into field"], "rows": []},
         },
     }
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("query", "path"),
+    [
+        pytest.param("par_among=7", "par", id="alias-list"),
+        pytest.param("par_span_0=7", "par", id="alias-range"),
+        pytest.param("offspring_array=1", "offspring", id="reverse-alias-array"),
+    ],
+)
+def test_a_path_the_filter_queryset_override_does_not_add_is_left_to_django(
+    query: str,
+    path: str,
+) -> None:
+    """A path no queryset holds, the one ``filter_queryset`` passes on included, is Django's.
+
+    The late set's override adds ``lag`` and ``kids`` only, so nothing cleans a value over
+    the ``par`` or ``offspring`` alias and the path is Django's ``FieldError`` when the
+    leaf applies, as it is for a set handed no queryset.
+    """
+    cleaned_specimen("parent", kept=True)
+    assert _post(
+        _annotation_schema(),
+        _ANNOTATION_ROWS,
+        {"parent": "package", "query": query, "mode": "late"},
+    ) == {
+        "data": {
+            "annotationRows": {
+                "errors": [f"Cannot resolve keyword '{path}' into field"],
+                "rows": [],
+            },
+        },
+    }
+
+
+_ANNOTATION_READ = (
+    "query($query: String!, $mode: String!, $order: String!) { "
+    "annotationRead(query: $query, mode: $mode, order: $order) "
+    "{ validBefore validAfter errors rows } }"
+)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["handed", "late"])
+@pytest.mark.parametrize(
+    ("query", "errors"),
+    [
+        pytest.param(
+            "lag_span_0=999999999 00:00:00",
+            ["lag_span: Enter a value the database can represent."],
+            id="duration-bound-the-database-cannot-bind",
+        ),
+        pytest.param(
+            "lag_among=999999999 00:00:00",
+            ["lag_among: Enter a value the database can represent."],
+            id="duration-member-the-database-cannot-bind",
+        ),
+    ],
+)
+def test_a_package_set_asks_the_database_about_an_annotation_value(
+    mode: str,
+    query: str,
+    errors: list[str],
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """The package's set asks the bind question of a value over an annotation, late or handed.
+
+    A duration past the backend's range is cleaned as a duration and then refused by the bind
+    ask over the queryset that compares it: the handed one, or the one the set's own
+    ``filter_queryset`` passes on. No statement runs.
+    """
+    _annotation_family()
+    statements = record_compiled_sql(models.ScalarSpecimen._meta.db_table)
+    assert _post(
+        _annotation_schema(),
+        _ANNOTATION_ROWS,
+        {"parent": "package", "query": query, "mode": mode},
+    ) == {"data": {"annotationRows": {"errors": errors, "rows": []}}}
+    assert statements == []
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mode", ["handed", "late"])
+@pytest.mark.parametrize(
+    ("query", "order", "expected"),
+    [
+        pytest.param(
+            "kids_span_0=abc",
+            "qs",
+            {
+                "validBefore": None,
+                "validAfter": False,
+                "errors": ["kids_span: Enter a number."],
+                "rows": ["child", "parent"],
+            },
+            id="qs-before-errors",
+        ),
+        pytest.param(
+            "kids_among=1,abc&signed_among=7",
+            "qs",
+            {
+                "validBefore": None,
+                "validAfter": False,
+                "errors": ["kids_among: Enter a number."],
+                "rows": ["child", "parent"],
+            },
+            id="qs-applies-the-leaves-that-cleaned",
+        ),
+        pytest.param(
+            "kids_span_0=1",
+            "qs",
+            {
+                "validBefore": None,
+                "validAfter": True,
+                "errors": [],
+                "rows": ["parent"],
+            },
+            id="qs-of-a-valid-bound",
+        ),
+    ],
+)
+def test_a_bare_qs_read_applies_the_leaves_that_clean_and_reports_the_rest(
+    mode: str,
+    query: str,
+    order: str,
+    expected: JSONObject,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """``.qs`` read before ``is_valid()`` applies the leaves that clean and drops a refused one.
+
+    django-filter's own ``qs`` filters whatever ``errors`` holds, so a junk bound or member
+    over an annotation is the form's error afterwards and its leaf applies nothing, never
+    Django's ``ValueError``: handed, or added by the set's own ``filter_queryset``, in one
+    statement.
+    """
+    _annotation_family()
+    statements = record_compiled_sql(models.ScalarSpecimen._meta.db_table)
+    assert _post(
+        _annotation_schema(),
+        _ANNOTATION_READ,
+        {"query": query, "mode": mode, "order": order},
+    ) == {"data": {"annotationRead": expected}}
+    assert len(statements) == 1, statements
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("order", "runs"),
+    [pytest.param("qs", 2, id="qs-first"), pytest.param("valid", 1, id="is-valid-first")],
+)
+@pytest.mark.parametrize("query", ["kids_span_0=1", "kids_span_0=abc"])
+def test_a_bare_qs_read_runs_the_sets_filter_queryset_once_more_than_is_valid_first(
+    query: str,
+    order: str,
+    runs: int,
+) -> None:
+    """``.qs`` read first runs the set's own ``filter_queryset`` twice, ``is_valid()`` first once.
+
+    django-filter's ``qs`` reads ``errors`` before it filters, and the set's ``errors``
+    builds ``qs`` to clean a value waiting for the queryset ``filter_queryset`` passes on;
+    django-filter then filters again, with the same rows. Asked first, ``is_valid()`` builds
+    ``qs`` once and django-filter keeps it for the read that follows.
+    """
+    _annotation_family()
+    assert _post(
+        _annotation_schema(),
+        "query($query: String!, $order: String!) "
+        "{ lateFilterQuerysetRuns(query: $query, order: $order) }",
+        {"query": query, "order": order},
+    ) == {"data": {"lateFilterQuerysetRuns": runs}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        pytest.param(
+            "handed",
+            {
+                "validBefore": False,
+                "validAfter": False,
+                "errors": ["kids_span: Enter a number."],
+                "rows": ["child", "parent"],
+            },
+            id="handed",
+        ),
+        pytest.param(
+            "late",
+            {
+                "validBefore": True,
+                "validAfter": False,
+                "errors": ["kids_span: Enter a number."],
+                "rows": ["child", "parent"],
+            },
+            id="late",
+        ),
+    ],
+)
+def test_the_bare_form_sees_a_late_refusal_only_once_qs_is_built(
+    mode: str,
+    expected: JSONObject,
+) -> None:
+    """``form.is_valid()`` asked directly sees a value ``filter_queryset`` refuses only at ``.qs``.
+
+    The set's ``is_valid()`` and ``errors`` build ``qs`` to clean a value only the queryset
+    the set's own ``filter_queryset`` passes on resolves; the bare form django-filter builds
+    knows no such queryset, so it is valid until ``.qs`` runs and invalid after it. A value
+    the handed queryset resolves is the bare form's error from the start.
+    """
+    _annotation_family()
+    assert _post(
+        _annotation_schema(),
+        _ANNOTATION_READ,
+        {"query": "kids_span_0=abc", "mode": mode, "order": "form"},
+    ) == {"data": {"annotationRead": expected}}
+
+
+@pytest.mark.django_db
+def test_a_set_with_no_filter_queryset_override_builds_no_qs_to_validate() -> None:
+    """A set overriding no ``filter_queryset`` adds no path, so ``is_valid()`` builds no ``qs``.
+
+    ``pj`` is a ``JSONField`` annotation of the queryset handed to the set, so the list is
+    applied as sent: its form lists it as uncleaned, yet nothing a ``filter_queryset`` override
+    could add awaits it, so ``is_valid()`` leaves ``qs`` unbuilt and the ``.qs`` read that
+    follows builds it.
+    """
+    _annotation_family()
+    assert _post(
+        _annotation_schema(),
+        "query($query: String!) { handedJsonBuilds(query: $query) }",
+        {"query": "pj_among=1"},
+    ) == {"data": {"handedJsonBuilds": [False, True]}}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "driver",
+        "query",
+        "refusal",
+        "labels",
+    ),
+    [
+        pytest.param("backend", "1,abc", {"n_among": ["Enter a number."]}, [], id="backend-junk"),
+        pytest.param("filter-view", "1,abc", None, [], id="filter-view-junk"),
+        pytest.param("backend", "1", None, ["parent"], id="backend-member"),
+        pytest.param("filter-view", "1", None, ["parent"], id="filter-view-member"),
+    ],
+)
+def test_an_override_replacing_a_handed_annotation_cleans_the_value_it_compares(
+    driver: str,
+    query: str,
+    refusal: JSONObject | None,
+    labels: list[str],
+) -> None:
+    """A ``filter_queryset`` override shadowing a handed annotation's name is cleaned over it.
+
+    ``n`` is handed as a ``JSONField`` annotation, whose output gives the list no cleaner,
+    and the override replaces it with a ``Count`` before ``super()``: the set's
+    ``is_valid()`` builds ``qs`` and cleans each member as the ``Count`` compares it, so a
+    junk member is refused (DRF's 400 body, the strict ``FilterView``'s empty answer) and a
+    count matches its row.
+    """
+    _annotation_family()
+    status, body = _raw_set_answer(Client(), driver, "shadowed-annotation", {"n_among": query})
+    if refusal is not None:
+        assert (status, body) == (400, refusal)
+        return
+    assert status == 200, body
+    ids = [
+        json_int(row, "id") if driver == "backend" else json_int(row) for row in json_list(body)
+    ]
+    assert ids == [saved_pk(models.ScalarSpecimen.objects.get(label=label)) for label in labels]
+
+
+_NATIVE_BESIDE_LATE = "signed_among=abc&kids_span_0=abc"
+
+
+_BOTH_REFUSALS = ["kids_span: Enter a number.", "signed_among: Enter a number."]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "mode",
+        "order",
+        "errors",
+        "rows",
+        "statements",
+    ),
+    [
+        pytest.param("handed", "valid", _BOTH_REFUSALS, [], 0, id="handed-is-valid-first"),
+        pytest.param(
+            "late",
+            "valid",
+            ["signed_among: Enter a number."],
+            [],
+            0,
+            id="late-is-valid-first",
+        ),
+        pytest.param("handed", "qs", _BOTH_REFUSALS, ["child", "parent"], 1, id="handed-qs-first"),
+        pytest.param("late", "qs", _BOTH_REFUSALS, ["child", "parent"], 1, id="late-qs-first"),
+    ],
+)
+def test_a_native_form_error_answers_alone_beside_a_late_refusal(
+    mode: str,
+    order: str,
+    errors: list[str],
+    rows: list[str],
+    statements: int,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """Under ``is_valid()`` a form a field of the model refuses is not handed to ``filter_queryset``.
+
+    ``signed_among`` cleans as the model's ``signed_big`` column; with its junk member
+    ``is_valid()`` refuses the form before any queryset is built, so a junk bound over an
+    annotation the set's own ``filter_queryset`` adds is not asked and the refusal is the
+    model field's alone, where a handed annotation's bound is refused beside it; no
+    statement runs. A bare ``.qs`` read first filters whatever ``errors`` holds, as
+    django-filter's ``qs`` does, so ``filter_queryset`` runs: the late bound is refused there
+    beside the model field's error, neither leaf applies, in one statement.
+    """
+    _annotation_family()
+    recorded = record_compiled_sql(models.ScalarSpecimen._meta.db_table)
+    payload = _post(
+        _annotation_schema(),
+        _ANNOTATION_READ,
+        {"query": _NATIVE_BESIDE_LATE, "mode": mode, "order": order},
+    )
+    answer = json_object(payload, "data", "annotationRead")
+    assert sorted(map(str, json_list(answer, "errors"))) == errors, payload
+    assert answer["rows"] == rows, payload
+    assert len(recorded) == statements, recorded
 
 
 class _PackageYearSet(FilterSet):
@@ -2598,18 +3153,29 @@ def _raw_set_client(viewer: str) -> Client:
     return client
 
 
+def _raw_set_answer(
+    client: Client,
+    driver: str,
+    name: str,
+    query: dict[str, str],
+) -> tuple[int, object]:
+    """The status code and JSON body one driver route answers for ``query``."""
+    data = QueryDict(mutable=True)
+    data.update(query)
+    with override_settings(ROOT_URLCONF=__name__):
+        response = client.get(f"/raw-sets/{driver}/{name}/?{data.urlencode()}")
+    return response.status_code, json_loads(response.content)
+
+
 def _raw_set_ids(
     client: Client,
     driver: str,
     name: str,
     query: dict[str, str],
 ) -> list[int]:
-    data = QueryDict(mutable=True)
-    data.update(query)
-    with override_settings(ROOT_URLCONF=__name__):
-        response = client.get(f"/raw-sets/{driver}/{name}/?{data.urlencode()}")
-    assert response.status_code == 200, response.content
-    rows = json_list(json_loads(response.content))
+    status, body = _raw_set_answer(client, driver, name, query)
+    assert status == 200, body
+    rows = json_list(body)
     return [json_int(row, "id") if driver == "backend" else json_int(row) for row in rows]
 
 
@@ -2699,6 +3265,65 @@ def test_a_raw_key_over_a_filtered_relation_alias_reads_the_shelfs_visibility(
         books[title] for title in (staff if viewer == "staff" else anonymous)
     ]
     assert len(recorded) == 1, recorded
+
+
+#: (raw key, the refusal ``DjangoFilterBackend`` answers with its 400, else ``None``, and the
+#: specimens every driver answers: the bare ``.qs`` of a consumer's own construction applies
+#: no refused leaf, and django-filter's strict ``FilterView`` answers no row for a refused form)
+_LATE_ANNOTATION_KEYS: dict[str, tuple[dict[str, str], JSONObject | None, list[str]]] = {
+    "junk-bound": (
+        {"kids_span_0": "abc"},
+        {"kids_span": ["Enter a number."]},
+        ["parent", "child"],
+    ),
+    "junk-member": (
+        {"kids_among": "1,abc"},
+        {"kids_among": ["Enter a number."]},
+        ["parent", "child"],
+    ),
+    "bound": ({"kids_span_0": "1"}, None, ["parent"]),
+    "member": ({"kids_among": "0"}, None, ["child"]),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("key", sorted(_LATE_ANNOTATION_KEYS))
+@pytest.mark.parametrize("driver", _RAW_DRIVERS)
+def test_a_raw_value_over_an_annotation_filter_queryset_adds_is_cleaned_by_every_driver(
+    driver: str,
+    key: str,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A value over an annotation the set's own ``filter_queryset`` adds is cleaned per driver.
+
+    The set is handed its model's unannotated rows (``_late_annotated_set``); each junk bound
+    or member is cleaned over the queryset the override passes on and refused as the form's
+    error: DRF's ``DjangoFilterBackend`` answers its 400 body and django-filter's strict
+    ``FilterView`` no row, without a statement, while a consumer's bare ``.qs`` applies the
+    leaves that cleaned in one; never Django's ``ValueError``.
+    """
+    family = {"parent": cleaned_specimen("parent", kept=True)}
+    family["child"] = cleaned_specimen("child", kept=True)
+    family["child"].parent = family["parent"]
+    family["child"].save(update_fields=["parent"])
+    query, refusal, labels = _LATE_ANNOTATION_KEYS[key]
+    statements = record_compiled_sql(models.ScalarSpecimen._meta.db_table)
+
+    status, body = _raw_set_answer(Client(), driver, "late-annotation", query)
+
+    rows = [saved_pk(family[label]) for label in labels]
+    if refusal is not None and driver == "backend":
+        assert (status, body) == (400, refusal)
+    elif refusal is not None and driver == "filter-view":
+        assert (status, body) == (200, [])
+    else:
+        assert status == 200, body
+        ids = [
+            json_int(row, "id") if driver == "backend" else json_int(row)
+            for row in json_list(body)
+        ]
+        assert ids == rows
+    assert len(statements) == (0 if refusal is not None and driver != "direct" else 1), statements
 
 
 #: (the set, the refusal its first construction raises)

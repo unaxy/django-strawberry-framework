@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 489 done, 116 to do. The CHANGELOG entries filed here moved to
+Progress: 490 done, 117 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2681,6 +2681,38 @@ Progress: 489 done, 116 to do. The CHANGELOG entries filed here moved to
   refused "Enter a valid date." for `date__in`, `date__range` and a bare `date` lone end through raw form data and
   `apply_sync`; the live `Date` scalar refuses it first). The mutant `_bound_value_field` -> `_bound_model_field` now
   fails 9 new date rows on 6 shapes. Tests only
+- [x] 847. A package `FilterSet` whose `filter_queryset` override adds or replaces a path before `super()` (an
+  annotation or alias, one shadowing a name the handed queryset holds, a column past a `FilteredRelation` alias it
+  adds) now cleans and bind-asks each `ListFilter` / `ArrayFilter` / `RangeFilter` value over the queryset the
+  override passes on, before any flat leaf applies (`filters/sets.py::FilterSet._clean_late_comparisons`, first in
+  `::FilterSet._apply_flat_leaves`): junk, `1.5` over an integer, an empty range box, `-1e1000000` and a range list of
+  other than two members answer the form's error on raw drivers (DRF 400, a strict FilterView no row, a bare `.qs`
+  applies the leaves that cleaned) and `FILTER_INVALID` under `apply_sync` / `apply_async`, logical-arm keys included,
+  as over the handed queryset, where they raised an unmasked `ValueError` / `ValidationError` / `OverflowError` or
+  silently dropped a junk list member. `FilterSet.is_valid` / `errors` build `qs` first to report the refusal
+  (`::FilterSet._settle_late_comparisons`) only on a set that overrides `filter_queryset`
+  (`utils/truth.py::overrides`) and only when no native form error already refuses the form; the bare
+  `form.is_valid()` sees it only after `.qs`, and a `.qs` read before `is_valid()` runs the override twice with the
+  same rows (the maintainer's consent is needed for a `qs` override, so none was added). `query` is threaded through
+  `filters/base.py::_model_unresolved_query`, `::_bound_lookup_operand`, `::_bound_value_field`,
+  `::_column_form_field` and the `_hand_column_field` implementations; `filters/sets.py::_unbindable_value_errors`
+  takes `rows=` / `names=`; new `::_model_value_field` and `::FilterSet._late_comparison_names`. Grid: 450 of 4780
+  cells move from an exception or a masked error to the handed answer, 0 row changes, late equal to handed in every
+  cell. README, spec-027 (slice checklist, Decision 4, Decision 8, Edge cases, Test plan, DoD), the test README and
+  GLOSSARY `FilterSet` (pk 463) follow. Pinned by `examples/fakeshop/test_query/test_raw_filter_forms_api.py`
+  (`::test_a_raw_value_over_a_queryset_annotation_is_cleaned_as_the_queryset_compares_it`,
+  `::test_a_path_the_filter_queryset_override_does_not_add_is_left_to_django`,
+  `::test_a_package_set_asks_the_database_about_an_annotation_value`,
+  `::test_a_bare_qs_read_applies_the_leaves_that_clean_and_reports_the_rest`,
+  `::test_a_bare_qs_read_runs_the_sets_filter_queryset_once_more_than_is_valid_first`,
+  `::test_the_bare_form_sees_a_late_refusal_only_once_qs_is_built`,
+  `::test_a_set_with_no_filter_queryset_override_builds_no_qs_to_validate`,
+  `::test_an_override_replacing_a_handed_annotation_cleans_the_value_it_compares`,
+  `::test_a_native_form_error_answers_alone_beside_a_late_refusal`,
+  `::test_a_raw_value_over_an_annotation_filter_queryset_adds_is_cleaned_by_every_driver`),
+  `examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_served_value_over_an_annotation_filter_queryset_adds_is_cleaned_as_it_compares`
+  and `tests/filters/test_sets.py::test_an_unbound_set_is_invalid_and_holds_no_error_as_django_filters_is`. CHANGELOG:
+  item 908
 
 ## To do: found along the way
 
@@ -2802,11 +2834,6 @@ Progress: 489 done, 116 to do. The CHANGELOG entries filed here moved to
   ForeignKey or join on the field not permitted", `filters/sets.py::_apply_relation_leaf`; a class-level `filter`
   override answers "Venue has no field named 'faults'" from `::_names_every_through`). The nested branch serves. Found
   fact-finding 745
-- [ ] 847. A raw-form `RangeFilter` over an annotation a consumer `filter_queryset` adds before filtering (a path
-  only the queryset resolves) hands Django the uncleaned string bound: an unmasked `ValueError` under `range` and
-  every other declared lookup (316 turned a declared `iexact`'s silent no rows into the same `ValueError`). The
-  queryset-only cleaning gate (`filters/sets.py::_queryset_integer_column`) still reads the declared lookup. Evidence:
-  the 316 verifier's annotation probe. Found verifying 316
 - [ ] 838. (robustness) An unbound or absent `RelatedFilter` head's rendered form field (django-filter's `FilterView`
   page, DRF's browsable API through `DjangoFilterBackend.to_html`) lists every row of the declaration's queryset as a
   choice, rows the target type's `get_queryset` hides included, so the rendered page names hidden rows; a bound named
@@ -2864,6 +2891,22 @@ Progress: 489 done, 116 to do. The CHANGELOG entries filed here moved to
   is not judged when its set publishes: the build-time GlobalID checks (`filters/sets.py::_globalid_decode_sites`)
   cannot see an alias, which only the queryset holds, so its key checks no type name against the alias's target and an
   encode-only target over the alias is refused per request instead of at build. Found fixing 792
+- [ ] 909. (robustness) A `FilteredRelation` alias a package `FilterSet.filter_queryset` override adds
+  (`super().filter_queryset(queryset.alias(kids=FilteredRelation("issues")))`), compared as the relation itself by
+  `ListFilter(field_name="kids", lookup_expr="in")` or `RangeFilter(field_name="kids", lookup_expr="exact")`, is not
+  cleaned: raw `?kid=abc` / `?kidr_0=abc`, `kid=4.5` and `kid=-1e1000000,4` raise Django's unmasked `ValueError` (a
+  masked error over GraphQL under `apply_sync` / `apply_async`), where the same set handed the alias answers the
+  form's error or drops the member. `filters/base.py::_compared_value_column` (through `_bound_lookup_lhs_path`) and
+  `::_integer_in_column` read the handed queryset; cleaning alone leaves `kid=4.5` answering a truncated key's row, so
+  the filter-time member drop takes the receiving query too. Found fixing 847
+- [ ] 910. (robustness) A stock `django_filters.FilterSet` parent declaring the package's `RangeFilter` / `ListFilter`
+  / `ArrayFilter` over an annotation its own `filter_queryset` adds before `super()`
+  (`qs.annotate(n=Count("issues"))`), served by `DjangoFilterBackend` / `FilterView` or called directly, never cleans
+  the value: `?n_0=abc`, `?n_0=1.5`, `?n_1=` and `?n_0=-1e1000000` raise an unmasked `ValueError` / `ValidationError`
+  / `OverflowError` and `?n=1,abc` silently drops the junk member, while README promises the package filters clean
+  under any django-filter `FilterSet` parent (it holds for a handed annotation). The stock parent has no
+  `_apply_flat_leaves` / `is_valid` seam, so the fix site is the filter (`RangeFilter.filter` / `ListFilter.filter`
+  cleaning over `qs.query`). Found fixing 847
 
 ## To do: holes found re-checking the fixes
 
