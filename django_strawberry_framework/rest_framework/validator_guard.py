@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-import logging
-from contextlib import nullcontext
 from typing import TYPE_CHECKING, TypeVar
 
-import django
-from django.db import DatabaseError, connections, transaction
-from django.db.models import BooleanField, Q, Value
-from django.db.models.functions import Coalesce
-from django.db.models.sql.constants import SINGLE
+from django.db.models import Q, Value
 from django.db.models.sql.query import Query
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.validators import (
@@ -21,23 +15,28 @@ from rest_framework.validators import (
 
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
-    call_method,
     is_queryset,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
     UNBINDABLE_TEMPORAL_MESSAGE,
 )
-from django_strawberry_framework.utils.typing import object_result
 
 from .query_bind import guard_query
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-_ValidatorT = TypeVar("_ValidatorT")
+_ValidatorT = TypeVar(
+    "_ValidatorT",
+    bound=UniqueValidator | UniqueTogetherValidator | BaseUniqueForValidator,
+)
+
+#: The ``against`` key under which ``_GuardInstaller`` reaches Django's check query.
+_GUARD_ANNOTATION = "_dsf_validator_guard"
 
 
 def guard_uniqueness_validator(
@@ -53,19 +52,14 @@ def guard_uniqueness_validator(
     decisions. The copied queryset's query keeps a local compiler guard through
     ``Query.clone``. DRF's original validator-list position and context are intact.
     """
-    if not isinstance(
-        validator,
-        UniqueValidator | UniqueTogetherValidator | BaseUniqueForValidator,
-    ):
-        return validator
 
-    def _refusal(name: str | None) -> None:
+    def _refusal(name: str | None) -> DRFValidationError:
         if field_name is None:
-            raise DRFValidationError(
+            return DRFValidationError(
                 UNBINDABLE_TEMPORAL_MESSAGE,
                 code=FIELD_ERROR_CODE_INVALID,
             )
-        raise DRFValidationError(
+        return DRFValidationError(
             {name or field_name: [UNBINDABLE_TEMPORAL_MESSAGE]},
             code=FIELD_ERROR_CODE_INVALID,
         )
@@ -76,7 +70,7 @@ def guard_uniqueness_validator(
         queryset.query,
         alias=alias,
         sources=sources,
-        refuse=_refusal,
+        refusal=_refusal,
         provenance=provenance,
     )
     validator.queryset = queryset
@@ -97,20 +91,42 @@ def _guarded_condition(
     condition: Q,
     alias: str,
     sources: Mapping[str, str],
-    refuse: Callable[[str | None], None],
+    refusal: Callable[[str | None], Exception],
     provenance: list[tuple[object, object, str | None, str]],
 ) -> Q:
-    """Make DRF's combined conditional ``Q.check`` use its pinned write alias.
+    """Make DRF's combined conditional ``Q.check`` run Django's own body, guarded, on its alias.
 
     ``Q._combine`` creates the result through ``self.create``. Thus DRF's
     ``(condition & Exists(queryset.filter(condition))).check(against)`` retains this
-    per-validator subtype, including the local compiler guard.
+    per-validator subtype. Its ``check`` calls the installed Django's ``Q.check`` on the
+    pinned write alias, so that release's own body (its nullable-boolean handling, its
+    ``DatabaseError`` reading) decides; a ``_GuardInstaller`` among ``against`` installs
+    the per-query compiler guard on the query that body builds, before it adds the
+    condition or compiles.
     """
     condition_type = type(condition)
 
     def _check(self: Q, against: Mapping[str, object], using: str = "default") -> bool:
         del using
-        return _checked_q_check(self, against, alias, sources, refuse, provenance)
+
+        def _install(query: Query) -> Query:
+            return guard_query(
+                query,
+                alias=alias,
+                sources=sources,
+                refusal=refusal,
+                provenance=provenance,
+            )
+
+        installer = _GuardInstaller(_install)
+        checked = condition_type.check(
+            self,
+            {_GUARD_ANNOTATION: installer, **against},
+            using=alias,
+        )
+        # A body that never resolved the installer ran unguarded: fail loudly.
+        _ = require_instance(installer.query, Query)
+        return checked
 
     guarded_type = type(
         f"_Guarded{truth.name(condition_type)}",
@@ -122,50 +138,21 @@ def _guarded_condition(
     return guarded
 
 
-def _checked_q_check(
-    condition: Q,
-    against: Mapping[str, object],
-    alias: str,
-    sources: Mapping[str, str],
-    refuse: Callable[[str | None], None],
-    provenance: list[tuple[object, object, str | None, str]],
-) -> bool:
-    """Run Django's ``Q.check`` once on the pinned alias with guarded compilation.
+class _GuardInstaller:
+    """An ``against`` value whose resolution guards the query Django's ``Q.check`` builds.
 
-    Adapted from Django ``django/db/models/query_utils.py::Q.check`` (BSD-3-Clause;
-    ``LICENSE.django``). Django exposes ``using`` but no injection seam between
-    constructing its new ``Query(None)`` and executing it. This narrow adaptation
-    installs the per-query compiler guard there; the rest is Django's own body.
+    Every supported Django ``Q.check`` resolves each ``against`` value on its fresh
+    ``Query(None)`` (``add_annotation(..., select=False)``) before it adds the condition
+    and compiles, so the guard sees both. The annotation it leaves is never selected and
+    no condition names it.
     """
-    query = guard_query(
-        Query(None),
-        alias=alias,
-        sources=sources,
-        refuse=refuse,
-        provenance=provenance,
-    )
-    for name, value in against.items():
-        expression = value if hasattr(value, "resolve_expression") else Value(value)
-        query.add_annotation(expression, name, select=False)
-    query.add_annotation(Value(1), "_check")
-    connection = connections[alias]
-    # Django 5.2/6.0 Q.check wraps a nullable boolean expression before adding
-    # it; 6.1 removes that wrapper. Keep each supported upstream body here.
-    if django.VERSION < (6, 1) and connection.features.supports_comparing_boolean_expr:
-        query.add_q(Q(Coalesce(condition, Value(value=True), output_field=BooleanField())))
-    else:
-        query.add_q(condition)
-    compiler = object_result(query.get_compiler, using=alias)
-    context_manager = (
-        transaction.atomic(using=alias) if connection.in_atomic_block else nullcontext()
-    )
-    try:
-        with context_manager:
-            return call_method(compiler, "execute_sql", SINGLE) is not None
-    except DatabaseError as exc:
-        logging.getLogger("django.db.models").warning(
-            "Got a database error calling check() on %r: %s",
-            condition,
-            exc,
-        )
-        return True
+
+    def __init__(self, install: Callable[[Query], Query]) -> None:
+        self.install: Callable[[Query], Query] = install
+        self.query: Query | None = None
+
+    def resolve_expression(self, query: Query, *args: object, **kwargs: object) -> Value:
+        """Guard ``query`` and stand in as an inert, unselected annotation."""
+        del args, kwargs
+        self.query = self.install(query)
+        return Value(None)

@@ -1824,7 +1824,8 @@ def _hold_serializer_values(
             field_name = checked_names[0] if checked_names else ""
             sources = {name: fields[name].source or name for name in names if name in fields}
         elif isinstance(validator, BaseUniqueForValidator):
-            names = [validator.field]
+            # The date field's year bound is client data the query compiles too.
+            names = [validator.field, validator.date_field]
             field_name = validator.field
             # BaseUniqueForValidator.__call__ uses source_attrs[-1], whereas
             # UniqueTogetherValidator.filter_queryset uses the complete source.

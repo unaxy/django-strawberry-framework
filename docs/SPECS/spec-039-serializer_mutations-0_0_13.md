@@ -2080,9 +2080,12 @@ The pipeline steps:
      guard (`django_strawberry_framework/rest_framework/query_bind.py::guard_query`).
      Django's own `build_filter` owns source resolution and eager lookup preparation;
      the real compiler owns transforms, annotations, iterable RHS preparation and
-     final SQL parameters. An `OverflowError` during eager preparation is the bound
-     serializer field's `invalid` error. A compiled bind is refused only when its
-     parameter survives into the executable outer SQL and the pinned backend or driver
+     final SQL parameters. An `OverflowError` during eager preparation or compilation
+     of a lookup built from a serializer field (a date-family validator's `date_field`
+     year bound included) is that field's `invalid` error; one a validator queryset's
+     own constant raises names no field and propagates as the query's own error. A
+     compiled bind is refused only when its parameter survives into the executable
+     outer SQL and the pinned backend or driver
      would refuse it in a way DRF cannot recover. SQLite's signed driver width, a
      PostgreSQL typed server parameter and an actual integer-array cast are distinct
      from a positive column's storage check; MySQL and PostgreSQL client numeric
@@ -2098,11 +2101,12 @@ The pipeline steps:
      that reaches no preparation or compiled bind stays with DRF and the consumer's
      `create()` / `update()`; a root writable value is independently held to the
      save rule using actual writable conversion and final `validated_data`, never a
-     validation-only read-only default. The conditional `Q.check` uses the same pinned
-     alias, through a narrow adaptation of Django's check body
-     (`django_strawberry_framework/rest_framework/validator_guard.py::_checked_q_check`),
-     preserving the installed Django body's nullable-boolean handling. DRF's own
-     `TypeError` / `ValueError` / `DataError` no-match reading remains, while an
+     validation-only read-only default. The conditional `Q.check` runs the installed
+     Django's own `Q.check` body on the same pinned alias; an `against` value it resolves
+     on the query that body builds installs the per-query guard there
+     (`django_strawberry_framework/rest_framework/validator_guard.py::_GuardInstaller`),
+     so that release's nullable-boolean handling and `DatabaseError` reading decide.
+     DRF's own `TypeError` / `ValueError` / `DataError` no-match reading remains, while an
      overflowing preparation or an unrecoverable PostgreSQL server/cast refusal is the field's
      `invalid` `"Enter a value the database can represent."` at its dotted path,
      nothing written.
@@ -3269,10 +3273,15 @@ same transport, different app.
     annotation and iterable lookups, signed integer versus positive storage bounds,
     PostgreSQL scalar/array binding and recoverable list dumping, single/deep nested
     validator paths, a late empty predicate, prior validator mutation, instance fallback,
-    eager date preparation, DRF validator decisions, and Django Q.check variants through
-    live HTTP. Its sharded sibling
+    eager date preparation, a date-family validator's datetime year bound, a validator
+    queryset's own overflowing constant, DRF validator decisions, and Django Q.check
+    variants through live HTTP. Its sharded sibling
     `examples/fakeshop/test_query/test_serializer_validator_bind_sharded_api.py`
     proves conditional create, update and nested validation use the pinned alias.
+    `tests/rest_framework/test_query_bind.py` holds the PostgreSQL integer rules on a
+    stand-in alias: a server-bound typed integer to its wrapper's signed width, an
+    integer array's explicit cast to its element's signed cast type, and a list parameter
+    to the array type psycopg's dumper selects.
   - `test_converter.py` — each supported serializer-field class → annotation +
     required-ness; `PrimaryKeyRelatedField` / `ManyRelatedField` id mapping
     (Relay-`GlobalID` vs raw pk); `FileField` → [`Upload`][glossary-upload-scalar]; the

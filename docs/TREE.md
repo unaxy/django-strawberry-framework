@@ -658,6 +658,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_converter.py         # Converter tests for the DRF serializer-field -> Strawberry annotation registry.
 │   ├── test_dry_import_ratchet.py  # The serializer flavor IMPORTS its shared substrate; it never redefines it.
 │   ├── test_inputs.py            # Serializer-derived input tests for the generated ``<Serializer>Input`` / ``PartialInput``.
+│   ├── test_query_bind.py        # The PostgreSQL integer bind rules a DRF uniqueness validator's guarded query applies.
 │   ├── test_resolvers.py         # Serializer-mutation resolver internals a live products `/graphql/` cannot drive.
 │   ├── test_sets.py              # ``SerializerMutation`` base, ``Meta`` validation, and the phase-2.5 bind.
 │   └── test_soft_dependency.py   # The DRF soft-dependency import guard.
@@ -1054,6 +1055,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 │   ├── test_converter.py         # Converter tests for the DRF serializer-field -> Strawberry annotation registry.
 │   ├── test_dry_import_ratchet.py  # The serializer flavor IMPORTS its shared substrate; it never redefines it.
 │   ├── test_inputs.py            # Serializer-derived input tests for the generated ``<Serializer>Input`` / ``PartialInput``.
+│   ├── test_query_bind.py        # The PostgreSQL integer bind rules a DRF uniqueness validator's guarded query applies.
 │   ├── test_resolvers.py         # Serializer-mutation resolver internals a live products `/graphql/` cannot drive.
 │   ├── test_sets.py              # ``SerializerMutation`` base, ``Meta`` validation, and the phase-2.5 bind.
 │   └── test_soft_dependency.py   # The DRF soft-dependency import guard.

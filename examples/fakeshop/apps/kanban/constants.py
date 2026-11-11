@@ -369,6 +369,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "tests/rest_framework/test_converter.py",
     "tests/rest_framework/test_dry_import_ratchet.py",
     "tests/rest_framework/test_inputs.py",
+    "tests/rest_framework/test_query_bind.py",
     "tests/rest_framework/test_resolvers.py",
     "tests/rest_framework/test_sets.py",
     "tests/rest_framework/test_soft_dependency.py",

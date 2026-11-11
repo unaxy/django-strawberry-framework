@@ -25,6 +25,7 @@ from graphql_client import JSONObject, graphql_payload, json_at
 from rest_framework import serializers
 from rest_framework.validators import (
     UniqueForDateValidator,
+    UniqueForYearValidator,
     UniqueTogetherValidator,
     UniqueValidator,
     qs_exists_with_condition,
@@ -1077,6 +1078,115 @@ def test_update_instance_value_is_prepared_by_the_other_models_date_field() -> N
     assert json_at(admitted, "data", "write", "errors") == [], admitted
     fit.refresh_from_db()
     assert fit.label == "fit-after"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("_tables")
+@pytest.mark.parametrize(
+    ("zone", "edge"),
+    [
+        pytest.param("America/New_York", "9999-12-31T12:00:00Z", id="last-year-behind-utc"),
+        pytest.param("Asia/Tokyo", "0001-01-01T00:30:00Z", id="first-year-ahead-of-utc"),
+    ],
+)
+def test_unique_for_year_datetime_bound_is_the_date_fields_error(zone: str, edge: str) -> None:
+    """A ``date_field`` datetime whose year bound the backend cannot bind is that field's error.
+
+    DRF's ``UniqueForYearValidator`` filters ``occurred_at__year``; over a datetime column
+    Django binds the year's first and last instants in the current time zone, and on
+    SQLite projects them onto UTC, which leaves years 1..9999 at either end of the range.
+    The stored value itself binds, so the year bound alone is refused, as ``occurredAt``'s
+    ``invalid`` error with nothing written. PostgreSQL binds the aware bounds; the write
+    goes through there. A fitting year is written, and a repeat of its label is DRF's own
+    ``unique`` error.
+    """
+
+    class UniqueLabelPerYear(_BaseSerializer):
+        class Meta:
+            model = _Parent
+            fields = ("label", "occurred_at")
+            validators = [
+                UniqueForYearValidator(
+                    queryset=_Parent.objects.all(),
+                    field="label",
+                    date_field="occurred_at",
+                ),
+            ]
+
+    schema = _schema(UniqueLabelPerYear)
+    with override_settings(TIME_ZONE=zone):
+        edge_payload = _post(schema, f'label: "edge", occurredAt: "{edge}"')
+        fitting = _post(schema, 'label: "fit", occurredAt: "2021-06-01T12:00:00Z"')
+        repeated = _post(schema, 'label: "fit", occurredAt: "2021-09-01T12:00:00Z"')
+    if connection.vendor == "sqlite":
+        _assert_invalid(edge_payload, "occurredAt")
+    else:
+        assert json_at(edge_payload, "data", "write", "errors") == [], edge_payload
+    assert json_at(fitting, "data", "write", "errors") == [], fitting
+    assert json_at(repeated, "data", "write", "result") is None, repeated
+    assert json_at(repeated, "data", "write", "errors", 0, "field") == "label", repeated
+    assert json_at(repeated, "data", "write", "errors", 0, "codes") == ["unique"], repeated
+    written = ["fit"] if connection.vendor == "sqlite" else ["edge", "fit"]
+    assert list(_Parent.objects.order_by("pk").values_list("label", flat=True)) == written
+
+
+#: An aware instant whose date in New York is in year 0: ``DateField`` cannot prepare it.
+_BEFORE_YEAR_ONE = datetime.datetime(1, 1, 1, 0, 30, tzinfo=datetime.timezone.utc)
+
+
+class _OtherBeforeYearOneQuerySet(models.QuerySet[_Other]):
+    """A consumer queryset whose ``filter`` adds its own ``day`` constant to every filter."""
+
+    @override
+    def filter(self, *args: object, **kwargs: object) -> models.QuerySet[_Other]:
+        return super().filter(*args, day__gt=_BEFORE_YEAR_ONE, **kwargs)
+
+
+class _ParentLastYearQuerySet(models.QuerySet[_Parent]):
+    """A consumer queryset whose ``filter`` adds its own ``occurred_at`` year to every filter."""
+
+    @override
+    def filter(self, *args: object, **kwargs: object) -> models.QuerySet[_Parent]:
+        return super().filter(*args, occurred_at__year=9999, **kwargs)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("_tables")
+@pytest.mark.parametrize(
+    "queryset",
+    [
+        pytest.param(_OtherBeforeYearOneQuerySet(model=_Other), id="prepared-constant"),
+        pytest.param(_ParentLastYearQuerySet(model=_Parent), id="compiled-constant"),
+    ],
+)
+def test_a_validator_querysets_own_overflowing_constant_is_no_field_error(
+    queryset: models.QuerySet[models.Model],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An ``OverflowError`` a validator queryset's own constant raises is not the client's.
+
+    The consumer's ``filter`` adds a constant no serializer field supplies: an aware date
+    ``DateField`` preparation cannot make naive in New York, or a year whose last instant
+    SQLite cannot project onto UTC. The guard names no field for it, so the error is the
+    query's own: the mutation fails as an unexpected error (the ``OverflowError`` logged),
+    nothing written, never as ``label``'s ``invalid`` error. PostgreSQL binds the compiled
+    year bound, so that row is SQLite's.
+    """
+    if queryset.model is _Parent and connection.vendor != "sqlite":
+        pytest.skip("only SQLite projects a datetime year bound onto UTC")
+
+    class UniqueLabel(_BaseSerializer):
+        class Meta:
+            model = _Parent
+            fields = ("label",)
+            extra_kwargs = {"label": {"validators": [UniqueValidator(queryset=queryset)]}}
+
+    with override_settings(TIME_ZONE="America/New_York"):
+        payload = _post(_schema(UniqueLabel), 'label: "constant"')
+    assert json_at(payload, "data") is None, payload
+    assert json_at(payload, "errors", 0, "message") == "An unexpected error occurred.", payload
+    assert {record.exc_info[0] for record in caplog.records if record.exc_info} == {OverflowError}
+    assert not _Parent.objects.exists()
 
 
 def _drf_queries_other(schema: DjangoSchema, data: str, *, row_id: int) -> bool:
