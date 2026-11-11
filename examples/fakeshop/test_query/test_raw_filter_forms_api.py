@@ -2254,12 +2254,12 @@ _ANNOTATION_READ = (
         pytest.param(
             "lag_span_0=999999999 00:00:00",
             ["lag_span: Enter a value the database can represent."],
-            id="duration-bound-the-database-cannot-bind",
+            id="duration-bound-past-sqlite",
         ),
         pytest.param(
             "lag_among=999999999 00:00:00",
             ["lag_among: Enter a value the database can represent."],
-            id="duration-member-the-database-cannot-bind",
+            id="duration-member-past-sqlite",
         ),
     ],
 )
@@ -2271,18 +2271,21 @@ def test_a_package_set_asks_the_database_about_an_annotation_value(
 ) -> None:
     """The package's set asks the bind question of a value over an annotation, late or handed.
 
-    A duration past the backend's range is cleaned as a duration and then refused by the bind
-    ask over the queryset that compares it: the handed one, or the one the set's own
-    ``filter_queryset`` passes on. No statement runs.
+    The value is cleaned as a duration, then bind-asked over the queryset that compares it: the
+    handed one, or the one the set's own ``filter_queryset`` passes on. SQLite stores a duration
+    as integer microseconds, so the database refuses the value and no statement runs.
+    PostgreSQL's ``interval`` holds every ``timedelta``, so there the value binds and filters,
+    matching no row.
     """
     _annotation_family()
     statements = record_compiled_sql(models.ScalarSpecimen._meta.db_table)
+    sqlite = connection.vendor == "sqlite"
     assert _post(
         _annotation_schema(),
         _ANNOTATION_ROWS,
         {"parent": "package", "query": query, "mode": mode},
-    ) == {"data": {"annotationRows": {"errors": errors, "rows": []}}}
-    assert statements == []
+    ) == {"data": {"annotationRows": {"errors": errors if sqlite else [], "rows": []}}}
+    assert len(statements) == (0 if sqlite else 1)
 
 
 @pytest.mark.django_db
