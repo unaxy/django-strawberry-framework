@@ -49,6 +49,14 @@ query shape, off the SQL the request emitted:
   ``conflict`` envelope, never re-INSERTed by the model or ``ModelForm`` flavor, and the
   serializer's re-INSERT is refused the same way and rolled back; an ``id`` past
   ``Venue.id``'s range is the not-found error in every flavor, the desk kept.
+- A serializer write saving a row of its model's family: over ``Venue``, ``OpenVenue``
+  and ``LendingDesk``, a ``create()`` / ``update()`` saving a proxy, a proxy of a proxy,
+  a multi-table child or grandchild or a proxy of a child (test-local proxies included)
+  answers that row; the concrete base under the proxy is refused as no ``OpenVenue``; a
+  create saving a child over a stored plain ``Venue`` is that child's INSERT, an update
+  doing so over the located row is never observed being UPDATED (no ``conflict``), and an
+  INSERT through the concrete base or a sibling proxy under the ``OpenVenue`` update is
+  no re-INSERT.
 - A key into a parent-link chain: ``createKioskFault`` and its ``ViaForm`` /
   ``ViaSerializer`` siblings name a non-Relay ``SelfServeDesk``, whose primary key is
   the ``lendingdesk_ptr`` -> ``venue_ptr`` chain, so ``kioskId`` is typed ``Int!`` from
@@ -63,8 +71,9 @@ query shape, off the SQL the request emitted:
 import asyncio
 import datetime
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from functools import wraps
+from typing import TypeVar
 
 import pytest
 import strawberry
@@ -97,14 +106,17 @@ from graphql_client import (
     statement_shapes_after_last_delete,
 )
 from strategy_schemas import make_django_type
+from typing_extensions import override
 
 from django_strawberry_framework import (
     DjangoConnectionField,
     DjangoListField,
     DjangoMutation,
+    DjangoMutationField,
     DjangoOptimizerExtension,
     DjangoSchema,
     DjangoType,
+    SerializerMutation,
     aapply_cascade_permissions,
     apply_cascade_permissions,
     finalize_django_types,
@@ -114,6 +126,7 @@ from django_strawberry_framework.filters import FilterSet, RelatedFilter
 from django_strawberry_framework.orders import OrderSet, RelatedOrder
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
+from tests._idioms import ModelSerializerBase, saved_pk
 
 
 def _sql_from_table(captured: CaptureQueriesContext, table: str) -> list[str]:
@@ -533,10 +546,23 @@ async def _branch_reads_async_view(request: HttpRequest) -> HttpResponseBase:
     return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
 
 
-# Served only under ``override_settings(ROOT_URLCONF=__name__)`` by ``_branch_reads``.
+#: The private schema ``_post_family`` serves, set for one request.
+_FAMILY_WRITES: dict[str, DjangoSchema | None] = {"schema": None}
+
+
+@wraps(DjangoGraphQLView.as_view())
+def _family_writes_view(request: HttpRequest) -> HttpResponseBase:
+    schema = _FAMILY_WRITES["schema"]
+    assert schema is not None
+    return DjangoGraphQLView.as_view(schema=schema)(request)
+
+
+# Served only under ``override_settings(ROOT_URLCONF=__name__)`` by ``_branch_reads`` and
+# ``_post_family``.
 urlpatterns = [
     path("graphql-branch-reads/", _branch_reads_view),
     path("graphql-branch-reads-async/", _branch_reads_async_view),
+    path("graphql-venue-family/", _family_writes_view),
 ]
 
 
@@ -1954,3 +1980,490 @@ def test_kiosk_fault_create_naming_a_hidden_or_missing_kiosk_is_the_relation_err
         ],
     }
     assert not models.KioskFault.objects.exists()
+
+
+# ===========================================================================
+# A serializer write saving a proxy or multi-table child of its model's rows
+# ===========================================================================
+
+_FAMILY_DAY = datetime.date(2024, 1, 2)
+
+_VenueT = TypeVar("_VenueT", bound=models.Venue)
+
+#: The request's consumer scenario: what the write does (``scenario``), the class key of
+#: the row it saves (``saved``) and, for a create promoting a stored venue, its key.
+_FAMILY: dict[str, str] = {}
+
+#: The classes the scenario keys name, rebuilt per request (the proxies are test-local).
+_FAMILY_CLASSES: dict[str, type[models.Venue]] = {}
+
+
+def _proxy_of(base: type[_VenueT], name: str) -> type[_VenueT]:
+    """Declare a test-local proxy of ``base``; the registry restore drops it after the test."""
+    meta = type("Meta", (), {"proxy": True, "app_label": "library"})
+    made = type(name, (base,), {"Meta": meta, "__module__": __name__})
+    assert issubclass(made, base)
+    return made
+
+
+def _install_family_classes() -> None:
+    """Key the shipped ``Venue`` family and three test-local proxies for the scenario."""
+    _FAMILY_CLASSES.update(
+        venue=models.Venue,
+        venue_proxy=_proxy_of(models.Venue, "SavedVenueProxy"),
+        open_venue=models.OpenVenue,
+        open_venue_proxy=_proxy_of(models.OpenVenue, "SavedOpenVenueProxy"),
+        desk=models.LendingDesk,
+        desk_proxy=_proxy_of(models.LendingDesk, "SavedLendingDeskProxy"),
+        self_serve=models.SelfServeDesk,
+    )
+
+
+def _child_values(cls: type[models.Venue]) -> dict[str, object]:
+    """The local columns a new row of ``cls`` stores beside its ``Venue`` ones."""
+    values: dict[str, object] = {}
+    if issubclass(cls, models.LendingDesk):
+        values["window_count"] = 3
+    if issubclass(cls, models.SelfServeDesk):
+        values["kiosk_code"] = "K-9"
+    return values
+
+
+def _family_write(instance: models.Venue | None) -> models.Venue:
+    """The consumer's ``create()`` / ``update()``: save the scenario's row, return it.
+
+    ``save`` saves a new row of the class (create) or the located row loaded as it
+    (update), named ``Saved``. ``promote`` saves a new row of the multi-table class over a
+    stored plain ``Venue`` row (the located one on an update), turning that row into a
+    child. ``replace`` deletes the located row, stores it again through the class and then
+    saves the located instance, renamed ``Saved``.
+    """
+    scenario = _FAMILY["scenario"]
+    cls = _FAMILY_CLASSES[_FAMILY["saved"]]
+    if scenario == "save":
+        if instance is None:
+            row = cls(name="Saved", opened_on=_FAMILY_DAY, **_child_values(cls))
+        else:
+            row = cls._base_manager.get(pk=instance.pk)
+            row.name = "Saved"
+        row.save()
+        return row
+    if scenario == "promote":
+        key = int(_FAMILY["promoted"]) if instance is None else instance.pk
+        child = cls(pk=key, name="Promoted", opened_on=_FAMILY_DAY, **_child_values(cls))
+        child.save()
+        return child
+    assert instance is not None
+    _ = models.Venue._base_manager.filter(pk=instance.pk).delete()
+    cls(pk=instance.pk, name="Replaced", opened_on=_FAMILY_DAY).save()
+    instance.name = "Saved"
+    instance.save()
+    return instance
+
+
+class FamilySerializer(ModelSerializerBase[models.Venue]):
+    """A ``Venue``-family serializer whose ``create()`` / ``update()`` save the scenario's row."""
+
+    @override
+    def create(self, validated_data: dict[str, object]) -> models.Venue:
+        return _family_write(None)
+
+    @override
+    def update(self, instance: models.Venue, validated_data: dict[str, object]) -> models.Venue:
+        return _family_write(instance)
+
+
+class FamilyVenueSerializer(FamilySerializer):
+    """The ``Venue`` serializer."""
+
+    class Meta:
+        model = models.Venue
+        fields = ("name",)
+
+
+class FamilyOpenVenueSerializer(FamilySerializer):
+    """The ``OpenVenue`` proxy's serializer."""
+
+    class Meta:
+        model = models.OpenVenue
+        fields = ("name",)
+
+
+class FamilyLendingDeskSerializer(FamilySerializer):
+    """The ``LendingDesk`` child's serializer."""
+
+    class Meta:
+        model = models.LendingDesk
+        fields = ("name",)
+
+
+def _family_schema() -> DjangoSchema:
+    """A serializer create and update per backing model: ``Venue``, a proxy, a child."""
+
+    class VenueNode(DjangoType):
+        class Meta:
+            model = models.Venue
+            fields = ("id", "name")
+
+    class OpenVenueNode(DjangoType):
+        class Meta:
+            model = models.OpenVenue
+            fields = ("id", "name")
+
+    class LendingDeskNode(DjangoType):
+        class Meta:
+            model = models.LendingDesk
+            fields = ("id", "name")
+
+    class CreateVenueFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyVenueSerializer
+            operation = "create"
+            permission_classes = []
+
+    class UpdateVenueFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyVenueSerializer
+            operation = "update"
+            permission_classes = []
+
+    class CreateOpenVenueFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyOpenVenueSerializer
+            operation = "create"
+            permission_classes = []
+
+    class UpdateOpenVenueFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyOpenVenueSerializer
+            operation = "update"
+            permission_classes = []
+
+    class CreateLendingDeskFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyLendingDeskSerializer
+            operation = "create"
+            permission_classes = []
+
+    class UpdateLendingDeskFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyLendingDeskSerializer
+            operation = "update"
+            permission_classes = []
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class Mutation:
+        create_venue_family = DjangoMutationField(CreateVenueFamily)
+        update_venue_family = DjangoMutationField(UpdateVenueFamily)
+        create_open_venue_family = DjangoMutationField(CreateOpenVenueFamily)
+        update_open_venue_family = DjangoMutationField(UpdateOpenVenueFamily)
+        create_lending_desk_family = DjangoMutationField(CreateLendingDeskFamily)
+        update_lending_desk_family = DjangoMutationField(UpdateLendingDeskFamily)
+
+    del VenueNode, OpenVenueNode, LendingDeskNode
+    finalize_django_types()
+    return DjangoSchema(query=Query, mutation=Mutation, error_policy={"enabled": False})
+
+
+#: (root field suffix, serializer class name) per backing model.
+_FAMILY_BACKINGS = {
+    "venue": ("VenueFamily", "FamilyVenueSerializer"),
+    "open_venue": ("OpenVenueFamily", "FamilyOpenVenueSerializer"),
+    "desk": ("LendingDeskFamily", "FamilyLendingDeskSerializer"),
+}
+
+
+def _post_family(backing: str, located: int | None) -> tuple[JSONObject, list[str], int]:
+    """POST ``backing``'s create, or its update of ``located``.
+
+    Returns the payload, the SQL and the root field's 1-based column in the document.
+    """
+    suffix, serializer = _FAMILY_BACKINGS[backing]
+    if located is None:
+        root = f"create{suffix}"
+        document = (
+            f"mutation($d: {serializer}Input!) {{ {root}(data: $d) {{ {_FAMILY_RESULT} }} }}"
+        )
+        variables: JSONObject = {"d": {"name": "Sent"}}
+    else:
+        root = f"update{suffix}"
+        document = (
+            f"mutation($id: ID!, $d: {serializer}PartialInput!) "
+            f"{{ {root}(id: $id, data: $d) {{ {_FAMILY_RESULT} }} }}"
+        )
+        variables = {"id": located, "d": {"name": "Sent"}}
+    _install_family_classes()
+    _FAMILY_WRITES["schema"] = _family_schema()
+    try:
+        with (
+            override_settings(ROOT_URLCONF=__name__),
+            CaptureQueriesContext(connection) as captured,
+        ):
+            payload = graphql_payload(document, variables=variables, url="/graphql-venue-family/")
+    finally:
+        _FAMILY_WRITES["schema"] = None
+        _FAMILY_CLASSES.clear()
+    return payload, [query["sql"] for query in captured.captured_queries], document.index(root) + 1
+
+
+def _family_writes(sql: list[str]) -> list[str]:
+    """The ``INSERT`` and ``UPDATE`` shapes of ``sql``, in order."""
+    return [shape for shape in statement_shapes(sql) if shape.split()[0] in {"INSERT", "UPDATE"}]
+
+
+_FAMILY_RESULT = "result { name } errors { field messages codes }"
+
+
+def _stored_venues() -> tuple[list[tuple[int | None, str]], list[int | None], list[int | None]]:
+    """Every venue's key and name, every desk's key and every kiosk's key."""
+    return (
+        list(models.Venue._base_manager.order_by("pk").values_list("pk", "name")),
+        list(models.LendingDesk._base_manager.order_by("pk").values_list("pk", flat=True)),
+        list(models.SelfServeDesk._base_manager.order_by("pk").values_list("pk", flat=True)),
+    )
+
+
+def _plain_venue(name: str) -> int:
+    """Store a plain, opened ``Venue`` row; return its key."""
+    return saved_pk(models.Venue.objects.create(name=name, opened_on=_FAMILY_DAY))
+
+
+@pytest.fixture
+def family_scenario() -> Generator[dict[str, str], None, None]:
+    """The family scenario, cleared after the test."""
+    try:
+        yield _FAMILY
+    finally:
+        _FAMILY.clear()
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize("op", ["create", "update"])
+@pytest.mark.parametrize(
+    ("backing", "saved"),
+    [
+        pytest.param("venue", "venue", id="venue-venue"),
+        pytest.param("venue", "open_venue", id="venue-proxy"),
+        pytest.param("venue", "open_venue_proxy", id="venue-proxy-of-proxy"),
+        pytest.param("venue", "desk", id="venue-child"),
+        pytest.param("venue", "desk_proxy", id="venue-proxy-of-child"),
+        pytest.param("venue", "self_serve", id="venue-grandchild"),
+        pytest.param("open_venue", "open_venue", id="proxy-proxy"),
+        pytest.param("open_venue", "open_venue_proxy", id="proxy-proxy-of-proxy"),
+        pytest.param("desk", "desk", id="child-child"),
+        pytest.param("desk", "desk_proxy", id="child-proxy-of-child"),
+        pytest.param("desk", "self_serve", id="child-grandchild"),
+    ],
+)
+def test_a_serializer_returning_a_row_of_its_models_family_answers_the_payload(
+    backing: str,
+    saved: str,
+    op: str,
+    family_scenario: dict[str, str],
+) -> None:
+    """A ``create()`` / ``update()`` saving a proxy or child row of the model answers it.
+
+    The consumer saves a row of another class and returns it: a proxy, a proxy of a
+    proxy, a multi-table child or grandchild, a proxy of a child. Django sends its
+    ``post_save`` with that class, and each saves the model's rows, so the write witness
+    records the save and the returned row is the one observed being INSERTED (create) or
+    UPDATED (update), and the payload answers it.
+    """
+    kiosk = models.SelfServeDesk.objects.create(
+        name="Kiosk",
+        opened_on=_FAMILY_DAY,
+        window_count=1,
+        kiosk_code="K-0",
+    )
+    located = saved_pk(kiosk) if op == "update" else None
+    venues, desks, kiosks = _stored_venues()
+    family_scenario.update(scenario="save", saved=saved)
+
+    payload, _sql, _column = _post_family(backing, located)
+
+    assert payload == {
+        "data": {
+            f"{op}{_FAMILY_BACKINGS[backing][0]}": {"result": {"name": "Saved"}, "errors": []},
+        },
+    }
+    if op == "update":
+        assert _stored_venues() == ([(located, "Saved")], desks, kiosks)
+        return
+    stored_venues, stored_desks, stored_kiosks = _stored_venues()
+    [(new, name)] = [entry for entry in stored_venues if entry not in venues]
+    assert name == "Saved"
+    child = saved in {"desk", "desk_proxy", "self_serve"}
+    assert stored_desks == [*desks, new] if child else desks
+    assert stored_kiosks == [*kiosks, new] if saved == "self_serve" else kiosks
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize("op", ["create", "update"])
+def test_a_proxy_serializer_returning_its_concrete_base_row_is_refused(
+    op: str,
+    family_scenario: dict[str, str],
+) -> None:
+    """The ``OpenVenue`` serializer's write returning a plain ``Venue`` row is refused.
+
+    The concrete base is not a subclass of the proxy, so the returned row is not an
+    ``OpenVenue`` instance: a ``ConfigurationError``, the write rolled back.
+    """
+    located = _plain_venue("Located") if op == "update" else None
+    before = _stored_venues()
+    family_scenario.update(scenario="save", saved="venue")
+
+    payload, _sql, column = _post_family("open_venue", located)
+
+    mutation = f"{op.title()}OpenVenueFamily"
+    assert payload == {
+        "data": None,
+        "errors": [
+            {
+                "message": (
+                    f"SerializerMutation {mutation}: FamilyOpenVenueSerializer.save() returned "
+                    "<Venue: Saved>, not a OpenVenue instance; the serializer's "
+                    "create()/update() must return the written model row."
+                ),
+                "locations": [{"line": 1, "column": column}],
+                "path": [f"{op}OpenVenueFamily"],
+            },
+        ],
+    }
+    assert _stored_venues() == before
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("saved", "writes"),
+    [
+        pytest.param(
+            "desk",
+            [
+                'UPDATE "library_venue"',
+                'UPDATE "library_lendingdesk"',
+                'INSERT "library_lendingdesk"',
+            ],
+            id="child",
+        ),
+        pytest.param(
+            "self_serve",
+            [
+                'UPDATE "library_venue"',
+                'UPDATE "library_lendingdesk"',
+                'INSERT "library_lendingdesk"',
+                'INSERT "library_selfservedesk"',
+            ],
+            id="grandchild",
+        ),
+    ],
+)
+def test_a_create_promoting_a_stored_venue_to_a_child_is_its_insert(
+    saved: str,
+    writes: list[str],
+    family_scenario: dict[str, str],
+) -> None:
+    """A create saving a child row over a stored plain ``Venue`` answers the child.
+
+    The consumer's ``create()`` saves a new ``LendingDesk`` (or ``SelfServeDesk``) whose key
+    is a stored plain venue's: Django UPDATEs the ``Venue`` row and INSERTs the child's own
+    table rows, and its ``post_save`` reports ``created=True``. The witness takes that
+    answer as the create's INSERT, so the payload answers the promoted row.
+    """
+    promoted = _plain_venue("Plain")
+    family_scenario.update(scenario="promote", saved=saved, promoted=str(promoted))
+
+    payload, sql, _column = _post_family("venue", None)
+
+    assert payload == {
+        "data": {"createVenueFamily": {"result": {"name": "Promoted"}, "errors": []}},
+    }
+    assert _family_writes(sql) == writes
+    kiosks = [promoted] if saved == "self_serve" else []
+    assert _stored_venues() == ([(promoted, "Promoted")], [promoted], kiosks)
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "saved",
+    [pytest.param("desk", id="child"), pytest.param("self_serve", id="grandchild")],
+)
+def test_an_update_promoting_its_located_venue_to_a_child_is_refused(
+    saved: str,
+    family_scenario: dict[str, str],
+) -> None:
+    """An update saving a child row over the located plain ``Venue`` is no update of it.
+
+    The child's ``post_save`` reports ``created=True`` under the authorized key, but for
+    the child's own table, not the located row's: the located ``Venue`` row was UPDATEd,
+    never re-INSERTed, so it is not the ``conflict`` of a vanished row. No ``created=False``
+    save of the returned row was observed, so the result is refused as never UPDATED and
+    the write rolled back.
+    """
+    located = _plain_venue("Located")
+    before = _stored_venues()
+    family_scenario.update(scenario="promote", saved=saved)
+
+    payload, _sql, column = _post_family("venue", located)
+
+    assert payload == {
+        "data": None,
+        "errors": [
+            {
+                "message": (
+                    "SerializerMutation UpdateVenueFamily: FamilyVenueSerializer.save() "
+                    "returned a Venue that was never observed being UPDATED on alias "
+                    "'default' during the save; the serializer must persist and return the "
+                    "same row addressed by this mutation. Returning an existing instance "
+                    "without saving it is not an update and cannot be reported as success."
+                ),
+                "locations": [{"line": 1, "column": column}],
+                "path": ["updateVenueFamily"],
+            },
+        ],
+    }
+    assert _stored_venues() == before
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "saved",
+    [pytest.param("venue", id="concrete-base"), pytest.param("venue_proxy", id="sibling-proxy")],
+)
+def test_an_update_restoring_its_row_through_a_class_outside_the_family_answers_the_payload(
+    saved: str,
+    family_scenario: dict[str, str],
+) -> None:
+    """A row the ``OpenVenue`` update INSERTs through the concrete base or a sibling is unread.
+
+    The consumer's ``update()`` deletes the located row, stores it again under its key
+    through ``Venue`` or another proxy of it, then saves the located ``OpenVenue``, an
+    UPDATE. Neither class is a subclass of the proxy, so their INSERT under the
+    authorized key is not recorded and is never read as the re-INSERT of a vanished row:
+    the observed UPDATE answers the payload.
+    """
+    located = _plain_venue("Located")
+    family_scenario.update(scenario="replace", saved=saved)
+
+    payload, sql, _column = _post_family("open_venue", located)
+
+    assert payload == {
+        "data": {"updateOpenVenueFamily": {"result": {"name": "Saved"}, "errors": []}},
+    }
+    # The restore's update-else-insert, then the located row's UPDATE.
+    assert _family_writes(sql) == [
+        'UPDATE "library_venue"',
+        'INSERT "library_venue"',
+        'UPDATE "library_venue"',
+    ]
+    assert _stored_venues() == ([(located, "Saved")], [], [])

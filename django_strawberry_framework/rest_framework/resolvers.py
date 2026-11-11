@@ -109,14 +109,16 @@ The serializer-specific invariants this module owns:
   names through ``save_time_error_key_map``, one level, since a Django error names
   no nested item; the integrity mapper, which answers a refused row's ``None`` on a
   ``blank=True, null=False`` input column as that column's field-keyed ``null`` error,
-  read from the backing-model row whose save the write witness saw raise the caught
-  exception (``_attempted_row_integrity_errors``)),
+  read from the backing-model row (the model's own, a proxy's or a multi-table
+  child's) whose save the write witness saw raise the caught exception
+  (``_attempted_row_integrity_errors``)),
   never a top-level ``GraphQLError``. A
   nested item fails at save time through a DRF ``ValidationError`` in the nested
   shape, which the flattener keys to the item's path. DRF's ``update()`` saves
-  through Django's update-else-insert, so on an update a ``created=True`` write the
-  witness (``_write_witness``) records under the authorized pk on the pinned alias
-  is the re-INSERT of a located row a concurrent transaction deleted after the
+  through Django's update-else-insert, so on an update a ``created=True`` write of the
+  located row's own table the witness (``_write_witness``) records under the
+  authorized pk on the pinned alias is the re-INSERT of a located row a concurrent
+  transaction deleted after the
   locate: the step returns the in-band ``conflict`` envelope on ``id``, rolled back
   with the re-inserted row, before the saved result is validated. A decode or
   ``is_valid()`` that fails over such a row first (``serializer.errors``, or a
@@ -247,6 +249,7 @@ from django_strawberry_framework.utils.write_values import (
     decode_visible_relation_ids,
     decoded_into,
     refused_save,
+    saves_rows_of,
     unstorable_columns,
 )
 from django_strawberry_framework.write_mixins import backing_model_of
@@ -2643,14 +2646,16 @@ def _attest_saved_relations(
 
 @dataclasses.dataclass(frozen=True)
 class _Witness:
-    """What ``_write_witness`` observed of the backing model's saves on the owning thread.
+    """What ``_write_witness`` observed of the backing model's row saves on the owning thread.
 
     ``written`` holds one ``(instance, pk_at_write, created, using)`` record per
     completed save (its ``post_save``); ``attempted`` is the
     ``utils/write_values.py::attempted_saves`` record of the saves that started and have
     not completed, so after a failed ``serializer.save()`` it holds the row whose save
     raised the caught exception, if a backing-model save raised it, and the columns that
-    save wrote (``_attempted_row_integrity_errors``).
+    save wrote (``_attempted_row_integrity_errors``). A backing-model save is one of a row
+    of the model, a proxy of it or a multi-table child
+    (``utils/write_values.py::saves_rows_of``).
     """
 
     written: list[_WrittenRow]
@@ -2694,10 +2699,18 @@ def _write_witness(
       the snapshot. ``serializer.instance`` identity alone is likewise forgeable through
       normal DRF bookkeeping (a custom ``create()`` returning an EXISTING row still gets
       assigned to ``self.instance``); only the observed INSERT + pk snapshot proves the
-      returned row is new. On UPDATE, a ``created=True`` record under the authorized
-      pk is the update-else-insert re-INSERT of a row that vanished after the
-      locate, which ``_guarded_serializer_write`` returns as the ``conflict``
-      envelope.
+      returned row is new. On UPDATE, a ``created=True`` record of the located row's
+      own table under the authorized pk is the update-else-insert re-INSERT of a row
+      that vanished after the locate, which ``_guarded_serializer_write`` returns as
+      the ``conflict`` envelope (``_inserted_authorized_row``).
+
+    Both recorders hear a save of any row of the backing model: Django sends
+    ``pre_save`` / ``post_save`` with the saved instance's own class, so they connect
+    without a sender and keep a save whose sender is the model, a proxy of it or a
+    multi-table child (``utils/write_values.py::saves_rows_of``), the classes the
+    saved-result check accepts a returned row of. A save of the concrete base under a
+    proxy model, of a sibling proxy, of a multi-table parent or of an unrelated model
+    is not recorded.
 
     Signal-less SAME-alias bulk writes are invisible to the recorder; for the create
     witness that fails CLOSED (an unwitnessed create result is rejected - persist the
@@ -2724,8 +2737,8 @@ def _write_witness(
         using: str | None,
         **kwargs: object,
     ) -> None:
-        del sender, kwargs
-        if threading.get_ident() != owner:
+        del kwargs
+        if threading.get_ident() != owner or not saves_rows_of(model, sender):
             return
         written.append(
             (
@@ -2739,12 +2752,12 @@ def _write_witness(
     # The cross-alias blocker connects first, so a save it refuses is never recorded
     # as attempted.
     pre_save.connect(_block_cross_alias, weak=False)
-    post_save.connect(_record, sender=model, weak=False)
+    post_save.connect(_record, weak=False)
     try:
         with attempted_saves(model) as attempted:
             yield _Witness(written=written, attempted=attempted)
     finally:
-        _ = post_save.disconnect(_record, sender=model)
+        _ = post_save.disconnect(_record)
         _ = pre_save.disconnect(_block_cross_alias)
 
 
@@ -2759,15 +2772,23 @@ def _inserted_authorized_row(
     alias: str,
     written: list[_WrittenRow],
 ) -> bool:
-    """Return whether the write witness saw an INSERT under the update's authorized pk.
+    """Return whether the witness saw the located row's table INSERTed under the authorized pk.
 
     ``written`` is the ``_write_witness`` ``post_save`` record of the backing model; a
     ``created=True`` row whose pk snapshot is ``authorized_pk`` on the pinned alias was
-    INSERTed under the located row's key, which a present row would have refused.
+    INSERTed under the located row's key, which a present row would have refused. Only a
+    row of the located row's own table counts (``_meta.concrete_model``: the backing
+    model or a proxy of it): a multi-table child's ``created`` names its own table's
+    INSERT, which a child row saved over a present parent row (an existing row turned
+    into a child) reports too.
     """
+    table = model._meta.concrete_model
     return any(
-        created and using == alias and pks_match(model, row_pk, authorized_pk)
-        for _row, row_pk, created, using in written
+        created
+        and using == alias
+        and row._meta.concrete_model is table
+        and pks_match(model, row_pk, authorized_pk)
+        for row, row_pk, created, using in written
     )
 
 
@@ -2810,12 +2831,17 @@ def _checked_saved_result(
       ``self.instance``), and object identity alone is forgeable too (insert a row, then
       re-point the same object's pk at a hidden row). Only the observed INSERT whose
       snapshotted pk still equals ``saved.pk`` proves the returned row is the new one.
+      A multi-table child saved over an existing parent row (an existing row turned
+      into a child) is such an INSERT: Django's ``post_save`` reports ``created=True``
+      for the child table's new row, and that answer is taken as Django gives it.
       A custom ``create()`` that persists via signal-less bulk paths fails closed here;
       persist the returned row via ``instance.save()``;
     - on UPDATE it must match a witnessed ``created=False`` write the same way. An
-      update whose save was witnessed INSERTing under the authorized pk never
-      reaches this check: the located row vanished after the locate, which
-      ``_guarded_serializer_write`` returns as the ``conflict`` envelope first.
+      update whose save was witnessed INSERTing into the located row's own table under
+      the authorized pk never reaches this check: the located row vanished after the
+      locate, which ``_guarded_serializer_write`` returns as the ``conflict`` envelope
+      first. A multi-table child saved over the located row INSERTs only its own table,
+      so it reaches this check, which refuses it as never UPDATED.
     """
     model = backing_model_of(mutation_cls._mutation_meta)
     name = truth.name(type(serializer))
@@ -3007,8 +3033,9 @@ def _attempted_row_integrity_errors(
 ) -> list[FieldError]:
     """Map a failed ``serializer.save()``'s ``IntegrityError``, naming each input column left null.
 
-    ``attempted`` is the write witness's record of the backing model's saves that started
-    and never completed, and ``error`` the caught exception: the row read is the one whose
+    ``attempted`` is the write witness's record of the saves of backing-model rows (the
+    model's own, a proxy's or a multi-table child's) that started and never completed,
+    and ``error`` the caught exception: the row read is the one whose
     save raised it (``utils/write_values.py::refused_save``), never a save the consumer's
     ``create()`` / ``update()`` caught and swallowed before another write raised. A
     ``blank=True, null=False`` column with no default skips ``Model.clean_fields`` on an
@@ -3025,8 +3052,9 @@ def _attempted_row_integrity_errors(
     column there by its name or its ``attname``. The columns and their names are the
     save-time key map (``utils/errors.py::save_time_error_key_map``), keyed by model field
     name. No backing-model save that raised ``error`` (a custom ``create()`` /
-    ``update()`` whose failing write is another model's, an M2M row, raw SQL, or no write
-    at all), or one no such column explains, is the ``"__all__"`` ``constraint`` envelope.
+    ``update()`` whose failing write is another model's, the concrete base's under a
+    proxy model or a multi-table parent's included, an M2M row, raw SQL, or no write at
+    all), or one no such column explains, is the ``"__all__"`` ``constraint`` envelope.
     Read after the failed save, never before, so a consumer ``save()`` that fills the
     value in still writes.
     """
@@ -3060,8 +3088,8 @@ def _guarded_serializer_write(
     (``utils/inputs.py::published_input_specs``).
 
     A save-time ``IntegrityError`` is diagnosed from the row the database refused, the
-    backing-model row in ``witness.attempted`` whose save raised it
-    (``_attempted_row_integrity_errors``): each
+    backing-model row (the model's own, a proxy's or a multi-table child's) in
+    ``witness.attempted`` whose save raised it (``_attempted_row_integrity_errors``): each
     input column that save writes and the row holds ``None`` on with ``null=False`` (a
     ``ModelSerializer`` field DRF generates ``required=False`` over a ``blank=True``
     column with no default, left out; a declared ``allow_null=True`` field sent ``null``)
@@ -3246,8 +3274,9 @@ def _guarded_serializer_write(
         )
     if write_error is not None:
         return StepFailure(write_error)
-    # An INSERT under the authorized pk during an UPDATE proves the located row was gone
-    # when the save ran (an INSERT over a present row is an ``IntegrityError``): DRF's
+    # An INSERT into the located row's own table under the authorized pk during an UPDATE
+    # proves the located row was gone when the save ran (an INSERT over a present row is
+    # an ``IntegrityError``): DRF's
     # ``ModelSerializer.update()`` saves through ``save()``'s update-else-insert fallback,
     # so a row a concurrent transaction deleted after the locate was re-inserted. That is
     # the in-band ``conflict`` envelope, rolled back with the re-inserted row.

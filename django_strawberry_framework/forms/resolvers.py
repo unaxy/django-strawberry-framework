@@ -1718,9 +1718,11 @@ def _unstorable_cleaned_fields(
     """Return the columns the refused save of ``form.instance`` wrote and cannot store.
 
     ``attempted`` is the ``utils/write_values.py::attempted_saves`` record of the saves
-    that started and did not complete, and ``error`` the caught exception; the refused
-    save is the recorded save that raised it (``utils/write_values.py::refused_save``),
-    read only when it is a save of ``form.instance``. Only a column that save writes
+    of the mutation's model's rows (its own, a proxy's or a multi-table child's) that
+    started and did not complete, and ``error`` the caught exception; the refused save is
+    the recorded save that raised it (``utils/write_values.py::refused_save``), read only
+    when it is a save of ``form.instance``, whatever row a consumer ``save()`` bound there
+    before saving it. Only a column that save writes
     counts: a save with ``update_fields`` (a model ``save()`` narrowing its write, or a
     deferred-load row's loaded fields) leaves every column outside it untouched, so its
     value cannot be what the database refused, and it is never read (a deferred column is
@@ -2125,7 +2127,9 @@ def _modelform_save_or_field_errors(
     ``_unstorable_cleaned_fields`` finds such a column on ``form.instance`` when its own
     save raised the exception (``utils/write_values.py::refused_save``), among the
     columns that save writes (its ``update_fields``, recorded at ``pre_save`` by
-    ``utils/write_values.py::attempted_saves``), so the
+    ``utils/write_values.py::attempted_saves`` for every row of the mutation's model, a
+    proxy of it or a multi-table child, so a consumer ``save()`` that binds
+    ``form.instance`` to such a row is read too), so the
     error carries the field, code ``null``, path and message the model flavor gives the
     same input (``mutations/resolvers.py::_explicit_null_error`` for an explicit
     ``null`` scalar, ``mutations/resolvers.py::_decode_single_relation_id``
@@ -2152,7 +2156,7 @@ def _modelform_save_or_field_errors(
     """
 
     def save() -> None:
-        with attempted_saves(type(form.instance)) as attempted:
+        with attempted_saves(backing_model_of(mutation_cls._mutation_meta)) as attempted:
             try:
                 if not creating:
                     save_located_row(form.save(commit=False))

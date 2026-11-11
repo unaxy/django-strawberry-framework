@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 228 to do.
+Progress: 0 done, 229 to do.
 
 ## From dry-0_0_15_3
 
@@ -1097,6 +1097,12 @@ Progress: 0 done, 228 to do.
   column's depth: over a numeric leaf a ragged member or one deeper than the column answers `FILTER_INVALID` with the
   leaf's form error ("Enter a number.") where the queryset raised `TypeError`, and a member shallower than the column
   or a leaf beside a row answers `FILTER_INVALID` "Enter a list of values."
+- [ ] 918. CHANGELOG entry for item 764: a `SerializerMutation` whose custom `create()` / `update()` saves a proxy or
+  multi-table child row of the serializer's model now answers that row's refused `None` column with its field-keyed
+  `null` error, where it answered the `"__all__"` constraint envelope, and a returned such row now answers its
+  payload, where it was refused as never saved ("never observed being INSERTED/UPDATED"); a `DjangoModelFormMutation`
+  whose form `save()` rebinds `form.instance` to such a row answers the same `null`. An update whose `update()` saves
+  a multi-table child over the located row is refused as never UPDATED, never answered as `conflict`
 
 ## From dry-upstream-0_0_15
 

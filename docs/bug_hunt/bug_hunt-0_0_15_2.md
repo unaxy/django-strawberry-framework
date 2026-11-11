@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 507 done, 103 to do. The CHANGELOG entries filed here moved to
+Progress: 508 done, 102 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2896,13 +2896,31 @@ Progress: 507 done, 103 to do. The CHANGELOG entries filed here moved to
   (`BaseTemporalField.to_python`, as on a flat array, a plain `in` and stock django-filter); unequal sibling lengths,
   a leaf-and-list value under the containment lookups and `None` where a row is due stay with PostgreSQL's array
   parser, as on a plain queryset.
+- [x] 764. A save of any row of a mutation's model is recorded: `utils/write_values.py::saves_rows_of` (`sender` a
+  subclass of the model: the model, a proxy, a proxy of a proxy, a multi-table child or grandchild, a proxy of a
+  child, the classes the saved-result checks already accept) filters `attempted_saves`' `pre_save` recorder and
+  `rest_framework/resolvers.py::_write_witness`'s `post_save` recorder, both connected with no sender (Django matches
+  a sender exactly), and the form flavor records the mutation's model, not `type(form.instance)`. A
+  `SerializerMutation` whose `create()` / `update()` saves such a row answers its refused `None` column's field-keyed
+  `null` (spec-039 Decision 8) where it answered the `"__all__"` envelope, and a returned such row answers its payload
+  where it was rolled back as "never observed being INSERTED/UPDATED"; a `DjangoModelFormMutation` whose form `save()`
+  rebinds `form.instance` to one answers the same `null`. `_inserted_authorized_row` counts only an INSERT into the
+  located row's own table, so a child saved over the located row is refused as never UPDATED, not `conflict`; a child
+  saved over a stored parent on create is that create's INSERT (Django's `created=True`). A concrete base under a proxy
+  model, a sibling proxy, a multi-table parent and an unrelated model stay unrecorded. spec-039 (Decision 8, Edge
+  cases, Test plan), spec-038 and GLOSSARY `serializermutation` restated. Pinned live by
+  `examples/fakeshop/test_query/test_save_time_refused_row_api.py::test_a_serializer_names_the_null_of_a_refused_row_of_its_models_family`,
+  `::test_a_serializer_names_a_proxy_row_refused_after_its_own_row_saved`,
+  `::test_a_failure_after_a_family_rows_save_completed_is_the_envelope`,
+  `::test_a_modelform_names_the_null_of_its_instance_refused_as_any_row_of_its_model` and
+  `examples/fakeshop/test_query/test_library_inheritance_api.py::test_a_serializer_returning_a_row_of_its_models_family_answers_the_payload`,
+  `::test_a_proxy_serializer_returning_its_concrete_base_row_is_refused`,
+  `::test_a_create_promoting_a_stored_venue_to_a_child_is_its_insert`,
+  `::test_an_update_promoting_its_located_venue_to_a_child_is_refused`,
+  `::test_an_update_restoring_its_row_through_a_class_outside_the_family_answers_the_payload`.
 
 ## To do: found along the way
 
-- [ ] 764. (robustness) `utils/write_values.py::attempted_saves` connects `sender=model` exactly, so a serializer
-  `create()` / `update()` saving a proxy or subclass row of the backing model leaves no record and a refused save of
-  it answers the envelope where its `None` column's `null` applies (spec-039 Decision 8). Envelope at the parent and
-  after 695. Found researching 695
 - [ ] 766. `Decision N step M` sub-ordinals in first-party prose are ungated: 53 sites plus one `spec-NNN step M`, 52
   resolving (703 fixed the dangling spec-039 Decision 7 step 4 and the Decision-less spec-036 step). Root-cause fix:
   restate each by content and refuse `Decision N step M` in the citation gate, amending START.md's "a Decision's step

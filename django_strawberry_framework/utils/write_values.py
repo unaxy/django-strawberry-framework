@@ -24,6 +24,9 @@ runs at decode time:
 - ``unstorable_columns`` - the save-time diagnosis of an attempted row: the
   declared columns holding a value the column cannot store (``None`` on a
   ``null=False`` column), read from the in-memory instance after a failed save;
+- ``saves_rows_of`` - whether a ``pre_save`` / ``post_save`` sender saves rows of a
+  model (the model, a proxy of it or a multi-table child), the one predicate every
+  save recorder filters by;
 - ``attempted_saves`` - the thread-scoped ``pre_save`` / ``post_save`` record of the
   saves that started and have not completed, each with its ``update_fields`` and the
   call that sent its ``pre_save``;
@@ -829,6 +832,22 @@ def _signal_sender_frame() -> FrameType | None:
     return None if frame is None else frame.f_back
 
 
+def saves_rows_of(model: type[models.Model], sender: object) -> bool:
+    """Return whether a ``pre_save`` / ``post_save`` ``sender`` saves a row of ``model``.
+
+    Django sends both signals with the saved instance's own class as ``sender``
+    (``Model.save_base``), so a proxy of ``model`` or a multi-table child (and their
+    proxies and children) sends its own class, never ``model``, and a receiver
+    connected with ``sender=model`` hears none of them. Every such class is a subclass
+    of ``model``, the rule the write flavors' saved-result checks read a returned row by
+    (``truth.is_instance``), so a recorder filtering by this predicate hears exactly the
+    saves whose instance those checks accept: ``model``'s own, a proxy's, a multi-table
+    child's. A concrete base of a proxy ``model``, a sibling proxy, a multi-table parent
+    and an unrelated model are not subclasses and stay unheard.
+    """
+    return truth.is_subclass(sender, model)
+
+
 @contextmanager
 def attempted_saves(model: type[models.Model]) -> Generator[list[AttemptedSave], None, None]:
     """Record the saves of ``model`` rows that start on this thread and do not complete.
@@ -842,8 +861,9 @@ def attempted_saves(model: type[models.Model]) -> Generator[list[AttemptedSave],
     refused save's record stays, a save the consumer caught and swallowed among them:
     ``refused_save`` names the one a given exception propagated out of. ``pre_save`` and
     ``post_save`` are global signals, so a save on another thread (a concurrent request)
-    is never recorded. ``model`` is the signals' sender, the class of the instance saved.
-    The records are dropped when the block exits, so no frame outlives it.
+    is never recorded. A save of ``model``'s rows is one whose sender (the class of the
+    instance saved) ``saves_rows_of`` accepts: ``model``, a proxy of it or a multi-table
+    child. The records are dropped when the block exits, so no frame outlives it.
     """
     owner = threading.get_ident()
     attempted: list[AttemptedSave] = []
@@ -855,8 +875,8 @@ def attempted_saves(model: type[models.Model]) -> Generator[list[AttemptedSave],
         update_fields: frozenset[str] | None = None,
         **kwargs: object,
     ) -> None:
-        del sender, kwargs
-        if threading.get_ident() == owner:
+        del kwargs
+        if threading.get_ident() == owner and saves_rows_of(model, sender):
             attempted.append((instance, update_fields, _signal_sender_frame()))
 
     def _complete(sender: object, instance: models.Model, **kwargs: object) -> None:
@@ -868,13 +888,13 @@ def attempted_saves(model: type[models.Model]) -> Generator[list[AttemptedSave],
                 del attempted[index]
                 break
 
-    pre_save.connect(_attempt, sender=model, weak=False)
-    post_save.connect(_complete, sender=model, weak=False)
+    pre_save.connect(_attempt, weak=False)
+    post_save.connect(_complete, weak=False)
     try:
         yield attempted
     finally:
-        _ = post_save.disconnect(_complete, sender=model)
-        _ = pre_save.disconnect(_attempt, sender=model)
+        _ = post_save.disconnect(_complete)
+        _ = pre_save.disconnect(_attempt)
         attempted.clear()
 
 

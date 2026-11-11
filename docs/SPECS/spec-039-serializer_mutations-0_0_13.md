@@ -2119,7 +2119,8 @@ The pipeline steps:
 6. **Write** via `serializer.save()`, **wrapped by the `036` `IntegrityError` → envelope
    mapper** (`utils/errors.py::integrity_error_field_errors` — no top-level error on a
    save-time race; a refusal over a `blank=True, null=False` input column the refused
-   backing-model row holds `None` on and its save writes (no `update_fields`, or the column
+   backing-model row (the model's own, a proxy's or a multi-table child's) holds `None` on
+   and its save writes (no `update_fields`, or the column
    named there by field name or `attname`; the refused save is the recorded save the
    caught exception propagated out of, or out of its explicit `raise ... from` cause or
    the refusal consumer code raised it over without `from` (or `from None`): in the
@@ -2155,7 +2156,15 @@ The pipeline steps:
      because the model object is mutable and identity alone is forgeable; a `pre_save`
      arm blocks cross-alias writes, and a second records each backing-model save that
      started and has not completed, with that save's `update_fields`: the row a refused
-     save leaves for the `IntegrityError` diagnosis, and the columns it wrote.
+     save leaves for the `IntegrityError` diagnosis, and the columns it wrote. Django
+     sends `pre_save` / `post_save` with the saved row's own class, so both recorders
+     hear a save of the model, a proxy of it or a multi-table child (and their proxies
+     and children), the classes the saved-result check accepts a returned row of
+     (`django_strawberry_framework/utils/write_values.py::saves_rows_of`); a save of the
+     concrete base under a proxy model, of a sibling proxy, of a multi-table parent or of
+     an unrelated model is not recorded. A create whose `create()` saves a multi-table
+     child over a stored parent row is that child's INSERT (Django's `post_save` reports
+     `created=True`).
    - **`get_serializer_save_kwargs` runs inside the same value-preserving, error-mapped
      closure as `save()` itself**.
    - **After the save the returned top-level row is attested against the database**
@@ -2185,12 +2194,13 @@ The pipeline steps:
    concurrent transaction committed under it witnesses no `created=True` write and fails
    closed the same way; DRF's own `ModelSerializer.create` INSERTs (`QuerySet.create`),
    so the stock create meets that race as the `IntegrityError` envelope. Before these
-   checks, an update whose save the witness saw INSERT (`created=True`) under the
-   `authorized_pk` on the pinned alias returns the in-band `conflict` envelope on `id`,
-   rolled back with the inserted row (`_guarded_serializer_write`): DRF's
-   `ModelSerializer.update` saves through Django's update-else-insert, so a located row
-   a concurrent transaction deleted after the locate (whole, or only a multi-table
-   child's own table) is re-inserted, where a present row would have refused the INSERT.
+   checks, an update whose save the witness saw INSERT (`created=True`) into the located
+   row's own table (`_meta.concrete_model`) under the `authorized_pk` on the pinned alias
+   returns the in-band `conflict` envelope on `id`, rolled back with the inserted row
+   (`_guarded_serializer_write`): DRF's `ModelSerializer.update` saves through Django's
+   update-else-insert, so a located row a concurrent transaction deleted after the locate
+   (whole, or only a multi-table child's own table) is re-inserted, where a present row
+   would have refused the INSERT.
 
    **The wrapper is value-preserving — the saved object is captured, not re-derived.**
    Every flavor's save rides `mutations/resolvers.py::save_or_field_errors`, which
@@ -2958,9 +2968,11 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   `GraphQLError`. One the database raises over a `blank=True, null=False` column with no
   default (a generated `required=False` field left out, a declared `allow_null=True`
   field sent `null`) is that column's field-keyed `null` error instead, read from the
-  backing-model row the write witness saw attempted on the request's own thread whose
-  save raised the caught exception; a `create()` / `update()` that raises without saving
-  a backing-model row, one whose failing write is another model's, raw SQL or
+  backing-model row (the model's own, a proxy's or a multi-table child's) the write
+  witness saw attempted on the request's own thread whose save raised the caught
+  exception; a `create()` / `update()` that raises without saving a backing-model row,
+  one whose failing write is another model's (the concrete base's under a proxy model
+  or a multi-table parent's included), raw SQL or
   `QuerySet.update()` (after a refused backing-model save it swallowed or not, or while
   handling one), or a refused save whose `update_fields` leaves the `None` column out,
   stays the `"__all__"` envelope, a fallback refused through a helper the handler calls
@@ -2971,9 +2983,13 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
 - **Write-time disappearing row.** An update whose located row a concurrent transaction
   deleted after the locate (reachable under `Meta.select_for_update = False` or on a
   backend without `FOR UPDATE`) is re-inserted by DRF's update-else-insert save; the
-  write witness's `created=True` under the `authorized_pk` returns the null-object +
-  `conflict` `FieldError` envelope on `id` with the transaction rolled back, never a
-  top-level `ConfigurationError`.
+  write witness's `created=True` of the located row's own table under the
+  `authorized_pk` returns the null-object + `conflict` `FieldError` envelope on `id`
+  with the transaction rolled back, never a top-level `ConfigurationError`. A
+  multi-table child an `update()` saves over the located row reports `created=True` for
+  its own table only: the located row was UPDATEd, so it is no re-INSERT, and with no
+  UPDATE of the returned row observed the result is the `ConfigurationError` "never
+  observed being UPDATED".
 - **Validation-time disappearing row.** A located row removed before the decode or
   `serializer.is_valid()` finished (deleted, or cascaded away with a row it references)
   can fail them first: a named relation that vanished with the row is the relation's
@@ -3165,6 +3181,18 @@ same transport, different app.
   the `conflict` envelope after the witnessed re-INSERT, rolled back, as does the
   multi-table `updateLendingDeskViaSerializer` deleted whole or only from the desk's own
   table ([`test_library_inheritance_api.py`][test-library-inheritance-api]`::test_lending_desk_update_of_a_row_deleted_after_authorization_is_conflict_over_http`).
+  A custom `create()` / `update()` saving a proxy or multi-table child row of the
+  serializer's model answers its payload, a child saved over a stored parent row on
+  create included, while one over the located row on update is never observed being
+  UPDATED and an INSERT through the concrete base under a proxy model is no re-INSERT
+  ([`test_library_inheritance_api.py`][test-library-inheritance-api]`::test_a_serializer_returning_a_row_of_its_models_family_answers_the_payload`,
+  `::test_a_create_promoting_a_stored_venue_to_a_child_is_its_insert`,
+  `::test_an_update_promoting_its_located_venue_to_a_child_is_refused`,
+  `::test_an_update_restoring_its_row_through_a_class_outside_the_family_answers_the_payload`);
+  such a row's refused save names its `None` column, a parent-table or a child-table
+  one, and a refused save of the concrete base, a multi-table parent or an unrelated
+  model is the `"__all__"` envelope
+  ([`test_save_time_refused_row_api.py`][test-save-time-refused-row-api]`::test_a_serializer_names_the_null_of_a_refused_row_of_its_models_family`).
   An `updateItemViaSerializer` whose category delete cascaded to the row after
   authorization (`::test_item_update_whose_category_delete_cascaded_to_the_row_is_conflict_over_http`:
   the omitted category and another named category through DRF's
@@ -3368,6 +3396,8 @@ same transport, different app.
     field's `null` on create and update, a cleared foreign key a custom `update()` saves
     under `update_fields` by field name or `attname`; a model `save()` filling the value in
     writes, and a `create()` raising before any row save, another thread's attempted row,
+    a refused save of a class outside the model's family (live:
+    [`test_save_time_refused_row_api.py`][test-save-time-refused-row-api]),
     or a `None` column outside the refused save's `update_fields` stays the `"__all__"`
     envelope; the row read is the one whose save raised, found by the call that sent its
     `pre_save` under a receiver-wrapping integration too:

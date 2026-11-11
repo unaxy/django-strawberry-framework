@@ -42,8 +42,8 @@ discipline instead of three drifting copies:
   ``mutations/resolvers.py::save_located_row`` (``force_update``, plus
   ``update_fields`` on a multi-table row so no parent table is re-INSERTed); the
   serializer flavor, whose DRF save keeps Django's update-else-insert, maps a
-  witnessed INSERT under the authorized pk to the same envelope
-  (``rest_framework/resolvers.py::_guarded_serializer_write``).
+  witnessed INSERT of the located row's own table under the authorized pk to the
+  same envelope (``rest_framework/resolvers.py::_guarded_serializer_write``).
 - **One nested write boundary.** ``open_write_pipeline`` is the substrate every
   write flavor (model create/update, delete, ModelForm, serializer, plain form)
   enters: ``require_managed_write`` then ``transaction.atomic`` nested with

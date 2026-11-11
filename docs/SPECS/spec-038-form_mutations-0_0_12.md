@@ -1942,7 +1942,9 @@ write flavor rides.
    editable non-pk column holding `None` on a `null=False` column, or `""` on a `null=False`
    column that stores no empty string, that the refused save of the form's instance writes (no
    `update_fields`, or the column named there by field name or `attname`, as recorded at
-   `pre_save` by `django_strawberry_framework/utils/write_values.py::attempted_saves`; the
+   `pre_save` by `django_strawberry_framework/utils/write_values.py::attempted_saves` for
+   every row of the mutation's model, a proxy of it or a multi-table child, so a consumer
+   `save()` that binds `form.instance` to such a row before saving it is read too; the
    refused save is the recorded save the caught exception propagated out of, or out of
    its explicit `raise ... from` cause or the refusal consumer code raised it over
    without `from` (or `from None`): in the handler's own frame, or, for a database

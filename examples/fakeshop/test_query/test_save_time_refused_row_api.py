@@ -24,21 +24,36 @@ that flavor offers: a ``pre_save`` receiver on ``ItemHold`` for the model create
 model mutation runs no consumer save hook and the shipped model has no ``save()``
 override), a ``save()`` override on a ``ModelForm`` subclass, and ``create()`` /
 ``update()`` on a ``ModelSerializer`` subclass.
+
+A row of the backing model's family is that model's row: the library ``Venue`` family
+(the ``OpenVenue`` proxy, the ``LendingDesk`` / ``SelfServeDesk`` multi-table chain and
+two test-local proxies, of ``OpenVenue`` and of ``LendingDesk``) behind serializers over
+``Venue``, ``OpenVenue`` and ``LendingDesk`` whose ``create()`` / ``update()`` save a row
+of another class, and ``ModelForm`` creates whose ``save()`` binds ``form.instance`` to
+one. A refused save of a proxy's, a proxy of a proxy's, a multi-table child's or
+grandchild's or a proxy of a child's row names its ``None`` column, a parent-table
+(``name``) or a child-table (``windowCount``) one, also after the backing row's own save
+and on a form first bound to a ``LendingDesk``; the concrete base under a proxy model,
+a multi-table parent, a sibling and an unrelated ``Genre`` are the envelope, and so is a
+failure a receiver raises after a family row's save completed.
 """
 
 from __future__ import annotations
 
+import datetime
 from collections.abc import Generator, Mapping
 from functools import wraps
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, NoReturn, TypeVar
 
 import pytest
 import strawberry
+from apps.library import models as library_models
 from apps.products import models as product_models
 from apps.products.forms import ItemHoldModelForm
 from apps.products.serializers import ItemHoldSerializer
 from apps.products.services import seed_data
 from asgiref.sync import sync_to_async
+from django import forms
 from django.db import IntegrityError, connection, transaction
 from django.db.models.signals import post_save, pre_save
 from django.http import HttpRequest, HttpResponseBase
@@ -58,6 +73,7 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
+from tests._idioms import ModelSerializerBase, saved_pk
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -691,3 +707,577 @@ async def test_a_swallowed_refused_save_over_the_async_view_is_the_envelope(
     assert "errors" not in payload, payload
     assert json_at(payload, "data", root) == {"result": None, "errors": _ENVELOPE}
     assert not await product_models.ItemHold.objects.aexists()
+
+
+# ===========================================================================
+# The backing model's family: a proxy's or a multi-table child's refused save
+# ===========================================================================
+
+_TODAY = datetime.date(2024, 1, 2)
+
+_NULL_NAME = [{"field": "name", "messages": ["This field cannot be null."], "codes": ["null"]}]
+_NULL_WINDOW_COUNT = [
+    {"field": "windowCount", "messages": ["This field cannot be null."], "codes": ["null"]},
+]
+
+_FAMILY_RESULT = "result { name } errors { field messages codes }"
+
+_VenueT = TypeVar("_VenueT", bound=library_models.Venue)
+
+#: The request's consumer scenario: the class key of the row the write saves (``saved``),
+#: the column that row leaves ``None`` (``refusal``) and what runs after its save
+#: (``after_save``).
+_FAMILY: dict[str, str] = {}
+
+#: The classes the scenario keys name, rebuilt per request (the proxies are test-local).
+_FAMILY_CLASSES: dict[str, type[library_models.Venue]] = {}
+
+
+def _proxy_of(base: type[_VenueT], name: str) -> type[_VenueT]:
+    """Declare a test-local proxy of ``base``; the registry restore drops it after the test."""
+    meta = type("Meta", (), {"proxy": True, "app_label": "library"})
+    made = type(name, (base,), {"Meta": meta, "__module__": __name__})
+    assert issubclass(made, base)
+    return made
+
+
+def _install_family_classes() -> None:
+    """Key the shipped ``Venue`` family and two test-local proxies for the scenario."""
+    _FAMILY_CLASSES.update(
+        venue=library_models.Venue,
+        open_venue=library_models.OpenVenue,
+        open_venue_proxy=_proxy_of(library_models.OpenVenue, "RefusedOpenVenueProxy"),
+        desk=library_models.LendingDesk,
+        desk_proxy=_proxy_of(library_models.LendingDesk, "RefusedLendingDeskProxy"),
+        self_serve=library_models.SelfServeDesk,
+    )
+
+
+def _family_row(saved: str, instance: library_models.Venue | None) -> library_models.Venue:
+    """Build the unsaved ``saved`` row: a new one, or ``instance``'s row loaded as that class.
+
+    The column the scenario's ``refusal`` names holds ``None``; every other is storable.
+    """
+    cls = _FAMILY_CLASSES[saved]
+    if instance is None:
+        values: dict[str, object] = {"name": "Saved", "opened_on": _TODAY}
+        if issubclass(cls, library_models.LendingDesk):
+            values["window_count"] = 0
+        if issubclass(cls, library_models.SelfServeDesk):
+            values["kiosk_code"] = "K-1"
+        row = cls(**values)
+    else:
+        row = cls._base_manager.get(pk=instance.pk)
+        vars(row)["name"] = "Saved"
+    refusal = _FAMILY.get("refusal")
+    if refusal is not None:
+        vars(row)[refusal] = None
+    return row
+
+
+def _null_and_raise(instance: Model, **_kwargs: object) -> NoReturn:
+    """A receiver the consumer connects inside its write: it runs after the save completed."""
+    vars(instance)["name"] = None
+    msg = "The venue could not be audited."
+    raise IntegrityError(msg)
+
+
+def _family_write(instance: library_models.Venue | None) -> library_models.Venue:
+    """The consumer's ``create()`` / ``update()``: save the scenario's row, return it."""
+    saved = _FAMILY["saved"]
+    if saved == "genre":
+        library_models.Genre(name=None).save()
+        pytest.fail("the genre's save was not refused")
+    if saved == "backing_then_proxy":
+        row = _family_row("venue", instance)
+        row.save()
+        library_models.OpenVenue(name=None, opened_on=_TODAY).save()
+        return row
+    row = _family_row(saved, instance)
+    if _FAMILY.get("after_save") != "null_and_raise":
+        row.save()
+        return row
+    post_save.connect(_null_and_raise, sender=type(row), weak=False)
+    try:
+        row.save()
+    finally:
+        _ = post_save.disconnect(_null_and_raise, sender=type(row))
+    return row
+
+
+class FamilySerializer(ModelSerializerBase[library_models.Venue]):
+    """A ``Venue``-family serializer whose ``create()`` / ``update()`` save the scenario's row."""
+
+    @override
+    def create(self, validated_data: dict[str, object]) -> library_models.Venue:
+        return _family_write(None)
+
+    @override
+    def update(
+        self,
+        instance: library_models.Venue,
+        validated_data: dict[str, object],
+    ) -> library_models.Venue:
+        return _family_write(instance)
+
+
+class FamilyVenueSerializer(FamilySerializer):
+    """The ``Venue`` serializer."""
+
+    class Meta:
+        model = library_models.Venue
+        fields = ("name",)
+        extra_kwargs = {"name": {"allow_null": True}}
+
+
+class FamilyOpenVenueSerializer(FamilySerializer):
+    """The ``OpenVenue`` proxy's serializer."""
+
+    class Meta:
+        model = library_models.OpenVenue
+        fields = ("name",)
+        extra_kwargs = {"name": {"allow_null": True}}
+
+
+class FamilyLendingDeskSerializer(FamilySerializer):
+    """The ``LendingDesk`` child's serializer, over a parent and a child column."""
+
+    class Meta:
+        model = library_models.LendingDesk
+        fields = ("name", "window_count")
+        extra_kwargs = {"name": {"allow_null": True}, "window_count": {"allow_null": True}}
+
+
+class FamilyForm(forms.ModelForm[library_models.Venue]):
+    """A ``Venue``-family form whose ``save()`` may save a row of another class instead.
+
+    ``name`` cleans an explicit ``null`` to ``None``. A ``rebind_*`` scenario binds
+    ``form.instance`` to the new row of that class it saves, holding ``None`` on ``name``;
+    ``save_other_proxy`` saves such an ``OpenVenue`` and returns the form's own row unsaved.
+    """
+
+    name = forms.CharField(required=False, empty_value=None)
+
+    @override
+    def save(self, commit: bool = True) -> library_models.Venue:
+        scenario = _FAMILY["saved"]
+        if scenario == "default":
+            return super().save(commit=commit)
+        row = super().save(commit=False)
+        if scenario == "save_other_proxy":
+            library_models.OpenVenue(name=None, opened_on=_TODAY).save()
+            return row
+        rebound = {
+            "rebind_proxy": library_models.OpenVenue,
+            "rebind_child": library_models.LendingDesk,
+            "rebind_concrete": library_models.Venue,
+        }[scenario]
+        new = rebound(name=None, opened_on=_TODAY)
+        self.instance = new
+        new.save()
+        return new
+
+
+class FamilyVenueForm(FamilyForm):
+    """The ``Venue`` form."""
+
+    class Meta:
+        model = library_models.Venue
+        fields = ("name",)
+
+
+class FamilyOpenVenueForm(FamilyForm):
+    """The ``OpenVenue`` proxy's form."""
+
+    class Meta:
+        model = library_models.OpenVenue
+        fields = ("name",)
+
+
+class FamilyLendingDeskForm(FamilyForm):
+    """The ``LendingDesk`` child's form."""
+
+    class Meta:
+        model = library_models.LendingDesk
+        fields = ("name",)
+
+
+def _family_schema() -> DjangoSchema:
+    """Every family write: a serializer create / update per backing model, a form create."""
+
+    class VenueNode(DjangoType):
+        class Meta:
+            model = library_models.Venue
+            fields = ("id", "name")
+
+    class OpenVenueNode(DjangoType):
+        class Meta:
+            model = library_models.OpenVenue
+            fields = ("id", "name")
+
+    class LendingDeskNode(DjangoType):
+        class Meta:
+            model = library_models.LendingDesk
+            fields = ("id", "name", "window_count")
+
+    class CreateVenueFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyVenueSerializer
+            operation = "create"
+            permission_classes = []
+
+    class UpdateVenueFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyVenueSerializer
+            operation = "update"
+            permission_classes = []
+
+    class CreateOpenVenueFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyOpenVenueSerializer
+            operation = "create"
+            permission_classes = []
+
+    class UpdateOpenVenueFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyOpenVenueSerializer
+            operation = "update"
+            permission_classes = []
+
+    class CreateLendingDeskFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyLendingDeskSerializer
+            operation = "create"
+            permission_classes = []
+
+    class UpdateLendingDeskFamily(SerializerMutation):
+        class Meta:
+            serializer_class = FamilyLendingDeskSerializer
+            operation = "update"
+            permission_classes = []
+
+    class CreateVenueViaForm(DjangoModelFormMutation):
+        class Meta:
+            form_class = FamilyVenueForm
+            operation = "create"
+            permission_classes = []
+
+    class CreateVenueViaFormFromDesk(DjangoModelFormMutation):
+        """Binds the create's form to a new ``LendingDesk``, a row of the form's model."""
+
+        class Meta:
+            form_class = FamilyVenueForm
+            operation = "create"
+            permission_classes = []
+
+        @override
+        def get_form(
+            self,
+            info: strawberry.Info[object, object],
+            *,
+            data: dict[str, object],
+            files: dict[str, object],
+            instance: Model | None = None,
+        ) -> forms.ModelForm[library_models.Venue]:
+            return super().get_form(
+                info,
+                data=data,
+                files=files,
+                instance=library_models.LendingDesk(window_count=0),
+            )
+
+    class CreateOpenVenueViaForm(DjangoModelFormMutation):
+        class Meta:
+            form_class = FamilyOpenVenueForm
+            operation = "create"
+            permission_classes = []
+
+    class CreateLendingDeskViaForm(DjangoModelFormMutation):
+        class Meta:
+            form_class = FamilyLendingDeskForm
+            operation = "create"
+            permission_classes = []
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> int:
+            return 1
+
+    @strawberry.type
+    class Mutation:
+        create_venue_family = DjangoMutationField(CreateVenueFamily)
+        update_venue_family = DjangoMutationField(UpdateVenueFamily)
+        create_open_venue_family = DjangoMutationField(CreateOpenVenueFamily)
+        update_open_venue_family = DjangoMutationField(UpdateOpenVenueFamily)
+        create_lending_desk_family = DjangoMutationField(CreateLendingDeskFamily)
+        update_lending_desk_family = DjangoMutationField(UpdateLendingDeskFamily)
+        create_venue_via_form = DjangoMutationField(CreateVenueViaForm)
+        create_venue_via_form_from_desk = DjangoMutationField(CreateVenueViaFormFromDesk)
+        create_open_venue_via_form = DjangoMutationField(CreateOpenVenueViaForm)
+        create_lending_desk_via_form = DjangoMutationField(CreateLendingDeskViaForm)
+
+    del VenueNode, OpenVenueNode, LendingDeskNode
+    finalize_django_types()
+    return DjangoSchema(query=Query, mutation=Mutation, error_policy={"enabled": False})
+
+
+#: (root field suffix, serializer class name) per backing model.
+_FAMILY_BACKINGS = {
+    "venue": ("VenueFamily", "FamilyVenueSerializer"),
+    "open_venue": ("OpenVenueFamily", "FamilyOpenVenueSerializer"),
+    "desk": ("LendingDeskFamily", "FamilyLendingDeskSerializer"),
+}
+
+
+def _family_rows() -> tuple[list[tuple[int | None, str]], list[int], list[str]]:
+    """Every stored venue's key and name, every desk's window count, every genre's name."""
+    return (
+        list(library_models.Venue._base_manager.order_by("pk").values_list("pk", "name")),
+        list(
+            library_models.LendingDesk._base_manager.order_by("pk").values_list(
+                "window_count",
+                flat=True,
+            ),
+        ),
+        sorted(library_models.Genre.objects.values_list("name", flat=True)),
+    )
+
+
+def _post_family(root: str, document: str, variables: Mapping[str, object]) -> object:
+    """POST a family write over ``/graphql-refused-row/``; return its root field's answer."""
+    _install_family_classes()
+    _CURRENT["schema"] = _family_schema()
+    try:
+        with override_settings(ROOT_URLCONF=__name__):
+            payload = graphql_payload(document, variables=variables, url="/graphql-refused-row/")
+    finally:
+        _CURRENT["schema"] = None
+        _FAMILY_CLASSES.clear()
+    assert "errors" not in payload, payload
+    return json_at(payload, "data", root)
+
+
+def _located_kiosk() -> int:
+    """Store the ``SelfServeDesk`` an update locates: a row of every ``Venue``-family class."""
+    return saved_pk(
+        library_models.SelfServeDesk.objects.create(
+            name="Located",
+            opened_on=_TODAY,
+            window_count=1,
+            kiosk_code="K-0",
+        ),
+    )
+
+
+def _post_family_serializer(backing: str, located: int | None) -> object:
+    """POST the ``backing`` serializer's create, or its update of the ``located`` row."""
+    suffix, serializer = _FAMILY_BACKINGS[backing]
+    data: JSONObject = {"name": None}
+    if backing == "desk":
+        data["windowCount"] = None if _FAMILY.get("refusal") == "window_count" else 1
+    if located is None:
+        root = f"create{suffix}"
+        document = (
+            f"mutation($d: {serializer}Input!) {{ {root}(data: $d) {{ {_FAMILY_RESULT} }} }}"
+        )
+        return _post_family(root, document, {"d": data})
+    root = f"update{suffix}"
+    document = (
+        f"mutation($id: ID!, $d: {serializer}PartialInput!) "
+        f"{{ {root}(id: $id, data: $d) {{ {_FAMILY_RESULT} }} }}"
+    )
+    return _post_family(root, document, {"id": str(located), "d": data})
+
+
+@pytest.fixture(autouse=True)
+def _clear_family_scenario() -> Generator[None, None, None]:
+    """Clear the family scenario after the test."""
+    try:
+        yield
+    finally:
+        _FAMILY.clear()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("op", ["create", "update"])
+@pytest.mark.parametrize(
+    (
+        "backing",
+        "saved",
+        "refusal",
+        "expected",
+    ),
+    [
+        pytest.param("venue", "venue", "name", _NULL_NAME, id="venue-venue"),
+        pytest.param("venue", "open_venue", "name", _NULL_NAME, id="venue-proxy"),
+        pytest.param("venue", "open_venue_proxy", "name", _NULL_NAME, id="venue-proxy-of-proxy"),
+        pytest.param("venue", "desk", "name", _NULL_NAME, id="venue-child"),
+        pytest.param("venue", "desk_proxy", "name", _NULL_NAME, id="venue-proxy-of-child"),
+        pytest.param("venue", "self_serve", "name", _NULL_NAME, id="venue-grandchild"),
+        pytest.param("venue", "genre", "name", _ENVELOPE, id="venue-unrelated"),
+        pytest.param("open_venue", "open_venue", "name", _NULL_NAME, id="proxy-proxy"),
+        pytest.param(
+            "open_venue",
+            "open_venue_proxy",
+            "name",
+            _NULL_NAME,
+            id="proxy-proxy-of-proxy",
+        ),
+        pytest.param("open_venue", "venue", "name", _ENVELOPE, id="proxy-concrete-base"),
+        pytest.param("open_venue", "desk", "name", _ENVELOPE, id="proxy-sibling-child"),
+        pytest.param("open_venue", "genre", "name", _ENVELOPE, id="proxy-unrelated"),
+        pytest.param("desk", "desk", "name", _NULL_NAME, id="child-child"),
+        pytest.param("desk", "desk_proxy", "name", _NULL_NAME, id="child-proxy-of-child"),
+        pytest.param("desk", "self_serve", "name", _NULL_NAME, id="child-grandchild"),
+        pytest.param("desk", "venue", "name", _ENVELOPE, id="child-parent"),
+        pytest.param("desk", "genre", "name", _ENVELOPE, id="child-unrelated"),
+        pytest.param(
+            "desk",
+            "desk",
+            "window_count",
+            _NULL_WINDOW_COUNT,
+            id="child-child-own-table",
+        ),
+        pytest.param(
+            "desk",
+            "desk_proxy",
+            "window_count",
+            _NULL_WINDOW_COUNT,
+            id="child-proxy-of-child-own-table",
+        ),
+        pytest.param(
+            "desk",
+            "self_serve",
+            "window_count",
+            _NULL_WINDOW_COUNT,
+            id="child-grandchild-own-table",
+        ),
+    ],
+)
+def test_a_serializer_names_the_null_of_a_refused_row_of_its_models_family(
+    backing: str,
+    saved: str,
+    refusal: str,
+    expected: list[dict[str, object]],
+    op: str,
+) -> None:
+    """A refused save of a row of the serializer's model, a proxy or a child, names its column.
+
+    The consumer's ``create()`` / ``update()`` saves a row of another class holding ``None``
+    on a ``null=False`` column: ``Venue.name`` (the parent table's) or
+    ``LendingDesk.window_count`` (a child table's own). Django sends the save's signals with
+    the row's own class, and every subclass of the serializer's model (a proxy, a proxy of
+    a proxy, a multi-table child or grandchild, a proxy of a child) saves the model's rows,
+    so its refusal is the field-keyed ``null`` the model's own row answers. A row of the
+    concrete base under a proxy model, of a sibling, of a multi-table parent or of an
+    unrelated model (``Genre``) is not, and is the ``"__all__"`` envelope. Nothing is
+    written.
+    """
+    located = _located_kiosk() if op == "update" else None
+    before = _family_rows()
+    _FAMILY.update(saved=saved, refusal=refusal)
+    answer = _post_family_serializer(backing, located)
+    assert answer == {"result": None, "errors": expected}
+    assert _family_rows() == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("op", ["create", "update"])
+def test_a_serializer_names_a_proxy_row_refused_after_its_own_row_saved(op: str) -> None:
+    """The ``Venue`` serializer saves its row, then an ``OpenVenue`` holding ``None`` on ``name``.
+
+    The ``OpenVenue`` row's refused save is the one the failure propagated out of, a row of
+    the serializer's model's family, so its ``name`` is named. Nothing is written.
+    """
+    located = _located_kiosk() if op == "update" else None
+    before = _family_rows()
+    _FAMILY.update(saved="backing_then_proxy")
+    answer = _post_family_serializer("venue", located)
+    assert answer == {"result": None, "errors": _NULL_NAME}
+    assert _family_rows() == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "saved",
+    [
+        pytest.param("venue", id="model"),
+        pytest.param("open_venue", id="proxy"),
+        pytest.param("desk", id="child"),
+    ],
+)
+def test_a_failure_after_a_family_rows_save_completed_is_the_envelope(saved: str) -> None:
+    """A receiver raising after the row's save completed leaves no refused save of the row.
+
+    The consumer's ``create()`` connects a ``post_save`` receiver for the row's class that
+    clears ``name`` and raises an ``IntegrityError``. The row's ``post_save`` has already
+    taken its record back, whatever its class, so the row's ``None`` is never named: the
+    answer is the ``"__all__"`` envelope, the same for the model's own row, a proxy's and a
+    child's. Nothing is written.
+    """
+    before = _family_rows()
+    _FAMILY.update(saved=saved, after_save="null_and_raise")
+    answer = _post_family_serializer("venue", None)
+    assert answer == {"result": None, "errors": _ENVELOPE}
+    assert _family_rows() == before
+
+
+#: (root field, form class name) per form create.
+_FAMILY_FORMS = {
+    "venue": ("createVenueViaForm", "FamilyVenueForm"),
+    "venue_from_desk": ("createVenueViaFormFromDesk", "FamilyVenueForm"),
+    "open_venue": ("createOpenVenueViaForm", "FamilyOpenVenueForm"),
+    "desk": ("createLendingDeskViaForm", "FamilyLendingDeskForm"),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("form", "scenario", "expected"),
+    [
+        pytest.param("venue", "default", _NULL_NAME, id="venue-default"),
+        pytest.param("open_venue", "default", _NULL_NAME, id="proxy-default"),
+        pytest.param("desk", "default", _NULL_NAME, id="child-default"),
+        pytest.param("venue", "rebind_proxy", _NULL_NAME, id="venue-rebind-proxy"),
+        pytest.param("venue", "rebind_child", _NULL_NAME, id="venue-rebind-child"),
+        pytest.param(
+            "venue_from_desk",
+            "rebind_proxy",
+            _NULL_NAME,
+            id="venue-from-child-rebind-proxy",
+        ),
+        pytest.param(
+            "venue_from_desk",
+            "rebind_concrete",
+            _NULL_NAME,
+            id="venue-from-child-rebind-venue",
+        ),
+        pytest.param("venue", "save_other_proxy", _ENVELOPE, id="venue-save-other-proxy"),
+        pytest.param("open_venue", "rebind_concrete", _ENVELOPE, id="proxy-rebind-concrete-base"),
+        pytest.param("desk", "rebind_concrete", _ENVELOPE, id="child-rebind-parent"),
+    ],
+)
+def test_a_modelform_names_the_null_of_its_instance_refused_as_any_row_of_its_model(
+    form: str,
+    scenario: str,
+    expected: list[dict[str, object]],
+) -> None:
+    """A form ``save()`` that rebinds ``form.instance`` to a proxy or child row names its column.
+
+    The consumer's ``save()`` binds ``form.instance`` to a new row of another class holding
+    ``None`` on ``name`` and saves it. A row of the form's model (a proxy, a multi-table
+    child) is the form's row, so its refusal is the field-keyed ``null``, also when the
+    create's form was bound to a ``LendingDesk`` first (``get_form``) and the rebound row is
+    an ``OpenVenue`` or a plain ``Venue``, neither of them a ``LendingDesk``. The concrete
+    base under a proxy form, the parent under a child form, and another row saved while
+    ``form.instance`` stays the form's own are the ``"__all__"`` envelope. Nothing is
+    written.
+    """
+    before = _family_rows()
+    _FAMILY.update(saved=scenario)
+    root, form_class = _FAMILY_FORMS[form]
+    document = f"mutation($d: {form_class}Input!) {{ {root}(data: $d) {{ {_FAMILY_RESULT} }} }}"
+    answer = _post_family(root, document, {"d": {"name": None}})
+    assert answer == {"result": None, "errors": expected}
+    assert _family_rows() == before
