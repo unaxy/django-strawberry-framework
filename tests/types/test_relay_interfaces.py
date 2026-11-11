@@ -43,7 +43,6 @@ from django_strawberry_framework.types.definition import (
     origin_has_custom_id_resolver,
 )
 from django_strawberry_framework.types.relay import (
-    SyncMisuseError,
     _published_node_name_table,
     _resolve_id_attr_default,
     _resolve_nodes_default,
@@ -57,7 +56,7 @@ from django_strawberry_framework.types.relay import (
 )
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import require
-from django_strawberry_framework.utils.querysets import model_for
+from django_strawberry_framework.utils.querysets import SyncMisuseError, model_for
 from django_strawberry_framework.utils.typing import call_forwarded, object_result
 from tests._idioms import async_relay_hooks, comparing_metaclass, relay_hooks, saved_pk
 from tests._info import make_info

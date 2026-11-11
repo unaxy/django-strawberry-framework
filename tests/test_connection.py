@@ -60,8 +60,8 @@ from django_strawberry_framework.optimizer.plans import (
 )
 from django_strawberry_framework.orders import _helper_referenced_ordersets
 from django_strawberry_framework.registry import registry
-from django_strawberry_framework.types.relay import SyncMisuseError
 from django_strawberry_framework.utils.input_values import UNSET
+from django_strawberry_framework.utils.querysets import SyncMisuseError
 from tests._connection_field_schemas import (
     _PLANNED_CONNECTION_DOCUMENT,
     _PLANNED_LIST_DOCUMENT,

@@ -17,14 +17,14 @@ Rules of the road:
 
 ## Status
 
-Measured 2026-11-11 at 41de5b69 (the tests/ row recounted for typing item 44), ruff 0.17.4.
+Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4.
 
 | | Count |
 | --- | --- |
 | Stable rules | 815: 806 on, 9 off by design |
 | Preview-only rules | 142, all off (`preview` is not enabled) |
-| Lines carrying `# noqa` | 450, in 123 files |
-| `# noqa` lines with no reason | 159 (see To do) |
+| Lines carrying `# noqa` | 452, in 124 files |
+| `# noqa` lines with no reason | 163 (see To do) |
 | `# ruff: disable[...]` fences | 9, every one `ERA001` around a TODO-anchored pseudo block |
 | File-level `# ruff: noqa` | 0 |
 | Complexity ratchets | `max-complexity` 45, `max-branches` 39, `max-returns` 20, `max-args` 18, `max-statements` 133, `max-positional-args` 10 |
@@ -39,10 +39,10 @@ per 1,000 lines of source.
 
 | Area | Files | Lines | `# noqa` lines | Per 1k lines | Per-file ignores |
 | --- | --- | --- | --- | --- | --- |
-| Package (`django_strawberry_framework/`) | 131 | 115,090 | 178 | 1.55 | none |
-| tests/ | 215 | 255,986 | 155 | 0.61 | 17 codes, plus `D102` / `D103` on `test_*.py` |
-| examples/ | 266 | 201,962 | 101 | 0.50 | 12 codes, plus `D102` / `D103` on `test_*.py`, `D` / `DJ008` on migrations, `INP001` / `UP031` by folder |
-| scripts/ | 45 | 43,638 | 12 | 0.27 | 6 codes |
+| Package (`django_strawberry_framework/`) | 131 | 115,070 | 176 | 1.53 | none |
+| tests/ | 217 | 257,748 | 159 | 0.62 | 17 codes, plus `D102` / `D103` on `test_*.py` |
+| examples/ | 266 | 202,432 | 101 | 0.50 | 12 codes, plus `D102` / `D103` on `test_*.py`, `D` / `DJ008` on migrations, `INP001` / `UP031` by folder |
+| scripts/ | 46 | 45,205 | 12 | 0.27 | 6 codes |
 | Root (`conftest.py`, `line_count.py`, `docs/dry/export_dry_review.py`) | 3 | 2,254 | 4 | 1.77 | `TID253`, `T201`, `INP001` per file |
 
 ### Package, by subpackage
@@ -50,11 +50,11 @@ per 1,000 lines of source.
 | Part | Files | Lines | `# noqa` lines | Per 1k lines |
 | --- | --- | --- | --- | --- |
 | top-level modules | 28 | 22,356 | 51 | 2.28 |
-| `utils/` | 28 | 21,540 | 10 | 0.46 |
-| `filters/` | 6 | 18,557 | 26 | 1.40 |
+| `utils/` | 28 | 21,571 | 10 | 0.46 |
+| `filters/` | 6 | 18,529 | 25 | 1.35 |
 | `optimizer/` | 14 | 13,128 | 11 | 0.84 |
-| `rest_framework/` | 9 | 8,682 | 6 | 0.69 |
-| `types/` | 8 | 8,678 | 33 | 3.80 |
+| `rest_framework/` | 9 | 8,663 | 6 | 0.69 |
+| `types/` | 8 | 8,674 | 32 | 3.69 |
 | `forms/` | 5 | 5,725 | 5 | 0.87 |
 | `mutations/` | 7 | 5,111 | 14 | 2.74 |
 | `extensions/` | 5 | 4,431 | 3 | 0.68 |
@@ -73,10 +73,10 @@ factories and the unittest mixin.
 | --- | --- | --- | --- | --- | --- | --- |
 | `PLC0415` | 123 | 82 | 27 | 6 | 8 | a local import: an import cycle, an optional dependency (Channels, DRF, the Postgres driver), or a subsystem bound only when imported |
 | `A002` | 71 | 9 | 2 | 60 | 0 | a `filter` / `id` parameter that is the GraphQL argument name or a public keyword |
-| `FBT001` | 65 | 2 | 55 | 8 | 0 | a parametrized bool column, or Django's positional `execute_wrapper(..., many, ...)` |
+| `FBT001` | 69 | 2 | 59 | 8 | 0 | a parametrized bool column, or Django's positional `execute_wrapper(..., many, ...)` |
 | `BLE001` | 24 | 21 | 1 | 1 | 1 | deliberate containment: consumer code may raise anything, a boundary fails closed, cleanup must not mask the primary error |
 | `N802` | 14 | 10 | 4 | 0 | 0 | PascalCase field factories (graphene-django parity), unittest vocabulary |
-| `PLC0414` | 12 | 12 | 0 | 0 | 0 | explicit re-exports basedpyright needs |
+| `PLC0414` | 10 | 10 | 0 | 0 | 0 | explicit re-exports basedpyright needs |
 | `FBT003` | 12 | 0 | 11 | 1 | 0 | the bool is the value under test, or mirrors `execute_wrapper` |
 | `S101` | 11 | 11 | 0 | 0 | 0 | django-filter's own asserts, upstream invariants |
 | `S102` | 11 | 0 | 11 | 0 | 0 | `exec` of a literal program the test runs |
@@ -108,32 +108,32 @@ Each row gives the number of sites the ignore hides today and the reason.
 
 | Code | Tests | Examples | Scripts | Why |
 | --- | --- | --- | --- | --- |
-| `S101` | 20,126 | 10,603 | | assert is the pytest idiom |
-| `D102`, `D103` (`test_*.py`) | 1,445 | 419 | | the test name is the summary; most tests carry a contract docstring anyway |
-| `RUF012` | 1,227 | 964 | | `Meta.fields = [...]`, `permission_classes = [...]`, `Meta.ordering`: the consumer idiom, not a `ClassVar` |
-| `PLR2004` | 457 | 1,048 | 37 | assertions and reports compare against literal expected values |
-| `TC001`-`TC003` | 292 | 459 | | strawberry / `DjangoType` classes built inside functions, mostly without `from __future__ import annotations`; the fix would quote about 790 annotations |
-| `D401` | 541 | 430 | | a test docstring states the contract declaratively |
-| `TID253` | 195 | 378 | | pytest-django sets up Django and the fakeshop `pythonpath` before collection (also `conftest.py`) |
-| `DJ008` | 314 | 22 (migrations) | | throwaway test models; a migration's `TYPE_CHECKING`-only row shapes |
-| `D106` | 51 | 298 | | every site is `class Meta:` |
+| `S101` | 20,396 | 10,618 | | assert is the pytest idiom |
+| `D102`, `D103` (`test_*.py`) | 1,468 | 419 | | the test name is the summary; most tests carry a contract docstring anyway |
+| `RUF012` | 1,232 | 969 | | `Meta.fields = [...]`, `permission_classes = [...]`, `Meta.ordering`: the consumer idiom, not a `ClassVar` |
+| `PLR2004` | 462 | 1,048 | 39 | assertions and reports compare against literal expected values |
+| `TC001`-`TC003` | 294 | 459 | | strawberry / `DjangoType` classes built inside functions, mostly without `from __future__ import annotations`; the fix would quote about 790 annotations |
+| `D401` | 544 | 431 | | a test docstring states the contract declaratively |
+| `TID253` | 197 | 378 | | pytest-django sets up Django and the fakeshop `pythonpath` before collection (also `conftest.py`) |
+| `DJ008` | 316 | 22 (migrations) | | throwaway test models; a migration's `TYPE_CHECKING`-only row shapes |
+| `D106` | 53 | 298 | | every site is `class Meta:` |
 | `N806` | 159 | | | a class built by `type(...)` or a factory binds to a PascalCase local |
-| `INP001` | | 120 | 45 | folders with no `__init__.py` by design: scripts/, fakeshop's top-level modules, `examples/fakeshop/tests/`, `test_query/` |
+| `INP001` | | 120 | 46 | folders with no `__init__.py` by design: scripts/, fakeshop's top-level modules, `examples/fakeshop/tests/`, `test_query/` |
 | `D` (migrations) | | 80 | | `makemigrations` writes them |
 | `UP031` (`test_query/`) | | 78 | | GraphQL text is all braces; `str.format` / f-strings would double them |
 | `SLOT000`, `SLOT001` | 52 | 4 | | hostile `str` / `tuple` subclasses model consumer values, which carry an instance `__dict__` |
-| `S603`, `S607` | 87 | | 41 | a fixed argv of git, uv, ruff or `sys.executable` |
+| `S603`, `S607` | 87 | | 42 | a fixed argv of git, uv, ruff or `sys.executable` |
 | `S105`-`S107` | 5 | 13 | | fixture credentials and the example's dev `SECRET_KEY` |
-| `T201` | | | 307 | print is the CLI output (also `line_count.py`, `docs/dry/export_dry_review.py`) |
+| `T201` | | | 325 | print is the CLI output (also `line_count.py`, `docs/dry/export_dry_review.py`) |
 | `PERF` | | | 22 | one-shot scripts are not a performance surface |
 
 ## Off by design
 
 | Code | Sites | Why |
 | --- | --- | --- |
-| `SLF001` | 3,450 | the package shares underscore names across its modules (basedpyright's `reportPrivateUsage` is off for the same reason) |
+| `SLF001` | 3,454 | the package shares underscore names across its modules (basedpyright's `reportPrivateUsage` is off for the same reason) |
 | `TRY003`, `EM101`, `EM102` | 2,784 | exception-message style only |
-| `CPY001` | 659 | no copyright headers |
+| `CPY001` | 663 | no copyright headers |
 | `FIX002`, `TD003` | 9 each | a TODO is the `TODO(spec-NNN slice N): ...` anchor, which names a spec or backlog entry, not an issue link; the rest of `TD` and `FIX` is on |
 | `D203`, `D213` | | the opposites of `D211` / `D212`, which the Google convention selects |
 
@@ -217,9 +217,9 @@ Ruff against itself:
 
 ## To do
 
-- [ ] 40. A reason on every `# noqa`. 159 lines carry a bare code:
+- [ ] 40. A reason on every `# noqa`. 163 lines carry a bare code:
   - 71 `A002`;
-  - 54 parametrized `FBT001` columns in tests and examples;
+  - 58 parametrized `FBT001` columns in tests and examples;
   - 10 `PLC0415`;
   - the rest one to three each.
 
@@ -228,9 +228,6 @@ Ruff against itself:
 
 ## Waiting on you
 
-- `types.relay.SyncMisuseError` and `filters.base.LazyRelatedClassMixin` are back-compat re-export paths nothing in
-  the repo imports. Both names live on the package root and in their owner modules. Drop them? That clears 2
-  `PLC0414`.
 - The 60 example `filter:` / `id:` resolver parameters (`A002`). A fakeshop-level Strawberry `NameConverter` that
   strips a trailing `_` would let them read `filter_` with the wire name unchanged. But `FilterInput`'s docstring
   prescribes `filter:` for consumers. Adopt the converter in the example project?
@@ -238,7 +235,7 @@ Ruff against itself:
   - `DJ008`, `SLOT000` / `SLOT001` and `S105`-`S107` for tests/ and examples/;
   - `S603` / `S607` for tests/ and scripts/;
   - `N806` (159 PascalCase class bindings in tests, which would read as instances if renamed lowercase);
-  - `D102` / `D103` on test functions (1,864 functions without a docstring; turning the rule on means writing that
+  - `D102` / `D103` on test functions (1,887 functions without a docstring; turning the rule on means writing that
     many true contract docstrings).
 
 ## Done
@@ -284,6 +281,8 @@ Each item's commit holds the detail (`git log -S '<code>' -- pyproject.toml`).
 37. `# noqa` refactored away (410 to 302 lines): `utils/truth.py` identity reads, `_logger.py`, `id_` parameters.
 38. `D413` and `TID252` everywhere; `TC001`-`TC003` and `PLR2004` outside tests/ and examples/.
 39. `PLC0415`: 2,074 imports hoisted; the rest are local with a reason.
+41. Two redundant re-export paths dropped before the first release, `types.relay.SyncMisuseError` and
+    `filters.base.LazyRelatedClassMixin` (2 `PLC0414`); every public path to both names stays.
 
 ## Measuring
 

@@ -29,8 +29,9 @@ subpackage also consumes leaf helpers from ``..utils`` (``pascal_case``,
 same rule.
 """
 
+from django_strawberry_framework.utils.querysets import SyncMisuseError
+
 from .base import DjangoType
 from .finalizer import finalize_django_types
-from .relay import SyncMisuseError
 
 __all__ = ("DjangoType", "SyncMisuseError", "finalize_django_types")

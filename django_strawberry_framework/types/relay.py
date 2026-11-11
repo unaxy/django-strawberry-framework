@@ -54,11 +54,6 @@ from django_strawberry_framework.utils._narrowing import (
 )
 from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.lazy import unwrap_lazy_object
-
-# ``SyncMisuseError`` is owned by ``utils/querysets.py``; the redundant ``as``
-# alias re-exports it from this module so ``from ...types.relay import
-# SyncMisuseError`` and the ``types/__init__.py`` re-export resolve here.
-from django_strawberry_framework.utils.querysets import SyncMisuseError as SyncMisuseError  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.querysets import (
     apply_type_visibility_async,
     apply_type_visibility_sync,

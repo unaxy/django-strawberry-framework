@@ -137,7 +137,6 @@ from django_strawberry_framework.resource_policy import (
     _windowed_rows,
 )
 from django_strawberry_framework.types.definition import DjangoTypeDefinition
-from django_strawberry_framework.types.relay import SyncMisuseError
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import list_of, read_attr, require_instance
 from django_strawberry_framework.utils._queryset_private import (
@@ -145,6 +144,7 @@ from django_strawberry_framework.utils._queryset_private import (
 )
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import (
+    SyncMisuseError,
     _routing_hints_equal,
     _routing_repr,
     _snapshot_routing_intent,

@@ -23,6 +23,7 @@ from typing import Generic, TypeVar
 from django_filters import Filter
 
 from django_strawberry_framework.registry import register_subsystem_clear
+from django_strawberry_framework.sets_mixins import LazyRelatedClassMixin
 from django_strawberry_framework.utils.inputs import build_lazy_input_annotation
 
 from .base import (
@@ -30,7 +31,6 @@ from .base import (
     ArrayFilterMethod,
     GlobalIDFilter,
     GlobalIDMultipleChoiceFilter,
-    LazyRelatedClassMixin,
     ListFilter,
     ListFilterMethod,
     RangeField,

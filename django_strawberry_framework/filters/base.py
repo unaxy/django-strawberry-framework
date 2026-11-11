@@ -23,10 +23,6 @@ five parity-floor primitives (spec-027 Decision 4):
 - `TextPatternFilter`: the generated filter of a text-pattern lookup (`iexact`,
   `contains`, `startswith`, `regex`, ...) on a non-text column, a `CharFilter`
   whose leaf is typed `String`.
-- `LazyRelatedClassMixin`: re-exported from the package-root
-  `sets_mixins` module (shared with the future order / aggregate sets);
-  imported here so `RelatedFilter` and the `filters` public surface keep
-  exposing it unchanged.
 - `RelatedFilter`: collapsed port of the cookbook's
   `BaseRelatedFilter` + `RelatedFilter(BaseRelatedFilter, ModelChoiceFilter)`
   pair into a single consumer-facing class so the public surface matches
@@ -93,9 +89,6 @@ from django_strawberry_framework.exceptions import (
 )
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.relay import _coerce_pk_or_none, _node_id_slot
-from django_strawberry_framework.sets_mixins import (
-    LazyRelatedClassMixin as LazyRelatedClassMixin,  # noqa: PLC0414 - kept re-export path
-)  # re-exported via filters.__init__
 from django_strawberry_framework.sets_mixins import RelatedSetTargetMixin
 from django_strawberry_framework.types.converters import _field_label
 from django_strawberry_framework.types.definition import DjangoTypeDefinition, _resolves_id_off_pk

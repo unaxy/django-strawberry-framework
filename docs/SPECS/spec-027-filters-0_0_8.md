@@ -402,7 +402,7 @@ The filter subsystem is a subpackage at **[`django_strawberry_framework/filters/
 | --- | --- |
 | `filters/inputs.py::FieldSpec` | [`utils/inputs.py::GeneratedInputFieldSpec`][utils-inputs] |
 | `filters/inputs.py::build_input_class` | [`utils/inputs.py::build_strawberry_input_class`][utils-inputs] |
-| `filters/base.py::LazyRelatedClassMixin` | [`sets_mixins.py::LazyRelatedClassMixin`][sets-mixins] |
+| `filters/__init__.py::LazyRelatedClassMixin` | [`sets_mixins.py::LazyRelatedClassMixin`][sets-mixins] |
 | `RelatedFilter`'s owner-bind / lazy-target machinery | [`sets_mixins.py::RelatedSetTargetMixin`][sets-mixins] |
 | `FilterSet._run_permission_checks` | [`sets_mixins.py::ActiveInputPermissionMixin._run_permission_checks`][sets-mixins] |
 

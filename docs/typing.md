@@ -33,7 +33,7 @@ Rules of the road:
 
 ## Status
 
-Measured 2026-11-11 at 41de5b69 (the tests/ row recounted for typing item 44), basedpyright 1.40.2 (pyright 1.1.414).
+Measured 2026-11-11 on the tree after 21cc9c7f, basedpyright 1.40.2 (pyright 1.1.414).
 
 | | Count |
 | --- | --- |
@@ -50,10 +50,10 @@ holds. The density is the number of suppressions (ignore lines plus casts) per 1
 
 | Area | Files | Lines | Rules relaxed | Ignore lines | Casts | Per 1k lines |
 | --- | --- | --- | --- | --- | --- | --- |
-| Package (`django_strawberry_framework/`) | 131 | 115,090 | none | 116 | 70 | 1.62 |
-| tests/ | 215 | 255,986 | `reportUnannotatedClassAttribute`, `reportUnusedCallResult` | 472 | 22 | 1.93 |
-| examples/ | 266 | 201,962 | `reportUnannotatedClassAttribute`; `reportUnusedCallResult` in its test folders | 55 | 0 | 0.27 |
-| scripts/ | 45 | 43,638 | none | 3 | 11 | 0.32 |
+| Package (`django_strawberry_framework/`) | 131 | 115,070 | none | 116 | 70 | 1.62 |
+| tests/ | 217 | 257,748 | `reportUnannotatedClassAttribute`, `reportUnusedCallResult` | 472 | 22 | 1.92 |
+| examples/ | 266 | 202,432 | `reportUnannotatedClassAttribute`; `reportUnusedCallResult` in its test folders | 55 | 0 | 0.27 |
+| scripts/ | 46 | 45,205 | none | 3 | 11 | 0.31 |
 | Root (`conftest.py`, `line_count.py`, `docs/dry/export_dry_review.py`) | 3 | 2,254 | none | 0 | 0 | 0 |
 
 Rules relaxed in every area are listed under [Rules off](#rules-off).
@@ -63,11 +63,11 @@ Rules relaxed in every area are listed under [Rules off](#rules-off).
 | Part | Files | Lines | Ignore lines | Casts | Per 1k lines |
 | --- | --- | --- | --- | --- | --- |
 | top-level modules | 28 | 22,356 | 27 | 16 | 1.92 |
-| `utils/` | 28 | 21,540 | 26 | 13 | 1.81 |
-| `filters/` | 6 | 18,557 | 22 | 9 | 1.67 |
+| `utils/` | 28 | 21,571 | 26 | 13 | 1.81 |
+| `filters/` | 6 | 18,529 | 22 | 9 | 1.67 |
 | `optimizer/` | 14 | 13,128 | 4 | 16 | 1.52 |
-| `rest_framework/` | 9 | 8,682 | 11 | 3 | 1.61 |
-| `types/` | 8 | 8,678 | 4 | 2 | 0.69 |
+| `rest_framework/` | 9 | 8,663 | 11 | 3 | 1.62 |
+| `types/` | 8 | 8,674 | 4 | 2 | 0.69 |
 | `forms/` | 5 | 5,725 | 4 | 2 | 1.05 |
 | `mutations/` | 7 | 5,111 | 5 | 1 | 1.17 |
 | `extensions/` | 5 | 4,431 | 4 | 2 | 1.35 |

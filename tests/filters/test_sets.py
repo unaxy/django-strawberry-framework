@@ -189,7 +189,7 @@ from django_strawberry_framework.optimizer.predicates import correlated_inner_ro
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.sets_mixins import collect_related_declarations
 from django_strawberry_framework.testing.relay import global_id_for
-from django_strawberry_framework.types.relay import SyncMisuseError, apply_interfaces
+from django_strawberry_framework.types.relay import apply_interfaces
 from django_strawberry_framework.utils import truth, widgets
 from django_strawberry_framework.utils._narrowing import (
     is_dict,
@@ -205,6 +205,7 @@ from django_strawberry_framework.utils.permissions import (
     UndeclaredHop,
     relation_path_gates,
 )
+from django_strawberry_framework.utils.querysets import SyncMisuseError
 from django_strawberry_framework.utils.relations import ClassifiedPath, classify_path
 from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.utils.widgets import multi_widget_keys
