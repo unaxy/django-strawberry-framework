@@ -1868,6 +1868,7 @@ def test_the_macos_schedule_is_a_launchd_agent_running_sync_pins_only(tmp_path: 
     assert json_list(agent, "ProgramArguments")[-3:] == ["sync", "--pins-only", "--json"]
     assert agent["StartInterval"] == 120
     assert agent["WorkingDirectory"] == str(fleet_sync.REPO_ROOT)
+    assert agent["StandardOutPath"] == str(fleet_sync.REPO_ROOT / ".work" / "fleet-pins.log")
     commands = fleet_sync.schedule_commands(files, "darwin")
     assert [command[:2] for command in commands] == [
         ["launchctl", "bootout"],
@@ -1882,6 +1883,7 @@ def test_the_linux_schedule_is_a_systemd_user_timer(tmp_path: Path) -> None:
     timer = files[units / f"{fleet_sync.SCHEDULE_UNIT}.timer"]
     assert "sync --pins-only --json" in service
     assert "OnUnitActiveSec=300s" in timer
+    assert f">> {fleet_sync.REPO_ROOT / '.work' / 'fleet-pins.log'} 2>&1" in service
     assert fleet_sync.schedule_commands(files, "linux")[-1][-2:] == [
         "--now",
         f"{fleet_sync.SCHEDULE_UNIT}.timer",

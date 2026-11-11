@@ -241,7 +241,8 @@ Commands
     ``schedule [--every SECONDS] [--install]``
         Print this machine's timer for ``sync --pins-only --json`` every
         ``--every`` seconds (default 120, at least 30): a launchd agent on macOS,
-        a systemd user service and timer on Linux, each logging to one file.
+        a systemd user service and timer on Linux, each logging to the checkout's
+        ``.work/fleet-pins.log``.
         ``--install`` writes it and loads it (``launchctl bootstrap``,
         ``systemctl --user enable --now``); run it from the shared checkout, once
         per machine. The timer's ``PATH`` is the folders git, ssh, rsync and
@@ -3716,6 +3717,8 @@ SCHEDULE_TOOLS = (
     "rsync",
     "tailscale",
 )
+#: The log every scheduled run appends to, under the checkout's ``.work/`` (git-ignored).
+SCHEDULE_LOG = "fleet-pins.log"
 #: Seconds between scheduled ``sync --pins-only`` runs unless ``--every`` says otherwise.
 SCHEDULE_EVERY = 120
 #: The shortest interval ``schedule`` accepts; a run reads every peer's inventory.
@@ -3736,7 +3739,8 @@ def schedule_files(home: Path, every: int, platform: str = sys.platform) -> dict
     """Return the timer files that run ``sync --pins-only --json`` every ``every`` seconds.
 
     A launchd agent on macOS, a systemd user service and timer on Linux; each runs the
-    checkout's ``.venv`` Python from the checkout and appends to one log file.
+    checkout's ``.venv`` Python from the checkout and appends to ``.work/fleet-pins.log``;
+    only the timer file itself sits outside the checkout, where the OS reads it.
 
     Raises:
         SetupError: ``platform`` is neither.
@@ -3749,8 +3753,8 @@ def schedule_files(home: Path, every: int, platform: str = sys.platform) -> dict
         "--pins-only",
         "--json",
     ]
+    log = REPO_ROOT / ".work" / SCHEDULE_LOG
     if platform == "darwin":
-        log = home / "Library" / "Logs" / f"{SCHEDULE_UNIT}.log"
         agent = {
             "Label": SCHEDULE_LABEL,
             "ProgramArguments": command,
@@ -3764,7 +3768,6 @@ def schedule_files(home: Path, every: int, platform: str = sys.platform) -> dict
         plist = home / "Library" / "LaunchAgents" / f"{SCHEDULE_LABEL}.plist"
         return {plist: plistlib.dumps(agent).decode()}
     if platform.startswith("linux"):
-        log = home / ".cache" / f"{SCHEDULE_UNIT}.log"
         run = f"{shlex.join(command)} >> {shlex.quote(str(log))} 2>&1"
         units = home / ".config" / "systemd" / "user"
         service = (
