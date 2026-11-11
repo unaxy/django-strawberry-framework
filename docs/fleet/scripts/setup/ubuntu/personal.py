@@ -1,4 +1,4 @@
-"""Personalize an Ubuntu fleet machine the way ``rio-ubu`` is set up: CLI tools and dotfiles only.
+"""Personalize an Ubuntu fleet machine the way ``rio-ubu`` is: CLI tools, dotfiles, GNOME settings.
 
 The core setup (``docs/fleet/scripts/fleet_setup.py add <host>``) makes a machine a fleet member;
 this script is the optional layer on top: the extra command-line tools, the shell, tmux and git
@@ -69,7 +69,7 @@ Steps
         off, and the enabled extensions list. The dock's favourites are
         ``files/desktop/favorites.txt`` less the apps the target lacks. Machine state stays out
         (monitor connectors, window sizes, profile ids, night-light coordinates, extension
-        bookkeeping).
+        bookkeeping, and the edge-tiling keys Tiling Assistant saves and restores on every lock).
         Settings for an extension the target lacks are stored and take effect if it is added.
     ``desktop-files``
         ``~/projects`` first in the Files sidebar, four ``~/Templates`` (New Document), and the
@@ -91,6 +91,7 @@ import io
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -118,6 +119,7 @@ APT_PACKAGES = (
     "stress-ng",
     "lm-sensors",
     "wl-clipboard",
+    "dconf-cli",
 )
 OSV_VERSION = "v2.7.0"
 KINDS = ("sudo", "user", "hand")
@@ -527,6 +529,8 @@ APPLICATION_DIRS = (
     "/usr/share/applications",
     "/usr/local/share/applications",
     "/var/lib/snapd/desktop/applications",
+    "/var/lib/flatpak/exports/share/applications",
+    "~/.local/share/flatpak/exports/share/applications",
     "~/.local/share/applications",
 )
 BOOKMARK = "file://{home}/projects projects"
@@ -565,6 +569,8 @@ def dconf_keys(text: str) -> dict[str, str]:
 
 
 def _check_desktop_settings(box: Box) -> str | None:
+    if not shutil.which("dconf"):
+        return "no dconf command (the apt-cli step installs dconf-cli)"
     wrong = [
         path
         for path, value in dconf_keys(dconf_text(box)).items()
@@ -589,7 +595,13 @@ def _desktop_files(box: Box) -> dict[Path, tuple[str, str]]:
     for source in sorted((DESKTOP / "nautilus-scripts").iterdir()):
         files[scripts / source.name] = (source.read_text(encoding="utf-8"), "755")
     accels = box.home / ".config" / "nautilus" / "scripts-accels"
-    lines = [line for line in _text(accels).splitlines() if line.strip() and line != ACCEL]
+    # One binding per script name (Nautilus keeps the last): drop every other line for this script.
+    script = ACCEL.split(None, 1)[1]
+    lines = [
+        line
+        for line in _text(accels).splitlines()
+        if line.strip() and line.strip().split(None, 1)[1:] != [script]
+    ]
     files[accels] = ("\n".join([ACCEL, *lines]) + "\n", "644")
     bookmarks = box.home / ".config" / "gtk-3.0" / "bookmarks"
     mark = BOOKMARK.format(home=box.home)
@@ -601,8 +613,8 @@ def _desktop_files(box: Box) -> dict[Path, tuple[str, str]]:
 def _check_desktop_files(box: Box) -> str | None:
     stale = [
         path.name
-        for path, (body, _mode) in _desktop_files(box).items()
-        if not path.exists() or _text(path) != body
+        for path, (body, mode) in _desktop_files(box).items()
+        if not path.exists() or _text(path) != body or path.stat().st_mode & 0o777 != int(mode, 8)
     ]
     return ", ".join(stale) if stale else None
 
@@ -834,7 +846,9 @@ class _Args(argparse.Namespace):
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one command; exit 0 when done, 1 on a missing or failed step, 2 on bad setup."""
-    parser = argparse.ArgumentParser(description="Personalize an Ubuntu fleet machine (CLI only).")
+    parser = argparse.ArgumentParser(
+        description="Personalize an Ubuntu fleet machine (no GUI app installed).",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     box_parser = sub.add_parser("box", help="run on the machine itself")
     _ = box_parser.add_argument("action", choices=["check", "install"])

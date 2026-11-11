@@ -121,7 +121,7 @@ cd ~/projects/django-strawberry-framework && uv run python docs/fleet/scripts/fl
 ## 5a. Personalize (optional): `setup/ubuntu/personal.py`
 
 The core above makes a fleet member. [personal.py][personal] adds the layer `rio-ubu` carries,
-CLI only (no GUI application, no desktop setting):
+installing no GUI application: CLI tools, dotfiles and GNOME settings:
 
 ```sh
 python3 docs/fleet/scripts/setup/ubuntu/personal.py apply <host> --check   # what <host> lacks

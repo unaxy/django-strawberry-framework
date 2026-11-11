@@ -1,9 +1,10 @@
-"""Script tests for ``docs/fleet/scripts/setup/ubuntu/personal.py``, the CLI-only personalization."""
+"""Script tests for ``docs/fleet/scripts/setup/ubuntu/personal.py``, a fleet box's personal layer."""
 
 from __future__ import annotations
 
 import io
 import re
+import shutil
 import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -200,14 +201,27 @@ def test_the_private_value_pattern_lets_ordinary_text_through(sample: str) -> No
     assert PRIVATE.search(f"text {sample} text") is None
 
 
-def test_the_dock_keeps_only_installed_favourites_in_order(tmp_path: Path) -> None:
-    apps = tmp_path / ".local" / "share" / "applications"
-    apps.mkdir(parents=True)
-    for name in ("org.gnome.Settings.desktop", "org.gnome.Nautilus.desktop"):
-        _ = (apps / name).write_text("[Desktop Entry]\n")
+def test_the_dock_keeps_only_installed_favourites_in_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    apps = tmp_path / "apps"
+    flatpak = tmp_path / "flatpak"
+    for folder, name in (
+        (apps, "org.gnome.Settings.desktop"),
+        (flatpak, "org.gnome.Nautilus.desktop"),
+    ):
+        folder.mkdir()
+        _ = (folder / name).write_text("[Desktop Entry]\n")
+    monkeypatch.setattr(personal, "APPLICATION_DIRS", (str(apps), str(flatpak)))
     assert personal.favorites(_box(tmp_path)) == (
         "['org.gnome.Nautilus.desktop', 'org.gnome.Settings.desktop']"
     )
+
+
+def test_flatpak_exports_are_searched_for_favourites() -> None:
+    assert "/var/lib/flatpak/exports/share/applications" in personal.APPLICATION_DIRS
+    assert "~/.local/share/flatpak/exports/share/applications" in personal.APPLICATION_DIRS
 
 
 def test_no_installed_favourite_is_an_empty_typed_list(
@@ -233,3 +247,42 @@ def test_the_files_sidebar_puts_projects_first_once(tmp_path: Path) -> None:
     _ = bookmarks.write_text(f"file://{tmp_path}/Documents\n{mark}\n")
     body, _mode = personal._desktop_files(_box(tmp_path))[bookmarks]
     assert body == f"{mark}\nfile://{tmp_path}/Documents\n"
+
+
+def test_an_older_copy_path_shortcut_is_replaced_not_kept(tmp_path: Path) -> None:
+    accels = tmp_path / ".config" / "nautilus" / "scripts-accels"
+    accels.parent.mkdir(parents=True)
+    _ = accels.write_text("F4 Copy Path\n<Control>o Other Script\n")
+    body, _mode = personal._desktop_files(_box(tmp_path))[accels]
+    assert body == f"{personal.ACCEL}\n<Control>o Other Script\n"
+
+
+def test_a_copy_path_script_without_its_execute_bit_is_stale(tmp_path: Path) -> None:
+    box = _box(tmp_path)
+    for path, (body, mode) in personal._desktop_files(box).items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_text(body)
+        path.chmod(int(mode, 8))
+    assert personal._check_desktop_files(box) is None
+    script = tmp_path / ".local" / "share" / "nautilus" / "scripts" / "Copy Path"
+    script.chmod(0o644)
+    assert personal._check_desktop_files(box) == "Copy Path"
+
+
+def test_desktop_settings_name_a_missing_dconf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_command(_name: str) -> None:
+        return None
+
+    monkeypatch.setattr(shutil, "which", no_command)
+    gap = personal._check_desktop_settings(_box(tmp_path))
+    assert gap is not None
+    assert "dconf-cli" in gap
+
+
+def test_dconf_cli_is_installed_before_the_desktop_steps() -> None:
+    keys = [step.key for step in personal.STEPS]
+    assert "dconf-cli" in personal.APT_PACKAGES
+    assert keys.index("apt-cli") < keys.index("desktop-settings")
