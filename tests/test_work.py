@@ -105,7 +105,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     def ample(_path: Path) -> int:
         return work.MIN_FREE_BYTES * 2
 
-    monkeypatch.setattr(work, "cwd_users", no_users)
+    monkeypatch.setattr(work, "process_census", no_users)
     monkeypatch.setattr(work, "free_bytes", ample)
     return root
 
@@ -1694,16 +1694,19 @@ def test_rm_refuses_a_copy_a_process_works_in(
     def busy(_path: Path) -> list[str]:
         return ["4242"]
 
-    monkeypatch.setattr(work, "cwd_users", busy)
+    monkeypatch.setattr(work, "process_census", busy)
     assert work.main(["rm", "spike-busy"]) == 1
     assert "process 4242" in capsys.readouterr().err
 
-    def unknown(_path: Path) -> None:
-        return None
+    def unknown(_path: Path) -> work.CensusGap:
+        return work.CensusGap("cannot read the working folder of pid 1234 (foo)")
 
-    monkeypatch.setattr(work, "cwd_users", unknown)
+    monkeypatch.setattr(work, "process_census", unknown)
     assert work.main(["rm", "spike-busy"]) == 1
-    assert "cannot tell" in capsys.readouterr().err
+    assert (
+        "the process census is incomplete: cannot read the working folder of pid 1234 (foo), "
+        "so it cannot tell"
+    ) in capsys.readouterr().err
     assert path.is_dir()
 
 
@@ -2598,7 +2601,7 @@ def test_gc_reports_a_landed_copy_it_must_keep(
     def busy(_path: Path) -> list[str]:
         return ["4242"]
 
-    monkeypatch.setattr(work, "cwd_users", busy)
+    monkeypatch.setattr(work, "process_census", busy)
     assert work.main(["gc", "--dry-run"]) == 0
     assert "keep fix-landed" in capsys.readouterr().out
     assert work.main(["gc"]) == 1
@@ -3758,24 +3761,37 @@ def test_an_lsof_census_that_fails_misses_its_own_process_or_cannot_cover_cannot
     target = tmp_path / "copy"
     target.mkdir()
 
-    def census(body: str, *, shut: bool = True) -> list[str] | None:
+    def census(body: str, *, shut: bool = True) -> list[str] | work.CensusGap:
         return work._lsof_users(_fake_lsof(tmp_path, body), target, others_shut_out=shut)
 
-    assert census("exit 1") is None
-    assert census(f"printf 'p{os.getpid()}\\nn/\\n'; exit 1") is None
-    assert census("printf 'p1\\nn/\\n'") is None
+    assert census("exit 1") == work.CensusGap("lsof exited 1")
+    assert census(f"printf 'p{os.getpid()}\\nn/\\n'; exit 1") == work.CensusGap("lsof exited 1")
+    assert census("printf 'p1\\nn/\\n'") == work.CensusGap("lsof does not list this process")
     whole = f"printf 'p{os.getpid()}\\nn/\\np77\\nn{target}\\n'"
     assert census(whole) == ["77"]
-    assert census(whole, shut=False) is None
+    assert isinstance(census(whole, shut=False), work.CensusGap)
+
+
+def _fake_process(
+    proc: Path,
+    pid: int,
+    cwd: Path,
+    comm: str = "bash",
+    cmdline: bytes = b"",
+) -> None:
+    """Add ``/proc/<pid>`` with its ``cwd`` link and the ``comm`` and ``cmdline`` the kernel shows."""
+    entry = proc / str(pid)
+    entry.mkdir(parents=True)
+    (entry / "cwd").symlink_to(cwd)
+    _ = (entry / "comm").write_text(f"{comm}\n", encoding="utf-8")
+    _ = (entry / "cmdline").write_bytes(cmdline or f"{comm}\0".encode())
 
 
 def _fake_proc(tmp_path: Path, target: Path, *, with_self: bool) -> Path:
     proc = tmp_path / "proc"
-    (proc / "77").mkdir(parents=True)
-    (proc / "77" / "cwd").symlink_to(target)
+    _fake_process(proc, 77, target)
     if with_self:
-        (proc / str(os.getpid())).mkdir()
-        (proc / str(os.getpid()) / "cwd").symlink_to(tmp_path)
+        _fake_process(proc, os.getpid(), tmp_path, "python3")
     return proc
 
 
@@ -3783,46 +3799,128 @@ def test_a_proc_census_without_its_own_process_cannot_tell(tmp_path: Path) -> No
     target = tmp_path / "copy"
     target.mkdir()
     without = _fake_proc(tmp_path, target, with_self=False)
-    assert work._proc_users(without, target, others_shut_out=True) is None
+    assert work._proc_users(without, target, others_shut_out=True) == work.CensusGap(
+        "/proc does not list this process",
+    )
     work.delete_tree(without)
     whole = _fake_proc(tmp_path, target, with_self=True)
     assert work._proc_users(whole, target, others_shut_out=True) == ["77"]
 
 
-@pytest.mark.parametrize(
-    ("owner_offset", "shut", "expected"),
-    [(0, True, None), (1, False, None), (1, True, [])],
-    ids=["own-process-unreadable", "other-user-while-others-may-enter", "other-user-shut-out"],
-)
-def test_a_proc_census_with_an_unreadable_process(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    owner_offset: int,
-    *,
-    shut: bool,
-    expected: list[str] | None,
-) -> None:
-    target = tmp_path / "copy"
-    target.mkdir()
-    proc = _fake_proc(tmp_path, target, with_self=True)
-    other = proc / "77"
+def _hide_cwd(monkeypatch: pytest.MonkeyPatch, entry: Path, owner: int) -> None:
+    """Make ``entry``'s cwd unreadable, as the kernel does, and its folder owned by ``owner``."""
     readlink, stat_of = Path.readlink, Path.stat
 
     def denied(path: Path) -> Path:
-        if path == other / "cwd":
+        if path == entry / "cwd":
             raise PermissionError(path)
         return readlink(path)
 
     def owned(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
         info = stat_of(path, follow_symlinks=follow_symlinks)
-        if path == other:
+        if path == entry:
             fields = list(info)
-            fields[4] = os.getuid() + owner_offset
+            fields[4] = owner
             return os.stat_result(fields)
         return info
 
     monkeypatch.setattr(Path, "readlink", denied)
     monkeypatch.setattr(Path, "stat", owned)
+
+
+#: One own process per entry of ``work.CENSUS_SKIPPED_DAEMONS``, as Linux logins show them.
+LOGIN_DAEMONS = {
+    "systemd": b"/usr/lib/systemd/systemd\0--user\0",
+    "(sd-pam)": b"(sd-pam)\0",
+    "sshd-session": b"sshd-session: rio@notty" + b"\0" * 17,
+    "sshd": b"sshd: rio@pts/0\0",
+    "ssh-agent": b"/usr/bin/ssh-agent\0-D\0-a\0/run/user/1000/gcr/.ssh\0",
+    "gpg-agent": b"/usr/bin/gpg-agent\0--supervised\0",
+    "gnome-keyring-d": b"/usr/bin/gnome-keyring-daemon\0--foreground\0--components=secrets\0",
+}
+
+
+def test_every_skipped_daemon_has_a_census_row() -> None:
+    assert set(LOGIN_DAEMONS) == set(work.CENSUS_SKIPPED_DAEMONS)
+
+
+@pytest.mark.parametrize("comm", sorted(LOGIN_DAEMONS))
+def test_a_proc_census_skips_an_own_login_daemon_it_cannot_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    comm: str,
+) -> None:
+    target = tmp_path / "copy"
+    target.mkdir()
+    proc = _fake_proc(tmp_path, target, with_self=True)
+    _fake_process(proc, 78, target, comm, LOGIN_DAEMONS[comm])
+    _hide_cwd(monkeypatch, proc / "78", os.getuid())
+    assert work._proc_users(proc, target, others_shut_out=True) == ["77"]
+
+
+@pytest.mark.parametrize(
+    ("comm", "cmdline", "shown"),
+    [
+        ("bash", b"-bash\0", "-bash"),
+        ("claude", b"node\0/usr/bin/claude\0", "node /usr/bin/claude"),
+        ("systemd", b"/usr/lib/systemd/systemd\0", "/usr/lib/systemd/systemd"),
+        ("sshd", b"/usr/sbin/sshd\0-D\0-f\0sshd_config\0", "/usr/sbin/sshd -D -f sshd_config"),
+        ("ssh-agent", b"python3\0agent.py\0", "python3 agent.py"),
+        ("bash", b"\0", "bash"),
+    ],
+    ids=[
+        "shell",
+        "agent-cli",
+        "systemd-not-user",
+        "sshd-server",
+        "comm-argv-mismatch",
+        "empty-cmdline",
+    ],
+)
+def test_a_proc_census_with_an_unknown_own_unreadable_process_names_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    comm: str,
+    cmdline: bytes,
+    shown: str,
+) -> None:
+    target = tmp_path / "copy"
+    target.mkdir()
+    proc = _fake_proc(tmp_path, target, with_self=True)
+    _fake_process(proc, 78, tmp_path, comm, cmdline)
+    _hide_cwd(monkeypatch, proc / "78", os.getuid())
+    for shut in (True, False):
+        found = work._proc_users(proc, target, others_shut_out=shut)
+        assert isinstance(found, work.CensusGap)
+        assert found.reason.startswith(f"cannot read the working folder of pid 78 ({shown}), ")
+
+
+@pytest.mark.parametrize(
+    ("shut", "expected"),
+    [
+        (
+            False,
+            work.CensusGap(
+                "cannot read the working folder of pid 78 (bash), another user's, while no "
+                "folder above the copy shuts others out",
+            ),
+        ),
+        (True, ["77"]),
+    ],
+    ids=["other-user-while-others-may-enter", "other-user-shut-out"],
+)
+def test_a_proc_census_with_another_users_unreadable_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    shut: bool,
+    expected: list[str] | work.CensusGap,
+) -> None:
+    target = tmp_path / "copy"
+    target.mkdir()
+    proc = _fake_proc(tmp_path, target, with_self=True)
+    _fake_process(proc, 78, target)
+    _hide_cwd(monkeypatch, proc / "78", os.getuid() + 1)
     assert work._proc_users(proc, target, others_shut_out=shut) == expected
 
 
@@ -3845,7 +3943,7 @@ def test_rm_refuses_when_the_real_census_fails(
         pytest.skip("this machine censuses /proc, not lsof")
     path = _new("spike-census")
     _age(path)
-    monkeypatch.setattr(work, "cwd_users", _real_cwd_users)
+    monkeypatch.setattr(work, "process_census", _real_process_census)
     _ = _fake_lsof(tmp_path, "exit 1")
     monkeypatch.setenv("PATH", os.pathsep.join([str(tmp_path / "bin"), os.environ["PATH"]]))
     assert work.main(["rm", "spike-census"]) == 1
@@ -3854,7 +3952,7 @@ def test_rm_refuses_when_the_real_census_fails(
     _ = repo
 
 
-_real_cwd_users = work.cwd_users
+_real_process_census = work.process_census
 
 
 # --------------------------------------------------------------------------------------------

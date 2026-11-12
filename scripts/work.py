@@ -407,11 +407,18 @@ Commands
 The process census behind ``rm``: Linux reads ``/proc/<pid>/cwd``, other
 systems ask ``lsof -d cwd``. A census that fails, cannot read one of this
 user's own processes, or does not see the process running it is incomplete,
-and an incomplete census refuses. Another user's process it cannot read (and
-``lsof`` never lists) is skipped only while a folder above the copy is this
-user's and closed to everyone else (``.work`` is ``0700``), since no other
-non-root user can then be inside; otherwise the census is incomplete. Root's
-processes stay invisible.
+and an incomplete census refuses, naming why (an unreadable process by pid
+and command). The kernel hides the folder of a process that is not dumpable
+or holds credentials or capabilities the caller lacks, which every Linux
+login starts (``systemd --user``, ``(sd-pam)``, ``sshd-session``,
+``ssh-agent``): an own process is skipped only when its ``comm`` and
+``cmdline``, which stay readable, name one of ``CENSUS_SKIPPED_DAEMONS``,
+login and agent daemons that run no user's work and hold no file under their
+folder. Another user's process it cannot read (and ``lsof`` never lists) is
+skipped only while a folder above the copy is this user's and closed to
+everyone else (``.work`` is ``0700``), since no other non-root user can then
+be inside; otherwise the census is incomplete. Root's processes stay
+invisible.
 
 A copy holding a nested repository or a submodule is refused by ``save``,
 ``land`` and ``rm`` (``rm --discard`` aside): no tree carries that
@@ -2824,12 +2831,94 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
-def _proc_users(proc: Path, target: Path, *, others_shut_out: bool) -> list[str] | None:
-    """Census ``/proc``: the pids whose cwd lies in ``target``; ``None`` when incomplete.
+# The login and agent daemons the ``/proc`` census skips when it cannot read their working
+# folder, keyed by ``/proc/<pid>/comm`` (the executable's base name, cut by the kernel to 15
+# characters), each with the pattern its ``/proc/<pid>/cmdline`` (arguments joined by spaces)
+# must match. Both files are readable for every process; ``cwd`` is not for a process that is
+# not dumpable or holds credentials or capabilities this one lacks, and every Linux login
+# starts some of these. ``/proc/<pid>/status`` cannot stand in for the names: ``(sd-pam)``
+# and ``sshd-session`` show ids and capabilities equal to any shell's, since dumpability is
+# not in it. Nor can a start time: a process older than the copy can still enter it. None of
+# these runs a user's work (a login shell is a child, read and counted like any other) or
+# holds a file under its working folder, so a copy one of them sits in loses no work.
+CENSUS_SKIPPED_DAEMONS: dict[str, re.Pattern[str]] = {
+    # The user's service manager: started by PID 1 in the home folder, never changes folder;
+    # unreadable because it holds a capability (``CAP_WAKE_ALARM``) a shell lacks.
+    "systemd": re.compile(r"(?:/usr)?/lib/systemd/systemd --user"),
+    # The user manager's PAM helper: forked as root and dropped to the user (so not
+    # dumpable), it only waits to close the PAM session.
+    "(sd-pam)": re.compile(r"\(sd-pam\)"),
+    # OpenSSH's per-connection process (9.8 and later), dropped from root to the user and
+    # marked not dumpable; it relays the session, whose shell is its child.
+    "sshd-session": re.compile(r"sshd-session: \S+@(?:pts/\d+|notty)"),
+    # The same process before OpenSSH 9.8.
+    "sshd": re.compile(r"sshd: \S+@(?:pts/\d+|notty)"),
+    # Key agents: setgid, not dumpable or holding a capability to guard the keys they keep in
+    # memory; their sockets live in the runtime or GnuPG folder; a forking start moves to /.
+    "ssh-agent": re.compile(r"(?:\S*/)?ssh-agent(?: .*)?"),
+    "gpg-agent": re.compile(r"(?:\S*/)?gpg-agent(?: .*)?"),
+    "gnome-keyring-d": re.compile(r"(?:\S*/)?gnome-keyring-daemon(?: .*)?"),
+}
 
-    A process whose cwd cannot be read is unknown. It is skipped only when it belongs to
-    another user and ``others_shut_out`` (``.work`` is ``0700``, so no other non-root user
-    can be inside); one of this user's own, or any while others could enter, is ``None``.
+
+@dataclasses.dataclass(frozen=True)
+class CensusGap:
+    """Why the process census cannot vouch for a folder: it is incomplete."""
+
+    reason: str
+
+
+def _proc_command(entry: Path) -> tuple[str, str] | None:
+    """Return a process's ``comm`` and its arguments joined by spaces; ``None`` once it is gone.
+
+    Both read as empty when the kernel will not show them, which matches no daemon.
+    """
+    try:
+        comm = (entry / "comm").read_bytes()
+        argv = (entry / "cmdline").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except OSError:
+        return "", ""
+    return (
+        comm.decode(errors="replace").removesuffix("\n"),
+        " ".join(part.decode(errors="replace") for part in argv.rstrip(b"\0").split(b"\0")),
+    )
+
+
+def _unreadable_gap(entry: Path, *, others_shut_out: bool) -> CensusGap | None:
+    """Return the gap a process whose cwd cannot be read leaves; ``None`` when it is skipped.
+
+    Another user's is skipped while ``others_shut_out`` (``.work`` is ``0700``, so no other
+    non-root user can be inside), one of this user's own only when it is a daemon of
+    :data:`CENSUS_SKIPPED_DAEMONS`.
+    """
+    try:
+        own = entry.stat().st_uid == os.getuid()
+    except OSError:
+        return None
+    if not own and others_shut_out:
+        return None
+    command = _proc_command(entry)
+    if command is None:
+        return None
+    comm, cmdline = command
+    if own:
+        daemon = CENSUS_SKIPPED_DAEMONS.get(comm)
+        if daemon is not None and daemon.fullmatch(cmdline) is not None:
+            return None
+        whose = "one of this user's own processes that is not a known login daemon"
+    else:
+        whose = "another user's, while no folder above the copy shuts others out"
+    shown = "".join(char if char.isprintable() else "?" for char in cmdline or comm) or "?"
+    return CensusGap(f"cannot read the working folder of pid {entry.name} ({shown}), {whose}")
+
+
+def _proc_users(proc: Path, target: Path, *, others_shut_out: bool) -> list[str] | CensusGap:
+    """Census ``/proc``: the pids whose cwd lies in ``target``, or why it cannot tell.
+
+    A process whose cwd cannot be read is unknown: skipped or a gap by
+    :func:`_unreadable_gap`.
     """
     users: list[str] = []
     seen_self = False
@@ -2841,28 +2930,27 @@ def _proc_users(proc: Path, target: Path, *, others_shut_out: bool) -> list[str]
         except (FileNotFoundError, ProcessLookupError):
             continue
         except PermissionError:
-            try:
-                owner = entry.stat().st_uid
-            except OSError:
-                continue
-            if owner == os.getuid() or not others_shut_out:
-                return None
+            gap = _unreadable_gap(entry, others_shut_out=others_shut_out)
+            if gap is not None:
+                return gap
             continue
         if int(entry.name) == os.getpid():
             seen_self = True
         elif _is_within(cwd, target):
             users.append(entry.name)
-    return users if seen_self else None
+    return users if seen_self else CensusGap("/proc does not list this process")
 
 
-def _lsof_users(lsof: str, target: Path, *, others_shut_out: bool) -> list[str] | None:
-    """Census through ``lsof -d cwd``; ``None`` when it fails, misses this process, or cannot cover.
+def _lsof_users(lsof: str, target: Path, *, others_shut_out: bool) -> list[str] | CensusGap:
+    """Census through ``lsof -d cwd``; a gap when it fails, misses this process, or cannot cover.
 
     ``lsof`` lists only what this user may see, so it vouches for a copy only while no
     other (non-root) user can enter it (``others_shut_out``).
     """
     if not others_shut_out:
-        return None
+        return CensusGap(
+            "lsof lists only this user's processes, and no folder above the copy shuts others out",
+        )
     completed = subprocess.run(
         [
             lsof,
@@ -2878,7 +2966,7 @@ def _lsof_users(lsof: str, target: Path, *, others_shut_out: bool) -> list[str] 
         check=False,
     )
     if completed.returncode != 0:
-        return None
+        return CensusGap(f"lsof exited {completed.returncode}")
     users: list[str] = []
     seen_self = False
     pid = ""
@@ -2890,7 +2978,7 @@ def _lsof_users(lsof: str, target: Path, *, others_shut_out: bool) -> list[str] 
             with contextlib.suppress(OSError, ValueError):
                 if _is_within(Path(line[1:]).resolve(), target):
                     users.append(pid)
-    return users if seen_self else None
+    return users if seen_self else CensusGap("lsof does not list this process")
 
 
 def others_shut_out(path: Path) -> bool:
@@ -2903,13 +2991,13 @@ def others_shut_out(path: Path) -> bool:
     return False
 
 
-def cwd_users(path: Path) -> list[str] | None:
-    """Return the processes whose current directory lies in ``path``; ``None`` = cannot tell.
+def process_census(path: Path) -> list[str] | CensusGap:
+    """Return the processes whose current directory lies in ``path``, or why it cannot tell.
 
     Linux reads ``/proc/<pid>/cwd``; elsewhere ``lsof -d cwd`` is asked. A census that
     fails, cannot read a process it has to vouch for, or does not list the process asking
-    (a census that ran at all sees its own caller) is incomplete: ``None``. Root's
-    processes stay invisible to both.
+    (a census that ran at all sees its own caller) is incomplete: a :class:`CensusGap`.
+    Root's processes stay invisible to both.
     """
     target = path.resolve()
     shut = others_shut_out(target)
@@ -2918,8 +3006,14 @@ def cwd_users(path: Path) -> list[str] | None:
         return _proc_users(proc, target, others_shut_out=shut)
     lsof = shutil.which("lsof")
     if lsof is None:
-        return None
+        return CensusGap("this machine has neither /proc nor lsof")
     return _lsof_users(lsof, target, others_shut_out=shut)
+
+
+def cwd_users(path: Path) -> list[str] | None:
+    """Return :func:`process_census`'s pids for ``path``; ``None`` when it cannot tell."""
+    found = process_census(path)
+    return None if isinstance(found, CensusGap) else found
 
 
 def newest_mtime(path: Path) -> float:
@@ -3300,11 +3394,13 @@ def removal_refusals(repo: Path, copy: Copy, *, discard: bool) -> list[str]:
     if not copy.present:
         refusal = None if discard else _gone_folder_refusal(repo, copy)
         return reasons if refusal is None else [*reasons, refusal]
-    users = cwd_users(copy.path)
-    if users is None and os.name != "nt":
-        reasons.append(
-            "the process census is incomplete, so it cannot tell whether a process works in it",
-        )
+    users = process_census(copy.path)
+    if isinstance(users, CensusGap):
+        if os.name != "nt":
+            reasons.append(
+                f"the process census is incomplete: {users.reason}, so it cannot tell "
+                "whether a process works in it",
+            )
     elif users:
         reasons.append(f"process {', '.join(users)} has its current directory inside it")
     modified = newest_mtime(copy.path)
