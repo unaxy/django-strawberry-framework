@@ -264,7 +264,7 @@ When the optimizer prefetches a relation, the target type's `get_queryset` recei
 #### Scope
 
 - Slice 1 - per-relation hook info: adapt strawberry-django's `optimizer.py::_generate_selection_resolve_info` (MIT; `LICENSE.strawberry-django` already ships, the adapted block names its origin) to build a `GraphQLResolveInfo` per planned relation (its own field nodes, return type, parent type, and path, keyed `0` only under a list-valued relation), and thread it through `django_strawberry_framework/optimizer/walker.py::_hook_info`, `django_strawberry_framework/optimizer/walker.py::_build_child_queryset` and `django_strawberry_framework/optimizer/nested_planner.py`, so the target's `get_queryset` reads the relation's `field_name`, `python_name`, `return_type` and `selected_fields`.
-- Slice 2 - pins and docs: live tests in `examples/fakeshop/test_query/` asserting the hook observes the same `info` on the prefetch path and on the relation's own resolver path at depth 1 and 2; restate the `docs/README.md` sentence describing today's behaviour and its [`get_queryset` visibility hook](docs/GLOSSARY.md#get_queryset-visibility-hook) glossary entry; tick typing tracker item 35 (`docs/typing-0_0_15.md`).
+- Slice 2 - pins and docs: live tests in `examples/fakeshop/test_query/` asserting the hook observes the same `info` on the prefetch path and on the relation's own resolver path at depth 1 and 2; restate the `docs/README.md` sentence describing today's behaviour and its [`get_queryset` visibility hook](docs/GLOSSARY.md#get_queryset-visibility-hook) glossary entry; tick typing tracker item 35 (`docs/typing.md`).
 
 #### Definition of done
 
@@ -277,7 +277,7 @@ When the optimizer prefetches a relation, the target type's `get_queryset` recei
 
 - `django_strawberry_framework/optimizer/walker.py`, `django_strawberry_framework/optimizer/nested_planner.py`
 - A new or existing `examples/fakeshop/test_query/` module
-- `docs/README.md`, `docs/GLOSSARY.md` (via DB), `docs/typing-0_0_15.md`
+- `docs/README.md`, `docs/GLOSSARY.md` (via DB), `docs/typing.md`
 
 #### Verified in upstream
 
