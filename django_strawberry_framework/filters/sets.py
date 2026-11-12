@@ -49,6 +49,7 @@ from django.db.models import lookups as model_lookups
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.expressions import BaseExpression
 from django.db.models.query_utils import check_rel_lookup_compatibility
+from django.db.models.sql.constants import INNER
 from django.db.models.sql.query import Query
 from django.db.models.sql.where import WhereNode
 from django.forms import ModelChoiceField
@@ -1831,8 +1832,10 @@ class ProjectedChildFilter(Filter):
         from an absent one, the value is read as absent: the child filter first
         runs over the child model's unscoped rows to learn whether it constrains
         anything, then once more over the visible child rows when it does; one
-        that returns its input BY IDENTITY leaves the parent unchanged
-        (``FilterSet._apply_relation_leaf``).
+        that returns its input BY IDENTITY leaves the parent unchanged, and one
+        returning a queryset that keeps every row it was given
+        (``_constrains_nothing``: ``qs.distinct()``, ``qs.all()``) keeps every
+        parent (``FilterSet._apply_relation_leaf``).
         """
         return self.parent._apply_relation_leaf(qs, self, value, supplied=False)
 
@@ -2300,6 +2303,63 @@ def _inner_forward(field: object) -> bool:
     )
 
 
+def _inner_joins(queryset: models.QuerySet[models.Model, object]) -> set[str]:
+    """Return the aliases of the inner joins Django's compiler makes for ``queryset``'s rows.
+
+    The joins of every clause the statement holds, read once the compiler has set the
+    query up (``SQLCompiler.pre_sql_setup``, on a clone): a filter's, an annotation's, and
+    the ones ``select_related`` and an ordering add only while compiling. A join no clause
+    references (``Query.alias_refcount``) is not in the statement, and a base table
+    (``BaseTable``, whose ``join_type`` Django sets to ``None``) is no inner join.
+    """
+    query = queryset.query.clone()
+    _ = call_method(call_method(query, "get_compiler", queryset.db), "pre_sql_setup")
+    return {
+        alias
+        for alias, join in query.alias_map.items()
+        if query.alias_refcount[alias] and join.join_type == INNER
+    }
+
+
+def _constrains_nothing(
+    result: models.QuerySet[models.Model, object],
+    rows: models.QuerySet[models.Model, object],
+) -> bool:
+    """Whether ``result``, which a filter returned for ``rows``, keeps every row ``rows`` holds.
+
+    Read off the statement Django builds for each, as strawberry-django's
+    ``PrefetchInspector.merge`` tells two filtered querysets apart (``tree.Node``
+    equality of ``Query.where``): the same model on the same database, the same
+    ``Query.where`` (which also holds the ``HAVING`` and ``QUALIFY`` predicates), no
+    slice, no set operation, the same extra tables, the same ``DISTINCT ON`` fields,
+    and no inner join ``rows`` does not make (``_inner_joins``: an inner join drops a
+    row whose related row does not exist). ``qs.distinct()``, ``qs.all()``,
+    ``qs.filter()``, ``qs.filter(Q())``, ``qs.exclude(Q())``, ``qs.order_by()`` and
+    ``qs.select_related(None)`` keep every row, as ``rows`` itself does. A predicate
+    rebuilt equal (a tautology, a fresh subquery) or a join the compiler refuses
+    (``FieldError``) reads as constraining, which only keeps the answer a constraint
+    gets.
+    """
+    if result is rows:
+        return True
+    query, base = result.query, rows.query
+    if (
+        result.model is not rows.model
+        or result.db != rows.db
+        or query.where != base.where
+        or query.combinator is not None
+        or base.combinator is not None
+        or (query.low_mark, query.high_mark) != (base.low_mark, base.high_mark)
+        or query.extra_tables != base.extra_tables
+        or query.distinct_fields != base.distinct_fields
+    ):
+        return False
+    try:
+        return _inner_joins(result) <= _inner_joins(rows)
+    except FieldError:
+        return False
+
+
 def _round_trip(field: object) -> str | None:
     """Return the query name ``field``'s target rows reach its rows back by, for an inner forward key.
 
@@ -2458,7 +2518,9 @@ class _LeafChain:
     terminal filter and the outward correlation without replacing the shared
     request-wide target visibility queryset. ``null_view`` is the chain a forward
     ``RelatedFilter`` head overriding ``filter`` reads for its own ``null_value``
-    (``_head_null_view``): the head as declared, its relation read through ``view``.
+    (``_head_null_view``): the head as declared, its relation read through ``view``. A
+    ``terminal`` returning rows that keep every row it was given (``_constrains_nothing``)
+    constrains nothing, whichever chain it runs on.
     """
 
     hops: tuple[RelationHop, ...]
@@ -8677,7 +8739,10 @@ class FilterSet(
         (django-filter's empty-value skip, ``MultipleChoiceFilter.is_noop``, a
         ``FilterMethod`` short circuit), whatever rows it runs over; only running
         it tells a filter that skips an absent value from one that acts on it (a
-        consumer ``filter`` reading an absent value as a default). The leaf's
+        consumer ``filter`` reading an absent value as a default). Only identity is
+        read here: a new queryset keeping every row (``qs.distinct()``) reads as
+        applying, and ``_apply_relation_leaf`` then decides with
+        ``_constrains_nothing`` over the visible rows. The leaf's
         terminal (``_leaf_chain``) runs with the value it would receive over the
         rows of the model it was written for, unscoped: the last hop target's base
         rows, or, when the chain walks no hop (a relation-key leaf on one forward
@@ -9054,8 +9119,15 @@ class FilterSet(
         runs once per value. A terminal that returns its input BY IDENTITY
         (django-filter's empty-value skip, ``MultipleChoiceFilter.is_noop``, a
         ``FilterMethod`` short circuit) applied no constraint, and ``queryset``
-        is returned unchanged: restricting it to parents reaching ANY visible
-        row would turn "no constraint" into "has a visible related row". Each
+        is returned unchanged. One returning a new queryset that keeps every row
+        its input holds (``_constrains_nothing``: a consumer ``filter`` override or
+        ``method=`` answering an empty value with ``qs.distinct()``, ``qs.all()``,
+        ``qs.order_by()``) applied none either, as django-filter reads it unwalked:
+        ``queryset`` is returned unchanged, except that a relation-key leaf running as
+        declared over ``queryset`` without ``exclude`` returns the override's own rows,
+        its ``distinct`` included; with ``exclude`` it returns ``queryset``, whose
+        repeated rows stay. Restricting either to parents reaching ANY visible row
+        would turn "no constraint" into "has a visible related row". Each
         hop of an active terminal folds outward with ``_reaches_hop``, the
         correlated ``EXISTS`` every declared branch restricts through, onto the
         previous hop's visible rows, then onto ``queryset``:
@@ -9156,7 +9228,7 @@ class FilterSet(
                     self._filter_child_rows(terminal, inner_root, value),
                     queryset,
                 )
-                if inner is inner_root:
+                if _constrains_nothing(inner, inner_root):
                     return queryset
                 if not chain.view:
                     inner = inner.filter(self._reaches_key(inner, chain, key_hop, named, using))
@@ -9175,7 +9247,7 @@ class FilterSet(
             )
             if matched is source:
                 return queryset
-            if chain.view:
+            if chain.view or _constrains_nothing(matched, source):
                 return matched
             return matched.filter(self._reaches_key(matched, chain, key_hop, named, using))
         visible: list[models.QuerySet[models.Model]] = []
@@ -9186,7 +9258,7 @@ class FilterSet(
         if chain.view:
             source, terminal = self._relation_view(chain.view, terminal, source, using)
         rows = self._filter_child_rows(terminal, source, value)
-        if rows is source:
+        if _constrains_nothing(rows, source):
             return queryset
         if key_hop is not None and not chain.view:
             rows = rows.filter(self._reaches_key(rows, chain, key_hop, named, using))
@@ -9579,7 +9651,9 @@ class FilterSet(
         ``qs``, for a class overriding django-filter's) runs the leaf-clause path
         against the child's normalized data AND re-enters ``_evaluate_logic_tree``
         for any deeper ``and`` / ``or`` / ``not`` keys the branch carries. A branch whose rows come back as
-        ``queryset`` itself constrained nothing and composes as ``Q()``.
+        ``queryset`` itself, or as a queryset keeping every row ``queryset`` holds
+        (``_constrains_nothing``: a filter answering its value with ``qs.distinct()``),
+        constrained nothing and composes as ``Q()``.
 
         The related re-application is essential: ``_normalize_input``
         STRIPS related-branch keys from the child's form data (the parent
@@ -9704,12 +9778,13 @@ class FilterSet(
             # does at the top level; its rows compose as ``pk__in`` like any other arm.
             return models.Q(pk__in=child_set.qs.values("pk"))
         child_qs = child_set.filter_queryset(constrained)
-        if child_qs is queryset:
+        if _constrains_nothing(child_qs, queryset):
             # The arm applied no constraint at all (no active leaf, branch or nested
-            # logical key): it is Django's ``Q()`` identity, as strawberry-django's
-            # ``process_filters`` composes an empty arm and as ``exclude()`` / ``~Q()``
-            # read it -- never ``pk__in=<every visible row>``, which ``not`` would
-            # invert to no rows and ``or`` would widen to every row.
+            # logical key, or only filters returning a queryset that keeps every row,
+            # ``qs.distinct()`` as well as ``qs``): it is Django's ``Q()`` identity, as
+            # strawberry-django's ``process_filters`` composes an empty arm and as
+            # ``exclude()`` / ``~Q()`` read it -- never ``pk__in=<every visible row>``,
+            # which ``not`` would invert to no rows and ``or`` would widen to every row.
             return models.Q()
         return models.Q(pk__in=child_qs.values("pk"))
 

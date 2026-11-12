@@ -174,6 +174,7 @@ from django_strawberry_framework.filters.sets import (
     FilterGenerationProvenance,
     ProjectedChildFilter,
     _candidate_metadata_for,
+    _constrains_nothing,
     _expansion_record,
     _family_profile_for,
     _lookups_for_field,
@@ -20321,3 +20322,74 @@ def test_a_nested_branch_through_a_sliced_queryset_keeps_the_rows_the_slice_hold
         )
         assert result.errors is None, result.errors
         assert result.data == {"rows": {"edges": [{"node": {"name": name}} for name in expected]}}
+
+
+def _books() -> QuerySet[library_models.Book]:
+    return library_models.Book.objects.all()
+
+
+def _ordered_books() -> QuerySet[library_models.Book]:
+    return library_models.Book.objects.order_by("shelf__code")
+
+
+def _profiles() -> QuerySet[library_models.PatronProfile]:
+    return library_models.PatronProfile.objects.all()
+
+
+def _shelves_not_the(_rows: QuerySet[models.Model]) -> QuerySet[models.Model]:
+    """The rows of another model, whatever the filter was given."""
+    return library_models.Shelf.objects.all()
+
+
+def _books_not_the(_rows: QuerySet[models.Model]) -> QuerySet[models.Model]:
+    """Every book as a plain queryset, whatever the filter was given."""
+    return library_models.Book.objects.all()
+
+
+#: ``id -> (the rows a filter is given, what it returns, whether that keeps every row)``.
+_CONSTRAINS_NOTHING_CASES: dict[
+    str,
+    tuple[
+        Callable[[], QuerySet[models.Model]],
+        Callable[[QuerySet[models.Model]], QuerySet[models.Model]],
+        bool,
+    ],
+] = {
+    "the-input": (_books, lambda rows: rows, True),
+    "distinct": (_books, lambda rows: rows.distinct(), True),
+    "a-trimmed-inner-join": (_books, lambda rows: rows.order_by("shelf"), True),
+    "the-input-own-inner-join": (_ordered_books, lambda rows: rows.distinct(), True),
+    "the-input-own-inner-join-dropped": (_ordered_books, lambda rows: rows.order_by(), True),
+    "the-input-own-select-related-dropped": (
+        lambda: _books().select_related("shelf"),
+        lambda rows: rows.select_related(None),
+        True,
+    ),
+    "a-predicate": (_books, lambda rows: rows.filter(title="x"), False),
+    "another-model": (_books, _shelves_not_the, False),
+    "another-database": (_books, lambda rows: rows.using("shard_b"), False),
+    "a-set-operation": (_books, lambda rows: rows.union(rows), False),
+    "a-set-operation-given": (lambda: _books().union(_books()), _books_not_the, False),
+    "a-slice": (_books, lambda rows: rows[:1], False),
+    "an-extra-table": (_books, lambda rows: rows.extra(tables=["library_shelf"]), False),
+    "distinct-on": (_books, lambda rows: rows.distinct("title"), False),
+    "a-new-outer-join": (_profiles, lambda rows: rows.select_related("favorite_genre"), True),
+    "a-new-inner-join": (_books, lambda rows: rows.order_by("shelf__code"), False),
+    "a-join-the-compiler-refuses": (_books, lambda rows: rows.select_related("bogus"), False),
+}
+
+
+@pytest.mark.parametrize("case", list(_CONSTRAINS_NOTHING_CASES))
+def test_constrains_nothing_reads_only_a_statement_keeping_every_row(case: str) -> None:
+    """A filter's result keeps every row only on the input's model, database, ``WHERE`` and joins.
+
+    Read off the statement Django would build, without running it: anything that may drop a
+    row (a predicate, another model or database, a set operation on either side, a slice, an
+    extra table, ``DISTINCT ON``, an inner join the input does not make, a join the compiler
+    refuses) reads as constraining; a join Django trims (``order_by("shelf")`` orders on the
+    key column) does not, nor does dropping an inner join the input makes (its ordering or
+    ``select_related`` across a forward key), which only keeps rows.
+    """
+    given, returned, keeps_every_row = _CONSTRAINS_NOTHING_CASES[case]
+    rows = given()
+    assert _constrains_nothing(returned(rows), rows) is keeps_every_row

@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 508 done, 105 to do. The CHANGELOG entries filed here moved to
+Progress: 509 done, 106 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2938,6 +2938,25 @@ Progress: 508 done, 105 to do. The CHANGELOG entries filed here moved to
   `::test_a_create_promoting_a_stored_venue_to_a_child_is_its_insert`,
   `::test_an_update_promoting_its_located_venue_to_a_child_is_refused`,
   `::test_an_update_restoring_its_row_through_a_class_outside_the_family_answers_the_payload`.
+- [x] 795. (robustness) fixed: a filter answering a value with a new queryset that keeps every row it was given (a
+  consumer `filter` override's or a `method=`'s `qs.distinct()`, `qs.all()`, `qs.order_by()`, `qs.filter(Q())`,
+  `qs.exclude(Q())`, `qs.select_related(None)`) constrains nothing, as the identity does and as django-filter reads it
+  unwalked. A walked leaf on a forward relation key (nullable, or two hops long) or on a path into a target column
+  (through a forward key or a to-many hop) keeps every parent, a NULL key, a hidden related row and no related row
+  included, with `exclude=True` too, on `apply_sync`, `apply_async` and the set's own form; without `exclude` a
+  forward key keeps the override's own rows (its `distinct` collapses a repeated parent as unwalked), an excluding one
+  the resolver's rows. A logical arm holding only such leaves composes as `Q()`, as README states, walked and
+  unwalked. The reading is `filters/sets.py::_constrains_nothing`: identity, or the same model, database, `Query.where`
+  (strawberry-django's `PrefetchInspector.merge` precedent), slice, set operation, extra tables and `DISTINCT ON`
+  fields and no inner join the input lacks after Django's compiler setup (`_inner_joins`; dropping one the input makes
+  keeps every row), at the three `FilterSet._apply_relation_leaf` sites and `FilterSet._q_for_branch`;
+  `_absent_leaf_applies` still reads identity, so hook and query counts are unchanged.
+  `filters/base.py::_match_none_queryset` answers an excluded empty membership with `exclude(pk__in=[])`, so `not` of
+  it still matches no rows. 616 walked grid cells, every `exclude` no-op (756) and the no-op arms answer as unwalked;
+  0 cells correct before changed (4900-cell attack grid and a 10980-cell side-by-side probe: 0 narrowed). Pinned by
+  `examples/fakeshop/test_query/test_unconstraining_overrides_api.py` (654 rows) and
+  `tests/filters/test_sets.py::test_constrains_nothing_reads_only_a_statement_keeping_every_row`. spec-027, README,
+  GLOSSARY `FilterSet`. Filed 923, 924.
 
 ## To do: found along the way
 
@@ -2974,11 +2993,6 @@ Progress: 508 done, 105 to do. The CHANGELOG entries filed here moved to
   unwalked answers (`ScalarSpecimen.children` naming two children: walked `[]`, unwalked `['p1']`): each AND is re-read
   on the target key column over a single target row (`filters/sets.py::FilterSet._leaf_chain`,
   `_LeafChain.terminal_value`). One declaration, two answers (GOAL "Trust boundary"). Found researching 784
-- [ ] 795. (robustness) A consumer `filter` override on a flat leaf a hop walks, on a forward relation key or a path
-  into a target column, that returns a new queryset when it constrains nothing (`return qs.distinct()` or `qs.all()` on
-  an empty value) reads as constraining, so supplied empty or left out it keeps only the parents that reach a visible
-  related row, where unwalked and django-filter keep every row: the identity-as-no-op rule on the rebound rows plus the
-  EXISTS fold, not the double run. A to-many key's override answers as unwalked (item 796). Found researching 790
 - [ ] 816. (robustness) A filter declared over a `GeneratedField` whose `output_field` no filter converts (a consumer
   column class with no `SCALAR_MAP` entry, or a `FileField`) is refused at build with the DjangoType advice
   (`types/converters.py::generated_output_field`: "Add an entry to SCALAR_MAP or exclude this field via Meta.exclude." /
@@ -3079,6 +3093,17 @@ Progress: 508 done, 105 to do. The CHANGELOG entries filed here moved to
   another key) and a hidden-row leak (a code meaning a hidden row keeps its parent), at 2b286a09^ and after 881. The
   784 contract (declared `field_name`, the value names rows) has no reading that fixes it without changing that
   contract. Found fixing the final review of 881
+- [ ] 923. (robustness) A class-level `filter` override on a walked path into a target column that reads an empty
+  value as `None` / `__isnull=True` (`qs.filter(fk__name=None)`, `fk__name__isnull=True`) answers `[]` where unwalked
+  and django-filter keep the parents with a NULL key (108/144 grid cells on `fk__name`, `one__name`, `m2m__name`): the
+  rebind onto the target's visible rows loses Django's LEFT JOIN null extension. The forward-key twin is 799's. Found
+  fixing 795
+- [ ] 924. (robustness) On a base queryset holding duplicate rows (a consumer queryset multiplied through a to-many
+  join), a walked override's `qs.distinct()` (or `annotate(Count)`) on a path into a column, or any `exclude=True`
+  leaf, is dropped by the EXISTS fold, so the parent keeps its duplicates where django-filter collapses them (48
+  positive grid cells on `fk_col`, `one_col`, `req_col`, `m2m_col`, plus the `exclude` duplicate-base cells; wrong
+  before 795 too). A forward key of any length without `exclude` keeps the override's own rows since 881 and 795.
+  Found fixing 795
 
 ## To do: holes found re-checking the fixes
 
@@ -3121,14 +3146,16 @@ Progress: 508 done, 105 to do. The CHANGELOG entries filed here moved to
   796, 807) in two more cases, an `isnull` override whatever its value and a forward key's override whose value names no
   row? Today both keep the earlier re-bind: a `null` or left-out value an `isnull` override reads as `True` answers `[]`
   where unwalked answers the parents with no related row, and a forward override reading an empty choice as `None`, a
-  default, `<field_name>_id` or `qs.distinct()` drops parents with a `NULL` or hidden key. Routing the `isnull` override
+  default or `<field_name>_id` drops parents with a `NULL` or hidden key. Routing the `isnull` override
   alone fixes 752 cells of the research grid; adding the forward fallback fixes 2534, plus 2800 in a wider isnull probe.
   The cost: the view's alias is a `FilteredRelation`, so an override's `only()` / `prefetch_related(self.field_name)`
   raises Django's `ValueError` (470 cells correct today from the `isnull` routing alone; the fallback adds 36 grid and
   90 probe cells), and `<field_name>_id` past a to-many hop raises `FieldError` (the override must read
   `<field_name>__pk`). Route both and state those as the override's contract, route neither (today), or route only the
   forward fallback? The round-trip limits of 809 apply. (The maintainer chose "nothing breaks" for this pass; the routed
-  design was built and verified)
+  design was built and verified) (Item 795 now reads every new queryset keeping every row as constraining
+  nothing, and item 881 runs a consumer leaf on a forward key of any length as declared; the counts were measured
+  before both and need re-measuring.)
 - [ ] 800. Decide: a class-level `filter` override on a many-to-many key a flat leaf walks, where Django gives the
   through key onto the source no reverse name of its own (an auto-created self-referential many-to-many read forward,
   symmetrical or not; an explicit through whose two keys onto the model share `related_name="+"`), still runs on the

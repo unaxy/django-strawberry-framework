@@ -357,11 +357,13 @@ def _match_none_queryset(filter_instance: Filter, qs: models.QuerySet[_M]) -> mo
     nothing on an empty or rejected input. Must never degrade to django-filter's
     empty-value skip (which would silently widen a restrictive predicate to no
     constraint). The excluded empty set is a constraint whose answer is every
-    row, never the input BY IDENTITY, which the package reads as "applied no
-    constraint" (``FilterSet._q_for_branch``, ``FilterSet._apply_relation_leaf``):
+    row: Django's own ``exclude(pk__in=[])``, whose ``WHERE`` it compiles away,
+    never the input or a copy carrying the input's ``Query.where``, which the
+    package reads as "applied no constraint" (``filters/sets.py::_constrains_nothing``,
+    read by ``FilterSet._q_for_branch`` and ``FilterSet._apply_relation_leaf``):
     ``not`` of it matches no rows.
     """
-    return qs.all() if filter_instance.exclude else qs.none()
+    return qs.exclude(pk__in=[]) if filter_instance.exclude else qs.none()
 
 
 def _materialize_list_shaped_values(value: object, *, message: str, code: str) -> list[object]:

@@ -871,6 +871,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_transport_api.py         # Live ``/graphql/`` transport-boundary acceptance tests.
 ├── test_transport_chain_api.py   # Live HTTP tests for configured middleware policies and GraphQL callback fallbacks.
 ├── test_transport_encoding_api.py  # Live HTTP tests for declared multipart codecs and middleware-assigned form encodings.
+├── test_unconstraining_overrides_api.py  # A walked filter override answering a value with every row it was given keeps every parent.
 ├── test_uploads_api.py           # Live GraphQL HTTP tests for the file / image field wire contract.
 ├── test_visible_relation_boundaries_api.py  # Native HTTP visibility across async hops, multi-relation branches and bound re-entry.
 ├── test_visible_relation_keys_api.py  # Native HTTP visible target keys and fully undeclared relation paths.

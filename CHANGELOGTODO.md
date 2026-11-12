@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 230 to do.
+Progress: 0 done, 231 to do.
 
 ## From dry-0_0_15_3
 
@@ -1115,6 +1115,12 @@ Progress: 0 done, 230 to do.
   walked relation key decides which rows a value means, a translated choice code included, while each hop's
   visibility still holds, and a to-many predicate that names its relation in its own path reads that relation as
   written
+- [ ] 925. CHANGELOG entry for item 795: a `filter` override or `method=` that answers a value with every row it was
+  given as a new queryset (`qs.distinct()`, `qs.all()`, `qs.order_by()`, ...) now applies no constraint, as `qs`
+  itself and django-filter do. On a leaf walking a relation every parent is kept, a NULL key and a related row the
+  target type hides included, with `exclude=True` too and on a forward key two hops long, and a logical arm holding
+  only such leaves is the identity (`not` keeps every row, `or` is its other arm)
+
 ## From dry-upstream-0_0_15
 
 - [ ] 101. CHANGELOG entry for item 22: the debug-toolbar middleware and its GraphiQL bridge template are adapted from
