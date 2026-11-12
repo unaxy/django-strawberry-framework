@@ -1420,19 +1420,54 @@ def write_evidence_tombstone(repo: Path, grave: EvidenceTombstone) -> bool:
 def evidence_files(folder: Path) -> dict[str, tuple[int, int]]:
     """Return ``{relative path: [size, mtime seconds]}`` for every synced file under ``folder``.
 
-    :data:`UNSYNCED` folders and ``*.pyc`` files are left out; a file that cannot be
-    ``lstat``-ed is too.
+    A symlink is one entry (its own ``lstat``), dangling or to a folder alike, never followed
+    (:func:`evidence_listing`).
+    """
+    return evidence_listing(folder)[0]
+
+
+def evidence_listing(folder: Path) -> tuple[dict[str, tuple[int, int]], dict[str, str]]:
+    """Return :func:`evidence_files`'s states and ``{relative path: link target}`` of its links.
+
+    A symlink is listed as itself whatever it points at (a file, a folder, nothing) and never
+    descended into, so the listing never leaves ``folder``. :data:`UNSYNCED` folders and
+    ``*.pyc`` files are left out; an entry that cannot be ``lstat``-ed (or read, a link) is too.
     """
     files: dict[str, tuple[int, int]] = {}
+    links: dict[str, str] = {}
     for directory, dirnames, filenames in os.walk(folder):
         dirnames[:] = [name for name in dirnames if name not in UNSYNCED]
-        for name in filenames:
+        linked = [name for name in dirnames if (Path(directory) / name).is_symlink()]
+        dirnames[:] = [name for name in dirnames if name not in linked]
+        for name in [*filenames, *linked]:
             if name.endswith(".pyc"):
                 continue
             path = Path(directory) / name
+            rel = path.relative_to(folder).as_posix()
             with contextlib.suppress(OSError):
-                files[path.relative_to(folder).as_posix()] = file_state(path.lstat())
-    return files
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    links[rel] = link_text(path)
+                files[rel] = file_state(info)
+    return files, links
+
+
+def link_text(path: Path) -> str:
+    """Return symlink ``path``'s text verbatim, read in its folder opened without following it.
+
+    ``Path.readlink`` normalizes the text (``a//b``, a trailing ``/``), which changes the
+    link's size, part of its evidence state; the folder is opened ``O_NOFOLLOW``, so a parent
+    swapped for a link is refused rather than read through.
+
+    Raises:
+        OSError: the folder or the link cannot be read.
+
+    """
+    folder = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return os.readlink(path.name, dir_fd=folder)
+    finally:
+        os.close(folder)
 
 
 def evidence_manifest(path: Path) -> dict[str, dict[str, tuple[int, int]]]:

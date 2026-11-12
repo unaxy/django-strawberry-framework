@@ -1657,6 +1657,111 @@ def test_evidence_is_a_union_the_changed_side_wins_and_both_changed_is_reported(
     assert ("conflict", f"{NAME}/both.txt") in [(r, s) for r, s, _d in _results(document)]
 
 
+def test_evidence_and_replicas_carry_symlinks_as_links_dangling_ones_included(
+    fleet: Fleet,
+) -> None:
+    """A link travels as a link both ways with its mtime, never followed; a resync is clean."""
+    outside = _write(fleet.tmp / "outside" / "secret.txt", "outside .work\n").parent
+    copy = _new()
+    (copy / "dangling-in-copy").symlink_to(copy / "missing.txt")
+    _age(copy)
+    evidence_a, evidence_b = _evidence(fleet.repo_a), _evidence(fleet.repo_b)
+    proofs = evidence_a / "pytest-final" / "popen-gw0"
+    _ = _write(proofs / "base.sqlite3", "base\n")
+    (proofs / "out.sqlite3").symlink_to(proofs / "missing.sqlite3")
+    (proofs / "ours.sqlite3").symlink_to("./base.sqlite3")
+    (evidence_a / "folder-link").symlink_to(outside, target_is_directory=True)
+    code, document = fleet.run("sync")
+    assert code == 0, document
+    assert ("synced", NAME, "evidence: 4 out, 0 in") in _results(document), document
+    assert str((evidence_b / "folder-link").readlink()) == str(outside)
+    assert "folder-link/secret.txt" not in work.evidence_files(evidence_b)
+    landed = evidence_b / "pytest-final" / "popen-gw0"
+    assert str((landed / "out.sqlite3").readlink()) == str(proofs / "missing.sqlite3")
+    assert work.link_text(landed / "ours.sqlite3") == "./base.sqlite3"
+    assert work.evidence_files(evidence_b) == work.evidence_files(evidence_a)
+    replica = fleet.repo_b / ".work" / "clones" / NAME
+    assert str((replica / "dangling-in-copy").readlink()) == str(copy / "missing.txt")
+    (evidence_b / "from-b").symlink_to("nowhere")
+    code, document = fleet.run("sync")
+    assert code == 0, document
+    assert ("synced", NAME, "evidence: 0 out, 1 in") in _results(document), document
+    assert str((evidence_a / "from-b").readlink()) == "nowhere"
+    code, document = fleet.run("sync")
+    assert code == 0, document
+    assert [row for row in _results(document) if row[1] == NAME and row[0] == "synced"] == []
+
+
+def test_an_evidence_file_rsync_cannot_send_is_one_failed_row_and_the_rest_still_syncs(
+    fleet: Fleet,
+) -> None:
+    """The file is named, every other file and stem arrives, and the next run carries it."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads a file whatever its mode")
+    copy = _new()
+    _age(copy)
+    evidence_a, evidence_b = _evidence(fleet.repo_a), _evidence(fleet.repo_b)
+    locked = _write(evidence_a / "locked.txt", "unreadable\n")
+    _ = _write(evidence_a / "fine.txt", "readable\n")
+    _ = _write(_evidence(fleet.repo_a, "spike-later-stem") / "later.txt", "later\n")
+    locked.chmod(0)
+    try:
+        code, document = fleet.run("sync")
+    finally:
+        locked.chmod(0o644)
+    assert code == 1, document
+    rows = [(result, subject) for result, subject, _detail in _results(document)]
+    assert ("failed", f"{NAME}/locked.txt") in rows, document
+    assert ("failed", "sync") not in rows, document
+    assert ("synced", NAME, "evidence: 1 out, 0 in") in _results(document), document
+    assert (evidence_b / "fine.txt").read_text(encoding="utf-8") == "readable\n"
+    assert not (evidence_b / "locked.txt").exists()
+    later = _evidence(fleet.repo_b, "spike-later-stem") / "later.txt"
+    assert later.read_text(encoding="utf-8") == "later\n"
+    code, document = fleet.run("sync")
+    assert code == 0, document
+    assert [row for row in _results(document) if row[1] == NAME and row[0] != "fresh"] == [
+        ("synced", NAME, "evidence: 1 out, 0 in"),
+    ], document
+    assert (evidence_b / "locked.txt").read_text(encoding="utf-8") == "unreadable\n"
+
+
+def test_a_peer_without_the_links_feature_gets_its_evidence_links_by_rsync(
+    fleet: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    copy = _new()
+    _age(copy)
+    _ = _write(_evidence(fleet.repo_a) / "base.txt", "base\n")
+    (_evidence(fleet.repo_a) / "alias.txt").symlink_to("base.txt")
+    _without_feature(monkeypatch, "b", fleet_sync.LINKS_FEATURE)
+    seen = _record_calls(monkeypatch)
+    code, document = fleet.run("sync")
+    assert code == 0, document
+    assert [call.args[0] for call in seen if call.args[0] == "evidence-links"] == []
+    assert str((_evidence(fleet.repo_b) / "alias.txt").readlink()) == "base.txt"
+
+
+def test_an_agent_writes_no_evidence_link_through_a_symlinked_folder(fleet: Fleet) -> None:
+    outside = (fleet.tmp / "outside").resolve()
+    outside.mkdir()
+    evidence = _evidence(fleet.repo_b)
+    evidence.mkdir(parents=True)
+    (evidence / "sub").symlink_to(outside, target_is_directory=True)
+    (evidence / "taken").mkdir()
+    links = {
+        "sub/x": ["t", 0],
+        "taken": ["t", 0],
+        "odd": ["t"],
+        "ok/y": ["t", 5],
+    }
+    answer = fleet_sync.agent_evidence_links(fleet.repo_b, NAME, json.dumps(links).encode())
+    assert answer["written"] == ["ok/y"]
+    assert sorted(str(rel) for rel in json_object(answer["failed"])) == ["odd", "sub/x", "taken"]
+    assert list(outside.iterdir()) == []
+    assert work.evidence_files(evidence)["ok/y"] == (1, 5)
+
+
 # --------------------------------------------------------------------------------------------
 # Evidence tombstones: an explicit deletion reaches every machine, a hand deletion none
 # --------------------------------------------------------------------------------------------

@@ -139,6 +139,16 @@ two other machines hold is reported, for their own runs)
     forgets a stem neither side holds. A file it lists that this machine lacks and the
     peer holds unchanged (removed by hand: ``rm -rf`` deletes nothing fleet-wide)
     comes back, with a ``note`` naming ``work.py evidence-rm <stem> --adopt-missing``.
+    A symlink is one file, its own state (``lstat``), dangling or to a folder alike, never
+    followed nor descended into: the listing names its target, and it travels as a link
+    through the receiving agent (``evidence-links``: made beside its path with the sender's
+    mtime, renamed over it, refused through a symlinked folder), never through rsync, since
+    macOS's rsync (openrsync) ``stat``s each ``--files-from`` entry and fails a dangling link
+    (a peer whose probe lacks the ``evidence-links`` feature gets links by rsync, as files).
+    A file that cannot be carried (rsync could not read or write it, the receiver refused a
+    link) is one ``failed`` row naming it, found by the receiver's listing after the transfer;
+    the rest of the stem and every other stem go on, and the manifest keeps its last-sync
+    state so the next run tries it again.
 
     Main: commits only, pulled, never pushed. Each peer's ``main`` is fetched
     into this repository's object store (no ref, no ``FETCH_HEAD``). A peer
@@ -481,6 +491,7 @@ WRITES = frozenset(
         "pins-link",
         "evidence-tombstones-import",
         "evidence-apply",
+        "evidence-links",
     },
 )
 #: What this script's agent can do beyond the operations every version has; a peer's probe
@@ -489,7 +500,10 @@ EVIDENCE_FEATURE = "evidence-tombstones"
 #: ``inventory --ids`` / ``--no-evidence``, ``tombstones-export``, and the imports' ``{id: body}``
 #: form (:func:`Inventory.read`, :func:`with_graves`).
 IDS_FEATURE = "tombstone-ids"
-FEATURES = (EVIDENCE_FEATURE, IDS_FEATURE)
+#: ``evidence-links`` and the inventory's ``links``: an evidence symlink travels as a link
+#: through the agents, never through rsync (:func:`sync_evidence`).
+LINKS_FEATURE = "evidence-links"
+FEATURES = (EVIDENCE_FEATURE, IDS_FEATURE, LINKS_FEATURE)
 CALL_TIMEOUT = 600.0
 PROBE_TIMEOUT = 60.0
 #: Seconds a peer's ``hold`` may take to print its token.
@@ -808,6 +822,9 @@ def agent_inventory(
 ) -> dict[str, object]:
     """Return every copy (or those ``names``), their pins, evidence and tombstones.
 
+    ``links`` names each evidence symlink's target, by stem and path (``evidence`` lists the
+    link's own state, as every other file's).
+
     Evidence and evidence tombstones are filtered by the stems of ``names`` (a ``-verify``
     copy's stem is its purpose's), copy tombstones by the names themselves. With ``ids``
     each kind of tombstone is ``{file name: removedat}`` (its body comes from
@@ -830,13 +847,16 @@ def agent_inventory(
     }
     stems = {_stem(name) for name in wanted}
     listed: dict[str, object] = {}
+    links: dict[str, object] = {}
     root = work.work_dir(repo) / work.EVIDENCE
     if root.is_dir():
         for folder in sorted(root.iterdir()):
             if work.copy_hazard(repo, folder, work.EVIDENCE) is not None or not folder.is_dir():
                 continue
             if evidence and (not wanted or folder.name in stems):
-                listed[folder.name] = work.evidence_files(folder)
+                listed[folder.name], targets = work.evidence_listing(folder)
+                if targets:
+                    links[folder.name] = targets
     held = [
         tombstone for tombstone in work.tombstones(repo) if not wanted or tombstone.name in wanted
     ]
@@ -852,6 +872,7 @@ def agent_inventory(
         "copies": copies,
         "pins": pin_map,
         "evidence": listed,
+        "links": links,
         "tombstones": graves,
         "evidence_tombstones": evidence_graves,
     }
@@ -1994,6 +2015,57 @@ def agent_prepare_evidence(repo: Path, stem: str) -> dict[str, object]:
     return {"path": str(folder)}
 
 
+def agent_evidence_links(repo: Path, stem: str, data: bytes) -> dict[str, object]:
+    """Write each symlink the JSON ``{path: [target, mtime]}`` names into evidence ``stem``.
+
+    Each is made beside its path and renamed over it, with the sender's whole-second mtime, so
+    its state there is the sender's; a path passing a symlinked or non-folder part, or held
+    by a folder, is refused (``failed``, path to reason) and nothing is followed. Answers
+    ``written`` and ``failed``.
+
+    Raises:
+        FleetError: the stem's folder is unsafe.
+
+    """
+    folder = Path(_string(agent_prepare_evidence(repo, stem), "path"))
+    written: list[str] = []
+    failed: dict[str, str] = {}
+    for rel, entry in _decode(data, "evidence links").items():
+        if not fleet.is_json_array(entry) or len(entry) != 2:
+            failed[rel] = "no [target, mtime] entry"
+            continue
+        target, mtime = entry
+        if not isinstance(target, str) or not isinstance(mtime, int):
+            failed[rel] = "no [target, mtime] entry"
+            continue
+        try:
+            _write_link(folder, rel, target, mtime)
+        except (work.WorkError, OSError) as error:
+            failed[rel] = str(error)
+            continue
+        written.append(rel)
+    return {"written": written, "failed": failed}
+
+
+def _write_link(
+    folder: Path,
+    rel: str,
+    target: str,
+    mtime: int,
+) -> None:
+    """Make ``folder/rel`` a symlink to ``target`` with ``mtime``, following no link on the way."""
+    work.inside(folder, rel).parent.mkdir(parents=True, exist_ok=True)
+    path = work.inside(folder, rel)
+    staged = path.with_name(f".{path.name}.{work._token()}")
+    staged.symlink_to(target)
+    try:
+        os.utime(staged, (mtime, mtime), follow_symlinks=False)
+        _ = staged.replace(path)
+    except OSError:
+        staged.unlink(missing_ok=True)
+        raise
+
+
 def agent_hold(repo: Path, stdin: IO[bytes], stdout: IO[str]) -> int:
     """Hold this machine's fleet lock until ``stdin`` closes; print the token first."""
     try:
@@ -2101,6 +2173,8 @@ def _agent_output(repo: Path, args: _Args) -> dict[str, object] | bytes:
         return agent_commit_import(repo, sys.stdin.buffer.read())
     if operation == "prepare-evidence":
         return agent_prepare_evidence(repo, args.name)
+    if operation == "evidence-links":
+        return agent_evidence_links(repo, args.name, sys.stdin.buffer.read())
     msg = f"no agent operation {operation!r} here"
     raise FleetError(msg)
 
@@ -2749,6 +2823,11 @@ class Inventory:
     evidence_tombstone_ids: Mapping[str, float] = dataclasses.field(
         default_factory=dict[str, float],
     )
+    #: Each evidence symlink's target by stem and path (``{}`` from a peer without
+    #: :data:`LINKS_FEATURE`, whose links read as files).
+    links: Mapping[str, Mapping[str, str]] = dataclasses.field(
+        default_factory=dict[str, dict[str, str]],
+    )
 
     @classmethod
     def read(
@@ -2782,6 +2861,9 @@ class Inventory:
                     if isinstance(size, int) and isinstance(mtime, int):
                         entries[rel] = (size, mtime)
             listing[stem] = entries
+        links = {
+            stem: _string_map(targets) for stem, targets in _object(answer.get("links")).items()
+        }
         copies = {
             name: CopyInfo.parse(name, raw) for name, raw in _object(answer.get("copies")).items()
         }
@@ -2795,6 +2877,7 @@ class Inventory:
                 evidence_tombstones={},
                 tombstone_ids=_moments(answer.get("tombstones")),
                 evidence_tombstone_ids=_moments(answer.get("evidence_tombstones")),
+                links=links,
             )
         graves = answer.get("tombstones")
         parsed = [
@@ -2819,6 +2902,7 @@ class Inventory:
             evidence_tombstone_ids={
                 key: grave.removed_at for key, grave in evidence_bodies.items()
             },
+            links=links,
         )
 
 
@@ -3983,6 +4067,56 @@ def _hand_deleted_rows(
     ]
 
 
+def _carry(
+    stem: str,
+    source: Endpoint,
+    target: Endpoint,
+    files: Sequence[str],
+    held: Inventory,
+    token: str,
+) -> dict[str, str]:
+    """Copy evidence ``files`` of ``stem`` from ``source`` to ``target``; return those it could not.
+
+    A symlink (``held``, the source's inventory, names its target) goes through ``target``'s
+    ``evidence-links``, never rsync: macOS's rsync (openrsync) ``stat``s every
+    ``--files-from`` entry, following it, and fails a dangling one. A peer without
+    :data:`LINKS_FEATURE` gets its links by rsync, as files. When rsync fails, ``target``'s
+    listing of the stem names each file that did not arrive in ``source``'s state. Returns
+    path to reason.
+    """
+    states = held.evidence.get(stem, {})
+    none: Mapping[str, str] = {}
+    targets = held.links.get(stem, none) if LINKS_FEATURE in target.features else none
+    links: dict[str, tuple[str, int]] = {
+        rel: (targets[rel], states[rel][1]) for rel in files if rel in targets
+    }
+    plain = [rel for rel in files if rel not in links]
+    failed: dict[str, str] = {}
+    try:
+        folder = _string(target.call("prepare-evidence", stem, "--token", token), "path")
+        if links:
+            answer = target.call(
+                "evidence-links",
+                stem,
+                "--token",
+                token,
+                stdin=json.dumps(links).encode(),
+            )
+            failed.update(_string_map(answer.get("failed")))
+        if plain:
+            source_folder = str(work.work_dir(Path(_repo_of(source))) / work.EVIDENCE / stem)
+            try:
+                rsync(source, source_folder, target, folder, files=plain)
+            except FleetError as error:
+                arrived = Inventory.read(target, (stem,)).evidence.get(stem, {})
+                failed.update(
+                    {rel: str(error) for rel in plain if arrived.get(rel) != states.get(rel)},
+                )
+    except FleetError as error:
+        failed.update({rel: str(error) for rel in files if rel not in failed})
+    return failed
+
+
 def sync_evidence(
     here: Endpoint,
     peer: Endpoint,
@@ -3996,9 +4130,11 @@ def sync_evidence(
 ) -> list[Row]:
     """Union every evidence folder with ``peer``, file by file; never delete.
 
-    A file holding a state one of ``graves`` records is carried neither way. The manifest of
-    the last sync with ``peer`` forgets a stem (of ``stems``, the run's scope; every stem
-    when ``None``) neither side holds any more.
+    A file holding a state one of ``graves`` records is carried neither way. A file that
+    could not be carried is one ``failed`` row and keeps its last-sync state in the manifest,
+    so the next run tries it again; every other file and stem goes on (:func:`_carry`). The
+    manifest of the last sync with ``peer`` forgets a stem (of ``stems``, the run's scope;
+    every stem when ``None``) neither side holds any more.
     """
     manifest = _read_manifest(peer.machine)
     buried = _buried(graves)
@@ -4027,22 +4163,39 @@ def sync_evidence(
                     Row(stem, peer.label, "would", f"evidence: {len(push)} out, {len(pull)} in"),
                 )
             continue
-        for source, target, files in ((here, peer, push), (peer, here, pull)):
-            if not files:
-                continue
-            folder = _string(
-                target.call("prepare-evidence", stem, "--token", tokens[target.machine]),
-                "path",
-            )
-            source_folder = str(work.work_dir(Path(_repo_of(source))) / work.EVIDENCE / stem)
-            rsync(source, source_folder, target, folder, files=files)
-        if push or pull:
-            rows.append(
-                Row(stem, peer.label, "synced", f"evidence: {len(push)} out, {len(pull)} in"),
-            )
+        failed: dict[str, str] = {}
+        for source, target, files, held in (
+            (
+                here,
+                peer,
+                push,
+                mine,
+            ),
+            (
+                peer,
+                here,
+                pull,
+                theirs,
+            ),
+        ):
+            if files:
+                failed.update(_carry(stem, source, target, files, held, tokens[target.machine]))
+        rows.extend(
+            Row(f"{stem}/{rel}", peer.label, "failed", f"evidence not carried: {reason}")
+            for rel, reason in sorted(failed.items())
+        )
+        out = len([rel for rel in push if rel not in failed])
+        into = len([rel for rel in pull if rel not in failed])
+        if out or into:
+            rows.append(Row(stem, peer.label, "synced", f"evidence: {out} out, {into} in"))
         merged = {**b, **a}
         merged.update({rel: b[rel] for rel in pull})
         merged.update({rel: a[rel] for rel in push})
+        for rel in failed:
+            if rel in last:
+                merged[rel] = last[rel]
+            else:
+                _ = merged.pop(rel, None)
         manifest[stem] = {rel: state for rel, state in merged.items() if rel not in clash}
     held = set(mine.evidence) | set(theirs.evidence)
     for stem in [stem for stem in manifest if stem not in held]:
@@ -5317,6 +5470,7 @@ def build_parser() -> argparse.ArgumentParser:
             "evidence-tombstones-import",
             "evidence-apply",
             "tombstones-export",
+            "evidence-links",
         ),
     )
     _ = agent.add_argument("name", nargs="?", default="")
