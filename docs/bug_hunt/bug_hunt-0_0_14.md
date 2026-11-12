@@ -2,7 +2,7 @@
 
 Status: in-progress
 Mode: autonomous
-Baseline commit: `b99484b339ab871cd4b0259cea9de9a312c8917b`
+Baseline commit: `b310fe721bf1e8c4f69858c10cde927a75be43c4`
 
 ## Concurrent dirty inventory (Worker 0 note)
 
