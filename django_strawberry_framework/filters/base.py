@@ -35,7 +35,7 @@ import copy
 from dataclasses import dataclass, replace
 from functools import cache
 from itertools import takewhile
-from types import FunctionType, MappingProxyType, MethodType
+from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, final
 
 from django.core.exceptions import FieldError, ValidationError
@@ -236,7 +236,6 @@ else:
     _UploadedFileAny = UploadedFile
 
 _M = TypeVar("_M", bound=models.Model)
-_MultipleT = TypeVar("_MultipleT", bound=MultipleChoiceFilter)
 
 
 class TypedFilter(Filter):
@@ -3259,27 +3258,6 @@ class _GlobalIDMultipleChoiceField(MultipleChoiceField):
         super().validate(value)
 
 
-def _predicate_copy(filter_instance: _MultipleT, field_name: str, lookup_expr: str) -> _MultipleT:
-    """Copy ``filter_instance`` to build its predicates on ``field_name`` and ``lookup_expr``.
-
-    A ``get_filter_predicate`` the instance holds bound to itself (the shipped hook the
-    walked-key comparison binds, ``filters/sets.py::_with_shipped_predicate``) is re-bound
-    to the copy, so the predicate reads the copy's path, as the class's own hook would.
-    """
-    rebound = copy.copy(filter_instance)
-    rebound.field_name = field_name
-    rebound.lookup_expr = lookup_expr
-    held = (truth.instance_dict(rebound) or {}).get("get_filter_predicate")
-    function = truth.stored_function(held)
-    if (
-        truth.is_exact(held, MethodType)
-        and truth.is_instance(function, FunctionType)
-        and held == MethodType(function, filter_instance)
-    ):
-        rebound.get_filter_predicate = MethodType(function, rebound)
-    return rebound
-
-
 class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
     """Multi-value sibling of `GlobalIDFilter`.
 
@@ -3361,7 +3339,9 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
                 return super().filter(qs, node_ids)
             # Upstream's per-element predicates read ``field_name`` and ``lookup_expr``; a copy
             # carries the path and the lookup applied where it ends.
-            rebound = _predicate_copy(self, path, lookup_expr)
+            rebound = copy.copy(self)
+            rebound.field_name = path
+            rebound.lookup_expr = lookup_expr
             return super(GlobalIDMultipleChoiceFilter, rebound).filter(qs, node_ids)
         # ``_globalid_predicate_path`` DERIVES the path from the LIVE ``field_name``
         # (immune to ``_expand_related_filter`` rebasing): the target's id column for a

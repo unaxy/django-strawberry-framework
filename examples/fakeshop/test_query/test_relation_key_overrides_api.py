@@ -5,22 +5,22 @@ hop count, a to-one key two or more hops away) receives the ``field_name`` it wa
 with, the value its form cleaned and the rows of the set declaring it, exactly as when no
 hop is walked; a supplied value runs it once per request (a leaf the request leaves out is
 first asked whether it constrains, then applied). The parents it keeps must also reach,
-through each hop's visible rows, a visible last-hop row its value names, so a row a target
-type's ``get_queryset`` hides matches nothing. A value naming no row of the relation's
-target (an empty or absent choice, instances or a key of another model, a value the key's
-own comparison skips or refuses) runs the override as declared over the rows of the set
-declaring it, its ``field_name`` an alias of its relation that joins only the related rows
-the walk keeps visible (a many-to-many's through rows included; a first non-null forward key
-the database enforces joined round its target, so a parent whose related row is hidden is
-kept, any other first key joined as Django joins it) and its ``lookup_expr`` the walked
-lookup: a default it reads (a key, model instances, a queryset, one instance, a GlobalID,
-through a crossing ``lookup_expr`` too), a path it continues past the relation
-(``__pk__in``, ``__code``, ``__isnull``), ``exclude``, ``conjoined`` and Django's own
-refusal answer as unwalked, over visible rows, through every relation a declared hop crosses
-and its ``RelatedFilter(queryset=...)``, and under a connection's count, order and pages; a
-relation the override's own Python names reads every row, its own scoping. Each request
-reaches the leaf over HTTP through ``FilterSet.apply_sync`` / ``apply_async`` or the set's
-own form.
+through each hop's visible rows, a visible last-hop row (on a to-many key one its value
+names), so a row a target type hides matches nothing. On a to-many key a value naming no row
+of the relation's target (an empty or absent choice, instances or a key of another model, a
+value the key's own comparison skips or refuses) runs the override as declared over the rows
+of the set declaring it, its ``field_name`` an alias of its relation that joins only the
+related rows the walk keeps visible (a many-to-many's through rows included; a first
+non-null forward key the database enforces joined round its target, so a parent whose
+related row is hidden is kept, any other first key joined as Django joins it) and its
+``lookup_expr`` the walked lookup: a default it reads (a key, model instances, a queryset,
+one instance, a GlobalID, through a crossing ``lookup_expr`` too), a path it continues past
+the relation (``__pk__in``, ``__code``, ``__isnull``), ``exclude``, ``conjoined`` and
+Django's own refusal answer as unwalked, over visible rows, through every relation a
+declared hop crosses and its ``RelatedFilter(queryset=...)``, and under a connection's
+count, order and pages; a relation the override's own Python names reads every row, its own
+scoping. Each request reaches the leaf over HTTP through ``FilterSet.apply_sync`` /
+``apply_async`` or the set's own form.
 """
 
 import asyncio

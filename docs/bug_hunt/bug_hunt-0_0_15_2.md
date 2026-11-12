@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 508 done, 104 to do. The CHANGELOG entries filed here moved to
+Progress: 508 done, 105 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2886,7 +2886,15 @@ Progress: 508 done, 104 to do. The CHANGELOG entries filed here moved to
   class state. spec-027, docs/README.md, GLOSSARY `FilterSet` and the test_query README restated. Pinned by the rows
   the spec-027 Test plan lists for 881 (raw annotation-held / unannotated / route rows, served annotation and
   per-request refusal rows, consumer-predicate rows incl. off-key NodeID and class-state recording rows, the walker
-  rows in `tests/utils/test_querysets.py`). Filed 920, 921.
+  rows in `tests/utils/test_querysets.py`). A consumer leaf on a walked relation key keeps the rows its own code
+  decides: on a forward key two or more hops long it runs as declared and a kept row must reach a visible last-hop row
+  through visible hops, no value read as a key (`FilterSet._routed_leaf_chain`, `_reaches_key`), and on a to-many key
+  a `get_filter_predicate` override's value names no row, so its predicate runs once over the visible relation
+  (`_KeyMatch.named_rows`, `_builds_consumer_predicate`); `_with_shipped_predicate` and
+  `filters/base.py::_predicate_copy` are gone, so a code a predicate or forward `filter` override translates returns
+  the row it means (final review; pinned by
+  `test_a_consumer_leaf_translating_its_choice_filters_its_walked_forward_key` and
+  `test_a_consumer_predicate_translating_its_choice_filters_its_walked_to_many_key`). Filed 920, 921, 922.
 - [x] 762. An `in` over a nested `ArrayField` holds each member to the column's depth: `filters/base.py::_ElementField`
   carries the depth `utils/_array_field.py::array_leaf_field` returns (no longer a nests flag) at every fill site
   (`_ElementCleanedFilter._hand_column_field`, `install_comparison_cleaner`,
@@ -3066,6 +3074,11 @@ Progress: 508 done, 104 to do. The CHANGELOG entries filed here moved to
   `annotate(content_object__name=...)`, `CharFilter(field_name="tag", lookup_expr="bogus")` over
   `annotate(tag__bogus=...)` (Django reads the annotation first, `Query.solve_lookup_type`). Same before 881. Found
   fixing the review of 881
+- [ ] 922. (robustness) A consumer `filter` override that translates its value on a to-many walked relation key keeps
+  parents by the key rows the shipped comparison reads the untranslated value as: a narrowing (a code spelled as
+  another key) and a hidden-row leak (a code meaning a hidden row keeps its parent), at 21cc9c7f^ and after 881. The
+  784 contract (declared `field_name`, the value names rows) has no reading that fixes it without changing that
+  contract. Found fixing the final review of 881
 
 ## To do: holes found re-checking the fixes
 

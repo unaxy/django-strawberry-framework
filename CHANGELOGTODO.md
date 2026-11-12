@@ -1111,7 +1111,10 @@ Progress: 0 done, 230 to do.
   with the annotation as a remedy, where it answered Django's masked `FieldError`. A `MultipleChoiceFilter` whose
   `get_filter_predicate` the consumer overrides, and a `GlobalIDMultipleChoiceFilter` doing so for any lookup but
   `in`, is no longer judged by its path or lookup when its set publishes or applies, and on a key walked through a
-  scoped hop it answers rows where it raised `FieldError`
+  scoped hop it answers rows where it raised `FieldError`; a consumer `get_filter_predicate` or `filter` override on a
+  walked relation key decides which rows a value means, a translated choice code included, while each hop's
+  visibility still holds, and a to-many predicate that names its relation in its own path reads that relation as
+  written
 ## From dry-upstream-0_0_15
 
 - [ ] 101. CHANGELOG entry for item 22: the debug-toolbar middleware and its GraphiQL bridge template are adapted from

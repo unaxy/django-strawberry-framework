@@ -1699,8 +1699,8 @@ def test_a_consumer_predicate_on_a_globalid_multiple_choice_filter_filters_its_w
 
     The decoded ids reach ``get_filter_predicate``, which names the path itself, so the leaf
     runs as declared over the shifts, never rebound onto the target of the key it walks
-    through the scoped desks; the key rows its value names are read by the shipped
-    comparison, the package's own predicate: the shift at the branch sent.
+    through the scoped desks, and a shift it keeps reaches a visible branch through a
+    visible desk: the shift at the branch sent.
     """
     branches = _branch_shifts()
     schema, filterset, branch_type = _shift_schema(
@@ -1766,11 +1766,10 @@ class _RecordingChoicePredicate(MultipleChoiceFilter):
 @pytest.mark.django_db
 @pytest.mark.parametrize("kind", ["globalid", "choice"])
 def test_a_consumer_predicate_on_a_walked_key_keeps_its_class_and_class_state(kind: str) -> None:
-    """The shipped comparison of a consumer predicate's walked key creates no class.
+    """A consumer predicate on a walked key runs once, on its own class, creating none.
 
-    Reading the key rows the value names with the shipped predicate binds that predicate on
-    a copy of the leaf, never a subclass of the consumer's class: no ``__init_subclass__``
-    fires, and the consumer's predicate, run once as declared, counts on its own class.
+    No subclass of the consumer's class is created (no ``__init_subclass__`` fires), and
+    the consumer's predicate, run once as declared, counts on its own class.
     """
     _RECORDED_SUBCLASSES.clear()
     branches = _branch_shifts()
@@ -1845,12 +1844,11 @@ def test_a_consumer_predicate_on_a_walked_key_into_an_off_key_node_id_filters(
     driver: str,
     predicate: str,
 ) -> None:
-    """Past a walked key whose target's ``NodeID`` is no primary key, the shipped comparison reads.
+    """Past a walked key whose target's ``NodeID`` is no primary key, the predicate reads.
 
     The GlobalID filter builds its predicates on a copy carrying the path to the target's
-    id column (``desk__branch__isil``); the shipped predicate the key rows are read with is
-    bound to that copy too, so it reads the copy's path. The consumer's predicate, run once
-    as declared, sees the same path: the shift at the branch sent.
+    id column (``desk__branch__isil``). The consumer's predicate, run once as declared,
+    sees that path: the shift at the branch sent.
     """
     _PREDICATE_PATHS.clear()
     _isil_branch_shifts()
@@ -1888,12 +1886,11 @@ class _BranchKeyChoicePredicate(MultipleChoiceFilter):
 
 @pytest.mark.django_db
 def test_a_consumer_predicate_on_a_multiple_choice_filter_filters_its_walked_key() -> None:
-    """A raw key sent to a consumer predicate on a walked key: the shipped comparison's rows.
+    """A raw key sent to a consumer predicate on a walked key: the predicate's rows.
 
-    An unserved set (a served one's input finds no scalar for the relation). The key rows
-    the value names are read by ``MultipleChoiceFilter``'s own predicate on the scoped
-    desks' branch key, never the consumer's, and the leaf runs as declared over the shifts:
-    the shift at the branch sent.
+    An unserved set (a served one's input finds no scalar for the relation). The leaf runs
+    as declared over the shifts, each shift it keeps reaching a visible branch through a
+    visible desk: the shift at the branch sent.
     """
     branches = _branch_shifts()
     keys = [(str(pk), name) for name, pk in branches.items()]
@@ -1913,6 +1910,222 @@ def test_a_consumer_predicate_on_a_multiple_choice_filter_filters_its_walked_key
 
     rows = require(bound.qs, is_queryset)
     assert [require_instance(row, models.DeskShift).name for row in rows] == ["shift-Sibling"]
+
+
+#: The related key each choice code means to a translating consumer leaf, filled per test.
+_MEANT_KEYS: dict[str, int] = {}
+#: The codes each translating consumer leaf was sent, one entry per value it translated.
+_TRANSLATED: list[str] = []
+
+
+def _meant(codes: object) -> list[int]:
+    """The keys ``codes`` mean, each recorded as translated."""
+    sent = [require(code, is_str) for code in require(codes, is_list_or_tuple)]
+    _TRANSLATED.extend(sent)
+    return [_MEANT_KEYS[code] for code in sent]
+
+
+class _NamedPathCodePredicate(MultipleChoiceFilter):
+    """A consumer predicate naming the path itself, each code translated to the key it means."""
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        return {"desk__branch": _meant([v])[0]}
+
+
+class _SelfPathCodePredicate(MultipleChoiceFilter):
+    """A consumer predicate building on its own ``field_name``, each code translated."""
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        return {require(self.field_name, is_str): _meant([v])[0]}
+
+
+class _NamedPathCodeFilter(MultipleChoiceFilter):
+    """A ``filter`` override naming the path itself, each code translated to the key it means."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        if not value:
+            return qs
+        return qs.filter(desk__branch__in=_meant(value))
+
+
+class _SelfPathCodeFilter(MultipleChoiceFilter):
+    """A ``filter`` override building on its own ``field_name``, each code translated."""
+
+    @override
+    def filter(self, qs: QuerySet[_M], value: object) -> QuerySet[_M]:
+        if not value:
+            return qs
+        return qs.filter(**{f"{self.field_name}__in": _meant(value)})
+
+
+#: Each consumer leaf translating its choice codes on ``desk__branch``, by its shape.
+_TRANSLATING_KEY_LEAVES: dict[str, type[MultipleChoiceFilter]] = {
+    "named-path-predicate": _NamedPathCodePredicate,
+    "self-path-predicate": _SelfPathCodePredicate,
+    "named-path-filter": _NamedPathCodeFilter,
+    "self-path-filter": _SelfPathCodeFilter,
+}
+
+#: The branches in the order each one's code names the key of the one before it.
+_CODED_BRANCHES = ("Target", "Sibling", "Hidden")
+
+
+def _hidden_desk(branch: models.Branch) -> models.CirculationDesk:
+    """A desk of ``branch`` the scoped desk type hides (``_desks_but_closed``)."""
+    return models.CirculationDesk.objects.create(
+        name="desk-closed",
+        branch=branch,
+        shelf=models.Shelf.objects.create(code=f"closed-{branch.name}", branch=branch),
+    )
+
+
+def _coded_branch_shifts() -> dict[str, int]:
+    """``_branch_shifts`` and ``Hidden``, whose one desk is hidden; the branches' keys by name."""
+    branches = _branch_shifts()
+    hidden = models.Branch.objects.create(name="Hidden", city="Boston")
+    _ = models.DeskShift.objects.create(name="shift-Hidden", desk=_hidden_desk(hidden))
+    branches["Hidden"] = saved_pk(hidden)
+    return branches
+
+
+def _mean(keys: Mapping[str, int], codes: str) -> dict[str, str]:
+    """Fill ``_MEANT_KEYS`` with a code meaning each of ``keys``; answer the codes by name.
+
+    ``other-keys`` spells each code as the key of the name before it (``Target``'s code is
+    ``Hidden``'s key), so read as a key it names another row; ``no-keys`` spells it as no
+    key at all.
+    """
+    _MEANT_KEYS.clear()
+    _TRANSLATED.clear()
+    names = list(keys)
+    sent: dict[str, str] = {}
+    for index, name in enumerate(names):
+        code = str(keys[names[index - 1]]) if codes == "other-keys" else name.lower()
+        _MEANT_KEYS[code] = keys[name]
+        sent[name] = code
+    return sent
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("meant", _CODED_BRANCHES)
+@pytest.mark.parametrize("codes", ["other-keys", "no-keys"])
+@pytest.mark.parametrize("leaf", sorted(_TRANSLATING_KEY_LEAVES))
+def test_a_consumer_leaf_translating_its_choice_filters_its_walked_forward_key(
+    leaf: str,
+    codes: str,
+    meant: str,
+) -> None:
+    """A code means the branch the consumer's own code translates it to, through visible desks.
+
+    On a forward key two hops deep a predicate override and a ``filter`` override alike run
+    once, as declared, over the shifts, and a shift either keeps must reach a visible branch
+    through a visible desk; no value is read as a key. A code spelled as another branch's
+    key, or as none, keeps the shift at the branch it means, and one meaning the branch
+    reached only through the hidden desk keeps nothing.
+    """
+    branches = _coded_branch_shifts()
+    sent = _mean({name: branches[name] for name in _CODED_BRANCHES}, codes)
+    _ = _shift_schema(CharFilter(field_name="name"))
+
+    class TranslatingKeySet(FilterSet):
+        held = _TRANSLATING_KEY_LEAVES[leaf](
+            field_name="desk__branch",
+            choices=[(code, code) for code in _MEANT_KEYS],
+        )
+
+        class Meta:
+            model = models.DeskShift
+            fields = []
+
+    bound = TranslatingKeySet(
+        data={"held": [sent[meant]]},
+        queryset=models.DeskShift.objects.all(),
+    )
+
+    rows = require(bound.qs, is_queryset)
+    expected = [] if meant == "Hidden" else [f"shift-{meant}"]
+    assert [require_instance(row, models.DeskShift).name for row in rows] == expected
+    assert [sent[meant]] == _TRANSLATED
+
+
+class _NamedPathDeskPredicate(MultipleChoiceFilter):
+    """A consumer predicate naming its relation itself, each code translated to a desk key."""
+
+    @override
+    def get_filter_predicate(self, v: object) -> dict[str, object]:
+        return {"circulation_desks": _meant([v])[0]}
+
+
+#: Each consumer predicate translating its choice codes on ``circulation_desks``, by its shape.
+_TRANSLATING_DESK_PREDICATES: dict[str, type[MultipleChoiceFilter]] = {
+    "named-path": _NamedPathDeskPredicate,
+    "self-path": _SelfPathCodePredicate,
+}
+
+
+def _branch_desks() -> dict[str, int]:
+    """``Target`` with a desk, ``Sibling`` with a desk and a hidden one; desk keys by meaning.
+
+    ``Hidden`` is ``Sibling``'s hidden desk.
+    """
+    target = models.Branch.objects.create(name="Target", city="Boston")
+    sibling = models.Branch.objects.create(name="Sibling", city="Boston")
+    desks: dict[str, int] = {"Hidden": saved_pk(_hidden_desk(sibling))}
+    for name, branch in (("Target", target), ("Sibling", sibling)):
+        desk = models.CirculationDesk.objects.create(
+            name=f"desk-{name}",
+            branch=branch,
+            shelf=models.Shelf.objects.create(code=name, branch=branch),
+        )
+        desks[name] = saved_pk(desk)
+    return desks
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("meant", _CODED_BRANCHES)
+@pytest.mark.parametrize("predicate", sorted(_TRANSLATING_DESK_PREDICATES))
+def test_a_consumer_predicate_translating_its_choice_filters_its_walked_to_many_key(
+    predicate: str,
+    meant: str,
+) -> None:
+    """On a to-many key a consumer predicate runs once over the desks the request may see.
+
+    No value names a row of the relation's target: the predicate decides which desk a code
+    means, built on the leaf's ``field_name`` bound to the relation joined only to the
+    visible desks, so a code spelled as another desk's key keeps the branch of the desk it
+    means, and one meaning ``Sibling``'s hidden desk keeps nothing. A predicate naming its
+    relation itself reads every desk, its own scoping, as a ``filter`` override's own
+    Python does.
+    """
+    desks = _branch_desks()
+    sent = _mean({name: desks[name] for name in _CODED_BRANCHES}, "other-keys")
+    _ = _shift_schema(CharFilter(field_name="name"))
+
+    class TranslatingDeskSet(FilterSet):
+        held = _TRANSLATING_DESK_PREDICATES[predicate](
+            field_name="circulation_desks",
+            choices=[(code, code) for code in _MEANT_KEYS],
+        )
+
+        class Meta:
+            model = models.Branch
+            fields = []
+
+    bound = TranslatingDeskSet(
+        data={"held": [sent[meant]]},
+        queryset=models.Branch.objects.all(),
+    )
+
+    rows = require(bound.qs, is_queryset)
+    expected = {"Target": ["Target"], "Sibling": ["Sibling"]}.get(
+        meant,
+        ["Sibling"] if predicate == "named-path" else [],
+    )
+    assert [require_instance(row, models.Branch).name for row in rows] == expected
+    assert [sent[meant]] == _TRANSLATED
 
 
 @pytest.mark.django_db
