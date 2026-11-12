@@ -82,6 +82,14 @@ def test_the_tracked_machine_list_loads_with_the_current_fleet() -> None:
     assert machines["rio-air"].weights["heavy"] < machines["rio-ubu"].weights["heavy"]
 
 
+def test_other_projects_defaults_to_false_and_reads_a_boolean(tmp_path: Path) -> None:
+    listed = _write_list(
+        tmp_path,
+        [_entry("a", "macos", other_projects=True), _entry("b", "linux")],
+    )
+    assert [machine.other_projects for machine in fleet.load_machines(listed)] == [True, False]
+
+
 @pytest.mark.parametrize(
     ("machines", "message"),
     [
@@ -126,6 +134,8 @@ def test_the_tracked_machine_list_loads_with_the_current_fleet() -> None:
             "heavy_slots must be finite",
         ),
         ([_entry("a", "linux", aliases="box")], "aliases must be a list"),
+        ([_entry("a", "macos", other_projects="yes")], "other_projects must be true or false"),
+        ([_entry("a", "macos", other_projects=1)], "other_projects must be true or false"),
         ([_entry("a", "linux", aliases=[""])], "aliases must be a list"),
         (
             [_entry("a", "linux", aliases=["Box.local"]), _entry("b", "macos", aliases=["box"])],

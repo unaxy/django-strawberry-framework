@@ -51,7 +51,7 @@ has the capacity, not whichever has the tool.
 | OS | Ubuntu Desktop 26.04 LTS. |
 | Availability | Not yet established; treat it as offline when it does not answer. |
 | Reach it as | `rio-bee`, from the other three. |
-| Expect | Light work only: four slow cores and 7 GiB cannot carry a full suite or a heavy flow (`load_balancing.py` weights it low). No passwordless `sudo` (stop and hand root commands to the maintainer). `/tmp` is a 3.6 GiB tmpfs that every reboot empties, so a `workspace.py` pool there is small and short-lived. Carries `rio-ubu`'s CLI layer (`heavy` with 1 slot, `pressure`, `git-autosync`, `~/MACHINE.md`) from [personal.py][personal]. Set up by [docs/fleet/scripts/fleet_setup.py][fleet-setup] ([SETUP.md][setup]). |
+| Expect | Light work only: four slow cores and 7 GiB cannot carry a full suite or a heavy flow (`load_balancing.py` weights it low). No passwordless `sudo` (stop and hand root commands to the maintainer). `/tmp` is a 3.6 GiB tmpfs that every reboot empties, so a `workspace.py` pool there is small and short-lived. Carries `rio-ubu`'s CLI layer (`heavy` with 1 slot, `pressure`, `agent-status`, `~/MACHINE.md`) from [personal.py][personal]. Set up by [docs/fleet/scripts/fleet_setup.py][fleet-setup] ([SETUP.md][setup]). |
 
 Connection details (transport, addresses, credentials) are kept in each machine's private
 configuration, never in this repo. If a "reach it as" name does not answer from where you are,
@@ -88,11 +88,14 @@ machine itself rather than trusting a number written here.
 ## 3. Rules that hold on every machine
 
 - A repo's own `AGENTS.md` beats a machine's house rules, and both beat habit. This repo forbids
-  creating branches and agent commits unless the maintainer says so, on every machine.
-- Checkouts live under `~/projects/<repo>`; an agent's private copies live inside that checkout's
-  git-ignored `.work/`, never as sibling folders under `~/projects/` (the desktop's autosync
-  fast-forwards those). Machines do not share a working tree: work moves between them through
-  the remote, or through a clone on the target machine whose `parent` remote is the source
+  creating branches unless the maintainer says so, and only the maintainer pushes, on every machine.
+- `~/projects/` holds the checkout `~/projects/django-strawberry-framework`, the two reference
+  sources AGENTS.md names and the agent rules files, nothing else (rio-air, whose row sets
+  `other_projects`, also holds the maintainer's own projects there). An agent's private copies
+  live inside the checkout's git-ignored `.work/`, never as sibling folders: `fleet_update.py
+  check` names any other clone of this repo under `~`, and any other `~/projects/` entry, as a
+  stray ([SETUP.md][setup] section 7). Machines do not share a working tree: work moves between
+  them through the remote, or through a clone on the target machine whose `parent` remote is the source
   checkout over SSH (push disabled), its work handed back as a patch ([START.md][start] "Private
   working copies"). Only the maintainer pushes.
 - The full test suite runs in GitHub Actions (AGENTS.md); a machine runs targeted tests unless
@@ -123,7 +126,8 @@ uv run python docs/fleet/scripts/load_balancing.py --json    # one document for 
 - The machine list is [machines.json][machines-json]: per machine its ssh host, OS
   (`linux`, `macos`, `windows`), checkout path, a preference weight per mode (`light`, `heavy`)
   and hard floors per mode, plus its `aliases`: other names the machine's stored records may
-  carry, read only to resolve those records. The row's `name` is the machine's one name (its
+  carry, read only to resolve those records, and `other_projects` (`true` on rio-air only): its
+  `~/projects/` may hold entries the stray check would otherwise name. The row's `name` is the machine's one name (its
   hostname, Tailscale name and ssh alias match it). A machine joining the fleet gets a row there
   as well as its §1 block. Weights and floors are finite numbers of at least 0; a list breaking
   that exits 2.

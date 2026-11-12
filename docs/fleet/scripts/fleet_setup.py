@@ -13,6 +13,7 @@ and on the new machine itself (``add`` copies this file there and runs it)::
     python3 fleet_setup.py box check
     python3 fleet_setup.py box install [--only STEP,...] [--skip KIND,...]
     python3 fleet_setup.py box write-path-block   # the ``path-block`` step's writer
+    python3 fleet_setup.py box strays             # read-only: the stray check, run in the checkout
 
 ``docs/fleet/SETUP.md`` is the procedure around it: what to do before (Tailscale, an
 ssh alias, this machine's key on the box), what this script does, and what stays by hand
@@ -24,7 +25,8 @@ Steps
     steps whose check fails, in order, and stops at the first that fails, so a rerun
     picks up where the last one stopped and a finished box reruns as a no-op. A step is
     one of four kinds, and runs on the OSes its ``systems`` names (``platform.system()``:
-    every step on Ubuntu, only ``path-block`` on macOS, whose other steps stay by hand):
+    every step on Ubuntu; on macOS only ``path-block`` and the three reference-source steps,
+    whose other steps stay by hand):
 
     ``sudo``
         Needs root (apt packages, user lingering). Every missing ``sudo`` step runs in
@@ -53,6 +55,54 @@ Steps
     it; a file already as wanted is not touched. ``setup/ubuntu/personal.py``'s ``path-block``
     step runs this same check and writer, so there is one block file, one check and one writer.
 
+Reference sources
+    The two upstream trees ``AGENTS.md`` sends agents to, at the paths it names, on macOS and
+    Linux alike, each at the version :data:`VERSIONS_FILE` pins:
+
+    ``strawberry-django``
+        ``~/projects/strawberry-django-main``: GitHub's source tarball of the pinned tag of
+        strawberry-graphql-django (:data:`STRAWBERRY_DJANGO_ARCHIVE`), unpacked as a plain
+        tree (no git). Its version is the one its ``pyproject.toml`` names
+        (:func:`strawberry_django_version`). A tree at another version is replaced only when
+        it equals its own version's tarball (``diff -r``, ``__pycache__`` and ``.DS_Store``
+        aside), else left as it is and the step fails naming it
+        (:func:`strawberry_django_lines`).
+    ``django-graphene-filters``
+        ``~/projects/django-graphene-filters``: an https clone of :data:`FILTERS_URL` at the
+        pinned tag, detached (:func:`filters_lines`). Its status (:func:`filters_status`) is
+        ``ok`` at the tag, ``ahead`` past it (a working checkout carrying the tag's history,
+        which no step moves), ``behind`` short of it, else ``differs``. A checkout is moved
+        forward only when it is clean, detached, from that origin, and behind the tag; one on a
+        branch or with local changes is never changed.
+    ``graphene-django``
+        ``uv sync --frozen`` in that clone (:func:`graphene_django_lines`), so its ``.venv``
+        holds the pinned graphene-django (:func:`graphene_django_version` reads its
+        ``dist-info``); run only in a clean clone from that origin.
+
+    Every ``git`` call reads through :func:`git_argv` (``--no-optional-locks``: a read never
+    rewrites the index of someone's checkout) with the caller's ``GIT_*`` variables dropped.
+    ``docs/fleet/scripts/fleet_update.py`` reports and applies the same three through these
+    functions.
+
+Strays
+    :func:`strays` is the read-only check ``verify`` runs (``box strays`` on the box) and
+    ``docs/fleet/scripts/fleet_update.py check`` reports; it deletes nothing. It names:
+
+    - every git repository, worktree or bare repository of this repo under ``~``
+      (:func:`is_this_repo`: its ``origin`` names django-strawberry-framework, it shares the
+      checkout's root commit, or its ``.git`` file points into the checkout's git folder),
+      other than the checkout itself and its ``.work/`` copies. The walk does not enter
+      ``~/Library``, ``~/.nvm``, the trash folders, ``~/snap``, ``~/.npm``, on a Mac the
+      folders macOS guards with a privacy prompt (``~/Documents`` and its kin), any ``.cache/uv``,
+      any ``node_modules`` or ``.git`` folder, or the checkout's ``.work/``
+      (:func:`is_pruned`); a ``.git`` file that is no ``gitdir:`` pointer (uv's
+      ``sdists-*`` markers) is no repository.
+    - every entry of ``~/projects`` but :data:`PROJECT_ENTRIES` (the checkout, the two
+      reference folders, the agent rules files ``setup/ubuntu/personal.py`` writes, and
+      Finder's ``.DS_Store``), unless the machine's ``machines.json`` row sets
+      ``other_projects`` (a machine that also holds personal projects there; the first rule
+      still applies).
+
 ``mesh``
     Every ordered pair of machines in ``docs/fleet/machines.json`` (``--add HOST`` adds one
     the list does not hold yet) must reach the other as ``ssh -o BatchMode=yes <name>
@@ -77,14 +127,17 @@ Steps
     Runs ``docs/fleet/scripts/fleet_sync.py status`` here and on the box,
     ``docs/fleet/scripts/fleet_stop.py status`` here and the box's own
     ``docs/fleet/scripts/fleet_update.py check`` (every pinned tool against
-    :data:`VERSIONS_FILE`, and its OS updates pending; it exits 1 on version drift), then
-    requires plain (non-interactive) ``ssh <box> 'command -v uv git python3 node claude codex
-    gh'`` to find every one of :data:`SSH_TOOLS`: read-only, nothing synced or installed.
+    :data:`VERSIONS_FILE`, and its OS updates pending; it exits 1 on version drift), the box's
+    own stray check (``box strays``, "Strays"), then requires plain (non-interactive) ``ssh
+    <box> 'command -v uv git python3 node claude codex gh'`` to find every one of
+    :data:`SSH_TOOLS`: read-only, nothing synced, installed or deleted.
 
 Versions
     ``setup/versions.json`` (:data:`VERSIONS_FILE`) pins the version of every tool setup
     installs that can be pinned (nvm, node, npm, Codex, Claude Code, uv, pre-commit,
-    osv-scanner, OpenCode); a tool whose vendor installer takes no version reads
+    osv-scanner, OpenCode) and of the reference sources (strawberry-django's tag,
+    django-graphene-filters' tag, graphene-django); a tool whose vendor installer takes no
+    version reads
     :data:`LATEST` (:data:`VENDOR_INSTALLERS`). :func:`load_versions` is its one reader, and
     the line builders below it (:func:`node_lines`, :func:`claude_lines`, ...) are the one way
     each tool is installed: the ``box`` steps here, ``setup/ubuntu/personal.py``'s osv-scanner,
@@ -119,14 +172,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from typing_extensions import TypeIs
+
+    #: Runs ``git -C <folder> <args>`` (:func:`git_argv`); returns its exit code and stdout.
+    Git = Callable[[Path, Sequence[str]], tuple[int, str]]
 
 ROOT = Path(__file__).resolve().parents[3]
 MACHINES_FILE = ROOT / "docs" / "fleet" / "machines.json"
 #: Where every fleet machine keeps the checkout (``docs/fleet/scripts/fleet_sync.py`` requires it).
 REPO = "~/projects/django-strawberry-framework"
+#: The rules files ``setup/ubuntu/personal.py`` writes into ``~/projects``.
+RULES_FILES = ("AGENTS.md", "AGENTS_READ_THIS_FIRST.md")
+#: The folder metadata macOS's Finder writes into any folder it shows.
+FINDER_FILE = ".DS_Store"
 #: The public repository a box clones from; pushes stay the maintainer's.
 REPO_URL = "https://github.com/unaxy/django-strawberry-framework.git"
 #: The CPython builds every machine carries; the last is ``python3`` (MACHINES.md section 2).
@@ -144,6 +204,34 @@ LATEST = "latest"
 #: The shape of an exact pin: digits and dots, an optional leading ``v`` (each pin goes into
 #: shell lines and URLs, so nothing else is accepted).
 PIN = re.compile(r"v?\d+(?:\.\d+)+")
+#: A dotted version anywhere in a tool's output (:func:`version_of`).
+VERSION = re.compile(r"\d+(?:\.\d+)+")
+#: The folder every machine keeps its checkouts in, under the home folder.
+PROJECTS = "projects"
+#: strawberry-graphql-django's source tree (module docstring, "Reference sources").
+STRAWBERRY_DJANGO_DIR = "strawberry-django-main"
+STRAWBERRY_DJANGO_ARCHIVE = (
+    "https://github.com/strawberry-graphql/strawberry-django/archive/refs/tags/{tag}.tar.gz"
+)
+#: django-graphene-filters' clone, whose ``.venv`` holds graphene-django.
+FILTERS_DIR = "django-graphene-filters"
+FILTERS_URL = "https://github.com/riodw/django-graphene-filters.git"
+#: An ``origin`` naming that repository, over https or ssh.
+FILTERS_ORIGIN = re.compile(r"[/:]riodw/django-graphene-filters(?:\.git)?/?$")
+#: An ``origin`` naming this repository (module docstring, "Strays").
+THIS_ORIGIN = re.compile(r"[/:]django-strawberry-framework(?:\.git)?/?$")
+#: Every entry ``~/projects`` may hold (module docstring, "Strays").
+PROJECT_ENTRIES = frozenset(
+    {
+        REPO.rsplit("/", 1)[-1],
+        STRAWBERRY_DJANGO_DIR,
+        FILTERS_DIR,
+        *RULES_FILES,
+        FINDER_FILE,
+    },
+)
+#: The machine list key letting a machine hold other entries in ``~/projects``.
+OTHER_PROJECTS = "other_projects"
 #: The installer of each tool pinned to :data:`LATEST`: it installs whatever is current.
 VENDOR_INSTALLERS = {
     "muse": "https://dev.meta.ai/install.sh",
@@ -191,6 +279,8 @@ SSH_TOOLS = (
 )
 #: The update script whose ``check`` ``verify`` runs on the box, relative to its checkout.
 UPDATE_SCRIPT = "docs/fleet/scripts/fleet_update.py"
+#: This script, relative to a checkout (``verify`` runs its ``box strays`` there).
+SETUP_SCRIPT = "docs/fleet/scripts/fleet_setup.py"
 #: ``docs/fleet/scripts/fleet.py``'s ``SSH_OPTIONS``, repeated (this file imports nothing).
 SSH_OPTIONS = (
     "-o",
@@ -351,6 +441,18 @@ def load_versions(path: Path = VERSIONS_FILE) -> dict[str, str]:
     return pins
 
 
+def version_of(text: str) -> str:
+    """Return the first dotted version in ``text`` (``v26.13.1`` reads ``26.13.1``), else ``""``."""
+    found = VERSION.search(text)
+    return found.group(0) if found else ""
+
+
+def numbers(version: str) -> tuple[int, ...]:
+    """Return ``version``'s numbers (``""`` and ``latest`` read as none)."""
+    found = version_of(version)
+    return tuple(int(part) for part in found.split(".")) if found else ()
+
+
 def pinned(tool: str, path: Path = VERSIONS_FILE) -> str:
     """Return ``tool``'s pinned version (:func:`load_versions`).
 
@@ -453,6 +555,436 @@ def opencode_lines(version: str) -> list[str]:
 def vendor_lines(url: str) -> list[str]:
     """Return the line piping a vendor's installer (a :data:`LATEST` tool's) into bash."""
     return [f"curl -fsSL --retry 3 --proto '=https' {url} | bash"]
+
+
+# Reference sources (module docstring, "Reference sources").
+
+#: A ``pyproject.toml`` line naming the version.
+PROJECT_VERSION = re.compile(r'version\s*=\s*"([^"]*)"')
+#: The statuses that leave a reference checkout as it is: at its pin, or past it.
+PRESENT = ("ok", "ahead")
+#: The ``case`` pattern an ``origin`` naming django-graphene-filters matches in a shell line.
+FILTERS_ORIGIN_CASE = "|".join(
+    f"*[/:]riodw/django-graphene-filters{tail}" for tail in ("", ".git", "/")
+)
+
+
+def git_argv(folder: Path, args: Sequence[str]) -> list[str]:
+    """Return the ``git`` command running ``args`` in ``folder``, never taking optional locks."""
+    return [
+        "git",
+        "--no-optional-locks",
+        "-C",
+        str(folder),
+        *args,
+    ]
+
+
+def git_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return ``env`` less every ``GIT_*`` variable (a caller's ``GIT_DIR`` aims git elsewhere)."""
+    return {name: value for name, value in env.items() if not name.startswith("GIT_")}
+
+
+def box_git(box: Box) -> Git:
+    """Return the :data:`Git` runner on ``box``: its ``PATH``, no ``GIT_*`` variable."""
+    env = git_env(box_env(box))
+
+    def git(folder: Path, args: Sequence[str]) -> tuple[int, str]:
+        try:
+            completed = subprocess.run(
+                git_argv(folder, args),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return 127, ""
+        return completed.returncode, completed.stdout.strip()
+
+    return git
+
+
+def strawberry_django_version(home: Path) -> str:
+    """Return the release ``~/projects/strawberry-django-main``'s ``pyproject.toml`` names.
+
+    The ``version`` of its ``[project]`` table, when it is an exact release (:data:`PIN`);
+    ``""`` when the tree, the file or such a version is absent.
+    """
+    try:
+        text = (home / PROJECTS / STRAWBERRY_DJANGO_DIR / "pyproject.toml").read_text(
+            encoding="utf-8",
+        )
+    except (OSError, ValueError):
+        return ""
+    section = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped
+            continue
+        found = PROJECT_VERSION.fullmatch(stripped) if section == "[project]" else None
+        if found:
+            return found.group(1) if PIN.fullmatch(found.group(1)) else ""
+    return ""
+
+
+def graphene_django_version(home: Path) -> str:
+    """Return the graphene-django the django-graphene-filters clone's ``.venv`` holds ('' none)."""
+    lib = home / PROJECTS / FILTERS_DIR / ".venv" / "lib"
+    prefix, suffix = "graphene_django-", ".dist-info"
+    found = sorted(lib.glob(f"python*/site-packages/{prefix}*{suffix}"))
+    return found[-1].name[len(prefix) : -len(suffix)] if found else ""
+
+
+def filters_described(home: Path, git: Git) -> str:
+    """Return ``git describe --tags --always`` of the django-graphene-filters clone ('' none)."""
+    folder = home / PROJECTS / FILTERS_DIR
+    if not folder.exists():
+        return ""
+    code, described = git(folder, ["describe", "--tags", "--always"])
+    return described if code == 0 else ""
+
+
+def filters_status(home: Path, pin: str, git: Git) -> tuple[str, str]:
+    """Return the django-graphene-filters clone's status against tag ``pin``, and why.
+
+    ``missing``; ``differs`` (no checkout of its own, another ``origin``, or diverged from the
+    tag); ``behind`` (short of the tag, or the tag not fetched); ``ok`` at the tag; ``ahead``
+    past it. Local changes are named in the detail. Read-only.
+    """
+    folder = home / PROJECTS / FILTERS_DIR
+    if not folder.exists():
+        return "missing", ""
+    code, top = git(folder, ["rev-parse", "--show-toplevel"])
+    if code or Path(top).resolve() != folder.resolve():
+        return "differs", "not a git checkout of its own"
+    _, origin = git(folder, ["config", "--get", "remote.origin.url"])
+    if not FILTERS_ORIGIN.search(origin):
+        return "differs", f"its origin is {origin or 'unset'}, not {FILTERS_URL}"
+    _, head = git(
+        folder,
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "HEAD",
+        ],
+    )
+    code, wanted = git(
+        folder,
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            f"refs/tags/{pin}^{{commit}}",
+        ],
+    )
+    _, changes = git(folder, ["status", "--porcelain"])
+    notes = ["local changes"] if changes else []
+    if code:
+        status = "behind"
+        notes.insert(0, f"tag {pin} is not fetched")
+    elif head == wanted:
+        status = "ok"
+    elif (
+        git(
+            folder,
+            [
+                "merge-base",
+                "--is-ancestor",
+                wanted,
+                head,
+            ],
+        )[0]
+        == 0
+    ):
+        status = "ahead"
+    elif (
+        git(
+            folder,
+            [
+                "merge-base",
+                "--is-ancestor",
+                head,
+                wanted,
+            ],
+        )[0]
+        == 0
+    ):
+        status = "behind"
+    else:
+        status = "differs"
+        notes.insert(0, f"diverged from {pin}")
+    return status, "; ".join(notes)
+
+
+def _refuse(message: str) -> str:
+    """Return the shell group printing ``message`` to stderr and failing the line."""
+    return f"{{ echo {shlex.quote(message)} >&2; exit 1; }}"
+
+
+def _filters_guard() -> list[str]:
+    """Return the shell lines failing unless ``$d`` is a clean django-graphene-filters clone."""
+    folder = f"~/{PROJECTS}/{FILTERS_DIR}"
+    return [
+        (
+            '[ "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$d" && pwd -P)" ] '
+            f"|| {_refuse(f'{folder} is not a git checkout of its own; left as it is')}"
+        ),
+        (
+            f'case "$(git -C "$d" config --get remote.origin.url)" in {FILTERS_ORIGIN_CASE}) ;; '
+            f"*) {_refuse(f'{folder} has another origin than {FILTERS_URL}; left as it is')} ;; "
+            "esac"
+        ),
+        (
+            '[ -z "$(git --no-optional-locks -C "$d" status --porcelain)" ] '
+            f"|| {_refuse(f'{folder} has local changes; left as it is')}"
+        ),
+    ]
+
+
+def strawberry_django_lines(
+    pin: str,
+    installed: str,
+    archive: str = STRAWBERRY_DJANGO_ARCHIVE,
+) -> list[str]:
+    """Return the line putting strawberry-django's ``pin`` tarball at ``~/projects``.
+
+    ``installed`` is the version the tree there names (``""``: none). The new tree is unpacked
+    in a scratch folder under ``~/.cache/dsf-fleet-setup`` first; a tree already there is
+    replaced only when it equals its own ``installed`` release's tarball, else the line fails
+    and leaves it as it is (as it does a tree naming no version).
+    """
+    folder = f"~/{PROJECTS}/{STRAWBERRY_DJANGO_DIR}"
+
+    def fetch(into: str, tag: str) -> str:
+        url = shlex.quote(archive.format(tag=tag))
+        return (
+            f'mkdir "$t"/{into} && curl -fsSL --retry 3 {url} '
+            f'| tar -xzf - --strip-components=1 -C "$t"/{into}'
+        )
+
+    if installed:
+        old = f"{'v' if pin.startswith('v') and not installed.startswith('v') else ''}{installed}"
+        existing = [
+            fetch("old", old),
+            (
+                f'diff -rq -x __pycache__ -x {FINDER_FILE} "$t"/old "$d" >/dev/null '
+                f"|| {_refuse(f'{folder} differs from the {old} release; left as it is')}"
+            ),
+            'mv "$d" "$t"/replaced',
+        ]
+    else:
+        existing = [_refuse(f"{folder} names no release version; left as it is")]
+    script = [
+        "set -eo pipefail",
+        f'd="$HOME"/{PROJECTS}/{STRAWBERRY_DJANGO_DIR}',
+        'w="$HOME"/.cache/dsf-fleet-setup',
+        f'mkdir -p "$w" "$HOME"/{PROJECTS}',
+        't=$(mktemp -d "$w"/strawberry-django.XXXXXX)',
+        "trap 'rm -rf \"$t\"' EXIT",
+        fetch("new", pin),
+        f'if [ -e "$d" ]; then {"; ".join(existing)}; fi',
+        'mv "$t"/new "$d" || { [ ! -e "$t"/replaced ] || mv "$t"/replaced "$d"; exit 1; }',
+    ]
+    return ["; ".join(script)]
+
+
+def filters_lines(pin: str, url: str = FILTERS_URL) -> list[str]:
+    """Return the line cloning django-graphene-filters at tag ``pin``, or moving a clone to it.
+
+    An absent clone is made with ``git clone --branch <pin>`` (detached at the tag). A
+    folder already there is moved only when it is a clean clone of that origin, detached,
+    and behind the tag (fetched first); anything else fails the line and is left as it is.
+    """
+    folder = f"~/{PROJECTS}/{FILTERS_DIR}"
+    tag = shlex.quote(pin)
+    peeled = shlex.quote(f"refs/tags/{pin}^{{commit}}")
+    script = [
+        "set -e",
+        f'd="$HOME"/{PROJECTS}/{FILTERS_DIR}',
+        f'mkdir -p "$HOME"/{PROJECTS}',
+        f'if [ ! -e "$d" ]; then git clone --quiet --branch {tag} {shlex.quote(url)} "$d"; exit 0; fi',
+        *_filters_guard(),
+        (
+            'if git -C "$d" symbolic-ref -q HEAD >/dev/null; then '
+            f"{_refuse(f'{folder} is on a branch (a working checkout); left as it is')}; fi"
+        ),
+        f'git -C "$d" fetch --quiet origin tag {tag}',
+        (
+            f'git -C "$d" merge-base --is-ancestor HEAD {peeled} '
+            f"|| {_refuse(f'{folder} is not behind {pin}; left as it is')}"
+        ),
+        f'git -C "$d" checkout --quiet --detach {peeled}',
+    ]
+    return ["; ".join(script)]
+
+
+def graphene_django_lines(python: str = PYTHONS[-1]) -> list[str]:
+    """Return the line running ``uv sync --frozen`` in a clean django-graphene-filters clone."""
+    folder = f"~/{PROJECTS}/{FILTERS_DIR}"
+    script = [
+        "set -e",
+        f'd="$HOME"/{PROJECTS}/{FILTERS_DIR}',
+        f'[ -d "$d" ] || {_refuse(f"{folder} is missing")}',
+        *_filters_guard(),
+        'cd "$d"',
+        f"env -u VIRTUAL_ENV -u UV_PROJECT_ENVIRONMENT uv sync --frozen --quiet --python {python}",
+    ]
+    return ["; ".join(script)]
+
+
+# Strays (module docstring, "Strays").
+
+
+@dataclasses.dataclass(frozen=True)
+class Stray:
+    """A folder or file the stray check names, and why."""
+
+    path: Path
+    why: str
+
+
+#: The folders under ``~`` macOS guards with a privacy prompt: the stray walk never enters them
+#: on a Mac, so neither ``verify`` nor the update timer ever asks for access.
+MACOS_PRIVATE_FOLDERS = (
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Movies",
+    "Music",
+    "Pictures",
+)
+
+
+def pruned_folders(home: Path, system: str | None = None) -> frozenset[Path]:
+    """Return the folders under ``home`` the stray walk never enters (module docstring).
+
+    ``system`` (``platform.system()`` by default) adds :data:`MACOS_PRIVATE_FOLDERS` on a Mac.
+    """
+    private = MACOS_PRIVATE_FOLDERS if (system or platform.system()) == MACOS else ()
+    return frozenset(
+        home / relative
+        for relative in (
+            "Library",
+            ".nvm",
+            ".Trash",
+            ".local/share/Trash",
+            "snap",
+            ".npm",
+            ".cache/uv",
+            *private,
+        )
+    )
+
+
+def is_pruned(path: Path, fixed: frozenset[Path], checkout: Path) -> bool:
+    """Return whether the stray walk leaves ``path`` out (``fixed``: :func:`pruned_folders`)."""
+    if path.name in {".git", "node_modules"} or path in fixed:
+        return True
+    return path == checkout / ".work" or (path.name == "uv" and path.parent.name == ".cache")
+
+
+def gitdir_of(path: Path) -> Path | None:
+    """Return the folder a ``.git`` file's ``gitdir:`` line points to, else ``None``."""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    pointed = Path(text[len("gitdir:") :].strip())
+    return pointed if pointed.is_absolute() else path.parent / pointed
+
+
+def is_this_repo(
+    folder: Path,
+    git: Git,
+    roots: Callable[[], frozenset[str]],
+    checkout: Path,
+    gitdir: Path | None = None,
+) -> bool:
+    """Return whether ``folder`` is a repository of this repo (module docstring, "Strays").
+
+    ``roots`` returns the ``checkout``'s root commits (asked only when needed); ``gitdir`` is
+    where the folder's ``.git`` file points, when it is one: into the checkout's own git
+    folder is this repo whatever git says (a worktree whose metadata is gone).
+    """
+    if gitdir is not None and gitdir.resolve().is_relative_to((checkout / ".git").resolve()):
+        return True
+    _, origin = git(folder, ["config", "--get", "remote.origin.url"])
+    if THIS_ORIGIN.search(origin):
+        return True
+    code, found = git(folder, ["rev-list", "--max-parents=0", "HEAD"])
+    return code == 0 and bool(set(found.split()) & roots())
+
+
+def _repository_kind(here: Path, folders: Sequence[str], files: Sequence[str]) -> str:
+    """Return what kind of repository the walked folder ``here`` is (``""``: none)."""
+    if ".git" in folders:
+        return "a clone"
+    if ".git" in files:
+        return "a worktree" if gitdir_of(here / ".git") is not None else ""
+    return "a bare clone" if "HEAD" in files and {"objects", "refs"} <= set(folders) else ""
+
+
+def strays(
+    home: Path,
+    checkout: Path,
+    git: Git,
+    *,
+    other_projects: bool,
+) -> list[Stray]:
+    """Return every stray under ``home`` (module docstring, "Strays"), by path; read-only.
+
+    ``checkout`` is this machine's checkout; ``other_projects`` lets ``~/projects`` hold
+    entries beyond :data:`PROJECT_ENTRIES`.
+    """
+    found: dict[Path, list[str]] = {}
+    fixed = pruned_folders(home)
+    known: list[frozenset[str]] = []
+
+    def roots() -> frozenset[str]:
+        if not known:
+            code, out = git(checkout, ["rev-list", "--max-parents=0", "HEAD"])
+            known.append(frozenset(out.split()) if code == 0 else frozenset())
+        return known[0]
+
+    for top, folders, files in os.walk(home):
+        here = Path(top)
+        kind = _repository_kind(here, folders, files)
+        if kind == "a bare clone":
+            folders[:] = []
+        gitdir = gitdir_of(here / ".git") if kind == "a worktree" else None
+        if kind and here != checkout and is_this_repo(here, git, roots, checkout, gitdir):
+            found.setdefault(here, []).append(f"{kind} of this repo")
+        folders[:] = [name for name in folders if not is_pruned(here / name, fixed, checkout)]
+    projects = home / PROJECTS
+    if not other_projects and projects.is_dir():
+        for entry in sorted(projects.iterdir()):
+            if entry.name not in PROJECT_ENTRIES:
+                found.setdefault(entry, []).append(f"no entry ~/{PROJECTS} holds")
+    return [Stray(path, "; ".join(why)) for path, why in sorted(found.items())]
+
+
+def home_relative(path: Path, home: Path) -> str:
+    """Return ``path`` as ``~/<relative>`` under ``home`` (no account in a report), else as is."""
+    try:
+        return f"~/{path.relative_to(home).as_posix()}"
+    except ValueError:
+        return str(path)
+
+
+def other_projects_allowed(name: str, path: Path = MACHINES_FILE) -> bool:
+    """Return whether the machine list's row named ``name`` sets ``other_projects`` true."""
+    document = _loads(path.read_text(encoding="utf-8"))
+    rows = document.get("machines") if _is_object(document) else None
+    for entry in rows if _is_list(rows) else []:
+        if _is_object(entry) and entry.get("name") == name:
+            return entry.get(OTHER_PROJECTS) is True
+    return False
 
 
 def _check_packages(_box: Box) -> str | None:
@@ -627,6 +1159,47 @@ def _lines_direnv_allow(box: Box) -> list[str]:
     return [f"direnv allow {shlex.quote(str(box.repo))}"]
 
 
+def _check_strawberry_django(box: Box) -> str | None:
+    pin = pinned("strawberry-django")
+    folder = f"~/{PROJECTS}/{STRAWBERRY_DJANGO_DIR}"
+    if not (box.home / PROJECTS / STRAWBERRY_DJANGO_DIR).exists():
+        return folder
+    have = strawberry_django_version(box.home)
+    if have and numbers(have) == numbers(pin):
+        return None
+    return f"{folder} at {have or 'no release'}, not {pin}"
+
+
+def _lines_strawberry_django(box: Box) -> list[str]:
+    return strawberry_django_lines(
+        pinned("strawberry-django"),
+        strawberry_django_version(box.home),
+    )
+
+
+def _check_filters(box: Box) -> str | None:
+    status, detail = filters_status(box.home, pinned(FILTERS_DIR), box_git(box))
+    if status in PRESENT:
+        return None
+    return f"~/{PROJECTS}/{FILTERS_DIR} {status}{f': {detail}' if detail else ''}"
+
+
+def _lines_filters(_box: Box) -> list[str]:
+    return filters_lines(pinned(FILTERS_DIR))
+
+
+def _check_graphene_django(box: Box) -> str | None:
+    pin = pinned("graphene-django")
+    have = graphene_django_version(box.home)
+    if have and numbers(have) == numbers(pin):
+        return None
+    return f"graphene-django {have or 'absent'} in ~/{PROJECTS}/{FILTERS_DIR}/.venv, not {pin}"
+
+
+def _lines_graphene_django(_box: Box) -> list[str]:
+    return graphene_django_lines()
+
+
 def _check_logins(box: Box) -> str | None:
     # Existence only: a credential file is never opened.
     files = {
@@ -778,6 +1351,30 @@ STEPS: tuple[Step, ...] = (
     Step("venv", "user", "uv sync --frozen", _check_venv, _lines_venv),
     Step("hook", "user", "pre-commit install", _check_hook, _lines_hook),
     Step("direnv-allow", "user", "direnv allow", _check_direnv_allow, _lines_direnv_allow),
+    Step(
+        "strawberry-django",
+        "user",
+        "strawberry-django reference source",
+        _check_strawberry_django,
+        _lines_strawberry_django,
+        (LINUX, MACOS),
+    ),
+    Step(
+        FILTERS_DIR,
+        "user",
+        "django-graphene-filters reference clone",
+        _check_filters,
+        _lines_filters,
+        (LINUX, MACOS),
+    ),
+    Step(
+        "graphene-django",
+        "user",
+        "graphene-django in that clone's .venv",
+        _check_graphene_django,
+        _lines_graphene_django,
+        (LINUX, MACOS),
+    ),
     Step("logins", "hand", "agent CLI logins", _check_logins, _lines_logins),
     Step("timer", "hand", "save-sync timer", _check_timer, _lines_timer),
 )
@@ -1151,6 +1748,20 @@ def check_tools(host: str) -> int:
     return 1 if absent else 0
 
 
+def print_strays(box: Box, machines_file: Path = MACHINES_FILE) -> int:
+    """Print this box's strays (module docstring, "Strays"); return 1 when there are any.
+
+    The machine list is the checkout's (``box strays`` runs in it, as ``verify`` calls it).
+    """
+    allowed = other_projects_allowed(this_name(machine_names(machines_file)), machines_file)
+    found = strays(box.home, box.repo, box_git(box), other_projects=allowed)
+    for stray in found:
+        print(f"stray   {home_relative(stray.path, box.home)}  {stray.why}")
+    if not found:
+        print("ok      no strays")
+    return 1 if found else 0
+
+
 def verify(host: str) -> int:
     """Run the sync and stop statuses, ``host``'s ``fleet_update.py check``, then the tools."""
     here = shlex.quote(str(ROOT))
@@ -1159,6 +1770,7 @@ def verify(host: str) -> int:
         (host, host, f"cd {REPO} && .venv/bin/python docs/fleet/scripts/fleet_sync.py status"),
         ("here", None, f"cd {here} && python3 docs/fleet/scripts/fleet_stop.py status"),
         (host, host, f"cd {REPO} && .venv/bin/python {UPDATE_SCRIPT} check"),
+        (host, host, f"cd {REPO} && python3 {SETUP_SCRIPT} box strays"),
     ]
     worst = 0
     for label, where, command in checks:
@@ -1192,7 +1804,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Set up a new fleet machine.")
     sub = parser.add_subparsers(dest="command", required=True)
     box_parser = sub.add_parser("box", help="run on the new machine itself")
-    _ = box_parser.add_argument("action", choices=["check", "install", "write-path-block"])
+    _ = box_parser.add_argument(
+        "action",
+        choices=[
+            "check",
+            "install",
+            "write-path-block",
+            "strays",
+        ],
+    )
     _ = box_parser.add_argument("--only", default="", help="comma-separated step keys")
     _ = box_parser.add_argument("--skip", default="", help="comma-separated kinds")
     _ = box_parser.add_argument("--repo-url", default=REPO_URL)
@@ -1218,6 +1838,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             kept = f" (the old file kept as ~/{backup.name})" if backup else ""
             print(f"PATH block first in ~/{startup_file(box.home, box.system).name}{kept}")
             return 0 if check_path_block(box.home, box.system) is None else 1
+        if args.action == "strays":
+            return print_strays(box)
         if args.action == "check":
             results = check(box, steps)
             print("\n".join(report(results)))

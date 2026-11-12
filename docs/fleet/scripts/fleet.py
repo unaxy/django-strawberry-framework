@@ -19,8 +19,11 @@ The list
     (``linux``, ``macos`` or ``windows``), the checkout path a thread works in
     (``repo``, ``~`` allowed), a preference weight per mode (``weight``: ``light``
     and ``heavy``), the hard floors per mode (``floors``; only the keys the
-    entry's OS can measure) and its ``aliases`` (optional: other names the
-    machine's stored records may carry, read only to resolve them; below). Names
+    entry's OS can measure), its ``aliases`` (optional: other names the
+    machine's stored records may carry, read only to resolve them; below) and
+    ``other_projects`` (optional, ``true`` or ``false``: whether ``~/projects`` may hold
+    entries beyond the checkout and the reference sources, a machine that also holds
+    personal projects; ``docs/fleet/scripts/fleet_setup.py`` "Strays"). Names
     and aliases are compared up to their first dot, casefolded
     (:func:`short_hostname`); each is non-blank there, no name or alias belongs to
     two machines or appears twice (an alias never equals a row's name), and a row
@@ -142,6 +145,7 @@ class Machine:
     weights: Mapping[str, float]
     floors: Mapping[str, Mapping[str, float]]
     aliases: tuple[str, ...] = ()
+    other_projects: bool = False
 
 
 # -- decoded JSON -------------------------------------------------------------------------
@@ -255,6 +259,10 @@ def _machine(raw: object, index: int) -> Machine:
     if empty:
         msg = f"{where}.aliases: {', '.join(map(repr, empty))} empty before the first dot"
         raise MachineListError(msg)
+    other_projects = entry.get("other_projects", False)
+    if not isinstance(other_projects, bool):
+        msg = f"{where}.other_projects must be true or false"
+        raise MachineListError(msg)
     return Machine(
         name=name,
         ssh=ssh,
@@ -263,6 +271,7 @@ def _machine(raw: object, index: int) -> Machine:
         weights=weights,
         floors=floors,
         aliases=tuple(short_hostname(str(item)) for item in aliases_raw),
+        other_projects=other_projects,
     )
 
 

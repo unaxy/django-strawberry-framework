@@ -56,14 +56,19 @@ def test_limits_scale_down_to_a_small_box() -> None:
 def test_every_template_renders_with_no_placeholder_left(tmp_path: Path) -> None:
     box = _box(tmp_path)
     tools = personal.house_tools(box)
-    assert set(tools) == {
-        "agent-status",
-        "git-autosync",
-        "heavy",
-        "pressure",
-    }
+    assert set(tools) == {"agent-status", "heavy", "pressure"}
     assert "SLOTS=1" in tools["heavy"]
     assert "at most 1 heavy job(s)" in personal.rules_text(box)
+
+
+def test_no_step_or_shipped_file_pulls_the_projects_from_github(tmp_path: Path) -> None:
+    keys = [step.key for step in personal.STEPS]
+    assert not [key for key in keys if "sync" in key or "timer" in key]
+    assert not (personal.FILES / "systemd").exists()
+    shipped = [path for path in sorted(personal.FILES.rglob("*")) if path.is_file()]
+    assert shipped
+    assert not [path for path in shipped if "autosync" in path.read_text(encoding="utf-8")]
+    assert "autosync" not in personal.rules_text(_box(tmp_path))
 
 
 def test_render_refuses_an_unfilled_placeholder() -> None:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
 import getpass
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -60,7 +62,12 @@ INSTALLS = (
     ("osv-scanner_", "osv-scanner"),
     (fleet_setup.OPENCODE_INSTALLER, "opencode"),
     *((url, key) for key, url in fleet_setup.VENDOR_INSTALLERS.items()),
+    ("strawberry-graphql/strawberry-django/archive/", "strawberry-django"),
+    ("git clone --quiet --branch", "django-graphene-filters"),
+    ("uv sync --frozen", "graphene-django"),
 )
+#: A strawberry-django tree whose ``pyproject.toml`` names no version.
+NO_RELEASE = "no-release"
 AT_PINS = {
     key: (version if version != fleet_update.LATEST else "1.0.0") for key, version in PINS.items()
 }
@@ -91,6 +98,7 @@ class Box:
         )
         self.after_install: Callable[[str], None] = lambda _key: None
         self.fail_install: set[str] = set()
+        self.filters_changes = ""
         self.alias = f"v{self.versions['node']}" if self.versions.get("node") else ""
         self.host = fleet_update.Host(
             fleet_setup.Box(home=home, user="someone", repo=home / "checkout", system=system),
@@ -114,9 +122,68 @@ class Box:
                 parents=True,
                 exist_ok=True,
             )
+        self.sync_references()
         alias = self.home / ".nvm" / "alias" / "default"
         alias.parent.mkdir(parents=True, exist_ok=True)
         _ = alias.write_text(self.alias)
+
+    def sync_references(self) -> None:
+        """Make the reference trees a probe reads match :attr:`versions`."""
+        projects = self.home / fleet_setup.PROJECTS
+        tree = projects / fleet_setup.STRAWBERRY_DJANGO_DIR
+        version = self.versions.get("strawberry-django")
+        if version:
+            tree.mkdir(parents=True, exist_ok=True)
+            line = "" if version == NO_RELEASE else f'version = "{version}"\n'
+            _ = (tree / "pyproject.toml").write_text(f"[project]\n{line}")
+        elif tree.exists():
+            shutil.rmtree(tree)
+        clone = projects / fleet_setup.FILTERS_DIR
+        if self.versions.get("django-graphene-filters"):
+            clone.mkdir(parents=True, exist_ok=True)
+        lib = clone / ".venv" / "lib" / "python3.14" / "site-packages"
+        if lib.exists():
+            shutil.rmtree(lib)
+        graphene = self.versions.get("graphene-django")
+        if graphene:
+            (lib / f"graphene_django-{graphene}.dist-info").mkdir(parents=True)
+
+    def git(self, argv: list[str]) -> fleet_update.Ran:
+        """Answer a ``git`` read of the django-graphene-filters clone (a fake history).
+
+        Its ``HEAD`` is ``head-<version>``; a version ``<pin>-<n>-g<sha>`` is past the tag.
+        """
+        assert argv[:4] == [
+            "git",
+            "--no-optional-locks",
+            "-C",
+            argv[3],
+        ]
+        args = argv[4:]
+        version = self.versions.get("django-graphene-filters", "")
+        tag = _bare(PINS["django-graphene-filters"])
+        answers: dict[tuple[str, ...], str] = {
+            ("rev-parse", "--show-toplevel"): argv[3],
+            ("config", "--get", "remote.origin.url"): fleet_setup.FILTERS_URL,
+            (
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "HEAD",
+            ): f"head-{version}",
+            ("status", "--porcelain"): self.filters_changes,
+            ("describe", "--tags", "--always"): f"v{version}",
+        }
+        if tuple(args) in answers:
+            return fleet_update.Ran(0, answers[tuple(args)] + "\n", "")
+        if args[:3] == ["rev-parse", "--verify", "--quiet"]:
+            return fleet_update.Ran(0, f"head-{tag}\n", "")
+        if args[:2] == ["merge-base", "--is-ancestor"]:
+            past = version.startswith(f"{tag}-")
+            ancestor = args[2:] == [f"head-{tag}", f"head-{version}"] and past
+            return fleet_update.Ran(0 if ancestor else 1, "", "")
+        msg = f"unexpected git command {argv}"
+        raise AssertionError(msg)
 
     def install(self, script: str) -> fleet_update.Ran:
         for marker, key in INSTALLS:
@@ -148,6 +215,8 @@ class Box:
     def answer(self, argv: list[str]) -> fleet_update.Ran:
         if argv[:2] == ["bash", "-c"]:
             return self.bash(argv[2])
+        if argv[0] == "git":
+            return self.git(argv)
         if argv[:3] == ["bash", "--noprofile", "--norc"]:
             return fleet_update.Ran(0, self.fleet_path(), "")
         name = Path(argv[0]).name
@@ -584,7 +653,7 @@ def test_check_json_is_one_report(
     rows = document["rows"]
     assert document["machine"] == "rio-ubu"
     assert fleet.is_json_array(rows)
-    assert [row["item"] for row in rows if fleet.is_json_object(row)][:12] == list(PINS)
+    assert [row["item"] for row in rows if fleet.is_json_object(row)][: len(PINS)] == list(PINS)
 
 
 # -- apply ---------------------------------------------------------------------------------
@@ -1370,3 +1439,153 @@ def test_personal_installs_the_pinned_opencode_with_the_same_line_builder() -> N
     lines = step.lines(personal.Box(home=Path("/h"), user="u", facts={}))
     assert lines == fleet_setup.opencode_lines(PINS["opencode"])
     assert "opencode" not in fleet_setup.VENDOR_INSTALLERS
+
+
+# -- reference sources and strays ----------------------------------------------------------
+
+
+def test_check_reports_both_reference_sources_against_their_pins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(
+        tmp_path,
+        monkeypatch,
+        {**AT_PINS, "strawberry-django": "0.81.0", "graphene-django": ""},
+    )
+    rows = _rows(fleet_update.check(box.host, PINS))
+    assert (rows["strawberry-django"].installed, rows["strawberry-django"].status) == (
+        "0.81.0",
+        "behind",
+    )
+    assert rows["django-graphene-filters"].status == "ok"
+    assert rows["graphene-django"].status == "missing"
+    assert box.scripts == []
+
+
+def test_a_working_filters_clone_past_the_pin_is_no_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    past = f"{_bare(PINS['django-graphene-filters'])}-3-g9ab2662"
+    box = _box(tmp_path, monkeypatch, {**AT_PINS, "django-graphene-filters": past})
+    box.filters_changes = " M pyproject.toml"
+    _here(monkeypatch, box)
+    row = _rows(fleet_update.check(box.host, PINS))["django-graphene-filters"]
+    assert (row.installed, row.status, row.detail) == (f"v{past}", "ahead", "local changes")
+    assert fleet_update.main(["check"]) == 0
+    _ = capsys.readouterr()
+    rows = _rows(fleet_update.apply(box.host, PINS))
+    assert rows["django-graphene-filters"].status == "ahead"
+    assert not any(marker in script for script in box.scripts for marker in ("git ", "uv sync"))
+
+
+def test_a_tree_naming_no_version_differs_and_apply_runs_its_guarded_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch, {**AT_PINS, "strawberry-django": NO_RELEASE})
+    row = _rows(fleet_update.check(box.host, PINS))["strawberry-django"]
+    assert (row.status, row.detail) == ("differs", "its pyproject.toml names no release version")
+    box.fail_install.add("strawberry-django")
+    row = _rows(fleet_update.apply(box.host, PINS))["strawberry-django"]
+    assert row.status == "failed"
+    pin = PINS["strawberry-django"]
+    line = fleet_setup.strawberry_django_lines(pin, "")[0]
+    assert any(line in script for script in box.scripts)
+
+
+def test_apply_brings_missing_reference_sources_with_the_setup_line_builders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(
+        tmp_path,
+        monkeypatch,
+        {
+            **AT_PINS,
+            "strawberry-django": "",
+            "django-graphene-filters": "",
+            "graphene-django": "",
+        },
+    )
+    rows = _rows(fleet_update.apply(box.host, PINS))
+    for key in ("strawberry-django", "django-graphene-filters", "graphene-django"):
+        assert (rows[key].status, rows[key].detail) == ("updated", "from nothing"), key
+    references = box.scripts[-3:]
+    assert fleet_setup.strawberry_django_lines(PINS["strawberry-django"], "")[0] in references[0]
+    assert fleet_setup.filters_lines(PINS["django-graphene-filters"])[0] in references[1]
+    assert fleet_setup.graphene_django_lines()[0] in references[2]
+
+
+def test_setup_installs_the_reference_sources_with_the_same_line_builders(tmp_path: Path) -> None:
+    box = fleet_setup.Box(home=tmp_path, user="u", repo=tmp_path / "r")
+    steps = {step.key: step.lines(box) for step in fleet_setup.STEPS}
+    assert steps["strawberry-django"] == fleet_setup.strawberry_django_lines(
+        PINS["strawberry-django"],
+        "",
+    )
+    assert steps["django-graphene-filters"] == fleet_setup.filters_lines(
+        PINS["django-graphene-filters"],
+    )
+    assert steps["graphene-django"] == fleet_setup.graphene_django_lines()
+
+
+def test_strays_make_check_exit_1_and_each_row_names_its_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    box = _box(tmp_path, monkeypatch)
+    _here(monkeypatch, box)
+    rows = _rows(fleet_update.check(box.host, PINS))
+    assert (rows["strays"].installed, rows["strays"].status) == ("none", "ok")
+    projects = box.home / fleet_setup.PROJECTS
+    (projects / "dsf-old").mkdir()
+    _ = (projects / "x.txt").write_text("x")
+    rows = _rows(fleet_update.check(box.host, PINS))
+    assert "strays" not in rows
+    why = "no entry ~/projects holds"
+    assert (rows["stray ~/projects/dsf-old"].status, rows["stray ~/projects/dsf-old"].detail) == (
+        "stray",
+        why,
+    )
+    assert rows["stray ~/projects/x.txt"].status == "stray"
+    assert fleet_update.main(["check"]) == 1
+    out = capsys.readouterr().out
+    assert "stray ~/projects/dsf-old" in out
+    assert (projects / "dsf-old").is_dir()
+    opened = dataclasses.replace(box.host, other_projects=True)
+
+    def here(_cls: type[fleet_update.Host]) -> fleet_update.Host:
+        return opened
+
+    monkeypatch.setattr(fleet_update.Host, "here", classmethod(here))
+    assert fleet_update.main(["check"]) == 0
+
+
+def test_the_host_reads_other_projects_from_its_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(fleet.MACHINE_ENV, "rio-air")
+    assert fleet_update.Host.here().other_projects is True
+    monkeypatch.setenv(fleet.MACHINE_ENV, "rio-bee")
+    assert fleet_update.Host.here().other_projects is False
+    monkeypatch.setenv(fleet.MACHINE_ENV, "nowhere")
+    assert fleet_update.Host.here().other_projects is False
+
+
+def test_check_all_lists_each_stray_on_its_own_line() -> None:
+    reports = [
+        fleet_update.Report("rio-ubu", (fleet_update.Row("strays", "", "none", "ok"),)),
+        fleet_update.Report(
+            "rio-bee",
+            (fleet_update.Row("stray ~/projects/dsf-2", "", "", "stray", "a clone of this repo"),),
+        ),
+    ]
+    assert fleet_update.fleet_table(reports) == [
+        "item                    pinned  rio-ubu  rio-bee",
+        "strays                          none     -",
+        "stray ~/projects/dsf-2          -        - stray",
+        "",
+        "rio-bee: stray ~/projects/dsf-2: a clone of this repo",
+    ]

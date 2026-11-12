@@ -11,6 +11,9 @@
     "opencode": "2.2.7",
     "muse": "latest",
     "grok": "latest",
-    "agy": "latest"
+    "agy": "latest",
+    "strawberry-django": "0.82.1",
+    "django-graphene-filters": "v1.0.0",
+    "graphene-django": "3.2.3"
   }
 }

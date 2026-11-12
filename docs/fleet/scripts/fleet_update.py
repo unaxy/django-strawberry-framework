@@ -165,6 +165,7 @@ DRIFT = frozenset(
         "shadowed",
         "error",
         "unreached",
+        "stray",
     },
 )
 #: The statuses ``apply`` exits 1 on.
@@ -200,7 +201,7 @@ SUDOERS_DIR = "/etc/sudoers.d"
 SUDOERS_NAME = "dsf-fleet-update"
 #: An account name safe to render into the drop-in and the shell command.
 ACCOUNT = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
-VERSION = re.compile(r"\d+(?:\.\d+)+")
+VERSION = fleet_setup.VERSION
 
 
 class UpdateError(Exception):
@@ -261,11 +262,17 @@ class Host:
     box: fleet_setup.Box
     arch: str
     root: Path
+    #: Its ``machines.json`` row lets ``~/projects`` hold other entries (``fleet_setup.strays``).
+    other_projects: bool = False
 
     @classmethod
     def here(cls) -> Host:
-        """Return this machine."""
-        return cls(fleet_setup.Box.here(), platform.machine(), ROOT)
+        """Return this machine (a machine the list does not name holds no other projects)."""
+        try:
+            other = fleet.this_machine(repo=ROOT).other_projects
+        except fleet.MachineListError:
+            other = False
+        return cls(fleet_setup.Box.here(), platform.machine(), ROOT, other)
 
     @property
     def nvm_dir(self) -> Path:
@@ -285,6 +292,15 @@ class Host:
             env=fleet_setup.box_env(self.box),
             cwd=self.box.home,
         )
+
+    def git(self, folder: Path, args: Sequence[str]) -> tuple[int, str]:
+        """Run ``git -C folder args`` (``fleet_setup.git_argv``); return its code and stdout."""
+        ran = run(
+            fleet_setup.git_argv(folder, args),
+            timeout=PROBE_TIMEOUT,
+            env=fleet_setup.git_env(fleet_setup.box_env(self.box)),
+        )
+        return ran.code, ran.out.strip()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -346,16 +362,8 @@ class Report:
 # --------------------------------------------------------------------------------------------
 
 
-def version_of(text: str) -> str:
-    """Return the first dotted version in ``text`` (``v26.13.1`` reads ``26.13.1``), else ``""``."""
-    found = VERSION.search(text)
-    return found.group(0) if found else ""
-
-
-def numbers(version: str) -> tuple[int, ...]:
-    """Return ``version``'s numbers (``""`` and ``latest`` read as none)."""
-    found = version_of(version)
-    return tuple(int(part) for part in found.split(".")) if found else ()
+version_of = fleet_setup.version_of
+numbers = fleet_setup.numbers
 
 
 def compare(pin: str, installed: str, *, self_updating: bool = False) -> str:
@@ -449,6 +457,21 @@ class Tool:
     lines: Callable[[Host, str, str], list[str]]
     #: Its own updater moves it past the pin: ``ahead``, never downgraded.
     self_updating: bool = False
+    #: Its status and detail from the pin and the installed reading, in place of
+    #: :func:`compare` (a reference source: a tree or a clone, not a binary's version).
+    assess: Callable[[Host, str, str], tuple[str, str]] | None = None
+
+
+def _strawberry_django_status(host: Host, pin: str, installed: str) -> tuple[str, str]:
+    if not (host.box.home / fleet_setup.PROJECTS / fleet_setup.STRAWBERRY_DJANGO_DIR).exists():
+        return "missing", ""
+    if not installed:
+        return "differs", "its pyproject.toml names no release version"
+    return compare(pin, installed), ""
+
+
+def _filters_status(host: Host, pin: str, _installed: str) -> tuple[str, str]:
+    return fleet_setup.filters_status(host.box.home, pin, host.git)
 
 
 TOOLS: tuple[Tool, ...] = (
@@ -493,6 +516,23 @@ TOOLS: tuple[Tool, ...] = (
     Tool("muse", _binary(".local", "bin", "muse"), _vendor("muse")),
     Tool("grok", _binary(".grok", "bin", "grok"), _vendor("grok")),
     Tool("agy", _binary(".local", "bin", "agy"), _vendor("agy")),
+    Tool(
+        "strawberry-django",
+        lambda host: fleet_setup.strawberry_django_version(host.box.home),
+        lambda _host, pin, installed: fleet_setup.strawberry_django_lines(pin, installed),
+        assess=_strawberry_django_status,
+    ),
+    Tool(
+        fleet_setup.FILTERS_DIR,
+        lambda host: fleet_setup.filters_described(host.box.home, host.git),
+        lambda _host, pin, _installed: fleet_setup.filters_lines(pin),
+        assess=_filters_status,
+    ),
+    Tool(
+        "graphene-django",
+        lambda host: fleet_setup.graphene_django_version(host.box.home),
+        lambda _host, _pin, _installed: fleet_setup.graphene_django_lines(),
+    ),
 )
 
 
@@ -541,6 +581,9 @@ def _alias(host: Host) -> str:
 def tool_row(host: Host, tool: Tool, pin: str) -> Row:
     """Return ``tool``'s row: its pin, the installed version and the status."""
     installed = tool.installed(host)
+    if tool.assess is not None:
+        status, detail = tool.assess(host, pin, installed)
+        return Row(tool.key, pin, installed, status, detail)
     status = compare(pin, installed, self_updating=tool.self_updating)
     detail = ""
     if tool.key == "node" and status == "ok":
@@ -771,11 +814,28 @@ def os_rows(host: Host) -> list[Row]:
     return [*rows, software_updates(host)]
 
 
+def stray_rows(host: Host) -> list[Row]:
+    """Return a ``stray`` row per path ``fleet_setup.strays`` names, else one ``strays`` ``ok``."""
+    home = host.box.home
+    found = fleet_setup.strays(home, host.box.repo, host.git, other_projects=host.other_projects)
+    if not found:
+        return [Row("strays", "", "none", "ok")]
+    return [
+        Row(f"stray {fleet_setup.home_relative(stray.path, home)}", "", "", "stray", stray.why)
+        for stray in found
+    ]
+
+
 def check(host: Host, pinned: Mapping[str, str]) -> list[Row]:
-    """Return this machine's rows: every tool against its pin, the shadows, the OS updates."""
+    """Return this machine's rows: the tools and reference sources, shadows, strays, OS updates."""
     rows = [tool_row(host, tool, pinned[tool.key]) for tool in TOOLS]
     node = next(row.installed for row in rows if row.item == "node")
-    return [*rows, *shadows(host, node), *os_rows(host)]
+    return [
+        *rows,
+        *shadows(host, node),
+        *stray_rows(host),
+        *os_rows(host),
+    ]
 
 
 # --------------------------------------------------------------------------------------------

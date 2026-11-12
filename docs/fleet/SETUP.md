@@ -68,12 +68,40 @@ machine reruns as a no-op. In order:
 | `venv` | user | `uv sync --frozen` |
 | `hook` | user | `pre-commit install` |
 | `direnv-allow` | user | `direnv allow` on the checkout |
+| `strawberry-django` | user | the reference source `~/projects/strawberry-django-main`: GitHub's tarball of strawberry-graphql-django's pinned tag, unpacked as a plain tree (section 2a) |
+| `django-graphene-filters` | user | the reference clone `~/projects/django-graphene-filters`: an https clone of `riodw/django-graphene-filters` detached at the pinned tag (section 2a) |
+| `graphene-django` | user | `uv sync --frozen` in that clone, so its `.venv` holds the pinned graphene-django (section 2a) |
 | `logins` | by hand | reported only, below |
 | `timer` | by hand | reported only, below |
 
 `--skip sudo,keys` runs only what needs no password and writes no key (how an agent tests
 the script); `box check` / `box install --only <step>,...` on the machine itself run part of
 the list.
+
+## 2a. The reference sources
+
+AGENTS.md sends agents to two upstream trees, at the same paths on every machine, macOS and Linux
+alike: `~/projects/strawberry-django-main/strawberry_django` and `graphene_django` inside
+`~/projects/django-graphene-filters/.venv`. The three steps above put them there at the versions
+[setup/versions.json][versions] pins (`strawberry-django`: the upstream tag, which has no `v`;
+`django-graphene-filters`: the tag of the clone; `graphene-django`: the version its `.venv`
+must hold). `fleet_update.py check` reports each against its pin and `apply` brings a machine to
+it with the same lines (section 7). Each step is idempotent and never overwrites what differs:
+
+- **strawberry-django** is read by the `version` its `pyproject.toml` names. A tree at another
+  version is replaced (new tree unpacked first, then swapped in) only when it equals its own
+  version's tarball (`diff -r`, `__pycache__` and `.DS_Store` aside); a tree that differs, or names
+  no version, is left as it is and the step fails naming it.
+- **django-graphene-filters** is `ok` at the tag, `ahead` past it (a working checkout carrying the
+  tag's history: present, never moved, so rio-air's own repository checks as present) and
+  `behind` short of it. A clone is moved forward only when it is clean, detached, from that
+  origin and behind the tag; one on a branch, with local changes, from another origin or diverged
+  is never changed. `check` reads with `--no-optional-locks`, so it never rewrites that
+  checkout's index.
+- **graphene-django**: `uv sync --frozen --python <newest>` runs only in a clean clone from that
+  origin.
+
+A pin bump is the same one-line edit as a tool's (section 7).
 
 ## 3. ssh between every pair: `fleet_setup.py mesh`
 
@@ -137,9 +165,8 @@ checked, resumable steps: apt CLIs (build-essential, fd, btop, stress-ng, lm-sen
 GitHub's apt repository), `tailscale set --operator`, the core `path-block` step again (the same
 check, writer and block file, carried in its bundle), tmux auto-attach and the shared-box
 banner for interactive logins, `~/.tmux.conf`, git's `init.defaultBranch` and the identity of the
-machine running `apply`, the house tools `heavy` / `pressure` / `agent-status` / `git-autosync`
-(rendered for the target's threads and RAM; `git-autosync` takes `.work/land.lock` across its
-fast-forward) with its 3-minute timer, OpenCode 2 at its pin (`https://opencode.ai/v2/install`;
+machine running `apply`, the house tools `heavy` / `pressure` / `agent-status`
+(rendered for the target's threads and RAM), OpenCode 2 at its pin (`https://opencode.ai/v2/install`;
 `https://opencode.ai/install` installs only OpenCode 1), Muse, grok, Antigravity (`agy`) and
 osv-scanner, the agent rules file `~/MACHINE.md` rendered from the target's measured facts, and `rio-ubu`'s
 GNOME settings (`files/desktop/dconf.ini`: fonts, clock, input, window buttons and keybindings,
@@ -163,20 +190,22 @@ Desktop GUI applications and rootless Docker are left out.
 ```sh
 python3 docs/fleet/scripts/fleet_setup.py add <host> --check   # every step ok but the hand ones
 python3 docs/fleet/scripts/fleet_setup.py mesh --check         # every pair ok
-python3 docs/fleet/scripts/fleet_setup.py verify <host>        # fleet_sync.py status here and there, fleet_stop.py status, version drift, the tools
+python3 docs/fleet/scripts/fleet_setup.py verify <host>        # fleet_sync.py status here and there, fleet_stop.py status, version drift, strays, the tools
 ```
 
-`verify` runs the box's own `fleet_update.py check` (section 7; exit 1 on version drift) and `ssh <host> 'command -v uv git python3 node claude codex gh'` (plain,
-non-interactive ssh, as `fleet_sync.py` and agents call it), failing naming each tool it does
-not find. It is read-only: nothing is synced or installed and no flag is written.
+`verify` runs the box's own `fleet_update.py check` (section 7; exit 1 on version drift), the
+box's own stray check (`fleet_setup.py box strays` in its checkout, section 7) and `ssh <host>
+'command -v uv git python3 node claude codex gh'` (plain, non-interactive ssh, as `fleet_sync.py`
+and agents call it), failing naming each tool it does not find. It is read-only: nothing is
+synced, installed or deleted and no flag is written.
 
 ## 7. Keep every machine updated: `fleet_update.py`
 
 [fleet_update.py][fleet-update] brings each machine to the versions pinned in
 [setup/versions.json][versions] (nvm, node, npm, Codex, Claude Code, uv, pre-commit, osv-scanner,
 OpenCode through OpenCode 2's installer `https://opencode.ai/v2/install` given `VERSION=<pin>`;
-Muse, grok and Antigravity read `latest`: their installers take no version) and updates
-the OS packages. Its module docstring is the full rule.
+Muse, grok and Antigravity read `latest`: their installers take no version; the reference
+sources, section 2a) and updates the OS packages. Its module docstring is the full rule.
 
 ```sh
 uv run python docs/fleet/scripts/fleet_update.py check --all   # read-only: one table, every machine; exit 1 on drift
@@ -188,6 +217,15 @@ uv run python docs/fleet/scripts/fleet_update.py apply --all   # every machine a
 the managed tool (with the command that removes it; nothing is deleted; the `PATH` searched is the
 fleet's own, the PATH block read afresh behind nvm's default node, whoever runs `check`), the apt
 and snap updates pending on Linux, and `brew outdated --greedy` plus `softwareupdate -l` on macOS.
+It also runs the stray check (`fleet_setup.py`'s `strays`, the one `verify` runs): a `stray
+<path>` row, and exit 1, for every git repository, worktree or bare clone of this repo under `~`
+other than the checkout and its `.work/` copies (found by its `origin` or its root commit; the
+walk skips `~/Library`, `~/.nvm`, the trash folders, `~/snap`, `~/.npm`, uv caches and
+`node_modules`), and for every `~/projects/` entry other than the checkout, the two reference
+folders, `AGENTS.md`, `AGENTS_READ_THIS_FIRST.md` and Finder's `.DS_Store`. A machine whose
+[machines.json][machines-json] row sets `"other_projects": true` (rio-air only) may hold other
+`~/projects/` entries; clones of this repo are still named there. Nothing is deleted: remove a
+stray by hand once its work is saved.
 `apply` never downgrades Claude Code past its pin (it updates itself: `ahead`), installs npm and
 Codex after switching to nvm's default node (`nvm use default`, whatever node its own `PATH`
 holds), runs a `latest` tool's installer every time, runs `brew update` and `brew upgrade
@@ -225,13 +263,13 @@ has installed the pinned Codex under nvm.
 
 ## macOS
 
-On a Mac, `fleet_setup.py box` runs one step, `path-block`, which writes the shared PATH block
-to `~/.zshenv` (zsh reads it for every shell, a non-interactive ssh command's included), on
-the stock `/usr/bin/python3`:
+On a Mac, `fleet_setup.py box` runs `path-block`, which writes the shared PATH block to
+`~/.zshenv` (zsh reads it for every shell, a non-interactive ssh command's included), and the
+three reference-source steps (section 2a), on the stock `/usr/bin/python3`:
 
 ```sh
-python3 docs/fleet/scripts/fleet_setup.py add <mac> --check   # read-only: is the block first in ~/.zshenv
-python3 docs/fleet/scripts/fleet_setup.py add <mac>           # write it
+python3 docs/fleet/scripts/fleet_setup.py add <mac> --check   # read-only: the block first in ~/.zshenv, the reference sources
+python3 docs/fleet/scripts/fleet_setup.py add <mac>           # write it, fetch them
 ```
 
 The rest of the list stays by hand: section 1 with System Settings' Remote Login in place of

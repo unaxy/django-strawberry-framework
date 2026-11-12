@@ -50,14 +50,15 @@ rerun it rather than editing this file by hand.
 - No passwordless `sudo`. If something needs root (apt packages, system config), stop and tell the
   owner the exact command to run.
 - User-level installs are fine: Node via nvm (`~/.nvm`), npm globals, `~/.local/bin`, uv.
-- Put projects in `~/projects/`; keep `~` itself clean.
+- Keep `~` itself clean.
 - **A repo's own AGENTS.md / CLAUDE.md beats this file.** Read it before you touch the repo.
   `django-strawberry-framework` forbids branches and agent commits unless the owner says so, and
   edits only in its `.work/` copies (`scripts/work.py`).
-- **Repos in `~/projects/` fast-forward from origin every 3 minutes** (`git-autosync`, a systemd user
-  timer) when their tree is clean, not ahead or diverged, no `heavy` job runs in them and no
-  `work.py land` or fleet sync holds their `.work/land.lock`. `git-autosync --status` shows what it
-  did and why it skipped.
+- **`~/projects/` holds only the checkout, its two reference sources and these rules files.** The
+  checkout's `main` fast-forwards from whichever fleet machine is ahead (the save-sync timer,
+  `fleet_sync.py sync --timer`); nothing pulls from GitHub on its own. Never clone this repo again
+  beside it: a copy goes in the checkout's `.work/` (`scripts/work.py`), and `fleet_update.py check`
+  names any other clone as a stray.
 - SSH logins auto-attach to tmux session `main`. Run long jobs in a tmux window, not under `nohup`
   or a bare `&` from a non-interactive shell (the job inherits SIGINT/SIGQUIT as ignored, which breaks
   tests that send signals).

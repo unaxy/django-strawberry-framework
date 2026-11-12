@@ -24,11 +24,11 @@ Machines
     peer qualifies when that call answers, its checkout is at
     ``~/projects/django-strawberry-framework`` (a repository elsewhere is reported,
     never synced), it shares this checkout's root commit, its checkout ignores
-    ``.work/`` (else every copy would dirty its tree and stop the desktop's
-    ``git-autosync``), and it has ``rsync``. A Windows peer is reported "not
-    supported yet" and never half synced: work.py's process census and locks,
-    ``sh`` and ``rsync`` are POSIX here. A qualifying peer no row lists is synced
-    and reported with a suggested ``machines.json`` row; the list is never written.
+    ``.work/`` (else every copy would dirty its tree), and it has ``rsync``. A
+    Windows peer is reported "not supported yet" and never half synced: work.py's
+    process census and locks, ``sh`` and ``rsync`` are POSIX here. A qualifying peer
+    no row lists is synced and reported with a suggested ``machines.json`` row; the
+    list is never written.
     Machines are named, and stored names read, by ``docs/fleet/scripts/fleet.py``'s rule (its
     "Identity"): a listed machine is its row's name everywhere, and ``sync``,
     ``fetch-pins`` and ``handoff`` refuse on a host no row names.
@@ -164,9 +164,7 @@ two other machines hold is reported, for their own runs)
     every other uncommitted change survives the fast-forward as it was. A
     fast-forward that changes ``uv.lock`` adds a ``note`` that the ``.venv`` is stale
     (``uv sync --frozen``); no run touches ``.venv``. A peer behind is left to that
-    peer's own run; diverged is reported, one row per peer, never merged. Coexists
-    with the Linux desktop's ``git-autosync`` (fast-forward from origin while
-    clean): both only fast-forward, and ``.work/`` is ignored.
+    peer's own run; diverged is reported, one row per peer, never merged.
 
     Tombstones: ``.work/tombstones/`` file by file, both ways, before any copy is
     planned; union, create-only, never deleted by a sync (``work.py gc`` prunes
@@ -386,7 +384,7 @@ Running it periodically
     (``*/10 * * * * cd ~/projects/django-strawberry-framework &&
     .venv/bin/python docs/fleet/scripts/fleet_sync.py sync --json >> ~/.cache/fleet-sync.log
     2>&1``), a
-    systemd user timer beside ``git-autosync.timer`` on Linux, or a launchd
+    systemd user timer on Linux, or a launchd
     agent with ``StartInterval`` on macOS each fit; a run that finds another
     holding the lock skips (a ``--timer`` run after its wait), so overlapping runs are
     harmless.
@@ -2849,8 +2847,8 @@ def _disqualifications(probe: Probe, local: Probe | None, *, busy: bool = True) 
         reasons.append("another repository (its root commit differs)")
     if not probe.ignored:
         reasons.append(
-            "its checkout does not ignore .work/ (copies would dirty its tree and stop "
-            "git-autosync); its main needs the .gitignore rule first",
+            "its checkout does not ignore .work/ (copies would dirty its tree); "
+            "its main needs the .gitignore rule first",
         )
     if not probe.rsync:
         reasons.append("no rsync")

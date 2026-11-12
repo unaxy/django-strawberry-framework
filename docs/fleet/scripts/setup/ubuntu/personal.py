@@ -50,16 +50,10 @@ Steps
     ``gitconfig``
         ``init.defaultBranch main``, plus ``user.name`` / ``user.email`` when given.
     ``house-tools``
-        ``heavy`` (a slot-limited, low-priority job gate), ``pressure`` (a PSI/load/RAM verdict),
-        ``agent-status`` and ``git-autosync`` in ``~/.local/bin``. ``heavy`` and ``pressure`` are
-        rendered for this machine (:func:`limits`): slots = threads / 4 (at least 1), the RAM floor =
-        RAM / 10 GiB (at least 2), YELLOW under twice that, load YELLOW above 3/4 of the threads and
-        RED above 3/2. ``git-autosync`` takes a repository's ``.work/land.lock`` (without waiting)
-        across its fast-forward, so it never moves a checkout while ``work.py land`` or
-        ``fleet_sync.py`` writes it.
-    ``autosync-timer``
-        ``git-autosync`` every 3 minutes as a systemd user timer (lingering, which the core setup
-        turns on, keeps it running logged out).
+        ``heavy`` (a slot-limited, low-priority job gate), ``pressure`` (a PSI/load/RAM verdict)
+        and ``agent-status`` in ``~/.local/bin``. ``heavy`` and ``pressure`` are rendered for this
+        machine (:func:`limits`): slots = threads / 4 (at least 1), the RAM floor = RAM / 10 GiB (at
+        least 2), YELLOW under twice that, load YELLOW above 3/4 of the threads and RED above 3/2.
     ``opencode``, ``muse``, ``grok``, ``agy``, ``osv-scanner``
         ``opencode``: OpenCode 2's installer at the version ``setup/versions.json`` pins
         (``fleet_setup.opencode_lines``); ``muse``, ``grok``, ``agy``: each vendor's own
@@ -463,37 +457,6 @@ def _lines_house(box: Box) -> list[str]:
     return [write_line(box.bin / name, body, "755") for name, body in house_tools(box).items()]
 
 
-def _units(box: Box) -> dict[Path, str]:
-    folder = box.home / ".config" / "systemd" / "user"
-    return {
-        folder / unit.name: unit.read_text(encoding="utf-8")
-        for unit in sorted((FILES / "systemd").iterdir())
-    }
-
-
-def _check_timer(box: Box) -> str | None:
-    if any(_text(path) != body for path, body in _units(box).items()):
-        return "git-autosync units"
-    enabled = _read(
-        [
-            "systemctl",
-            "--user",
-            "is-enabled",
-            "git-autosync.timer",
-        ],
-    )
-    return None if enabled == "enabled" else "git-autosync.timer not enabled"
-
-
-def _lines_timer(box: Box) -> list[str]:
-    writes = [write_line(path, body) for path, body in _units(box).items()]
-    return [
-        *writes,
-        "systemctl --user daemon-reload",
-        "systemctl --user enable --now git-autosync.timer",
-    ]
-
-
 def _exists(*parts: str) -> Callable[[Box], str | None]:
     def check(box: Box) -> str | None:
         return None if box.home.joinpath(*parts).exists() else "/".join(("~", *parts))
@@ -861,7 +824,6 @@ STEPS: tuple[Step, ...] = (
     Step("tmux-conf", "user", _check_tmux, _lines_tmux),
     Step("gitconfig", "user", _check_git, _lines_git),
     Step("house-tools", "user", _check_house, _lines_house),
-    Step("autosync-timer", "user", _check_timer, _lines_timer),
     Step(
         "opencode",
         "user",
