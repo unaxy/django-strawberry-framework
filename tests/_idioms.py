@@ -767,6 +767,7 @@ def websocket_scope(
         "client": None,
         "server": server,
         "subprotocols": [],
+        "state": {},
         "extensions": None,
     }
 
