@@ -2871,7 +2871,7 @@ Progress: 508 done, 105 to do. The CHANGELOG entries filed here moved to
   misconfiguration. An explicit `queryset=None` fails the same way in stock django-filter.
 - [x] 881. A filter running shipped code whose path continues past a `GenericForeignKey` filters by a queryset
   annotation of its path and, over rows annotating none, answers a `ConfigurationError` naming the key when it applies
-  (reopened by the maintainer 2026-11-11; 21cc9c7f refused it at publish, an external review found that narrowing).
+  (reopened by the maintainer 2026-11-11; 2b286a09 refused it at publish, an external review found that narrowing).
   Publishing keeps only 877's ending-on refusal (a bare key cannot be annotated). A path past a key, or a `lookup_expr`
   carrying onto one, names a value wherever the rows the leaf filters annotate a name of it (Django's
   `refs_expression`, read before `names_to_path`); over rows annotating none, `filters/sets.py::_joinless_restated`
@@ -3076,7 +3076,7 @@ Progress: 508 done, 105 to do. The CHANGELOG entries filed here moved to
   fixing the review of 881
 - [ ] 922. (robustness) A consumer `filter` override that translates its value on a to-many walked relation key keeps
   parents by the key rows the shipped comparison reads the untranslated value as: a narrowing (a code spelled as
-  another key) and a hidden-row leak (a code meaning a hidden row keeps its parent), at 21cc9c7f^ and after 881. The
+  another key) and a hidden-row leak (a code meaning a hidden row keeps its parent), at 2b286a09^ and after 881. The
   784 contract (declared `field_name`, the value names rows) has no reading that fixes it without changing that
   contract. Found fixing the final review of 881
 
