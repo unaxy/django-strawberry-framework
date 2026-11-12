@@ -10,8 +10,8 @@ Usage, from ``~/projects/django-strawberry-framework`` on any fleet machine::
 Pins
     ``docs/fleet/scripts/setup/versions.json`` (``fleet_setup.VERSIONS_FILE``, read by
     ``fleet_setup.load_versions``) holds one line per tool: an exact release, or
-    ``latest`` for a tool whose vendor installer takes no version (OpenCode, Muse, grok,
-    Antigravity: ``fleet_setup.VENDOR_INSTALLERS``). Bumping a version is a one-line commit
+    ``latest`` for a tool whose vendor installer takes no version (Muse, grok, Antigravity:
+    ``fleet_setup.VENDOR_INSTALLERS``). Bumping a version is a one-line commit
     on main; the save-sync timers fast-forward every machine's main
     (``docs/fleet/scripts/fleet_sync.py`` "Periodic runs"), and each machine's next
     ``apply`` installs exactly that version. :data:`TOOLS` must name exactly the pinned
@@ -20,12 +20,15 @@ Pins
 
 Tools
     :data:`TOOLS`, in the order ``apply`` brings them up: nvm, node, npm, Codex, Claude
-    Code, uv, pre-commit, osv-scanner, then the four ``latest`` tools. nvm is sourced in a
-    ``bash`` subprocess (``. "$NVM_DIR/nvm.sh" --no-use``), never in this process: node is
-    nvm's ``default`` alias, npm and Codex are read and installed under that node (Codex as
-    ``@openai/codex``, a global npm package: the one way every machine installs it). Each
-    tool is installed by ``docs/fleet/scripts/fleet_setup.py``'s line builder for it, the
-    same lines a new box runs; node's carries the previous default's global packages over
+    Code, uv, pre-commit, osv-scanner, OpenCode (OpenCode 2's installer,
+    ``fleet_setup.OPENCODE_INSTALLER``, given the pin), then the three ``latest`` tools. nvm
+    is sourced in a ``bash`` subprocess without switching node (``fleet_setup.nvm``), never in
+    this process: node is nvm's ``default`` alias, and npm and Codex are read and installed
+    after an explicit switch to that node (``fleet_setup.under_default``), whatever node the
+    caller's ``PATH`` holds (Codex as ``@openai/codex``, a global npm package: the one way
+    every machine installs it). Each tool is installed by
+    ``docs/fleet/scripts/fleet_setup.py``'s line builder for it, the same lines a new box
+    runs; node's carries the previous default's global packages over
     (``--reinstall-packages-from``) and sets ``nvm alias default`` to the pin.
 
 ``check``
@@ -35,14 +38,17 @@ Tools
     downgraded), ``drift`` (node at the pin while nvm's ``default`` alias names something
     else) or ``latest`` (a ``latest`` tool's version, compared across machines by
     ``--all``). A ``shadowed`` row names a file that runs instead of the managed tool: a
-    ``codex`` on ``PATH`` other than nvm's (an npm prefix of its own, a standalone binary),
-    or a node under ``~/.nvm`` newer than the default (the PATH block,
-    ``setup/files/path.sh``, puts the newest first); it is never deleted, and the row
-    prints the command that removes it. Then the OS updates pending: ``apt`` (``apt list
-    --upgradable``, from the lists the last ``apt-get update`` fetched) and ``snap``
-    (``snap refresh --list``) on Linux, ``brew`` (``brew outdated --greedy``, casks
-    included, with Homebrew's auto-update off) and ``macos`` (``softwareupdate -l``) on
-    macOS. Exit 1 on drift (:data:`DRIFT`); pending OS updates alone are not drift.
+    ``codex`` on the fleet ``PATH`` other than nvm's default node's (an npm prefix of its own,
+    a standalone binary), or an nvm node there other than the default (the PATH block,
+    ``setup/files/path.sh``, adds the newest); it is never deleted, and the row prints the
+    command that removes it. The fleet ``PATH`` (:func:`fleet_path`) is the PATH block read
+    afresh over :data:`BASE_PATH`, behind nvm's default node's ``bin``, never the caller's
+    own: the same for an ssh session, the timer and an interactive shell; one that cannot be
+    read is an ``error`` row. Then the OS updates pending: ``apt`` (``apt list --upgradable``,
+    from the lists the last ``apt-get update`` fetched) and ``snap`` (``snap refresh
+    --list``) on Linux, ``brew`` (``brew outdated --greedy``, casks included, with
+    Homebrew's auto-update off) and ``macos`` (``softwareupdate -l``) on macOS. Exit 1 on
+    drift (:data:`DRIFT`); pending OS updates alone are not drift.
 
 ``apply``
     Brings this machine to the pins, one line per step, then the OS packages: on Linux
@@ -147,8 +153,8 @@ REMOTE_TIMEOUT = {"check": 900.0, "apply": 4 * 3600.0}
 #: What ``run`` reports for a command that could not start, and one past its time.
 NOT_RUN = 127
 TIMED_OUT = 124
-#: The sources ``nvm`` from ``$NVM_DIR`` without switching node (``fleet_setup.box_env`` sets it).
-NVM = '. "$NVM_DIR/nvm.sh" --no-use'
+#: The system ``PATH`` the fleet PATH block is read over (:func:`fleet_path`).
+BASE_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 #: The statuses ``check`` exits 1 on.
 DRIFT = frozenset(
     {
@@ -372,28 +378,23 @@ def compare(pin: str, installed: str, *, self_updating: bool = False) -> str:
 
 
 def _nvm_version(host: Host) -> str:
-    ran = host.bash(f"{NVM} && nvm --version")
+    ran = host.bash(fleet_setup.nvm("nvm --version"))
     return version_of(ran.out) if ran.code == 0 else ""
 
 
 def _node_version(host: Host) -> str:
-    ran = host.bash(f"{NVM} && nvm version default")
+    ran = host.bash(fleet_setup.nvm("nvm version default"))
     return version_of(ran.out) if ran.code == 0 else ""
 
 
-def under_default(command: str) -> str:
-    """Return a ``bash`` line running ``command`` with nvm's default node first on ``PATH``."""
-    return f"{NVM} && nvm use --silent default >/dev/null && {command}"
-
-
 def _npm_version(host: Host) -> str:
-    ran = host.bash(under_default("npm --version"))
+    ran = host.bash(fleet_setup.under_default("npm --version"))
     return version_of(ran.out) if ran.code == 0 else ""
 
 
 def _codex_version(host: Host) -> str:
     # ``npm ls`` exits 1 on any problem in the tree (an extraneous package) yet lists it.
-    ran = host.bash(under_default("npm ls -g --depth=0 --json"))
+    ran = host.bash(fleet_setup.under_default("npm ls -g --depth=0 --json"))
     try:
         listing = _loads(ran.out)
     except ValueError:
@@ -484,7 +485,11 @@ TOOLS: tuple[Tool, ...] = (
         lambda _host, pin, _installed: fleet_setup.pre_commit_lines(pin),
     ),
     Tool("osv-scanner", _binary(".local", "bin", "osv-scanner"), _osv_lines),
-    Tool("opencode", _binary(".opencode", "bin", "opencode"), _vendor("opencode")),
+    Tool(
+        "opencode",
+        _binary(".opencode", "bin", "opencode"),
+        lambda _host, pin, _installed: fleet_setup.opencode_lines(pin),
+    ),
     Tool("muse", _binary(".local", "bin", "muse"), _vendor("muse")),
     Tool("grok", _binary(".grok", "bin", "grok"), _vendor("grok")),
     Tool("agy", _binary(".local", "bin", "agy"), _vendor("agy")),
@@ -555,28 +560,70 @@ def home_path(path: Path, home: Path) -> str:
     return f'"$HOME"/{shlex.quote(relative.as_posix())}'
 
 
-def _newest_node(host: Host) -> str:
-    folder = host.nvm_dir / "versions" / "node"
-    try:
-        found = [entry.name for entry in folder.iterdir() if numbers(entry.name)]
-    except OSError:
-        return ""
-    return max(found, key=numbers, default="")
+def fleet_path(host: Host, node: str) -> str:
+    """Return the ``PATH`` a fleet shell runs with: nvm's default node's ``bin``, then the block.
 
+    The PATH block (``fleet_setup.PATH_BLOCK_FILE``) is read in a fresh ``bash`` holding only
+    ``HOME`` and :data:`BASE_PATH`, so the answer is the same whoever asks: an ssh session
+    whose ``PATH`` predates a node switch, the timer's bare ``PATH``, an interactive shell.
+    ``node`` is the default's version (``""``: none).
 
-def node_shadow(host: Host, installed: str) -> Row | None:
-    """Return a ``shadowed`` row when a node newer than the default leads the PATH block."""
-    newest = _newest_node(host)
-    if not installed or not newest or numbers(newest) <= numbers(installed):
-        return None
-    command = "bash -c " + shlex.quote(f'. "$HOME/.nvm/nvm.sh" && nvm uninstall {newest}')
-    return Row(
-        "node shadow",
-        "",
-        f"~/.nvm/versions/node/{newest}",
-        "shadowed",
-        f"newer than the default v{installed}, so first on the PATH block; remove: {command}",
+    Raises:
+        UpdateError: the block could not be read.
+
+    """
+    block = shlex.quote(str(fleet_setup.PATH_BLOCK_FILE))
+    ran = run(
+        [
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            f'. {block} && printf "%s" "$PATH"',
+        ],
+        timeout=PROBE_TIMEOUT,
+        env={"HOME": str(host.box.home), "PATH": BASE_PATH},
+        cwd=host.box.home,
     )
+    if ran.code != 0:
+        msg = f"cannot read the fleet PATH: {ran.last_line()}"
+        raise UpdateError(msg)
+    folders = [str(host.nvm_dir / "versions" / "node" / f"v{node}" / "bin")] if node else []
+    folders += [folder for folder in ran.out.split(os.pathsep) if folder]
+    return os.pathsep.join(dict.fromkeys(folders))
+
+
+def by_hand(command: str) -> str:
+    """Return the ``bash -c`` line a person runs for ``command`` under nvm's default node."""
+    return "bash -c " + shlex.quote(f'NVM_DIR="$HOME/.nvm"; {fleet_setup.under_default(command)}')
+
+
+def node_shadows(host: Host, installed: str, search: str) -> list[Row]:
+    """Return a ``shadowed`` row for each nvm node on ``search`` other than the default.
+
+    ``search`` is the fleet ``PATH`` (:func:`fleet_path`); ``installed`` the default's version
+    (``""``: none, so nothing shadows it). A node nvm holds that ``search`` lacks is no shadow.
+    """
+    versions = host.nvm_dir / "versions" / "node"
+    rows: list[Row] = []
+    for folder in dict.fromkeys(filter(None, search.split(os.pathsep))):
+        path = Path(folder)
+        if not installed or path.name != "bin" or path.parent.parent != versions:
+            continue
+        version = path.parent.name
+        if numbers(version) == numbers(installed):
+            continue
+        rows.append(
+            Row(
+                "node shadow",
+                "",
+                f"~/.nvm/versions/node/{version}",
+                "shadowed",
+                f"not the default v{installed}, yet on the fleet PATH; "
+                f"remove: {by_hand(f'nvm uninstall {shlex.quote(version)}')}",
+            ),
+        )
+    return rows
 
 
 def removal_command(path: Path, home: Path) -> str:
@@ -589,26 +636,21 @@ def removal_command(path: Path, home: Path) -> str:
     parts = target.parts
     if "node_modules" in parts and parts[parts.index("node_modules") - 1] == "lib":
         prefix = Path(*parts[: parts.index("node_modules") - 1])
-        line = (
-            f'. "$HOME/.nvm/nvm.sh" && npm uninstall -g --prefix {home_path(prefix, home)} '
-            "@openai/codex"
-        )
-        return "bash -c " + shlex.quote(line)
+        return by_hand(f"npm uninstall -g --prefix {home_path(prefix, home)} @openai/codex")
     return f"rm {home_path(path, home)}"
 
 
-def codex_shadows(host: Host, node: str, search: str | None = None) -> list[Row]:
-    """Return a ``shadowed`` row for each ``codex`` on ``PATH`` other than nvm's default node's.
+def codex_shadows(host: Host, node: str, search: str) -> list[Row]:
+    """Return a ``shadowed`` row for each ``codex`` on ``search`` other than nvm's default node's.
 
-    ``search`` is the ``PATH`` searched (default this process's). A copy reached twice (a
-    folder listed twice, a link to it) is one row.
+    ``search`` is the fleet ``PATH`` (:func:`fleet_path`). A copy reached twice (a folder
+    listed twice, a link to it) is one row.
     """
     managed = host.nvm_dir / "versions" / "node" / f"v{node}" / "bin" / "codex" if node else None
     wanted = os.path.realpath(managed) if managed is not None else ""
     seen: set[str] = set()
     rows: list[Row] = []
-    path = os.environ.get("PATH", "") if search is None else search
-    for folder in filter(None, path.split(os.pathsep)):
+    for folder in filter(None, search.split(os.pathsep)):
         candidate = Path(folder) / "codex"
         if not os.access(candidate, os.X_OK) or candidate.is_dir():
             continue
@@ -626,6 +668,15 @@ def codex_shadows(host: Host, node: str, search: str | None = None) -> list[Row]
             ),
         )
     return rows
+
+
+def shadows(host: Host, node: str) -> list[Row]:
+    """Return the ``shadowed`` rows on the fleet ``PATH`` (an ``error`` row when it is unread)."""
+    try:
+        search = fleet_path(host, node)
+    except UpdateError as error:
+        return [Row("shadows", "", "", "error", str(error))]
+    return [*node_shadows(host, node, search), *codex_shadows(host, node, search)]
 
 
 def _names(lines: Iterable[str], limit: int = 5) -> str:
@@ -724,9 +775,7 @@ def check(host: Host, pinned: Mapping[str, str]) -> list[Row]:
     """Return this machine's rows: every tool against its pin, the shadows, the OS updates."""
     rows = [tool_row(host, tool, pinned[tool.key]) for tool in TOOLS]
     node = next(row.installed for row in rows if row.item == "node")
-    shadow = node_shadow(host, node)
-    rows += [*([shadow] if shadow else []), *codex_shadows(host, node)]
-    return [*rows, *os_rows(host)]
+    return [*rows, *shadows(host, node), *os_rows(host)]
 
 
 # --------------------------------------------------------------------------------------------
@@ -897,13 +946,11 @@ def apply(
 
 def _shadows_after(host: Host) -> Row:
     """Return one row summing up the shadows ``check`` names (``ok`` when none)."""
-    node = _node_version(host)
-    found = [
-        *([shadow] if (shadow := node_shadow(host, node)) else []),
-        *codex_shadows(host, node),
-    ]
+    found = shadows(host, _node_version(host))
     if not found:
         return Row("shadows", "", "", "ok")
+    if found[0].status == "error":
+        return found[0]
     return Row(
         "shadows",
         "",

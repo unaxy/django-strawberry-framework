@@ -61,8 +61,10 @@ Steps
         ``git-autosync`` every 3 minutes as a systemd user timer (lingering, which the core setup
         turns on, keeps it running logged out).
     ``opencode``, ``muse``, ``grok``, ``agy``, ``osv-scanner``
-        Each vendor's own installer (``fleet_setup.VENDOR_INSTALLERS``); ``osv-scanner``: its
-        release binary at the version ``setup/versions.json`` pins (``fleet_setup.osv_lines``).
+        ``opencode``: OpenCode 2's installer at the version ``setup/versions.json`` pins
+        (``fleet_setup.opencode_lines``); ``muse``, ``grok``, ``agy``: each vendor's own
+        installer (``fleet_setup.VENDOR_INSTALLERS``); ``osv-scanner``: its release binary at
+        the version ``setup/versions.json`` pins (``fleet_setup.osv_lines``).
     ``rules``
         ``~/MACHINE.md``, ``~/AGENTS_READ_THIS_FIRST.md``, ``~/projects/AGENTS.md`` and
         ``~/projects/AGENTS_READ_THIS_FIRST.md``: one agent rules file rendered from
@@ -506,6 +508,10 @@ def _installer(tool: str) -> Callable[[Box], list[str]]:
     return lines
 
 
+def _lines_opencode(_box: Box) -> list[str]:
+    return fleet_setup.opencode_lines(fleet_setup.pinned("opencode"))
+
+
 def _lines_osv(box: Box) -> list[str]:
     version = fleet_setup.pinned("osv-scanner")
     return fleet_setup.osv_lines(box.bin, version, fleet_setup.LINUX, "x86_64")
@@ -860,7 +866,7 @@ STEPS: tuple[Step, ...] = (
         "opencode",
         "user",
         _exists(".opencode", "bin", "opencode"),
-        _installer("opencode"),
+        _lines_opencode,
     ),
     Step(
         "muse",

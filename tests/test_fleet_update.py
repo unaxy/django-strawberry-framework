@@ -19,6 +19,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
 PINS = fleet_setup.load_versions()
+#: The real ``subprocess.run`` and ``Popen``, for the tests that run ``bash`` on purpose
+#: (:func:`_real_processes`; the autouse fixture refuses every other process).
+_REAL_RUN = subprocess.run
+_REAL_POPEN = subprocess.Popen
 #: ``json.loads`` and ``plistlib.loads``, their results typed ``object`` for the test to narrow.
 _loads: Callable[[str], object] = json.loads
 _plist: Callable[[bytes], object] = plistlib.loads
@@ -54,6 +58,7 @@ INSTALLS = (
     ("astral.sh/uv/", "uv"),
     ("pre-commit==", "pre-commit"),
     ("osv-scanner_", "osv-scanner"),
+    (fleet_setup.OPENCODE_INSTALLER, "opencode"),
     *((url, key) for key, url in fleet_setup.VENDOR_INSTALLERS.items()),
 )
 AT_PINS = {
@@ -105,7 +110,7 @@ class Box:
             else:
                 path.unlink(missing_ok=True)
         if self.versions.get("node"):
-            (self.home / ".nvm" / "versions" / "node" / f"v{self.versions['node']}").mkdir(
+            (self.home / ".nvm" / "versions" / "node" / f"v{self.versions['node']}" / "bin").mkdir(
                 parents=True,
                 exist_ok=True,
             )
@@ -127,9 +132,24 @@ class Box:
         self.sync()
         return fleet_update.Ran(0, "installed\n", "")
 
+    def fleet_path(self) -> str:
+        """Stand in for the PATH block (``test_the_fleet_path_*`` runs the real one).
+
+        The newest nvm node's ``bin``, ``~/.local/bin``, then the system folders.
+        """
+        nodes = sorted(
+            (self.home / ".nvm" / "versions" / "node").glob("v*/bin"),
+            key=lambda folder: fleet_update.numbers(folder.parent.name),
+        )
+        return os.pathsep.join(
+            [*(str(folder) for folder in nodes[-1:]), str(self.home / ".local" / "bin"), "/bin"],
+        )
+
     def answer(self, argv: list[str]) -> fleet_update.Ran:
         if argv[:2] == ["bash", "-c"]:
             return self.bash(argv[2])
+        if argv[:3] == ["bash", "--noprofile", "--norc"]:
+            return fleet_update.Ran(0, self.fleet_path(), "")
         name = Path(argv[0]).name
         if argv[0] == "sudo":
             return self.sudo(argv)
@@ -250,16 +270,7 @@ def test_the_pins_name_exactly_the_tools_and_only_vendor_tools_read_latest() -> 
     assert fleet_update.pins() == PINS
     assert list(PINS) == [tool.key for tool in fleet_update.TOOLS]
     latest = {key for key, version in PINS.items() if version == fleet_update.LATEST}
-    assert (
-        latest
-        == set(fleet_setup.VENDOR_INSTALLERS)
-        == {
-            "opencode",
-            "muse",
-            "grok",
-            "agy",
-        }
-    )
+    assert latest == set(fleet_setup.VENDOR_INSTALLERS) == {"muse", "grok", "agy"}
 
 
 def test_osv_scanner_is_pinned_in_the_versions_file_not_in_personal() -> None:
@@ -453,7 +464,7 @@ def test_a_newer_node_than_the_default_is_a_shadow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     box = _box(tmp_path, monkeypatch)
-    (box.home / ".nvm" / "versions" / "node" / "v99.0.0").mkdir()
+    (box.home / ".nvm" / "versions" / "node" / "v99.0.0" / "bin").mkdir(parents=True)
     row = _rows(fleet_update.check(box.host, PINS))["node shadow"]
     assert row.status == "shadowed"
     assert "nvm uninstall v99.0.0" in row.detail
@@ -494,8 +505,9 @@ def test_another_codex_on_path_is_named_with_the_command_that_removes_it(
     assert [row.installed for row in rows] == ["~/.local/bin/codex", "~/other/codex"]
     assert all(row.status == "shadowed" for row in rows)
     assert rows[0].detail.endswith(
-        'bash -c \'. "$HOME/.nvm/nvm.sh" && npm uninstall -g --prefix "$HOME"/.local @openai/codex\'',
+        fleet_update.by_hand('npm uninstall -g --prefix "$HOME"/.local @openai/codex'),
     )
+    assert "nvm use --silent default" in rows[0].detail
     assert rows[1].detail.endswith('rm "$HOME"/other/codex')
     assert (home / ".local" / "bin" / "codex").is_symlink()
     assert (home / "other" / "codex").is_file()
@@ -648,7 +660,7 @@ def test_a_new_node_carries_the_global_packages_over_and_becomes_the_default(
         f"nvm install {pin} --reinstall-packages-from=v24.22.2 && nvm alias default {pin}"
         in script
     )
-    assert script.lstrip("( ").startswith('. "$NVM_DIR/nvm.sh" && ')
+    assert script.lstrip("( ").startswith('. "$NVM_DIR/nvm.sh" --no-use && ')
     assert box.alias == pin
 
 
@@ -1132,3 +1144,229 @@ def test_an_nvm_update_leaves_the_shell_files_alone(
     assert (row.status, row.installed) == ("updated", _bare(PINS["nvm"]))
     script = next(script for script in box.scripts if "nvm-sh/nvm/" in script)
     assert f"nvm-sh/nvm/{PINS['nvm']}/install.sh | PROFILE=/dev/null bash" in script
+
+
+# -- the default node, whatever node the caller's PATH holds ------------------------------
+
+#: An ``nvm.sh`` keeping nvm's rule that matters here: sourced without ``--no-use`` it switches
+#: to the default (when there is one) only while no nvm node is on ``PATH`` yet; ``nvm use``
+#: puts the default's ``bin`` first and exports ``NVM_BIN``, and fails while there is no
+#: default alias.
+FAKE_NVM = r"""
+nvm() {
+  case "$1" in
+    use)
+      [ -f "$NVM_DIR/alias/default" ] || return 3
+      NVM_BIN="$NVM_DIR/versions/node/$(cat "$NVM_DIR/alias/default")/bin"
+      PATH="$NVM_BIN:$PATH"
+      export NVM_BIN PATH ;;
+    install) mkdir -p "$NVM_DIR/versions/node/$2/bin" ;;
+    alias) mkdir -p "$NVM_DIR/alias" && printf '%s' "$3" > "$NVM_DIR/alias/default" ;;
+  esac
+}
+if [ "${1-}" != "--no-use" ] && [ -f "$NVM_DIR/alias/default" ]; then
+  case ":$PATH:" in *":$NVM_DIR/versions/node/"*) ;; *) nvm use --silent default ;; esac
+fi
+"""
+OLD_NODE = "v24.22.2"
+NEW_NODE = "v26.13.1"
+
+
+def _real_processes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let this test start real processes (``bash`` on files under its own folder)."""
+    monkeypatch.setattr(subprocess, "run", _REAL_RUN)
+    monkeypatch.setattr(subprocess, "Popen", _REAL_POPEN)
+
+
+def _nvm_home(home: Path, default: str | None) -> dict[str, Path]:
+    """Make ``home/.nvm`` with the old and the new node, each with an ``npm`` naming itself."""
+    nvm_dir = home / ".nvm"
+    nvm_dir.mkdir(parents=True)
+    _ = (nvm_dir / "nvm.sh").write_text(FAKE_NVM)
+    bins: dict[str, Path] = {}
+    for version in (OLD_NODE, NEW_NODE):
+        bins[version] = nvm_dir / "versions" / "node" / version / "bin"
+        npm = bins[version] / "npm"
+        npm.parent.mkdir(parents=True)
+        _ = npm.write_text('#!/bin/sh\necho "$0 $*"\n')
+        npm.chmod(0o755)
+    if default is not None:
+        (nvm_dir / "alias").mkdir()
+        _ = (nvm_dir / "alias" / "default").write_text(default)
+    return bins
+
+
+def _bash(line: str, home: Path, path: str) -> subprocess.CompletedProcess[str]:
+    env = {"HOME": str(home), "NVM_DIR": str(home / ".nvm"), "PATH": path}
+    return _REAL_RUN(
+        ["bash", "-c", line],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
+def test_a_global_npm_install_runs_under_the_default_node_whatever_node_path_holds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _real_processes(monkeypatch)
+    bins = _nvm_home(tmp_path, NEW_NODE)
+    # The apply process's PATH: the old node first, from the PATH block read before the new existed.
+    stale = f"{bins[OLD_NODE]}:/usr/bin:/bin"
+    for package, pin in (("npm", PINS["npm"]), ("@openai/codex", PINS["codex"])):
+        ran = _bash(fleet_setup.npm_global_lines(package, pin)[0], tmp_path, stale)
+        assert ran.returncode == 0, ran.stderr
+        assert ran.stdout == f"{bins[NEW_NODE] / 'npm'} install -g {package}@{pin}\n"
+
+
+def test_a_fresh_box_installs_node_without_a_default_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _real_processes(monkeypatch)
+    _ = _nvm_home(tmp_path, None)
+    ran = _bash(fleet_setup.node_lines(PINS["node"])[0], tmp_path, "/usr/bin:/bin")
+    assert ran.returncode == 0, ran.stderr
+    assert (tmp_path / ".nvm" / "alias" / "default").read_text() == PINS["node"]
+
+
+def test_setups_codex_check_looks_under_the_default_node_not_the_callers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _real_processes(monkeypatch)
+    bins = _nvm_home(tmp_path, NEW_NODE)
+    _ = _executable(bins[OLD_NODE] / "codex")
+    monkeypatch.setenv("PATH", f"{bins[OLD_NODE]}:/usr/bin:/bin")
+    box = fleet_setup.Box(home=tmp_path, user="u", repo=tmp_path / "r", system=fleet_setup.LINUX)
+    assert fleet_setup._check_codex(box) == "codex"
+    _ = _executable(bins[NEW_NODE] / "codex")
+    assert fleet_setup._check_codex(box) is None
+
+
+# -- shadows read the fleet PATH, never the caller's ---------------------------------------
+
+#: The ``PATH`` launchd gives the daily timer.
+TIMER_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def _fleet_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[fleet_update.Host, dict[str, Path]]:
+    """A machine whose apply just made v26 the default while the old v24 is still on its PATH."""
+    _real_processes(monkeypatch)
+    home = tmp_path / "home"
+    bins = _nvm_home(home, NEW_NODE)
+    (home / ".local" / "bin").mkdir(parents=True)
+    host = fleet_update.Host(
+        fleet_setup.Box(home=home, user="u", repo=home / "checkout", system=fleet_setup.LINUX),
+        "x86_64",
+        home / "checkout",
+    )
+    return host, bins
+
+
+def _in_home(rows: Sequence[fleet_update.Row]) -> list[tuple[str, str]]:
+    """The rows naming a file under the test's home (a real machine's own folders aside)."""
+    return [(row.item, row.installed) for row in rows if row.installed.startswith("~")]
+
+
+def test_the_fleet_path_is_the_block_over_the_system_path_whoever_asks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host, bins = _fleet_home(tmp_path, monkeypatch)
+    seen: set[str] = set()
+    for caller in (f"{bins[OLD_NODE]}:/usr/bin:/bin", TIMER_PATH, "/usr/bin:/bin"):
+        monkeypatch.setenv("PATH", caller)
+        seen.add(fleet_update.fleet_path(host, _bare(NEW_NODE)))
+    assert len(seen) == 1
+    folders = next(iter(seen)).split(os.pathsep)
+    assert folders[0] == str(bins[NEW_NODE])
+    assert str(host.box.home / ".local" / "bin") in folders
+    assert str(bins[OLD_NODE]) not in folders
+    assert set(fleet_update.BASE_PATH.split(os.pathsep)) <= set(folders)
+    # A default older than the newest node still leads; the block's newest follows it.
+    older = fleet_update.fleet_path(host, _bare(OLD_NODE)).split(os.pathsep)
+    assert older[0] == str(bins[OLD_NODE])
+    assert str(bins[NEW_NODE]) in older[1:]
+
+
+def test_shadows_read_the_fleet_path_not_the_callers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host, bins = _fleet_home(tmp_path, monkeypatch)
+    home = host.box.home
+    _ = _executable(bins[OLD_NODE] / "codex")  # the old node's: on the stale PATH only
+    _ = _executable(bins[NEW_NODE] / "codex")  # nvm's own
+    _ = _executable(home / ".local" / "bin" / "codex")  # a real shadow, off the timer's PATH
+    wanted = [("codex shadow", "~/.local/bin/codex")]
+    for caller in (f"{bins[OLD_NODE]}:/usr/bin:/bin", TIMER_PATH):
+        monkeypatch.setenv("PATH", caller)
+        assert _in_home(fleet_update.shadows(host, _bare(NEW_NODE))) == wanted
+    newest = home / ".nvm" / "versions" / "node" / "v99.0.0" / "bin"
+    newest.mkdir(parents=True)
+    rows = fleet_update.shadows(host, _bare(NEW_NODE))
+    assert _in_home(rows) == [("node shadow", "~/.nvm/versions/node/v99.0.0"), *wanted]
+    assert fleet_update.by_hand("nvm uninstall v99.0.0") in rows[0].detail
+
+
+def test_an_unread_fleet_path_is_an_error_not_a_clean_bill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch)
+    answer = box.answer
+
+    def broken(argv: list[str]) -> fleet_update.Ran:
+        if argv[:3] == ["bash", "--noprofile", "--norc"]:
+            return fleet_update.Ran(2, "", "path.sh: syntax error")
+        return answer(argv)
+
+    monkeypatch.setattr(box, "answer", broken)
+    row = _rows(fleet_update.check(box.host, PINS))["shadows"]
+    assert (row.status, row.detail) == (
+        "error",
+        "cannot read the fleet PATH: path.sh: syntax error",
+    )
+    assert _rows(fleet_update.apply(box.host, PINS))["shadows"].status == "error"
+
+
+# -- OpenCode 2, pinned --------------------------------------------------------------------
+
+
+def test_opencode_1_is_brought_to_the_pinned_opencode_2_by_the_v2_installer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert PINS["opencode"].startswith("2.")
+    box = _box(tmp_path, monkeypatch, {**AT_PINS, "opencode": "1.19.5"})
+    assert _rows(fleet_update.check(box.host, PINS))["opencode"].status == "behind"
+    row = _rows(fleet_update.apply(box.host, PINS))["opencode"]
+    assert (row.status, row.installed) == ("updated", PINS["opencode"])
+    script = next(script for script in box.scripts if "opencode.ai" in script)
+    assert (
+        f"https://opencode.ai/v2/install | VERSION={PINS['opencode']} bash -s -- --no-modify-path"
+        in script
+    )
+    assert not any("https://opencode.ai/install" in script for script in box.scripts)
+
+
+def test_opencode_at_its_pin_is_left_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch)
+    assert _rows(fleet_update.apply(box.host, PINS))["opencode"].status == "ok"
+    assert not any("opencode.ai" in script for script in box.scripts)
+
+
+def test_personal_installs_the_pinned_opencode_with_the_same_line_builder() -> None:
+    step = next(step for step in personal.STEPS if step.key == "opencode")
+    lines = step.lines(personal.Box(home=Path("/h"), user="u", facts={}))
+    assert lines == fleet_setup.opencode_lines(PINS["opencode"])
+    assert "opencode" not in fleet_setup.VENDOR_INSTALLERS

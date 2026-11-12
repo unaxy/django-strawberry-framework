@@ -139,8 +139,9 @@ check, writer and block file, carried in its bundle), tmux auto-attach and the s
 banner for interactive logins, `~/.tmux.conf`, git's `init.defaultBranch` and the identity of the
 machine running `apply`, the house tools `heavy` / `pressure` / `agent-status` / `git-autosync`
 (rendered for the target's threads and RAM; `git-autosync` takes `.work/land.lock` across its
-fast-forward) with its 3-minute timer, OpenCode, Muse, grok, Antigravity (`agy`) and osv-scanner,
-the agent rules file `~/MACHINE.md` rendered from the target's measured facts, and `rio-ubu`'s
+fast-forward) with its 3-minute timer, OpenCode 2 at its pin (`https://opencode.ai/v2/install`;
+`https://opencode.ai/install` installs only OpenCode 1), Muse, grok, Antigravity (`agy`) and
+osv-scanner, the agent rules file `~/MACHINE.md` rendered from the target's measured facts, and `rio-ubu`'s
 GNOME settings (`files/desktop/dconf.ini`: fonts, clock, input, window buttons and keybindings,
 Nautilus and file-chooser views, Ptyxis and Text Editor, the dock on the left at 40 px, no sleep on
 AC, location off) plus the Files sidebar's `~/projects`, four New Document templates and the
@@ -172,8 +173,9 @@ not find. It is read-only: nothing is synced or installed and no flag is written
 ## 7. Keep every machine updated: `fleet_update.py`
 
 [fleet_update.py][fleet-update] brings each machine to the versions pinned in
-[setup/versions.json][versions] (nvm, node, npm, Codex, Claude Code, uv, pre-commit, osv-scanner;
-OpenCode, Muse, grok and Antigravity read `latest`: their installers take no version) and updates
+[setup/versions.json][versions] (nvm, node, npm, Codex, Claude Code, uv, pre-commit, osv-scanner,
+OpenCode through OpenCode 2's installer `https://opencode.ai/v2/install` given `VERSION=<pin>`;
+Muse, grok and Antigravity read `latest`: their installers take no version) and updates
 the OS packages. Its module docstring is the full rule.
 
 ```sh
@@ -183,11 +185,14 @@ uv run python docs/fleet/scripts/fleet_update.py apply --all   # every machine a
 ```
 
 `check` shows pinned against installed per tool, a `shadowed` row for a file that runs instead of
-the managed tool (with the command that removes it; nothing is deleted), the apt and snap updates
-pending on Linux, and `brew outdated --greedy` plus `softwareupdate -l` on macOS. `apply` never
-downgrades Claude Code past its pin (it updates itself: `ahead`), runs a `latest` tool's installer
-every time, runs `brew update` and `brew upgrade --greedy` on macOS but never a macOS system update,
-holds `.work/update.lock` and stops at the fleet stop flag.
+the managed tool (with the command that removes it; nothing is deleted; the `PATH` searched is the
+fleet's own, the PATH block read afresh behind nvm's default node, whoever runs `check`), the apt
+and snap updates pending on Linux, and `brew outdated --greedy` plus `softwareupdate -l` on macOS.
+`apply` never downgrades Claude Code past its pin (it updates itself: `ahead`), installs npm and
+Codex after switching to nvm's default node (`nvm use default`, whatever node its own `PATH`
+holds), runs a `latest` tool's installer every time, runs `brew update` and `brew upgrade
+--greedy` on macOS but never a macOS system update, holds `.work/update.lock` and stops at the
+fleet stop flag.
 
 **Bump a version**: edit its one line in `setup/versions.json` (the current release: `npm view <package>
 version`, the project's GitHub releases), run `fleet_update.py check` to see the drift, commit on

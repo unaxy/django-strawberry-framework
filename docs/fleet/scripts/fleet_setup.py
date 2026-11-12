@@ -84,12 +84,15 @@ Steps
 Versions
     ``setup/versions.json`` (:data:`VERSIONS_FILE`) pins the version of every tool setup
     installs that can be pinned (nvm, node, npm, Codex, Claude Code, uv, pre-commit,
-    osv-scanner); a tool whose vendor installer takes no version reads :data:`LATEST`
-    (:data:`VENDOR_INSTALLERS`). :func:`load_versions` is its one reader, and the line
-    builders below it (:func:`node_lines`, :func:`claude_lines`, ...) are the one way each
-    tool is installed: the ``box`` steps here, ``setup/ubuntu/personal.py``'s osv-scanner and
-    vendor steps, and ``docs/fleet/scripts/fleet_update.py apply`` all call them. ``add``
-    copies the file with the script, so a new box installs the pins.
+    osv-scanner, OpenCode); a tool whose vendor installer takes no version reads
+    :data:`LATEST` (:data:`VENDOR_INSTALLERS`). :func:`load_versions` is its one reader, and
+    the line builders below it (:func:`node_lines`, :func:`claude_lines`, ...) are the one way
+    each tool is installed: the ``box`` steps here, ``setup/ubuntu/personal.py``'s osv-scanner,
+    OpenCode and vendor steps, and ``docs/fleet/scripts/fleet_update.py apply`` all call them.
+    ``add`` copies the file with the script, so a new box installs the pins. nvm is sourced
+    without switching node (:func:`nvm`), and whatever runs under nvm's default node switches
+    to it first (:func:`under_default`): sourcing alone leaves the node already on ``PATH``
+    (the PATH block's, read when the shell began) in front.
 
 ``add`` accepts an Ubuntu box or a Mac (``uname -s``) and copies :data:`PUSHED` (this file,
 the PATH block and the pins) under :data:`REMOTE_ROOT` there. Standard library only, Python 3.9
@@ -143,11 +146,15 @@ LATEST = "latest"
 PIN = re.compile(r"v?\d+(?:\.\d+)+")
 #: The installer of each tool pinned to :data:`LATEST`: it installs whatever is current.
 VENDOR_INSTALLERS = {
-    "opencode": "https://opencode.ai/install",
     "muse": "https://dev.meta.ai/install.sh",
     "grok": "https://x.ai/cli/install.sh",
     "agy": "https://antigravity.google/cli/install.sh",
 }
+#: OpenCode 2's installer (``https://opencode.ai/install`` installs only OpenCode 1); it takes
+#: the version in ``VERSION`` and installs to ``~/.opencode/bin``.
+OPENCODE_INSTALLER = "https://opencode.ai/v2/install"
+#: Sources nvm from ``$NVM_DIR`` (:func:`box_env` sets it) without switching node.
+NVM_SOURCE = '. "$NVM_DIR/nvm.sh" --no-use'
 #: Apt packages a fresh Ubuntu Desktop lacks, keyed by the command each provides.
 APT_PACKAGES = {
     "git": "git",
@@ -279,8 +286,23 @@ def run_quiet(argv: Sequence[str], box: Box, cwd: Path | None = None) -> tuple[i
 
 
 def nvm(command: str) -> str:
-    """Return a shell line running ``command`` with nvm's default node on ``PATH``."""
-    return f'. "$NVM_DIR/nvm.sh" && {command}'
+    """Return a shell line sourcing nvm without switching node, then running ``command``.
+
+    For nvm's own commands (``nvm install``, ``nvm alias``, ``nvm version``); what must run
+    under the default node goes through :func:`under_default`.
+    """
+    return f"{NVM_SOURCE} && {command}"
+
+
+def under_default(command: str) -> str:
+    """Return a shell line running ``command`` with nvm's default node first on ``PATH``.
+
+    Sourcing ``nvm.sh`` switches to the default only when no nvm node is on ``PATH`` yet, so a
+    caller whose ``PATH`` already holds another node (the PATH block's, read before a new
+    default existed) would run that node's ``npm``; ``nvm use`` switches explicitly. It
+    fails while nvm has no default alias.
+    """
+    return nvm(f"nvm use --silent default >/dev/null && {command}")
 
 
 def missing(names: Iterable[str]) -> str | None:
@@ -353,6 +375,7 @@ def node_lines(version: str, previous: str = "") -> list[str]:
     """Return the line installing node ``version`` through nvm and making it nvm's default.
 
     ``previous`` (a node nvm holds) has its global packages installed again under the new one.
+    It needs no default alias yet (a fresh box has none): ``nvm install`` names its version.
     """
     carry = f" --reinstall-packages-from={shlex.quote(previous)}" if previous else ""
     wanted = shlex.quote(version)
@@ -361,7 +384,7 @@ def node_lines(version: str, previous: str = "") -> list[str]:
 
 def npm_global_lines(package: str, version: str) -> list[str]:
     """Return the line installing ``package`` at ``version`` globally under nvm's default node."""
-    return [nvm(f"npm install -g {shlex.quote(f'{package}@{version}')}")]
+    return [under_default(f"npm install -g {shlex.quote(f'{package}@{version}')}")]
 
 
 def claude_lines(version: str) -> list[str]:
@@ -415,6 +438,16 @@ def osv_lines(
             f"&& mv {target}.dsf-tmp {target}"
         ),
     ]
+
+
+def opencode_lines(version: str) -> list[str]:
+    """Return the line running OpenCode 2's installer for ``version``.
+
+    ``--no-modify-path``: the PATH block (``setup/files/path.sh``) already carries
+    ``~/.opencode/bin``, so no shell file is edited.
+    """
+    get = f"curl -fsSL --retry 3 --proto '=https' {OPENCODE_INSTALLER}"
+    return [f"{get} | VERSION={shlex.quote(version)} bash -s -- --no-modify-path"]
 
 
 def vendor_lines(url: str) -> list[str]:
@@ -506,7 +539,7 @@ def _lines_node(_box: Box) -> list[str]:
 
 
 def _check_codex(box: Box) -> str | None:
-    code, _ = run_quiet(["bash", "-c", nvm("command -v codex")], box)
+    code, _ = run_quiet(["bash", "-c", under_default('[ -x "$NVM_BIN/codex" ]')], box)
     return None if code == 0 else "codex"
 
 

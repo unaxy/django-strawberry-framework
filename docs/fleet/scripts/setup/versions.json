@@ -8,7 +8,7 @@
     "uv": "0.13.7",
     "pre-commit": "4.7.0",
     "osv-scanner": "v2.7.1",
-    "opencode": "latest",
+    "opencode": "2.2.7",
     "muse": "latest",
     "grok": "latest",
     "agy": "latest"
