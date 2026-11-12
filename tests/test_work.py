@@ -18,6 +18,7 @@ import getpass
 import json
 import math
 import os
+import shlex
 import shutil
 import signal
 import sqlite3
@@ -5304,3 +5305,582 @@ def test_land_refuses_a_wal_commit_made_after_the_first_check(
         assert _terms(repo / DB) == [(1, "one"), (2, "MAIN-OWNED")]
     finally:
         writer.close()
+
+
+# --------------------------------------------------------------------------------------------
+# gate, commit
+# --------------------------------------------------------------------------------------------
+
+COMMITTER = ("Test Committer", "committer@example.com")
+
+
+@dataclasses.dataclass
+class _Committer:
+    """The seams a ``commit`` test sets: the gate's commands and the commit checks run."""
+
+    commands: tuple[str, ...] = ("true",)
+    checks: list[work.CommitCheck] = dataclasses.field(default_factory=list)
+    checked: list[list[str]] = dataclasses.field(default_factory=list)
+
+
+@pytest.fixture
+def committer(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Committer:
+    """Give the caller a global git identity and stand in for the gate and commit checks."""
+    config = _write(
+        tmp_path / "home" / ".gitconfig",
+        f"[user]\n\tname = {COMMITTER[0]}\n\temail = {COMMITTER[1]}\n",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    seams = _Committer()
+
+    def commands() -> tuple[str, ...]:
+        return seams.commands
+
+    def checks(
+        root: Path,
+        paths: list[str],
+        commit: tuple[str, str, Path],
+        wanted: Mapping[str, work.State],
+    ) -> list[work.CommitCheck]:
+        assert root == repo
+        assert set(paths) <= set(wanted)
+        assert commit[0] == _git_out(repo, "rev-parse", "HEAD").strip()
+        seams.checked.append(sorted(paths))
+        return seams.checks
+
+    monkeypatch.setattr(work, "gate_commands", commands)
+    monkeypatch.setattr(work, "commit_checks", checks)
+    return seams
+
+
+def _gate(name: str, path: Path) -> None:
+    if not (path / ".venv").exists():
+        _fake_venv(path)
+    assert work.main(["gate", name]) == 0
+
+
+def _head(repo: Path) -> str:
+    return _git_out(repo, "rev-parse", "HEAD").strip()
+
+
+def _committed_paths(repo: Path) -> list[str]:
+    return sorted(
+        _git_out(repo, "show", "--name-only", "--format=", "HEAD").split(),
+    )
+
+
+def test_commit_commits_a_gated_landing_and_gc_then_frees_the_copy(
+    repo: Path,
+    committer: _Committer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-commit")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _gate("fix-commit", path)
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-commit"]) == 0
+    assert (
+        "work: landed 1 path(s); commit it: work.py commit fix-commit -m '...'"
+        in capsys.readouterr().err
+    )
+    base = _head(repo)
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-commit",
+                "-m",
+                "fix(core): three",
+            ],
+        )
+        == 0
+    )
+    new = _head(repo)
+    assert capsys.readouterr().out.strip() == f"committed {new[:7]}: 1 path(s)"
+    assert _git_out(repo, "rev-parse", "HEAD^").strip() == base
+    assert _git_out(repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>|%B").strip() == (
+        f"{COMMITTER[0]} <{COMMITTER[1]}>|{COMMITTER[0]} <{COMMITTER[1]}>|fix(core): three"
+    )
+    assert _committed_paths(repo) == [f"{PACKAGE}/core.py"]
+    assert _git_out(repo, "show", f"HEAD:{PACKAGE}/core.py") == "CORE = 3\n"
+    assert _git_out(repo, "status", "--porcelain") == ""
+    assert committer.checked == [[f"{PACKAGE}/core.py"]]
+    assert work.locate(repo, "fix-commit").note["committed"] == new
+    assert work.main(["list"]) == 0
+    assert f"committed={new[:7]} " in capsys.readouterr().out
+    assert work.main(["gc"]) == 0
+    assert "removed fix-commit (landed)" in capsys.readouterr().out
+    assert not path.exists()
+
+
+@pytest.mark.usefixtures("committer")
+def test_commit_takes_every_landings_paths_not_only_the_last(repo: Path) -> None:
+    path = _new("fix-two-landings")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _gate("fix-two-landings", path)
+    assert work.main(["land", "fix-two-landings"]) == 0
+    _ = _write(path / "gone.txt", "second landing\n")
+    _gate("fix-two-landings", path)
+    assert work.main(["land", "fix-two-landings"]) == 0
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-two-landings",
+                "-m",
+                "both landings",
+            ],
+        )
+        == 0
+    )
+    assert _committed_paths(repo) == [f"{PACKAGE}/core.py", "gone.txt"]
+    assert _git_out(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.usefixtures("committer")
+def test_commit_carries_a_deletion_and_a_new_file(repo: Path) -> None:
+    path = _new("fix-add-delete")
+    (path / "gone.txt").unlink()
+    _ = _write(path / "docs" / "new.md", "new\n")
+    _gate("fix-add-delete", path)
+    assert work.main(["land", "fix-add-delete"]) == 0
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-add-delete",
+                "-m",
+                "add and delete",
+            ],
+        )
+        == 0
+    )
+    listed = _git_out(repo, "ls-tree", "-r", "--name-only", "HEAD").split()
+    assert "gone.txt" not in listed
+    assert "docs/new.md" in listed
+    assert _git_out(repo, "status", "--porcelain") == ""
+    assert _git_out(repo, "diff", "--cached", "--name-only") == ""
+
+
+@pytest.mark.usefixtures("committer")
+def test_an_edited_landed_path_refuses_the_commit_and_held_only_commits_the_rest(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-held-only")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _ = _write(path / "gone.txt", "landed\n")
+    _gate("fix-held-only", path)
+    assert work.main(["land", "fix-held-only"]) == 0
+    _ = _write(repo / "gone.txt", "another writer\n")
+    base = _head(repo)
+    _ = capsys.readouterr()
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-held-only",
+                "-m",
+                "refused",
+            ],
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "gone.txt no longer holds what the copy landed" in err
+    assert "`--held-only` commits the rest" in err
+    assert _head(repo) == base
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-held-only",
+                "-m",
+                "the held part",
+                "--held-only",
+            ],
+        )
+        == 0
+    )
+    assert "not committed, not held as landed: gone.txt" in capsys.readouterr().err
+    assert _committed_paths(repo) == [f"{PACKAGE}/core.py"]
+    assert (repo / "gone.txt").read_text(encoding="utf-8") == "another writer\n"
+
+
+@pytest.mark.usefixtures("committer")
+def test_another_sessions_staged_entry_refuses_its_path_and_is_never_committed_or_unstaged(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-staged")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _gate("fix-staged", path)
+    assert work.main(["land", "fix-staged"]) == 0
+    _ = _write(repo / PACKAGE / "core.py", "CORE = THEIRS\n")
+    _ = _git_out(repo, "add", f"{PACKAGE}/core.py")
+    theirs = _git_out(repo, "ls-files", "-s", f"{PACKAGE}/core.py")
+    _ = _write(repo / PACKAGE / "core.py", "CORE = 3\n")
+    _ = _write(repo / "docs" / "theirs.md", "theirs\n")
+    _ = _git_out(repo, "add", "docs/theirs.md")
+    base = _head(repo)
+    _ = capsys.readouterr()
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-staged",
+                "-m",
+                "refused",
+            ],
+        )
+        == 1
+    )
+    assert f"{PACKAGE}/core.py no longer holds what the copy landed" in capsys.readouterr().err
+    assert _head(repo) == base
+    assert _git_out(repo, "ls-files", "-s", f"{PACKAGE}/core.py") == theirs
+    _ = _git_out(repo, "reset", "-q", "HEAD", "--", f"{PACKAGE}/core.py")
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-staged",
+                "-m",
+                "ours alone",
+            ],
+        )
+        == 0
+    )
+    assert _committed_paths(repo) == [f"{PACKAGE}/core.py"]
+    assert _git_out(repo, "diff", "--cached", "--name-only").split() == ["docs/theirs.md"]
+
+
+def test_commit_plans_again_when_main_moves_and_gives_up_after_three_tries(
+    repo: Path,
+    committer: _Committer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-moved")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _gate("fix-moved", path)
+    assert work.main(["land", "fix-moved"]) == 0
+    moves: list[str] = []
+
+    def move_main() -> tuple[int, str]:
+        rel = f"other-{len(moves)}.txt"
+        _ = _write(repo / rel, "main moves\n")
+        _ = _git_out(repo, "add", rel)
+        _ = _git_out(repo, "commit", "-q", "-m", f"another session commits {rel}")
+        moves.append(_head(repo))
+        return 0, ""
+
+    committer.checks = [work.CommitCheck("moves main", move_main)]
+    _ = capsys.readouterr()
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-moved",
+                "-m",
+                "never lands",
+            ],
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert err.count("main moved during the run; planning again against it") == 2
+    assert "main moved during the run; nothing committed; rerun" in err
+    assert len(moves) == work.MAX_COMMIT_ATTEMPTS
+    assert _head(repo) == moves[-1]
+
+    def move_once() -> tuple[int, str]:
+        return move_main() if len(moves) == work.MAX_COMMIT_ATTEMPTS else (0, "")
+
+    committer.checks = [work.CommitCheck("moves main once", move_once)]
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-moved",
+                "-m",
+                "lands on the moved main",
+            ],
+        )
+        == 0
+    )
+    assert _git_out(repo, "rev-parse", "HEAD^").strip() == moves[-1]
+    assert _committed_paths(repo) == [f"{PACKAGE}/core.py"]
+
+
+@pytest.mark.usefixtures("committer")
+def test_commit_refuses_a_landing_whose_gate_stamp_is_missing_or_stale(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-ungated")
+    _fake_venv(path)
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    assert work.main(["land", "fix-ungated"]) == 0
+    assert "gate it (work.py gate fix-ungated), then: work.py commit" in capsys.readouterr().err
+    base = _head(repo)
+    refusal = (
+        "fix-ungated's landed content was not gated (run work.py gate fix-ungated); "
+        "nothing committed"
+    )
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-ungated",
+                "-m",
+                "ungated",
+            ],
+        )
+        == 1
+    )
+    assert refusal in capsys.readouterr().err
+    _ = _write(path / "gone.txt", "gated later, never landed\n")
+    _gate("fix-ungated", path)
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-ungated",
+                "-m",
+                "stale stamp",
+            ],
+        )
+        == 1
+    )
+    assert refusal in capsys.readouterr().err
+    assert _head(repo) == base
+
+
+@pytest.mark.parametrize(
+    ("message", "refusal"),
+    [
+        ("fix\n\nCo-Authored-By: Someone <s@example.com>\n", "attribution line"),
+        ("fix\n\nSigned-off-by: Someone <s@example.com>\n", "attribution line"),
+        ("fix\n\nGenerated with a tool\n", "attribution line"),
+        ("  \n", "the commit message is empty"),
+    ],
+)
+@pytest.mark.usefixtures("committer")
+def test_commit_refuses_an_empty_message_or_an_attribution_footer(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    message: str,
+    refusal: str,
+) -> None:
+    path = _new("fix-message")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _gate("fix-message", path)
+    assert work.main(["land", "fix-message"]) == 0
+    base = _head(repo)
+    _ = capsys.readouterr()
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-message",
+                "-m",
+                message,
+            ],
+        )
+        == 1
+    )
+    assert refusal in capsys.readouterr().err
+    assert _head(repo) == base
+    trailer = "fix\n\nSuppression-Growth-Approved: the maintainer said so\n"
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-message",
+                "-m",
+                trailer,
+            ],
+        )
+        == 0
+    )
+    assert _git_out(repo, "log", "-1", "--format=%B").rstrip("\n") == trailer.rstrip("\n")
+
+
+@pytest.mark.usefixtures("committer")
+def test_commit_reads_the_identity_from_the_callers_git_config_and_refuses_none(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-identity")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _gate("fix-identity", path)
+    assert work.main(["land", "fix-identity"]) == 0
+    base = _head(repo)
+    with monkeypatch.context() as unset:
+        unset.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+        _ = capsys.readouterr()
+        assert (
+            work.main(
+                [
+                    "commit",
+                    "fix-identity",
+                    "-m",
+                    "nobody",
+                ],
+            )
+            == 1
+        )
+        assert "user.name and user.email unset" in capsys.readouterr().err
+    assert _head(repo) == base
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-identity",
+                "-m",
+                "somebody",
+            ],
+        )
+        == 0
+    )
+    assert _git_out(repo, "log", "-1", "--format=%an|%ae").strip() == "|".join(COMMITTER)
+
+
+@pytest.mark.usefixtures("committer")
+def test_a_copy_lands_and_commits_again_after_a_commit(repo: Path) -> None:
+    path = _new("fix-again-commit")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _gate("fix-again-commit", path)
+    assert work.main(["land", "fix-again-commit"]) == 0
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-again-commit",
+                "-m",
+                "first",
+            ],
+        )
+        == 0
+    )
+    _ = _write(path / PACKAGE / "core.py", "CORE = 4\n")
+    _gate("fix-again-commit", path)
+    assert work.main(["land", "fix-again-commit"]) == 0
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-again-commit",
+                "-m",
+                "second",
+            ],
+        )
+        == 0
+    )
+    assert _git_out(repo, "show", f"HEAD:{PACKAGE}/core.py") == "CORE = 4\n"
+    assert _committed_paths(repo) == [f"{PACKAGE}/core.py"]
+    assert _git_out(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.usefixtures("committer")
+def test_commit_dry_run_names_each_path_and_commits_nothing(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-dry-commit")
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _gate("fix-dry-commit", path)
+    assert work.main(["land", "fix-dry-commit"]) == 0
+    base = _head(repo)
+    _ = capsys.readouterr()
+    assert work.main(["commit", "fix-dry-commit", "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert f"would commit: {PACKAGE}/core.py" in out
+    assert "gate: stamped" in out
+    assert out.rstrip().endswith("would commit")
+    assert _head(repo) == base
+    assert _git_out(repo, "status", "--porcelain") == f" M {PACKAGE}/core.py\n"
+
+
+def test_gate_stamps_the_content_it_passed_and_a_failure_clears_the_stamp(
+    repo: Path,
+    committer: _Committer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-gate")
+    _fake_venv(path)
+    _ = capsys.readouterr()
+    assert work.main(["gate", "fix-gate"]) == 0
+    assert capsys.readouterr().out.strip() == "nothing to gate"
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    assert work.main(["gate", "fix-gate"]) == 0
+    assert capsys.readouterr().out.strip() == "gate: PASS"
+    note = work.locate(repo, "fix-gate").note
+    assert note["gated"] == work.content_tree(path)
+    assert "gatedat" in note
+    committer.commands = ("true", "echo broken; false")
+    assert work.main(["gate", "fix-gate"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "gate: FAIL (1 of 2: echo broken; false)"
+    assert "fix: read its output above" in captured.err
+    assert "broken" in captured.err
+    note = work.locate(repo, "fix-gate").note
+    assert "gated" not in note
+    assert "gatedat" not in note
+
+
+def test_gate_runs_every_command_after_a_failure_and_names_each(
+    repo: Path,
+    committer: _Committer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-gate-all")
+    _fake_venv(path)
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    committer.commands = ("exit 3", "true", "exit 4")
+    _ = capsys.readouterr()
+    assert work.main(["gate", "fix-gate-all"]) == 1
+    assert capsys.readouterr().out.strip() == "gate: FAIL (2 of 3: exit 3, exit 4)"
+    assert work.main(["gate", "fix-gate-all", "--json"]) == 1
+    document = json_object(json_loads(capsys.readouterr().out))
+    assert document["result"] == "FAIL"
+    rows = [json_object(row) for row in json_list(document["commands"])]
+    assert [row["exit"] for row in rows] == [3, 0, 4]
+    assert "gated" not in work.locate(repo, "fix-gate-all").note
+
+
+@pytest.mark.usefixtures("committer")
+def test_gate_puts_an_untracked_file_and_a_deletion_into_the_copys_own_index(
+    repo: Path,
+) -> None:
+    path = _new("fix-gate-index")
+    _ = _write(path / "docs" / "new.md", "new\n")
+    (path / "gone.txt").unlink()
+    _gate("fix-gate-index", path)
+    listed = _git_out(path, "ls-files").split()
+    assert "docs/new.md" in listed
+    assert "gone.txt" not in listed
+    assert _git_out(path, "write-tree").strip() == work.content_tree(path)
+    assert work.locate(repo, "fix-gate-index").note["gated"] == work.content_tree(path)
+
+
+def test_the_gate_runs_cis_lint_commands_and_never_pytest(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert work.gate_commands() == workspace.LINT_COMMANDS
+    assert not any(work.is_pytest(shlex.split(command)) for command in work.gate_commands())
+
+    def with_pytest() -> tuple[str, ...]:
+        return ("true", "uv run pytest -x")
+
+    monkeypatch.setattr(work, "gate_commands", with_pytest)
+    path = _new("fix-gate-pytest")
+    _fake_venv(path)
+    _ = _write(path / PACKAGE / "core.py", "CORE = 3\n")
+    _ = capsys.readouterr()
+    assert work.main(["gate", "fix-gate-pytest"]) == 1
+    assert "gate never runs pytest" in capsys.readouterr().err
+    assert "gated" not in work.locate(repo, "fix-gate-pytest").note

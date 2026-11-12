@@ -240,7 +240,9 @@ Commands
         copy's own, ``foreign-pins=`` others under its name (an earlier copy's,
         a sync's), ``missing-pins=`` ones its note records that ``pins.git`` no
         longer holds (``--json``: ``pins``, ``foreign``, ``missing``; ``-``
-        for none). A copy with no note owns every pin under its name.
+        for none). A copy with no note owns every pin under its name. A copy
+        ``commit`` committed shows ``committed=`` (that commit; ``--json``:
+        ``committed``).
     ``save <name>``
         Pin the copy's content as the next ``save-N``. Content equal to
         ``HEAD`` with ``HEAD`` still at the start pin saves nothing.
@@ -296,8 +298,66 @@ Commands
         the merged result on that ``HEAD`` (``landed-copy`` the copy's own
         content). ``--dry-run`` checks and reports without writing;
         ``--patch`` also writes the patch (the merged database as its binary
-        diff from ``HEAD``). The landing is then committed on main, which stays
-        linear.
+        diff from ``HEAD``). ``commit`` then commits the landing on main, which
+        stays linear; a successful landing says so on stderr (``gate it``
+        first when the copy's gate stamp is not the content it landed).
+    ``gate <name> [--json]``
+        Run CI's lint job (``scripts/workspace.py``'s ``LINT_COMMANDS``, every
+        command check-only, never pytest) in the copy, as ``run`` runs a
+        command (the same environment, ``.venv`` rebuild and import check),
+        each through ``sh -c`` with ``SINCE`` and ``UNTIL`` unset, so the
+        suppression checkers skip their growth walks. Content equal to the
+        copy's ``HEAD`` prints ``nothing to gate``. First the copy's own index
+        takes its content (``add -A``: new files and deletions too, which the
+        tracked-path constants and ``docs/TREE.md`` generators read) and must
+        write the content's tree (an ``assume-unchanged`` bit refuses). Every
+        command runs, a failure included; all passing, with the content
+        unchanged meanwhile, writes ``gated=<tree>`` and ``gatedat`` into the
+        note, anything else clears them. Prints ``gate: PASS`` or ``gate: FAIL
+        (n of N: names)`` and, on stderr, each failure's fix and output tail;
+        ``--json`` prints every command's result. Exit ``0`` or ``1``.
+    ``commit <name> (-m MSG | -F FILE) [--dry-run] [--held-only]``
+        Commit the copy's landing on the shared ``main`` without touching the
+        shared index's other entries or the working tree. Holds
+        ``land.lock`` throughout and first undoes an interrupted landing, as
+        ``land`` does; refuses a replica, a shared ``HEAD`` other than
+        ``refs/heads/main`` and a copy that has not landed (its landing pins
+        checked as for ``land``). The paths are every landing's: those the
+        copy's content at its last landing changed from its ``HEAD`` then,
+        plus those the last landing wrote; each path's landed entry is the
+        ``landed`` pin's where the last landing wrote it (merged onto main),
+        else the ``landed-copy`` pin's. A path the shared ``HEAD`` already
+        holds as landed is skipped; one main changed since (its ``HEAD``
+        entry neither the landed one nor the one the landing started from) is
+        skipped and named; one the working tree holds as landed, with the
+        shared index at the ``HEAD``'s entry or the landed one, is held; any
+        other (edited since it landed, another writer's bytes, another entry
+        staged) refuses the whole commit, or with ``--held-only`` is named
+        and left. The copy's ``gated`` stamp must be its ``landed-copy``
+        tree: otherwise ``<name>'s landed content was not gated``, with no
+        bypass. The held paths are hashed from the working tree into a
+        private index read from the ``HEAD`` (each must hash to its landed
+        blob; a symlinked folder, a gitlink or a live database journal
+        refuses), whose tree must differ from the ``HEAD`` in exactly them;
+        then check-only gates run (``commit_checks``: ``ruff check``, ``ruff
+        format --check`` and the source-layout ``--check`` on the held files,
+        the tracked-path constants and citations ``--check`` against the
+        private index, and the suppression checkers' growth walks over the new
+        commit, which read git objects alone); a failure refuses, since no
+        fixing hook runs. The message (``-F -`` reads stdin) must not be
+        empty or carry ``Co-Authored-By:``, ``Signed-off-by:`` or ``Generated
+        with`` (``Suppression-Growth-Approved:`` passes); the author and
+        committer are the caller's own ``user.name`` / ``user.email``, read by
+        a plain ``git config`` (unset refuses). ``commit-tree`` on the
+        ``HEAD``, then ``update-ref`` of ``main`` against that ``HEAD``
+        (compare-and-swap, the branch checked again first); a ``main`` that
+        moved is planned again, at most three times, then ``main moved during
+        the run; nothing committed; rerun``. Afterwards the shared index takes
+        the commit's entries for the held paths alone (a mismatch is a
+        warning: main already moved), the note records ``committed`` and
+        ``committedat``, and it prints ``committed <sha7>: N path(s)``.
+        ``--dry-run`` prints each path's class, the gate stamp and the checks,
+        moves nothing, and exits ``1`` when the commit would refuse.
     ``rm <name> [--discard] [--drop-saves] [--evidence]``
         Remove one copy: move it into ``.work/trash/`` (one rename, which a
         running process holding a file refuses on Windows), then delete it,
@@ -470,10 +530,11 @@ returns the command's code and ``125`` when it refused before starting it.
 Standard library and ``scripts/_git.py`` only for the git and copy work;
 ``scripts/workspace.py`` and ``scripts/prove_failability.py`` are read only to
 find their state folders for a copy, so the two scripts and this one name the
-same paths. Run from the shared checkout as ``uv run python scripts/work.py
-...``. A ``work.py`` started inside a copy (``.work/clones/<name>``,
+same paths, and ``workspace.py`` for the lint commands ``gate`` runs. Run from
+the shared checkout as ``uv run python scripts/work.py ...``. A ``work.py``
+started inside a copy (``.work/clones/<name>``,
 ``.work/worktrees/<name>``) works on the shared checkout around it for ``list``,
-``save``, ``run`` and ``check-name``, and refuses every other command (``run work.py
+``save``, ``run``, ``gate`` and ``check-name``, and refuses every other command (``run work.py
 from the shared checkout <path>``): those write the shared tree or other copies, never
 from a copy's own, perhaps edited, script. Another interpreter is refused in one line
 naming ``uv run python``: below Python 3.10 before anything runs, and one lacking a
@@ -486,6 +547,7 @@ import argparse
 import contextlib
 import dataclasses
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -517,8 +579,12 @@ else:  # run or imported from its own folder: fleet.py lives in the checkout's d
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
 
+    from typing_extensions import TypeIs
+
 #: ``json.loads``, its result typed ``object`` for the caller to narrow.
 _loads: Callable[[str], object] = json.loads
+#: ``getattr``, its result typed ``object`` for the caller to narrow.
+_attribute: Callable[[object, str], object] = getattr
 
 REPO_ROOT = _git_runner.CHECKOUT_ROOT
 #: How work.py runs: ``uv run`` gives it the project's Python and every module it reads.
@@ -4301,6 +4367,7 @@ def cmd_list(args: _Args) -> int:
                 "adopted": "yes" if copy.adopted else "no",
                 "home": home_of(copy.note) if copy.note else "",
                 "replica": "yes" if is_replica(copy.note) else "no",
+                "committed": copy.note.get("committed", "")[:12],
                 "purpose": copy.note.get("purpose", ""),
                 "owner": copy.note.get("owner", ""),
                 "path": str(copy.path) if copy.path is not None else "-",
@@ -4317,6 +4384,7 @@ def cmd_list(args: _Args) -> int:
             + (f"missing-pins={row['missing']} " if row["missing"] != "-" else "")
             + f"adopted={row['adopted']} "
             + (f"replica-of={row['home']} " if row["replica"] == "yes" else "")
+            + (f"committed={row['committed'][:7]} " if row["committed"] else "")
             + (f"owner={shlex.quote(row['owner'])} " if row["owner"] else "")
             + row["path"]
             + (f"  # {row['purpose']}" if row["purpose"] else ""),
@@ -5386,6 +5454,12 @@ def _land(
         print(f"landed: {change.path}")
         if change.path in plan.rows:
             print(f"  rows: {rows_summary(plan.rows[change.path])}")
+    step = (
+        "commit it"
+        if copy.note.get("gated") == plan.tree
+        else f"gate it (work.py gate {copy.name}), then"
+    )
+    _say(f"landed {len(plan.applied)} path(s); {step}: work.py commit {copy.name} -m '...'")
     return 0
 
 
@@ -5405,6 +5479,788 @@ def _pin_landing(repo: Path, copy: Copy, plan: LandPlan) -> None:
         copy.form,
         {"landed": plan.head, "landedtree": plan.tree, "landedat": str(time.time())},
     )
+
+
+# --------------------------------------------------------------------------------------------
+# commit, gate
+# --------------------------------------------------------------------------------------------
+
+#: A commit message line ``commit`` refuses: an author-attribution footer (AGENTS.md). The
+#: ``Suppression-Growth-Approved:`` trailer is no attribution and passes.
+ATTRIBUTION_LINE = re.compile(
+    r"^\s*(?:co-authored-by|signed-off-by)\s*:|generated with",
+    re.IGNORECASE,
+)
+#: How many times ``commit`` plans and commits again after main moved under its compare-and-swap.
+MAX_COMMIT_ATTEMPTS = 3
+#: The suffixes ``scripts/check_trailing_commas.py`` checks (its ``SUFFIXES``); a path named
+#: with any other suffix is reported there as ignored.
+LAYOUT_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".md",
+        ".json",
+        ".graphql",
+        ".gql",
+    },
+)
+#: The growth walks of ``scripts/check_type_suppressions.py`` and
+#: ``scripts/check_noqa_suppressions.py`` alone, over ``argv[1]..argv[2]``: each reads the
+#: ledgers and the consent trailers from git objects. Their per-site ledger count reads the
+#: working tree, which other sessions' edits share in the shared checkout, so ``gate`` measures
+#: that part in the copy instead.
+SUPPRESSION_WALK = (
+    "import sys\n"
+    "from scripts import check_noqa_suppressions, check_type_suppressions\n"
+    "since, until = sys.argv[1:3]\n"
+    "found = [\n"
+    "    *check_type_suppressions.growth_violations(since, until),\n"
+    "    *check_noqa_suppressions._walk(since, until),\n"
+    "]\n"
+    "for violation in found:\n"
+    "    print(f'{violation.path}:{violation.line}: {violation.message}')\n"
+    "sys.exit(1 if found else 0)\n"
+)
+#: What to run in the copy when a ``gate`` command fails, by a word of the command.
+GATE_HINTS = (
+    ("ruff check", "uv run ruff check --fix ."),
+    ("ruff format", "uv run ruff format ."),
+    ("check_type_suppressions.py", "fix the diagnostic; a lowered count: that script's --write"),
+    ("check_noqa_suppressions.py", "fix the diagnostic; a lowered count: that script's --write"),
+    ("basedpyright", "fix the diagnostics it names"),
+    ("check_public_types.py", "type or document the public symbols it names"),
+    ("check_trailing_commas.py", "python scripts/check_trailing_commas.py --fix <paths>"),
+    ("check_truthful_reads.py", "read the fact it names through utils/truth.py"),
+    ("check_annotation_subscripts.py", "move the subscript into an `if TYPE_CHECKING:` alias"),
+    ("check_citations.py", "fix the citations it names"),
+    (
+        "build_kanban_tracked_path_constants.py",
+        "python scripts/build_kanban_tracked_path_constants.py",
+    ),
+    ("check_kanban_anchors.py", "fix the anchors it names"),
+    ("import_spec_terms", "python examples/fakeshop/manage.py import_spec_terms"),
+    ("check_all_spec_glossaries.py", "fix the spec glossary rows it names"),
+    ("--check", "run the generator without --check"),
+)
+#: How many trailing lines of a failed ``gate`` command's output are shown.
+GATE_OUTPUT_LINES = 40
+
+
+def _is_tuple(value: object) -> TypeIs[tuple[object, ...]]:
+    """Return whether ``value`` is a tuple."""
+    return isinstance(value, tuple)
+
+
+def clear_note(copy_root: Path, form: str, keys: Iterable[str]) -> None:
+    """Remove ``keys`` from the copy's note; a key that is not there is no error.
+
+    Raises:
+        WorkError: git cannot write the copy's config.
+
+    """
+    for key in keys:
+        completed = _git_runner.run_git(
+            copy_root,
+            "config",
+            _scope(form),
+            "--unset-all",
+            f"{NOTE_SECTION}.{key}",
+        )
+        if completed.returncode not in {0, 5}:
+            msg = f"cannot clear {NOTE_SECTION}.{key} in {copy_root}: {completed.stderr.strip()}"
+            raise WorkError(msg)
+
+
+@dataclasses.dataclass(frozen=True)
+class CommitPlan:
+    """Where each path of a copy's landings stands against the shared ``HEAD`` it was read at.
+
+    ``wanted`` is each path's landed entry (``None`` for a deletion): the ``landed`` pin's
+    where the last landing wrote it (merged onto main), else the ``landed-copy`` pin's.
+    """
+
+    head: str
+    wanted: dict[str, State]
+    committed: list[str]
+    held: list[str]
+    main_changed: list[str]
+    edited: list[str]
+
+
+@dataclasses.dataclass(frozen=True)
+class CommitCheck:
+    """One check-only gate ``commit`` runs on what it is about to commit: a name and a runner."""
+
+    name: str
+    run: Callable[[], tuple[int, str]]
+
+
+def plan_commit(repo: Path, copy_root: Path, landing: tuple[Path, str, str]) -> CommitPlan:
+    """Classify every path the copy's landings changed against the shared ``HEAD``.
+
+    ``landing`` is :func:`earlier_landing`'s ``(pins.git, landed-copy, landed)``. The paths
+    are cumulative: every path the copy's content at its last landing changed from the
+    copy's ``HEAD`` then (so an earlier landing's paths too), plus every path the last
+    landing wrote. Each is already committed (the ``HEAD`` holds its landed entry), changed
+    by main (the ``HEAD`` holds neither that nor the entry the landing started from: the
+    landing's parent for a path the last landing wrote, the copy's ``HEAD`` else), held
+    (the working tree holds the landed entry and the shared index the ``HEAD``'s or that
+    one), or edited (anything else: edited since it landed, another writer's bytes, or
+    another entry staged).
+
+    Raises:
+        WorkError: a path is a gitlink, or passes a symlinked folder of the shared checkout.
+
+    """
+    store, own, merged = landing
+    head = _resolve_commit(repo, "HEAD")
+    started_at = f"{own}^"
+    wrote = _landing_wrote(store, merged)
+    paths = sorted(
+        {change.path for change in copy_changes(copy_root, started_at, own)} | wrote,
+    )
+    for path in paths:
+        refuse_symlinked_folder(repo, path)
+    landed = _tree_states(store, merged, paths)
+    before = _tree_states(store, f"{merged}^", paths)
+    owned = _tree_states(copy_root, own, paths)
+    started = _tree_states(copy_root, started_at, paths)
+    at_head = _tree_states(repo, head, paths)
+    staged = _index_states(repo, paths)
+    wanted: dict[str, State] = {}
+    committed: list[str] = []
+    held: list[str] = []
+    main_changed: list[str] = []
+    edited: list[str] = []
+    for path in paths:
+        want = landed[path] if path in wrote else owned[path]
+        origin = before[path] if path in wrote else started[path]
+        wanted[path] = want
+        if at_head[path] == want:
+            committed.append(path)
+        elif at_head[path] != origin:
+            main_changed.append(path)
+        elif working_state(repo, path) == want and staged[path] in {at_head[path], want}:
+            held.append(path)
+        else:
+            edited.append(path)
+    return CommitPlan(head, wanted, committed, held, main_changed, edited)
+
+
+def stage_commit(
+    repo: Path,
+    plan: CommitPlan,
+    paths: Sequence[str],
+    index: Path,
+) -> str:
+    """Return the tree of the shared ``HEAD`` plus ``paths`` as landed, built in ``index``.
+
+    Each file is hashed from the shared working tree into the object store and must hash to
+    its landed blob, so the commit holds exactly the landed bytes; a deletion is removed.
+    The tree must differ from the ``HEAD`` in exactly ``paths``.
+
+    Raises:
+        WorkError: a file no longer hashes to its landed blob, or the tree differs from the
+            ``HEAD`` elsewhere.
+
+    """
+    env = {"GIT_INDEX_FILE": str(index)}
+    _ = _git(repo, "read-tree", plan.head, env=env)
+    for path in paths:
+        want = plan.wanted[path]
+        if want is None:
+            _ = _git(repo, "update-index", "--force-remove", "--", path, env=env)
+            continue
+        mode, oid = want
+        if mode == "120000":
+            link = str((repo / path).readlink()).encode("utf-8", "surrogateescape")
+            blob = _git_bytes(repo, "hash-object", "-w", "--stdin", stdin=link).decode().strip()
+        else:
+            blob = _git(repo, "hash-object", "-w", f"--path={path}", "--", path).strip()
+        if blob != oid:
+            msg = f"{path} now hashes to {blob[:12]}, not its landed {oid[:12]}; nothing committed"
+            raise WorkError(msg)
+        _ = _git(repo, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}", env=env)
+    tree = _git(repo, "write-tree", env=env).strip()
+    names = _git(repo, "diff-tree", "-r", "-z", "--no-renames", "--name-only", plan.head, tree)
+    differ = {entry for entry in names.split("\0") if entry}
+    if differ != set(paths):
+        extra = sorted(differ.symmetric_difference(paths))
+        msg = f"the staged tree differs from HEAD otherwise than planned in {', '.join(extra)}"
+        raise WorkError(msg)
+    return tree
+
+
+def _command_check(
+    repo: Path,
+    name: str,
+    argv: Sequence[str],
+    extra: Mapping[str, str] | None = None,
+) -> CommitCheck:
+    """Return the check running ``argv`` from the shared checkout, ``extra`` added to its env."""
+
+    def run() -> tuple[int, str]:
+        completed = subprocess.run(
+            list(argv),
+            cwd=repo,
+            env={**os.environ, **dict(extra or {})},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        return completed.returncode, completed.stdout.decode("utf-8", "replace")
+
+    return CommitCheck(name, run)
+
+
+def commit_checks(
+    repo: Path,
+    paths: Sequence[str],
+    commit: tuple[str, str, Path],
+    wanted: Mapping[str, State],
+) -> list[CommitCheck]:
+    """Return the check-only gates ``commit`` runs before it moves main; none writes a file.
+
+    ``commit`` is ``(base, new, index)``: the shared ``HEAD`` the commit is made on, the
+    commit made (no ref names it yet) and the private index holding its tree. ``ruff
+    check``, ``ruff format --check`` and the source-layout ``--check`` read the committed
+    ``paths`` from the working tree, which holds exactly their landed bytes; the
+    tracked-path constants and the citations ``--check`` read the file list from the
+    private index (``GIT_INDEX_FILE``); the suppression growth walks read git objects
+    (:data:`SUPPRESSION_WALK`). A fixing hook never runs: a needed rewrite is a refusal.
+    """
+    base, new, index = commit
+    present = [path for path in paths if wanted[path] is not None]
+    python = [path for path in present if PurePosixPath(path).suffix in {".py", ".pyi"}]
+    layout = [path for path in present if PurePosixPath(path).suffix in LAYOUT_SUFFIXES]
+    private = {"GIT_INDEX_FILE": str(index)}
+    checks: list[CommitCheck] = []
+    if python:
+        checks.extend(
+            [
+                _command_check(
+                    repo,
+                    "ruff check",
+                    (
+                        sys.executable,
+                        "-m",
+                        "ruff",
+                        "check",
+                        "--no-fix",
+                        "--",
+                        *python,
+                    ),
+                ),
+                _command_check(
+                    repo,
+                    "ruff format --check",
+                    (
+                        sys.executable,
+                        "-m",
+                        "ruff",
+                        "format",
+                        "--check",
+                        "--",
+                        *python,
+                    ),
+                ),
+            ],
+        )
+    if layout:
+        checks.append(
+            _command_check(
+                repo,
+                "check_trailing_commas.py --check",
+                (
+                    sys.executable,
+                    "scripts/check_trailing_commas.py",
+                    "--check",
+                    "--",
+                    *layout,
+                ),
+            ),
+        )
+    checks.extend(
+        [
+            _command_check(
+                repo,
+                "build_kanban_tracked_path_constants.py --check",
+                (sys.executable, "scripts/build_kanban_tracked_path_constants.py", "--check"),
+                private,
+            ),
+            _command_check(
+                repo,
+                "check_citations.py --check --substrings",
+                (
+                    sys.executable,
+                    "scripts/check_citations.py",
+                    "--check",
+                    "--substrings",
+                ),
+                private,
+            ),
+            _command_check(
+                repo,
+                "suppression growth walk",
+                (
+                    sys.executable,
+                    "-c",
+                    SUPPRESSION_WALK,
+                    base,
+                    new,
+                ),
+            ),
+        ],
+    )
+    return checks
+
+
+def failed_checks(checks: Sequence[CommitCheck]) -> list[str]:
+    """Run every check (one failing never stops the rest); return the failed checks' names."""
+    failed: list[str] = []
+    for check in checks:
+        code, output = check.run()
+        if code == 0:
+            _say(f"check {check.name}: pass")
+            continue
+        failed.append(check.name)
+        _say(f"check {check.name}: FAIL (exit {code})")
+        tail = output.rstrip().splitlines()[-GATE_OUTPUT_LINES:]
+        if tail:
+            print("\n".join(tail), file=sys.stderr)
+    return failed
+
+
+def commit_message(args: _Args) -> str | None:
+    """Return the message ``-m`` or ``-F`` gives (``-F -`` reads stdin), ``None`` for neither.
+
+    Raises:
+        WorkError: the message is empty or carries an attribution footer
+            (:data:`ATTRIBUTION_LINE`).
+
+    """
+    if args.message is not None:
+        text = args.message
+    elif args.message_file is not None:
+        source = args.message_file
+        text = sys.stdin.read() if source == "-" else Path(source).read_text(encoding="utf-8")
+    else:
+        return None
+    if not text.strip():
+        msg = "the commit message is empty; nothing committed"
+        raise WorkError(msg)
+    footers = [line.strip() for line in text.splitlines() if ATTRIBUTION_LINE.search(line)]
+    if footers:
+        msg = (
+            f"the commit message carries an attribution line ({footers[0]!r}); the message "
+            "is the change description and nothing else (AGENTS.md); nothing committed"
+        )
+        raise WorkError(msg)
+    return text if text.endswith("\n") else f"{text}\n"
+
+
+def commit_identity(repo: Path) -> dict[str, str]:
+    """Return the author and committer variables from the caller's own git identity.
+
+    Read with a plain ``git config`` against the shared checkout, every scope the caller's
+    git reads included: every other git call here runs in ``_git.repository_env``, whose
+    ``GIT_CONFIG_GLOBAL=/dev/null`` hides the caller's global ``user.*``.
+
+    Raises:
+        WorkError: ``user.name`` or ``user.email`` is unset.
+
+    """
+    values: dict[str, str] = {}
+    for key in ("user.name", "user.email"):
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "config",
+                "--get",
+                key,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        values[key] = completed.stdout.strip() if completed.returncode == 0 else ""
+    missing = [key for key, value in values.items() if not value]
+    if missing:
+        msg = (
+            f"{' and '.join(missing)} unset in your git config (`git config --global "
+            f"{missing[0]} ...`); nothing committed"
+        )
+        raise WorkError(msg)
+    name, email = values["user.name"], values["user.email"]
+    return {
+        "GIT_AUTHOR_NAME": name,
+        "GIT_AUTHOR_EMAIL": email,
+        "GIT_COMMITTER_NAME": name,
+        "GIT_COMMITTER_EMAIL": email,
+    }
+
+
+def _refuse_live_shared_journals(repo: Path, paths: Iterable[str]) -> None:
+    """Refuse a held row-merged database whose ``-wal`` or ``-journal`` holds unwritten rows.
+
+    Raises:
+        WorkError: naming each such journal.
+
+    """
+    live = [
+        journal
+        for path in sorted(ROW_MERGED_PATHS.intersection(paths))
+        if (journal := _sqlite_rows.live_journal(repo / path)) is not None
+    ]
+    if live:
+        msg = (
+            f"{', '.join(str(journal) for journal in live)} holds database writes its file "
+            "does not (a connection is open or was not checkpointed); close it and run "
+            "`PRAGMA wal_checkpoint(TRUNCATE)`; nothing committed"
+        )
+        raise WorkError(msg)
+
+
+def sync_shared_index(repo: Path, new: str, paths: Sequence[str]) -> None:
+    """Point the shared index at ``new`` for ``paths`` alone, and warn where it does not hold it.
+
+    The commit already moved main, so a failure here is a warning, never a rollback; every
+    other entry, another session's staged work included, is left as it is.
+    """
+    try:
+        _ = _git(repo, "--literal-pathspecs", "reset", "-q", new, "--", *paths)
+    except WorkError as error:
+        _say(f"warning: committed, but the shared index was not reset: {error}")
+        return
+    staged = _index_states(repo, paths)
+    committed = _tree_states(repo, new, paths)
+    off = [path for path in paths if staged[path] != committed[path]]
+    if off:
+        _say(
+            f"warning: committed, but the shared index does not hold the commit at "
+            f"{', '.join(off)} (`git reset -q HEAD -- <path>` there)",
+        )
+
+
+def cmd_commit(args: _Args) -> int:
+    """Commit a copy's landing on main from a private index, all or nothing."""
+    message = commit_message(args)
+    if message is None and not args.dry_run:
+        msg = "commit needs a message: -m MSG or -F FILE"
+        raise WorkError(msg)
+    repo = args.repo
+    with land_lock(repo):
+        if _journal(repo).is_file():
+            _say("undoing an interrupted landing from its journal first")
+        left = recover_landing(repo).summary()
+        if left is not None:
+            msg = f"an interrupted landing was undone except {left}"
+            raise WorkError(msg)
+        copy = locate(repo, args.name)
+        refuse_replica(copy, "commit")
+        index = _git_path(repo, f"dsf-work-commit-{_token()}")
+        try:
+            return _commit(repo, copy, args, message, index)
+        finally:
+            index.unlink(missing_ok=True)
+
+
+def _report_plan(plan: CommitPlan, *, held_only: bool) -> None:
+    """Name on stderr the paths a commit leaves: main changed them, or (``--held-only``) not held."""
+    if plan.main_changed:
+        _say(
+            f"skipped, main changed since the landing: {', '.join(plan.main_changed)} "
+            "(left as main holds them)",
+        )
+    if held_only and plan.edited:
+        _say(f"not committed, not held as landed: {', '.join(plan.edited)}")
+
+
+def _commit(
+    repo: Path,
+    copy: Copy,
+    args: _Args,
+    message: str | None,
+    index: Path,
+) -> int:
+    copy_root = _live(copy)
+    branch = _branch(repo)
+    if branch != LANDING_BRANCH:
+        msg = f"the shared checkout's HEAD is {branch or 'detached'}, not {LANDING_BRANCH}"
+        raise WorkError(msg)
+    landing = earlier_landing(repo, copy, copy_root)
+    if landing is None:
+        msg = f"{copy.name} has not landed; nothing to commit (`work.py land {copy.name}` first)"
+        raise WorkError(msg)
+    store, own, _merged = landing
+    gated = copy.note.get("gated", "") == _tree_of(store, own)
+    if args.dry_run:
+        return _dry_run_commit(repo, copy_root, landing, (args, message, index), gated=gated)
+    identity = commit_identity(repo)
+    for attempt in range(1, MAX_COMMIT_ATTEMPTS + 1):
+        plan = plan_commit(repo, copy_root, landing)
+        if plan.edited and not args.held_only:
+            msg = (
+                f"{', '.join(plan.edited)} no longer hold{'s' if len(plan.edited) == 1 else ''} "
+                "what the copy landed (edited since, another writer's bytes, or staged "
+                "otherwise); nothing committed (`--held-only` commits the rest)"
+            )
+            raise WorkError(msg)
+        _report_plan(plan, held_only=args.held_only)
+        if not plan.held:
+            _say(f"{copy.name}: nothing to commit")
+            return 0
+        if not gated:
+            msg = (
+                f"{copy.name}'s landed content was not gated (run work.py gate {copy.name}); "
+                "nothing committed"
+            )
+            raise WorkError(msg)
+        _refuse_live_shared_journals(repo, plan.held)
+        tree = stage_commit(repo, plan, plan.held, index)
+        new = (
+            _git_bytes(
+                repo,
+                "commit-tree",
+                tree,
+                "-p",
+                plan.head,
+                "-F",
+                "-",
+                env=identity,
+                stdin=(message or "").encode("utf-8"),
+            )
+            .decode()
+            .strip()
+        )
+        failed = failed_checks(
+            commit_checks(repo, plan.held, (plan.head, new, index), plan.wanted),
+        )
+        if failed:
+            msg = (
+                f"commit checks failed: {', '.join(failed)}; nothing committed (fix it in the "
+                f"copy, `work.py gate {copy.name}`, and land again)"
+            )
+            raise WorkError(msg)
+        branch = _branch(repo)
+        if branch != LANDING_BRANCH:
+            msg = f"the shared checkout left {LANDING_BRANCH} for {branch or 'a detached HEAD'}"
+            raise WorkError(msg)
+        moved = _git_runner.run_git(
+            repo,
+            "update-ref",
+            "-m",
+            f"work.py commit {copy.name}",
+            LANDING_BRANCH,
+            new,
+            plan.head,
+        )
+        if moved.returncode == 0:
+            break
+        if _resolve_commit(repo, LANDING_BRANCH) == plan.head:
+            msg = f"git update-ref failed: {moved.stderr.strip()}; nothing committed"
+            raise WorkError(msg)
+        if attempt < MAX_COMMIT_ATTEMPTS:
+            _say("main moved during the run; planning again against it")
+    else:
+        msg = "main moved during the run; nothing committed; rerun"
+        raise WorkError(msg)
+    sync_shared_index(repo, new, plan.held)
+    write_note(copy_root, copy.form, {"committed": new, "committedat": str(time.time())})
+    print(f"committed {new[:7]}: {len(plan.held)} path(s)")
+    return 0
+
+
+def _dry_run_commit(
+    repo: Path,
+    copy_root: Path,
+    landing: tuple[Path, str, str],
+    run: tuple[_Args, str | None, Path],
+    *,
+    gated: bool,
+) -> int:
+    """Print the classification and the checks a commit would run; return 1 if it would refuse."""
+    args, message, index = run
+    plan = plan_commit(repo, copy_root, landing)
+    for label, paths in (
+        ("committed already", plan.committed),
+        ("would commit", plan.held),
+        ("main changed", plan.main_changed),
+        ("edited", plan.edited),
+    ):
+        for path in paths:
+            print(f"{label}: {path}")
+    refusals: list[str] = []
+    if plan.edited and not args.held_only:
+        refusals.append("edited paths")
+    if not plan.held:
+        print("gate: not needed (nothing to commit)")
+        return 1 if refusals else 0
+    print(f"gate: {'stamped' if gated else 'NOT gated'}")
+    if not gated:
+        refusals.append("not gated")
+    try:
+        identity = commit_identity(repo)
+    except WorkError as error:
+        print(f"identity: {error}")
+        refusals.append("no identity")
+        identity = SAVE_IDENTITY
+    _refuse_live_shared_journals(repo, plan.held)
+    tree = stage_commit(repo, plan, plan.held, index)
+    new = (
+        _git_bytes(
+            repo,
+            "commit-tree",
+            tree,
+            "-p",
+            plan.head,
+            "-F",
+            "-",
+            env=identity,
+            stdin=(message or "work.py commit --dry-run\n").encode("utf-8"),
+        )
+        .decode()
+        .strip()
+    )
+    failed = failed_checks(commit_checks(repo, plan.held, (plan.head, new, index), plan.wanted))
+    for name in failed:
+        print(f"check failed: {name}")
+    refusals.extend(failed)
+    print(f"would {'refuse: ' + ', '.join(refusals) if refusals else 'commit'}")
+    return 1 if refusals else 0
+
+
+@dataclasses.dataclass(frozen=True)
+class GateResult:
+    """One ``gate`` command's exit code and output."""
+
+    command: str
+    code: int
+    output: str
+
+
+def gate_commands() -> tuple[str, ...]:
+    """Return the commands ``gate`` runs: CI's lint job in check form (``workspace.LINT_COMMANDS``).
+
+    ``scripts.workspace`` is the fallback only when ``workspace`` itself is not on the
+    path (``work`` imported as ``scripts.work``).
+
+    Raises:
+        WorkError: the list is not a tuple of strings.
+
+    """
+    try:
+        module = importlib.import_module("workspace")
+    except ModuleNotFoundError as error:
+        if error.name != "workspace":
+            raise
+        module = importlib.import_module("scripts.workspace")
+    commands = _attribute(module, "LINT_COMMANDS")
+    if not _is_tuple(commands):
+        msg = "workspace.LINT_COMMANDS is not a tuple"
+        raise WorkError(msg)
+    texts = tuple(command for command in commands if isinstance(command, str))
+    if len(texts) != len(commands):
+        msg = "workspace.LINT_COMMANDS holds a command that is not a string"
+        raise WorkError(msg)
+    return texts
+
+
+def gate_label(command: str) -> str:
+    """Return a short name for a gate command: its script's file name and its fixed flags."""
+    words = [
+        PurePosixPath(word).name if "/" in word else word
+        for word in shlex.split(command)
+        if "$" not in word
+        and word
+        not in {
+            "python",
+            ".",
+            "--since",
+            "--until",
+        }
+    ]
+    return " ".join(words)
+
+
+def gate_hint(command: str) -> str:
+    """Return what to run or do in the copy when ``command`` fails (:data:`GATE_HINTS`)."""
+    return next((hint for word, hint in GATE_HINTS if word in command), "read its output above")
+
+
+def cmd_gate(args: _Args) -> int:
+    """Run CI's lint job check-only in a copy; stamp the content it passed."""
+    copy = locate(args.repo, args.name)
+    refuse_replica(copy, "gate")
+    copy_root = _live(copy)
+    tree = content_tree(copy_root)
+    if not copy_changes(copy_root, _head(copy_root), tree):
+        print("nothing to gate")
+        return 0
+    commands = gate_commands()
+    tests = [command for command in commands if is_pytest(shlex.split(command))]
+    if tests:
+        msg = f"gate never runs pytest (the suite runs in GitHub Actions): {'; '.join(tests)}"
+        raise WorkError(msg)
+    _ = _git(copy_root, *UNTRUSTED_CACHES, "add", "-A")
+    indexed = _git(copy_root, "write-tree").strip()
+    if indexed != tree:
+        msg = (
+            f"the copy's own index reads {indexed[:12]}, not its content {tree[:12]} (an "
+            "assume-unchanged or skip-worktree bit hides an edit); nothing run"
+        )
+        raise WorkError(msg)
+    root, env = copy_run_env(copy)
+    for name in ("SINCE", "UNTIL"):
+        _ = env.pop(name, None)
+    results: list[GateResult] = []
+    for command in commands:
+        code, output = run_in_copy(root, env, ("sh", "-c", command), capture=True)
+        results.append(GateResult(command, code, output))
+        if not args.json:
+            _say(f"gate {gate_label(command)}: {'pass' if code == 0 else f'FAIL (exit {code})'}")
+    failed = [result for result in results if result.code != 0]
+    changed = content_tree(copy_root) != tree
+    passed = not failed and not changed
+    if passed:
+        write_note(copy_root, copy.form, {"gated": tree, "gatedat": str(time.time())})
+    else:
+        clear_note(copy_root, copy.form, ("gated", "gatedat"))
+    names = [gate_label(result.command) for result in failed]
+    if changed:
+        names.append("the copy changed while the gate ran")
+    if args.json:
+        rows = [
+            {
+                "command": result.command,
+                "label": gate_label(result.command),
+                "exit": result.code,
+                "hint": "" if result.code == 0 else gate_hint(result.command),
+                "output": result.output,
+            }
+            for result in results
+        ]
+        verdict = "PASS" if passed else "FAIL"
+        document = {
+            "result": verdict,
+            "tree": tree,
+            "changed": changed,
+            "commands": rows,
+        }
+        print(json.dumps(document, indent=2))
+        return 0 if passed else 1
+    for result in failed:
+        _say(f"gate {gate_label(result.command)} failed; fix: {gate_hint(result.command)}")
+        tail = result.output.rstrip().splitlines()[-GATE_OUTPUT_LINES:]
+        if tail:
+            print("\n".join(tail), file=sys.stderr)
+    if passed:
+        print("gate: PASS")
+        return 0
+    print(f"gate: FAIL ({len(names)} of {len(commands)}: {', '.join(names)})")
+    return 1
 
 
 # --------------------------------------------------------------------------------------------
@@ -6181,12 +7037,18 @@ def _pytest_lock_held(repo: Path, holder: str) -> Generator[dict[str, str], None
         raise WorkError(str(error)) from error
 
 
-def cmd_run(args: _Args) -> int:
-    """Run a command in a copy's own environment."""
-    if not args.tail:
-        msg = "run needs a command after --"
-        raise WorkError(msg)
-    copy = locate(args.repo, args.name)
+def copy_run_env(copy: Copy) -> tuple[Path, dict[str, str]]:
+    """Return the copy's resolved folder and the environment ``run`` gives a command there.
+
+    A copy whose ``.venv`` is marked stale (:data:`VENV_STALE`) has it rebuilt first; the
+    environment is :func:`clean_env`'s, and the copy's interpreter must import the package
+    from inside the copy.
+
+    Raises:
+        WorkError: the copy is not live, its ``.venv`` cannot be built, or the package
+            imports from outside the copy.
+
+    """
     copy_root = _live(copy).resolve()
     stale = _git_path(copy_root, VENV_STALE)
     if stale.exists():
@@ -6198,7 +7060,42 @@ def cmd_run(args: _Args) -> int:
     if not _is_within(location, copy_root):
         msg = f"{PACKAGE} imports from {location}, outside the copy {copy_root}"
         raise WorkError(msg)
-    executable = shutil.which(args.tail[0], path=env["PATH"]) or args.tail[0]
+    return copy_root, env
+
+
+def run_in_copy(
+    copy_root: Path,
+    env: Mapping[str, str],
+    argv: Sequence[str],
+    *,
+    capture: bool = False,
+) -> tuple[int, str]:
+    """Run ``argv`` from ``copy_root`` in ``env`` (:func:`copy_run_env`); return its code and output.
+
+    The code is ``128 + N`` for death by signal ``N``. With ``capture`` the output is
+    stdout and stderr together, else it goes to this process's own streams and is ``""``.
+    """
+    executable = shutil.which(argv[0], path=env["PATH"]) or argv[0]
+    completed = subprocess.run(
+        [executable, *argv[1:]],
+        cwd=copy_root,
+        env=dict(env),
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.STDOUT if capture else None,
+        check=False,
+    )
+    code = 128 - completed.returncode if completed.returncode < 0 else completed.returncode
+    output = (completed.stdout or b"").decode("utf-8", "replace") if capture else ""
+    return code, output
+
+
+def cmd_run(args: _Args) -> int:
+    """Run a command in a copy's own environment."""
+    if not args.tail:
+        msg = "run needs a command after --"
+        raise WorkError(msg)
+    copy = locate(args.repo, args.name)
+    copy_root, env = copy_run_env(copy)
     _say(f"run {copy.name} in {copy_root} (.venv {env['VIRTUAL_ENV']})")
     no_hold: dict[str, str] = {}
     serialise = (
@@ -6208,13 +7105,8 @@ def cmd_run(args: _Args) -> int:
     )
     with serialise as held:
         env.update(held)
-        completed = subprocess.run(
-            [executable, *args.tail[1:]],
-            cwd=copy_root,
-            env=env,
-            check=False,
-        )
-    return 128 - completed.returncode if completed.returncode < 0 else completed.returncode
+        code, _output = run_in_copy(copy_root, env, args.tail)
+    return code
 
 
 # --------------------------------------------------------------------------------------------
@@ -6231,6 +7123,7 @@ FROM_COPY_COMMANDS = frozenset(
         "save",
         "run",
         "check-name",
+        "gate",
     },
 )
 
@@ -6285,6 +7178,9 @@ class _Args(argparse.Namespace):
     evidence: bool
     file: list[str]
     adopt_missing: bool
+    message: str | None
+    message_file: str | None
+    held_only: bool
     repo: Path
 
 
@@ -6336,6 +7232,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="patch from the copy's start, not its last landing",
     )
     land.set_defaults(handler=cmd_land)
+
+    commit = commands.add_parser(
+        "commit",
+        help="commit a copy's gated landing on main from a private index",
+    )
+    _ = commit.add_argument("name")
+    message = commit.add_mutually_exclusive_group()
+    _ = message.add_argument("-m", dest="message", default=None, help="the commit message")
+    _ = message.add_argument(
+        "-F",
+        dest="message_file",
+        default=None,
+        help="read the message from this file (- for stdin)",
+    )
+    _ = commit.add_argument("--dry-run", action="store_true")
+    _ = commit.add_argument(
+        "--held-only",
+        action="store_true",
+        help="commit the paths held as landed and name the rest",
+    )
+    commit.set_defaults(handler=cmd_commit)
+
+    gate = commands.add_parser("gate", help="run CI's lint job check-only in a copy")
+    _ = gate.add_argument("name")
+    _ = gate.add_argument("--json", action="store_true")
+    gate.set_defaults(handler=cmd_gate)
 
     rm = commands.add_parser("rm", help="remove one copy")
     _ = rm.add_argument("name")
