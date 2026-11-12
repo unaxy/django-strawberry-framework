@@ -115,6 +115,7 @@ from django_strawberry_framework.utils._array_field import array_leaf_field, is_
 from django_strawberry_framework.utils._narrowing import (
     call_method,
     dict_items,
+    dict_of,
     is_concrete_field,
     is_dict,
     is_list_or_tuple,
@@ -1351,6 +1352,11 @@ class ExpansionSnapshot:
     - ``copy_keys`` -- each form-data key a deferred copy's widget reads, mapped to
       the copies reading it (``_copy_form_keys``), so a request names a copy by
       exactly the keys its form field binds (``_named_flat_copies``).
+    - ``required_own`` -- the names of ``filters`` outside ``deferred_copies`` that
+      declare ``required`` (django-filter's ``extra["required"]``, the flag
+      graphene-django publishes as a non-null argument): fields of every form the
+      request pipeline binds for this set, so the set has no form a request that
+      supplies no filter input may skip (``FilterSet._requires_bound_form``).
 
     The read-only mapping keeps a snapshot HOLDER from rewriting the published
     classification; it is not a claim that the filter objects themselves are frozen.
@@ -1370,6 +1376,7 @@ class ExpansionSnapshot:
     candidates: Mapping[str, CandidateFilterMetadata]
     deferred_copies: frozenset[str]
     copy_keys: Mapping[str, frozenset[str]]
+    required_own: frozenset[str]
 
 
 def _widget_keys(filter_instance: Filter, name: str) -> list[str]:
@@ -4947,11 +4954,17 @@ class FilterSet(
         # table being published (``_publishing``), never publishes it again inside.
         with _publishing(cls, filters):
             copy_keys = _copy_form_keys(table, deferred)
+        required_own = frozenset(
+            name
+            for name, f in table.items()
+            if name not in deferred and dict_of(read_attr(f, "extra")).get("required", False)
+        )
         cls._expanded_snapshot = ExpansionSnapshot(
             filters=filters,
             candidates=MappingProxyType(candidates),
             deferred_copies=deferred,
             copy_keys=copy_keys,
+            required_own=required_own,
         )
         cls.base_filters = table
 
@@ -5121,6 +5134,28 @@ class FilterSet(
             return cls.get_filters()
         finally:
             _reshape_var.reset(token)
+
+    @classmethod
+    def _requires_bound_form(cls) -> bool:
+        """Whether a request on this set binds its form when it supplies no filter input.
+
+        A set whose own filters flag one ``required`` (``extra["required"]``, the
+        flag graphene-django publishes as a non-null argument and DRF's always-bound
+        backend validates; ``ExpansionSnapshot.required_own``) is applied with empty
+        input when ``filter:`` is omitted or ``null`` (``apply_sync`` /
+        ``apply_async`` read either as no data), so the request answers exactly
+        what ``filter: {}`` answers: the form refuses it where a required field
+        refuses an absent value, and every own filter that acts on an absent value
+        acts. The flag is read, never whether its form field refuses (a required
+        ``BooleanFilter``'s ``NullBooleanField`` does not). Any other set keeps the
+        reading django-filter gives a set built with no data
+        (``FilterSet(data=None).qs``: no validation, every row), so an omitted
+        ``filter:`` runs no filter step there.
+        """
+        # Publishes the table (and its snapshot) for a set first read here.
+        _ = cls._filter_table()
+        snapshot = cls._expansion_snapshot()
+        return snapshot is not None and bool(snapshot.required_own)
 
     @classmethod
     def _expansion_snapshot(cls) -> ExpansionSnapshot | None:

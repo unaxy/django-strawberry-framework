@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 509 done, 106 to do. The CHANGELOG entries filed here moved to
+Progress: 510 done, 106 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2957,6 +2957,23 @@ Progress: 509 done, 106 to do. The CHANGELOG entries filed here moved to
   `examples/fakeshop/test_query/test_unconstraining_overrides_api.py` (654 rows) and
   `tests/filters/test_sets.py::test_constrains_nothing_reads_only_a_statement_keeping_every_row`. spec-027, README,
   GLOSSARY `FilterSet`. Filed 923, 924.
+- [x] 852. (robustness) fixed: a served set's own `required=True` filter was never checked when a connection request
+  left `filter:` out, sent `filter: null` or an unset variable: the root and the nested `<relation>Connection`
+  answered every row, while `filter: {}` and `FilterSet.apply_sync(None, ...)` refused (one declaration, two answers;
+  graphene-django publishes such a filter as a non-null argument, DRF's backend always binds). A set with a filter of
+  its own flagged `required` now binds its form with no data on an omitted `filter:` and answers exactly what
+  `filter: {}` answers: `FILTER_INVALID` keyed `required` where the field refuses an absent value, before any row is
+  read; a `required` `BooleanFilter` (whose `NullBooleanField` never refuses) binds the set all the same, so its
+  absence-acting own filters act. `connection.py::_filter_step_runs` (the root and nested `_sidecar_steps` gate) reads
+  `filters/sets.py::FilterSet._requires_bound_form`, off `ExpansionSnapshot.required_own` (own, non-deferred filters
+  carrying `extra["required"]`; a child's required leaf copied flat is not one); `optimizer/nested_planner.py::
+  plan_connection_relation` leaves such a relation unplanned with its own reason, and the resolver names it under
+  strictness. A set with no required filter keeps the unbound reading and its window (root 1 query, nested 2). The
+  item's literal cell (an enabled flat copy of a non-required child leaf taking the own required key answers `{}` with
+  every row) is by design, as README states and as django-graphene-filters 1.0.0 does, and is now pinned. 12 grid cells
+  moved, all the defect; 0 narrowed. Pinned by `examples/fakeshop/test_query/test_required_filter_omission_api.py`
+  (32 rows). spec-030 Decision 7 step 3, spec-033 Decision 6, spec-027 empty-filter edge, README, GLOSSARY `FilterSet`,
+  `DjangoConnectionField`, connection-aware optimizer planning. Filed 926.
 
 ## To do: found along the way
 
@@ -3027,11 +3044,6 @@ Progress: 509 done, 106 to do. The CHANGELOG entries filed here moved to
   under `null_label` answers it since 748. A to-many `ModelChoiceFilter(null_label=...)` overriding `filter`, sent
   `null` or its `null_value="0"`, answers `[]` at `fe4eb38f`, pinned as unchanged by
   `tests/filters/test_sets.py::test_a_declared_model_choice_override_keeps_its_null_value_routing`. Found fixing 748
-- [ ] 852. (robustness) A `required=True` own filter of a served set is not enforced over GraphQL when the request
-  omits it: `filter: {}` (or a `filter:` naming only other keys) answers every row, under the package's and
-  django-filter's form builders alike, while README says a `required` filter acts on the form of the set that declares
-  it, at that set's root, and a directly built set refuses it
-  (`tests/filters/test_sets.py::test_a_directly_built_set_takes_required_from_the_keys_owner`). Found fixing 216
 - [ ] 864. (robustness) The `ArrayField` input gate judges a `method=` filter over an array by its key name: a
   `method=` `ListFilter` with `lookup_expr="in"` over an `ArrayField` is refused, though the method reads the list and
   applies no lookup. Found fixing 716
@@ -3104,6 +3116,11 @@ Progress: 509 done, 106 to do. The CHANGELOG entries filed here moved to
   positive grid cells on `fk_col`, `one_col`, `req_col`, `m2m_col`, plus the `exclude` duplicate-base cells; wrong
   before 795 too). A forward key of any length without `exclude` keeps the override's own rows since 881 and 795.
   Found fixing 795
+- [ ] 926. (robustness) A consumer form (`Meta.form`, or a `get_form_class` built from `self.filters`) carrying an
+  unnamed `required` flat copy refuses `filter: {}` but answers every row when `filter:` is omitted, `null` or unset:
+  `filters/sets.py::FilterSet._requires_bound_form` reads requiredness only from the set's own non-deferred filters
+  (`extra["required"]`), never from a consumer form, while README says such a form "still validates it (a `required`
+  one refuses the request)". Probe cell X2 `child_req=True flat=True form=dj` in the 852 research grid. Found fixing 852
 
 ## To do: holes found re-checking the fixes
 

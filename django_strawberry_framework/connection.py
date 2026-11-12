@@ -2048,6 +2048,21 @@ def _prepare_pipeline_source(
     )
 
 
+def _filter_step_runs(filterset_class: type[FilterSet], filter_input: object) -> bool:
+    """Whether a connection's filter step runs ``filterset_class`` on ``filter_input``.
+
+    It runs on a supplied ``filter:``, and on an omitted, ``null`` or unset one
+    when the set has no unbound form (``FilterSet._requires_bound_form``: an own
+    ``required`` filter), which ``apply_sync`` / ``apply_async`` bind with no
+    data so the request answers what ``filter: {}`` answers (refused where a
+    required field refuses an absent value).
+    Any other set left without ``filter:`` runs no filter step: django-filter's
+    unbound reading of a set built with no data (``FilterSet(data=None).qs``,
+    every row).
+    """
+    return is_supplied(filter_input) or filterset_class._requires_bound_form()
+
+
 def _sidecar_steps(
     definition: DjangoTypeDefinition,
     filter_input: object,
@@ -2055,7 +2070,9 @@ def _sidecar_steps(
 ) -> tuple[_SidecarStep, ...]:
     """Return the ``(kind, set_class, input)`` sidecar steps this call actually applies.
 
-    The gate is one rule - supplied AND declared - and the ORDER is contractual
+    The gate is one rule per step - a declared set whose step runs
+    (``_filter_step_runs``: supplied, or a set with a ``required`` own filter),
+    a declared order set given ``orderBy:`` - and the ORDER is contractual
     (filter narrows, then orderBy sorts). Both are written once here for both
     colored pipelines, so the halves cannot drift. The colored ``apply_sync`` /
     ``apply_async`` dispatch deliberately stays at each caller: the ``await`` is written where it
@@ -2068,8 +2085,9 @@ def _sidecar_steps(
     post-sidecar seal.
     """
     steps: list[_SidecarStep] = []
-    if is_supplied(filter_input) and definition.filterset_class is not None:
-        steps.append(("filter", definition.filterset_class, filter_input))
+    filterset_class = definition.filterset_class
+    if filterset_class is not None and _filter_step_runs(filterset_class, filter_input):
+        steps.append(("filter", filterset_class, filter_input))
     if is_supplied(order_by_input) and definition.orderset_class is not None:
         steps.append(("order", definition.orderset_class, order_by_input))
     return tuple(steps)
@@ -2536,12 +2554,14 @@ def _build_relation_connection_resolver(
     the pagination arguments to re-derive the window;
     ``ConnectionExtension`` consumes them) - then falls back to the shared
     attr. When the found rows carry the window annotations AND the
-    resolver's own ``filter`` / ``order_by`` kwargs are absent, it returns a
+    resolver's own ``filter`` / ``order_by`` kwargs are absent and the target's
+    filter set has no ``required`` own filter (``_filter_step_runs``), it returns a
     ``_WindowedConnectionRows`` marker handing the rows to the generated
     connection class (which builds the Relay object - the resolver never
     constructs a connection, since Strawberry feeds the resolver return back
     through ``resolve_connection`` as the node iterable). A sidecar kwarg
-    present means the window is ignored and the pipeline runs, so a future
+    present, or a required own filter on the target's set, means the window is
+    ignored and the pipeline runs, so a future
     planner/argument desync can never serve unfiltered wrong data. The marker
     also carries a fallback factory re-running this pipeline as a defensive
     recovery seam when the wrapper cannot be served (for example planned
@@ -2600,10 +2620,19 @@ def _build_relation_connection_resolver(
         if window_rows is None:
             window_rows = getattr(root, to_attr, None)
         filter_input, order_by_input = connection_sidecar_inputs_from_kwargs(kwargs)
-        no_sidecar = not has_connection_sidecar_input(
+        sidecar_input = has_connection_sidecar_input(
             filter_input=filter_input,
             order_by_input=order_by_input,
         )
+        # A target set with a ``required`` own filter applies its filter step with
+        # ``filter:`` omitted too, so its rows never come from the window.
+        filterset_class = definition.filterset_class
+        bound_filter = (
+            not sidecar_input
+            and filterset_class is not None
+            and _filter_step_runs(filterset_class, filter_input)
+        )
+        no_sidecar = not sidecar_input and not bound_filter
         if is_list(window_rows) and no_sidecar and _window_rows_are_annotated(window_rows):
             # Hand off the windowed page. The marker carries a fallback factory
             # (NOT a prebuilt connection - that would be fed back through
@@ -2633,18 +2662,21 @@ def _build_relation_connection_resolver(
             )
         # Strictness (spec-033 Decision 8): this branch did not serve the
         # windowed page (attr absent, not a list, rows without the window row
-        # number, or a sidecar kwarg), so the per-parent pipeline below WILL
-        # query; ``_check_n1`` consults the union-published sentinels before
-        # it runs. The reason names WHY the fallback fired so a flagged
-        # connection reads as actionable: a sidecar (``filter:`` / ``orderBy:``)
-        # selection is the explicitly-unwindowed shape (spec-033 Decision 6),
-        # so it carries the spec's filter/orderBy wording; any other fallback
-        # gets the generic per-parent reason.
-        reason = (
-            "not window-planned: selection carries filter/orderBy; resolving per-parent"
-            if not no_sidecar
-            else "not window-planned; resolving per-parent"
-        )
+        # number, a sidecar kwarg, or a target set with a required filter), so
+        # the per-parent pipeline below WILL query; ``_check_n1`` consults the
+        # union-published sentinels before it runs. The reason names WHY the
+        # fallback fired so a flagged connection reads as actionable: a sidecar
+        # (``filter:`` / ``orderBy:``) selection and a required-filter target
+        # are the explicitly-unwindowed shapes (spec-033 Decision 6), each with
+        # its own wording; any other fallback gets the generic per-parent reason.
+        if sidecar_input:
+            reason = "not window-planned: selection carries filter/orderBy; resolving per-parent"
+        elif bound_filter:
+            reason = (
+                "not window-planned: target filter set has a required filter; resolving per-parent"
+            )
+        else:
+            reason = "not window-planned; resolving per-parent"
         source = require(read_attr(root, accessor_name), is_manager).all()
         _check_n1(
             info,

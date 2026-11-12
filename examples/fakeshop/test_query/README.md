@@ -636,6 +636,7 @@ Module docstring = authoritative description; this = index. Read the docstring b
 | [`test_visible_relation_boundaries_api.py`][test-visible-relation-boundaries-api] | Async-only visibility hooks, intermediate and terminal relation scopes, null extension and secondary-type reentry. |
 | [`test_backend_bindability_api.py`][test-backend-bindability-api] | Numeric input format and timezone-setting boundaries measured on the executing database backend. |
 | [`test_filter_absence_api.py`][test-filter-absence-api] | Absent child defaults stay inactive on a parent until the request names their flat or nested input; a `RelatedFilter(flat=False)` declaration hands an own key back to the parent's own filter (its omitted checkbox value, `method=`, `exclude`, `lookup_expr`, HIDE direction, one statement per request). |
+| [`test_required_filter_omission_api.py`][test-required-filter-omission-api] | A set with a `required` own filter refuses `filter:` omitted, `null` or unset as it refuses `filter: {}` (root sync and async, no row read; nested `<relation>Connection` not window-planned, with its own strictness reason); a set with no required filter keeps its query counts, a required `BooleanFilter` (which never refuses) answers an omitted `filter:` with the `filter: {}` rows and reads its nested page per parent; a child's required leaf copied flat keeps the target unbound and windowed; an iterable `resolver=` passes through, and an enabled flat copy taking the own required key answers every row until `flat=False`. |
 | [`test_visible_relation_keys_api.py`][test-visible-relation-keys-api] | Raw and Relay relation keys respect each target's visible identity set, including custom target keys and empty inputs. |
 | [`test_declared_temporal_bindability_api.py`][test-declared-temporal-bindability-api] | Declared temporal filters and annotated columns refuse unbindable values under their form keys while admitted controls execute. |
 | [`test_json_filter_typing_api.py`][test-json-filter-typing-api] | Consumer filters over a JSON key on a holder schema publish the scalar their own form cleans (an integer form `Int`, its CSV `in` members too, a `method=` `NumberFilter` `Decimal`, a `forms.JSONField` `method=` filter `JSON`) and compare that kind: the integer `5` matches the JSON number, never the text `"5"`, an object binds whole, a `DateField` subclass cleaning ISO text and a `coerce=tuple` choice build and compare that text and that array. |
@@ -816,6 +817,7 @@ Outside this dir: [`../tests/`][fakeshop-tests] = project-level rows (urls, sett
 [test-relation-reentry-api]: test_relation_reentry_api.py
 [test-relation-spelling-api]: test_relation_spelling_api.py
 [test-relations-async-api]: test_relations_async_api.py
+[test-required-filter-omission-api]: test_required_filter_omission_api.py
 [test-resource-policy-api]: test_resource_policy_api.py
 [test-scalar-predicate-binding-api]: test_scalar_predicate_binding_api.py
 [test-scalars-api]: test_scalars_api.py

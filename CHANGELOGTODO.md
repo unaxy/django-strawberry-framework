@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 231 to do.
+Progress: 0 done, 232 to do.
 
 ## From dry-0_0_15_3
 
@@ -1120,6 +1120,11 @@ Progress: 0 done, 231 to do.
   itself and django-filter do. On a leaf walking a relation every parent is kept, a NULL key and a related row the
   target type hides included, with `exclude=True` too and on a forward key two hops long, and a logical arm holding
   only such leaves is the identity (`not` keeps every row, `or` is its other arm)
+- [ ] 927. CHANGELOG entry for item 852: a `DjangoConnectionField` or nested `<relation>Connection` over a
+  `FilterSet` with a filter of its own flagged `required=True` now answers a request that omits `filter:`, sends
+  `filter: null` or leaves its variable unset exactly as it answers `filter: {}`: `FILTER_INVALID` "This field is
+  required." where the field refuses an absent value, instead of every row. Such a nested connection is read per
+  parent, never from the optimizer's window
 
 ## From dry-upstream-0_0_15
 

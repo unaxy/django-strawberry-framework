@@ -223,6 +223,10 @@ def has_connection_sidecar_kwargs(kwargs: Mapping[str, object] | None) -> bool:
 
     The walker's fallback predicate (a sidecar-bearing nested connection is not
     window-planned) and the resolver's "no sidecar" gate share this one rule.
+    It reads the arguments alone: a target set with a ``required`` own filter,
+    which runs its filter step with no ``filter:`` too, is a relation-level
+    refusal both sides read off the set
+    (``django_strawberry_framework/filters/sets.py::FilterSet._requires_bound_form``).
     """
     filter_input, order_by_input = connection_sidecar_inputs_from_kwargs(kwargs)
     return has_connection_sidecar_input(filter_input=filter_input, order_by_input=order_by_input)

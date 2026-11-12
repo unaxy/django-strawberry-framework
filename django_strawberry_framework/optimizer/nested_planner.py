@@ -1291,6 +1291,20 @@ def plan_connection_relation(
     # imposed, exactly as the root slicer resolves it.
     keyset_context = declared_cursor_state_for_definition(target_definition)
 
+    # A target set with a ``required`` own filter has no unbound form
+    # (``FilterSet._requires_bound_form``): its filter step runs on every
+    # request, ``filter:`` supplied or not, so no payload can be served from a
+    # window. The relation stays UNPLANNED and strictness-visible, like the
+    # sidecar shapes.
+    filterset_class = None if target_definition is None else target_definition.filterset_class
+    if filterset_class is not None and filterset_class._requires_bound_form():
+        _log_connection_fallback(
+            relation_field_name,
+            _response_keys(sel),
+            "target filter set has a required filter",
+        )
+        return NestedConnectionPlanResult(plan=plan)
+
     # (e/f) Slice window(s) from the selection's resolved pagination arguments.
     # Pure (mutates nothing), so resolve BEFORE the child build - a malformed
     # slice must not leave child resolver keys / cacheable flips on the parent
