@@ -451,7 +451,7 @@ def holds_values_as_given(field: "ModelField") -> bool:
     cleans is the kind the column compares or stores. A filter over such a column is typed by
     the kind its form cleans (``filters/inputs.py::_form_cleaned_value_field``), and so is a
     built-in single-value form field over one listing no choices in a form mutation
-    (``forms/inputs.py::held_json_column``). A subclass that overrides either method
+    (``forms/inputs.py::_input_typing_column``). A subclass that overrides either method
     converts and is typed by the column, as is every column with another scalar (a consumer
     column converting in ``get_db_prep_value`` keeps its registered scalar), and a column no
     entry covers keeps the unsupported-field refusal. A relation registered as ``JSON`` is

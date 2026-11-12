@@ -536,6 +536,44 @@ def test_set_card_files_rejects_a_falsy_non_list_without_clearing_links(bad: obj
     assert card.path_links.filter(path__path=path, kind="predicted").exists()
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "sent",
+    [
+        pytest.param(
+            '["django_strawberry_framework/mutations_ws3b_live_probe.py"]',
+            id="json-text",
+        ),
+        pytest.param("django_strawberry_framework/mutations_ws3b_live_probe.py", id="one-path"),
+    ],
+)
+def test_set_card_files_reads_a_json_string_as_a_string(sent: str) -> None:
+    """A JSON string sent to the plain form's ``forms.JSONField`` reaches the service as a string.
+
+    ``paths`` is ``JSON``, and the field's ``to_python`` parses a string as JSON text, so the
+    value is bound as the field's presentation of it, its JSON text: a string whose text is a
+    JSON list is the string, never the list it spells, and a path is the string, never "Enter a
+    valid JSON." The service refuses a string as no list, and no link is written.
+    """
+    create_users(1)
+    card = kf.make_card(status=kf.make_status("todo"))
+    client = _staff_client()
+    payload = _run(
+        "mutation($d: SetCardFilesFormInput!) { setCardFiles(data: $d) { ok errors { field codes } } }",
+        {"d": {"cardId": _card_gid(card), "kind": "predicted", "paths": sent}},
+        client=client,
+    )
+    assert payload == {
+        "data": {
+            "setCardFiles": {
+                "ok": False,
+                "errors": [{"field": "__all__", "codes": ["invalid_tracked_path"]}],
+            },
+        },
+    }, payload
+    assert not card.path_links.exists()
+
+
 # An allowlisted package path (constants.py TRACKED_FILE_PATHS) so the strict
 # changed-file writer accepts it without a planned-row escape.
 _ALLOWLISTED_PATH = "django_strawberry_framework/filters/base.py"

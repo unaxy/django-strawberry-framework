@@ -12,7 +12,13 @@ neither of which owns a widget:
   value through them (``forms/resolvers.py::_bind_under_form_keys``), and the filter
   side names a flat copy and tells a supplied leaf from an absent one through
   ``widget_keys`` (``filters/sets.py::_widget_keys``,
-  ``filters/sets.py::FilterSet._leaf_absent``).
+  ``filters/sets.py::FilterSet._leaf_absent``);
+- ``reads_json_text`` - whether a form field parses the text its widget reads under one
+  key as JSON (a ``forms.JSONField``), so a JSON value is bound as the field's
+  ``prepare_value`` of it, the text an HTML form posts: the form flavors through
+  ``forms/resolvers.py::_bind_provided_presentations`` and
+  ``forms/inputs.py::presented_column``, the filter side through
+  ``filters/inputs.py::FilterLookupTable``'s ``json_text_fields``.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from __future__ import annotations
 import datetime
 from typing import TYPE_CHECKING
 
+from django import forms
 from django.contrib.postgres.validators import ArrayMaxLengthValidator
 from django.core.exceptions import ValidationError
 from django.forms import MultiWidget, SelectDateWidget, Widget
@@ -46,6 +53,7 @@ if TYPE_CHECKING:
 __all__ = (
     "bound_value",
     "multi_widget_keys",
+    "reads_json_text",
     "widget_entries",
     "widget_keys",
 )
@@ -135,6 +143,23 @@ def widget_keys(widget: object, key: str) -> list[str]:
     if subs is None:
         return [key]
     return [read for sub_key, sub_widget in subs for read in widget_keys(sub_widget, sub_key)]
+
+
+def reads_json_text(field: object) -> bool:
+    """Return whether form field ``field`` parses the text its widget reads under one key as JSON.
+
+    A ``forms.JSONField`` (a subclass included) whose widget reads one form-data key: its
+    ``to_python`` parses a string as JSON text, and its ``prepare_value`` presents a value as
+    that text (``json.dumps`` with the field's encoder), the text an HTML form posts and the
+    field parses back with its decoder. Django's forms answer this only through the class,
+    since a ``forms.JSONField``'s ``to_python`` takes a string as text whatever its kind
+    (``forms/converter.py::form_field_reads_list`` reads the class the same way). One whose
+    widget reads parts under several keys (a ``SplitArrayWidget``, a ``MultiWidget``) is
+    handed the list the widget assembles, never text, so it reads the value as given.
+    """
+    if not truth.is_instance(field, forms.JSONField):
+        return False
+    return widget_keys(read_attr(field, "widget"), "name") == ["name"]
 
 
 def widget_entries(widget: object, key: str, value: object) -> dict[str, object]:

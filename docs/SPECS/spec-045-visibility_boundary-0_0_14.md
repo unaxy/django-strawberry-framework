@@ -660,7 +660,9 @@ Every other bound payload — a direct `Lookup` right-hand side, an expression's
 payload slot (`Value.value`), a raw-SQL parameter, a mapping key — goes through the one
 admitted-bound-value rule: a plain-data subclass is normalized to an EXACT inert
 value (a `TextChoices` member becomes an exact `str`, a `date` subclass an exact
-`datetime.date`), read through the base type's own descriptors and C slots so
+`datetime.date`, and so does a genuine Django subclass of a plain-data base, such as the
+`JSONString` a `forms.JSONField` cleans a JSON string to, which is a bound value, never
+query AST rebuilt as a node), read through the base type's own descriptors and C slots so
 neither an overridden dunder nor a property shadowing a field name can run during
 normalization; anything that reduces to no exact inert value and is not trusted
 schema fails closed as an `untrusted` defect naming its type. A direct `Lookup`
@@ -751,7 +753,7 @@ The seal / row-survival matrix (maintainer-invoked gates only, per `AGENTS.md`):
 - [`tests/utils/test_querysets.py`][queryset-tests] — the shared seal / rebuild
   suite: provenance, callable-shadow, expression-graph, container, shape-defect,
   deferred-filter, prefetch alias-threading and relation-target, bound-value
-  reconstruction, derived-cache drop (both drop sets against the running Django's
+  reconstruction (a genuine Django `str` subclass, `JSONString`, included), derived-cache drop (both drop sets against the running Django's
   copy and clone), per-code error-message, and sync + async cache-removal cases.
 - [`tests/test_relay_node_field.py`][relay-tests],
   [`tests/test_connection.py`][connection-tests],

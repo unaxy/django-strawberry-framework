@@ -6645,10 +6645,17 @@ class FilterSet(
         its declared axis keys for the bounds it carries (none for a range naming no bound), any
         other value writes the logical ``form_key``, and a dict other than the range patch raises
         (``_reject_dict_form_value``) unless the filter publishes a ``JSON`` value
-        (``inputs.py::publishes_json_value``), which takes an object as one value. The actual bound
-        consumer form reads those current values under its own widget keys and prefix (``form``). A
-        lookup writing no key remains unnamed (``_named_leaf_filters``) and absent
-        (``_leaf_absent``).
+        (``inputs.py::publishes_json_value``), which takes an object as one value. A ``JSON`` value
+        whose form field parses the text it reads as JSON (``inputs.py::FilterLookupTable``'s
+        ``json_text_fields``: a declared filter whose ``field_class`` is ``forms.JSONField``)
+        writes the field's ``prepare_value`` of it, the JSON text an HTML form posts, which the
+        field parses back, and each member of a CSV filter over such a field
+        (``json_text_member_fields``, an ``in`` taking ``[JSON!]``) is written the same way: a
+        JSON string sent is that string, never the JSON text it spells; django-filter skips the
+        cleaned empty values (``""``, ``{}``, ``[]``) as it does for any filter.
+        The actual bound consumer form reads those current values under
+        its own widget keys and prefix (``form``). A lookup writing no key remains unnamed
+        (``_named_leaf_filters``) and absent (``_leaf_absent``).
         """
         _refuse_generated_filter_output(filter_instance, None, cls)
         normalized = normalize_input_value(filter_instance, value, field_name=form_key)
@@ -6657,6 +6664,13 @@ class FilterSet(
             return normalized
         if is_dict(normalized) and not publishes_json_value(filter_instance, cls):
             cls._reject_dict_form_value(filter_instance, form_key, value)
+        table = filter_lookup_table(cls)
+        presenting = table.json_text_fields.get(form_key)
+        if presenting is not None:
+            return {form_key: presenting.prepare_value(normalized)}
+        presenting = table.json_text_member_fields.get(form_key)
+        if presenting is not None:
+            return {form_key: [presenting.prepare_value(member) for member in list_of(normalized)]}
         # An element-binding integer ``__in`` is range-coerced (and
         # empty-aware) by ``IntegerInFilter`` at filter time, not here
         # (``filter_for_lookup`` routes it there), so the normalized

@@ -335,8 +335,10 @@ package-internal; Slice 4 is the live consumer surface.
     values under the form's **full declared** field set, overlaid by `provided_data`,
     with `files = provided_files`, then
     `form_class(**get_form_kwargs(info, data=, files=, instance=<row>))` (omitted fields
-    preserved; an omitted single-value field over a `JSONField` listing no choices binds
-    the field's `prepare_value` of its initial, what the form presents for it); **bind**
+    preserved; an omitted single-value field over a `JSONField` listing no choices, and an
+    omitted `forms.JSONField`, binds the field's `prepare_value` of its initial, what the
+    form presents for it; a `forms.JSONField` sent a value binds its `prepare_value` of it,
+    so a JSON string is stored as that string); **bind**
     each value under the keys its widget reads
     (`form.add_prefix`, a multi-key widget's own keys; a list longer than a
     `SplitArrayWidget`'s `size` → that field's `max_length` error; a value a
@@ -1612,7 +1614,22 @@ write flavor rides.
    value under `form.add_prefix`, so an explicit `null` reads as `None` whatever the
    widget; `django_strawberry_framework/forms/resolvers.py::_bind_form_values` binds whole
    and in parts), so a consumer `add_prefix` override is honoured; `form.errors` stays
-   keyed by field name. The form
+   keyed by field name. A `forms.JSONField` (a subclass included) whose widget reads one
+   key parses a string as JSON text
+   (`django_strawberry_framework/utils/widgets.py::reads_json_text`), so a value its
+   input hands it as a value (typed `JSON`, a choice enum or any scalar but `String`,
+   recorded at build on `django_strawberry_framework/utils/inputs.py::InputFieldSpec` as
+   `binds_json_text`) is bound, once the form is built and re-keyed, as the bound field's
+   `prepare_value` of it, the JSON text an HTML form posts, which the field parses back
+   with its decoder
+   (`django_strawberry_framework/forms/resolvers.py::_bind_provided_presentations`): a
+   JSON string is stored as that string, never refused or read as the value its text
+   spells, and `{}` / `[]` as sent. An explicit `null` stays `None`; a bound field an
+   `__init__` or `get_form` rebuilt as another kind, a `disabled` field and a value a
+   `get_form` / `get_form_kwargs` hook replaced (in a copy or in place) are left as bound.
+   Typed `String` (a text column listing no choices), the client sends the posted text
+   itself. The field's `prepare_value` must round-trip through its `to_python` with the
+   column's encoder and decoder, as Django's edit round trip requires. The form
    is built with the `data=` / `files=` split Django requires (a bound form reads
    scalars/relations from `data=` and uploaded files from `files=` — an `UploadedFile`
    in `data=` does **not** validate):
@@ -1694,10 +1711,13 @@ write flavor rides.
        initial set with `setlist`, any other mapping merged into a `dict`; an initial longer
        than a `SplitArrayWidget`'s `size` is the field's `max_length` error.
 
-     - **A single-value field over a `JSONField` listing no choices binds the form's
-       presentation.** A field typed by the form field over a column holding JSON as given
-       (Decision 7) reads text, and the stored value is a JSON value, so the reconstruction
-       leaves it out and, once `get_form` has built the form, binds the field's
+     - **A single-value field over a `JSONField` listing no choices, and a `forms.JSONField`
+       over any column, bind the form's presentation.** A field typed by the form field over
+       a column holding JSON as given (Decision 7) reads text, and the stored value is a JSON
+       value; a `forms.JSONField` reading one key parses a stored string as the JSON text it
+       spells (`django_strawberry_framework/forms/inputs.py::presented_column` names both).
+       So the reconstruction leaves it out and, once `get_form` has built the form, binds the
+       field's
        `prepare_value` of `form.get_initial_for_field`
        (`django_strawberry_framework/forms/resolvers.py::_bind_omitted_json_presentations`),
        what Django's `BoundField.value` presents for an unbound field and an HTML post sends
@@ -2405,6 +2425,18 @@ Rationale companion: [Decision 14][rationale-d14].
   `TypedChoiceField` Django builds for it, and a declared `ChoiceField` / `TypedChoiceField`,
   keep the column's choice enum (narrowed by the form's choices as any choice column's is), and
   an update omitting it reconstructs the stored value from the row.
+- **A `forms.JSONField` sent a JSON value.** A `forms.JSONField` reading one key parses a
+  string as JSON text, so the value its `JSON` or choice-enum input sends is bound as its
+  `prepare_value` of it: a JSON string (`"hi"`, one whose text is JSON, `"null"`, `""`, text
+  that is no JSON) is stored as that string, never refused nor read as the value its text
+  spells, and `{}` / `[]` are stored, not read as empty; numbers, booleans, objects and lists
+  as sent; an explicit `null` stores `NULL`. The default `ModelForm` field, a subclass, a
+  prefixed form and a plain `Form` alike; the field's decoder reads the presentation as it
+  reads an HTML post. An update omitting it binds its presentation of the stored value and
+  keeps every stored kind. A `disabled` field, a field an `__init__` rebuilds as a text field
+  and a value a hook binds are left as bound; over a text column listing no choices it is
+  typed `String` and the text sent is parsed. A consumer `prepare_value` that does not
+  round-trip through its `to_python` fails as Django's own edit form does.
 - **A form field whose widget reads several keys.** A `SplitArrayField` over an
   `ArrayField` (required or optional, `remove_trailing_nulls` either way, text or integer
   elements, a nullable-element column, a column default, a prefixed form) writes exactly
@@ -2858,7 +2890,16 @@ behavior reachable through `/graphql/`, package tests own internals.
     number, boolean, `null`), refuses a raw object or list as the coercion error and text that
     is no JSON as its `invalid` error with nothing written, and keeps a stored object, list,
     string, number or `NULL` on an update omitting it, sync and async
-    (`examples/fakeshop/test_query/test_scalars_mutation_api.py`);
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py`); the default-`forms.JSONField`
+    form's `payload` (`createNullableScalarSpecimenViaJsonForm` /
+    `updateNullableScalarSpecimenViaJsonForm`) stores each JSON value sent as sent (strings,
+    one whose text is JSON or none, `"null"`, `""`, `{}`, `[]`, numbers, booleans, objects,
+    lists, `null`) and keeps each stored kind on an update omitting it
+    (`examples/fakeshop/test_query/test_scalars_mutation_api.py`), the plain kanban form's
+    `paths` reads a JSON string as a string
+    (`examples/fakeshop/test_query/test_kanban_mutations_api.py`), and a prefixed form, a
+    subclass, a decoder, a `disabled` field, a rebuilt text field, hook-bound text and the
+    `String`-typed control are pinned in `tests/forms/test_resolvers.py`;
     on the Postgres tier the default `ModelForm` `SimpleArrayField`, a subclass of it and a
     `MultipleChoiceField` over a real `ArrayField` keep `[String!]!` while a `ChoiceField` is
     `String!`, and a built-in single-value field over an `ArrayField` creates, updates and keeps an
@@ -3357,8 +3398,9 @@ The completion contract.
    payload** from the located row over the form's full declared field set, overlaid by
    `provided_data` and in the three shapes a provided field decodes to (an omitted field
    whose input shape disagrees with its column binds the built form's initial, and an
-   omitted single-value field over a `JSONField` listing no choices the field's
-   `prepare_value` of it), with
+   omitted single-value field over a `JSONField` listing no choices, or an omitted
+   `forms.JSONField`, the field's `prepare_value` of it; a `forms.JSONField` sent a value
+   its `prepare_value` of that value), with
    `files = provided_files`, then `form_class(**get_form_kwargs(…, instance=<located
    row>))` — so omitted scalar / FK / M2M / file values are preserved (a scalar as
    stored, not as the form field cleans it) and

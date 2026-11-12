@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 515 done, 106 to do. The CHANGELOG entries filed here moved to
+Progress: 516 done, 106 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3036,14 +3036,27 @@ Progress: 515 done, 106 to do. The CHANGELOG entries filed here moved to
   publication hands `filters/inputs.py::_build_range_input_class` text. Pinned by the fakeshop
   `NullableScalarSpecimenFilter.score_window` and
   `test_lazy_filter_names_api.py::test_a_lazily_named_range_filter_serves_and_compares_its_column`
+- [x] 786. (robustness) fixed: a form mutation bound a `forms.JSONField`'s decoded GraphQL value raw, so the field's
+  `to_python` re-read a string as JSON text: a JSON string was refused ("Enter a valid JSON.") or stored as the value its
+  text spells, `"null"` / `""` / `{}` / `[]` cleaned to `None` (refused on a non-null column), choice-enum members over
+  a choices `JSONField` were refused, and an update omitting the field over a stored string was refused; the same root
+  on a declared filter whose `field_class` is `forms.JSONField` (and its CSV `in`). A `forms.JSONField` (a subclass
+  included) reading one form-data key whose input is not `String` text (`utils/widgets.py::reads_json_text`, recorded
+  at build as `utils/inputs.py::InputFieldSpec.binds_json_text`) is now bound the bound field's `prepare_value` of the
+  value sent, as Django's edit round trip posts (`forms/resolvers.py::_bind_provided_presentations`, after `get_form`;
+  explicit `null`, a disabled field, a rebuilt field and a hook's value left as bound), an omitted one its presentation
+  of the initial on any column (`forms/inputs.py::presented_column`, one mechanism with item 720's), and such a filter
+  is bound the same presentation, member by member for the CSV filter (`filters/inputs.py::FilterLookupTable`,
+  `filters/sets.py::FilterSet._leaf_form_data`); the seal binds a genuine Django subclass of a plain-data base (the
+  `JSONString` the field cleans a string to) as its exact base value (`utils/querysets.py::_is_reconstructable_node`).
+  Every value is now stored as the model and serializer flavors store it; a field's decoder applies as under Django.
+  Pinned live by `examples/fakeshop/test_query/test_scalars_mutation_api.py` (the `ViaJsonForm` pair over a new
+  `NullableScalarSpecimenJsonForm`), `test_kanban_mutations_api.py` (`setCardFiles`) and
+  `test_json_filter_typing_api.py`, plus `tests/forms/test_resolvers.py` and `tests/utils/test_querysets.py`. spec-038,
+  spec-027, spec-045, README, GLOSSARY `DjangoModelFormMutation`. Filed 935.
 
 ## To do: found along the way
 
-- [ ] 786. (robustness) A `ModelForm`'s default `forms.JSONField` over a `JSONField` re-parses a decoded JSON
-  string as JSON text: the JSON string `"hi"` sent is refused "Enter a valid JSON.", the JSON string `'{"a": 1}'` is
-  stored as the object, and an update omitting the field over a stored JSON string is refused the same way, though the
-  input is typed `JSON` by the column (docs/README.md "Form mutations"). Likely fix: bind the form field's
-  `prepare_value` of the decoded value. Found researching 720
 - [ ] 787. (robustness, lead, unprobed) A `DateField` / `DecimalField` / `UUIDField` form field over a `JSONField` with
   no encoder hands the column a value its JSON encoder cannot encode, failing at save; the filter side refuses the
   same kind at build (`filters/inputs.py::_refuse_kind_json_cannot_encode`), the form side does not. Found researching
@@ -3188,6 +3201,9 @@ Progress: 515 done, 106 to do. The CHANGELOG entries filed here moved to
   registered for its target model it skips spec-027 Decision 8's refusal that a plain `str` or `StrEnum` spelling
   raises ("no DjangoType is registered for its target model Shelf") and answers rows; with a hiding target type every
   spelling answers the same rows. Found verifying 783
+- [ ] 935. (robustness) A `SerializerMutation` over DRF `serializers.JSONField(binary=True)` types the input `JSON`,
+  but DRF's `to_internal_value` with `binary=True` reads only JSON text: a number or object sent is refused and a
+  string is parsed as JSON text. Type it `String`, or bind `json.dumps` of the value. Found researching 786
 
 ## To do: holes found re-checking the fixes
 

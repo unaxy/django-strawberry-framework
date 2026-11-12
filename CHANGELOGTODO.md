@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 234 to do.
+Progress: 0 done, 235 to do.
 
 ## From dry-0_0_15_3
 
@@ -1135,6 +1135,12 @@ Progress: 0 done, 234 to do.
   hop was walked, a `method=` receives the text and a class-level `filter` override reads `self.field_name` as text,
   and a served `RangeFilter` with a lazy `field_name` builds where the schema build raised `TypeError` (item 920); a
   `str` subclass name is kept as declared
+- [ ] 936. CHANGELOG entry for item 786: a form mutation's `forms.JSONField` (the default form field of a model
+  `JSONField`) stores a JSON string sent as that string, no longer refused or read as the JSON its text spells, stores
+  `{}` / `[]` as sent, accepts choice-enum members over a choices `JSONField`, and keeps a stored string on an update
+  omitting it; its decoder reads the value as Django's HTML round trip does. A declared filter whose `field_class` is
+  `forms.JSONField` (and its CSV `in`, member by member) compares a JSON string as that string, where it was refused,
+  read as its text's value or answered with an unexpected error
 
 ## From dry-upstream-0_0_15
 

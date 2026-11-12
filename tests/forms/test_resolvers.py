@@ -7600,11 +7600,12 @@ def _update_omitting(
     hook: str = "copy",
     rebound: dict[str, object] | None = None,
     sent: dict[str, object] | None = None,
+    written_title: str | None = None,
 ) -> dict[str, object]:
     """Update a row stored with ``stored``, sending ``title`` and ``sent``; return its columns.
 
-    The update succeeds with empty ``errors``; the row is read back through its base
-    manager, ``title`` included.
+    The update succeeds with empty ``errors`` and a result titled ``written_title`` (default
+    ``title``); the row is read back through its base manager, ``title`` included.
     """
     type(
         f"{model.__name__}T",
@@ -7642,7 +7643,8 @@ def _update_omitting(
             variable_values={"id": str(pk_of(row)), "d": {"title": title, **(sent or {})}},
         )
         assert res.errors is None, res.errors
-        assert res.data == {"updateRow": {"result": {"title": title}, "errors": []}}
+        shown = title if written_title is None else written_title
+        assert res.data == {"updateRow": {"result": {"title": shown}, "errors": []}}
         return dict(model._base_manager.values(*columns).get())
 
 
@@ -8114,6 +8116,204 @@ def test_update_omitting_a_json_text_field_writes_the_consumers_value(
         hook=hook,
     )
     assert row == {"title": "New", "payload": written}
+
+
+class _PrefixedJsonForm(forms.ModelForm[_NullJsonRow]):
+    """The ``forms.JSONField`` Django builds for ``payload``, read under the prefix ``row``."""
+
+    prefix = "row"
+
+    class Meta:
+        model = _NullJsonRow
+        fields = ("title", "payload")
+
+
+class _EncodedJsonField(forms.JSONField):
+    """A ``forms.JSONField`` subclass, read as one."""
+
+
+class _SubclassJsonForm(forms.ModelForm[_NullJsonRow]):
+    """``payload`` through ``_EncodedJsonField``."""
+
+    payload = _EncodedJsonField(required=False)
+
+    class Meta:
+        model = _NullJsonRow
+        fields = ("title", "payload")
+
+
+class _TaggingDecoder(json.JSONDecoder):
+    """A JSON decoder marking every object it decodes ``"decoded": true``."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(object_hook=lambda decoded: {**decoded, "decoded": True})
+        del kwargs
+
+
+class _DecodingJsonForm(forms.ModelForm[_NullJsonRow]):
+    """``payload`` through a ``forms.JSONField`` parsing its text with ``_TaggingDecoder``."""
+
+    payload = forms.JSONField(required=False, decoder=_TaggingDecoder)
+
+    class Meta:
+        model = _NullJsonRow
+        fields = ("title", "payload")
+
+
+class _DisabledJsonForm(forms.ModelForm[_NullJsonRow]):
+    """A disabled ``forms.JSONField`` for ``payload``, which reads no data."""
+
+    payload = forms.JSONField(required=False, disabled=True)
+
+    class Meta:
+        model = _NullJsonRow
+        fields = ("title", "payload")
+
+
+class _RebuiltTextForm(forms.ModelForm[_NullJsonRow]):
+    """``payload`` declared a ``forms.JSONField``, rebuilt in ``__init__`` as a text field."""
+
+    payload = forms.JSONField(required=False)
+
+    def __init__(
+        self,
+        data: Mapping[str, object] | None = None,
+        files: _FilesT | None = None,
+        instance: _NullJsonRow | None = None,
+    ) -> None:
+        super().__init__(data=data, files=files, instance=instance)
+        self.fields["payload"] = _PresentedTextField(required=False)
+
+    class Meta:
+        model = _NullJsonRow
+        fields = ("title", "payload")
+
+
+class _JsonTitleForm(forms.ModelForm[_NullJsonRow]):
+    """The text column ``title`` through a ``forms.JSONField``, typed ``String`` by the column."""
+
+    title = forms.JSONField()
+
+    class Meta:
+        model = _NullJsonRow
+        fields = ("title", "payload")
+
+
+#: JSON values a ``forms.JSONField`` reads as JSON text if bound as they are decoded.
+_JSON_STRINGS_AND_EMPTIES = [
+    pytest.param("hi", id="string"),
+    pytest.param('{"a": 1}', id="string-of-json-text"),
+    pytest.param("null", id="string-null"),
+    pytest.param("", id="empty-string"),
+    pytest.param({}, id="empty-object"),
+    pytest.param([], id="empty-list"),
+]
+
+
+@pytest.mark.parametrize("sent", _JSON_STRINGS_AND_EMPTIES)
+@pytest.mark.parametrize(
+    "form_class",
+    [
+        pytest.param(_PrefixedJsonForm, id="prefixed"),
+        pytest.param(_SubclassJsonForm, id="subclass"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_a_json_form_field_binds_its_presentation_of_the_value_sent(
+    form_class: type[forms.BaseForm],
+    sent: object,
+) -> None:
+    """A ``forms.JSONField`` sent a JSON value stores it as sent, under a prefix and subclassed.
+
+    The value is bound as the field's ``prepare_value`` of it, the JSON text an HTML form
+    posts, under the key the bound form reads (``row-payload`` for the prefixed form), so a
+    JSON string is stored as that string and ``{}`` / ``[]`` as themselves.
+    """
+    row = _update_omitting(
+        _NullJsonRow,
+        form_class,
+        {"payload": {"k": "v"}},
+        sent={"payload": sent},
+    )
+    assert row == {"title": "New", "payload": sent}
+
+
+@pytest.mark.parametrize(
+    ("sent", "written"),
+    [
+        pytest.param({"payload": {"a": 1}}, {"a": 1, "decoded": True}, id="sent"),
+        pytest.param({}, {"a": 1}, id="omitted"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_a_json_form_field_parses_its_presentation_with_its_decoder(
+    sent: dict[str, object],
+    written: object,
+) -> None:
+    """The field's decoder reads the presentation bound for it, as it reads an HTML post.
+
+    An object sent is bound as its JSON text, which the field's ``to_python`` parses with its
+    decoder, so the decoded object is written; an update omitting the field binds the stored
+    object's presentation, which the decoder reads to its cleaning, and keeps the stored object.
+    """
+    row = _update_omitting(_NullJsonRow, _DecodingJsonForm, {"payload": {"a": 1}}, sent=sent)
+    assert row == {"title": "New", "payload": written}
+
+
+@pytest.mark.parametrize(
+    (
+        "form_class",
+        "hook",
+        "bind",
+        "written",
+    ),
+    [
+        pytest.param(_DisabledJsonForm, "copy", {}, "s", id="disabled"),
+        pytest.param(_RebuiltTextForm, "copy", {}, "y", id="rebuilt-reads-text"),
+        pytest.param(_SubclassJsonForm, "copy", {"payload": '"x"'}, "x", id="hook-copy"),
+        pytest.param(_SubclassJsonForm, "in-place", {"payload": '"x"'}, "x", id="hook-in-place"),
+    ],
+)
+@pytest.mark.django_db(transaction=True)
+def test_a_json_form_field_leaves_a_value_it_does_not_read_as_bound(
+    form_class: type[forms.BaseForm],
+    hook: str,
+    bind: dict[str, object],
+    written: object,
+) -> None:
+    """A value the bound ``forms.JSONField`` does not read as sent is left as bound.
+
+    A ``disabled`` field reads no data and cleans the stored value; a field an ``__init__``
+    rebuilds as a text field (here one presenting values as JSON text) reads the string sent as
+    text, never its presentation; and a value a ``get_form_kwargs`` hook binds, in a copy of the
+    mapping or in place, is the consumer's JSON text, which the field parses.
+    """
+    row = _update_omitting(
+        _NullJsonRow,
+        form_class,
+        {"payload": "s"},
+        bind=bind,
+        hook=hook,
+        sent={"payload": "y"},
+    )
+    assert row == {"title": "New", "payload": written}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_json_form_field_typed_string_reads_the_text_sent() -> None:
+    """A ``forms.JSONField`` over a text column is typed ``String`` and parses the text sent.
+
+    The client sends the text an HTML form posts, so it is bound as sent: ``'"New"'`` is the
+    JSON text of the string ``"New"``, which the field parses and the column stores.
+    """
+    row = _update_omitting(
+        _NullJsonRow,
+        _JsonTitleForm,
+        {"payload": None},
+        title='"New"',
+        written_title="New",
+    )
+    assert row == {"title": "New", "payload": None}
 
 
 @pytest.mark.django_db(transaction=True)

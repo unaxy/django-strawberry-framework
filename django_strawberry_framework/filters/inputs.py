@@ -109,7 +109,11 @@ from django_strawberry_framework.utils.querysets import (
 from django_strawberry_framework.utils.relations import generated_column_source
 from django_strawberry_framework.utils.strings import flatten_lookup_path, pascal_case_or_raise
 from django_strawberry_framework.utils.typing import object_result
-from django_strawberry_framework.utils.widgets import multi_widget_keys, widget_keys
+from django_strawberry_framework.utils.widgets import (
+    multi_widget_keys,
+    reads_json_text,
+    widget_keys,
+)
 
 from .base import (
     _RANGE_BOUNDS,
@@ -1977,24 +1981,48 @@ def publishes_json_value(filter_instance: Filter, filterset_cls: type[FilterSet]
     kind table, for the scalar alone (``_element_scalar``: no choice enum is built); every
     other arm publishes no ``JSON`` value. ``filters/sets.py::FilterSet._leaf_form_data``
     reads it: an object sent to such a leaf (a pass-through ``TypedFilter`` on a ``JSONField``
-    key, a ``method=`` filter whose form is a ``forms.JSONField``) is one JSON value, bound
+    key, a filter whose ``field_class`` is ``forms.JSONField``) is one JSON value, bound
     under its one form-data key.
+    """
+    return _json_publication(filter_instance, filterset_cls) == _JSON_VALUE
+
+
+#: ``_json_publication``'s answers: one value published as ``JSON``, or each CSV member.
+_JSON_VALUE = "value"
+_JSON_MEMBERS = "members"
+
+
+def _json_publication(filter_instance: Filter, filterset_cls: type[FilterSet]) -> str | None:
+    """Return ``_JSON_VALUE`` / ``_JSON_MEMBERS`` where the filter publishes ``JSON``, else ``None``.
+
+    The arms of ``convert_filter_to_input_annotation`` that type a value through
+    ``_element_annotation`` (a bare ``TypedFilter``, the catch-all, and each member of a CSV
+    filter), dispatched on the same kind table, asked for the scalar alone
+    (``_element_scalar``: no choice enum is built); every other arm publishes no ``JSON``.
     """
     model_field = _filterset_value_field(filterset_cls, filter_instance)
 
     def _no_json(_filter: Filter) -> object:
         return None
 
+    def _csv(matched: Filter) -> object:
+        value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
+        column = _array_element_column(matched, value_field, filterset_cls)
+        member = _element_scalar(matched, column, filterset_cls)
+        return _JSON_MEMBERS if truth.is_among(member, (strawberry.scalars.JSON,)) else None
+
     def _typed(matched: Filter) -> object:
         value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
-        return _element_scalar(matched, value_field, filterset_cls)
+        return _json_value_of(_element_scalar(matched, value_field, filterset_cls))
 
     def _catchall(matched: Filter) -> object:
-        return _catchall_element(
-            matched,
-            model_field,
-            filterset_cls,
-            lambda field: _element_scalar(matched, field, filterset_cls),
+        return _json_value_of(
+            _catchall_element(
+                matched,
+                model_field,
+                filterset_cls,
+                lambda field: _element_scalar(matched, field, filterset_cls),
+            ),
         )
 
     published = convert_with_mro(
@@ -2005,7 +2033,7 @@ def publishes_json_value(filter_instance: Filter, filterset_cls: type[FilterSet]
             _no_json,
             _no_json,
             _no_json,
-            _no_json,
+            _csv,
             _no_json,
             _no_json,
             _typed,
@@ -2016,7 +2044,12 @@ def publishes_json_value(filter_instance: Filter, filterset_cls: type[FilterSet]
         scalar_registry={},
         fallthrough_error_factory=_unexpected_filter_dispatch,
     )
-    return truth.is_among(published, (strawberry.scalars.JSON,))
+    return published if isinstance(published, str) else None
+
+
+def _json_value_of(scalar: object) -> str | None:
+    """``_JSON_VALUE`` when ``scalar`` is ``JSON``, else ``None``."""
+    return _JSON_VALUE if truth.is_among(scalar, (strawberry.scalars.JSON,)) else None
 
 
 # ---------------------------------------------------------------------------
@@ -2817,13 +2850,24 @@ class FilterLookupTable:
     ``name`` and ``name__icontains`` share the ``name`` gate
     (``leaf_gate_path``). ``source`` is the published filter table
     (``FilterSet._filter_table``) the lookup table was built from: the cache is
-    valid only while that object is.
+    valid only while that object is. ``json_text_fields`` maps the form key of each
+    lookup whose value is published as ``JSON`` (``publishes_json_value``) and whose form
+    field parses the text it reads as JSON (``utils/widgets.py::reads_json_text``: a
+    declared filter whose ``field_class`` is ``forms.JSONField``) to that field, built
+    from a copy of the declaration (``_declared_form_field``), and ``json_text_member_fields``
+    does the same for a CSV filter over such a field whose members are each published as
+    ``JSON`` (``_json_publication``: an ``in`` taking ``[JSON!]``):
+    ``filters/sets.py::FilterSet._leaf_form_data`` binds such a value, or each member, as
+    the field's ``prepare_value`` of it, the JSON text an HTML form posts, so a JSON string is
+    compared as that string, never read as the JSON text it spells.
     """
 
     source: Mapping[str, Filter]
     heads: Mapping[str, Mapping[str, FormKeyedFilter]]
     by_input_attr: Mapping[str, Mapping[str, FormKeyedFilter]]
     gate_paths: Mapping[str, str]
+    json_text_fields: Mapping[str, forms.Field]
+    json_text_member_fields: Mapping[str, forms.Field]
 
 
 def _is_declared_head(filterset_cls: type[FilterSet], name: str, filter_instance: Filter) -> bool:
@@ -2969,14 +3013,52 @@ def filter_lookup_table(filterset_cls: type[FilterSet]) -> FilterLookupTable:
             )
         by_input_attr[input_attr] = by_input_attr[head]
         gate_paths[input_attr] = gate_paths[head]
+    json_text_fields, json_text_member_fields = _json_text_fields(filterset_cls, heads)
     table = FilterLookupTable(
         source=all_filters,
         heads=heads,
         by_input_attr=by_input_attr,
         gate_paths=gate_paths,
+        json_text_fields=json_text_fields,
+        json_text_member_fields=json_text_member_fields,
     )
     filterset_cls._lookup_table = table
     return table
+
+
+def _json_text_fields(
+    filterset_cls: type[FilterSet],
+    heads: Mapping[str, Mapping[str, FormKeyedFilter]],
+) -> tuple[dict[str, forms.Field], dict[str, forms.Field]]:
+    """Return ``FilterLookupTable``'s ``json_text_fields`` and ``json_text_member_fields``.
+
+    Read once per published filter table, so no request builds a form field to ask it. Only a
+    filter whose ``field_class`` is a ``forms.JSONField`` (django-filter's ``Filter.field``
+    builds its form field from that class, a CSV filter's from a subclass of it) builds one
+    here (``_declared_form_field``) and asks how its value is published
+    (``_json_publication``): every other filter keeps its field unbuilt and its typing
+    unasked, as an apply that builds no schema leaves them.
+    """
+    values: dict[str, forms.Field] = {}
+    members: dict[str, forms.Field] = {}
+    for bag in heads.values():
+        for form_key, filter_instance in bag.values():
+            if not truth.is_subclass(
+                read_attr(filter_instance, "field_class", None),
+                forms.JSONField,
+            ):
+                continue
+            field = _declared_form_field(filter_instance)
+            publication = (
+                _json_publication(filter_instance, filterset_cls)
+                if reads_json_text(field)
+                else None
+            )
+            if publication == _JSON_VALUE:
+                values[form_key] = require_instance(field, forms.Field)
+            elif publication == _JSON_MEMBERS:
+                members[form_key] = require_instance(field, forms.Field)
+    return values, members
 
 
 def filter_member_lever(filterset_cls: type[FilterSet], head: str) -> MemberLever:

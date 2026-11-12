@@ -2632,7 +2632,15 @@ def _is_reconstructable_node(node_type: type[object]) -> bool:
       payload;
     - a ``models.Model`` instance in an expression slot is a BOUND PARAMETER (Django
       extracts a lookup's pk from it; a raw-SQL parameter reaches the driver as is),
-      inert with respect to SQL structure.
+      inert with respect to SQL structure;
+    - an instance of a plain-data base the bound-value rule normalizes
+      (``_BOUND_VALUE_BASES``: ``str``, ``int``, ``Decimal``, a date, ...) is a BOUND
+      VALUE whatever class carries it, Django's own included: ``forms.JSONField`` cleans a
+      JSON string to ``django.forms.fields.JSONString``, a ``str`` subclass with an
+      instance ``__dict__``, which a filter hands its lookup as the value to compare. No
+      Django AST class descends from one, and the base allocator cannot build such an
+      instance slot by slot, so it binds as its exact base value
+      (``_normalized_bound_value``).
 
     Anything whose type is NOT genuine Django is likewise not rebuilt as a node: the only
     such objects the proofs admit are direct lookup right-hand-side values -- plain query
@@ -2652,6 +2660,8 @@ def _is_reconstructable_node(node_type: type[object]) -> bool:
     """
     if node_type in _RECONSTRUCTABLE_NODE_TYPES:
         return True
+    if issubclass(node_type, _BOUND_VALUE_BASES):
+        return False
     if issubclass(node_type, _RETAINED_SCHEMA_BASES):
         _RETAINED_TYPES.add(node_type)
         return False
@@ -2781,6 +2791,9 @@ _BOUND_VALUE_NORMALIZERS: tuple[tuple[type[object], Callable[[Any], object]], ..
     (datetime.timedelta, _normalized_timedelta),
     (uuid.UUID, _normalized_uuid),
 )
+#: The plain-data bases ``_BOUND_VALUE_NORMALIZERS`` rebuilds, whose every instance, a
+#: genuine Django subclass's included, is a bound value (``_is_reconstructable_node``).
+_BOUND_VALUE_BASES: tuple[type[object], ...] = tuple(base for base, _ in _BOUND_VALUE_NORMALIZERS)
 # This is a hand-ordered MIRROR of ``_INERT_VALUE_TYPES`` minus ``bool`` (whose
 # subclasses cannot exist): it pairs each base with its normalizer, and its ORDER is
 # semantic -- ``datetime`` before ``date`` because the first subclasses the second --

@@ -89,6 +89,14 @@ variable coercion error and text that is no JSON the field's ``invalid`` error, 
 written; an update omitting ``payload`` binds the field's presentation of the stored value,
 its JSON text, and keeps a stored object, list, string, number or ``NULL``, sync and async.
 
+``createNullableScalarSpecimenViaJsonForm`` / ``updateNullableScalarSpecimenViaJsonForm`` write
+``payload`` through ``NullableScalarSpecimenJsonForm``'s own ``forms.JSONField``, typed ``JSON``,
+which parses the text it reads: each JSON value sent is bound as the field's presentation of it,
+its JSON text, so a JSON string (``"hi"``, one whose text is JSON, ``"null"``, ``""``), ``{}``,
+``[]``, a number, a boolean, an object and a list are each stored as sent and an explicit ``null``
+stores ``NULL``, on create and on update; an update omitting ``payload`` keeps every stored kind,
+a string whose text is no JSON included.
+
 ``updateScalarSpecimenViaLockedStampForm`` writes through a form disabling ``occurred_at``,
 ``occurred_time`` and ``external_id``: an update keeps each one's stored value, the
 microseconds the ``DateTimeInput`` / ``TimeInput`` presentation of a stored instant zeroes
@@ -1845,6 +1853,91 @@ async def test_async_json_text_field_writes_the_same_way(
         )
 
     await sync_to_async(_assert_json_written)(root, response_json(result.response), expected)
+
+
+#: The default-``forms.JSONField`` form's create and update root fields and their input types.
+_JSON_FORM = (
+    "createNullableScalarSpecimenViaJsonForm",
+    "NullableScalarSpecimenJsonFormInput",
+    "updateNullableScalarSpecimenViaJsonForm",
+    "NullableScalarSpecimenJsonFormPartialInput",
+)
+
+#: The JSON values a ``forms.JSONField`` stores as sent: strings, ``{}`` / ``[]``, scalars.
+_JSON_VALUES = [
+    pytest.param("hi", id="string"),
+    pytest.param('{"a": 1}', id="string-of-json-text"),
+    pytest.param("null", id="string-null"),
+    pytest.param("", id="empty-string"),
+    pytest.param("caf\u00e9 {", id="string-of-no-json"),
+    pytest.param({}, id="empty-object"),
+    pytest.param([], id="empty-list"),
+    pytest.param(5, id="integer"),
+    pytest.param(1.5, id="float"),
+    pytest.param(True, id="boolean"),
+    pytest.param({"a": ["x", {"b": "y"}]}, id="object"),
+    pytest.param([1, "two"], id="list"),
+]
+
+
+def _json_form_write(
+    operation: str,
+    data: Mapping[str, object],
+    stored: object,
+) -> tuple[str, str, dict[str, object]]:
+    """Seed the row an update starts from (``payload`` ``stored``); return root, document, variables."""
+    root, document = _flag_document(operation, "label payload", form=_JSON_FORM)
+    if operation == "create":
+        return root, document, {"data": {"label": "written", **data}}
+    specimen = models.NullableScalarSpecimen.objects.create(label="stored", payload=stored)
+    return root, document, {"id": str(specimen.pk), "data": {"label": "renamed", **data}}
+
+
+def _assert_json_form_wrote(root: str, payload: JSONObject, expected: object) -> None:
+    """The write succeeded and the one row holds the JSON value ``expected`` in ``payload``."""
+    label = "written" if root == _JSON_FORM[0] else "renamed"
+    assert payload == {
+        "data": {root: {"result": {"label": label, "payload": expected}, "errors": []}},
+    }
+    rows = list(models.NullableScalarSpecimen.objects.values_list("label", "payload"))
+    assert rows == [(label, expected)], rows
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize("sent", [*_JSON_VALUES, pytest.param(None, id="null")])
+def test_json_form_field_stores_each_json_value_as_sent(operation: str, sent: object) -> None:
+    """A ``forms.JSONField`` over the JSON ``payload`` stores each JSON value sent as is.
+
+    ``payload`` keeps the column's ``JSON``, and the field's ``to_python`` parses a string as
+    JSON text, so each value is bound as the field's presentation of it, its JSON text: a
+    JSON string is stored as that string (``"hi"``, ``'{"a": 1}'``, ``"null"``, ``""``, text
+    that is no JSON), never refused or read as the value its text spells, ``{}`` and ``[]``
+    are stored rather than read as empty, and a number, boolean, object or list as sent;
+    an explicit ``null`` stores ``NULL``. On create and on update over a stored object.
+    """
+    root, document, variables = _json_form_write(operation, {"payload": sent}, {"k": "v"})
+
+    payload = response_json(post_graphql(document, variables=variables))
+
+    _assert_json_form_wrote(root, payload, sent)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("stored", [*_JSON_VALUES, pytest.param(None, id="null")])
+def test_update_omitting_a_json_form_field_keeps_the_stored_value(stored: object) -> None:
+    """An update omitting ``payload`` binds the field's presentation and keeps every stored kind.
+
+    The update binds the ``forms.JSONField``'s ``prepare_value`` of the form's initial, the
+    stored value's JSON text an HTML edit form posts back, which the field parses back to the
+    stored value: a stored string is kept, one whose text is no JSON included, never parsed
+    as JSON text, and so are ``{}``, ``[]``, scalars, an object, a list and ``NULL``.
+    """
+    root, document, variables = _json_form_write("update", {}, stored)
+
+    payload = response_json(post_graphql(document, variables=variables))
+
+    _assert_json_form_wrote(root, payload, stored)
 
 
 _KEPT_COLUMNS = [

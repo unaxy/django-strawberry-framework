@@ -37,6 +37,11 @@ list). Its ``payload`` input is the ``CharField``'s ``String``, not the column's
 ``prepare_value`` presents a value as its JSON text, as ``forms.JSONField``'s does, so an update
 omitting ``payload`` reads the stored JSON value back from the form's presentation of it.
 
+``NullableScalarSpecimenJsonForm`` writes ``payload`` through the form field the ``JSONField``
+builds itself, a ``forms.JSONField``, typed ``JSON``: each JSON value sent is bound as the
+field's presentation of it, its JSON text, which the field parses back, so a JSON string is
+stored as that string, never as the JSON value its text spells.
+
 ``UniqueScalarSpecimenForm`` writes ``UniqueScalarSpecimen``, whose temporal and decimal
 columns are each under a uniqueness rule the form's ``validate_unique()`` /
 ``validate_constraints()`` binds in a query inside ``is_valid()``: a value the database cannot
@@ -226,6 +231,18 @@ class NullableScalarSpecimenJsonTextForm(forms.ModelForm[models.NullableScalarSp
     """
 
     payload = JsonTextField(required=False)
+
+    class Meta:
+        model = models.NullableScalarSpecimen
+        fields = ("label", "payload")
+
+
+class NullableScalarSpecimenJsonForm(forms.ModelForm[models.NullableScalarSpecimen]):
+    """A ``NullableScalarSpecimen`` ``ModelForm`` writing ``payload`` through its own ``forms.JSONField``.
+
+    ``payload`` declares no form field, so the ``ModelForm`` builds the ``JSONField``'s own,
+    a ``forms.JSONField(required=False)``, whose input keeps the column's ``JSON``.
+    """
 
     class Meta:
         model = models.NullableScalarSpecimen

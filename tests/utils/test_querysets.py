@@ -102,6 +102,7 @@ from django.db.models.sql import query as sql_query_module
 from django.db.models.sql.compiler import SQLCompiler
 from django.db.models.sql.datastructures import BaseTable, Join
 from django.db.models.sql.where import ExtraWhere, WhereNode
+from django.forms.fields import JSONString
 from django.http import HttpRequest
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
@@ -4336,6 +4337,27 @@ def test_lookup_direct_rhs_str_subclass_normalizes_to_exact_str() -> None:
 
     source = Category.objects.filter(name=_NormChoices.KEEP)
     assert type(_rhs(source.query)) is _NormChoices
+    sealed, defect = _seal_or_defect(source, Category, None)
+    assert defect is None
+    assert sealed is not None
+    sealed_rhs = _rhs(sealed.query)
+    assert type(sealed_rhs) is str
+    assert sealed_rhs == "keep"
+
+    expected = Category.objects.filter(name="keep")
+    assert sealed.query.sql_with_params() == expected.query.sql_with_params()
+
+
+def test_lookup_direct_rhs_django_str_subclass_binds_as_exact_str() -> None:
+    """Django's own ``JSONString`` RHS binds as an exact ``str``, never rebuilt as a node.
+
+    ``forms.JSONField`` cleans a JSON string to ``django.forms.fields.JSONString``, a
+    genuine Django ``str`` subclass carrying an instance ``__dict__``, which a filter hands
+    its lookup as the value to compare. It is a bound value like any ``str`` subclass, so
+    the seal binds its exact text with the SQL an exact ``str`` gives.
+    """
+    source = Category.objects.filter(name=JSONString("keep"))
+    assert type(_rhs(source.query)) is JSONString
     sealed, defect = _seal_or_defect(source, Category, None)
     assert defect is None
     assert sealed is not None

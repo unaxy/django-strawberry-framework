@@ -115,6 +115,7 @@ from django_strawberry_framework.utils.relations import (
     is_stored_column,
     non_pk_relation_key_attname,
 )
+from django_strawberry_framework.utils.widgets import reads_json_text
 
 from .converter import (
     convert_form_field,
@@ -1047,17 +1048,25 @@ def shape_disagreeing_column(
     return column
 
 
-def held_json_column(form_class: FormClass, name: str, field: forms.Field) -> ConcreteField | None:
-    """Return the JSON column form field ``name`` reads one value of its own kind over, or ``None``.
+def presented_column(form_class: FormClass, name: str, field: forms.Field) -> ConcreteField | None:
+    """Return the column form field ``name`` reads through its presentation of the value, or ``None``.
 
-    The backing column (``_model_column_for``) when ``_reads_one_value_of_held_json`` holds
-    for it, else ``None``. An update omitting such a field binds the form's own presentation
-    of its initial (``forms/resolvers.py::_bind_omitted_json_presentations``).
+    The backing column (``_model_column_for``) of a field reading posted text that the
+    stored value is not: a built-in single-value field over a column holding JSON as given
+    (``_reads_one_value_of_held_json``: a ``CharField`` over a ``JSONField`` listing no
+    choices), or a field parsing the text it reads as JSON (``utils/widgets.py::reads_json_text``:
+    a ``forms.JSONField``, subclasses included, whose widget reads one key), over any column.
+    An update omitting such a field binds the field's presentation of its initial
+    (``forms/resolvers.py::_bind_omitted_json_presentations``), the text an HTML edit form
+    posts back for the unchanged field, never the stored value, which a ``forms.JSONField``
+    would read as the JSON text a string spells.
     """
     column = _model_column_for(form_class, name)
-    if column is None or not _reads_one_value_of_held_json(field, column):
+    if column is None:
         return None
-    return column
+    if reads_json_text(field) or _reads_one_value_of_held_json(field, column):
+        return column
+    return None
 
 
 def _advise_shape_disagreement(
@@ -1294,7 +1303,13 @@ def _field_triple_and_spec(
     (the backing column's ``related_model``, else the model
     ``annotate_queryset_relation`` resolved from ``queryset.model``) so the
     decode never re-derives it from the class-level ``base_fields`` field
-    (whose ``queryset`` is ``None`` under the request-scoped-choices idiom).
+    (whose ``queryset`` is ``None`` under the request-scoped-choices idiom). A field
+    parsing the text it reads as JSON (``utils/widgets.py::reads_json_text``: a
+    ``forms.JSONField``) whose scalar input is not ``String`` (``JSON``, a choice enum, any
+    other scalar) records ``binds_json_text``: the client sends a value, not the text an HTML
+    form posts, so the decode binds the field's ``prepare_value`` of it. Typed ``String``
+    (by a text column listing no choices, or a consumer converter), the client sends that
+    text itself.
     """
     related_model: type[models.Model] | None = None
     # ONE requiredness decision for both the column-backed and column-less paths
@@ -1359,6 +1374,9 @@ def _field_triple_and_spec(
         kind=kind,
         related_model=related_model,
         key_attname=None if related_model is None else non_pk_relation_key_attname(column),
+        # A field parsing JSON text handed a JSON value, not ``String`` text, binds its
+        # presentation of the value (``forms/resolvers.py::_bind_provided_presentations``).
+        binds_json_text=kind == SCALAR and annotation is not str and reads_json_text(field),
     )
     return python_attr, annotation, spec, field_required
 

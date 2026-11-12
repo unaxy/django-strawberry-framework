@@ -477,6 +477,13 @@ class InputFieldSpec:
       tuple of frozen ``InputFieldSpec`` is hashable, so it participates in the
       frozen descriptor identity + the per-shape build cache key like any other
       axis.
+    - ``binds_json_text`` - the form-only presentation axis: the form field parses the
+      text it reads as JSON (``utils/widgets.py::reads_json_text``: a ``forms.JSONField``)
+      while its input hands it a JSON value, not ``String`` text, so the decode binds the
+      bound field's ``prepare_value`` of the value
+      (``forms/resolvers.py::_bind_provided_presentations``). Recorded at BUILD time from
+      the field and its input annotation (``forms/inputs.py::_field_triple_and_spec``), so
+      no request re-derives it. ``False`` for every other field and flavor.
     """
 
     input_attr: str
@@ -489,6 +496,7 @@ class InputFieldSpec:
     nested_specs: tuple[InputFieldSpec, ...] | None = None
     annotation_repr: str | None = None
     required: bool | None = None
+    binds_json_text: bool = False
 
 
 def published_input_specs(

@@ -1,9 +1,12 @@
 """Consumer filters over a JSON column publish and compare the kind their own form cleans.
 
 Rung 3: the subject is consumer filter classes no fakeshop app would ship (an integer-cleaning
-``Filter`` and its CSV ``in``, ``method=`` filters, one cleaning a JSON document, a form field
+``Filter`` and its CSV ``in``, ``method=`` filters, two cleaning a JSON document, a form field
 validating a date and cleaning its ISO text, a ``TypedMultipleChoiceFilter`` coercing to a
-``tuple``), declared over ``ScalarSpecimen.payload`` and its key paths. The shipped filter
+``tuple``), declared over ``ScalarSpecimen.payload`` and its key paths. The ``forms.JSONField``
+filters (two ``method=`` ones, a declared one over ``payload``, its CSV ``in`` and a ``String``
+one over ``label``) receive each JSON value, and each CSV member, as sent, a JSON string as that
+string. The shipped filter
 classes over the same column are declared on fakeshop's ``ScalarSpecimenFilter`` and live in
 ``test_scalars_filter_api.py``. All requests go over HTTP.
 """
@@ -66,6 +69,10 @@ class JSONFormFilter(Filter):
     field_class = forms.JSONField
 
 
+class JSONsInFilter(BaseInFilter, JSONFormFilter):
+    """A consumer CSV filter whose form cleans each member as a JSON document."""
+
+
 class IsoDateField(forms.DateField):
     """A consumer form field validating a date and cleaning it to its ISO text."""
 
@@ -105,6 +112,10 @@ def _holder() -> tuple[DjangoSchema, type[DjangoType]]:
         ints_n = IntsInFilter(field_name="payload__n", lookup_expr="in")
         own_number = NumberFilter(field_name="payload", method="own_filter")
         own_json = JSONFormFilter(method="own_json_filter")
+        own_json_label = JSONFormFilter(method="own_json_label_filter")
+        own_payload = JSONFormFilter(field_name="payload")
+        own_payloads = JSONsInFilter(field_name="payload", lookup_expr="in")
+        own_label = JSONFormFilter(field_name="label")
         iso_day = IsoDateFilter(field_name="payload__day")
         iso_days = IsoDatesInFilter(field_name="payload__day", lookup_expr="in")
         letters = TypedMultipleChoiceFilter(
@@ -132,6 +143,14 @@ def _holder() -> tuple[DjangoSchema, type[DjangoType]]:
             value: object,
         ) -> QuerySet[models.ScalarSpecimen]:
             return queryset.filter(payload__n=value)
+
+        def own_json_label_filter(
+            self,
+            queryset: QuerySet[models.ScalarSpecimen],
+            _name: str,
+            value: object,
+        ) -> QuerySet[models.ScalarSpecimen]:
+            return queryset.filter(label=value) if isinstance(value, str) else queryset.none()
 
     class JSONPayloadSpecimen(DjangoType):
         class Meta:
@@ -211,7 +230,7 @@ def _post(schema: DjangoSchema, where: JSONObject) -> JSONObject:
 
 
 def _seed() -> dict[str, models.ScalarSpecimen]:
-    """A number key, the same key as text, another number and an object; a day and letters."""
+    """A number key, the same key as text, another number, an object and a string; a day, letters."""
     moment = timezone.now()
     return {
         label: models.ScalarSpecimen.objects.create(
@@ -229,6 +248,7 @@ def _seed() -> dict[str, models.ScalarSpecimen]:
                 ("text", {"n": "5", "day": "2026-11-02", "letters": ["x"]}),
                 ("other", {"n": 6}),
                 ("object", {"n": {"k": 1}}),
+                ("word", "hi"),
             ),
             start=1,
         )
@@ -310,5 +330,85 @@ def test_a_consumer_json_filter_compares_the_kind_its_form_cleans(
     rows = _seed()
     schema, row_type = _holder()
     payload = _post(schema, _where(schema, python_path, value))
+
+    assert payload == _expected(row_type, rows, labels), payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("sent", "labels"),
+    [
+        pytest.param("text", ("text",), id="string"),
+        pytest.param('"text"', (), id="string-of-json-text"),
+        pytest.param("null", (), id="string-null"),
+        pytest.param(
+            "",
+            (
+                "number",
+                "text",
+                "other",
+                "object",
+                "word",
+            ),
+            id="empty-string",
+        ),
+        pytest.param({"k": 1}, (), id="object"),
+    ],
+)
+def test_a_json_method_filter_receives_a_json_string_as_that_string(
+    sent: object,
+    labels: tuple[str, ...],
+) -> None:
+    """A JSON string sent to a ``method=`` filter whose form is a ``forms.JSONField`` is a string.
+
+    The field's ``to_python`` parses a string as JSON text, so the value is bound as the field's
+    presentation of it, its JSON text, and the method (matching the label it is handed as a
+    string, no row for any other kind) receives the value sent, a Django ``JSONString`` the
+    sealed queryset binds as its text: ``"text"`` matches its row
+    rather than being refused, and the strings ``'"text"'`` and ``"null"`` match no row rather
+    than the label their text spells or no filter at all. ``""`` is the empty value
+    django-filter's method filter skips, so every row matches; an object stays an object.
+    """
+    rows = _seed()
+    schema, row_type = _holder()
+    payload = _post(schema, _where(schema, ("own_json_label", "exact"), sent))
+
+    assert payload == _expected(row_type, rows, labels), payload
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("python_path", "sent", "labels"),
+    [
+        pytest.param(("own_payload", "exact"), "hi", ("word",), id="declared-string"),
+        pytest.param(("own_payload", "exact"), '"hi"', (), id="declared-string-of-json-text"),
+        pytest.param(("own_payload", "exact"), {"n": 6}, ("other",), id="declared-object"),
+        pytest.param(
+            ("own_payloads", "in_"),
+            ["hi", {"n": 6}],
+            ("other", "word"),
+            id="csv-members",
+        ),
+        pytest.param(("own_payloads", "in_"), ['"hi"'], (), id="csv-string-of-json-text"),
+        pytest.param(("own_label", "exact"), '"text"', ("text",), id="string-typed-text"),
+    ],
+)
+def test_a_declared_json_filter_compares_each_json_value_as_sent(
+    python_path: tuple[str, str],
+    sent: object,
+    labels: tuple[str, ...],
+) -> None:
+    """A declared ``forms.JSONField`` filter compares the JSON value sent, each CSV member too.
+
+    Over the JSON ``payload`` the leaf publishes ``JSON`` (its ``in``, ``[JSON!]``), so each value,
+    and each member, is bound as the field's presentation of it: the string ``"hi"`` matches the
+    row holding that JSON string, the string ``'"hi"'`` matches none, never the string its text
+    spells, and an object matches the row holding it. Over the text column ``label`` the leaf
+    publishes ``String``, so the client sends the text a form posts: ``'"text"'`` is the JSON
+    text of ``"text"``, which the field parses and the column compares.
+    """
+    rows = _seed()
+    schema, row_type = _holder()
+    payload = _post(schema, _where(schema, python_path, sent))
 
     assert payload == _expected(row_type, rows, labels), payload
