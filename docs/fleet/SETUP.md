@@ -208,9 +208,10 @@ Muse, grok and Antigravity read `latest`: their installers take no version; the 
 sources, section 2a) and updates the OS packages. Its module docstring is the full rule.
 
 ```sh
-uv run python docs/fleet/scripts/fleet_update.py check --all   # read-only: one table, every machine; exit 1 on drift
-uv run python docs/fleet/scripts/fleet_update.py apply         # this machine, one line per step
-uv run python docs/fleet/scripts/fleet_update.py apply --all   # every machine at once
+uv run python docs/fleet/scripts/fleet_update.py check --all        # read-only: one table, every machine; exit 1 on drift
+uv run python docs/fleet/scripts/fleet_update.py apply              # this machine, one line per step
+uv run python docs/fleet/scripts/fleet_update.py apply --all        # every machine at once
+uv run python docs/fleet/scripts/fleet_update.py apply --deferred   # only the families the last run deferred (the hourly timer)
 ```
 
 `check` shows pinned against installed per tool, a `shadowed` row for a file that runs instead of
@@ -229,28 +230,81 @@ stray by hand once its work is saved.
 `apply` never downgrades Claude Code past its pin (it updates itself: `ahead`), installs npm and
 Codex after switching to nvm's default node (`nvm use default`, whatever node its own `PATH`
 holds), runs a `latest` tool's installer every time, runs `brew update` and `brew upgrade
---greedy` on macOS but never a macOS system update, holds `.work/update.lock` and stops at the
-fleet stop flag.
+--greedy` on macOS but never a macOS system update, holds `.work/update.lock` (a second `apply`
+is `locked`) and stops at the fleet stop flag.
+
+**Desktop apps.** The `apps` object of [setup/versions.json][versions] lists the agent and dev
+apps, one line each (`family=`, `bundle=` the macOS bundle id, `cask=` the Homebrew cask, `apt=`
+the Linux package); adding one is one line there, then the sudoers rule again on Linux (below).
+An app a machine lacks is skipped.
+
+| App | Family | macOS cask | Linux apt package |
+|---|---|---|---|
+| Claude | claude | `claude` | `claude-desktop` |
+| ChatGPT (the Codex app) | codex | `chatgpt` | `chatgpt` |
+| Cursor | cursor | `cursor` | `cursor` |
+| VS Code | vscode | `visual-studio-code` | `code` |
+| Antigravity | antigravity | `antigravity` | `antigravity` |
+| OpenCode desktop | opencode | `opencode-desktop` | `opencode` |
+| T3 Code | t3code | `t3-code` | `t3code` |
+| Devin (Windsurf) | devin | `devin-desktop` | `windsurf` |
+| Warp | warp | `warp` | `warp-terminal` |
+| Ghostty | ghostty | `ghostty` | `ghostty` |
+| Grok Bot | grok | `grok-bot` | `grok-bot` |
+
+On macOS they are report only: drag-installed, they update themselves. `check` and `apply` give
+an `app <name>` row per one installed (found in `/Applications` or `~/Applications` by its bundle
+id): its `CFBundleShortVersionString` against the cask's version from `brew info --cask
+--json=v2`, `ok` or `behind` (`report` under `apply`; neither is drift). Nothing installs,
+upgrades, quits or modifies one, and `brew upgrade` names the other outdated formulae and casks
+instead of `--greedy` alone when a listed cask is outdated. On Linux the vendor apt repositories'
+packages come with `apt-get upgrade -y`; snapd postpones refreshing a running snap app itself.
+
+**Never while an agent works.** A family is one unit: the CLI and the desktop app (claude, codex
+with the ChatGPT app, opencode, antigravity's `agy`, grok with Grok Bot), muse (CLI), cursor,
+vscode, t3code, devin, warp, ghostty (desktop), node and npm (any process run from an nvm node),
+uv and pre-commit (any running `uv`). It is busy while a process runs from one of its install
+locations, matched by its executable path (Linux `/proc/<pid>/exe`, macOS `lsof` for a command
+started by a bare name, a Mac app's bundle folder) or the script a node process runs; the
+table is `FAMILIES` in [fleet_update.py][fleet-update]. `apply`'s own process tree never counts
+(its children, the `uv run` or timer shell that started it); the Claude Code session it runs in
+does, so claude stays deferred while you run `apply` from one. A busy family's install is a
+`busy` row naming the family and pids. On Linux each installed listed app of a busy family is
+held around the upgrade (`sudo -n /usr/bin/apt-mark hold <package>`, `apt-get upgrade -y`, `apt-mark
+unhold` in a `finally`); the packages held are recorded in `.work/update-holds.json`, so the next
+`apply` unholds what a killed run left held and `check` shows it as a `stale` hold (drift). A
+package held before is neither held nor unheld. Without the rule's `apt-mark` lines a busy app
+makes the whole upgrade a `busy` row: nothing upgrades unheld.
+
+**Retries.** Each family a run deferred is written to `.work/update-deferred.json` with when it
+first waited; `check` shows a `deferred <family>` row with how long. The hourly retry timer runs
+`apply --deferred`: only those families' steps (on Linux the apt upgrade, holding whatever still
+runs), nothing when none waits. A `busy` row is not trouble: `apply` exits 0 on it.
 
 **Bump a version**: edit its one line in `setup/versions.json` (the current release: `npm view <package>
 version`, the project's GitHub releases), run `fleet_update.py check` to see the drift, commit on
 main. The save-sync timers fast-forward every machine's main and each machine's next daily
 `apply` installs it.
 
-**By hand, once per Linux machine**: the sudoers rule letting `apply` run exactly
-`/usr/bin/apt-get update`, `/usr/bin/apt-get upgrade -y` and `/usr/bin/snap refresh` without a
-password ([setup/files/sudoers-fleet-update][sudoers]). Print it, then paste the command it prints
-(it validates with `visudo -cf` before the rule goes live):
+**By hand, once per Linux machine, and again whenever the app list changes**: the sudoers rule
+letting `apply` run exactly `/usr/bin/apt-get update`, `/usr/bin/apt-get upgrade -y`,
+`/usr/bin/snap refresh` and, per listed apt package, `/usr/bin/apt-mark hold <package>` and
+`/usr/bin/apt-mark unhold <package>` without a password ([setup/files/sudoers-fleet-update][sudoers];
+`sudoers` renders one exact line per command, no wildcard). Print it, then paste the command it
+prints (it validates with `visudo -cf` before the rule goes live):
 
 ```sh
 python3 docs/fleet/scripts/fleet_update.py sudoers
 ```
 
-Without it `apply` reports a `refused` row and prompts for nothing.
+Without it `apply` reports a `refused` row and prompts for nothing; with an older rule lacking the
+`apt-mark` lines, a busy app skips the upgrade (`busy`).
 
-**By hand, once per machine**: the daily timer (launchd agent on macOS, systemd user timer on
-Linux; 04:30 local plus up to 30 minutes of jitter, a 90-minute limit, logging to
-`.work/fleet-update.log`). `schedule` alone prints what it would install:
+**By hand, once per machine, and again after the timer files change**: the two timers (launchd
+agents on macOS, systemd user timers on Linux): `apply` daily at 04:30 local and `apply
+--deferred` hourly on the hour, each plus up to 30 minutes of jitter, a 90-minute limit, skipped
+by the stop flag, logging to `.work/fleet-update.log`. `schedule` alone prints what it would
+install:
 
 ```sh
 cd ~/projects/django-strawberry-framework && uv run python docs/fleet/scripts/fleet_update.py schedule --install

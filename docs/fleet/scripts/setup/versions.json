@@ -15,5 +15,18 @@
     "strawberry-django": "0.82.1",
     "django-graphene-filters": "v1.0.0",
     "graphene-django": "3.2.3"
+  },
+  "apps": {
+    "Claude": "family=claude bundle=com.anthropic.claudefordesktop cask=claude apt=claude-desktop",
+    "ChatGPT": "family=codex bundle=com.openai.codex cask=chatgpt apt=chatgpt",
+    "Cursor": "family=cursor bundle=com.todesktop.230313mzl4w4u92 cask=cursor apt=cursor",
+    "VS Code": "family=vscode bundle=com.microsoft.VSCode cask=visual-studio-code apt=code",
+    "Antigravity": "family=antigravity bundle=com.google.antigravity cask=antigravity apt=antigravity",
+    "OpenCode": "family=opencode bundle=ai.opencode.desktop cask=opencode-desktop apt=opencode",
+    "T3 Code": "family=t3code bundle=com.t3tools.t3code cask=t3-code apt=t3code",
+    "Devin": "family=devin bundle=com.exafunction.windsurf cask=devin-desktop apt=windsurf",
+    "Warp": "family=warp bundle=dev.warp.Warp-Stable cask=warp apt=warp-terminal",
+    "Ghostty": "family=ghostty bundle=com.mitchellh.ghostty cask=ghostty apt=ghostty",
+    "Grok Bot": "family=grok bundle=com.anysphere.sand cask=grok-bot apt=grok-bot"
   }
 }

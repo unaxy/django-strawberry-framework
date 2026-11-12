@@ -138,7 +138,9 @@ Versions
     osv-scanner, OpenCode) and of the reference sources (strawberry-django's tag,
     django-graphene-filters' tag, graphene-django); a tool whose vendor installer takes no
     version reads
-    :data:`LATEST` (:data:`VENDOR_INSTALLERS`). :func:`load_versions` is its one reader, and
+    :data:`LATEST` (:data:`VENDOR_INSTALLERS`). Its ``apps`` object lists the desktop agent and
+    dev apps ``fleet_update.py`` reports (macOS) and holds while they run (Linux), one line
+    each (:func:`load_apps`). :func:`load_versions` is the pins' one reader, and
     the line builders below it (:func:`node_lines`, :func:`claude_lines`, ...) are the one way
     each tool is installed: the ``box`` steps here, ``setup/ubuntu/personal.py``'s osv-scanner,
     OpenCode and vendor steps, and ``docs/fleet/scripts/fleet_update.py apply`` all call them.
@@ -465,6 +467,82 @@ def pinned(tool: str, path: Path = VERSIONS_FILE) -> str:
         msg = f"{path} pins no {tool!r}"
         raise ValueError(msg)
     return pins[tool]
+
+
+#: The fields of one ``apps`` entry in ``versions.json``, each a ``name=value`` word.
+APP_FIELDS = (
+    "family",
+    "bundle",
+    "cask",
+    "apt",
+)
+#: What each field may hold: a family name, a macOS bundle id, a Homebrew cask token, an apt
+#: package (rendered into the sudoers rule, so nothing a shell or sudoers reads specially).
+APP_VALUES = {
+    "family": re.compile(r"[a-z][a-z0-9-]*"),
+    "bundle": re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*"),
+    "cask": re.compile(r"[a-z0-9][a-z0-9.@+-]*"),
+    "apt": re.compile(r"[a-z0-9][a-z0-9.+-]+"),
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class App:
+    """One desktop agent or dev app: its product family and where each OS keeps it."""
+
+    name: str
+    family: str
+    #: The macOS bundle id (``CFBundleIdentifier``); ``""``: none on macOS.
+    bundle: str = ""
+    #: The Homebrew cask token ``brew info --cask`` reads the latest release from.
+    cask: str = ""
+    #: The Linux apt package; ``""``: none on Linux.
+    apt: str = ""
+
+
+def load_apps(path: Path = VERSIONS_FILE) -> tuple[App, ...]:
+    """Return the desktop apps ``path``'s ``apps`` object lists, one line each.
+
+    Each entry maps the app's name to space-separated ``field=value`` words over
+    :data:`APP_FIELDS` (``family`` required, the rest optional, none repeated); a file
+    without ``apps`` lists none.
+
+    Raises:
+        ValueError: the file is not JSON, ``apps`` is not an object of such strings, or a
+            value is not what :data:`APP_VALUES` allows (``OSError`` when it cannot be read).
+
+    """
+    document = _loads(path.read_text(encoding="utf-8"))
+    listed = document.get("apps", {}) if _is_object(document) else None
+    if not _is_object(listed):
+        msg = f"{path}: 'apps' must be an object"
+        raise ValueError(msg)
+    apps: list[App] = []
+    for name, text in listed.items():
+        if not isinstance(text, str) or not text.strip():
+            msg = f"{path}: app {name!r} must be a non-empty string of field=value words"
+            raise ValueError(msg)
+        fields: dict[str, str] = {}
+        for word in text.split():
+            field, equals, value = word.partition("=")
+            pattern = APP_VALUES.get(field)
+            if not equals or pattern is None or field in fields or not pattern.fullmatch(value):
+                msg = f"{path}: app {name!r}: {word!r} is no {'/'.join(APP_FIELDS)}=value word"
+                raise ValueError(msg)
+            fields[field] = value
+        if not name.strip() or "family" not in fields:
+            msg = f"{path}: app {name!r} needs a name and a family"
+            raise ValueError(msg)
+        apps.append(
+            App(
+                name,
+                fields["family"],
+                fields.get("bundle", ""),
+                fields.get("cask", ""),
+                fields.get("apt", ""),
+            ),
+        )
+    return tuple(apps)
 
 
 def nvm_lines(version: str, profile: str = "~/.bashrc") -> list[str]:

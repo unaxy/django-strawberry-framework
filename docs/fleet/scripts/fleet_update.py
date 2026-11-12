@@ -3,7 +3,7 @@
 Usage, from ``~/projects/django-strawberry-framework`` on any fleet machine::
 
     uv run python docs/fleet/scripts/fleet_update.py check [--all] [--json]
-    uv run python docs/fleet/scripts/fleet_update.py apply [--all] [--json]
+    uv run python docs/fleet/scripts/fleet_update.py apply [--all | --deferred] [--json]
     uv run python docs/fleet/scripts/fleet_update.py schedule [--install]
     uv run python docs/fleet/scripts/fleet_update.py sudoers
 
@@ -47,19 +47,61 @@ Tools
     read is an ``error`` row. Then the OS updates pending: ``apt`` (``apt list --upgradable``,
     from the lists the last ``apt-get update`` fetched) and ``snap`` (``snap refresh
     --list``) on Linux, ``brew`` (``brew outdated --greedy``, casks included, with
-    Homebrew's auto-update off) and ``macos`` (``softwareupdate -l``) on macOS. Exit 1 on
-    drift (:data:`DRIFT`); pending OS updates alone are not drift.
+    Homebrew's auto-update off) and ``macos`` (``softwareupdate -l``) on macOS. On macOS an
+    ``app <name>`` row per listed app installed (below, "Apps"); a ``deferred <family>`` row
+    per family the last ``apply`` deferred, with how long it has waited; a ``hold <package>``
+    row per package an ``apply`` held and has not unheld yet: ``held`` while that run is
+    alive, ``stale`` once it ended without unholding (the next ``apply`` unholds it). Exit 1
+    on drift (:func:`drifted`: :data:`DRIFT`, an app row aside); pending OS updates, a
+    ``behind`` app and a deferred family are not drift.
+
+Apps
+    ``setup/versions.json``'s ``apps`` object (``fleet_setup.load_apps``) lists the desktop
+    agent and dev apps, one line each: its product family (:data:`FAMILIES`), macOS bundle
+    id, Homebrew cask token and Linux apt package; an app a machine lacks is skipped. macOS
+    is report only: the apps are drag-installed and update themselves, so the row reads the
+    installed ``CFBundleShortVersionString`` (the ``.app`` in ``/Applications`` or
+    ``~/Applications`` whose ``CFBundleIdentifier`` is the bundle id) against the cask's
+    version from ``brew info --cask --json=v2`` (a read), ``ok`` or ``behind`` (``report``
+    under ``apply``); nothing here installs, upgrades, quits or modifies one, and
+    ``brew upgrade`` leaves a listed cask alone. On Linux the vendor apt repositories'
+    packages come with ``apt-get upgrade``; snapd postpones a running snap app's refresh
+    itself.
+
+Busy
+    Nothing is upgraded while an agent works. A family (:data:`FAMILIES`: one product's CLI
+    and desktop app, node and npm, uv and pre-commit) is busy while any process runs from one
+    of its install locations: the command line's executable path (on Linux
+    ``/proc/<pid>/exe``; on macOS ``lsof``'s text file for a command started by a bare
+    name), or the script a node process runs, matched against the family's folders and
+    files, never a loose name; a macOS app's bundle folder joins its family. ``apply``'s own
+    process, its children and the launchers whose command line runs this script (``uv run``,
+    the timer's shell) never count; the Claude Code session it runs in does. A tool step of
+    a busy family (:class:`Tool` ``family``) that would install is skipped with a ``busy``
+    row naming the family and its pids. On Linux each installed listed app of a busy family
+    is held around the upgrade (``sudo -n /usr/bin/apt-mark hold <package>``, ``apt-get
+    upgrade -y``, ``apt-mark unhold`` in a ``finally``); each package held is recorded in
+    ``.work/update-holds.json`` before the upgrade, so a run killed mid-way is unheld by the
+    next ``apply``; a package held before (``apt-mark showhold``) is neither held nor unheld.
+    A hold that fails (a sudoers rule without the ``apt-mark`` lines) makes the upgrade one
+    ``busy`` row: nothing is upgraded unheld. Each family a run skipped is written to
+    ``.work/update-deferred.json`` with when it first waited; ``apply --deferred`` (the hourly
+    retry timer) runs only those families' steps (on Linux the apt upgrade when one has a
+    listed apt package) and does nothing when none waits.
 
 ``apply``
     Brings this machine to the pins, one line per step, then the OS packages: on Linux
     ``sudo -n`` runs exactly ``/usr/bin/apt-get update``, ``/usr/bin/apt-get upgrade -y``
-    and ``/usr/bin/snap refresh`` (the three the sudoers rule allows, below); a ``sudo``
-    refusal is one ``refused`` row naming the missing rule and nothing prompts. On macOS
-    ``brew update`` and ``brew upgrade --greedy``; a macOS system update is never run,
-    only listed (``softwareupdate -l``). A tool already at its pin, or ``ahead``, is left
-    alone; a ``latest`` tool's installer runs every time. Each install is read back: a tool
-    not at its pin afterwards is ``failed``. It holds ``.work/update.lock`` (a kernel lock:
-    a second ``apply`` on the machine refuses), refuses while the fleet stop flag is set
+    and ``/usr/bin/snap refresh`` (the three the sudoers rule allows, below, with the
+    ``apt-mark`` holds of "Busy"); a ``sudo`` refusal is one ``refused`` row naming the
+    missing rule and nothing prompts. On macOS ``brew update`` and ``brew upgrade --greedy``
+    (naming the outdated formulae and casks instead when a listed app's cask is among them,
+    which is left alone), then the app rows; a macOS system update is never run, only
+    listed (``softwareupdate -l``). A tool already at its pin, or ``ahead``, is left
+    alone; a ``latest`` tool's installer runs every time; a tool of a busy family is
+    ``busy`` ("Busy"). Each install is read back: a tool not at its pin afterwards is
+    ``failed``. It holds ``.work/update.lock`` (a kernel lock: a second ``apply`` on the
+    machine is ``locked``), refuses while the fleet stop flag is set
     (``docs/fleet/scripts/fleet_stop.py``'s ``.work/fleet-stop``) and reads the flag again
     before every step, ending with a ``stopped`` row when it appears. Exit 1 when a step
     failed, was refused or stopped (:data:`TROUBLE`).
@@ -73,10 +115,11 @@ Tools
     ``latest`` tool older than the newest on any machine as ``drift``.
 
 ``schedule``
-    The daily timer, as ``fleet_sync.py schedule`` builds its own: a launchd agent on
+    Two timers, as ``fleet_sync.py schedule`` builds its own: a launchd agent each on
     macOS (``StartCalendarInterval``, missed runs fire on wake), systemd user units on Linux
-    (``OnCalendar`` with ``Persistent=true``), each running ``apply`` from the checkout's
-    ``.venv`` Python daily at :data:`SCHEDULE_HOUR` and :data:`SCHEDULE_MINUTE` local time, put off
+    (``OnCalendar`` with ``Persistent=true``), running from the checkout's ``.venv`` Python
+    ``apply`` daily at :data:`SCHEDULE_HOUR` and :data:`SCHEDULE_MINUTE` local time and
+    ``apply --deferred`` hourly at :data:`RETRY_MINUTE` past the hour, each put off
     a random 0 to :data:`SCHEDULE_JITTER` seconds, killed after
     :data:`SCHEDULE_TIME_LIMIT` seconds, appending to ``.work/fleet-update.log``, and
     skipped by a shell check of the stop flag before any Python starts. ``schedule`` alone
@@ -85,12 +128,15 @@ Tools
 
 ``sudoers``
     Prints the drop-in ``setup/files/sudoers-fleet-update`` with this account rendered in
-    (the tracked file names no user), and one command that installs it as
+    (the tracked file names no user) and its ``@APT_MARK@`` line rendered once per command
+    of :func:`hold_commands`: ``/usr/bin/apt-mark hold <package>`` and ``unhold <package>``
+    for each listed app's apt package, exact, no wildcard; and one command that installs it as
     ``/etc/sudoers.d/dsf-fleet-update``: staged root-owned with mode 0440 under a dotted
     name sudo's ``includedir`` skips, validated with ``visudo -cf``, then moved into
     place; a stage that fails validation is removed. Run once per Linux machine.
 
-Exit 0 clean, 1 drift (``check``) or a failed, refused or stopped step (``apply``), 2 a bad
+Exit 0 clean, 1 drift (``check``) or a failed, refused, stopped or locked step (``apply``;
+a ``busy`` step is deferred, not trouble), 2 a bad
 setup (an unreadable or inconsistent ``versions.json``, an unsupported OS for
 ``schedule``). Standard library plus ``docs/fleet/scripts/fleet.py`` (machines, ssh),
 ``docs/fleet/scripts/fleet_setup.py`` (the pins and the install lines),
@@ -104,7 +150,6 @@ import concurrent.futures
 import contextlib
 import dataclasses
 import getpass
-import itertools
 import json
 import os
 import platform
@@ -115,6 +160,7 @@ import shutil
 import subprocess
 import sys
 import time
+import xml.parsers.expat
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
@@ -133,8 +179,9 @@ else:  # run or imported from its own folder: the lock and git plumbing live in 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 
-#: ``json.loads``, its result typed ``object`` for the caller to narrow.
+#: ``json.loads`` and ``plistlib.loads``, their results typed ``object`` for the caller to narrow.
 _loads: Callable[[str], object] = json.loads
+_plist: Callable[[bytes], object] = plistlib.loads
 
 ROOT = _git_runner.CHECKOUT_ROOT
 #: This script, relative to a checkout (what ``--all`` runs on each machine).
@@ -166,6 +213,7 @@ DRIFT = frozenset(
         "error",
         "unreached",
         "stray",
+        "stale",
     },
 )
 #: The statuses ``apply`` exits 1 on.
@@ -174,7 +222,7 @@ TROUBLE = frozenset(
         "failed",
         "refused",
         "stopped",
-        "busy",
+        "locked",
         "error",
         "unreached",
     },
@@ -195,7 +243,19 @@ SUDO_COMMANDS = (
     ("/usr/bin/apt-get", "upgrade", "-y"),
     ("/usr/bin/snap", "refresh"),
 )
-#: The sudoers drop-in, ``@USER@`` rendered by ``sudoers``.
+#: The upgrade among them, the one a busy app's package is held around ("Busy").
+UPGRADE = SUDO_COMMANDS[1]
+#: ``apt-mark``, holding and unholding a package (the sudoers rule names each, exactly).
+APT_MARK = "/usr/bin/apt-mark"
+#: The state files under the checkout's ``.work/``: the packages held and not yet unheld,
+#: and the families a run deferred.
+HOLDS_STATE = "update-holds.json"
+DEFERRED_STATE = "update-deferred.json"
+#: An app row's item prefix (``app Claude``).
+APP_ITEM = "app "
+#: The most pids a ``busy`` row names.
+PID_LIMIT = 8
+#: The sudoers drop-in, ``@USER@`` and ``@APT_MARK@`` rendered by ``sudoers``.
 SUDOERS_FILE = Path(__file__).resolve().parent / "setup" / "files" / "sudoers-fleet-update"
 SUDOERS_DIR = "/etc/sudoers.d"
 SUDOERS_NAME = "dsf-fleet-update"
@@ -206,6 +266,10 @@ VERSION = fleet_setup.VERSION
 
 class UpdateError(Exception):
     """A refusal; the message says why and what to do (exit 2)."""
+
+
+class LockedError(UpdateError):
+    """Another ``apply`` holds the update lock, or it could not be taken."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -264,6 +328,12 @@ class Host:
     root: Path
     #: Its ``machines.json`` row lets ``~/projects`` hold other entries (``fleet_setup.strays``).
     other_projects: bool = False
+    #: The folders a macOS app is looked for in (module docstring, "Apps").
+    applications: tuple[Path, ...] = ()
+    #: Linux's ``/proc``, where a process's executable is read (``None``: not read).
+    proc: Path | None = None
+    #: The ``apply`` process itself, whose own tree is never busy (``0``: none).
+    pid: int = 0
 
     @classmethod
     def here(cls) -> Host:
@@ -272,7 +342,17 @@ class Host:
             other = fleet.this_machine(repo=ROOT).other_projects
         except fleet.MachineListError:
             other = False
-        return cls(fleet_setup.Box.here(), platform.machine(), ROOT, other)
+        box = fleet_setup.Box.here()
+        linux = box.system == fleet_setup.LINUX
+        return cls(
+            box,
+            platform.machine(),
+            ROOT,
+            other,
+            applications=() if linux else (Path("/Applications"), box.home / "Applications"),
+            proc=Path("/proc") if linux else None,
+            pid=os.getpid(),
+        )
 
     @property
     def nvm_dir(self) -> Path:
@@ -460,6 +540,8 @@ class Tool:
     #: Its status and detail from the pin and the installed reading, in place of
     #: :func:`compare` (a reference source: a tree or a clone, not a binary's version).
     assess: Callable[[Host, str, str], tuple[str, str]] | None = None
+    #: The family (:data:`FAMILIES`) whose running processes defer its install (``""``: none).
+    family: str = ""
 
 
 def _strawberry_django_status(host: Host, pin: str, installed: str) -> tuple[str, str]:
@@ -480,42 +562,48 @@ TOOLS: tuple[Tool, ...] = (
         _nvm_version,
         lambda _host, pin, _installed: fleet_setup.nvm_lines(pin, "/dev/null"),
     ),
-    Tool("node", _node_version, _node_lines),
+    Tool("node", _node_version, _node_lines, family="node"),
     Tool(
         "npm",
         _npm_version,
         lambda _host, pin, _installed: fleet_setup.npm_global_lines("npm", pin),
+        family="node",
     ),
     Tool(
         "codex",
         _codex_version,
         lambda _host, pin, _installed: fleet_setup.npm_global_lines("@openai/codex", pin),
+        family="codex",
     ),
     Tool(
         "claude",
         _binary(".local", "bin", "claude"),
         lambda _host, pin, _installed: fleet_setup.claude_lines(pin),
         self_updating=True,
+        family="claude",
     ),
     Tool(
         "uv",
         _binary(".local", "bin", "uv"),
         lambda _host, pin, _installed: fleet_setup.uv_lines(pin, modify_path=False),
+        family="uv",
     ),
     Tool(
         "pre-commit",
         _binary(".local", "bin", "pre-commit"),
         lambda _host, pin, _installed: fleet_setup.pre_commit_lines(pin),
+        family="uv",
     ),
     Tool("osv-scanner", _binary(".local", "bin", "osv-scanner"), _osv_lines),
     Tool(
         "opencode",
         _binary(".opencode", "bin", "opencode"),
         lambda _host, pin, _installed: fleet_setup.opencode_lines(pin),
+        family="opencode",
     ),
-    Tool("muse", _binary(".local", "bin", "muse"), _vendor("muse")),
-    Tool("grok", _binary(".grok", "bin", "grok"), _vendor("grok")),
-    Tool("agy", _binary(".local", "bin", "agy"), _vendor("agy")),
+    Tool("muse", _binary(".local", "bin", "muse"), _vendor("muse"), family="muse"),
+    Tool("grok", _binary(".grok", "bin", "grok"), _vendor("grok"), family="grok"),
+    Tool("agy", _binary(".local", "bin", "agy"), _vendor("agy"), family="antigravity"),
     Tool(
         "strawberry-django",
         lambda host: fleet_setup.strawberry_django_version(host.box.home),
@@ -564,6 +652,563 @@ def pins(path: Path | None = None) -> dict[str, str]:
         msg = f"{path}: {'; '.join(problems)}"
         raise UpdateError(msg)
     return pinned
+
+
+# --------------------------------------------------------------------------------------------
+# Families: what makes one busy, and the apps
+# --------------------------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class Family:
+    """One product family: where its processes run from, on both OSes and on each.
+
+    A location is a path (``~/`` the home folder): a folder when it ends in ``/``, else a
+    file; ``*`` stands for one path segment (a version folder). A listed macOS app adds its
+    bundle's folder (:func:`app_bundles`).
+    """
+
+    name: str
+    both: tuple[str, ...] = ()
+    macos: tuple[str, ...] = ()
+    linux: tuple[str, ...] = ()
+
+
+#: The one table of the families and their install locations (module docstring, "Busy").
+FAMILIES: tuple[Family, ...] = (
+    Family(
+        "claude",
+        both=("~/.local/bin/claude", "~/.local/share/claude/"),
+        macos=("~/Library/Application Support/Claude/claude-code/",),
+        linux=("/usr/lib/claude-desktop/",),
+    ),
+    Family(
+        "codex",
+        both=(
+            "~/.codex/",
+            "~/.nvm/versions/node/*/bin/codex",
+            "~/.nvm/versions/node/*/lib/node_modules/@openai/codex/",
+        ),
+        macos=("~/Library/Application Support/Codex/",),
+        linux=("/usr/lib/chatgpt/", "~/.config/Codex/"),
+    ),
+    Family("opencode", both=("~/.opencode/",), linux=("/opt/OpenCode/",)),
+    Family("antigravity", both=("~/.local/bin/agy",), linux=("/usr/share/antigravity/",)),
+    Family("grok", both=("~/.grok/",), linux=("/opt/Grok Bot/",)),
+    Family("muse", both=("~/.local/bin/muse",)),
+    Family(
+        "cursor",
+        macos=("~/Library/Application Support/Cursor/",),
+        linux=("/usr/share/cursor/",),
+    ),
+    Family("vscode", linux=("/usr/share/code/",)),
+    Family("t3code", linux=("/opt/T3 Code (Beta)/",)),
+    Family("devin", linux=("/usr/share/windsurf/",)),
+    Family("warp", linux=("/opt/warpdotdev/",)),
+    Family("ghostty", linux=("/usr/bin/ghostty",)),
+    Family("node", both=("~/.nvm/versions/node/",)),
+    Family(
+        "uv",
+        both=(
+            "~/.local/bin/uv",
+            "~/.local/bin/uvx",
+            "~/.local/bin/pre-commit",
+            "~/.local/share/uv/tools/pre-commit/",
+        ),
+    ),
+)
+App = fleet_setup.App
+
+
+def apps(path: Path | None = None) -> tuple[App, ...]:
+    """Return the listed apps (``fleet_setup.load_apps``), each family one of :data:`FAMILIES`.
+
+    ``path`` defaults to ``fleet_setup.VERSIONS_FILE``.
+
+    Raises:
+        UpdateError: the file is unreadable, or an app names a family the table lacks.
+
+    """
+    path = fleet_setup.VERSIONS_FILE if path is None else path
+    try:
+        listed = fleet_setup.load_apps(path)
+    except (OSError, ValueError) as error:
+        msg = f"cannot read the apps: {error}"
+        raise UpdateError(msg) from error
+    known = {family.name for family in FAMILIES}
+    unknown = [
+        f"{app.name}: no family {app.family!r}" for app in listed if app.family not in known
+    ]
+    if unknown:
+        msg = f"{path}: {'; '.join(unknown)}"
+        raise UpdateError(msg)
+    return listed
+
+
+def location_pattern(location: str, home: Path) -> re.Pattern[str]:
+    """Return the pattern a command line or executable path starting at ``location`` matches.
+
+    A folder matches anything under it; a file itself, alone or followed by its arguments.
+    """
+    path = f"{home}/{location[2:]}" if location.startswith("~/") else location
+    body = "[^/]*".join(re.escape(part) for part in path.split("*"))
+    return re.compile(body if path.endswith("/") else f"{body}(?: |$)")
+
+
+def family_patterns(
+    host: Host,
+    bundles: Mapping[str, Sequence[Path]],
+) -> dict[str, list[re.Pattern[str]]]:
+    """Return each family's location patterns on ``host``, its apps' ``bundles`` folders added."""
+    patterns: dict[str, list[re.Pattern[str]]] = {}
+    for family in FAMILIES:
+        own = family.linux if host.linux else family.macos
+        locations = [*family.both, *own, *(f"{path}/" for path in bundles.get(family.name, ()))]
+        patterns[family.name] = [location_pattern(where, host.box.home) for where in locations]
+    return patterns
+
+
+@dataclasses.dataclass(frozen=True)
+class Process:
+    """One running process: its pid, its parent's, its command line and executable."""
+
+    pid: int
+    ppid: int
+    args: str
+    #: The executable's real path, where the OS tells it (``""``: unknown).
+    exe: str = ""
+
+
+def _linux_exe(proc: Path, pid: int) -> str:
+    try:
+        target = str((proc / str(pid) / "exe").readlink())
+    except OSError:
+        return ""
+    return target.removesuffix(" (deleted)")
+
+
+def _bare(process: Process) -> bool:
+    return bool(process.args) and "/" not in process.args.split(maxsplit=1)[0]
+
+
+def _macos_exes(processes: Sequence[Process]) -> dict[int, str]:
+    """Return the executable of each process started by a bare name: ``lsof``'s first text file."""
+    pids = [str(process.pid) for process in processes if _bare(process)]
+    if not pids:
+        return {}
+    ran = run(
+        [
+            "/usr/sbin/lsof",
+            "-a",
+            "-d",
+            "txt",
+            "-Fpn",
+            "-p",
+            ",".join(pids),
+        ],
+        timeout=PROBE_TIMEOUT,
+    )
+    exes: dict[int, str] = {}
+    pid = 0
+    for line in ran.out.splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith("n") and pid and pid not in exes:
+            exes[pid] = line[1:]
+    return exes
+
+
+def processes(host: Host) -> list[Process]:
+    """Return the running processes (``ps``), each with its executable where the OS tells it.
+
+    Raises:
+        UpdateError: ``ps`` failed.
+
+    """
+    ran = run(
+        [
+            "ps",
+            "-A",
+            "-ww",
+            "-o",
+            "pid=,ppid=,args=",
+        ],
+        timeout=PROBE_TIMEOUT,
+        env=fleet_setup.box_env(host.box),
+    )
+    if ran.code != 0:
+        msg = f"cannot list the running processes: {ran.last_line()}"
+        raise UpdateError(msg)
+    found: list[Process] = []
+    for line in ran.out.splitlines():
+        parts = line.split(maxsplit=2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            found.append(Process(int(parts[0]), int(parts[1]), parts[2] if len(parts) > 2 else ""))
+    if host.proc is not None:
+        proc = host.proc
+        return [dataclasses.replace(each, exe=_linux_exe(proc, each.pid)) for each in found]
+    if host.linux:
+        return found
+    exes = _macos_exes(found)
+    return [dataclasses.replace(each, exe=exes.get(each.pid, "")) for each in found]
+
+
+def own_tree(found: Sequence[Process], pid: int) -> set[int]:
+    """Return ``pid``, its descendants, and the launchers above it that run this script."""
+    children: dict[int, list[int]] = {}
+    by_pid = {process.pid: process for process in found}
+    for process in found:
+        children.setdefault(process.ppid, []).append(process.pid)
+    own = {pid}
+    waiting = [pid]
+    while waiting:
+        for child in children.get(waiting.pop(), []):
+            if child not in own:
+                own.add(child)
+                waiting.append(child)
+    script = Path(SCRIPT).name
+    current = by_pid.get(pid)
+    while current is not None:
+        parent = by_pid.get(current.ppid)
+        if parent is None or parent.pid in own or script not in parent.args:
+            break
+        own.add(parent.pid)
+        current = parent
+    return own
+
+
+def candidates(process: Process) -> list[str]:
+    """Return what identifies ``process``: its command line, executable, a node's script."""
+    found = [process.args]
+    head, _, rest = process.args.partition(" ")
+    if process.exe:
+        found.append(process.exe)
+        if process.args.startswith(f"{process.exe} "):
+            head, rest = process.exe, process.args[len(process.exe) + 1 :]
+    if "node" in {Path(head).name, Path(process.exe).name}:
+        found.append(rest.lstrip())
+    return [text for text in found if text]
+
+
+def busy(host: Host, bundles: Mapping[str, Sequence[Path]]) -> dict[str, tuple[int, ...]]:
+    """Return each busy family's pids: the processes running from its locations, own tree aside.
+
+    Raises:
+        UpdateError: the processes could not be listed.
+
+    """
+    found = processes(host)
+    own: set[int] = own_tree(found, host.pid) if host.pid else set()
+    patterns = family_patterns(host, bundles)
+    running: dict[str, list[int]] = {}
+    for process in found:
+        if process.pid in own:
+            continue
+        texts = candidates(process)
+        for family, compiled in patterns.items():
+            if any(pattern.match(text) for pattern in compiled for text in texts):
+                running.setdefault(family, []).append(process.pid)
+    return {family: tuple(pids) for family, pids in running.items()}
+
+
+def busy_detail(family: str, pids: Sequence[int]) -> str:
+    """Return what a ``busy`` row says: the family and the pids found."""
+    return f"{family} is running (pids {_names(map(str, pids), PID_LIMIT)})"
+
+
+@dataclasses.dataclass(frozen=True)
+class Installed:
+    """A macOS app found: its bundle's path and ``CFBundleShortVersionString``."""
+
+    path: Path
+    version: str
+
+
+def bundle_info(path: Path) -> tuple[str, str]:
+    """Return the ``.app`` at ``path``'s bundle id and short version (``""`` each when unread)."""
+    try:
+        info = _plist((path / "Contents" / "Info.plist").read_bytes())
+    except (OSError, ValueError, xml.parsers.expat.ExpatError):
+        return "", ""
+    if not fleet.is_json_object(info):
+        return "", ""
+    bundle = info.get("CFBundleIdentifier")
+    version = info.get("CFBundleShortVersionString")
+    return (bundle if isinstance(bundle, str) else "", version if isinstance(version, str) else "")
+
+
+def app_bundles(host: Host, listed: Sequence[App]) -> dict[App, Installed]:
+    """Return each listed app installed in ``host.applications``, found by its bundle id."""
+    by_bundle = {app.bundle: app for app in listed if app.bundle}
+    found: dict[App, Installed] = {}
+    for folder in host.applications:
+        try:
+            entries = sorted(folder.glob("*.app"))
+        except OSError:
+            continue
+        for path in entries:
+            bundle, version = bundle_info(path)
+            app = by_bundle.get(bundle)
+            if app is not None and app not in found:
+                found[app] = Installed(path, version)
+    return found
+
+
+def bundle_folders(found: Mapping[App, Installed]) -> dict[str, list[Path]]:
+    """Return each family's app bundles among ``found``."""
+    folders: dict[str, list[Path]] = {}
+    for app, installed in found.items():
+        folders.setdefault(app.family, []).append(installed.path)
+    return folders
+
+
+def cask_versions(host: Host, casks: Sequence[str]) -> tuple[dict[str, str], str]:
+    """Return each cask's latest version (``brew info --cask --json=v2``, a read) and any error.
+
+    A version reads up to its first comma (``5.1231.2,<build>``). One call for all; when it
+    fails, one per cask, so an unknown token costs only its own row.
+    """
+    found = brew(host)
+    if not found:
+        return {}, "no Homebrew: the latest release is unknown"
+    if not casks:
+        return {}, ""
+
+    def read(tokens: Sequence[str]) -> tuple[dict[str, str], str]:
+        ran = run(
+            [
+                found,
+                "info",
+                "--cask",
+                "--json=v2",
+                *tokens,
+            ],
+            timeout=OS_TIMEOUT,
+            env=_brew_env(host),
+        )
+        try:
+            document = _loads(ran.out)
+        except ValueError:
+            document = None
+        listed = document.get("casks") if fleet.is_json_object(document) else None
+        versions: dict[str, str] = {}
+        for cask in listed if fleet.is_json_array(listed) else []:
+            token = cask.get("token") if fleet.is_json_object(cask) else None
+            version = cask.get("version") if fleet.is_json_object(cask) else None
+            if isinstance(token, str) and isinstance(version, str):
+                versions[token] = version.split(",", 1)[0]
+        return versions, "" if ran.code == 0 else ran.last_line()
+
+    versions, error = read(casks)
+    if not error:
+        return versions, ""
+    errors: list[str] = []
+    for token in casks:
+        one, problem = read([token])
+        versions.update(one)
+        if problem:
+            errors.append(problem)
+    return versions, "; ".join(errors)
+
+
+def app_rows(host: Host, found: Mapping[App, Installed], *, applying: bool) -> list[Row]:
+    """Return an ``app <name>`` row per app ``found``: installed against the cask's latest.
+
+    ``ok`` or ``behind`` (``report`` under ``apply``); an app whose latest cannot be read is
+    ``report``. Only reads: never installs, upgrades, quits or modifies an app.
+    """
+    latest, error = cask_versions(host, [app.cask for app in found if app.cask])
+    rows: list[Row] = []
+    for app, installed in found.items():
+        item = f"{APP_ITEM}{app.name}"
+        newest = latest.get(app.cask, "")
+        if not newest:
+            why = (error or f"no cask {app.cask!r} answered") if app.cask else "no cask listed"
+            rows.append(Row(item, "", installed.version, "report", why))
+        elif numbers(installed.version) >= numbers(newest):
+            rows.append(Row(item, newest, installed.version, "ok"))
+        else:
+            status = "report" if applying else "behind"
+            detail = f"{newest} is out; it updates itself (never upgraded here)"
+            rows.append(Row(item, newest, installed.version, status, detail))
+    return rows
+
+
+# --------------------------------------------------------------------------------------------
+# State under .work/: the packages held, the families deferred
+# --------------------------------------------------------------------------------------------
+
+
+def _read_state(path: Path) -> dict[str, object]:
+    try:
+        document = _loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as error:
+        msg = f"cannot read {path}: {error}"
+        raise UpdateError(msg) from error
+    if not fleet.is_json_object(document):
+        msg = f"{path} is not a JSON object"
+        raise UpdateError(msg)
+    return document
+
+
+def _write_state(path: Path, document: Mapping[str, object] | None) -> None:
+    """Write ``document`` to ``path`` atomically; ``None`` removes the file."""
+    if document is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(exist_ok=True)
+    staged = path.with_name(f".{path.name}.{os.getpid()}")
+    _ = staged.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    _ = staged.replace(path)
+
+
+def read_holds(root: Path) -> tuple[int, list[str]]:
+    """Return the pid of the run that held packages and those still held (``.work/`` state).
+
+    Raises:
+        UpdateError: the state file is unreadable.
+
+    """
+    document = _read_state(root / ".work" / HOLDS_STATE)
+    pid = document.get("pid", 0)
+    packages = document.get("packages", [])
+    held = (
+        [name for name in packages if isinstance(name, str)]
+        if fleet.is_json_array(packages)
+        else []
+    )
+    return (pid if isinstance(pid, int) else 0), held
+
+
+def save_holds(root: Path, packages: Sequence[str]) -> None:
+    """Record ``packages`` as held by this process (none: remove the record)."""
+    document = (
+        {"pid": os.getpid(), "packages": list(dict.fromkeys(packages))} if packages else None
+    )
+    _write_state(root / ".work" / HOLDS_STATE, document)
+
+
+@dataclasses.dataclass(frozen=True)
+class Waiting:
+    """A deferred family: since when it waits, and the pids that last kept it busy."""
+
+    since: float
+    pids: tuple[int, ...]
+
+
+def read_deferred(root: Path) -> dict[str, Waiting]:
+    """Return the families the last run deferred (``.work/`` state).
+
+    Raises:
+        UpdateError: the state file is unreadable.
+
+    """
+    families = _read_state(root / ".work" / DEFERRED_STATE).get("families", {})
+    waiting: dict[str, Waiting] = {}
+    for name, entry in families.items() if fleet.is_json_object(families) else ():
+        since = entry.get("since") if fleet.is_json_object(entry) else None
+        pids = entry.get("pids") if fleet.is_json_object(entry) else None
+        if isinstance(since, (int, float)):
+            listed = (
+                [pid for pid in pids if isinstance(pid, int)] if fleet.is_json_array(pids) else []
+            )
+            waiting[name] = Waiting(float(since), tuple(listed))
+    return waiting
+
+
+def save_deferred(root: Path, waiting: Mapping[str, Waiting]) -> None:
+    """Record the families ``waiting`` (none: remove the record)."""
+    document = {
+        "families": {
+            name: {"since": entry.since, "pids": list(entry.pids)}
+            for name, entry in sorted(waiting.items())
+        },
+    }
+    _write_state(root / ".work" / DEFERRED_STATE, document if waiting else None)
+
+
+@dataclasses.dataclass
+class Ledger:
+    """What one ``apply`` found of each family: deferred (busy) or cleared (nothing waits)."""
+
+    deferred: dict[str, tuple[int, ...]] = dataclasses.field(default_factory=dict)
+    cleared: set[str] = dataclasses.field(default_factory=set)
+
+    def settle(
+        self,
+        before: Mapping[str, Waiting],
+        now: float,
+        *,
+        finished: bool,
+    ) -> dict[str, Waiting]:
+        """Return the families still waiting after the run, each keeping when it first waited.
+
+        A family the run did not reach stays as it was unless the run ``finished``.
+        """
+        waiting = {
+            name: Waiting(before[name].since if name in before else now, pids)
+            for name, pids in self.deferred.items()
+        }
+        if not finished:
+            for name, entry in before.items():
+                if name not in waiting and name not in self.cleared:
+                    waiting[name] = entry
+        return waiting
+
+
+def _alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def waited(seconds: float) -> str:
+    """Return ``seconds`` as ``2d 3h``, ``3h 12m`` or ``12m``."""
+    minutes = max(0, int(seconds // 60))
+    days, rest = divmod(minutes, 24 * 60)
+    hours, minutes = divmod(rest, 60)
+    if days:
+        return f"{days}d {hours}h"
+    return f"{hours}h {minutes}m" if hours else f"{minutes}m"
+
+
+def state_rows(root: Path, now: float | None = None) -> list[Row]:
+    """Return ``check``'s rows for the state: each deferred family and each package still held."""
+    now = time.time() if now is None else now
+    try:
+        waiting = read_deferred(root)
+        pid, held = read_holds(root)
+    except UpdateError as error:
+        return [Row("state", "", "", "error", str(error))]
+    rows = [
+        Row(
+            f"deferred {name}",
+            "",
+            "",
+            "deferred",
+            f"waiting {waited(now - entry.since)}, since "
+            f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(entry.since))}; "
+            f"{busy_detail(name, entry.pids)}",
+        )
+        for name, entry in sorted(waiting.items())
+    ]
+    alive = _alive(pid)
+    for package in held:
+        detail = (
+            f"held by the running apply (pid {pid})"
+            if alive
+            else f"its apply (pid {pid}) ended before unholding it; the next apply unholds it"
+        )
+        rows.append(Row(f"hold {package}", "", "", "held" if alive else "stale", detail))
+    return rows
 
 
 # --------------------------------------------------------------------------------------------
@@ -826,16 +1471,28 @@ def stray_rows(host: Host) -> list[Row]:
     ]
 
 
-def check(host: Host, pinned: Mapping[str, str]) -> list[Row]:
-    """Return this machine's rows: the tools and reference sources, shadows, strays, OS updates."""
+def check(host: Host, pinned: Mapping[str, str], listed: Sequence[App] = ()) -> list[Row]:
+    """Return this machine's rows: the tools and reference sources, shadows, strays, OS updates.
+
+    Then, on macOS, a row per ``listed`` app installed, and the deferred families and held
+    packages the state records (:func:`state_rows`).
+    """
     rows = [tool_row(host, tool, pinned[tool.key]) for tool in TOOLS]
     node = next(row.installed for row in rows if row.item == "node")
+    found: dict[App, Installed] = {} if host.linux else app_bundles(host, listed)
     return [
         *rows,
         *shadows(host, node),
         *stray_rows(host),
         *os_rows(host),
+        *(app_rows(host, found, applying=False) if found else []),
+        *state_rows(host.root),
     ]
+
+
+def drifted(row: Row) -> bool:
+    """Return whether ``row`` is drift ``check`` exits 1 on (an app row never is: report only)."""
+    return row.status in DRIFT and not row.item.startswith(APP_ITEM)
 
 
 # --------------------------------------------------------------------------------------------
@@ -868,7 +1525,7 @@ def update_lock(root: Path) -> Generator[None, None, None]:
     """Hold ``.work/update.lock`` for the block.
 
     Raises:
-        UpdateError: another ``apply`` holds it, or the lock call failed.
+        LockedError: another ``apply`` holds it, or the lock call failed.
 
     """
     folder = root / ".work"
@@ -880,18 +1537,23 @@ def update_lock(root: Path) -> Generator[None, None, None]:
             taken = _locks.try_lock(descriptor)
         except OSError as error:
             msg = f"cannot lock {lock}: {error}"
-            raise UpdateError(msg) from error
+            raise LockedError(msg) from error
         if not taken:
             msg = f"another fleet_update apply holds {lock}"
-            raise UpdateError(msg)
+            raise LockedError(msg)
         yield
     finally:
         os.close(descriptor)
 
 
-def apply_tool(host: Host, tool: Tool, pin: str) -> Row:
-    """Bring ``tool`` to ``pin``: install when its row says so, then read it back."""
-    before = tool_row(host, tool, pin)
+def apply_tool(
+    host: Host,
+    tool: Tool,
+    pin: str,
+    before: Row | None = None,
+) -> Row:
+    """Bring ``tool`` to ``pin``: install when its row (``before``, else read) says so, then read it back."""
+    before = tool_row(host, tool, pin) if before is None else before
     if before.status not in ACTIONABLE:
         return before
     try:
@@ -910,57 +1572,265 @@ def apply_tool(host: Host, tool: Tool, pin: str) -> Row:
     return dataclasses.replace(after, status="updated", detail=moved)
 
 
+def tool_step(
+    host: Host,
+    tool: Tool,
+    pin: str,
+    ledger: Ledger,
+    bundles: Mapping[str, Sequence[Path]],
+) -> Row:
+    """Bring ``tool`` to ``pin`` unless its family is running (a ``busy`` row, deferred)."""
+    before = tool_row(host, tool, pin)
+    if not tool.family or before.status not in ACTIONABLE:
+        return apply_tool(host, tool, pin, before)
+    try:
+        running = busy(host, bundles).get(tool.family, ())
+    except UpdateError as error:
+        return dataclasses.replace(before, status="error", detail=f"{error}; not installed")
+    if running:
+        ledger.deferred[tool.family] = running
+        return dataclasses.replace(before, status="busy", detail=busy_detail(tool.family, running))
+    ledger.cleared.add(tool.family)
+    return apply_tool(host, tool, pin, before)
+
+
 def sudoers_hint() -> str:
     """Return what a ``refused`` row tells the maintainer to do."""
     return f"the sudoers rule is missing; print it with: python3 {SCRIPT} sudoers"
 
 
-def linux_steps(host: Host) -> Iterable[Callable[[], Row]]:
+def _sudo(host: Host, argv: Sequence[str]) -> Ran:
+    return run(["sudo", "-n", *argv], timeout=OS_TIMEOUT, env=fleet_setup.box_env(host.box))
+
+
+def _refusal(ran: Ran) -> bool:
+    """Return whether ``sudo`` itself refused (a ``sudo:`` line: no rule, a password wanted)."""
+    return any(line.startswith("sudo:") for line in ran.err.splitlines())
+
+
+def sudo_row(host: Host, argv: Sequence[str]) -> Row:
+    """Run ``argv`` through ``sudo -n``: ``done``, ``refused`` (no rule) or ``failed``."""
+    item = " ".join((Path(argv[0]).name, *argv[1:]))
+    ran = _sudo(host, argv)
+    if ran.code == 0:
+        return Row(item, "", "", "done", ran.last_line() if ran.out.strip() else "")
+    if _refusal(ran):
+        return Row("sudo", "", "", "refused", sudoers_hint())
+    return Row(item, "", "", "failed", ran.last_line())
+
+
+def installed_packages(host: Host, packages: Iterable[str]) -> set[str]:
+    """Return which of ``packages`` dpkg has installed (a read)."""
+    wanted = list(dict.fromkeys(packages))
+    if not wanted:
+        return set()
+    ran = run(
+        [
+            "dpkg-query",
+            "-W",
+            "-f",
+            "${Package} ${db:Status-Abbrev}\\n",
+            *wanted,
+        ],
+        timeout=PROBE_TIMEOUT,
+        env=fleet_setup.box_env(host.box),
+    )
+    found = {
+        words[0]
+        for words in (line.split() for line in ran.out.splitlines())
+        if len(words) >= 2 and words[1].startswith("ii")
+    }
+    return found & set(wanted)
+
+
+def held_packages(host: Host) -> set[str]:
+    """Return the packages held now (``apt-mark showhold``, a read)."""
+    ran = run(["apt-mark", "showhold"], timeout=PROBE_TIMEOUT, env=fleet_setup.box_env(host.box))
+    return {line.strip() for line in ran.out.splitlines() if line.strip()}
+
+
+def unhold(host: Host, packages: Sequence[str]) -> list[Row]:
+    """Unhold each of ``packages`` this updater held; return a row per one that stays held.
+
+    The holds record (``.work/update-holds.json``) keeps exactly the ones still held.
+    """
+    rows: list[Row] = []
+    kept: list[str] = []
+    for package in packages:
+        ran = _sudo(host, (APT_MARK, "unhold", package))
+        if ran.code != 0:
+            kept.append(package)
+            rows.append(Row(f"apt-mark unhold {package}", "", "", "failed", ran.last_line()))
+    _, recorded = read_holds(host.root)
+    save_holds(host.root, [name for name in recorded if name not in packages or name in kept])
+    return rows
+
+
+def release_holds(host: Host) -> list[Row]:
+    """Unhold what a run killed mid-upgrade left held (the holds record); one row saying so."""
+    _, held = read_holds(host.root)
+    if not held:
+        return []
+    failed = unhold(host, held)
+    released = [name for name in held if not any(row.item.endswith(f" {name}") for row in failed)]
+    rows = [
+        Row(
+            "holds",
+            "",
+            "",
+            "released",
+            f"unheld {', '.join(released)}, left held by a run that ended mid-upgrade",
+        ),
+    ]
+    return [*(rows if released else []), *failed]
+
+
+def apt_upgrade(host: Host, listed: Sequence[App], ledger: Ledger) -> list[Row]:
+    """Run ``apt-get upgrade -y``, each installed listed app of a busy family held around it.
+
+    A package held already (``apt-mark showhold``) is left as it is. Each hold is recorded
+    before the upgrade and unheld in a ``finally``. A hold that fails makes the step one
+    ``busy`` row and nothing is upgraded.
+    """
+    item = " ".join((Path(UPGRADE[0]).name, *UPGRADE[1:]))
+    installed = installed_packages(host, (app.apt for app in listed if app.apt))
+    present = [app for app in listed if app.apt in installed]
+    try:
+        running = busy(host, {}) if present else {}
+    except UpdateError as error:
+        return [Row(item, "", "", "error", f"{error}; nothing upgraded")]
+    waiting = [app for app in present if app.family in running]
+    for app in present:
+        if app.family in running:
+            ledger.deferred[app.family] = running[app.family]
+        else:
+            ledger.cleared.add(app.family)
+    if not waiting:
+        return [sudo_row(host, UPGRADE)]
+    already = held_packages(host)
+    held: list[str] = []
+    rows: list[Row] = []
+    try:
+        for package in dict.fromkeys(app.apt for app in waiting if app.apt not in already):
+            ran = _sudo(host, (APT_MARK, "hold", package))
+            if ran.code != 0:
+                families = "; ".join(
+                    busy_detail(family, running[family])
+                    for family in dict.fromkeys(app.family for app in waiting)
+                )
+                why = sudoers_hint() if _refusal(ran) else ran.last_line()
+                return [
+                    Row(
+                        item,
+                        "",
+                        "",
+                        "busy",
+                        f"{families}: nothing upgraded, apt-mark hold {package} failed ({why})",
+                    ),
+                ]
+            held.append(package)
+            save_holds(host.root, [*read_holds(host.root)[1], package])
+        for app in waiting:
+            how = "left held (held outside fleet_update)" if app.apt in already else "held"
+            detail = f"{busy_detail(app.family, running[app.family])}: {app.apt} {how} through the upgrade"
+            rows.append(Row(f"{APP_ITEM}{app.name}", "", "", "busy", detail))
+        rows.append(sudo_row(host, UPGRADE))
+    finally:
+        rows.extend(unhold(host, held))
+    return rows
+
+
+def linux_steps(
+    host: Host,
+    listed: Sequence[App] = (),
+    ledger: Ledger | None = None,
+    *,
+    upgrade_only: bool = False,
+) -> Iterable[Callable[[], list[Row]]]:
     """Yield the Linux OS steps: each of :data:`SUDO_COMMANDS` through ``sudo -n``.
 
-    The first ``sudo`` refusal (a ``sudo:`` line on stderr: no rule, a password wanted)
-    ends the list with one ``refused`` row.
+    The upgrade holds the busy apps' packages (:func:`apt_upgrade`); ``upgrade_only`` yields
+    it alone. The first ``sudo`` refusal ends the list with one ``refused`` row.
     """
+    ledger = Ledger() if ledger is None else ledger
     refused: list[Row] = []
-    for argv in SUDO_COMMANDS:
-        item = " ".join((Path(argv[0]).name, *argv[1:]))
+    for argv in (UPGRADE,) if upgrade_only else SUDO_COMMANDS:
 
-        def step(argv: tuple[str, ...] = argv, item: str = item) -> Row:
-            ran = run(["sudo", "-n", *argv], timeout=OS_TIMEOUT, env=fleet_setup.box_env(host.box))
-            if ran.code == 0:
-                return Row(item, "", "", "done", ran.last_line() if ran.out.strip() else "")
-            if any(line.startswith("sudo:") for line in ran.err.splitlines()):
-                refused.append(Row("sudo", "", "", "refused", sudoers_hint()))
-                return refused[-1]
-            return Row(item, "", "", "failed", ran.last_line())
+        def step(argv: tuple[str, ...] = argv) -> list[Row]:
+            rows = apt_upgrade(host, listed, ledger) if argv == UPGRADE else [sudo_row(host, argv)]
+            refused.extend(row for row in rows if row.status == "refused")
+            return rows
 
         if refused:
             return
         yield step
 
 
-def macos_steps(host: Host) -> Iterable[Callable[[], Row]]:
-    """Yield the macOS OS steps: ``brew update``, ``brew upgrade --greedy``, the system list."""
+def macos_steps(host: Host, listed: Sequence[App] = ()) -> Iterable[Callable[[], list[Row]]]:
+    """Yield the macOS OS steps: ``brew update``, ``brew upgrade --greedy``, the system list.
+
+    The upgrade never touches a listed app's cask: when one is outdated, it names the other
+    outdated formulae and casks instead.
+    """
     found = brew(host)
-    for words in (("update",), ("upgrade", "--greedy")):
+    casks = {app.cask for app in listed if app.cask}
 
-        def step(words: tuple[str, ...] = words) -> Row:
-            item = " ".join(("brew", *words))
-            if not found:
-                return Row(item, "", "", "skipped", "no Homebrew")
-            ran = run([found, *words], timeout=OS_TIMEOUT, env=_brew_env(host))
-            status = "done" if ran.code == 0 else "failed"
-            return Row(item, "", "", status, ran.last_line() if ran.out or ran.err else "")
+    def update() -> list[Row]:
+        if not found:
+            return [Row("brew update", "", "", "skipped", "no Homebrew")]
+        ran = run([found, "update"], timeout=OS_TIMEOUT, env=_brew_env(host))
+        status = "done" if ran.code == 0 else "failed"
+        return [Row("brew update", "", "", status, ran.last_line() if ran.out or ran.err else "")]
 
-        yield step
+    def upgrade() -> list[Row]:
+        item = "brew upgrade --greedy"
+        if not found:
+            return [Row(item, "", "", "skipped", "no Homebrew")]
+        names: list[str] = []
+        kept: list[str] = []
+        if casks:
+            outdated = run(
+                [
+                    found,
+                    "outdated",
+                    "--greedy",
+                    "--quiet",
+                ],
+                timeout=OS_TIMEOUT,
+                env=_brew_env(host),
+            )
+            if outdated.code != 0:
+                return [Row(item, "", "", "failed", f"brew outdated: {outdated.last_line()}")]
+            names = [line.strip() for line in outdated.out.splitlines() if line.strip()]
+            kept = [name for name in names if name.rsplit("/", 1)[-1] in casks]
+        rest = [name for name in names if name not in kept]
+        if kept and not rest:
+            return [Row(item, "", "", "done", f"left alone: {', '.join(kept)} (listed apps)")]
+        ran = run(
+            [
+                found,
+                "upgrade",
+                "--greedy",
+                *(rest if kept else []),
+            ],
+            timeout=OS_TIMEOUT,
+            env=_brew_env(host),
+        )
+        status = "done" if ran.code == 0 else "failed"
+        detail = ran.last_line() if ran.out or ran.err else ""
+        if kept:
+            detail = f"{detail}; left alone: {', '.join(kept)} (listed apps)".lstrip("; ")
+        return [Row(item, "", "", status, detail)]
 
-    def system() -> Row:
+    def system() -> list[Row]:
         row = software_updates(host)
         if row.status != "pending":
-            return row
+            return [row]
         detail = f"{row.detail}; never installed here (softwareupdate -i by hand)"
-        return dataclasses.replace(row, status="report", detail=detail)
+        return [dataclasses.replace(row, status="report", detail=detail)]
 
+    yield update
+    yield upgrade
     yield system
 
 
@@ -968,11 +1838,16 @@ def apply(
     host: Host,
     pinned: Mapping[str, str],
     emit: Callable[[Row], None] | None = None,
+    *,
+    listed: Sequence[App] = (),
+    deferred_only: bool = False,
 ) -> list[Row]:
     """Bring this machine to the pins, then update its OS packages; return one row per step.
 
     Holds ``.work/update.lock``; refuses while the fleet stop flag is set and ends at the
-    first step that finds it set (a ``stopped`` row). ``emit`` gets each row as it is made.
+    first step that finds it set (a ``stopped`` row). A family found running defers its
+    steps ("Busy"); the families deferred are recorded for ``deferred_only``, which runs
+    only their steps and nothing when none waits. ``emit`` gets each row as it is made.
     """
     rows: list[Row] = []
 
@@ -986,22 +1861,66 @@ def apply(
         add(Row("apply", "", "", "stopped", f"the fleet is stopped: {reason}"))
         return rows
     try:
+        before = read_deferred(host.root)
+    except UpdateError as error:
+        add(Row("deferred", "", "", "error", str(error)))
+        return rows
+    if deferred_only and not before:
+        add(Row("deferred", "", "", "ok", "no family waits: nothing to retry"))
+        return rows
+    try:
         with update_lock(host.root):
-            steps: list[Callable[[], Row]] = [
-                (lambda tool=tool: apply_tool(host, tool, pinned[tool.key])) for tool in TOOLS
-            ]
-            steps.append(lambda: _shadows_after(host))
-            os_steps = linux_steps(host) if host.linux else macos_steps(host)
+            ledger = Ledger()
+            found: dict[App, Installed] = {} if host.linux else app_bundles(host, listed)
+            bundles = bundle_folders(found)
+            steps = _steps(
+                host,
+                pinned,
+                listed,
+                ledger,
+                bundles,
+                set(before) if deferred_only else None,
+            )
+            finished = True
             # Lazily: a Linux step's ``sudo`` refusal ends the steps after it.
-            for step in itertools.chain(steps, os_steps):
+            for step in steps:
                 reason = stop_reason(host.root)
                 if reason:
                     add(Row("apply", "", "", "stopped", f"the fleet stopped mid-run: {reason}"))
+                    finished = False
                     break
-                add(step())
+                for row in step():
+                    add(row)
+            if not deferred_only and found:
+                for row in app_rows(host, found, applying=True):
+                    add(row)
+            save_deferred(host.root, ledger.settle(before, time.time(), finished=finished))
+    except LockedError as error:
+        add(Row("apply", "", "", "locked", str(error)))
     except UpdateError as error:
-        add(Row("apply", "", "", "busy", str(error)))
+        add(Row("apply", "", "", "error", str(error)))
     return rows
+
+
+def _steps(
+    host: Host,
+    pinned: Mapping[str, str],
+    listed: Sequence[App],
+    ledger: Ledger,
+    bundles: Mapping[str, Sequence[Path]],
+    only: set[str] | None,
+) -> Iterable[Callable[[], list[Row]]]:
+    """Yield ``apply``'s steps: every one, or (``only``) those of the families named."""
+    if host.linux:
+        yield lambda: release_holds(host)
+    for tool in TOOLS:
+        if only is None or tool.family in only:
+            yield lambda tool=tool: [tool_step(host, tool, pinned[tool.key], ledger, bundles)]
+    if only is None:
+        yield lambda: [_shadows_after(host)]
+        yield from linux_steps(host, listed, ledger) if host.linux else macos_steps(host, listed)
+    elif host.linux and any(app.apt and app.family in only for app in listed):
+        yield from linux_steps(host, listed, ledger, upgrade_only=True)
 
 
 def _shadows_after(host: Host) -> Row:
@@ -1076,9 +1995,10 @@ def local(action: str, name: str) -> Report:
     host = Host.here()
     try:
         pinned = pins()
+        listed = apps()
     except UpdateError as error:
         return Report(name, (Row("pins", "", "", "error", str(error)),))
-    rows = check(host, pinned) if action == "check" else apply(host, pinned)
+    rows = check(host, pinned, listed) if action == "check" else apply(host, pinned, listed=listed)
     return Report(name, tuple(rows))
 
 
@@ -1258,6 +2178,11 @@ SCHEDULE_MINUTE = 30
 SCHEDULE_JITTER = 1800
 #: Seconds a scheduled run may take before it is killed.
 SCHEDULE_TIME_LIMIT = 5400
+#: The hourly retry of the deferred families (``apply --deferred``): its launchd label,
+#: systemd unit and the minute past each hour it is due, before the same jitter.
+RETRY_LABEL = f"{SCHEDULE_LABEL}-retry"
+RETRY_UNIT = f"{SCHEDULE_UNIT}-retry"
+RETRY_MINUTE = 0
 
 
 def schedule_path() -> str:
@@ -1276,16 +2201,16 @@ def schedule_path() -> str:
     return os.pathsep.join(folders)
 
 
-def schedule_line(root: Path = ROOT, jitter: int = 0) -> str:
+def schedule_line(root: Path = ROOT, jitter: int = 0, action: str = "apply") -> str:
     """Return the shell line a scheduled run executes (``fleet_sync.schedule_line``'s shape).
 
     It checks the stop flag before any Python starts, sleeps a random ``0..jitter`` seconds
     (launchd only: systemd's timer has ``RandomizedDelaySec``) and checks it again, then runs
-    ``apply`` under ``perl``'s ``alarm`` so a run past :data:`SCHEDULE_TIME_LIMIT` seconds is
-    killed.
+    ``action`` (``apply``, or the retry's ``apply --deferred``) under ``perl``'s ``alarm`` so
+    a run past :data:`SCHEDULE_TIME_LIMIT` seconds is killed.
     """
     python = shlex.quote(str(root / ".venv" / "bin" / "python"))
-    command = f"{python} {SCRIPT} apply"
+    command = f"{python} {SCRIPT} {action}"
     limit = f"perl -e 'alarm shift @ARGV; exec @ARGV or die' {SCHEDULE_TIME_LIMIT}"
     stop = f"[ -e {fleet_stop.FLAG} ] && exit 0; "
     pause = (
@@ -1300,50 +2225,81 @@ def schedule_line(root: Path = ROOT, jitter: int = 0) -> str:
     )
 
 
+#: The two timers: label or unit, the ``apply`` they run, the launchd calendar entry and the
+#: systemd ``OnCalendar`` value.
+TIMERS = (
+    (
+        SCHEDULE_LABEL,
+        SCHEDULE_UNIT,
+        "apply",
+        {"Hour": SCHEDULE_HOUR, "Minute": SCHEDULE_MINUTE},
+        f"*-*-* {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}:00",
+    ),
+    (
+        RETRY_LABEL,
+        RETRY_UNIT,
+        "apply --deferred",
+        {"Minute": RETRY_MINUTE},
+        f"*-*-* *:{RETRY_MINUTE:02d}:00",
+    ),
+)
+
+
 def schedule_files(
     home: Path,
     root: Path = ROOT,
     platform_name: str = sys.platform,
 ) -> dict[Path, str]:
-    """Return the timer files running ``apply`` daily (module docstring, ``schedule``).
+    """Return the timer files: ``apply`` daily, ``apply --deferred`` hourly (module docstring).
 
     Raises:
         UpdateError: ``platform_name`` is neither macOS nor Linux.
 
     """
     log = root / ".work" / SCHEDULE_LOG
+    files: dict[Path, str] = {}
     if platform_name == "darwin":
-        agent = {
-            "Label": SCHEDULE_LABEL,
-            "ProgramArguments": ["/bin/sh", "-c", schedule_line(root, SCHEDULE_JITTER)],
-            "WorkingDirectory": str(root),
-            "StartCalendarInterval": {"Hour": SCHEDULE_HOUR, "Minute": SCHEDULE_MINUTE},
-            "StandardOutPath": str(log),
-            "StandardErrorPath": str(log),
-            "EnvironmentVariables": {"PATH": schedule_path(), "HOME": str(home)},
-        }
-        plist = home / "Library" / "LaunchAgents" / f"{SCHEDULE_LABEL}.plist"
-        return {plist: plistlib.dumps(agent).decode()}
+        for label, _unit, action, calendar, _when in TIMERS:
+            agent = {
+                "Label": label,
+                "ProgramArguments": [
+                    "/bin/sh",
+                    "-c",
+                    schedule_line(root, SCHEDULE_JITTER, action),
+                ],
+                "WorkingDirectory": str(root),
+                "StartCalendarInterval": calendar,
+                "StandardOutPath": str(log),
+                "StandardErrorPath": str(log),
+                "EnvironmentVariables": {"PATH": schedule_path(), "HOME": str(home)},
+            }
+            plist = home / "Library" / "LaunchAgents" / f"{label}.plist"
+            files[plist] = plistlib.dumps(agent).decode()
+        return files
     if platform_name.startswith("linux"):
-        command = f"{{ {schedule_line(root)}; }} >> {shlex.quote(str(log))} 2>&1"
         units = home / ".config" / "systemd" / "user"
-        title = "Update django-strawberry-framework's fleet tools to their pins"
-        service = (
-            f"[Unit]\nDescription={title}\n\n"
-            f"[Service]\nType=oneshot\nWorkingDirectory={root}\n"
-            f"Environment=PATH={schedule_path()}\nTimeoutStartSec={SCHEDULE_TIME_LIMIT}\n"
-            f"ExecStart=/bin/sh -c {shlex.quote(command)}\n"
-        )
-        timer = (
-            f"[Unit]\nDescription={title}\n\n"
-            f"[Timer]\nOnCalendar=*-*-* {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}:00\n"
-            f"Persistent=true\nRandomizedDelaySec={SCHEDULE_JITTER}s\nAccuracySec=1s\n\n"
-            "[Install]\nWantedBy=timers.target\n"
-        )
-        return {
-            units / f"{SCHEDULE_UNIT}.service": service,
-            units / f"{SCHEDULE_UNIT}.timer": timer,
-        }
+        for _label, unit, action, _calendar, when in TIMERS:
+            command = (
+                f"{{ {schedule_line(root, action=action)}; }} >> {shlex.quote(str(log))} 2>&1"
+            )
+            title = (
+                "Update django-strawberry-framework's fleet tools to their pins"
+                if action == "apply"
+                else "Retry the fleet tool updates deferred while their agents ran"
+            )
+            files[units / f"{unit}.service"] = (
+                f"[Unit]\nDescription={title}\n\n"
+                f"[Service]\nType=oneshot\nWorkingDirectory={root}\n"
+                f"Environment=PATH={schedule_path()}\nTimeoutStartSec={SCHEDULE_TIME_LIMIT}\n"
+                f"ExecStart=/bin/sh -c {shlex.quote(command)}\n"
+            )
+            files[units / f"{unit}.timer"] = (
+                f"[Unit]\nDescription={title}\n\n"
+                f"[Timer]\nOnCalendar={when}\n"
+                f"Persistent=true\nRandomizedDelaySec={SCHEDULE_JITTER}s\nAccuracySec=1s\n\n"
+                "[Install]\nWantedBy=timers.target\n"
+            )
+        return files
     msg = f"schedule writes a launchd agent (macOS) or systemd user units (Linux), not {platform_name}"
     raise UpdateError(msg)
 
@@ -1352,24 +2308,28 @@ def schedule_commands(
     files: Mapping[Path, str],
     platform_name: str = sys.platform,
 ) -> list[list[str]]:
-    """Return the commands that (re)load ``files``' timer."""
+    """Return the commands that (re)load ``files``' timers."""
     if platform_name == "darwin":
         domain = f"gui/{os.getuid()}"
-        plist = str(next(iter(files)))
-        return [
-            [
-                "launchctl",
-                "bootout",
-                domain,
-                plist,
-            ],
-            [
-                "launchctl",
-                "bootstrap",
-                domain,
-                plist,
-            ],
-        ]
+        commands: list[list[str]] = []
+        for path in files:
+            commands.append(
+                [
+                    "launchctl",
+                    "bootout",
+                    domain,
+                    str(path),
+                ],
+            )
+            commands.append(
+                [
+                    "launchctl",
+                    "bootstrap",
+                    domain,
+                    str(path),
+                ],
+            )
+        return commands
     return [
         ["systemctl", "--user", "daemon-reload"],
         [
@@ -1377,7 +2337,7 @@ def schedule_commands(
             "--user",
             "enable",
             "--now",
-            f"{SCHEDULE_UNIT}.timer",
+            *(f"{unit}.timer" for _label, unit, _action, _calendar, _when in TIMERS),
         ],
     ]
 
@@ -1401,17 +2361,41 @@ def load_schedule(commands: Sequence[Sequence[str]]) -> None:
 # --------------------------------------------------------------------------------------------
 
 
-def sudoers_text(user: str, template: Path = SUDOERS_FILE) -> str:
-    """Return the sudoers drop-in with ``user`` rendered in.
+def hold_commands(listed: Sequence[App]) -> list[tuple[str, ...]]:
+    """Return the ``apt-mark`` commands ``apply`` runs as root: hold, unhold, per apt package."""
+    return [
+        (APT_MARK, verb, package)
+        for package in dict.fromkeys(app.apt for app in listed if app.apt)
+        for verb in ("hold", "unhold")
+    ]
+
+
+def sudoers_text(user: str, listed: Sequence[App] = (), template: Path = SUDOERS_FILE) -> str:
+    """Return the sudoers drop-in with ``user`` rendered in, ``@APT_MARK@`` per hold command.
+
+    A template line holding ``@APT_MARK@`` is repeated once per command of
+    :func:`hold_commands`, each exact (absolute path, the package named, no wildcard).
 
     Raises:
-        UpdateError: ``user`` is no plain account name.
+        UpdateError: ``user`` is no plain account name, or a package is not plain.
 
     """
     if not ACCOUNT.fullmatch(user):
         msg = f"refusing to render the account {user!r} into a sudoers rule"
         raise UpdateError(msg)
-    return template.read_text(encoding="utf-8").replace("@USER@", user)
+    commands = [" ".join(argv) for argv in hold_commands(listed)]
+    pattern = fleet_setup.APP_VALUES["apt"]
+    odd = [app.apt for app in listed if app.apt and not pattern.fullmatch(app.apt)]
+    if odd:
+        msg = f"refusing to render the packages {odd!r} into a sudoers rule"
+        raise UpdateError(msg)
+    lines: list[str] = []
+    for line in template.read_text(encoding="utf-8").replace("@USER@", user).splitlines():
+        if "@APT_MARK@" in line:
+            lines.extend(line.replace("@APT_MARK@", command) for command in commands)
+        else:
+            lines.append(line)
+    return "\n".join(lines) + "\n"
 
 
 def sudoers_command(text: str) -> str:
@@ -1443,6 +2427,7 @@ class _Args(argparse.Namespace):
     all: bool
     json: bool
     install: bool
+    deferred: bool
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1456,7 +2441,16 @@ def build_parser() -> argparse.ArgumentParser:
         sub = commands.add_parser(name, help=text)
         _ = sub.add_argument("--all", action="store_true", help="every machine, in parallel")
         _ = sub.add_argument("--json", action="store_true", help="one JSON document")
-    schedule = commands.add_parser("schedule", help="print (or --install) the daily timer")
+        if name == "apply":
+            _ = sub.add_argument(
+                "--deferred",
+                action="store_true",
+                help="only the families the last run deferred (the hourly retry)",
+            )
+    schedule = commands.add_parser(
+        "schedule",
+        help="print (or --install) the daily timer and the hourly retry",
+    )
     _ = schedule.add_argument("--install", action="store_true", help="write the timer and load it")
     _ = commands.add_parser("sudoers", help="print the Linux sudoers rule and its install command")
     return parser
@@ -1476,17 +2470,24 @@ def cmd_check(args: _Args) -> int:
             print("\n".join(fleet_table(reports)))
         rows = [row for report in reports for row in report.rows]
     else:
-        report = Report(fleet.this_machine_name(repo=ROOT), tuple(check(Host.here(), pins())))
+        report = Report(
+            fleet.this_machine_name(repo=ROOT),
+            tuple(check(Host.here(), pins(), apps())),
+        )
         if args.json:
             _print_json(report.as_json())
         else:
             print("\n".join(machine_table(report)))
         rows = list(report.rows)
-    return 1 if any(row.status in DRIFT for row in rows) else 0
+    return 1 if any(drifted(row) for row in rows) else 0
 
 
 def cmd_apply(args: _Args) -> int:
     """Bring this machine (or every machine) to the pins; exit 1 when a step went wrong."""
+    deferred = args.deferred
+    if args.all and deferred:
+        msg = "--deferred retries this machine's own deferred families (its timer); not with --all"
+        raise UpdateError(msg)
     if args.all:
         reports = run_all("apply")
         if args.json:
@@ -1496,6 +2497,7 @@ def cmd_apply(args: _Args) -> int:
         rows = [row for report in reports for row in report.rows]
     else:
         pinned = pins()
+        listed = apps()
         name = fleet.this_machine_name(repo=ROOT)
         stamp = time.strftime("%Y-%m-%d %H:%M:%S %Z")
 
@@ -1503,8 +2505,15 @@ def cmd_apply(args: _Args) -> int:
             print(step_line(row), flush=True)
 
         if not args.json:
-            print(f"== fleet_update apply on {name} at {stamp}", flush=True)
-        rows = apply(Host.here(), pinned, None if args.json else emit)
+            what = "apply --deferred" if deferred else "apply"
+            print(f"== fleet_update {what} on {name} at {stamp}", flush=True)
+        rows = apply(
+            Host.here(),
+            pinned,
+            None if args.json else emit,
+            listed=listed,
+            deferred_only=deferred,
+        )
         if args.json:
             _print_json(Report(name, tuple(rows)).as_json())
     return 1 if any(row.status in TROUBLE for row in rows) else 0
@@ -1527,14 +2536,15 @@ def cmd_schedule(args: _Args) -> int:
         print(f"wrote {path}")
     load_schedule(commands)
     print(
-        f"installed: apply daily at {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} (+0-{SCHEDULE_JITTER}s)",
+        f"installed: apply daily at {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d}, apply --deferred "
+        f"hourly at :{RETRY_MINUTE:02d} (each +0-{SCHEDULE_JITTER}s)",
     )
     return 0
 
 
 def cmd_sudoers(_args: _Args) -> int:
     """Print the sudoers drop-in for this account and the command that installs it."""
-    text = sudoers_text(getpass.getuser())
+    text = sudoers_text(getpass.getuser(), apps())
     print(f"# {SUDOERS_DIR}/{SUDOERS_NAME} (Linux; once per machine):")
     print(text, end="" if text.endswith("\n") else "\n")
     print("# install it (validated with visudo before it takes effect):")

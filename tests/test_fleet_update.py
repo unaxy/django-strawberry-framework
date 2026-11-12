@@ -99,6 +99,14 @@ class Box:
         self.after_install: Callable[[str], None] = lambda _key: None
         self.fail_install: set[str] = set()
         self.filters_changes = ""
+        #: ``ps -A -o pid=,ppid=,args=``'s lines, ``lsof``'s answer, the apt packages
+        #: installed and held, each cask's latest version and ``brew outdated``'s names.
+        self.ps = ""
+        self.lsof = ""
+        self.debs: set[str] = set()
+        self.holds: set[str] = set()
+        self.casks: dict[str, str] = {}
+        self.outdated = "glab\nfirefox\n"
         self.alias = f"v{self.versions['node']}" if self.versions.get("node") else ""
         self.host = fleet_update.Host(
             fleet_setup.Box(home=home, user="someone", repo=home / "checkout", system=system),
@@ -221,7 +229,25 @@ class Box:
             return fleet_update.Ran(0, self.fleet_path(), "")
         name = Path(argv[0]).name
         if argv[0] == "sudo":
-            return self.sudo(argv)
+            return self.sudo_and_hold(argv)
+        if argv[:2] == ["ps", "-A"]:
+            return fleet_update.Ran(0, self.ps, "")
+        if argv[0] == "/usr/sbin/lsof":
+            return fleet_update.Ran(0, self.lsof, "")
+        if argv[0] == "dpkg-query":
+            found = [f"{name} ii \n" for name in argv[4:] if name in self.debs]
+            return fleet_update.Ran(0 if len(found) == len(argv[4:]) else 1, "".join(found), "")
+        if argv == ["apt-mark", "showhold"]:
+            return fleet_update.Ran(0, "".join(f"{name}\n" for name in sorted(self.holds)), "")
+        if name == "brew" and argv[1:4] == ["info", "--cask", "--json=v2"]:
+            known = [token for token in argv[4:] if token in self.casks]
+            casks = [{"token": token, "version": f"{self.casks[token]},abc"} for token in known]
+            code = 0 if len(known) == len(argv[4:]) else 1
+            return fleet_update.Ran(
+                code,
+                json.dumps({"casks": casks}),
+                "" if code == 0 else "Error: no cask",
+            )
         if argv[-1] == "--version":
             key = next(key for key, relative in BINARIES.items() if argv[0].endswith(relative))
             return fleet_update.Ran(0, SHAPES[key].format(self.versions[key]) + "\n", "")
@@ -234,7 +260,7 @@ class Box:
         if argv[:3] == ["snap", "refresh", "--list"]:
             return fleet_update.Ran(0, "", "All snaps up to date.\n")
         if name == "brew":
-            return fleet_update.Ran(0, "glab\nfirefox\n" if "outdated" in argv else "done\n", "")
+            return fleet_update.Ran(0, self.outdated if "outdated" in argv else "done\n", "")
         if name == "softwareupdate":
             return fleet_update.Ran(
                 0,
@@ -243,6 +269,15 @@ class Box:
             )
         msg = f"unexpected command {argv}"
         raise AssertionError(msg)
+
+    def sudo_and_hold(self, argv: list[str]) -> fleet_update.Ran:
+        """Answer a ``sudo`` call, tracking what ``apt-mark`` holds."""
+        ran = self.sudo(argv)
+        if ran.code == 0 and argv[2:4] == [fleet_update.APT_MARK, "hold"]:
+            self.holds.add(argv[4])
+        if ran.code == 0 and argv[2:4] == [fleet_update.APT_MARK, "unhold"]:
+            self.holds.discard(argv[4])
+        return ran
 
     def bash(self, script: str) -> fleet_update.Ran:
         if "nvm alias default" in script or any(marker in script for marker, _key in INSTALLS):
@@ -896,7 +931,8 @@ def test_a_second_apply_on_the_machine_is_refused_by_the_lock(
     box = _box(tmp_path, monkeypatch)
     with fleet_update.update_lock(box.host.root):
         rows = fleet_update.apply(box.host, PINS)
-    assert [row.status for row in rows] == ["busy"]
+    assert [row.status for row in rows] == ["locked"]
+    assert "locked" in fleet_update.TROUBLE
     assert "update.lock" in rows[0].detail
     assert box.calls == []
     assert (box.host.root / ".work" / fleet_update.LOCK).is_file()
@@ -1048,7 +1084,7 @@ def test_the_schedule_line_checks_the_stop_flag_first_and_kills_a_long_run() -> 
 
 def test_the_macos_schedule_is_a_daily_launchd_agent_logging_to_work(tmp_path: Path) -> None:
     files = fleet_update.schedule_files(tmp_path, Path("/r"), "darwin")
-    [(path, text)] = files.items()
+    [(path, text), _retry] = files.items()
     assert (
         path
         == tmp_path
@@ -1094,6 +1130,7 @@ def test_the_linux_schedule_is_a_persistent_daily_systemd_timer_with_jitter(
         "enable",
         "--now",
         "dsf-fleet-update.timer",
+        "dsf-fleet-update-retry.timer",
     ]
     with pytest.raises(fleet_update.UpdateError, match="not win32"):
         _ = fleet_update.schedule_files(tmp_path, Path("/r"), "win32")
@@ -1130,6 +1167,7 @@ def test_the_sudoers_drop_in_allows_exactly_the_three_commands_and_names_no_user
     assert rules == [
         "@USER@ ALL=(root) NOPASSWD: "
         + ", ".join(" ".join(argv) for argv in fleet_update.SUDO_COMMANDS),
+        "@USER@ ALL=(root) NOPASSWD: @APT_MARK@",
     ]
     assert fleet_update.SUDOERS_FILE.parent == fleet_setup.PATH_BLOCK_FILE.parent
 
@@ -1140,6 +1178,7 @@ def test_sudoers_renders_the_account_and_refuses_an_odd_one() -> None:
         .splitlines()[-1]
         .startswith("rio ALL=(root) NOPASSWD: /usr/bin/apt-get update,")
     )
+    assert "@" not in fleet_update.sudoers_text("rio", fleet_update.apps())
     with pytest.raises(fleet_update.UpdateError, match="refusing"):
         _ = fleet_update.sudoers_text("root ALL=(ALL) ALL #")
 
@@ -1163,8 +1202,10 @@ def test_sudoers_prints_the_rule_and_the_command(
     monkeypatch.setattr(getpass, "getuser", lambda: "rio")
     assert fleet_update.main(["sudoers"]) == 0
     out = capsys.readouterr().out
-    assert fleet_update.sudoers_text("rio") in out
-    assert fleet_update.sudoers_command(fleet_update.sudoers_text("rio")) in out
+    text = fleet_update.sudoers_text("rio", fleet_update.apps())
+    assert text in out
+    assert "/usr/bin/apt-mark hold claude-desktop" in text
+    assert fleet_update.sudoers_command(text) in out
 
 
 # -- fleet_setup -----------------------------------------------------------------------------
@@ -1589,3 +1630,460 @@ def test_check_all_lists_each_stray_on_its_own_line() -> None:
         "",
         "rio-bee: stray ~/projects/dsf-2: a clone of this repo",
     ]
+
+
+# -- busy families, held apps, deferred retries --------------------------------------------
+
+#: Two listed apps (the real list is ``fleet_update.apps()``).
+CLAUDE = fleet_setup.App(
+    "Claude",
+    "claude",
+    "com.anthropic.claudefordesktop",
+    "claude",
+    "claude-desktop",
+)
+CURSOR = fleet_setup.App("Cursor", "cursor", "com.todesktop.230313mzl4w4u92", "cursor", "cursor")
+LISTED = (CLAUDE, CURSOR)
+#: The Claude Code CLI's real executable under the home folder.
+CLAUDE_EXE = ".local/share/claude/versions/2.1.322"
+#: ``sudo -n`` of each Linux OS command, and of ``apt-mark``.
+UPDATE = [
+    "sudo",
+    "-n",
+    "/usr/bin/apt-get",
+    "update",
+]
+UPGRADE = [
+    "sudo",
+    "-n",
+    "/usr/bin/apt-get",
+    "upgrade",
+    "-y",
+]
+SNAP = [
+    "sudo",
+    "-n",
+    "/usr/bin/snap",
+    "refresh",
+]
+
+
+def _mark(verb: str, package: str) -> list[str]:
+    return [
+        "sudo",
+        "-n",
+        fleet_update.APT_MARK,
+        verb,
+        package,
+    ]
+
+
+def _sudo_calls(box: Box) -> list[list[str]]:
+    return [call for call in box.calls if call[0] == "sudo"]
+
+
+def _ps(box: Box, *processes: tuple[int, int, str]) -> None:
+    """Make ``ps`` list ``processes`` (pid, parent, command line; ``~`` is the box's home)."""
+    box.ps = "".join(
+        f"{pid:>6} {ppid:>6} {args.replace('~', str(box.home))}\n" for pid, ppid, args in processes
+    )
+
+
+def _proc(tmp_path: Path, box: Box, exes: Mapping[int, str]) -> fleet_update.Host:
+    """Return the box's host reading each pid's executable from a ``/proc`` of ``exes``."""
+    proc = tmp_path / "proc"
+    for pid, exe in exes.items():
+        (proc / str(pid)).mkdir(parents=True)
+        (proc / str(pid) / "exe").symlink_to(exe.replace("~", str(box.home)))
+    return dataclasses.replace(box.host, proc=proc)
+
+
+def _app(
+    folder: Path,
+    name: str,
+    bundle: str,
+    version: str,
+) -> Path:
+    path = folder / f"{name}.app"
+    (path / "Contents").mkdir(parents=True)
+    info = {"CFBundleIdentifier": bundle, "CFBundleShortVersionString": version}
+    _ = (path / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))
+    return path
+
+
+def test_the_apps_are_one_line_each_and_every_family_is_in_the_table() -> None:
+    listed = fleet_update.apps()
+    assert [app.name for app in listed] == [
+        "Claude",
+        "ChatGPT",
+        "Cursor",
+        "VS Code",
+        "Antigravity",
+        "OpenCode",
+        "T3 Code",
+        "Devin",
+        "Warp",
+        "Ghostty",
+        "Grok Bot",
+    ]
+    assert all(app.bundle and app.cask and app.apt for app in listed)
+    text = fleet_setup.VERSIONS_FILE.read_text()
+    assert all(text.count(f'"{app.name}": "family={app.family} ') == 1 for app in listed)
+    families = {family.name for family in fleet_update.FAMILIES}
+    assert {tool.family for tool in fleet_update.TOOLS} - {""} <= families
+    assert {app.family for app in listed} <= families
+    assert families == {
+        "claude",
+        "codex",
+        "opencode",
+        "antigravity",
+        "grok",
+        "muse",
+        "cursor",
+        "vscode",
+        "t3code",
+        "devin",
+        "warp",
+        "ghostty",
+        "node",
+        "uv",
+    }
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ("family=claude colour=red", "no family/bundle/cask/apt=value word"),
+        ("bundle=com.x cask=x", "needs a name and a family"),
+        ("family=claude apt=claude*", "no family/bundle/cask/apt=value word"),
+        ("family=claude family=codex", "no family/bundle/cask/apt=value word"),
+        ("family=paint", "no family 'paint'"),
+        ("", "non-empty string"),
+    ],
+)
+def test_a_malformed_app_line_is_refused(tmp_path: Path, line: str, message: str) -> None:
+    path = tmp_path / "versions.json"
+    _ = path.write_text(json.dumps({"versions": PINS, "apps": {"Thing": line}}))
+    with pytest.raises(fleet_update.UpdateError, match=message):
+        _ = fleet_update.apps(path)
+
+
+def test_a_running_cli_defers_its_family_and_only_its_family(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch, {**AT_PINS, "claude": "2.0.0", "uv": "0.1.0"})
+    _ps(box, (1001, 1, "claude --resume"))
+    host = _proc(tmp_path, box, {1001: f"~/{CLAUDE_EXE}"})
+    rows = _rows(fleet_update.apply(host, PINS))
+    assert (rows["claude"].status, rows["claude"].detail) == (
+        "busy",
+        "claude is running (pids 1001)",
+    )
+    assert not any("claude.ai/install.sh" in script for script in box.scripts)
+    assert rows["uv"].status == "updated"
+    assert "busy" not in fleet_update.TROUBLE
+    deferred = fleet_update.read_deferred(host.root)
+    assert list(deferred) == ["claude"]
+    assert deferred["claude"].pids == (1001,)
+
+
+def test_a_node_process_is_matched_by_the_script_it_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch)
+    _ps(box, (2002, 1, "node ~/.nvm/versions/node/v26.13.1/bin/codex exec --json"))
+    assert fleet_update.busy(box.host, {}) == {"codex": (2002,), "node": (2002,)}
+
+
+def test_a_loose_name_is_no_family(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    box = _box(tmp_path, monkeypatch)
+    _ps(
+        box,
+        (3003, 1, "/usr/bin/vim ~/.local/bin/claude"),
+        (3004, 1, "/opt/other/claude --resume"),
+        (3005, 1, "claude"),
+        (3006, 1, "~/.local/bin/claudette"),
+        (3007, 1, "/usr/bin/python3 -m codex"),
+    )
+    assert fleet_update.busy(box.host, {}) == {}
+
+
+def test_the_updaters_own_tree_is_never_busy_but_the_session_it_runs_in_is(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch)
+    session = (100, 1, f"~/{CLAUDE_EXE} --resume")
+    tree = (
+        (200, 100, "/bin/zsh -c uv run python docs/fleet/scripts/fleet_update.py apply"),
+        (300, 200, "~/.local/bin/uv run python docs/fleet/scripts/fleet_update.py apply"),
+        (500, 300, "/r/.venv/bin/python docs/fleet/scripts/fleet_update.py apply"),
+        (600, 500, "~/.local/bin/uv --version"),
+    )
+    host = dataclasses.replace(box.host, pid=500)
+    _ps(box, session, *tree)
+    assert fleet_update.busy(host, {}) == {"claude": (100,)}
+    _ps(box, session, *tree, (700, 1, "~/.local/bin/uv run pytest"))
+    assert fleet_update.busy(host, {}) == {"claude": (100,), "uv": (700,)}
+
+
+def test_macos_reads_a_bare_commands_executable_from_lsof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch, system=fleet_setup.MACOS)
+    _ps(box, (4004, 1, "claude --resume"), (4005, 1, "/usr/bin/true"))
+    box.lsof = f"p4004\nftxt\nn{box.home}/{CLAUDE_EXE}\nftxt\nn/usr/lib/dyld\n"
+    assert fleet_update.busy(box.host, {}) == {"claude": (4004,)}
+    lsof = [call for call in box.calls if call[0] == "/usr/sbin/lsof"]
+    assert lsof == [
+        [
+            "/usr/sbin/lsof",
+            "-a",
+            "-d",
+            "txt",
+            "-Fpn",
+            "-p",
+            "4004",
+        ],
+    ]
+
+
+def test_a_busy_desktop_app_is_held_around_the_upgrade_and_unheld(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch)
+    box.debs = {"claude-desktop", "cursor"}
+    _ps(box, (5005, 1, "/usr/lib/claude-desktop/claude-desktop --type=renderer"))
+    rows = fleet_update.apply(box.host, PINS, listed=LISTED)
+    assert _sudo_calls(box) == [
+        UPDATE,
+        _mark("hold", "claude-desktop"),
+        UPGRADE,
+        _mark("unhold", "claude-desktop"),
+        SNAP,
+    ]
+    app = _rows(rows)["app Claude"]
+    assert app.status == "busy"
+    assert app.detail == "claude is running (pids 5005): claude-desktop held through the upgrade"
+    assert _rows(rows)["apt-get upgrade -y"].status == "done"
+    assert box.holds == set()
+    assert not (box.host.root / ".work" / fleet_update.HOLDS_STATE).exists()
+    assert list(fleet_update.read_deferred(box.host.root)) == ["claude"]
+
+
+def test_a_hold_is_recorded_before_the_upgrade_and_a_killed_runs_hold_is_undone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch)
+    box.debs = {"claude-desktop"}
+    _ps(box, (5005, 1, "/usr/lib/claude-desktop/claude-desktop"))
+    recorded: list[list[str]] = []
+
+    def sudo(argv: list[str]) -> fleet_update.Ran:
+        if argv == UPGRADE:
+            recorded.append(fleet_update.read_holds(box.host.root)[1])
+        return fleet_update.Ran(0, "", "")
+
+    box.sudo = sudo
+    _ = fleet_update.apply(box.host, PINS, listed=LISTED)
+    assert recorded == [["claude-desktop"]]
+    # A run killed mid-upgrade leaves its record; check names it, the next apply unholds it.
+    fleet_update.save_holds(box.host.root, ["claude-desktop"])
+    state = box.host.root / ".work" / fleet_update.HOLDS_STATE
+    _ = state.write_text(json.dumps({"pid": 2_000_000_000, "packages": ["claude-desktop"]}))
+    row = _rows(fleet_update.check(box.host, PINS))["hold claude-desktop"]
+    assert row.status == "stale"
+    assert "stale" in fleet_update.DRIFT
+    _ps(box)
+    box.calls.clear()
+    rows = fleet_update.apply(box.host, PINS, listed=LISTED)
+    assert _sudo_calls(box)[0] == _mark("unhold", "claude-desktop")
+    assert rows[0].item == "holds"
+    assert rows[0].status == "released"
+    assert not state.exists()
+
+
+def test_a_package_held_before_is_neither_held_nor_unheld(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch)
+    box.debs = {"claude-desktop"}
+    box.holds = {"claude-desktop"}
+    _ps(box, (5005, 1, "/usr/lib/claude-desktop/claude-desktop"))
+    rows = fleet_update.apply(box.host, PINS, listed=LISTED)
+    assert _sudo_calls(box) == [UPDATE, UPGRADE, SNAP]
+    assert "left held" in _rows(rows)["app Claude"].detail
+    assert box.holds == {"claude-desktop"}
+
+
+def test_a_rule_without_the_hold_lines_skips_the_whole_upgrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch)
+    box.debs = {"claude-desktop", "cursor"}
+    _ps(box, (5005, 1, "/usr/lib/claude-desktop/claude-desktop"))
+    box.sudo = lambda argv: (
+        fleet_update.Ran(1, "", "sudo: a password is required\n")
+        if argv[2] == fleet_update.APT_MARK
+        else fleet_update.Ran(0, "", "")
+    )
+    rows = fleet_update.apply(box.host, PINS, listed=LISTED)
+    assert _sudo_calls(box) == [UPDATE, _mark("hold", "claude-desktop"), SNAP]
+    row = _rows(rows)["apt-get upgrade -y"]
+    assert row.status == "busy"
+    assert "claude is running (pids 5005): nothing upgraded" in row.detail
+    assert "fleet_update.py sudoers" in row.detail
+    assert list(fleet_update.read_deferred(box.host.root)) == ["claude"]
+
+
+def test_apply_deferred_does_nothing_when_no_family_waits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch, {**AT_PINS, "uv": "0.1.0"})
+    rows = fleet_update.apply(box.host, PINS, listed=LISTED, deferred_only=True)
+    assert [(row.item, row.status) for row in rows] == [("deferred", "ok")]
+    assert box.calls == []
+
+
+def test_apply_deferred_retries_only_the_waiting_families_and_clears_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch, {**AT_PINS, "claude": "2.0.0"})
+    _ps(box, (1001, 1, "claude"))
+    host = _proc(tmp_path, box, {1001: f"~/{CLAUDE_EXE}"})
+    _ = fleet_update.apply(host, PINS)
+    since = fleet_update.read_deferred(host.root)["claude"].since
+    box.versions["uv"] = "0.1.0"  # off its pin, yet no family of its waits
+    box.sync()
+    rows = fleet_update.apply(host, PINS, deferred_only=True)
+    assert [(row.item, row.status) for row in rows] == [("claude", "busy")]
+    assert fleet_update.read_deferred(host.root)["claude"].since == since
+    _ps(box)
+    rows = fleet_update.apply(host, PINS, deferred_only=True)
+    assert [(row.item, row.status) for row in rows] == [("claude", "updated")]
+    assert not any("astral.sh" in script for script in box.scripts)
+    assert fleet_update.read_deferred(host.root) == {}
+    rows = fleet_update.apply(host, PINS, deferred_only=True)
+    assert [(row.item, row.status) for row in rows] == [("deferred", "ok")]
+
+
+def test_check_shows_each_deferred_family_and_how_long_it_waited(tmp_path: Path) -> None:
+    now = 1_800_000_000.0
+    fleet_update.save_deferred(
+        tmp_path,
+        {"claude": fleet_update.Waiting(now - 3 * 3600 - 120, (100, 200))},
+    )
+    [row] = fleet_update.state_rows(tmp_path, now)
+    assert (row.item, row.status) == ("deferred claude", "deferred")
+    assert row.detail.startswith("waiting 3h 2m, since ")
+    assert row.detail.endswith("claude is running (pids 100, 200)")
+    assert not fleet_update.drifted(row)
+
+
+def test_macos_reports_each_installed_app_against_its_cask_and_never_touches_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch, system=fleet_setup.MACOS)
+    monkeypatch.setattr(fleet_update, "brew", _homebrew)
+    folder = tmp_path / "Applications"
+    claude = _app(folder, "Claude", CLAUDE.bundle, "5.0.0")
+    _ = _app(folder, "Cursor", CURSOR.bundle, "3.29.15")
+    _ = _app(folder, "Safari", "com.apple.Safari", "27.2")
+    host = dataclasses.replace(box.host, applications=(folder,))
+    box.casks = {"claude": "5.1231.2", "cursor": "3.29.15"}
+    rows = _rows(fleet_update.check(host, PINS, LISTED))
+    behind, current = rows["app Claude"], rows["app Cursor"]
+    assert (behind.pinned, behind.installed, behind.status) == ("5.1231.2", "5.0.0", "behind")
+    assert (current.installed, current.status) == ("3.29.15", "ok")
+    assert not any(fleet_update.drifted(row) for row in (behind, current))
+    assert "app Safari" not in rows
+    applied = _rows(fleet_update.apply(host, PINS, listed=LISTED))
+    assert applied["app Claude"].status == "report"
+    brew_calls = [call[1:] for call in box.calls if call[0] == "/opt/homebrew/bin/brew"]
+    assert all(
+        call[0]
+        in {
+            "info",
+            "update",
+            "outdated",
+            "upgrade",
+        }
+        for call in brew_calls
+    )
+    assert ["upgrade", "--greedy"] in brew_calls
+    _ps(box, (6006, 1, f"{claude}/Contents/MacOS/Claude"))
+    found = fleet_update.app_bundles(host, LISTED)
+    assert fleet_update.busy(host, fleet_update.bundle_folders(found)) == {"claude": (6006,)}
+
+
+def test_macos_brew_upgrade_leaves_a_listed_apps_cask_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path, monkeypatch, system=fleet_setup.MACOS)
+    monkeypatch.setattr(fleet_update, "brew", _homebrew)
+    box.outdated = "glab\ncursor\n"
+    rows = _rows(fleet_update.apply(box.host, PINS, listed=LISTED))
+    upgrades = [call for call in box.calls if call[1:2] == ["upgrade"]]
+    assert upgrades == [
+        [
+            "/opt/homebrew/bin/brew",
+            "upgrade",
+            "--greedy",
+            "glab",
+        ],
+    ]
+    assert rows["brew upgrade --greedy"].detail.endswith("left alone: cursor (listed apps)")
+
+
+def test_the_retry_timer_runs_apply_deferred_hourly_under_the_same_rules(
+    tmp_path: Path,
+) -> None:
+    stop = f"[ -e {fleet_stop.FLAG} ] && exit 0; "
+    macos = fleet_update.schedule_files(tmp_path, Path("/r"), "darwin")
+    retry = _plist(
+        macos[
+            tmp_path / "Library" / "LaunchAgents" / f"{fleet_update.RETRY_LABEL}.plist"
+        ].encode(),
+    )
+    assert fleet.is_json_object(retry)
+    assert retry["StartCalendarInterval"] == {"Minute": fleet_update.RETRY_MINUTE}
+    line = fleet_update.schedule_line(Path("/r"), fleet_update.SCHEDULE_JITTER, "apply --deferred")
+    assert retry["ProgramArguments"] == ["/bin/sh", "-c", line]
+    assert line.count(stop) == 2
+    assert line.index("sleep") < line.rindex(stop) < line.index("fleet_update.py apply --deferred")
+    linux = fleet_update.schedule_files(tmp_path, Path("/r"), "linux")
+    units = tmp_path / ".config" / "systemd" / "user"
+    timer = linux[units / f"{fleet_update.RETRY_UNIT}.timer"]
+    service = linux[units / f"{fleet_update.RETRY_UNIT}.service"]
+    assert f"OnCalendar=*-*-* *:{fleet_update.RETRY_MINUTE:02d}:00" in timer
+    assert "Persistent=true" in timer
+    assert f"RandomizedDelaySec={fleet_update.SCHEDULE_JITTER}s" in timer
+    assert "fleet_update.py apply --deferred" in service
+    assert stop in service
+
+
+def test_sudoers_names_one_exact_hold_and_unhold_per_listed_package() -> None:
+    listed = fleet_update.apps()
+    text = fleet_update.sudoers_text("rio", listed)
+    rules = [line for line in text.splitlines() if line and not line.startswith("#")]
+    marks = [rule for rule in rules if "apt-mark" in rule]
+    assert marks == [
+        f"rio ALL=(root) NOPASSWD: /usr/bin/apt-mark {verb} {app.apt}"
+        for app in listed
+        for verb in ("hold", "unhold")
+    ]
+    assert not any("*" in rule for rule in rules)
+    odd = fleet_setup.App("Odd", "claude", apt="x ALL")
+    with pytest.raises(fleet_update.UpdateError, match="refusing to render the packages"):
+        _ = fleet_update.sudoers_text("rio", [odd])
