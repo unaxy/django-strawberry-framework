@@ -985,10 +985,11 @@ _GRAPHQL_COST_ROWS: dict[str, tuple[str, dict[str, int], dict[str, int]]] = {
         {"BookType": 1, "ShelfType": 1},
         {"BookFilter": 1, "BranchFilter": 1, "ShelfFilter": 1},
     ),
+    # ``BranchFilter.shelf_codes`` walks ``shelves``: its absent-leaf probe builds ``ShelfFilter``.
     "branches-column": (
         '{ rows: allLibraryBranches(filter: {name: {exact: "Home"}}) { k: name } }',
         {"BranchType": 1},
-        {"BranchFilter": 1},
+        {"BranchFilter": 1, "ShelfFilter": 1},
     ),
 }
 
@@ -996,7 +997,10 @@ _GRAPHQL_COST_ROWS: dict[str, tuple[str, dict[str, int], dict[str, int]]] = {
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", sorted(_GRAPHQL_COST_ROWS))
 def test_graphql_sets_walk_and_scope_no_head(monkeypatch: pytest.MonkeyPatch, shape: str) -> None:
-    """A set the GraphQL pipeline builds names no head: no head adds a hook run or a set."""
+    """A set the GraphQL pipeline builds names no head: no head adds a hook run or a set.
+
+    An absent walked leaf's probe builds its hop's target set once and runs no hook.
+    """
     create_users(1)
     document, cost, built = _GRAPHQL_COST_ROWS[shape]
     _ = _head_world()
