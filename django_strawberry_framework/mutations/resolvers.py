@@ -43,7 +43,7 @@ and the load-bearing invariants this module owns:
   ``GraphQLError`` - before validation for ``create``, after the visibility
   lookup for ``update`` / ``delete``.
 - **``full_clean()`` feeds the ``FieldError`` envelope** (spec-036 Decision 7 /
-  Decision 8 step 4): a ``ValidationError`` returns a null-object payload, never
+  Decision 8): a ``ValidationError`` returns a null-object payload, never
   an exception at the GraphQL boundary, each error keyed to the GraphQL input
   field the client sent (the model field name re-keyed through
   ``utils/errors.py::build_error_key_map``; a field the input does not expose
@@ -661,7 +661,7 @@ def _decode_relations(
     """Decode provided input fields into model attrs + M2M key lists.
 
     The model rider of ``utils/write_values.py::decode_provided_fields`` (spec-036
-    Decision 8 step 1): bind-stashed ``InputFieldSpec`` records route each
+    Decision 8's decode): bind-stashed ``InputFieldSpec`` records route each
     provided attr by ``kind``. Dest policy stays on the handlers:
 
     - SCALAR / FILE / RELATION_SINGLE -> ``scalar_and_fk_attrs`` (FK as
@@ -1143,7 +1143,7 @@ def _assign_m2m(instance: models.Model, m2m_assignments: _M2MAssignments) -> Non
     For each provided ``(m2m_field_name, [key, ...])``: ``instance.<m2m>.set([
     ...])`` replaces the entire relation set (a provided empty list clears it);
     an omitted M2M field is never in ``m2m_assignments`` so it is left unchanged.
-    The keys are the through-row values decoded in step 1 (the target pk, or the
+    The keys are the through-row values decoded from the input (the target pk, or the
     ``to_field`` value the through table's target-side foreign key stores). Runs
     inside the transaction, after ``save()``.
     """
@@ -1941,7 +1941,7 @@ def save_or_field_errors(
     save-time catch serves every save path: the ``036`` model pipeline passes
     a create's ``save_new_row`` and its M2M assignment; the form pipeline passes
     a ``ModelForm`` create's save / a bound ``perform_mutate`` (the plain flavor,
-    spec-038 Decision 8 step 5); the serializer passes its savepointed
+    spec-038 Decision 8); the serializer passes its savepointed
     ``serializer.save()`` closure. An update of the model or ``ModelForm``
     flavor goes through ``forced_save_or_field_errors`` instead. Two failures map, and nothing
     else:

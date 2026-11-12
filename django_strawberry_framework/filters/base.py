@@ -1,7 +1,8 @@
 """Filter primitives + ``RelatedFilter``.
 
-Layers 1 and 2 of the six-layer pipeline (spec-027 Decision 3) plus the
-five parity-floor primitives (spec-027 Decision 4):
+Lazy ``RelatedFilter`` targets and their module-fallback resolution, from the
+lazy-resolution pipeline (spec-027 Decision 3), plus the five parity-floor
+primitives (spec-027 Decision 4):
 
 - `Filter` re-exported from `django_filters` for surface continuity.
 - `TypedFilter` -> `ArrayFilter` / `RangeFilter` / `ListFilter`: same contract as

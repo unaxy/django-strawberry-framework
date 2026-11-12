@@ -97,8 +97,9 @@ which limit applies, and what the ``413`` says - stays in
 ``bool``, in the fail-closed direction, rather than as an exception of its own, so
 this module cannot turn a hostile or unusual stream into an unrelated ``500``. It
 also never touches a multipart request; ``views.py`` returns before calling here,
-because reading a multipart body would defeat Django's streaming upload handlers
-(spec-046 Decision 7 step 3).
+because reading a multipart body would defeat Django's streaming upload handlers: a
+multipart body is bounded by its declared length and Django's own parser (spec-046
+Decision 7).
 
 That totality covers **both** phases, which is the whole reason the two are
 written the same way. The capability probe guards every call it makes into a

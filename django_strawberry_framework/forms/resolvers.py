@@ -16,7 +16,7 @@ observable distinction). For ``update`` the locate must precede authorize (objec
 and the form-specific invariants this module owns:
 
 - **The decode produces a FORM-field-keyed ``provided_data`` + a separate
-  ``provided_files``** (Decision 8 step 1). A bound Django form is keyed by FORM
+  ``provided_files``** (spec-038 Decision 8). A bound Django form is keyed by FORM
   field name (``ItemModelForm(data={"category": pk})``, never ``{"category_id":
   pk}``) and reads uploads from ``files=``, never ``data=``. The reverse
   map (``mutation_cls._input_field_specs``, a list of
@@ -28,8 +28,8 @@ and the form-specific invariants this module owns:
   clear, so that ``null`` is its ``required`` error (``_required_file_clears``).
 
 - **The dedicated form relation decoder visibility-checks EVERY branch**
-  (Decision 7 / Decision 8 step 1). Every model-choice field the input carries is a
-  relation id (the build refuses one over a column that is no relation,
+  (spec-038 Decision 7 / Decision 8, the decode). Every model-choice field the input
+  carries is a relation id (the build refuses one over a column that is no relation,
   ``forms/inputs.py::require_column_kind_agreement``). Each relation id - a GlobalID string
   *or* a raw pk, by target - is type-checked (``decode_model_global_id`` for the Relay
   branch, ``coerce_relation_pk_or_none`` for the raw-pk branch), then **resolved
@@ -58,7 +58,7 @@ and the form-specific invariants this module owns:
   ``empty_values`` is a clear; an M2M list element never is, so every element, ``""``
   included, is decoded.
 
-- **``update`` reconstructs the full bound payload** (Decision 8 step 4): for
+- **``update`` reconstructs the full bound payload** (spec-038 Decision 8): for
   every non-file declared form field the input did not provide, supply the located
   row's value under the form field name, then overlay ``provided_data``; ``files =
   provided_files``. Scalars, and a FK whose ``ModelChoiceField`` resolves its choice by
@@ -93,7 +93,7 @@ and the form-specific invariants this module owns:
   framework never silently excludes an invalid untouched field from validation.
 
 - **The form is constructed once via the overridable ``get_form`` /
-  ``get_form_kwargs`` hooks** (Decision 8 step 4 / Decision 6); ``form.is_valid()``
+  ``get_form_kwargs`` hooks** (spec-038 Decision 8 / Decision 6); ``form.is_valid()``
   runs once. Each value is bound under the keys the bound form reads it from: a prefixed
   form (a class-level ``prefix``, a ``get_form_kwargs`` ``prefix=``, a ``get_form``
   passing the package's mapping or a copy with a prefix) reads ``form.add_prefix(name)``,
@@ -138,7 +138,7 @@ and the form-specific invariants this module owns:
 
 - **Write via the ``ModelForm``'s save / ``perform_mutate`` (plain), wrapped by
   the reused save-time mappers** (``save_or_field_errors``; a ``ModelForm`` update
-  ``forced_save_or_field_errors``) (Decision 8 step 5), never a top-level
+  ``forced_save_or_field_errors``) (spec-038 Decision 8), never a top-level
   ``GraphQLError`` at the write: an ``IntegrityError``
   is the ``"__all__"`` envelope, and a Django ``ValidationError`` raised by
   consumer save-time code (a ``save()`` / ``perform_mutate`` override, a model
@@ -466,9 +466,9 @@ def _decode_form_relation_single(
     through UNCHANGED so the
     bound form's OWN validation decides - a required ``ModelChoiceField`` raises
     its field-keyed required error via ``form.is_valid()``, an optional one clears
-    to the empty value (spec-038 Decision 8 step 1). Treating it as a raw pk
-    instead would mis-report a decode-level "Invalid id for relation" error and
-    block a legitimate nullable-FK clear.
+    to the empty value (spec-038 Decision 7: the relation decode skips a clear).
+    Treating it as a raw pk instead would mis-report a decode-level "Invalid id for
+    relation" error and block a legitimate nullable-FK clear.
 
     A visible row whose stored key (``key_attname``, the column a ``to_field`` relation
     stores) is ``NULL`` names no row, whatever column the form field is keyed by: the
@@ -543,7 +543,7 @@ def _decode_form_relation_multi(
     required-ness (required -> a field-keyed error via ``form.is_valid()``;
     optional -> clear) and ``None`` is NEVER iterated - iterating it would raise a
     top-level ``TypeError`` instead of the field-keyed envelope
-    (spec-038 Decision 8 step 1).
+    (spec-038 Decision 7: the relation decode skips a clear).
 
     This DIVERGES, deliberately, from the model ``DjangoMutation`` path, which
     rejects an explicit ``null`` M2M with a field-keyed error
@@ -551,7 +551,7 @@ def _decode_form_relation_multi(
     ``null``"). A bound ``ModelForm`` follows Django form semantics, where an empty
     value clears an optional M2M (and a required one errors), so the form flavor
     honors the form's own required-ness rather than imposing the model path's
-    stricter "null is never a valid replace-set" stance (spec-038 Decision 8 step 1).
+    stricter "null is never a valid replace-set" stance (spec-038 Decision 7).
     """
     if _is_empty_form_value(values, form_field):
         return [], None
@@ -685,7 +685,7 @@ def _reconstruct_partial_data(
       ``to_field_name`` set, the bound form looks members up by THAT key, so a
       ``model_to_dict`` (instance) shape would fail validation for an omitted M2M
       while a PROVIDED list (decoded to ``to_field_name`` values) passes - an
-      omitted-vs-provided inconsistency (spec-038 Decision 8 step 4). Only a
+      omitted-vs-provided inconsistency (spec-038 Decision 8). Only a
       form field that is a real forward M2M on the model is reconstructed this way;
       a non-model extra is left to ``model_to_dict`` (which ignores non-columns).
 
@@ -815,7 +815,7 @@ def _form_errors_to_field_errors(
     ``036`` ``validation_error_to_field_errors`` over a ``ValidationError(errors)``: the
     ``{field: [ValidationError, ...]}`` shape is what the mapper's ``error_dict`` branch
     consumes, so the form's ``NON_FIELD_ERRORS`` bucket keys to the ``"__all__"``
-    sentinel exactly as a model ``full_clean()`` failure does (Decision 8 step 4).
+    sentinel exactly as a model ``full_clean()`` failure does (spec-038 Decision 8).
     Each form field name is re-keyed to the GraphQL input field the client sent
     through ``build_error_key_map`` over the request's published ``specs`` (a
     form spec's ``target_name`` IS the form field name); a form field the input

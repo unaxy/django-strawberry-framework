@@ -2032,8 +2032,8 @@ def test_malformed_offset_cursor_on_a_planned_nested_window_is_the_nested_fields
 ) -> None:
     """A cursor the decoder refuses plans no window and is the nested field's own cursor error.
 
-    The planner declines the window for that argument payload (spec-033
-    Decision 4 step f), so no ``library_book`` statement runs and the root
+    The planner declines the window for that argument payload (spec-033's
+    error shapes), so no ``library_book`` statement runs and the root
     ``library_genre`` page is the only SQL; the per-parent pipeline then raises
     the cursor error at the nested field's path, not at the root field the
     planner runs under. A cursor in the minted form pages each parent through

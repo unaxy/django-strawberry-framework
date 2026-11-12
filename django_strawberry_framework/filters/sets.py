@@ -1,7 +1,7 @@
 """``FilterSet`` + ``FilterSetMetaclass`` - declaration, validation, and the apply pipeline.
 
-Layers 3 and 4 of the six-layer pipeline (spec-027 Decision 3) plus the
-Decision-8 named-helper decomposition of `apply_sync` /
+Metaclass discovery and cycle-safe expansion, from the lazy-resolution pipeline
+(spec-027 Decision 3), plus the Decision-8 named-helper decomposition of `apply_sync` /
 `apply_async` / `apply`. The metaclass is a verbatim port of
 `django_graphene_filters/filterset.py::FilterSetMetaclass`; `FilterSet`
 mixes the cookbook's cycle-safe `get_filters` into a
@@ -1767,8 +1767,8 @@ class ProjectedChildFilter(Filter):
     a child ``__init__`` customization and a request-aware callable ``queryset``
     both apply), and ``filter`` runs the child filter inside that instance over
     the branch's visible child rows (the target type's ``get_queryset`` on the
-    parent's database, as the nested branch scopes them; spec-027 Decision 8
-    step 3), then answers at the parent through the rows the declaration's
+    parent's database, as the nested branch's visibility scoping derives them;
+    spec-027 Decision 8), then answers at the parent through the rows the declaration's
     explicit ``queryset=`` admits (``FilterSet._apply_relation_leaf``, the
     application every flat leaf walking a declared hop shares): a positive child
     filter keeps the parents reaching a matching child row, an ``isnull=True``
@@ -3869,7 +3869,7 @@ class FilterSet(
     # replaces it with the expanded table. Annotation only.
     base_filters: OrderedDict[str, Filter]
 
-    # Cache for fully-resolved filters per Layer 4 of Decision 3.
+    # Cache for fully-resolved filters (spec-027 Decision 3's cycle-safe expansion).
     _expanded_filters: ClassVar[OrderedDict[str, Filter] | None] = None
     # The immutable expansion snapshot (``ExpansionSnapshot``) owning the
     # published filter table AND the row-preserving-candidate metadata, published
@@ -6642,7 +6642,7 @@ class FilterSet(
     ) -> list[tuple[str, Filter, object]]:
         """Return ``(form key, filter, value)`` for each active lookup of one leaf field.
 
-        Per spec-027 Decision 3 Layer 5 a leaf field carries a per-field operator
+        Per spec-027 Decision 3's schema build a leaf field carries a per-field operator
         bag (``exact`` / ``i_contains`` / ``in_`` / ...). Each bag lookup's form
         key was decided once, when ``inputs.py::filter_lookup_table`` grouped the
         head, so the generated input and the form data never disagree. A scalar
@@ -6896,7 +6896,7 @@ class FilterSet(
                 f"{field_name!r} is active in the filter input (nested, or walked by a "
                 f"flat leaf) but {reason}. "
                 "The branch's visibility scoping runs the target type's "
-                "get_queryset (spec-027 Decision 8 step 3); skipping it would "
+                "get_queryset (spec-027 Decision 8); skipping it would "
                 "silently return unfiltered rows. Register a DjangoType for "
                 "the target model or remove the RelatedFilter.",
             )
@@ -7126,7 +7126,7 @@ class FilterSet(
         declaration several arms hold runs its target ``get_queryset`` once.
         ``apply_sync`` calls it before the permission pass and form validation,
         as ``apply_async`` calls its twin. Flat hops stay at their later sync
-        application boundary; nested branch errors retain their step-3 order.
+        application boundary; nested branch errors keep their visibility-scoping order.
         """
         result: dict[int, dict[str, models.QuerySet[models.Model]]] = {}
         for child_input, arm_path, depth in cls._iter_logic_arms(
@@ -7301,7 +7301,7 @@ class FilterSet(
     def _validate_form_or_raise(cls, filterset_instance: FilterSet) -> None:
         """Raise `GraphQLError` with the canonical extensions payload.
 
-        Decision 8 step 6 - `BaseFilterSet.qs` silently
+        spec-027 Decision 8 validates the form explicitly - `BaseFilterSet.qs` silently
         falls through to `filter_queryset` when the form has errors, so
         the explicit `is_valid()` call here is what turns a malformed
         input into a structured GraphQL response.
@@ -7530,7 +7530,7 @@ class FilterSet(
         Such a walk (a ``RelatedFilter(None)`` placeholder on its path, ``_visibility_hops``)
         has no chain: ``_leaf_chain`` needs every declared hop's target set, so a caller
         reading the chain before ``_apply_relation_leaf`` derives the hops (which refuses an
-        active one, spec-027 Decision 8 step 3) asks this first and leaves the leaf alone.
+        active one, spec-027 Decision 8) asks this first and leaves the leaf alone.
         """
         return any(
             isinstance(hop, DeclaredHop) and hop.target is None
@@ -8061,7 +8061,7 @@ class FilterSet(
     ) -> models.QuerySet[models.Model]:
         """Return ``hop``'s target rows its ``DjangoType.get_queryset`` lets this request see.
 
-        A declared hop's rows are the nested branch's step 3 for it
+        A declared hop's rows are the ones the nested branch's visibility scoping derives for it
         (``_declared_hop_rows``, with this instance's resolver ``info``): read
         from the request-wide map when present (a nested branch walking the hop,
         or ``apply_async``'s pre-pass, put them there), derived and stored on
@@ -9502,7 +9502,7 @@ class FilterSet(
     def filter_queryset(self, queryset: models.QuerySet[_M]) -> models.QuerySet[_M]:
         """Compose the tree-form ``and`` / ``or`` / ``not`` keys on top of the leaves.
 
-        spec-027 Decision 8 step 8, the tree-form override that is not the
+        The spec-027 Decision 8 tree-form override, which is not the
         resolver-facing ``apply_sync`` / ``apply_async`` pair. The flat leaf
         clauses are applied by ``self._apply_flat_leaves(queryset)`` -- a
         framework-owned loop that mirrors ``BaseFilterSet.filter_queryset``
@@ -9837,9 +9837,9 @@ class FilterSet(
 
         The explicit `RelatedFilter(queryset=...)`
         constraint (a callable one called with ``request``)
-        AND-intersects with the visibility-scoped child qs
-        from step 3, then the parent keeps the rows reaching an intersected
-        child row through one correlated ``EXISTS`` per active branch
+        AND-intersects with the branch's visibility-scoped child qs
+        (its target type's ``get_queryset``), then the parent keeps the rows
+        reaching an intersected child row through one correlated ``EXISTS`` per active branch
         (``_restrict_through_branch``, the restriction a flat leaf walking
         the branch applies too), passing through only the visible rows of each
         intermediate model a multi-relation branch crosses (``_via_rows``, read

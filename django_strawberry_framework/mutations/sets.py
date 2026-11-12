@@ -689,7 +689,7 @@ class DjangoMutation(_ModelResolverSeamsBase, metaclass=DjangoMutationMetaclass)
         distinct from the field-keyed validation envelope).
 
         **Defined here; invoked only by the resolver**, at
-        the pipeline placement spec-036 Decision 8 step 3 / Decision 15 pins
+        the pipeline placement spec-036 Decision 8 / Decision 15 pins
         (before the write for ``create``; after the visibility lookup for
         ``update`` / ``delete``). This module ships only the default method body
         + the ``permission_classes`` default assignment; the raise-on-denial lives

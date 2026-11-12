@@ -245,7 +245,7 @@ def _isolate_registry() -> Iterator[None]:
 
 
 def test_lookup_name_map_full_table_matches_spec() -> None:
-    """Pin the spec-027 Decision 3 Layer-5 lookup -> python attr table against drift."""
+    """Pin the spec-027 Decision 3 lookup -> python attr table against drift."""
     expected = {
         "exact": "exact",
         "iexact": "i_exact",

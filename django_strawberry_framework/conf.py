@@ -585,7 +585,7 @@ def max_request_body_bytes_setting() -> object:
     Reads ``DJANGO_STRAWBERRY_FRAMEWORK["MAX_REQUEST_BODY_BYTES"]``, defaulting
     to ``1_048_576`` (1 MiB) when the key (or the whole settings dict) is
     absent. ``None`` is a meaningful configured value here - it disables the
-    package cap (spec-046 Decision 7 step 4). Consumed by
+    package cap (spec-046 Decision 7). Consumed by
     ``views.py::_resolved_max_request_body_bytes``, the lower two rungs of the
     ``max_request_body_bytes=`` view kwarg > this setting > default precedence
     ladder, which is also where the value is validated - ``conf.py`` stays a

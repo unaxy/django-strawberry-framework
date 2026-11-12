@@ -18473,7 +18473,7 @@ def test_an_arm_branch_error_answers_before_any_form_error_on_both_colors(
 
     Both colors derive the root's and every ``and`` / ``or`` / ``not`` arm's
     ``branch`` before the root form and the arm forms validate (spec-027
-    Decision 8, step 3), so an input holding a rejected ``topic`` beside a
+    Decision 8), so an input holding a rejected ``topic`` beside a
     rejected ``branch`` ``name`` answers the branch's ``FILTER_INVALID`` key,
     the first in tree order, on ``apply_sync`` and on ``apply_async`` with a sync
     or an async-only ``BranchType.get_queryset``.
@@ -18524,7 +18524,8 @@ def test_an_arm_branch_error_answers_before_a_permission_denial_on_both_colors(
     ``check_topic_permission`` denies any ``topic``; each input also holds a
     rejected ``branch`` ``name`` in an arm, whose ``FILTER_INVALID`` answers
     first on ``apply_sync`` and on ``apply_async`` with a sync or an async-only
-    ``BranchType.get_queryset`` (spec-027 Decision 8: step 3 before step 5).
+    ``BranchType.get_queryset`` (spec-027 Decision 8: visibility scoping before the
+    permission checks).
     The gate alone answers its denial, a ``GraphQLError`` with no code.
     """
     filter_set = _arm_error_order_filter(mode, gated=True)

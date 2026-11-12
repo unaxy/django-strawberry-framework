@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 232 to do.
+Progress: 0 done, 233 to do.
 
 ## From dry-0_0_15_3
 
@@ -1125,6 +1125,9 @@ Progress: 0 done, 232 to do.
   `filter: null` or leaves its variable unset exactly as it answers `filter: {}`: `FILTER_INVALID` "This field is
   required." where the field refuses an absent value, instead of every row. Such a nested connection is read per
   parent, never from the optimizer's window
+- [ ] 931. CHANGELOG entry for item 766: the `ConfigurationError` raised for an active `RelatedFilter` branch, or at
+  `finalize_django_types()` for a `RelatedFilter` target with no registered `DjangoType`, cites "spec-027 Decision 8"
+  where it cited "spec-027 Decision 8 step 3"
 
 ## From dry-upstream-0_0_15
 

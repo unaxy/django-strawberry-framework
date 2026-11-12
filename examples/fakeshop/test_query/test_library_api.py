@@ -6671,9 +6671,9 @@ def test_an_arm_branch_error_answers_before_an_arm_form_error(
     """Every arm's related branches derive before any arm's form validates.
 
     Both arms refuse the lone surrogate, one in its own form (``title``) and one in
-    its ``shelf`` branch's ``branch`` branch; the branch derives first (spec-027
-    Decision 8, step 3), whichever arm holds it, so the error names the branch's key,
-    the one ``apply_async`` answers too.
+    its ``shelf`` branch's ``branch`` branch; the branch derives first, whichever arm holds it
+    (spec-027 Decision 8 scopes nested branches before any form validates), so the error
+    names the branch's key, the one ``apply_async`` answers too.
     """
     _seed_north_shelf()
     query = f"query($v: String) {{ allLibraryBooks(filter: {filter_text}) {{ title }} }}"

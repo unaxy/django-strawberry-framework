@@ -1,6 +1,6 @@
 """``RelatedOrder`` - the nested-path ordering primitive.
 
-Layer 1 of the spec-028 Decision 3 layer plan. ``RelatedOrder`` is the collapsed
+The lazy-reference layer of the spec-028 Decision 3 plan. ``RelatedOrder`` is the collapsed
 port of the cookbook's ``django_graphene_filters/orders.py::BaseRelatedOrder``
 + ``::RelatedOrder`` pair (per spec-028 Decision 2 - single-symbol public
 surface). ``LazyRelatedClassMixin`` is reused from the neutral

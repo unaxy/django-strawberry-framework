@@ -177,7 +177,7 @@ LOOKUP_PREFIXES: dict[str, str] = {
 }
 
 
-# `django-filter` lookup -> python attr per spec-027 Decision 3 Layer 5. The
+# `django-filter` lookup -> python attr per spec-027 Decision 3's schema build. The
 # map spells each lookup's attr with its word boundary (`i_contains`); the
 # schema's `NameConverter` names the field from it (`iContains` by default,
 # `i_contains` under `auto_camel_case=False`). `in` is a Python keyword, so its

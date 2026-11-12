@@ -1037,7 +1037,7 @@ def decode_global_id(
     rather than leaking Strawberry's ``GlobalIDValueError`` or Python's
     ``KeyError`` / ``AttributeError`` / ``TypeError``.
 
-    Steps:
+    Steps (the candidate resolution and strategy check follow spec-031 Decision 8):
 
     - **Input gate.** A value outside ``(relay.GlobalID, str)`` (``None``, an
       ``int``, a lazy object) is rejected up front, before any parse.
@@ -1046,7 +1046,7 @@ def decode_global_id(
       ``GlobalIDValueError``). An empty ``type_name`` or empty ``node_id`` is
       rejected (``from_id`` does not enforce non-empty slots; the encoder never
       emits an empty type-name slot and the package has no blank-string pks).
-    - **Step 1 - resolve a candidate.** A model-label slot (the ``type_name``
+    - **Resolve a candidate.** A model-label slot (the ``type_name``
       contains a dot, ``"app_label.modelname"``) resolves via
       ``model_for_label_slot`` (app label exact, model name case-insensitive) ->
       ``registry.get(model)`` (the primary / lone type, honoring ``Meta.primary``).
@@ -1064,7 +1064,7 @@ def decode_global_id(
       the spelling the default ``NameConverter`` publishes, Relay-Node
       definitions only), which is the same answer whenever no consumer
       converter renames the type.
-    - **Step 2 - enforce the recorded strategy permits the payload shape.** Reads
+    - **Enforce the recorded strategy permits the payload shape.** Reads
       the candidate's stamped ``effective_globalid_strategy``: a model-label
       payload is permitted iff ``_accepts_model_label_decode`` (``model`` /
       ``type+model``); a type-name payload iff ``_accepts_type_name_decode``

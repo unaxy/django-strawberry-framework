@@ -19,8 +19,8 @@ flavor supplies only the serializer ``decode_step`` / ``write_step`` callbacks.
 
 The serializer-specific invariants this module owns:
 
-- **The decode produces a SERIALIZER-FIELD-keyed ``provided_data``** (spec-039 Decision 8
-  step 1). DRF serializers are keyed by DECLARED field name and read uploads from
+- **The decode produces a SERIALIZER-FIELD-keyed ``provided_data``** (spec-039 Decision
+  8). DRF serializers are keyed by DECLARED field name and read uploads from
   ``data`` like any other value (the deliberate contrast with Django forms, which
   split ``files=``). The reverse map
   (``mutation_cls._input_field_specs``, a list of
@@ -58,7 +58,7 @@ The serializer-specific invariants this module owns:
   request).
 
 - **The serializer is constructed via the CONSTRUCTOR-ONLY ``get_serializer_kwargs``
-  hook + the framework merge** (spec-039 Decision 8 step 4). The framework
+  hook + the framework merge** (spec-039 Decision 8). The framework
   builds the authoritative serializer ``data`` ITSELF - decoded client data plus the
   ``get_serializer_injected_data`` injection (whose keys must EXACTLY match
   ``Meta.injected_fields``) - then calls ``get_serializer_kwargs(info, data=<copy>,
@@ -1123,7 +1123,7 @@ def _merged_serializer_kwargs(
 
     Calls the overridable CONSTRUCTOR-ONLY hook ``get_serializer_kwargs(info,
     data=<frozen view>, hook_context=<frozen context>)`` (the spec-039 Decision 8
-    step-4 hook), then OWNS the non-overridable framework rules. ``data``, ``instance``,
+    construction hook), then OWNS the non-overridable framework rules. ``data``, ``instance``,
     ``partial``, ``context["request"]``, and ``context["write_alias"]`` are
     FRAMEWORK-OWNED:
 

@@ -881,7 +881,7 @@ def _connection_window_slice_from_arguments(
     Returns ``None`` when the shared helper raises ``PaginationArgumentError``
     (negative / over-max ``first`` / ``last``, malformed cursor) so
     ``plan_connection_relation`` leaves the selection UNPLANNED and the shipped
-    nested field path raises at its own error locality (Decision 4 step f). No
+    nested field path raises at its own error locality (spec-033's error shapes). No
     other pagination exception can arise here: ``decode_offset_cursor`` folds
     every undecodable cursor, a non-``str`` one included, into that rejection,
     and once the validator has returned ``SliceMetadata.from_arguments`` has
@@ -1096,9 +1096,9 @@ def _settle_window_pass(
 ) -> list[_KeyedWindow]:
     """Log one window pass's fallbacks, record its malformed keys, return its windows.
 
-    Malformed pagination (Decision 4 step f / spec-033 Decision 8) emits NO
-    window so the connection pipeline raises at the field, but RECORDS the
-    identities so strictness does not preempt that error. Per-key under the
+    Malformed pagination emits NO window so the connection pipeline raises its
+    pagination error at the field, but RECORDS the identities as planned so
+    strictness does not preempt that error (spec-033 Decision 8). Per-key under the
     divergent scheme (that alias's own error locality; siblings plan
     independently); every identity for the shared window (``None`` is not a
     runtime_path suffix, so the filter would drop them all).

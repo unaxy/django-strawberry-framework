@@ -26,7 +26,7 @@ On top of that skeleton the module carries:
   ``_active_permission_targets`` / ``_invoke_permission_method`` /
   ``_request_from_info``) that drives
   active-input-only per-field ``check_<field>_permission`` dispatch per
-  spec-028 Decision 8 step 6.
+  spec-028 Decision 8.
 - The cookbook-style ``get_flat_orders`` classmethod walking the
   normalized data structure.
 """
@@ -519,7 +519,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
     ``related_orders`` collection via ``OrderSetMetaclass``.
 
     The resolver-facing surface is the classmethod pair ``apply_sync`` /
-    ``apply_async`` per spec-028 Decision 8 step 7. Each carries ``info``
+    ``apply_async`` per spec-028 Decision 8. Each carries ``info``
     end-to-end so per-field ``check_<field>_permission`` gates and
     active-input-only scope run consistently. There is **no**
     ``apply(...)`` dispatcher (spec-028 Decision 8): the
@@ -549,7 +549,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
     # Annotation only: the metaclass is the one writer.
     related_orders: ClassVar[dict[str, RelatedOrder]]
 
-    # Cache for fully-resolved fields per Layer 4 of spec-028 Decision 3.
+    # Cache for fully-resolved fields (spec-028 Decision 3's expansion + cache).
     _expanded_fields: ClassVar[OrderedDict[str, RelatedOrder | None] | None] = None
     # Expansion reentry-guard slot (named by ``_lifecycle.guard``):
     # ``sets_mixins.expanded_once`` sets it around ``get_fields``'s build and
@@ -1269,7 +1269,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         1. Resolve the request via ``_request_from_info``.
         2. Run per-field / per-branch permission checks BEFORE any
            ``order_by(...)`` clause touches the queryset
-           (spec-028 Decision 8 step 6 -- denial gates raise pre-mutation).
+           (spec-028 Decision 8 -- denial gates raise pre-mutation).
         3. Normalize the input into a flat
            ``[(field_path, Ordering | None), ...]`` list.
         4. Convert each ``(field_path, direction)`` pair into a Django
@@ -1280,7 +1280,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
            (spec-030 Decision 11 -- aggregate-ordering coexistence); a related
            row a scoping type hides reads as missing (``_visible_rows_sync``
            derives each such type's rows); ``None`` directions are filtered
-           (spec-028 Decision 8 step 7 -- term-less input returns the queryset
+           (spec-028 Decision 8 -- term-less input returns the queryset
            unchanged; Edge cases -- null-direction no-op).
         5. ``annotate(**annotations)`` (when any to-many term produced one) then
            ``order_by(*expressions)`` when at least one expression survived;
@@ -1313,7 +1313,7 @@ class OrderSet(ClassBasedTypeNameMixin, ActiveInputPermissionMixin, metaclass=Or
         target ``get_queryset`` works. ``get_flat_orders`` and
         ``queryset.order_by(...)`` are NOT wrapped -- they are pure-Python
         parsing + a queryset-method call that does no I/O (per spec-028
-        Decision 8 step 7).
+        Decision 8).
         """
         request = cls._request_from_info(info)
         await run_in_one_sync_boundary(cls._run_permission_checks, input_value, request)

@@ -472,7 +472,7 @@ def _default_get_form_kwargs(
     files: dict[str, object],
     instance: models.Model | None = None,
 ) -> dict[str, object]:
-    """Build the form kwargs: the default ``get_form_kwargs`` for both bases (spec-038 Decision 8 step 4).
+    """Build the form kwargs: the default ``get_form_kwargs`` for both bases (spec-038 Decision 8).
 
     Returns ``{"data": data, "files": files}`` plus ``"instance": instance`` when
     ``instance`` is non-``None`` (the ``ModelForm`` update path binds the located
@@ -496,7 +496,7 @@ def _default_get_form(
     files: dict[str, object],
     instance: models.Model | None = None,
 ) -> forms.BaseForm:
-    """Build the form: the default ``get_form`` for both bases (spec-038 Decision 8 step 4).
+    """Build the form: the default ``get_form`` for both bases (spec-038 Decision 8).
 
     The coarser construction hook: ``form_class(**self.get_form_kwargs(...))``. A
     consumer overrides this when it needs full control of instantiation (a form
@@ -620,7 +620,7 @@ def _form_input_type_name_for(
 if TYPE_CHECKING:
 
     class _FormConstructionHooks(Protocol):
-        """The construction hooks both form bases expose (spec-038 Decision 8 step 4)."""
+        """The construction hooks both form bases expose (spec-038 Decision 8)."""
 
         _mutation_meta: ClassVar[_ValidatedMutationMeta]
 
@@ -1174,7 +1174,7 @@ class DjangoFormMutation(_FormMutationBase, metaclass=DjangoFormMutationMetaclas
         get_form = _default_get_form
 
     def perform_mutate(self, form: forms.BaseForm, info: Info[object, object]) -> None:
-        """Run the plain-form write hook (spec-038 Decision 6 / Decision 8 step 5).
+        """Run the plain-form write hook (spec-038 Decision 6 / Decision 8).
 
         The default calls ``form.save()`` when the form defines one (a
         ``forms.Form`` does not by default), else a no-op. A consumer overrides this

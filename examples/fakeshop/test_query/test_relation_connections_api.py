@@ -1501,8 +1501,8 @@ def test_strictness_raise_malformed_nested_cursor_reports_the_pagination_error()
     """A malformed nested ``after:`` reports the cursor error, not an unplanned-N+1 flag.
 
     A malformed cursor leaves the connection unwindowed so the per-parent
-    pipeline raises its own cursor-validation error (spec-033 Decision 4 step f
-    / Decision 8). The walker still records the resolver key for that fallback,
+    pipeline raises its own cursor-validation error (spec-033's error shapes
+    and Decision 8). The walker still records the resolver key for that fallback,
     so under ``"raise"`` the strictness check stays silent and the only error the
     client sees is the cursor's.
     """

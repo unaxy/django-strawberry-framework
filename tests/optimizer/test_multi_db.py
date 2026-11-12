@@ -8,11 +8,11 @@ FK-id elision, so it does not need a ``router.db_for_read`` mock.
 
 - Consumer-provided ``OptimizerHint.prefetch(Prefetch(queryset=
   Child.objects.using("shard_b").all()))`` round-trips through plan
-  construction with the inner queryset's ``_db`` intact. Pins Decision 3
-  axis 3 - generated child querysets are intentionally NOT in scope per
-  Decision 2.
+  construction with the inner queryset's ``_db`` intact. Pins Decision 3's
+  consumer-``Prefetch`` axis - generated child querysets are intentionally
+  NOT in scope per Decision 2.
 
-Decision 3 axis 2 (explicit ``.using(alias)`` ``_db`` preservation through
+Decision 3's explicit-alias axis (``.using(alias)`` ``_db`` preservation through
 ``OptimizationPlan.apply``) is verified transitively by the live
 ``/graphql/`` test ``test_using_shard_b_resolver_returns_rows_seeded_on_shard_b``
 in ``examples/fakeshop/test_query/test_multi_db.py``: if a future refactor
@@ -62,7 +62,7 @@ def _sel(name: str, selections: list[SimpleNamespace] | None = None) -> SimpleNa
 
 
 def test_consumer_provided_prefetch_via_optimizer_hint_round_trips_using_alias() -> None:
-    """Decision 3 axis 3 - ``OptimizerHint.prefetch(Prefetch(queryset=using))`` round-trips ``_db``."""
+    """``OptimizerHint.prefetch(Prefetch(queryset=using))`` round-trips the inner ``_db``."""
     explicit = Prefetch("items", queryset=Item.objects.using("shard_b").all())
 
     registry.clear()

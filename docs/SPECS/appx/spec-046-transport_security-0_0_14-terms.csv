@@ -11,7 +11,7 @@ Auth mutations,auth-mutations,the session surface whose HTTP transport is the Dj
 `get_queryset` visibility hook,get_queryset-visibility-hook,consumes the actor the revalidation keeps fresh (Decision 11 + test 26)
 `DjangoModelPermission`,djangomodelpermission,same; the write-auth gate that must see a revalidated actor
 `ConfigurationError`,configurationerror,the typed construction-time failure for a missing/unusable `django_application` (Decision 3)
-`Upload` scalar,upload-scalar,the multipart write path the body cap must not materialize (Decision 7 step 3)
+`Upload` scalar,upload-scalar,the multipart write path the body cap must not materialize (Decision 7: multipart is bounded by its declaration and Django's parser)
 `DjangoMutation`,djangomutation,the write flavor behind that multipart path
 `FieldError` envelope,fielderror-envelope,the mutation error contract the transport leaves untouched
 `DjangoNodesField`,djangonodesfield,"ships the standing ""request-size limiting belongs to the consumer's transport layer"" note; the body cap is that layer's limit"

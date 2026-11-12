@@ -1012,7 +1012,7 @@ _DELETE_ITEM_WITH_CONNECTION = (
 def test_delete_item_snapshot_carries_connection_child_edges() -> None:
     """``deleteItem`` selecting ``entriesConnection`` returns its edges after the row is gone.
 
-    The connection-child half of the delete snapshot (spec-036 Decision 8 step 6):
+    The connection-child half of the delete snapshot (spec-036 Decision 8):
     the response selection must be fully materialized inside the write transaction
     BEFORE ``delete()``, connection children included, not only plain nested
     relations (``test_delete_item_happy_path`` covers the ``category { name }``

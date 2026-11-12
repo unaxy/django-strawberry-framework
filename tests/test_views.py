@@ -459,8 +459,8 @@ def test_the_cap_precedence_ladder_is_kwarg_then_setting_then_default(
 ) -> None:
     """``max_request_body_bytes=`` > ``MAX_REQUEST_BODY_BYTES`` > the default.
 
-    The two ``None``s mean different things by design (spec-046 Decision 7 step
-    4): a ``None`` KWARG says "this mount did not override anything" and defers,
+    The two ``None``s mean different things by design (spec-046 Decision 7):
+    a ``None`` KWARG says "this mount did not override anything" and defers,
     while ``None`` IN THE SETTING is the documented way to disable the package
     cap. Both rungs are exercised here against an explicitly-set setting so no
     row depends on ambient project settings.
@@ -659,7 +659,7 @@ def _capped_view(
 
 
 def test_a_declared_over_limit_request_is_refused_without_touching_the_stream() -> None:
-    """Decision 7 step 1: the declared gate rejects before the body is even measured.
+    """spec-046 Decision 7: a declared over-limit body is refused before it is measured.
 
     The untouched stream is the load-bearing half. A ``413`` alone would be
     satisfied by an implementation that read and measured the whole payload first;
@@ -692,7 +692,7 @@ def test_a_declared_over_limit_request_is_refused_without_touching_the_stream() 
 def test_a_multipart_request_under_the_declared_gate_is_never_materialized(
     view_class: _ViewClass,
 ) -> None:
-    """Decision 7 step 3: multipart is size-gated by the declaration, never by reading ``body``.
+    """spec-046 Decision 7: multipart is size-gated by the declaration, never by reading ``body``.
 
     Reading ``request.body`` here would pull the whole payload into memory and
     defeat Django's streaming upload handlers, breaking the ``Upload``-scalar
@@ -731,7 +731,7 @@ def test_a_hostile_content_length_on_get_never_materializes_the_body() -> None:
 
 
 def test_the_counted_check_fires_when_no_content_length_is_declared_at_all() -> None:
-    """Decision 7 step 2: with no declaration, the REAL length decides.
+    """spec-046 Decision 7: with no declaration, the REAL length decides.
 
     The package-tier colour of the ASGI live rows - an undeclared body is the
     shape Django's declared-length guard cannot see, and the counted check is
@@ -2159,7 +2159,8 @@ def test_the_package_view_rejects_every_non_utf8_wire_shape(
     """The wire matrix the view owns: every non-UTF-8 shape 400s, and why.
 
     The executable form of spec-046 Decision 9's measured-behavior table and of
-    Decision 10 reason (a). Status and message are identical across all nine rows
+    Decision 10's point that a BOM falls to the strict decode itself, with no lenient
+    branch. Status and message are identical across all nine rows
     - deliberately, so one byte sequence has one interpretation at every hop - so
     ``__cause__`` is the only thing that records the split:
 

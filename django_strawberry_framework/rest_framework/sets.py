@@ -45,8 +45,8 @@ inherits ``DjangoMutation``'s callable pair; both the overrides here AND the
 resolver bodies land, the same pairing the form flavor uses in
 ``forms/sets.py``). The default ``get_serializer_kwargs`` construction hook ships
 here as the constructor-only customization seam; the resolver consumes
-``get_serializer_kwargs`` (the hook Decision 8 step 4 names) and OWNS the framework
-merge / ``partial`` injection / the actor-drift ``context["request"]``
+``get_serializer_kwargs`` (spec-039 Decision 8's construction hook) and OWNS the
+framework merge / ``partial`` injection / the actor-drift ``context["request"]``
 ``ConfigurationError`` rules on top of its return, so those framework-owned
 invariants never live in the consumer-overridable hook. The serializer flavor
 deliberately has **no** coarse ``get_serializer`` constructor hook (unlike the form

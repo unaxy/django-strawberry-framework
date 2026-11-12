@@ -11,7 +11,7 @@ the lazy-resolution Layer-2 prefix-with-owner branch is exercised end to end; th
 ``BookOrder.genres = RelatedOrder("apps.library.orders_genre.GenreOrder")``
 declaration deliberately uses the absolute-import-path form so the
 Layer-2 ``import_string`` first-attempt branch is also exercised
-(spec-028 Decision 3 Layer 2).
+(spec-028 Decision 3's module-fallback resolution).
 
 ``GenreOrder`` lives in the sibling ``orders_genre.py`` module so the
 absolute-import-path resolution path has a real cross-module target;

@@ -4192,7 +4192,7 @@ def test_malformed_slice_arguments_emit_no_window_but_record_resolver_key(
 ) -> None:
     """A malformed ``after:`` cursor emits NO window but RECORDS the resolver key.
 
-    Error-locality contract (spec-033 Decision 4 step f / Decision 8): the
+    Error-locality contract (spec-033's error shapes and Decision 8): the
     selection must NOT get a window prefetch (so the connection pipeline runs
     per-parent and raises its own cursor/pagination validation error), but the
     resolver identity IS recorded so the strictness check does not preempt

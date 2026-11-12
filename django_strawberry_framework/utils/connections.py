@@ -838,7 +838,7 @@ def derive_connection_window_bounds(
     engine itself never rejects, and a forward page's end stays below
     ``sys.maxsize``, so the engine's ``end == sys.maxsize`` is the last-only
     sentinel below and nothing else. The walker catches the error to leave the
-    selection unplanned (Decision 4 step f); the resolver lets it surface as
+    selection unplanned (spec-033's error shapes); the resolver lets it surface as
     the field's own pagination error.
 
     Backward (``last``-only) pagination needs the reversed-row-number window:

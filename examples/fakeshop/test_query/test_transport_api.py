@@ -1662,7 +1662,7 @@ def test_on_wsgi_a_missing_or_understated_content_length_shrinks_the_body_it_can
     one yields exactly the declared count. The honest outcome is therefore
     upstream's malformed-JSON ``400`` on a truncated document, not a ``413`` -
     there is nothing for the counted check to catch on this transport, which is
-    exactly the claim Decision 7 step 2 makes about WSGI. The ASGI colour of the
+    exactly what spec-046 Decision 7 says of WSGI. The ASGI colour of the
     same two shapes is where the counted check earns its keep (below).
     """
     seed_data(1)
@@ -1808,7 +1808,7 @@ def test_post_not_json_body_is_upstreams_malformed_json_400() -> None:
 
 @pytest.mark.django_db
 def test_a_multipart_request_over_the_declared_cap_is_refused() -> None:
-    """Multipart gets the declared-size gate (Decision 7 step 3).
+    """Multipart gets the declared-size gate (spec-046 Decision 7).
 
     The declared gate is the whole of the view's multipart contract: per-file
     count, per-file size, and aggregate size lie outside it. What the view must

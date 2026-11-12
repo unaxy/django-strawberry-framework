@@ -1514,7 +1514,7 @@ def _selected_scalar_names(
     relay_type = type_cls if type_cls is not None and implements_relay_node(type_cls) else None
     # TODO(BACKLOG polymorphic_interface_connections - the abstract-return optimizer entry card): audit
     # this FK-id-elision helper as the walker's second ``included_field_selections`` consumer. This
-    # is that card's requirement R2 in spec-035 Decision 6, and it is unreachable until the same
+    # is a requirement spec-035 Decision 6 sets that card, and it is unreachable until the same
     # card builds the abstract-return production-entry contract (R1).
     # Pseudocode: either share the same type-condition classifier used by
     # ``_walk_selections`` or prove the helper only receives concretely typed

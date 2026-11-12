@@ -13,7 +13,7 @@ derivable from the foundation rather than from per-schema resolver workarounds).
 
 Enforcement is wired into the mutation resolver pipeline: the resolver invokes
 ``Meta.permission_classes`` / ``check_permission`` at the authorization step
-(spec-036 Decision 8 step 3), so ``has_permission`` runs on every ``/graphql/``
+(spec-036 Decision 8), so ``has_permission`` runs on every ``/graphql/``
 write. Each hook must be a SYNC method returning a ``bool`` - an ``async def``
 returns a truthy coroutine and any non-bool is truthy too, so both are rejected
 outright rather than silently treated as "allow" (an authorization bypass).

@@ -121,8 +121,8 @@ opt-out, landed; its plan is `git show 771c299f:docs/related-filter-flat-opt-out
 - A child predicate is built by the child's own form, defaults included. A child checkbox's omitted `False` or a
   disabled initial value can constrain inside `some`, `none` and `every`. For example, under
   `issues: {every: {title: ...}}` the predicate also requires the checkbox's default.
-- This is today's child-form contract (spec-027 Decision 3 Layer 4). The wrapper does not change it, and the docs
-  state it per operator.
+- This is today's child-form contract (spec-027 Decision 3's cycle-safe expansion). The wrapper does not change it,
+  and the docs state it per operator.
 
 ### D8: migration, a breaking schema change pre-1.0, made once
 

@@ -188,7 +188,7 @@ def _resolved_max_request_body_bytes(value: object) -> int | None:
     1 MiB package default - this module never restates that number). ``None``
     from the *setting* is the documented way to disable the package cap
     entirely, which is why the two rungs read the same sentinel differently
-    (spec-046 Decision 7 step 4).
+    (spec-046 Decision 7).
 
     Validation lives here rather than in ``conf.py``, which stays a thin reader
     - the same split ``optimizer/nested_fetch.py::resolve_strategy`` uses for

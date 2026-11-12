@@ -1910,14 +1910,15 @@ def _finalize_queryset(
 ) -> models.QuerySet[models.Model]:
     """Apply the sync pipeline tail: deterministic total order, then optimizer plan.
 
-    Steps 5-6 of the Decision 7 pipeline; ``_finalize_queryset_async`` is the
-    async pipeline's twin. Both colors share step 5 through
-    ``_ordered_for_window``, whose order is pure queryset-method calls on a lazy
-    queryset. Step 6 is not I/O-free: building a plan runs each planned target's
-    ``get_queryset``, so the async twin builds it off the event loop
+    The ordering and planning tail of the spec-030 Decision 7 pipeline;
+    ``_finalize_queryset_async`` is the async pipeline's twin. Both colors share
+    the total order through ``_ordered_for_window``, whose order is pure
+    queryset-method calls on a lazy queryset. The plan is not I/O-free: building
+    a plan runs each planned target's ``get_queryset``, so the async twin builds it
+    off the event loop
     (``optimizer/extension.py::apply_connection_optimization_async``).
 
-    5. Deterministic TOTAL ordering - the connection's positional offset cursors
+    - Deterministic TOTAL ordering - the connection's positional offset cursors
         (Strawberry's ``ListConnection``) are only stable across separate
         requests when the ``ORDER BY`` is a unique total order. The effective
         order - a keyset target's declared ``cursor_field`` when no explicit
@@ -1936,7 +1937,7 @@ def _finalize_queryset(
         ``order_by()`` inverts it, the tiebreaker extends the extra ordering
         rather than replacing it, and the order applied, sought and minted is
         the one compiled.
-    6. Optimizer plan - ``apply_connection_optimization`` applies
+    - Optimizer plan - ``apply_connection_optimization`` applies
         ``select_related`` / ``prefetch_related`` / ``only()`` using the node
         type / model explicitly (the connection field's own cooperation
         point, spec-030 Decision 11), because the schema middleware never
@@ -1966,7 +1967,7 @@ def _ordered_for_window(
     *,
     definition: DjangoTypeDefinition,
 ) -> models.QuerySet[models.Model]:
-    """Apply ``_finalize_queryset``'s step 5, the deterministic total order, for both colors."""
+    """Apply ``_finalize_queryset``'s deterministic total order, for both colors."""
     target_model = definition.model
     cursor_field = definition.cursor_field
     # A hook / manager ``extra(order_by=...)`` ordering becomes ``order_by`` terms, and a
@@ -2116,7 +2117,7 @@ def _pipeline_sync(
 
     ``source`` is the base value (the consumer ``resolver=`` return or the
     captured-model default seed). A ``Manager`` is coerced to a ``QuerySet``;
-    a ``QuerySet`` receives steps 2-6 (visibility -> filter -> orderBy ->
+    a ``QuerySet`` receives the rest of the pipeline (visibility -> filter -> orderBy ->
     default-order -> optimizer); a non-queryset iterable is passed through
     unchanged after the sidecar-input guard rejects ``filter:`` / ``orderBy:``.
 

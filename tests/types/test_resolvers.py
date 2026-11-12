@@ -874,9 +874,9 @@ def test_forward_resolver_without_related_model_propagates_attribute_error() -> 
 #
 # Per ``docs/SPECS/spec-023-multi_db-0_0_7.md``.
 #
-# Five resolver-level tests pin Decision 3 axis 1 (FK-id elision router
-# call shape; four tests) and axis 4 (strictness connection-agnostic shape;
-# one test). The four FK-id tests mock ``router.db_for_read`` per Decision 5;
+# Five resolver-level tests pin two Decision 3 axes: the FK-id elision router
+# call shape (four tests) and the connection-agnostic strictness shape (one
+# test). The four FK-id tests mock ``router.db_for_read`` per Decision 5;
 # the strictness test does NOT mock the router (it never reaches that path
 # per ``django_strawberry_framework/types/resolvers.py::_check_n1``).
 #
@@ -907,7 +907,7 @@ def test_forward_resolver_without_related_model_propagates_attribute_error() -> 
 def test_fk_id_elision_stub_sets_state_db_via_router_db_for_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Decision 3 axis 1 - stub's ``_state.db`` is set via ``router.db_for_read``."""
+    """FK-id elision: the stub's ``_state.db`` is set via ``router.db_for_read``."""
     db_for_read = Mock(return_value="default")
     mock_router = Mock(db_for_read=db_for_read)
     monkeypatch.setattr(resolvers_module, "router", mock_router)
@@ -932,7 +932,7 @@ def test_fk_id_elision_stub_sets_state_db_via_router_db_for_read(
 def test_fk_id_elision_router_call_passes_parent_row_as_instance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Decision 3 axis 1 - ``router.db_for_read`` receives ``instance=<parent_row>`` with ``_state``."""
+    """FK-id elision: ``router.db_for_read`` receives ``instance=<parent_row>`` with ``_state``."""
     db_for_read = Mock(return_value="default")
     mock_router = Mock(db_for_read=db_for_read)
     monkeypatch.setattr(resolvers_module, "router", mock_router)
@@ -956,7 +956,7 @@ def test_fk_id_elision_router_call_passes_parent_row_as_instance(
 def test_fk_id_elision_router_call_passes_none_instance_when_parent_lacks_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Decision 3 axis 1 - router.db_for_read receives ``instance=None`` when parent lacks ``_state``."""
+    """FK-id elision: the router gets ``instance=None`` for a parent with no ``_state``."""
     db_for_read = Mock(return_value="default")
     mock_router = Mock(db_for_read=db_for_read)
     monkeypatch.setattr(resolvers_module, "router", mock_router)
@@ -984,7 +984,7 @@ def test_fk_id_elision_router_call_passes_none_instance_when_parent_lacks_state(
 def test_fk_id_elision_returns_none_for_null_fk_and_does_not_call_router(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Decision 3 axis 1 - null FK takes the early-return branch BEFORE the router is consulted."""
+    """FK-id elision: a null FK takes the early-return branch BEFORE the router is consulted."""
     db_for_read = Mock(return_value="default")
     mock_router = Mock(db_for_read=db_for_read)
     monkeypatch.setattr(resolvers_module, "router", mock_router)
@@ -1009,7 +1009,7 @@ def test_fk_id_elision_returns_none_for_null_fk_and_does_not_call_router(
 
 
 def test_strictness_check_is_connection_agnostic_under_non_default_alias() -> None:
-    """Decision 3 axis 4 - strictness mode raises ``OptimizerError`` regardless of ``_state.db``."""
+    """Strictness mode raises ``OptimizerError`` whatever alias ``_state.db`` names."""
     _ParentType = _parent_type(Item, "_ParentType")
 
     # ``_state.db = "shard_b"`` proves the non-default alias is accepted

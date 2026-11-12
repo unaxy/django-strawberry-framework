@@ -1572,7 +1572,7 @@ def _format_unregistered_related_target_error(
         f"{truth.qualname(filterset_cls)} declares RelatedFilter "
         f"{truth.render(field_name)} targeting {target_label}, but no "
         f"DjangoType is registered for that model. The related branch's visibility "
-        f"scoping runs the target type's get_queryset (spec-027 Decision 8 step 3); "
+        f"scoping runs the target type's get_queryset (spec-027 Decision 8); "
         f"without a registered target the branch would silently return unfiltered "
         f"rows at request time. Register a DjangoType for {target_label} or remove "
         f"the RelatedFilter."
@@ -1724,7 +1724,7 @@ def _audit_unregistered_related_filter_targets(wired: list[type[FilterSet]]) -> 
     """Filter-only subpass 2.5: every reachable ``RelatedFilter`` target must be registered.
 
     A related branch's visibility scoping runs the target type's
-    ``get_queryset`` (spec-027 Decision 8 step 3); an unregistered target would
+    ``get_queryset`` (spec-027 Decision 8); an unregistered target would
     make the branch unfulfillable even though its input field is materialized
     into the schema, so the misconfiguration surfaces here -- at finalize,
     naming the filterset -- instead of on the first request that activates the

@@ -2098,7 +2098,8 @@ def test_the_plan_label_sweep_reports_nothing_for_a_planted_permitted_form(
 #: ``Goals item N``, ``Goal: N``, ``DoD (N``, ``Slices N-M``, a builder
 #: ``Slice X.Na``). Renumbering such a list strands every citer and no gate
 #: resolves them; ``spec-NNN Decision N`` is the one ordinal
-#: ``scripts/check_citations.py`` resolves, so it is not read here.
+#: ``scripts/check_citations.py`` resolves, so it is not read here (an ordinal
+#: inside it is: ``DECISION_SUB_ORDINAL_PATTERN``).
 #: Case-insensitive, so a def or class name (read with its underscores as
 #: spaces) matches in lower case.
 SPEC_ORDINAL_PATTERN = re.compile(
@@ -2114,6 +2115,92 @@ SPEC_ORDINAL_PATTERN = re.compile(
 #: removed in the change that ships the slice, so it is the one Slice ordinal kept.
 TODO_SLICE_ANCHOR_PATTERN = re.compile(r"TODO\(spec-\d{3}\s+slice\s+\d+\w*\)", re.IGNORECASE)
 
+#: The words a spec Decision numbers its inner lists with: a step, a stage, a
+#: layer, an axis, a rule, a subpass and a reason.
+_DECISION_LIST_WORD = r"(?:steps?|stages?|layers?|ax[ie]s|rules?|subpass(?:es)?|reasons?)"
+
+#: One list position after any list word: a number, or a parenthesized letter or number.
+_DECISION_LIST_POSITION = r"(?:\d+|\(\w\))"
+
+#: A lone-letter position, read only after the singular ``step`` (``step f``):
+#: after any other word a lone letter is an article (``rules a lot``).
+_DECISION_STEP_LETTER = r"step[-\s]+[a-z](?![\w'-])"
+
+#: A list word and its first position, a lettered step, or an ``R`` requirement
+#: label. Detection fires on the first position, so a range or a pair after it
+#: is not read.
+_DECISION_SUB_ORDINAL = (
+    r"(?:"
+    + _DECISION_LIST_WORD
+    + r"[-\s]+"
+    + _DECISION_LIST_POSITION
+    + r"|"
+    + _DECISION_STEP_LETTER
+    + r"|R\d+\b)"
+)
+
+#: The same, carrying the further positions a citer lists before naming the
+#: Decision after them (``Steps 5-6 of``, ``Layers 1 and 2 of``), so a shape
+#: whose Decision follows the positions reaches it.
+_DECISION_SUB_ORDINAL_LIST = (
+    _DECISION_SUB_ORDINAL
+    + r"(?:[ \t]*(?:[-/,]|\band\b|\bor\b|\bto\b)[ \t]*"
+    + _DECISION_LIST_POSITION
+    + r")*"
+)
+
+#: Further Decision numbers after the first (``Decisions 3 and 4``, ``Decision 8 / 10``).
+_DECISION_NUMBER_LIST = r"(?:[ \t]*(?:[,/]|\band\b|\bor\b)[ \t]*\d+[a-z]?)*"
+
+_DECISION_POINTER = r"Decisions?[-\s]+\d+[a-z]?" + _DECISION_NUMBER_LIST
+
+#: What may close the Decision's number before the ordinal: a code span's
+#: backticks or bold asterisks.
+_DECISION_MARKUP_CLOSE = r"[`*]*"
+
+#: The separator between a Decision and an ordinal after it: one ``,`` ``:``
+#: ``;`` ``(`` ``/`` or spaced ``-``, spaces, or a line break.
+_DECISION_FORWARD_SEPARATOR = r"(?:[ \t]*(?:[,:;(/]|-(?=[ \t]))[ \t]*|[ \t]+|[ \t]*\n\s*)"
+
+#: The words that place an ordinal before its Decision.
+_DECISION_REVERSE_WORD = r"(?:of|in|under|from)"
+
+#: An ordinal inside a spec Decision, in the three shapes a citer writes it: after
+#: the Decision (``_DECISION_MARKUP_CLOSE``, then ``'s``, then
+#: ``_DECISION_FORWARD_SEPARATOR``); before it through ``of``, ``in``, ``under``
+#: or ``from`` (an optional ``the`` and ``spec-NNN`` between); or before the
+#: Decision in parentheses, directly (``<word> N (spec-NNN Decision N``) or after
+#: the name of the Decision's list (``Stage N of the <flow> (spec-NNN Decision
+#: N``, at most four words of name). A heading number such as ``Decision 7a`` is
+#: part of the gated pointer, not an ordinal inside it. Words for numbers and
+#: Roman numerals are not read. Case-insensitive, so a def or class name matches
+#: in lower case.
+DECISION_SUB_ORDINAL_PATTERN = re.compile(
+    r"(?<![\w-])(?:"
+    + _DECISION_POINTER
+    + _DECISION_MARKUP_CLOSE
+    + r"(?:'s)?"
+    + _DECISION_FORWARD_SEPARATOR
+    + _DECISION_SUB_ORDINAL
+    + r"|"
+    + _DECISION_SUB_ORDINAL_LIST
+    + r"\s+"
+    + _DECISION_REVERSE_WORD
+    + r"\s+(?:the\s+)?(?:spec-\d{3}\s+)?"
+    + _DECISION_POINTER
+    + r"|"
+    + _DECISION_SUB_ORDINAL_LIST
+    + r"\s+(?:of\s+the\s+(?:[^\s()]+\s+){1,4})?\((?:spec-\d{3}\s+)?"
+    + _DECISION_POINTER
+    + r")",
+    re.IGNORECASE,
+)
+
+#: A ``#"..."`` pinpoint closed on its line: a quote of the cited text (START.md
+#: "Source refs"), so a content citation and never an ordinal pointer, whatever
+#: words it quotes.
+PINPOINT_QUOTE_PATTERN = re.compile(r'#"[^"\n]*"')
+
 
 def _spec_ordinal_entries_in(
     paths: Iterable[Path],
@@ -2123,8 +2210,10 @@ def _spec_ordinal_entries_in(
 
     The texts are ``_swept_texts``: every file's prose, plus a package file's
     runtime strings, each read with its staged-slice anchors
-    (``TODO_SLICE_ANCHOR_PATTERN``) blanked. Each violation names the file, the
-    line the match starts on, the kind of text and the match.
+    (``TODO_SLICE_ANCHOR_PATTERN``) and ``#"..."`` pinpoint quotes
+    (``PINPOINT_QUOTE_PATTERN``) blanked, against ``SPEC_ORDINAL_PATTERN`` and
+    ``DECISION_SUB_ORDINAL_PATTERN``. Each violation names the file, the line the
+    match starts on, the kind of text and the match, in text order.
     """
     violations: list[str] = []
     read = 0
@@ -2134,7 +2223,12 @@ def _spec_ordinal_entries_in(
         for first_line, kind, text in _swept_texts(path, source, package_root):
             read += 1
             blanked = TODO_SLICE_ANCHOR_PATTERN.sub(lambda anchor: " " * len(anchor[0]), text)
-            for match in SPEC_ORDINAL_PATTERN.finditer(blanked):
+            blanked = PINPOINT_QUOTE_PATTERN.sub(lambda quote: " " * len(quote[0]), blanked)
+            matches = [
+                *SPEC_ORDINAL_PATTERN.finditer(blanked),
+                *DECISION_SUB_ORDINAL_PATTERN.finditer(blanked),
+            ]
+            for match in sorted(matches, key=lambda found: found.start()):
                 line = first_line + text.count("\n", 0, match.start())
                 violations.append(f"{display}:{line}: {kind}: {match[0]!r}")
     return violations, read
@@ -2147,11 +2241,16 @@ def test_no_comment_docstring_name_or_package_string_cites_a_spec_section_by_num
     never by ordinal, and ``spec-NNN Decision N`` is the one gated ordinal. A
     spec's Definition of done, Goals and Slices are numbered lists a later edit
     renumbers, so a pointer such as a Definition of done item or a Goal by
-    number goes stale silently. This row reads every comment, string statement
+    number goes stale silently. A list inside a Decision (its steps, stages,
+    layers, axes, rules, subpasses, reasons, requirement labels) is the same
+    numbered list one level down: a position in it is an ordinal the pointer
+    does not cover, and ``scripts/check_citations.py`` checks only the
+    Decision's own number. This row reads every comment, string statement
     and def/class name of the sweep corpus, plus every other ``str`` constant in
     ``django_strawberry_framework/``, and refuses the forms
-    ``SPEC_ORDINAL_PATTERN`` names: state what the item says, or cite the
-    Decision that owns it as ``spec-NNN Decision N``.
+    ``SPEC_ORDINAL_PATTERN`` and ``DECISION_SUB_ORDINAL_PATTERN`` name: state
+    what the item or the step does, or cite the Decision that owns it as
+    ``spec-NNN Decision N``.
 
     Deliberate limits. A live ``TODO(spec-NNN slice N)`` anchor is not read (the
     staged-slice convention). A section named without a number (a spec's
@@ -2159,12 +2258,20 @@ def test_no_comment_docstring_name_or_package_string_cites_a_spec_section_by_num
     Roman numerals (no spec numbers its sections so). The match is
     case-insensitive and reads no context, code spans included: a lowercase
     ``slice``, ``goal`` or ``dod`` followed by a number is refused wherever it
-    appears, so such prose is rephrased. A bare ``Decision N`` is a repo-wide
+    appears, so such prose is rephrased. A list word is read only beside a
+    ``Decision N`` (after it; before it through ``of``, ``in``, ``under`` or
+    ``from``; or before the Decision in parentheses), with a number or a
+    parenthesized position after it, or a lone letter after the singular
+    ``step``; detection fires on the first position. A step, stage, layer or
+    subpass named with no
+    Decision beside it (a module's own numbered list, the package's own
+    vocabularies such as a filter pipeline layer or a finalizer subpass) is
+    local prose, and a Decision step referred to without its Decision, or
+    across a sentence break, is not read: both are judged by hand. A ``#"..."``
+    pinpoint is a quote, so it is not read. A bare ``Decision N`` is a repo-wide
     convention graded by its anchor (START.md "Reconciling a spec with the
-    tree"), a step inside a Decision rides on the gated pointer, and a module's
-    own numbered list is local prose: none is read here, each is judged by
-    hand. A non-statement string outside the package (test data, fixtures) is
-    not read.
+    tree") and is not read. A non-statement string outside the package (test
+    data, fixtures) is not read.
     """
     corpus = _sweep_corpus()
     violations, read = _spec_ordinal_entries_in(corpus)
@@ -2202,7 +2309,7 @@ PLANTED_SPEC_ORDINAL_SHAPES = [
             'def run():\n    """Run.\n\n    spec-027 Decision 8 step 8 + Definition-of-done\n'
             '    item 4(d).\n    """\n'
         ),
-        ["4: docstring: 'Definition-of-done\\n    item 4'"],
+        ["4: docstring: 'Decision 8 step 8'", "4: docstring: 'Definition-of-done\\n    item 4'"],
     ),
     (
         "parenthesized",
@@ -2276,6 +2383,133 @@ PLANTED_SPEC_ORDINAL_SHAPES = [
         "MESSAGE = 'see spec-028 DoD 4'\n",
         ["1: string: 'DoD 4'"],
     ),
+    (
+        "decision-step",
+        "other",
+        "# the cap holds (spec-046 Decision 7 step 3)\n",
+        ["1: comment: 'Decision 7 step 3'"],
+    ),
+    (
+        "decision-step-punctuated",
+        "other",
+        "# per spec-027 Decision 8, step 3; spec-027 Decision 8: step 3 before step 5\n",
+        ["1: comment: 'Decision 8, step 3'", "1: comment: 'Decision 8: step 3'"],
+    ),
+    (
+        "decision-steps-pair",
+        "other",
+        "# scoped per Decision 8 steps 6/7\n",
+        ["1: comment: 'Decision 8 steps 6'"],
+    ),
+    (
+        "decision-step-hyphen-capital-letter",
+        "other",
+        "# spec-039 Decision 8 step-4, spec-031 Decision 8 Step 1, spec-033 Decision 4 step f\n",
+        [
+            "1: comment: 'Decision 8 step-4'",
+            "1: comment: 'Decision 8 Step 1'",
+            "1: comment: 'Decision 4 step f'",
+        ],
+    ),
+    (
+        "steps-of-a-decision",
+        "other",
+        "# Steps 5-6 of the Decision 7 pipeline; Layer 4 of spec-028 Decision 3\n",
+        [
+            "1: comment: 'Steps 5-6 of the Decision 7'",
+            "1: comment: 'Layer 4 of spec-028 Decision 3'",
+        ],
+    ),
+    (
+        "docstring-wrapped-decision-step",
+        "other",
+        'def run():\n    """Run.\n\n    Scoped per spec-027 Decision 8\n    step 3.\n    """\n',
+        ["4: docstring: 'Decision 8\\n    step 3'"],
+    ),
+    (
+        "comment-wrapped-decision-step",
+        "other",
+        "# the decode runs first per spec-038 Decision\n# 8 step 3, before the form\n",
+        ["1: comment: 'Decision\\n8 step 3'"],
+    ),
+    (
+        "second-decision-of-a-pair",
+        "other",
+        "# the shape binds (spec-038 Decision 7 / Decision 8 step 1)\n",
+        ["1: comment: 'Decision 8 step 1'"],
+    ),
+    (
+        "decision-list-words",
+        "other",
+        (
+            "# Decision 3 axis 2, spec-027 Decision 3 Layer-5, spec-029 Decision 8 rule 4,\n"
+            "# spec-027 Decision 6 subpass 4 and Decision 10's reason (a)\n"
+        ),
+        [
+            "1: comment: 'Decision 3 axis 2'",
+            "1: comment: 'Decision 3 Layer-5'",
+            "1: comment: 'Decision 8 rule 4'",
+            "2: comment: 'Decision 6 subpass 4'",
+            '2: comment: "Decision 10\'s reason (a)"',
+        ],
+    ),
+    (
+        "requirement-label",
+        "other",
+        "# spec-035 Decision 6 R1 first; requirement R2 in spec-035 Decision 6\n",
+        ["1: comment: 'Decision 6 R1'", "1: comment: 'R2 in spec-035 Decision 6'"],
+    ),
+    (
+        "named-list-of-a-parenthesized-decision",
+        "other",
+        (
+            'def run():\n    """Run.\n\n    Layers 1 and 2 of the six-layer pipeline'
+            ' (spec-027 Decision 3).\n    """\n'
+        ),
+        ["4: docstring: 'Layers 1 and 2 of the six-layer pipeline (spec-027 Decision 3'"],
+    ),
+    (
+        "decision-step-test-name",
+        "other",
+        "def test_decision_8_step_3_scopes_the_branch():\n    pass\n",
+        ["1: name: 'decision 8 step 3'"],
+    ),
+    (
+        "package-decision-step-message",
+        "package",
+        "MESSAGE = 'scoped before validation (spec-027 Decision 8 step 3)'\n",
+        ["1: string: 'Decision 8 step 3'"],
+    ),
+    (
+        "ordinal-before-a-parenthesized-decision",
+        "other",
+        "# runs first: step 3 (spec-027 Decision 8) and rule 2 (Decision 8)\n",
+        ["1: comment: 'step 3 (spec-027 Decision 8'", "1: comment: 'rule 2 (Decision 8'"],
+    ),
+    (
+        "decision-number-list",
+        "other",
+        "# per Decisions 3 and 4 step 2 and spec-036 Decision 8 / 10 step 3\n",
+        ["1: comment: 'Decisions 3 and 4 step 2'", "1: comment: 'Decision 8 / 10 step 3'"],
+    ),
+    (
+        "decision-dash-and-semicolon",
+        "other",
+        "# per spec-027 Decision 8 - step 3, and spec-028 Decision 8; step 6\n",
+        ["1: comment: 'Decision 8 - step 3'", "1: comment: 'Decision 8; step 6'"],
+    ),
+    (
+        "decision-markup-close",
+        "other",
+        "# per spec-027 ``Decision 8`` step 3 and spec-028 **Decision 8** step 6\n",
+        ["1: comment: 'Decision 8`` step 3'", "1: comment: 'Decision 8** step 6'"],
+    ),
+    (
+        "ordinal-under-or-from-a-decision",
+        "other",
+        "# step 3 under spec-027 Decision 8 and rule 2 from Decision 8\n",
+        ["1: comment: 'step 3 under spec-027 Decision 8'", "1: comment: 'rule 2 from Decision 8'"],
+    ),
 ]
 
 
@@ -2306,17 +2540,28 @@ def test_the_spec_ordinal_sweep_reports_nothing_for_a_planted_permitted_form(
 
     A spec's Definition of done named without a number, a live staged-slice
     anchor in a comment and quoted in a docstring code span, the gated
-    ``spec-NNN Decision N`` pointer with a step, a section word with no number
-    after it (a sliced queryset, plain goals, a ``goal:`` followed by a word),
-    a section word glued to a longer word, a variable named like a section,
-    and a test-data string outside the package.
+    ``spec-NNN Decision N`` pointer with a heading letter and a pair of
+    Decisions, a list word after a Decision with no position after it, a
+    module's own numbered step and the package's own layer and subpass words
+    with no Decision beside them, a stage after a sentence break, a pinpoint
+    quoting a Decision's step, a list word with no position before a
+    parenthesized Decision, a lone letter after a plural or non-step list
+    word, a section word with no number after it (a sliced queryset, plain
+    goals, a ``goal:`` followed by a word), a section word glued to a longer
+    word, a variable named like a section, and a test-data string outside the
+    package.
     """
     planted = _plant_prose(
         tmp_path,
         "# spec-036 DoD: every row pinned; TODO(spec-062 Slice 1): wire search\n"
         'def run():\n    """Wired at the ``TODO(spec-062 Slice 1)`` anchor."""\n'
-        "# spec-045 Decision 2 step 3 seals it; a queryset sliced 0:5; the goals\n"
+        "# spec-019 Decision 7a seals it; spec-036 Decision 8 / 10 and Decisions 3 and 4\n"
+        "# hold; the spec-030 Decision 7 rule raises; step 3 below runs the decode\n"
+        "# the Layer-4 expansion and finalizer subpass 4 materialize the classes\n"
+        "# per spec-032 Decision 7. Stage 1 of the flow checks the shape\n"
+        '# (spec-010 #"Decision 2 step 7 defers it"); a queryset sliced 0:5; the goals\n'
         "# DoDs, Goalpost 4, preslice 2 and the goal: keep 3 rows are not pointers\n"
+        "# the step (spec-027 Decision 8) runs; Decision 3 rules a lot; Decision 8's rule a user\n"
         "goal_4 = 'DoD 4'\n",
     )
     violations, read = _spec_ordinal_entries_in([planted])

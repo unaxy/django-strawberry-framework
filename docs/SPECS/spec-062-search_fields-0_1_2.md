@@ -992,18 +992,18 @@ calls it — but a relation path compiled in the root's join
 relations. Visibility-blind, a visible parent could qualify **only
 because a related row hidden on its own GraphQL surface matched the
 search** — a related-data existence oracle. This package's posture
-rejects that, as spec-027 Decision 8 step 3 does for every related filter
-constraint: the contract is **search never qualifies a row, root or
-related, through data the viewer's GraphQL surface hides — a related row
-the hop target type's `get_queryset` hides, or a walked
+rejects that, as spec-027 Decision 8's visibility scoping does for every
+related filter constraint: the contract is **search never qualifies a
+row, root or related, through data the viewer's GraphQL surface hides —
+a related row the hop target type's `get_queryset` hides, or a walked
 `RelatedFilter(queryset=...)` excludes, behaves exactly like no related
 row**.
 
 Mechanism — the visible-row restriction the filter side already runs
 every declared branch and every walked flat leaf through (spec-027
-Decision 8 step 3), never a parallel implementation. A relational search
-arm is the nested branch chain its path spells, answered over the rows
-each hop's target type lets the request see:
+Decision 8's visibility scoping), never a parallel implementation. A
+relational search arm is the nested branch chain its path spells,
+answered over the rows each hop's target type lets the request see:
 
 - **Hop resolution (finalize time, frozen in the plan).**
   `build_search_path_plan(definition, paths)` reads each relation path as
@@ -1146,10 +1146,10 @@ each hop's target type lets the request see:
   `loans` and `patron`, so `LoanType` visibility scopes the inner loans
   under both, and a relation no `RelatedFilter` declares reads its
   registered type's visibility under both
-  (`utils/querysets.py::relation_target_type`; spec-027 Decision 8
-  step 3). The one place search is stricter is a root re-entry whose
-  exact owner differs from the hop's resolved type, where it applies both
-  hooks.
+  (`utils/querysets.py::relation_target_type`; spec-027 Decision 8's
+  visibility scoping). The one place search is stricter is a root
+  re-entry whose exact owner differs from the hop's resolved type, where
+  it applies both hooks.
 - A related model with **no registered type** has no GraphQL surface and
   therefore no visibility contract to honor; neither does a type keeping
   the identity default `get_queryset`, which hides nothing. Such an

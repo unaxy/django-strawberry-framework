@@ -371,7 +371,7 @@ def _message(owner: type[FilterSet], branch: str, *, missing_type: bool = False)
         f"FilterSet {owner.__qualname__}: related filter branch {branch!r} is active in the "
         f"filter input (nested, or walked by a flat leaf) but {reason}. "
         "The branch's visibility scoping runs the target type's get_queryset "
-        "(spec-027 Decision 8 step 3); skipping it would silently return unfiltered rows. "
+        "(spec-027 Decision 8); skipping it would silently return unfiltered rows. "
         "Register a DjangoType for the target model or remove the RelatedFilter."
     )
 

@@ -281,15 +281,15 @@ def normalize_input_value(
     The function consumes the Strawberry input dataclass (post-
     deserialization, post-Strawberry-type-coercion) and produces a flat
     ``[(field_path, Ordering | None), ...]`` list. Per spec-028 Decision 5 (the
-    list-shaped argument), Decision 8 steps 6/7 (active-input-only scope,
-    the nested-``RelatedOrder`` walk, term-less pass-through), and Edge
+    list-shaped argument), Decision 8 (active-input-only scope, the
+    nested-``RelatedOrder`` walk, term-less pass-through), and Edge
     cases (the null-direction no-op):
 
     - top-level ``list[<T>OrderInputType] | None`` -> recurse on each
       element and concatenate.
     - per-element ``<T>OrderInputType`` -> walk the dataclass's fields
       via the ``_field_specs`` map; ``None`` attribute values short-
-      circuit (active-input-only scope per spec-028 Decision 8 step 6). Thus
+      circuit (active-input-only scope per spec-028 Decision 8). Thus
       an omitted field and an explicit GraphQL ``null`` direction have
       identical no-op semantics: neither contributes an ordering term
       nor fires that field's permission gate.

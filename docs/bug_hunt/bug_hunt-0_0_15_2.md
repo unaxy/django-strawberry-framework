@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 511 done, 106 to do. The CHANGELOG entries filed here moved to
+Progress: 512 done, 107 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2986,14 +2986,27 @@ Progress: 511 done, 106 to do. The CHANGELOG entries filed here moved to
   executable code; 13 planted refused shapes and the widened permitted row pin it. START.md Style bullet and its
   label-vocabulary example restated; requirement ids, other work packages and review-round ids stay judged by hand.
   Filed 928.
+- [x] 766. Ordinals inside a spec Decision are restated by content, and the spec-section-ordinal row reads them:
+  `tests/test_ci_governance.py::test_no_comment_docstring_name_or_package_string_cites_a_spec_section_by_number` now
+  also refuses, through `DECISION_SUB_ORDINAL_PATTERN` in `_spec_ordinal_entries_in`, a step, stage, layer, axis, rule,
+  subpass or reason with a number or parenthesized position, a lettered `step` and an `R<N>` label written after a
+  `Decision N` (a Decision-number list, `,` `:` `;` `(` `/` or a spaced dash, a line break, closing markup between) or
+  before one through of / in / under / from or a parenthesized Decision; `#"..."` pinpoint quotes are blanked first
+  (`PINPOINT_QUOTE_PATTERN`), and a module's own numbered list stays unread. Measured population at the parent: 90
+  sites in 40 files (60 steps, 30 neighbours), not 53; 12 pointed at the wrong place and are corrected: the spec-038
+  and spec-039 decode sites (decode is the third step; the clear-skip rule is spec-038 Decision 7) and six spec-033
+  "Decision 4 step f" sites (now its error shapes and Decision 8). The 9 bare implicit Decision steps no lexical gate
+  sees, `types/relay.py::decode_global_id`'s spec-031 bullets, the cross-spec step cites in spec-027, spec-033,
+  spec-062 and `docs/relation-quantifiers-plan.md`, and two terms-CSV notes (glossary rows re-imported) are restated
+  too; a spec's references to its own steps stay. The `ConfigurationError` text of
+  `filters/sets.py::FilterSet._branch_visibility_seed` and `types/finalizer.py::_format_unregistered_related_target_error`
+  cites `spec-027 Decision 8` without the step. 19 planted refused shapes and the widened permitted row pin the gate,
+  8 `prove_failability.py` mutants each fail exactly their rows; docstring-stripped ASTs unchanged outside the
+  governance module, the two message constants and the live test pinning one. START.md's Source-refs sentence says
+  what the row reads. Filed 929, 930; CHANGELOG 931
 
 ## To do: found along the way
 
-- [ ] 766. `Decision N step M` sub-ordinals in first-party prose are ungated: 53 sites plus one `spec-NNN step M`, 52
-  resolving (703 fixed the dangling spec-039 Decision 7 step 4 and the Decision-less spec-036 step). Root-cause fix:
-  restate each by content and refuse `Decision N step M` in the citation gate, amending START.md's "a Decision's step
-  ... judged by hand" in the same change; resolving step ordinals in `scripts/check_citations.py` would make them a
-  second gated ordinal against START.md's "Cite contract by CONTENT, never ordinal". Found fixing 703
 - [ ] 770. (robustness) A declared non-Boolean filter with `lookup_expr="isnull"` publishes `Boolean`, and its own
   form cleans the bool as its own kind: 205 of 240 grid cells answer every value with an error (96 masked). Django's
   `IsNull` refuses a non-bool only at SQL compile, so 708's probe does not decide it
@@ -3134,6 +3147,16 @@ Progress: 511 done, 106 to do. The CHANGELOG entries filed here moved to
   `tests/filters/test_sets.py`'s "the R4 contract", a review-round id that resolves nowhere): restate each by content
   and decide whether the plan-label row reads `R<N>` (no data collisions measured), after 766 lands its gate on the
   beside-a-Decision form. Found fixing 767
+- [ ] 929. (robustness) The spec-section-ordinal row's Decision sub-ordinal reading
+  (`tests/test_ci_governance.py::DECISION_SUB_ORDINAL_PATTERN`) misses spellings no corpus site uses yet: a line break
+  after the separator punctuation (`spec-027 Decision 8,` then `step 3` on the next docstring line), a ` -- `
+  separator, markup around the ordinal (`Decision 8 ``step 3```), markup opening before the Decision in a reverse
+  shape, and `per` as a reverse word; and reads a module's own step before a parenthesized citation (`runs before
+  step 2 (spec-027 Decision 8 orders it)`) as a Decision step. Found verifying 766
+- [ ] 930. (robustness) `scripts/check_citations.py` resolves only path-headed `#"..."` pinpoints: a spec-headed one
+  (`spec-010 #"The unconditional deferral at step 7 is the load-bearing part"`,
+  `tests/types/test_definition_order.py::test_reverse_fk_resolves_when_parent_declared_before_child`) is never
+  checked, so its quote rots silently (30 in first-party .py at 0799c986). Found researching 766
 
 ## To do: holes found re-checking the fixes
 

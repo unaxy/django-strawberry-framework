@@ -1,7 +1,7 @@
 """Filter input-class BFS factory.
 
-Layer 5 of the six-layer pipeline (spec-027 Decision 3): the BFS that builds every
-reachable Strawberry input class via the named converter
+The schema-build layer of the lazy-resolution pipeline (spec-027 Decision 3): the BFS
+that builds every reachable Strawberry input class via the named converter
 ``convert_filter_to_input_annotation``. ``DjangoConnectionField`` reads the
 wrapped type's already-resolved ``Meta.filterset_class`` sidecar directly;
 auto-generation of a ``FilterSet`` from ``Meta.fields`` without an explicit
@@ -55,7 +55,7 @@ class FilterArgumentsFactory(GeneratedInputArgumentsFactory[FilterSet]):
 
     The factory does NOT materialize built classes as module globals; that is
     the finalizer's phase-2.5 contract. ``arguments`` returns the built input
-    class for the root filterset (per spec-027 Decision 6 subpass 4).
+    class for the root filterset (spec-027 Decision 6).
 
     Subclassing is rejected at class-creation time (the caches are shared
     mutable dicts a subclass would inherit rather than isolate, silently

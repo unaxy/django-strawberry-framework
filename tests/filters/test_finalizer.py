@@ -1460,7 +1460,7 @@ def test_phase_2_5_unresolved_related_filter_raises_at_finalize() -> None:
     """A ``RelatedFilter("UnknownFilter")`` propagates as ``ConfigurationError``.
 
     ``LazyRelatedClassMixin.resolve_lazy_class`` raises ``ImportError``
-    at Layer-2 resolution time (spec-027 Decision 3 Layer 2). The
+    at module-fallback resolution time (spec-027 Decision 3). The
     phase-2.5 binding pass re-wraps it as ``ConfigurationError`` per the
     package's "finalize-time errors are ``ConfigurationError``"
     convention; the original ``ImportError`` is preserved on
@@ -1515,7 +1515,7 @@ def test_phase_2_5_unregistered_related_filter_target_raises_at_finalize() -> No
     """A wired filterset whose ``RelatedFilter`` target model has no registered type raises.
 
     Subpass 2.5: a related branch's visibility scoping runs the target
-    type's ``get_queryset`` (spec-027 Decision 8 step 3), so a
+    type's ``get_queryset`` (spec-027 Decision 8), so a
     ``RelatedFilter`` whose target model has no registered ``DjangoType``
     is unfulfillable even though its input field would be materialized
     into the schema. The misconfiguration surfaces at finalize, naming

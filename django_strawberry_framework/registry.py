@@ -539,8 +539,8 @@ class TypeRegistry:
     def definition_for_graphql_name(self, name: str) -> DjangoTypeDefinition:
         """Return the unique Relay-Node ``DjangoTypeDefinition`` for a GraphQL type ``name``.
 
-        The SCHEMA-LESS GlobalID type-name decode (spec-031 Decision 8 Step 1,
-        type-name branch, for a ``types/relay.py::decode_global_id`` call made
+        The SCHEMA-LESS GlobalID type-name decode (spec-031 Decision 8's candidate
+        resolution from a type-name slot, for a ``types/relay.py::decode_global_id`` call made
         outside a request). The ``type`` strategy's live slot is the name the
         executing schema published for the type; with no schema at hand this
         resolves the spelling the default ``NameConverter`` publishes,

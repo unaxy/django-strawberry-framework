@@ -521,7 +521,7 @@ def response_keys(selection: FieldSelection) -> tuple[str, ...]:
 # (interface/union) root field never reaches the walker today - registry.model_for_type returns
 # None for the abstract origin, so _optimize passes the queryset through before this inliner runs;
 # the classifier therefore ships nothing until that card first builds the abstract-return
-# production-entry contract (spec-035 Decision 6 R1). Pseudocode: no classifier means INLINE-all
+# production-entry contract (spec-035 Decision 6). Pseudocode: no classifier means INLINE-all
 # for extension cache-key and connection extraction callers; a walker-supplied classifier returns
 # INLINE, SKIP, or RECURSE_FRAGMENTS_ONLY. The recursion mode drops direct fields for an unknown
 # composite/union condition while still re-checking nested fragments.

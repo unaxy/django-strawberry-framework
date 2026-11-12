@@ -360,7 +360,7 @@ def _validate_relation_shapes(
 ) -> dict[str, str] | None:
     """Validate ``Meta.relation_shapes`` shape AND the Relay-Node requirement (spec-032 Decision 7).
 
-    Stage 1 of the relation-shapes validation flow, structurally modeled on
+    The shape stage of the relation-shapes validation flow, structurally modeled on
     ``_validate_connection`` and called from ``_validate_meta``:
     ``None``-short-circuits when unset (every eligible relation defaults to
     ``DEFAULT_RELATION_SHAPE`` at the Phase-2.5 synthesis); shape-checks the
@@ -369,9 +369,10 @@ def _validate_relation_shapes(
 
     Field-level checks (unknown / excluded / non-relation / single-valued /
     consumer-authored) need the selected fields and the consumer-override
-    union, which do not exist at ``_validate_meta`` time - they run in stage 2,
-    ``_validate_relation_shape_targets``, from ``__init_subclass__`` (the
-    spec-029 ``nullable_overrides`` two-stage precedent). The
+    union, which do not exist at ``_validate_meta`` time - they run in the
+    field-name stage, ``_validate_relation_shape_targets``, from
+    ``__init_subclass__`` (the spec-029 ``nullable_overrides`` two-stage
+    precedent). The
     target-is-Node-shaped check runs at finalization, where relation targets
     are settled (Decision 6).
 
@@ -1538,7 +1539,7 @@ def _validate_meta(cls: type[DjangoType], meta: object) -> _ValidatedMeta:
         _meta_attr(meta, "relation_shapes"),
         relay_shaped=relay_shaped,
     )
-    # Override shape stage (spec-029 Decision 8 step 1): the two set-valued
+    # Override shape stage (spec-029 Decision 8, shape + normalize): the two set-valued
     # keys reuse the shared collection guard (``_normalize_sequence_spec``, which
     # names the key it rejects), then normalize to ``frozenset``. The
     # both-sets collision is a shape-level contradiction visible from the raw
@@ -1807,7 +1808,7 @@ def _validate_nullability_override_targets(
 ) -> None:
     """Reject every illegal ``nullable_overrides`` / ``required_overrides`` target.
 
-    Stage 2 of the override validation flow (spec-029 Decision 8). Runs in
+    The target-validation stage of the override flow (spec-029 Decision 8). Runs in
     ``__init_subclass__`` AFTER ``_select_fields`` + ``consumer_authored_fields``
     + the Relay-shape check, so the selected fields, the consumer-override set,
     and the Relay-pk identity all exist. The shape check + both-sets collision
@@ -1971,13 +1972,13 @@ def _validate_relation_shape_targets(
 ) -> None:
     """Reject every illegal ``Meta.relation_shapes`` key at type creation.
 
-    Stage 2 of the relation-shapes validation flow (spec-032 Decision 7,
+    The field-name stage of the relation-shapes validation flow (spec-032 Decision 7,
     structurally the ``_validate_nullability_override_targets`` sibling). Runs
     in ``__init_subclass__`` AFTER ``_select_fields`` + ``consumer_authored_fields``
     exist, because every check here needs the selected fields, the cardinality
     classifier, or the consumer-override union - none of which exist at
     ``_validate_meta`` time. The shape check + Relay-Node gate already ran in
-    stage 1 (``_validate_relation_shapes``).
+    the shape stage (``_validate_relation_shapes``).
 
     Check order mirrors the sibling: unknown -> excluded -> per-name checks
     (non-relation / single-valued / consumer-authored), iterating keys sorted
