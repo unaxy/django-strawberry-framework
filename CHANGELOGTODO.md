@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 239 to do.
+Progress: 0 done, 240 to do.
 
 ## From dry-0_0_15_3
 
@@ -64,7 +64,9 @@ Progress: 0 done, 239 to do.
   Relay node defaults' recourse
 - [ ] 87. CHANGELOG entry for item 77: a declared `ArrayFilter` / `ListFilter` over a PostgreSQL `ArrayField` column
   builds a list of its element type (`exact`, `contains`, `contained_by`, `overlap`) instead of failing the schema build,
-  and any other filter or lookup over the column is refused at build with a message naming those lookups
+  and any other filter or lookup over the column that runs django-filter's or the package's own code is refused at build
+  with a message naming those lookups (a `method=` filter or a class-level `filter` override is typed by the column's
+  elements, item 864)
 - [ ] 88. CHANGELOG entry for item 72: a `DjangoType` that selects a visible reverse generic relation (a
   `GenericRelation` with `related_query_name`, seen from the generic-key model) is refused at declaration instead of
   publishing a field that failed every query, and a `RelatedFilter` through it no longer matches rows of another
@@ -1157,6 +1159,12 @@ Progress: 0 done, 239 to do.
   or to-many, by key or `to_field_name`, ending on a related column, a projected copy) answers its null value as the
   relation's or column's null test over the rows the request may see, alone, beside other values, conjoined and under
   `exclude=True`, where it matched nothing, dropped the null half, raised `TypeError` or excluded nothing
+- [ ] 952. CHANGELOG entry for item 864: a `method=` filter or a class-level `filter` override over a PostgreSQL
+  `ArrayField` column builds an input typed by the column's elements on every filter kind (a list of elements whatever
+  its `lookup_expr`, one element, the element choices' enum, element range bounds) instead of being refused by its
+  lookup name, and an override's `in` list and a package `RangeFilter`'s bounds are cleaned as elements, so the code
+  receives the values the input carries (an override delegating to `super().filter` with `in` over the array now
+  builds and sends elements to the lookup)
 
 ## From dry-upstream-0_0_15
 

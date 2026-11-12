@@ -142,6 +142,7 @@ from .base import (
     _filterset_walked_lookup,
     _model_identity_column,
     _related_column_path,
+    _runs_shipped_filter,
     comparison_form_field,
     copied_filter,
     copied_form_field,
@@ -434,7 +435,7 @@ def refuse_joinless_relation(filterset_cls: type[FilterSet], filter_instance: Fi
     (``Query.names_to_path``), so the filter could answer no request carrying a value: no
     queryset holds the name, since Django refuses an annotation or alias named as a field.
     ``filters/sets.py::FilterSet._publish_filters`` asks this of every leaf a set publishes
-    whose ``filter`` is shipped code (``filters/sets.py::_runs_shipped_filter``: never a
+    whose ``filter`` is shipped code (``filters/base.py::_runs_shipped_filter``: never a
     ``method=`` filter, a class-level ``filter`` override or a consumer
     ``get_filter_predicate``, which filter as they choose and are not judged by their path
     when the set publishes or applies), after
@@ -866,7 +867,7 @@ def _cleans_in_shipped_code(form_field: object) -> bool:
 
     Each class of the form field's real MRO whose own namespace defines a cleaning method
     (``_CLEANING_METHODS``) is read for the module defining it, as
-    ``filters/sets.py::_runs_shipped_filter`` reads ``filter``: every class is read, not only
+    ``filters/base.py::_runs_shipped_filter`` reads ``filter``: every class is read, not only
     the one resolving ``clean``, since django-filter's ``BaseCSVField`` and ``BaseRangeField``
     clean each member through the classes after them. A ``TypedChoiceField`` /
     ``TypedMultipleChoiceField`` also runs its ``coerce``: a class (``coerce=int``) or a
@@ -923,11 +924,9 @@ def _refuse_kind_json_cannot_encode(
     lookup (a key's ``icontains``, ``has_key``) renders the value as text and never reaches
     the encoder, and a declared encoder is trusted. A ``method=`` filter, a consumer
     ``filter`` override or a consumer ``get_filter_predicate``
-    (``filters/sets.py::_runs_shipped_filter``) owns what its value means. The refusal
+    (``filters/base.py::_runs_shipped_filter``) owns what its value means. The refusal
     names the filter as declared (``_declaration_of``).
     """
-    from .sets import _runs_shipped_filter  # noqa: PLC0415 - import cycle
-
     lookup = _filterset_lookup_operand(filterset_cls, filter_instance).lookup
     if (
         not truth.is_instance(column, models.JSONField)
@@ -1178,7 +1177,7 @@ def _validates_nothing(value: object) -> None:
 def _django_resolves(owner: type[object], *names: str) -> bool:
     """Whether every method ``names`` the class ``owner`` resolves is defined by Django.
 
-    Read as ``filters/sets.py::_runs_shipped_filter`` reads ``filter``: the function the
+    Read as ``filters/base.py::_runs_shipped_filter`` reads ``filter``: the function the
     class's real MRO resolves (``utils/truth.py::mro_attr``, unwrapped by
     ``stored_function``), for the module that defines it.
     """
@@ -1296,7 +1295,7 @@ def _refuse_form_serving_no_value(
     ``Meta.filter_overrides`` selection (``filters/sets.py::filter_generation_provenance``),
     never a generated leaf, whose class django-filter selects for the column. A ``method=``
     filter, a consumer ``filter`` override or a consumer ``get_filter_predicate``
-    (``filters/sets.py::_runs_shipped_filter``) owns what its value means, a form field any
+    (``filters/base.py::_runs_shipped_filter``) owns what its value means, a form field any
     consumer class or ``coerce`` cleans (``_cleans_in_shipped_code``) is a consumer's
     parser, a model-choice form field cleans by querying its queryset (the probe runs no
     query), and a column converting in its own ``to_python`` / ``get_prep_value`` (a
@@ -1307,7 +1306,6 @@ def _refuse_form_serving_no_value(
     """
     from .sets import (  # noqa: PLC0415 - import cycle
         _FRAMEWORK_GENERATED_ORIGINS,
-        _runs_shipped_filter,
         filter_generation_provenance,
     )
 
@@ -1449,14 +1447,14 @@ def _refuse_unsealable_served_leaves(served: Iterable[type[FilterSet]]) -> None:
     declares it, and named there with the ``RelatedFilter`` path it was reached through. A
     leaf whose ``filter`` is consumer code on its own set (a ``method=`` filter, a
     ``filter`` override, a ``filter`` held on the instance, a ``get_filter_predicate``
-    override: ``filters/sets.py::_runs_shipped_filter``) owns its query, and a path the
+    override: ``filters/base.py::_runs_shipped_filter``) owns its query, and a path the
     model alone cannot resolve (a queryset annotation) has no walk; the seal judges both
     per request. A predicate Django resolves on no queryset never reaches here: its set
     refused it when it published (``filters/base.py::refuse_unresolvable_lookup``). A set
     no connection serves, applied from the project's own resolver, is never sealed and is
     not asked.
     """
-    from .sets import _expansion_record, _runs_shipped_filter  # noqa: PLC0415 - import cycle
+    from .sets import _expansion_record  # noqa: PLC0415 - import cycle
 
     for _root, filterset_cls, through in _served_reach(served):
         table = filterset_cls._filter_table()
@@ -1624,14 +1622,23 @@ def _no_choices_refusal(
     """Build the refusal for a choice filter reading its value off no field declaring ``choices``.
 
     The reason names what the leaf is typed from: no model field (a ``method=`` path, a path
-    no column of the model answers), a transform's output, which is bound to no model
+    no column of the model answers), the elements of an ``ArrayField`` column a filter running
+    consumer code reads (``_array_element_column``: its ``base_field``, whose ``choices`` are
+    the enum's, never the array's own), a transform's output, which is bound to no model
     (``lookup_expr="year"`` compares an integer, which declares no ``choices`` whatever its
-    column declares), or a column; only the column can take ``choices``, so only its reason
-    carries the advice to declare them.
+    column declares), or a column; only a column can take ``choices``, so only the element's
+    and the column's reasons carry the advice to declare them.
     """
     declaration = _declaration_of(filter_instance, filterset_cls)
+    column = _filterset_model_field(filterset_cls, filter_instance)
     if model_field is None:
         reason, declare = "reads no model field", ""
+    elif model_field is not column and model_field is array_element_field(column):
+        reason = (
+            f"reads the elements of the ArrayField column {_field_label(column)}, whose "
+            "base_field declares no `choices`"
+        )
+        declare = "declare `choices` on that base_field, or "
     elif truth.is_type(read_attr(model_field, "model", None)):
         reason = f"reads {_field_label(model_field)}, which declares no `choices`"
         declare = (
@@ -1798,12 +1805,14 @@ def _array_column_refusal(
 ) -> ConfigurationError:
     """Build the refusal for a filter whose input cannot carry its ``ArrayField`` lookup's operand.
 
-    A scalar, typed, choice-list or catch-all filter hands the ORM one element where the
-    column compares a whole array, and an ``in`` compares the column with each of several
-    arrays, so an element-typed input would build and then fail every value at the
-    database. A transform spelled in the ``field_name`` (``<column>__len``, an index
-    ``<column>__0``, a slice ``<column>__0_2``) or a ``len`` in the ``lookup_expr`` never
-    reaches it: its leaf is typed from the transform's output
+    Asked only of a filter running shipped code (``filters/base.py::_runs_shipped_filter``),
+    which hands its value to its lookup: a scalar, typed, choice-list or catch-all filter hands
+    the ORM one element where the column compares a whole array, and an ``in`` compares the
+    column with each of several arrays, so an element-typed input would build and then fail
+    every value at the database. Consumer code applies no lookup of the filter's and is typed
+    by the column's elements instead (``_array_element_column``). A transform spelled in the
+    ``field_name`` (``<column>__len``, an index ``<column>__0``, a slice ``<column>__0_2``) or
+    a ``len`` in the ``lookup_expr`` never reaches it: its leaf is typed from the transform's output
     (``filters/base.py::_filterset_value_field``); an index or slice opening the
     ``lookup_expr`` names no input field (``_unnameable_lookup_refusal``). ``lookup``
     names what the filter applies when its ``lookup_expr`` does not (a ``RangeFilter``'s
@@ -1839,23 +1848,39 @@ def _array_element_column(
     filter_instance: Filter,
     model_field: ModelField | None,
     filterset_cls: type[FilterSet] | None,
+    *,
+    list_operand: bool = True,
+    lookup: str | None = None,
 ) -> ModelField | None:
-    """Return the column a list arm types each member from: an ``ArrayField``'s element.
+    """Return the column each value a filter publishes over an ``ArrayField`` is typed from.
 
-    A list input carries an ``ArrayField`` lookup only when the lookup's operand is an
-    array of the column's elements (``_ARRAY_ELEMENT_LIST_LOOKUPS``); then each member is a
-    value of ``base_field`` (``utils/_array_field.py::array_element_field``), the column it is
-    cleaned by (``filters/base.py::_column_form_field``) and the read side converts
-    (``types/converters.py::convert_scalar``), so element ``choices`` give the enum the column's
-    ``DjangoType`` shares and the array's own ``choices`` are never read. A nested array is
-    refused by ``types/converters.py::refuse_nested_array``; any other lookup by
-    ``_array_column_refusal``. Every other column is returned as given.
+    A filter running shipped code (``filters/base.py::_runs_shipped_filter``, asked of the
+    declaration the consumer wrote) hands its value to its lookup, so over an ``ArrayField``
+    column it has an input only where that value is the lookup's operand: a list arm
+    (``list_operand``) whose lookup takes an array of the column's elements
+    (``_ARRAY_ELEMENT_LIST_LOOKUPS``). Any other lookup, and every arm handing the lookup one
+    value per comparison (the scalar, choice, multiple-choice and range arms), is refused by
+    ``_array_column_refusal`` (``lookup`` names what a range applies). A ``method=`` filter, a
+    class-level ``filter`` override or a consumer ``get_filter_predicate`` applies no lookup of
+    the filter's: its own code receives the value, which is typed by its column as every such
+    filter's is (``filters/base.py::_filterset_value_field``), so one value, or each member of
+    a list, is one of the column's elements, whatever its ``lookup_expr``.
+
+    Each such value is a value of ``base_field`` (``utils/_array_field.py::array_element_field``),
+    the column it is cleaned by (``filters/base.py::_column_form_field``) and the read side
+    converts (``types/converters.py::convert_scalar``), so element ``choices`` give the enum the
+    column's ``DjangoType`` shares and the array's own ``choices`` are never read. A nested array
+    is refused by ``types/converters.py::refuse_nested_array`` whichever code runs. Every other
+    column is returned as given.
     """
     element = array_element_field(model_field)
     if element is None:
         return model_field
-    if getattr(filter_instance, "lookup_expr", None) not in _ARRAY_ELEMENT_LIST_LOOKUPS:
-        raise _array_column_refusal(filter_instance, model_field, filterset_cls)
+    if _runs_shipped_filter(_declaration_of(filter_instance, filterset_cls).declared) and (
+        not list_operand
+        or getattr(filter_instance, "lookup_expr", None) not in _ARRAY_ELEMENT_LIST_LOOKUPS
+    ):
+        raise _array_column_refusal(filter_instance, model_field, filterset_cls, lookup)
     refuse_nested_array(model_field, element)
     return element
 
@@ -1890,11 +1915,13 @@ def _element_annotation(
     Callers that need a different shape for a specific lookup (Django's ``isnull``
     is always boolean) handle that before calling this.
 
-    An ``ArrayField`` column reaches this only as its element column, which the list arms
-    pass after ``_array_element_column`` admits the lookup; any other arm or lookup over an
-    ``ArrayField`` column is refused here (``_array_column_refusal``), as the choice and range
-    arms refuse it before their own reads, since no input of the element type, or a list of
-    it, carries that lookup's operand. A catch-all null test never reaches it (``bool``).
+    An ``ArrayField`` column is typed by its element column (``_array_element_column``): the
+    list arms pass that column once the gate admits the lookup, and here a filter running
+    consumer code (a ``method=`` filter, a class-level ``filter`` override) is typed by it on
+    every arm, its code receiving the value; one running shipped code on any other arm or
+    lookup is refused (``_array_column_refusal``), as the choice and range arms refuse it
+    before their own reads, since no input of the element type, or a list of it, carries that
+    lookup's operand. A catch-all null test never reaches it (``bool``).
 
     One lookup-driven arm comes first: a generated text-pattern leaf on a
     non-text column (``FilterSet.filter_for_lookup`` gives it ``TextPatternFilter``)
@@ -1904,8 +1931,8 @@ def _element_annotation(
     refuses one whose own form and lookup answer no value of that type
     (``_refuse_form_serving_no_value``).
 
-    Known contract limit: a custom ``method=`` filter has no backing
-    ``model_field``, so its element type is inferred from the
+    Known contract limit: a custom ``method=`` filter whose ``field_name`` names no column
+    has no backing ``model_field``, so its element type is inferred from the
     ``django-filter`` form field and a CSV/list ``method=`` filter therefore
     yields ``list[str]`` even when the column it ultimately queries is an
     ``int``. To get a typed element on a method filter, back it with a model
@@ -1915,7 +1942,13 @@ def _element_annotation(
     if scalar is not None:
         return scalar
     type_name = _enum_prefix(owner_definition, filterset_cls)
-    return _choice_enum_from_filter(filter_instance, type_name, model_field, filterset_cls)
+    column = _array_element_column(
+        filter_instance,
+        model_field,
+        filterset_cls,
+        list_operand=False,
+    )
+    return _choice_enum_from_filter(filter_instance, type_name, column, filterset_cls)
 
 
 def _element_scalar(
@@ -1929,8 +1962,12 @@ def _element_scalar(
     """
     if truth.is_instance(filter_instance, TextPatternFilter):
         return str
-    if array_element_field(model_field) is not None:
-        raise _array_column_refusal(filter_instance, model_field, filterset_cls)
+    model_field = _array_element_column(
+        filter_instance,
+        model_field,
+        filterset_cls,
+        list_operand=False,
+    )
     if model_field is not None and getattr(model_field, "choices", None):
         return None
     if model_field is not None:
@@ -2311,11 +2348,16 @@ def convert_filter_to_input_annotation(
     def _range(matched: Filter) -> object:
         # Refuse a widget the patch cannot address when the schema is built, not per request.
         _ = range_form_keys(matched, matched.field_name or "range", filterset_cls)
-        if array_element_field(model_field) is not None:
-            raise _array_column_refusal(matched, model_field, filterset_cls, "range")
         # Each axis is typed like a scalar leaf's value (``_form_cleaned_value_field``), a
-        # package range's by its comparison form over a column holding values as given.
-        value_field = _form_cleaned_value_field(matched, model_field, filterset_cls)
+        # package range's by its comparison form over a column holding values as given; over
+        # an ``ArrayField`` only a filter running consumer code has one, an element.
+        value_field = _array_element_column(
+            matched,
+            _form_cleaned_value_field(matched, model_field, filterset_cls),
+            filterset_cls,
+            list_operand=False,
+            lookup="range",
+        )
         compared = _column_cleaned_scalar(matched, value_field, filterset_cls)
         if compared is not None:
             inner = compared
@@ -2345,11 +2387,11 @@ def convert_filter_to_input_annotation(
         return element
 
     def _choice(matched: Filter) -> object:
-        # The array's own ``choices`` are ambiguous (the read side refuses them too).
-        if array_element_field(model_field) is not None:
-            raise _array_column_refusal(matched, model_field, filterset_cls)
+        # The array's own ``choices`` are ambiguous (the read side refuses them too): a
+        # filter running consumer code reads its element's (``_array_element_column``).
+        column = _array_element_column(matched, model_field, filterset_cls, list_operand=False)
         type_name = _enum_prefix(owner_definition, filterset_cls)
-        return _choice_enum_from_filter(matched, type_name, model_field, filterset_cls)
+        return _choice_enum_from_filter(matched, type_name, column, filterset_cls)
 
     def _catchall(matched: Filter) -> object:
         # Catch-all scalar branch (``_catchall_element``).

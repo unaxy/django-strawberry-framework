@@ -44,7 +44,6 @@
 "django_strawberry_framework/filters/inputs.py::_is_declared_head" = { PLC0415 = 1 }
 "django_strawberry_framework/filters/inputs.py::_is_hidden_flat_copy" = { PLC0415 = 1 }
 "django_strawberry_framework/filters/inputs.py::_refuse_form_serving_no_value" = { PLC0415 = 1 }
-"django_strawberry_framework/filters/inputs.py::_refuse_kind_json_cannot_encode" = { PLC0415 = 1 }
 "django_strawberry_framework/filters/inputs.py::_refuse_unsealable_served_leaves" = { PLC0415 = 1 }
 "django_strawberry_framework/filters/inputs.py::_served_reach" = { PLC0415 = 1 }
 "django_strawberry_framework/filters/inputs.py::_unscalared_field_refusal" = { PLC0415 = 1 }

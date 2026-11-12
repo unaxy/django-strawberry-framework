@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 524 done, 107 to do. The CHANGELOG entries filed here moved to
+Progress: 525 done, 108 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -1264,7 +1264,7 @@ Progress: 524 done, 107 to do. The CHANGELOG entries filed here moved to
   `utils/errors.py::refuses_utc_offset` keeps the PostgreSQL offset rule. Tests: `tests/filters/test_sets.py`,
   `tests/utils/test_errors.py`
 - [x] 388. A class-level `Filter.filter()` override owns its value like `method=`: the unbindable-value ask runs only a
-  `filter` defined by django-filter or this package (`filters/sets.py::_runs_shipped_filter`, the MRO owner's module),
+  `filter` defined by django-filter or this package (`filters/base.py::_runs_shipped_filter`, the MRO owner's module),
   so consumer code never runs to validate; documented in `_unbindable_temporal_errors`. Tests: `tests/filters/test_sets.py`
 - [x] 398. A class-level `GlobalIDFilter.filter` override is read by `filters/sets.py::_decodes_before_binding` through
   `utils/truth.py::overrides`, so its lone-surrogate value is the coded `FILTER_INVALID` instead of a masked
@@ -3158,13 +3158,21 @@ Progress: 524 done, 107 to do. The CHANGELOG entries filed here moved to
   `examples/fakeshop/test_query/test_direct_filter_actor_api.py::test_a_model_choice_null_label_reads_its_null_value_as_the_visible_relations_null_test`
   over three `null_label` leaves on the fakeshop `ShelfFilter`, the alias row of `test_filter_apply_arguments_api.py`,
   and `tests/filters/test_sets.py`. spec-027, README, GLOSSARY `RelatedFilter`. Filed 948.
+- [x] 864. fixed: the `ArrayField` input gate (`filters/inputs.py::_array_element_column`, now the one gate every arm
+  asks) refuses by lookup only a filter running shipped code (`filters/base.py::_runs_shipped_filter`, moved down from
+  `filters/sets.py` with its helpers: no new suppression, one `PLC0415` retired); a `method=` filter or a class-level
+  `filter` override over a one-dimensional array is typed by the column's elements on every arm (a list of elements on
+  the list arms whatever its `lookup_expr`, one element, the element choices' enum, element range bounds), as over a
+  plain column of the element's type, nested arrays stay refused, and its form cleans an override's `in` members and a
+  package `RangeFilter`'s bounds as elements (`filters/base.py::_ElementCleanedFilter._hand_column_field`,
+  `RangeFilter._hand_column_field`); a choice filter over an array without element choices is refused naming the
+  `base_field`. Grid: 129/129 shipped and 72/72 plain-column cells unchanged, 174 consumer-code cells build typed by the
+  element, 72 nested refused. Pinned by 80 rows in `tests/filters/test_inputs.py` (`_consumer_code` over `method=` and
+  override); spec-027 (Decision 4 rows, refusal list, the listless "Not judged" list, the `ArrayField` Edge case, Test
+  plan, Definition of done), GLOSSARY `FilterSet`. Filed 950, 951; CHANGELOG 952
 
 ## To do: found along the way
 
-- [ ] 864. (robustness) The `ArrayField` input gate judges a `method=` filter over an array by its key name: a
-  `method=` `ListFilter` with `lookup_expr="in"` over an `ArrayField` is refused, though the method reads the list and
-  applies no lookup. Found fixing 716
-  - In progress (bug_hunt-0_0_15_2 - TOP-2): FIX phase 3 (clone spike-i864-research).
 - [ ] 867. (robustness) A wired `OrderSet` whose `RelatedOrder` two sets down names a lazy target that cannot import
   raises a bare `ImportError` at `finalize_django_types()`, where a direct unresolved target is rewrapped as a
   `ConfigurationError` naming the declaration and the filter family rewraps both
@@ -3301,6 +3309,13 @@ Progress: 524 done, 107 to do. The CHANGELOG entries filed here moved to
   null value over GraphQL: `exact: 0` is refused at form clean as `Invalid filter input` (django-filter's choice field
   cleans the string `"0"` and refuses the integer `0`), so the null test is reachable over GraphQL only through a String
   key (`to_field_name`). Found fixing 844
+- [ ] 950. (robustness) `filters/inputs.py::_catchall_element`'s null test hand-checks `method` instead of asking
+  `filters/base.py::_runs_shipped_filter`, so a `NumberFilter(lookup_expr="isnull")` with a class-level `filter` override
+  publishes `Boolean` while its form is a `DecimalField`: every request answers "Invalid filter input" (on a plain
+  column too). Found researching 864
+- [ ] 951. (robustness) A `method=` `DateFromToRangeFilter` over an integer column publishes `Int` bounds (typed by the
+  column, as a `method=` filter is) that its `DateField` form cannot clean: every request raises `'int' object has no
+  attribute 'strip'` (masked). Found researching 864
 
 ## To do: holes found re-checking the fixes
 

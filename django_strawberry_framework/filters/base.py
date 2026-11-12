@@ -1169,10 +1169,10 @@ def _column_form_field(
     filter holding a ``filter`` of its own, which reads its pair as declared), or one a
     ``method=`` filter names, whose method applies no lookup of the filter's to the
     relation.
-    ``element`` reads one element of a list value: an ``ArrayField`` column's element is a
-    value of its innermost ``base_field``, the column a nested array's leaves are stored
-    through (``utils/_array_field.py::array_leaf_field``), any other column's a value of
-    the column itself.
+    ``element`` reads one element of a list value, or one range bound: an ``ArrayField``
+    column's element is a value of its innermost ``base_field``, the column a nested array's
+    leaves are stored through (``utils/_array_field.py::array_leaf_field``), any other
+    column's a value of the column itself.
     ``query`` is the query of the rows the filter applies to when it is not the one the
     parent was handed (``filters/sets.py::FilterSet._clean_late_comparisons``: the
     queryset a consumer ``filter_queryset`` builds before it calls ``super()``), read as
@@ -1459,8 +1459,10 @@ class _ElementField(Field):
     compares as the nested one does, and ``exact`` finds a value of other dimensions equal to
     no row of the column's. Under an ``in`` whose members are whole array values
     (``members_are_arrays``: the column's own ``in`` is Django's ``ArrayInLookup``, flat or
-    nested) each member is one value of the column, held to its ``depth``, the levels Django's
-    ``ArrayField.get_db_prep_value`` walks before it hands an element to the innermost column:
+    nested, applied by a filter running shipped code, ``_runs_shipped_filter``; consumer code
+    applies no lookup of the filter's and receives elements) each member is one value of the
+    column, held to its ``depth``, the levels Django's ``ArrayField.get_db_prep_value`` walks
+    before it hands an element to the innermost column:
     a member, and each element of it above the innermost level, is descended when it is a list
     or tuple, and any other one, a member that is ``None`` included, is the field's error with
     ``MultipleChoiceField``'s ``invalid_list`` message (a member is never a leaf, since
@@ -1584,7 +1586,7 @@ class _ElementCleanedFilter(_ColumnCleanedFilter):
             lookup = operand.lookup
             field.element_field = _column_form_field(self, element=True, query=query)
             field.depth = array_leaf_field(operand.field)[1]
-            field.members_are_arrays = is_array_in_lookup(lookup)
+            field.members_are_arrays = _runs_shipped_filter(self) and is_array_in_lookup(lookup)
             field.bounds = truth.is_subclass(lookup, models.lookups.Range)
 
 
@@ -1642,7 +1644,10 @@ class ArrayFilter(_ElementCleanedFilter):
     Its lookup takes the list as ``ListFilter``'s does (``refuse_listless_lookup``): over an
     ``ArrayField`` column the input build admits ``exact``, ``contains``, ``contained_by``
     and ``overlap``; a transform's output that is no array (``len``, an index) is refused
-    with any lookup comparing one value.
+    with any lookup comparing one value. A ``method=`` filter or a class-level ``filter``
+    override (``_runs_shipped_filter``) applies no lookup of the filter's, so over an
+    ``ArrayField`` column it takes a list of the column's elements whatever its
+    ``lookup_expr``, each cleaned as one element.
     """
 
     # basedpyright: the stub declares ``Filter.method`` a plain attribute, not the property it is
@@ -1919,7 +1924,10 @@ class RangeFilter(_ColumnCleanedFilter):
     it and the lookup (``year``'s ``IntegerField``, ``date``'s ``DateField``), so a bound that
     value cannot hold (a non-finite decimal, a number past django-filter's ``1e50`` cap) is a
     form error as it is on ``gte``, a naive datetime bound is made aware and a text bound
-    stripped; a bound off a choice column's choices is compared like any other value. Over a
+    stripped; a bound off a choice column's choices is compared like any other value. Over an
+    ``ArrayField`` column, whose range input only a ``method=`` filter or a class-level
+    ``filter`` override has (``_runs_shipped_filter``), each bound is one of its elements, a
+    value of its innermost ``base_field``. Over a
     path only the queryset its ``FilterSet`` was handed resolves (a queryset annotation, a
     ``FilteredRelation`` alias and the columns past it) the value is the one that queryset
     compares, and an integer annotation's ``range`` applies as ``gte`` + ``lte`` as an integer
@@ -1943,9 +1951,15 @@ class RangeFilter(_ColumnCleanedFilter):
 
     @override
     def _hand_column_field(self, field: Field, query: Query | None = None, /) -> None:
-        """Fill only a missing bound cleaner on an owned ``RangeField``."""
+        """Fill only a missing bound cleaner on an owned ``RangeField``.
+
+        A filter running consumer code (``_runs_shipped_filter``) receives each bound as one
+        element of an ``ArrayField`` column, as its input publishes it; shipped code compares
+        the column itself.
+        """
         if isinstance(field, RangeField) and field.bound_field is None:
-            field.bound_field = _column_form_field(self, query=query)
+            element = not _runs_shipped_filter(self)
+            field.bound_field = _column_form_field(self, element=element, query=query)
 
     @override
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
@@ -3364,6 +3378,120 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
         return _apply_lookup_predicate(self, qs, node_ids, field_name=path)
 
 
+def _own_filter(filter_instance: Filter) -> object | None:
+    """Return the ``filter`` ``filter_instance`` holds of its own, ``None`` when its class's runs.
+
+    An instance ``filter`` replaces the class's for that filter and every copy
+    of it: the ``FilterMethod`` a ``method=`` installs (django-filter's, or the
+    package's list filters' own), or any callable a consumer stores on the
+    instance (a ``Filter`` subclass whose ``__init__`` sets ``self.filter``).
+    Such a filter owns its behavior: the package never rebinds its
+    ``field_name`` onto another model (a child filter set's is projected,
+    ``filters/sets.py::_owner_bound_child``; a parent's walks no hop,
+    ``filters/sets.py::FilterSet._flat_leaf_walk``) and never negates its ``exclude``
+    (``filters/sets.py::FilterSet._apply_relation_leaf``).
+    Read through the instance ``__dict__``, so a class-level ``filter``
+    override is not one: it walks its hops, on a relation key running as
+    declared over the parent's rows (``filters/sets.py::FilterSet._leaf_chain``), and the package
+    negates its ``exclude`` at the parent.
+    """
+    return (truth.instance_dict(filter_instance) or {}).get("filter")
+
+
+#: The packages whose filter classes' ``filter`` the bind ask runs: django-filter's and this one's.
+_SHIPPED_FILTER_PACKAGES = frozenset(
+    {truth.module(Filter).partition(".")[0], __name__.partition(".")[0]},
+)
+
+
+def _multiple_choice_predicate_hook(filter_instance: Filter) -> str | None:
+    """``get_filter_predicate``, whatever the filter's lookup.
+
+    django-filter's ``MultipleChoiceFilter.filter`` builds every value's predicate there,
+    its documented custom-predicate seam reading each value's lookup and operand.
+    """
+    del filter_instance
+    return "get_filter_predicate"
+
+
+def _globalid_predicate_hook(filter_instance: Filter) -> str | None:
+    """``get_filter_predicate`` for a lookup other than ``in``; ``None`` for ``in``.
+
+    ``GlobalIDMultipleChoiceFilter.filter`` hands the decoded ids of any lookup but ``in``
+    to ``MultipleChoiceFilter.filter``, which builds each predicate through the hook; an
+    ``in`` it applies itself, in one package predicate
+    (``_apply_lookup_predicate``). The lookup read is the one applied
+    where the path ends (``_bound_lookup_expr``), as the filter reads it.
+    """
+    return None if _bound_lookup_expr(filter_instance) == "in" else "get_filter_predicate"
+
+
+#: Each shipped ``filter`` that builds its predicate through a method a subclass may override,
+#: and the reading naming that method for a filter (``None`` where the ``filter`` builds the
+#: predicate itself): django-filter's ``MultipleChoiceFilter.filter`` and the package's
+#: ``GlobalIDMultipleChoiceFilter.filter`` off its ``in`` arm.
+_PREDICATE_HOOKS: Mapping[object, Callable[[Filter], str | None]] = MappingProxyType(
+    {
+        truth.class_dict(MultipleChoiceFilter)["filter"]: _multiple_choice_predicate_hook,
+        truth.class_dict(GlobalIDMultipleChoiceFilter)["filter"]: _globalid_predicate_hook,
+    },
+)
+
+
+def _predicate_hook(filter_instance: Filter, method: object) -> str | None:
+    """Return the overridable method the shipped ``method`` builds the predicate through.
+
+    ``None`` where ``method`` builds the predicate itself (``_PREDICATE_HOOKS``).
+    """
+    reading = _PREDICATE_HOOKS.get(method)
+    return None if reading is None else reading(filter_instance)
+
+
+def _is_shipped_function(function: object) -> bool:
+    """Whether ``function`` is defined in django-filter or this package (``_SHIPPED_FILTER_PACKAGES``)."""
+    return truth.module(function).partition(".")[0] in _SHIPPED_FILTER_PACKAGES
+
+
+def _builds_consumer_predicate(filter_instance: Filter, method: object) -> bool:
+    """Whether the shipped ``method`` builds ``filter_instance``'s predicate through consumer code.
+
+    ``method`` reads an overridable predicate method (``_predicate_hook``) the class of
+    ``filter_instance`` resolves to a function neither django-filter nor this package
+    defines: the predicate, path and value included, is the override's.
+    """
+    hook = _predicate_hook(filter_instance, method)
+    return hook is not None and not _is_shipped_function(
+        truth.stored_function(truth.mro_attr(truth.class_of(filter_instance), hook)),
+    )
+
+
+def _class_filter(filter_instance: Filter) -> object:
+    """Return the ``filter`` function ``filter_instance``'s class resolves through its real MRO."""
+    return truth.stored_function(truth.mro_attr(truth.class_of(filter_instance), "filter"))
+
+
+def _runs_shipped_filter(filter_instance: Filter) -> bool:
+    """Whether the ``filter`` ``filter_instance`` runs is django-filter's or this package's own code.
+
+    A ``filter`` the filter holds of its own (``_own_filter``: the ``FilterMethod`` a
+    ``method=`` installs, or a callable its ``__init__`` stores on the instance) is
+    consumer code. Otherwise its class's ``filter`` runs: the function the class's real
+    MRO resolves (``utils/truth.py::mro_attr``, unwrapped by ``stored_function``), read
+    for the module that defines it, so a consumer subclass that keeps an upstream or
+    package ``filter`` runs shipped code, and one that overrides ``filter`` (a
+    class-level override) runs its own. A shipped ``filter`` that builds its predicate
+    through an overridable method (``_PREDICATE_HOOKS``: ``MultipleChoiceFilter``'s
+    ``get_filter_predicate``, which ``GlobalIDMultipleChoiceFilter`` calls through it for
+    any lookup but ``in``) runs consumer code where the class resolves that method to a
+    function neither django-filter nor this package defines: the predicate, path
+    included, is the override's. Nothing consumer-defined runs.
+    """
+    if _own_filter(filter_instance) is not None:
+        return False
+    method = _class_filter(filter_instance)
+    return _is_shipped_function(method) and not _builds_consumer_predicate(filter_instance, method)
+
+
 def relation_identity_column(relation: object) -> ConcreteField | None:
     """Return the concrete column that types and coerces a relation leaf's raw identity.
 
@@ -3716,7 +3844,7 @@ def refuse_identityless_relation(
     dispatches it to that method, which filters as it chooses (the content type and
     object id columns, say), never through the relation its ``field_name`` names. A
     model-choice filter is asked only when its ``filter`` is ``shipped`` code
-    (``filters/sets.py::_runs_shipped_filter``): a ``filter`` override of its own, or a
+    (``_runs_shipped_filter``): a ``filter`` override of its own, or a
     ``get_filter_predicate`` of its own under django-filter's ``filter``, filters as it
     chooses too, while a GlobalID filter's override still holds the node-id comparison it
     would reach through ``super()``.
@@ -3849,7 +3977,7 @@ def refuse_unresolvable_lookup(
     (``_BOUNDED_RANGE_FILTERS``) is asked for a bound's ``gte``.
     ``filters/sets.py::FilterSet._publish_filters`` asks this of every
     leaf a set publishes whose ``filter`` is shipped code
-    (``filters/sets.py::_runs_shipped_filter``), as ``refuse_identityless_relation`` is
+    (``_runs_shipped_filter``), as ``refuse_identityless_relation`` is
     asked: a set a type serves refuses it when the schema builds, an unserved set at its
     first use (its first construction, or the package's first read of its table) and at
     every construction after until it is fixed. Nothing is kept between asks: a lookup a
@@ -4014,7 +4142,7 @@ def _filterset_walked_lookup(
     (``filters/sets.py::FilterSet._bound_terminal`` writes the walked pair onto its
     per-request copy alone). The filter's own pair answers for a filterset with no
     model, a ``ProjectedChildFilter`` (its child filter walks in the child set), and a
-    filter holding a ``filter`` of its own (``filters/sets.py::_own_filter``: the
+    filter holding a ``filter`` of its own (``_own_filter``: the
     ``FilterMethod`` a ``method=`` installs, or a callable stored on the instance, which
     receives the pair as declared). A class-level ``filter`` override walks, as
     ``filters/sets.py::FilterSet._flat_leaf_walk`` walks it: it reads its pair off the
@@ -4039,11 +4167,11 @@ def _filterset_walked_lookup(
 def _walks_declared_lookup(filter_instance: Filter) -> bool:
     """Whether the path ``filter_instance``'s package reads walk is the one Django walks.
 
-    A leaf holding no ``filter`` of its own (``filters/sets.py::_own_filter``), the rule
+    A leaf holding no ``filter`` of its own (``_own_filter``), the rule
     ``filters/sets.py::FilterSet._flat_leaf_walk`` walks by, a ``RelatedFilter`` head
     included; never a ``ProjectedChildFilter`` (``_filterset_walked_lookup``).
     """
-    from .sets import ProjectedChildFilter, _own_filter  # noqa: PLC0415 - import cycle
+    from .sets import ProjectedChildFilter  # noqa: PLC0415 - import cycle
 
     return (
         not isinstance(filter_instance, ProjectedChildFilter)

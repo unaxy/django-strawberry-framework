@@ -5039,6 +5039,317 @@ class _OwnFilterNumberFilter(NumberFilter):
         return qs
 
 
+#: How a filter over an ``ArrayField`` runs consumer code: a ``method=`` callable (django-filter's
+#: ``FilterMethod``) or a class-level ``filter`` override.
+_CONSUMER_CODE = [pytest.param("method", id="method"), pytest.param("override", id="override")]
+
+
+def _consumer_code(
+    filter_class: type[Filter],
+    mode: str,
+    received: list[object],
+    *,
+    field_name: str,
+    lookup_expr: str = "exact",
+    choices: list[tuple[int, str]] | None = None,
+) -> Filter:
+    """Declare ``filter_class`` running consumer code that records each value it receives.
+
+    ``mode`` ``"method"`` passes a ``method=`` callable; ``"override"`` declares a subclass whose
+    class-level ``filter`` is the consumer's. Either appends the value to ``received`` and keeps
+    no row, applying no lookup of the filter's.
+    """
+
+    def record(queryset: QuerySet[models.Model], value: object) -> QuerySet[models.Model]:
+        received.append(value)
+        return queryset.none()
+
+    def method(
+        queryset: QuerySet[models.Model],
+        _name: str,
+        value: object,
+    ) -> QuerySet[models.Model]:
+        return record(queryset, value)
+
+    def own_filter(
+        _self: Filter,
+        queryset: QuerySet[models.Model],
+        value: object,
+    ) -> QuerySet[models.Model]:
+        return record(queryset, value)
+
+    declared_class: type[Filter] = (
+        filter_class
+        if mode == "method"
+        else type(f"Own{filter_class.__name__}", (filter_class,), {"filter": own_filter})
+    )
+    consumer_method = method if mode == "method" else None
+    if choices is None:
+        return declared_class(
+            field_name=field_name,
+            lookup_expr=lookup_expr,
+            method=consumer_method,
+        )
+    return declared_class(
+        field_name=field_name,
+        lookup_expr=lookup_expr,
+        method=consumer_method,
+        choices=choices,
+    )
+
+
+@pytest.mark.parametrize("lookup", ["in", "icontains", "isnull"])
+@pytest.mark.parametrize(
+    "filter_class",
+    [
+        pytest.param(ListFilter, id="list-filter"),
+        pytest.param(ArrayFilter, id="array-filter"),
+        pytest.param(_NumbersInFilter, id="csv-filter"),
+    ],
+)
+@pytest.mark.parametrize("mode", _CONSUMER_CODE)
+def test_an_array_column_list_filter_running_consumer_code_takes_elements_for_any_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    filter_class: type[Filter],
+    lookup: str,
+) -> None:
+    """A list filter over an array whose own code receives the list takes ``list[int]``.
+
+    Consumer code applies no lookup of the filter's, so its ``lookup_expr`` never decides the
+    input: each member is one of the column's elements, as over a plain ``IntegerField``.
+    """
+    patch_array_field(monkeypatch)
+    declared = _consumer_code(filter_class, mode, [], field_name="ints", lookup_expr=lookup)
+    served = _serve_array_filter(declared, exposed=False)
+
+    assert _served_arr_annotation(served) == list[int]
+
+
+@pytest.mark.parametrize("lookup", ["exact", "contains"])
+@pytest.mark.parametrize(
+    ("filter_class", "choices", "expected"),
+    [
+        pytest.param(CharFilter, None, int, id="char-filter"),
+        pytest.param(NumberFilter, None, int, id="number-filter"),
+        pytest.param(TypedFilter, None, int, id="typed-filter"),
+        pytest.param(BooleanFilter, None, int, id="boolean-filter"),
+        pytest.param(
+            MultipleChoiceFilter,
+            [(1, "one"), (2, "two")],
+            list[int],
+            id="multiple-choice-filter",
+        ),
+    ],
+)
+@pytest.mark.parametrize("mode", _CONSUMER_CODE)
+def test_an_array_column_filter_running_consumer_code_is_typed_from_the_element_column(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    filter_class: type[Filter],
+    choices: list[tuple[int, str]] | None,
+    expected: object,
+    lookup: str,
+) -> None:
+    """One value, or each member, of a filter running consumer code over an array is an element.
+
+    The scalar, typed, catch-all and multiple-choice arms type it from ``base_field``, as they
+    type a filter running consumer code over that column alone.
+    """
+    patch_array_field(monkeypatch)
+    declared = _consumer_code(
+        filter_class,
+        mode,
+        [],
+        field_name="ints",
+        lookup_expr=lookup,
+        choices=choices,
+    )
+    served = _serve_array_filter(declared, exposed=False)
+
+    assert _served_arr_annotation(served) == expected
+
+
+@pytest.mark.parametrize("mode", _CONSUMER_CODE)
+def test_a_choice_filter_running_consumer_code_over_an_array_uses_the_element_enum(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Element ``choices`` type a consumer-code ``ChoiceFilter``'s value as the column's one enum."""
+    patch_array_field(monkeypatch)
+    declared = _consumer_code(
+        ChoiceFilter,
+        mode,
+        [],
+        field_name="tiers",
+        choices=[(1, "Bronze"), (2, "Silver")],
+    )
+    served = _serve_array_filter(declared, exposed=False)
+
+    annotation = _served_arr_annotation(served)
+    enum_cls = registry.get_enum(_ArraySpecimen, "tiers")
+    assert enum_cls is not None
+    assert annotation is enum_cls
+
+
+@pytest.mark.parametrize("column", ["ints", "flagged"])
+@pytest.mark.parametrize("mode", _CONSUMER_CODE)
+def test_a_choice_filter_running_consumer_code_over_an_array_without_element_choices_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    column: str,
+) -> None:
+    """With no element ``choices`` (the array's own never count) the refusal names ``base_field``."""
+    patch_array_field(monkeypatch)
+    declared = _consumer_code(ChoiceFilter, mode, [], field_name=column)
+    _ = _serve_array_filter(declared, exposed=False)
+
+    assert _build_refusal() == (
+        f"ArraySpecimenFilter: {type(declared).__name__} on {column!r} reads the elements of the "
+        f"ArrayField column _ArraySpecimen.{column}, whose base_field declares no `choices`, so "
+        "no choice enum types its input (the filter's own `choices` never feed the enum); "
+        "declare `choices` on that base_field, or filter the column through a non-choice filter "
+        "(`CharFilter`, `NumberFilter`, `DateFromToRangeFilter`, its lookups in Meta.fields, or "
+        "`CharFilter(method=...)` for a method filter)."
+    )
+    assert registry.get_enum(_ArraySpecimen, column) is None
+
+
+@pytest.mark.parametrize(
+    "range_class",
+    [
+        pytest.param(RangeFilter, id="package-range-filter"),
+        pytest.param(DjangoRangeFilter, id="django-filter-range-filter"),
+    ],
+)
+@pytest.mark.parametrize("mode", _CONSUMER_CODE)
+def test_a_range_filter_running_consumer_code_over_an_array_takes_element_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    range_class: type[Filter],
+) -> None:
+    """Each bound of a range whose own code receives the pair is one of the column's elements."""
+    patch_array_field(monkeypatch)
+    declared = _consumer_code(range_class, mode, [], field_name="ints")
+    served = _serve_array_filter(declared, exposed=False)
+
+    range_input = _served_arr_annotation(served)
+    assert isinstance(range_input, type)
+    assert {name: _args(bound) for name, bound in _annotations(range_input).items()} == {
+        "start": (int, type(None)),
+        "end": (int, type(None)),
+    }
+
+
+@pytest.mark.parametrize(
+    ("filter_class", "lookup"),
+    [
+        pytest.param(ListFilter, "in", id="list-filter"),
+        pytest.param(CharFilter, "exact", id="char-filter"),
+        pytest.param(RangeFilter, "range", id="range-filter"),
+    ],
+)
+@pytest.mark.parametrize("mode", _CONSUMER_CODE)
+def test_a_filter_running_consumer_code_over_a_nested_array_is_refused_as_the_read_side_does(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    filter_class: type[Filter],
+    lookup: str,
+) -> None:
+    """An array of arrays has no element scalar, whichever code receives the value."""
+    patch_array_field(monkeypatch)
+    declared = _consumer_code(filter_class, mode, [], field_name="grid", lookup_expr=lookup)
+    _ = _serve_array_filter(declared, exposed=False)
+
+    assert _build_refusal() == "Nested ArrayField on _ArraySpecimen.grid is not supported."
+
+
+def _unserved_array_set(declared: Filter) -> type[FilterSet]:
+    """A ``FilterSet`` over ``_ArraySpecimen`` declaring ``declared`` as ``arr``, served by no type."""
+
+    class RawSpecimenFilter(FilterSet):
+        arr = declared
+
+        class Meta:
+            model = _ArraySpecimen
+            fields = []
+
+    return RawSpecimenFilter
+
+
+@pytest.mark.parametrize(
+    ("filter_class", "lookup"),
+    [
+        pytest.param(CharFilter, "exact", id="char-filter"),
+        pytest.param(_NumbersInFilter, "in", id="csv-filter"),
+    ],
+)
+@pytest.mark.parametrize("mode", _CONSUMER_CODE)
+def test_an_unserved_array_filter_running_consumer_code_publishes_no_json_value(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    filter_class: type[Filter],
+    lookup: str,
+) -> None:
+    """``publishes_json_value`` asks the same gate: an element is no ``JSON`` value."""
+    patch_array_field(monkeypatch)
+    raw = _unserved_array_set(
+        _consumer_code(filter_class, mode, [], field_name="ints", lookup_expr=lookup),
+    )
+
+    assert publishes_json_value(raw.base_filters["arr"], raw) is False
+
+
+def test_an_unserved_shipped_array_filter_whose_lookup_takes_no_element_array_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shipped ``CharFilter`` over an array keeps the refusal on the unserved read."""
+    patch_array_field(monkeypatch)
+    raw = _unserved_array_set(CharFilter(field_name="ints", lookup_expr="exact"))
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _ = publishes_json_value(raw.base_filters["arr"], raw)
+    assert str(excinfo.value) == (
+        "RawSpecimenFilter: CharFilter on 'ints' has no input type for lookup 'exact' on the "
+        "ArrayField column _ArraySpecimen.ints: only exact, contains, contained_by and overlap "
+        "take one array of the column's elements. Declare an ArrayFilter with one of those "
+        "lookup_expr values."
+    )
+
+
+@pytest.mark.parametrize(
+    ("filter_class", "lookup", "data"),
+    [
+        pytest.param(ListFilter, "in", {"arr": ["1", "2"]}, id="list-filter-in"),
+        pytest.param(ArrayFilter, "in", {"arr": ["1", "2"]}, id="array-filter-in"),
+        pytest.param(RangeFilter, "range", {"arr_0": "1", "arr_1": "2"}, id="package-range"),
+    ],
+)
+@pytest.mark.parametrize("mode", _CONSUMER_CODE)
+def test_consumer_code_over_an_array_receives_its_values_cleaned_as_elements(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    filter_class: type[Filter],
+    lookup: str,
+    data: dict[str, object],
+) -> None:
+    """The form cleans each member, or each bound, as one element, never as an array.
+
+    Each value is cleaned as a comparison with one element is (``Decimal`` over an integer
+    column), so the consumer code receives the values its published input carries.
+    """
+    patch_array_field(monkeypatch)
+    received: list[object] = []
+    raw = _unserved_array_set(
+        _consumer_code(filter_class, mode, received, field_name="ints", lookup_expr=lookup),
+    )
+    filterset = raw(data=data, queryset=_ArraySpecimen.objects.all())
+
+    assert filterset.form.is_valid(), filterset.form.errors
+    _ = filterset.qs
+    assert received == [[decimal.Decimal(1), decimal.Decimal(2)]]
+
+
 def _payload_set(
     declared: Filter,
     *,
