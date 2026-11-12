@@ -6,7 +6,8 @@ Taking a lock
     from ``msvcrt``) means another holder has a lock, and any other error is
     raised, never read as a holder. :func:`try_lock` takes an exclusive,
     non-blocking kernel lock by it (``flock``; ``msvcrt.locking`` on Windows):
-    ``scripts/work.py`` (``land.lock``, the pytest lock),
+    ``scripts/work.py`` (``land.lock``, ``fleet.lock``, the pytest lock, each
+    evidence stem's ``stem-locks/<stem>.lock``),
     ``docs/fleet/scripts/fleet_sync.py`` (``fleet.lock``) and
     ``scripts/prove_failability.py`` (its repository-root lock).
     ``scripts/workspace.py`` keeps its own ``flock`` calls (some block, some

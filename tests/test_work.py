@@ -16,6 +16,7 @@ import dataclasses
 import errno
 import getpass
 import json
+import math
 import os
 import shutil
 import signal
@@ -1938,6 +1939,7 @@ def _evidence_entries(repo: Path, stem: str) -> list[Path]:
 def test_rm_evidence_of_a_saved_copy_deletes_it_though_its_saves_stay(repo: Path) -> None:
     """The removed copy's own name, left holding its saves, is no sibling of its stem."""
     path = _new("spike-saved")
+    note = work.locate(repo, "spike-saved").note
     _ = _write(path / "new.txt", "kept in a save\n")
     assert work.main(["save", "spike-saved"]) == 0
     _ = _write(_evidence(repo, "spike-saved") / "proof.txt", "proof\n")
@@ -1950,6 +1952,8 @@ def test_rm_evidence_of_a_saved_copy_deletes_it_though_its_saves_stay(repo: Path
         "spike-saved",
         ["proof.txt"],
     )
+    assert grave.identity == note["incarnation"]
+    assert dict(grave.pins) == {"start": note["start"], **_pins(repo)["spike-saved"]}
 
 
 def test_rm_evidence_writes_a_tombstone_of_exactly_the_deleted_files_before_trashing(
@@ -2071,6 +2075,64 @@ def test_an_evidence_tombstone_refuses_a_stem_or_path_that_leaves_its_folder(
     assert work.EvidenceTombstone.parse(document) is None
 
 
+@pytest.mark.parametrize(
+    "moment",
+    [
+        math.nan,
+        math.inf,
+        -math.inf,
+        -1.0,
+        2.0**32,
+        1e300,
+    ],
+    ids=[
+        "nan",
+        "positive-infinity",
+        "negative-infinity",
+        "negative",
+        "past-2106",
+        "huge",
+    ],
+)
+def test_a_record_whose_removal_moment_is_no_finite_sane_time_is_refused(moment: float) -> None:
+    """Retention reads the moment: one that is no real time would keep or reap a record at once."""
+    evidence = work.EvidenceTombstone("lead-merge", "a", 1.0, "a", (("f", 1, 1),), whole=True)
+    copy = work.Tombstone("fix-i1-x", "a", "abc@1", 1.0, "a")
+    assert work.EvidenceTombstone.parse({**evidence.as_json(), "removedat": moment}) is None
+    assert work.Tombstone.parse({**copy.as_json(), "removedat": moment}) is None
+    assert work.EvidenceTombstone.parse(evidence.as_json()) == evidence
+    assert work.Tombstone.parse(copy.as_json()) == copy
+
+
+def test_the_removed_copy_fields_round_trip_and_leave_the_record_name_alone() -> None:
+    """``identity`` and ``pins`` stay out of the name; a record without them exempts nothing."""
+    grave = work.EvidenceTombstone(
+        "fix-i1-x",
+        "a",
+        1_731_300_000.5,
+        "a",
+        (("f.txt", 3, 17),),
+        whole=True,
+        copy="fix-i1-x",
+        identity="0123456789abcdef",
+        pins=(("save-1", "c" * 40), ("start", "d" * 40)),
+    )
+    assert work.EvidenceTombstone.parse(json_loads(json.dumps(grave.as_json()))) == grave
+    older = {
+        key: value for key, value in grave.as_json().items() if key not in {"identity", "pins"}
+    }
+    stripped = work.EvidenceTombstone.parse(older)
+    assert stripped is not None
+    assert stripped == dataclasses.replace(grave, identity="", pins=())
+    assert stripped.file_name == grave.file_name
+    held = {"save-1": "c" * 40}
+    assert grave.removed is not None
+    assert grave.removed.left_alone("fix-i1-x", held)
+    assert stripped.removed is not None
+    assert not stripped.removed.left_alone("fix-i1-x", held)
+    assert work.EvidenceTombstone.parse({**grave.as_json(), "pins": {"save-1": 7}}) is None
+
+
 def test_the_copy_tombstone_reader_never_sees_evidence_tombstones(repo: Path) -> None:
     grave = work.EvidenceTombstone("spike-x", "a", time.time() - 40 * 86400, "a", (), whole=True)
     assert work.write_evidence_tombstone(repo, grave)
@@ -2186,6 +2248,40 @@ def test_evidence_rm_refuses_a_stem_a_name_still_uses_and_waits_for_the_fleet_lo
     assert path.is_dir()
     assert work.evidence_tombstones(repo) == []
     assert (_evidence(repo, "fix-i9-held") / "proof.txt").is_file()
+
+
+def test_a_held_stem_lock_refuses_new_and_evidence_deletions_with_nothing_changed(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A fleet sync applying a stem's deletion holds its lock: ``new`` and the deletions wait, then refuse."""
+    path = _new("fix-i9-locked")
+    _age(path)
+    proof = _write(_evidence(repo, "fix-i9-locked") / "proof.txt", "proof\n")
+    _ = _write(_evidence(repo, "lead-merge") / "proof.txt", "proof\n")
+    monkeypatch.setattr(work, "STEM_LOCK_WAIT_SECONDS", 0.3)
+    with work.stem_lock(repo, "fix-i9-locked", 0):
+        _ = capsys.readouterr()
+        assert work.main(["new", "fix-i9-locked-verify", "--no-setup"]) == 1
+        assert "holds" in capsys.readouterr().err
+        assert work.main(["rm", "fix-i9-locked", "--evidence"]) == 1
+        assert work.main(["new", "fix-i9-other", "--no-setup"]) == 0
+        with work.stem_lock(repo, "lead-merge", 0):
+            assert work.main(["evidence-rm", "lead-merge"]) == 1
+    assert "fix-i9-locked-verify" not in work.discover(repo)
+    assert not (repo / ".work" / "names" / "fix-i9-locked-verify").exists()
+    assert path.is_dir()
+    assert proof.is_file()
+    assert work.evidence_tombstones(repo) == []
+    with (
+        pytest.raises(work.StemBusyError),
+        work.stem_lock(repo, "fix-i9-locked", 0),
+        work.stem_lock(repo, "fix-i9-locked", 0),
+    ):
+        pass
+    assert work.main(["rm", "fix-i9-locked", "--evidence"]) == 0
+    assert not proof.exists()
 
 
 def test_evidence_rm_adopt_missing_builds_the_record_from_peer_manifests_and_refuses_a_wiped_root(

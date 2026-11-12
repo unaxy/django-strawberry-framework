@@ -1723,16 +1723,32 @@ def test_an_evidence_deletion_reaches_the_peer_by_full_sync_alone_and_goes_to_it
         NAME,
         f"evidence: 2 deleted on b (kept in .work/trash for {days} days)",
     ) in _results(document)
-    assert not evidence_b.exists()
+    assert (
+        "note",
+        NAME,
+        (
+            "evidence folder kept on b holding only files no sync carries (__pycache__); "
+            f"`work.py evidence-rm {NAME}` there removes it"
+        ),
+    ) in _results(document)
+    assert [path.name for path in evidence_b.iterdir()] == ["__pycache__"]
     (entry,) = _evidence_trash(fleet.repo_b)
     assert entry.name.endswith(f"-{work.KEPT_TRASH}")
-    assert (entry / "proofs" / "out.txt").read_text(encoding="utf-8") == "proof\n"
-    assert (entry / "__pycache__" / "x.cpython-314.pyc").is_file()
+    assert sorted(path.relative_to(entry).as_posix() for path in entry.rglob("*.txt")) == [
+        "proofs/out.txt",
+        "top.txt",
+    ]
+    assert not (entry / "__pycache__").exists()
+    code, document = fleet.run("sync", "--copy", NAME)
+    assert (code, [row for row in _results(document) if row[1] == NAME]) == (0, [])
+    fleet.at_b()
+    assert work.main(["evidence-rm", NAME]) == 0
+    fleet.at_a()
+    assert not evidence_b.exists()
+    assert fleet.run("sync", "--copy", NAME)[0] == 0
     assert NAME not in json_object(
         json_loads((fleet.repo_a / ".work" / "fleet" / "evidence-b.json").read_text()),
     )
-    code, document = fleet.run("sync", "--copy", NAME)
-    assert (code, [row for row in _results(document) if row[1] == NAME]) == (0, [])
     later = _write(evidence_a / "top.txt", "recreated, longer than before\n")
     past = grave.removed_at - 1000
     os.utime(later, (past, past))
@@ -2054,6 +2070,8 @@ def test_an_agent_evidence_apply_answers_its_own_shape_and_makes_no_folder(
         "skipped": {},
         "failed": {},
         "remaining": {},
+        "leftover": {},
+        "stopped": "",
     }
     assert sorted(path.name for path in (fleet.repo_b / ".work" / "evidence").iterdir()) == []
 
@@ -2095,31 +2113,45 @@ def test_a_hostile_tombstone_path_is_refused(fleet: Fleet, tmp_path: Path) -> No
     assert work.EvidenceTombstone.parse(hostile) is None
 
 
-def test_the_stem_folder_stays_while_unrecorded_files_remain_and_goes_with_only_leftovers(
+def test_an_emptied_stem_folder_goes_and_one_left_holding_unrecorded_or_unsynced_files_stays(
     fleet: Fleet,
 ) -> None:
+    """Only recorded files move: what else a stem folder holds keeps it, and is never moved."""
     fleet.at_b()
-    clean = _evidence(fleet.repo_b, "lead-merge")
-    mixed = _evidence(fleet.repo_b, "sol-review")
+    clean = _evidence(fleet.repo_b, "fix-i1-clean")
+    mixed = _evidence(fleet.repo_b, "lead-merge")
+    unsynced = _evidence(fleet.repo_b, "sol-review")
     graves = [
-        _grave("lead-merge", {"f.txt": _write(clean / "f.txt", "proof\n")}),
-        _grave("sol-review", {"f.txt": _write(mixed / "f.txt", "proof\n")}),
+        _grave(stem, {"proofs/f.txt": _write(folder / "proofs" / "f.txt", "proof\n")})
+        for stem, folder in (
+            ("fix-i1-clean", clean),
+            ("lead-merge", mixed),
+            ("sol-review", unsynced),
+        )
     ]
-    _ = _write(clean / ".venv" / "bin" / "python", "venv\n")
-    _ = _write(clean / "sub" / "__pycache__" / "m.cpython-314.pyc", "cache")
     _ = _write(mixed / "new.txt", "made after the delete\n")
+    python = _write(unsynced / ".venv" / "bin" / "python", "venv\n")
+    cache = _write(unsynced / "sub" / "__pycache__" / "m.cpython-314.pyc", "cache")
     for grave in graves:
         assert work.write_evidence_tombstone(fleet.repo_b, grave)
     answer = _apply(fleet.repo_b)
-    assert answer["remaining"] == {"sol-review": 1}
+    assert answer["trashed"] == {"fix-i1-clean": 1, "lead-merge": 1, "sol-review": 1}
+    assert (answer["remaining"], answer["leftover"]) == (
+        {"lead-merge": 1},
+        {"sol-review": [".venv", "sub"]},
+    )
     assert not clean.exists()
-    (entry,) = _evidence_trash(fleet.repo_b, "lead-merge")
-    assert sorted(
-        path.relative_to(entry).as_posix() for path in entry.rglob("*") if path.is_file()
-    ) == [".venv/bin/python", "f.txt", "sub/__pycache__/m.cpython-314.pyc"]
-    assert (mixed / "new.txt").is_file()
-    assert not (mixed / "f.txt").exists()
-    assert _apply(fleet.repo_b)["remaining"] == {}
+    assert sorted(path.name for path in mixed.iterdir()) == ["new.txt"]
+    assert python.read_text(encoding="utf-8") == "venv\n"
+    assert cache.is_file()
+    for stem in ("fix-i1-clean", "lead-merge", "sol-review"):
+        (entry,) = _evidence_trash(fleet.repo_b, stem)
+        assert sorted(path.relative_to(entry).as_posix() for path in entry.rglob("*")) == [
+            "proofs",
+            "proofs/f.txt",
+        ]
+    again = _apply(fleet.repo_b)
+    assert (again["trashed"], again["remaining"], again["leftover"]) == ({}, {}, {})
 
 
 def test_a_whole_record_leaves_a_stem_folder_it_moved_no_recorded_file_from(
@@ -2190,6 +2222,205 @@ def test_apply_is_idempotent_and_two_records_for_one_stem_use_separate_trash_ent
         ],
     ) == ["first\n", "second, longer\n"]
     assert (_evidence(fleet.repo_b) / "g.txt").is_file()
+
+
+def test_a_file_written_after_the_last_listing_stays_in_evidence_and_out_of_the_trash(
+    fleet: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A whole record moves recorded files alone: one written while it runs is never swept."""
+    fleet.at_b()
+    evidence = _evidence(fleet.repo_b)
+    held = _write(evidence / "f.txt", "proof\n")
+    cache = _write(evidence / "__pycache__" / "m.cpython-314.pyc", "cache")
+    assert work.write_evidence_tombstone(fleet.repo_b, _grave(NAME, {"f.txt": held}))
+    listing = work.evidence_files
+    late = evidence / "new-proof.txt"
+
+    def racing(folder: Path) -> dict[str, tuple[int, int]]:
+        found = listing(folder)
+        if folder == evidence:
+            _ = _write(late, "no tombstone records this\n")
+        return found
+
+    monkeypatch.setattr(work, "evidence_files", racing)
+    answer = _apply(fleet.repo_b)
+    assert answer["trashed"] == {NAME: 1}
+    assert late.read_text(encoding="utf-8") == "no tombstone records this\n"
+    assert cache.is_file()
+    (entry,) = _evidence_trash(fleet.repo_b)
+    assert [path.relative_to(entry).as_posix() for path in entry.rglob("*")] == ["f.txt"]
+
+
+def test_a_copy_made_during_the_owner_check_never_outlives_its_evidence(
+    fleet: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The apply holds the stem's lock from its owner check to its last move: ``new`` waits, then refuses."""
+    held = _write(_evidence(fleet.repo_a) / "f.txt", "proof\n")
+    assert work.write_evidence_tombstone(fleet.repo_a, _grave(NAME, {"f.txt": held}))
+    monkeypatch.setattr(work, "STEM_LOCK_WAIT_SECONDS", 0.3, raising=False)
+    users = work.evidence_users
+    made: list[int] = []
+
+    def interleaved(
+        repo: Path,
+        stem: str,
+        *,
+        removed: work.RemovedCopy | None = None,
+    ) -> list[str]:
+        found = users(repo, stem, removed=removed)
+        made.append(
+            work.main(
+                [
+                    "new",
+                    NAME,
+                    "--no-setup",
+                    "--purpose",
+                    "a probe",
+                ],
+            ),
+        )
+        return found
+
+    monkeypatch.setattr(work, "evidence_users", interleaved)
+    answer = _apply(fleet.repo_a)
+    alive = NAME in work.discover(fleet.repo_a)
+    assert alive or not held.exists()
+    assert (made, alive, answer["trashed"]) == ([1], False, {NAME: 1})
+    assert not (fleet.repo_a / ".work" / "names" / NAME).exists()
+
+
+def test_an_apply_while_new_takes_a_stem_skips_it_and_the_new_copy_keeps_its_evidence(
+    fleet: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    held = _write(_evidence(fleet.repo_a) / "f.txt", "proof\n")
+    assert work.write_evidence_tombstone(fleet.repo_a, _grave(NAME, {"f.txt": held}))
+    claim = work.claim_name
+    answers: list[dict[str, object]] = []
+
+    def applying(repo: Path, name: str) -> Path:
+        claimed = claim(repo, name)
+        answers.append(_apply(repo))
+        return claimed
+
+    monkeypatch.setattr(work, "claim_name", applying)
+    copy = _new()
+    assert held.read_text(encoding="utf-8") == "proof\n"
+    assert copy.is_dir()
+    (answer,) = answers
+    assert answer["trashed"] == {}
+    assert list(json_object(answer, "skipped")) == [NAME]
+
+
+def test_an_old_copys_record_never_exempts_a_later_copys_saved_pins(fleet: Fleet) -> None:
+    """A record binds its exemption to the removed incarnation's pins, never to its name alone."""
+    copy = _new()
+    proof = _write(_evidence(fleet.repo_a) / "proof.txt", "proof\n")
+    state = proof.lstat()
+    _age(copy)
+    assert (
+        work.main(
+            [
+                "rm",
+                NAME,
+                "--drop-saves",
+                "--evidence",
+            ],
+        )
+        == 0
+    )
+    assert len(work.evidence_tombstones(fleet.repo_a)) == 1
+    later = _new()
+    restored = _write(_evidence(fleet.repo_a) / "proof.txt", "proof\n")
+    os.utime(restored, ns=(state.st_atime_ns, state.st_mtime_ns))
+    _ = _write(later / "saved.txt", "the later copy's own work\n")
+    assert work.main(["save", NAME]) == 0
+    _age(later)
+    assert work.main(["rm", NAME]) == 0
+    assert work.discover(fleet.repo_a)[NAME].form == "pins"
+    answer = _apply(fleet.repo_a)
+    assert answer["trashed"] == {}
+    assert list(json_object(answer, "skipped")) == [NAME]
+    assert restored.read_text(encoding="utf-8") == "proof\n"
+
+
+@pytest.mark.parametrize(
+    ("identity", "pinned", "outcome"),
+    [
+        ("i1", "owned", "trashed"),
+        ("", "owned", "kept"),
+        ("i1", "fewer", "kept"),
+        ("i1", "moved", "kept"),
+    ],
+    ids=[
+        "its-own-pins",
+        "a-record-without-identity",
+        "a-pin-it-never-owned",
+        "a-pin-moved-since",
+    ],
+)
+def test_a_removed_copys_name_is_exempt_only_while_it_holds_the_pins_the_record_lists(
+    fleet: Fleet,
+    identity: str,
+    pinned: str,
+    outcome: str,
+) -> None:
+    copy = _new()
+    _ = _write(copy / "saved.txt", "saved\n")
+    assert work.main(["save", NAME]) == 0
+    _ = _write(copy / "saved.txt", "saved again\n")
+    assert work.main(["save", NAME]) == 0
+    _age(copy)
+    assert work.main(["rm", NAME]) == 0
+    held = work.pins(fleet.repo_a)[NAME]
+    assert set(held) == {"save-1", "save-2"}
+    listed = {
+        "owned": held,
+        "fewer": {"save-1": held["save-1"]},
+        "moved": {"save-1": held["save-1"], "save-2": held["save-1"]},
+    }[pinned]
+    proof = _write(_evidence(fleet.repo_a) / "f.txt", "proof\n")
+    grave = dataclasses.replace(
+        _grave(NAME, {"f.txt": proof}),
+        copy=NAME,
+        identity=identity,
+        pins=tuple(sorted(listed.items())),
+    )
+    assert work.write_evidence_tombstone(fleet.repo_a, grave)
+    answer = _apply(fleet.repo_a)
+    assert ("kept" if proof.exists() else "trashed") == outcome
+    if outcome == "kept":
+        assert answer["skipped"] == {NAME: f"{NAME} still use it here"}
+
+
+def test_a_stop_raised_during_an_apply_moves_nothing_of_the_next_stem(
+    fleet: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fleet.at_b()
+    first = _write(_evidence(fleet.repo_b, "lead-merge") / "f.txt", "proof\n")
+    second = _write(_evidence(fleet.repo_b, "sol-review") / "f.txt", "proof\n")
+    for stem, held in (("lead-merge", first), ("sol-review", second)):
+        assert work.write_evidence_tombstone(fleet.repo_b, _grave(stem, {"f.txt": held}))
+    move = work.move_evidence_file
+
+    def stopping(
+        folder: Path,
+        rel: str,
+        state: tuple[int, int],
+        entry: Callable[[], Path],
+    ) -> str:
+        outcome = move(folder, rel, state, entry)
+        fleet_sync.write_stop(fleet.repo_b, "mid apply")
+        return outcome
+
+    monkeypatch.setattr(work, "move_evidence_file", stopping)
+    answer = _apply(fleet.repo_b)
+    assert (answer["trashed"], answer.get("stopped")) == ({"lead-merge": 1}, "mid apply")
+    assert not first.exists()
+    assert second.read_text(encoding="utf-8") == "proof\n"
 
 
 def test_an_evidence_tombstone_adds_about_one_listing_of_its_stem_to_the_inventory(

@@ -187,26 +187,37 @@ two other machines hold is reported, for their own runs)
 
     Evidence tombstones: ``.work/evidence-tombstones/<stem>@<digest>.json``, written
     only by ``work.py rm --evidence`` (never on a replica) and ``work.py evidence-rm``: the
-    stem, machine,
-    moment, whether the whole folder went (``whole``), the removed copy, and each
-    deleted file's ``[size, mtime]``. Carried like tombstones (create-only, both ways,
-    by ``--pins-only`` too) but applied only by a full sync, on both machines of the
-    pair after the copy steps (``evidence-apply``): a file holding exactly a recorded
-    state moves into ``.work/trash/evidence-<stem>-<seconds>-kept`` (``gc`` deletes it
-    after 7 days), never deleted outright; one in another state is kept, and the union
-    carries it back to the deleting machine with one ``conflict``; a stem another name
-    there uses (a copy, a replica, a name holding pins alone; the removed copy's own
-    saves aside) is kept there with a ``note`` (no exit 1: the name is that machine's
-    to remove); a path leaving the stem folder or passing a symlink fails. A
-    ``whole`` record also moves the stem folder, left holding only unsynced files, in
-    an apply that moved a recorded file from it; a folder it moved nothing from (made
-    since, or holding only a ``.venv``) stays. State equality decides (a size and a
-    whole-second mtime, not content), never time, so clock skew changes nothing; a
-    false match stays restorable from the trash (``work.py evidence-restore``, which
+    stem, machine, moment, whether the whole folder went (``whole``), the removed copy
+    with its incarnation and the pins it owned then, and each deleted file's ``[size,
+    mtime]``. Carried like tombstones (create-only, both ways, by ``--pins-only`` too)
+    but applied only by a full sync, on both machines of the pair after the copy steps
+    (``evidence-apply``), stem by stem under the stem's lifecycle lock (``work.stem_lock``,
+    which ``work.py new``, ``adopt`` and the evidence deletions take too; held, the stem
+    waits for the next full sync with a ``note``), the stop flag read again before each
+    stem: a file holding exactly a recorded state moves into
+    ``.work/trash/evidence-<stem>-<seconds>-kept`` (``gc`` deletes it after 7 days),
+    never deleted outright, and nothing else ever moves; one in another state is kept,
+    and the union carries it back to the deleting machine with one ``conflict``; a stem
+    another name there uses (a copy, a replica, a name holding pins alone; the removed
+    copy's name aside while it holds only pins the record lists) is kept there with a
+    ``note`` (no exit 1: the name is that machine's to remove); a path leaving the stem
+    folder or passing a symlink fails. A ``whole`` record also removes the stem folder
+    once an apply that moved a recorded file from it left it empty (``rmdir``); one
+    left holding other files, or only files no sync carries (a ``.venv``, caches), stays
+    with a ``note``, and a folder it moved nothing from stays untouched. State equality
+    decides (a size and a whole-second mtime, not content), never time, so clock skew
+    changes nothing; a false match stays restorable from the trash (``work.py
+    evidence-restore``, which
     gives each file a fresh mtime). ``work.py gc`` deletes
     a record after 90 days, and a machine offline longer brings the files back. A peer
     whose probe lacks the ``evidence-tombstones`` feature (an older script) gets no
-    such operation: one ``note``, and its sync goes on.
+    such operation: one ``note``, and its sync goes on; an older script relaying a
+    record keeps its name and drops the removed copy's incarnation and pins, and such a
+    record exempts no name. A stop raised mid-apply ends it before the next stem, one
+    ``failed`` row saying how far it got. Known limits: a state is metadata, so other
+    bytes of the same size and second match; and each move checks the stem folder by
+    path, so a folder swapped for a symlink between that check and the rename (a
+    concurrent layout change; a standing symlink is refused) can redirect it.
 
     Deletions: a replica is removed only by a tombstone its home (or a later home
     of it, above) left for the replica's own identity, so a later copy reusing the
@@ -1604,76 +1615,131 @@ def agent_tombstones_export(repo: Path, data: bytes) -> dict[str, object]:
     }
 
 
+@dataclasses.dataclass
+class _Applied:
+    """What one ``evidence-apply`` did, stem by stem (:func:`agent_evidence_apply`'s answer)."""
+
+    trashed: dict[str, int] = dataclasses.field(default_factory=dict)
+    kept: list[list[str]] = dataclasses.field(default_factory=list)
+    skipped: dict[str, str] = dataclasses.field(default_factory=dict)
+    failed: dict[str, str] = dataclasses.field(default_factory=dict)
+    remaining: dict[str, int] = dataclasses.field(default_factory=dict)
+    leftover: dict[str, list[str]] = dataclasses.field(default_factory=dict)
+    stopped: str = ""
+
+
 def agent_evidence_apply(repo: Path, names: Sequence[str]) -> dict[str, object]:
     """Move every evidence file a tombstone held here records, in that very state, to the trash.
 
-    Each held record (only those of the stems of ``names``, when given) is applied to this
-    machine's current disk: a file holding exactly a recorded state goes into a fresh
+    Stem by stem (only the stems of ``names``, when given), each record held here is applied
+    to this machine's current disk: a file holding exactly a recorded state goes into a fresh
     ``.work/trash/evidence-<stem>-<seconds>-kept`` entry (``work.move_evidence_file``), one
-    in another state is kept (``kept``), a missing one is nothing to do. A stem a name here
-    still uses (``work.evidence_users``; the record's own copy holding pins alone does not) is
-    skipped whole, and an unsafe stem folder or a path leaving it fails. With ``whole``, a stem
-    folder this call moved a recorded file from and left holding only files no sync carries
-    (``work.UNSYNCED``) goes into the entry too; one still holding other files stays, their
-    count answered as ``remaining``, and one it moved nothing from (made since, or holding
-    only a ``.venv``) stays untouched. Idempotent.
+    in another state is kept (``kept``), a missing one is nothing to do. Nothing else ever
+    moves: no folder tree, no file a record does not name. Each stem is applied under its
+    lifecycle lock (``work.stem_lock``), tried once: held by a ``work.py new``, ``adopt`` or
+    evidence deletion, the stem is skipped for the next full sync. A stem a name here still
+    uses (``work.evidence_users``; the record's own removed copy holding only the pins it
+    owned does not) is skipped whole, and an unsafe stem folder or a path leaving it fails.
+
+    With ``whole``, a stem folder this call moved a recorded file from is removed once empty
+    (``rmdir``, which fails on a folder something was written into meanwhile). One still
+    holding files a sync carries stays, their count answered as ``remaining``; one holding
+    only files no sync carries (``work.UNSYNCED``: a ``.venv``, caches, ``*.pyc``) or empty
+    folders stays as it is, its entries answered as ``leftover`` (``work.py evidence-rm
+    <stem>`` there removes it). A stem folder it moved nothing from stays untouched.
+
+    The stop flag (``fleet_stop.py``) is read again before each stem: once raised, no further
+    stem is touched and ``stopped`` gives its reason, what was done so far answered beside
+    it. Idempotent.
     """
     stems = {_stem(name) for name in names}
     root = work.work_dir(repo) / work.EVIDENCE
-    trashed: dict[str, int] = {}
-    kept: list[list[str]] = []
-    skipped: dict[str, str] = {}
-    failed: dict[str, str] = {}
-    remaining: dict[str, int] = {}
+    graves: dict[str, list[work.EvidenceTombstone]] = {}
     for grave in work.evidence_tombstones(repo):
-        stem = grave.stem
+        if not stems or grave.stem in stems:
+            graves.setdefault(grave.stem, []).append(grave)
+    applied = _Applied()
+    for stem in sorted(graves):
+        applied.stopped = stop_reason(repo)
+        if applied.stopped:
+            break
         folder = root / stem
-        if (stems and stem not in stems) or not work._present(root, folder):
+        if not work._present(root, folder):
             continue
-        hazard = work.copy_hazard(repo, folder, work.EVIDENCE)
-        if hazard is not None or not work._is_kind(root, folder, stat.S_ISDIR):
-            failed[stem] = f"unsafe, never touched: {hazard or 'not a folder'}"
-            continue
-        users = work.evidence_users(repo, stem, removed=grave.copy)
+        try:
+            with work.stem_lock(repo, stem, 0):
+                _apply_stem(repo, stem, graves[stem], applied)
+        except work.StemBusyError:
+            applied.skipped[stem] = (
+                "a work.py command is changing who uses it here; the next full sync applies it"
+            )
+    return dataclasses.asdict(applied)
+
+
+def _apply_stem(
+    repo: Path,
+    stem: str,
+    graves: Sequence[work.EvidenceTombstone],
+    applied: _Applied,
+) -> None:
+    """Apply ``graves``, every record of ``stem``, to its folder (:func:`agent_evidence_apply`).
+
+    The caller holds the stem's lock.
+    """
+    root = work.work_dir(repo) / work.EVIDENCE
+    folder = root / stem
+    hazard = work.copy_hazard(repo, folder, work.EVIDENCE)
+    if hazard is not None or not work._is_kind(root, folder, stat.S_ISDIR):
+        applied.failed[stem] = f"unsafe, never touched: {hazard or 'not a folder'}"
+        return
+    made: list[Path] = []
+
+    def entry() -> Path:
+        if not made:
+            made.append(work.evidence_trash_entry(repo, stem, make=True))
+        return made[0]
+
+    moved = 0
+    whole = False
+    for grave in graves:
+        users = work.evidence_users(repo, stem, removed=grave.removed)
         if users:
-            skipped[stem] = f"{', '.join(users)} still use it here"
+            applied.skipped[stem] = f"{', '.join(users)} still use it here"
             continue
-        made: list[Path] = []
-
-        def entry(stem: str = stem, made: list[Path] = made) -> Path:
-            if not made:
-                made.append(work.evidence_trash_entry(repo, stem, make=True))
-            return made[0]
-
-        moved = 0
+        whole = whole or grave.whole
         for rel, size, mtime in grave.files:
             try:
                 outcome = work.move_evidence_file(folder, rel, (size, mtime), entry)
             except (work.WorkError, OSError) as error:
-                failed[f"{stem}/{rel}"] = str(error)
+                applied.failed[f"{stem}/{rel}"] = str(error)
                 continue
             if outcome == "moved":
                 moved += 1
             elif outcome == "changed":
-                kept.append([stem, rel])
-        if moved:
-            trashed[stem] = trashed.get(stem, 0) + moved
-        if grave.whole and trashed.get(stem) and work._present(root, folder):
+                applied.kept.append([stem, rel])
+    if moved:
+        applied.trashed[stem] = moved
+    if whole and moved and work._present(root, folder):
+        _prune_stem(folder, stem, applied)
+
+
+def _prune_stem(folder: Path, stem: str, applied: _Applied) -> None:
+    """Remove the emptied stem ``folder`` (``rmdir``); answer what keeps one that is not empty."""
+    try:
+        folder.rmdir()
+    except OSError as error:
+        try:
             left = len(work.evidence_files(folder))
-            if not left:
-                try:
-                    work.move_tree_into(folder, entry())
-                except OSError as error:
-                    failed[stem] = f"its leftovers stay: {error}"
-            elif moved:
-                remaining[stem] = left
-    return {
-        "trashed": trashed,
-        "kept": kept,
-        "skipped": skipped,
-        "failed": failed,
-        "remaining": remaining,
-    }
+            entries = sorted(child.name for child in folder.iterdir())
+        except OSError as listing:
+            applied.failed[stem] = f"its folder stays: {listing}"
+            return
+        if left:
+            applied.remaining[stem] = left
+        elif entries:
+            applied.leftover[stem] = entries
+        else:
+            applied.failed[stem] = f"its emptied folder stays: {error}"
 
 
 def agent_set_home(
@@ -2757,12 +2823,9 @@ class Inventory:
 
 
 def _moments(value: object) -> dict[str, float]:
-    """Return an ``{id: removedat}`` answer's entries whose moment is a number."""
-    return {
-        key: float(moment)
-        for key, moment in _object(value).items()
-        if isinstance(moment, (int, float)) and not isinstance(moment, bool)
-    }
+    """Return an ``{id: removedat}`` answer's entries whose moment is a real time (``work.record_moment``)."""
+    moments = ((key, work.record_moment(moment)) for key, moment in _object(value).items())
+    return {key: moment for key, moment in moments if moment is not None}
 
 
 def _record_key(file_name: str) -> str:
@@ -3780,6 +3843,28 @@ def apply_evidence_tombstones(
         )
         for stem, count in sorted(_object(answer.get("remaining")).items())
     ]
+    rows += [
+        Row(
+            stem,
+            peer.label,
+            "note",
+            f"evidence folder kept on {endpoint.label} holding only files no sync carries "
+            f"({', '.join(_strings(entries))}); `work.py evidence-rm {stem}` there removes it",
+        )
+        for stem, entries in sorted(_object(answer.get("leftover")).items())
+    ]
+    stopped = answer.get("stopped")
+    if isinstance(stopped, str) and stopped:
+        rows.append(
+            Row(
+                "evidence",
+                peer.label,
+                "failed",
+                f"evidence deletions on {endpoint.label} stopped ({stopped}) with "
+                f"{len(_object(answer.get('trashed')))} stems trashed; the rest wait for the "
+                "next full sync once the fleet resumes",
+            ),
+        )
     return rows
 
 

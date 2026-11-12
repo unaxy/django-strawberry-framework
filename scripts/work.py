@@ -75,6 +75,24 @@ Layout (all under ``.work/``, which ``.gitignore`` lists)
         ``tombstones/``, so an older script never reads them. A state is a size and
         a whole-second mtime, not content: a file rewritten in the same second at
         the same size matches, and the trash keeps such a false match restorable.
+        The record also names the removed copy's incarnation (its note's identity)
+        and the pins it owned at the removal: that name, left holding pins alone,
+        uses the stem nowhere only while every pin under it is one of those (a
+        later copy's save under the name keeps the evidence; a record without
+        them exempts no name). Only recorded files ever move, never a folder
+        tree: a stem folder they leave empty is removed with ``rmdir``, one
+        left holding other files stays, and so do files no sync carries
+        (:data:`UNSYNCED`: a ``.venv``, caches), reported, for ``evidence-rm``
+        there. Known limit: each move checks the stem folder by path, so one
+        swapped for a symlink between that check and the rename (a concurrent
+        layout change; a standing symlink is refused) can redirect it.
+    ``stem-locks/<stem>.lock``
+        The lifecycle lock of one evidence stem (:func:`stem_lock`): ``new``
+        and ``adopt`` hold it while the name becomes a user of the stem,
+        ``rm --evidence`` and ``evidence-rm`` while they check the users and
+        delete, and a fleet sync's apply from its user check to its last move
+        (tried once; held, the stem waits for the next full sync). A kernel
+        lock, released however its holder ends; the files are never deleted.
     ``land.lock``
         A file one ``land`` (or ``repair``) at a time holds an exclusive kernel
         lock on (``flock``; ``msvcrt.locking`` on Windows): released however
@@ -192,6 +210,9 @@ Commands
         character. Refused for a name in use or claimed, a
         name with pins left from an earlier copy, below 6 GB free disk, and a
         kind ``workspace.py`` owns. A failure part way removes what it made.
+        The claim and the copy folder are made under the stem's lock
+        (``stem-locks/``), refused with nothing made when a fleet sync deleting
+        the stem's evidence holds it past 10 s; ``adopt`` registers under it too.
     ``adopt <path> <name> [--purpose TEXT] [--owner TEXT]``
         Register, in place, a copy another tool made (``--purpose`` and
         ``--owner``, as for ``new``, hold no newline or other control
@@ -309,8 +330,10 @@ Commands
         once checked; the evidence folder
         stays unless ``--evidence`` and no other name of the stem remains (a
         sibling copy or a name holding pins alone; the copy's own saves do not
-        count), which then, holding ``.work/fleet.lock`` (waiting up to 60 s, else
-        refusing with nothing removed), records an evidence tombstone and moves
+        count, a pin under its name it cannot prove its own does), which then,
+        holding ``.work/fleet.lock`` (waiting up to 60 s, else refusing with
+        nothing removed) and the stem's lock (10 s), records an evidence
+        tombstone naming the copy and the pins it owned and moves
         the folder to ``.work/trash/evidence-<stem>-<seconds>-kept``, in that
         order, as ``evidence-rm`` does. ``--evidence`` on a replica is refused with
         nothing removed: evidence is deleted from the copy's home. So is a name
@@ -464,6 +487,7 @@ import contextlib
 import dataclasses
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -524,6 +548,8 @@ TOMBSTONES = "tombstones"
 #: Where an explicit evidence deletion leaves its record (:class:`EvidenceTombstone`), apart
 #: from the copy tombstones so a script that predates it never reads, relays or strips one.
 EVIDENCE_GRAVES = "evidence-tombstones"
+#: One lock file per evidence stem (:func:`stem_lock`), never deleted.
+STEM_LOCKS = "stem-locks"
 DIR_CONTAINERS = (
     CLONES,
     WORKTREES,
@@ -534,6 +560,7 @@ DIR_CONTAINERS = (
     FLEET,
     TOMBSTONES,
     EVIDENCE_GRAVES,
+    STEM_LOCKS,
 )
 FILE_ENTRIES = (
     LAND_LOCK,
@@ -581,6 +608,11 @@ TOMBSTONE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 EVIDENCE_TOMBSTONE_RETENTION_SECONDS = 90 * 24 * 60 * 60
 #: Seconds ``rm --evidence`` and ``evidence-rm`` wait for ``.work/fleet.lock`` before refusing.
 EVIDENCE_LOCK_WAIT_SECONDS = 60.0
+#: Seconds ``new``, ``adopt``, ``rm --evidence`` and ``evidence-rm`` wait for a stem's lock
+#: (:func:`stem_lock`) before refusing; a fleet sync's apply never waits for one.
+STEM_LOCK_WAIT_SECONDS = 10.0
+#: The first moment no record may carry (2106): a ``removedat`` is a real time below it.
+RECORD_MOMENT_LIMIT = 2.0**32
 #: Regenerable or per-platform files no transfer carries and no evidence listing holds.
 UNSYNCED = (
     ".venv",
@@ -829,6 +861,20 @@ def later_home(newer: Mapping[str, str], older: Mapping[str, str]) -> bool:
     ) > handoff_generation(older)
 
 
+def record_moment(value: object) -> float | None:
+    """Return a record's ``removedat`` as seconds when it is a real time, else ``None``.
+
+    A number (no bool), finite, from ``0`` up to :data:`RECORD_MOMENT_LIMIT`: retention
+    compares it (:func:`past_retention`), and a NaN or an infinity would keep a record for
+    ever or reap it at once. The record holding another value is refused whole.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not 0 <= value < RECORD_MOMENT_LIMIT or not math.isfinite(value):
+        return None
+    return float(value)
+
+
 @dataclasses.dataclass(frozen=True)
 class Tombstone:
     """A home's record that it removed one incarnation of a copy (``.work/tombstones/``).
@@ -916,13 +962,8 @@ class Tombstone:
             )
         ]
         strings = [field for field in fields if isinstance(field, str) and field]
-        removed_at = raw.get("removedat")
-        if (
-            len(strings) != len(fields)
-            or not _valid(strings[0])
-            or isinstance(removed_at, bool)
-            or not isinstance(removed_at, (int, float))
-        ):
+        removed_at = record_moment(raw.get("removedat"))
+        if len(strings) != len(fields) or not _valid(strings[0]) or removed_at is None:
             return None
         name, home, identity, removed_by = strings
         generation = raw.get("generation", 0)
@@ -946,7 +987,7 @@ class Tombstone:
             name,
             home,
             identity,
-            float(removed_at),
+            removed_at,
             removed_by,
             generation,
             tuple(homes),
@@ -1095,18 +1136,22 @@ def bury_pins(
     if not pinned:
         return
     here = machine_id()
-    listed = "\0".join(f"{leaf}={sha}" for leaf, sha in pinned)
-    identity = f"pins@{hashlib.sha256(listed.encode('utf-8')).hexdigest()[:16]}"
     tombstone = Tombstone(
         name,
         here,
-        identity,
+        pins_identity(dropped),
         time.time(),
         here,
         saves_dropped=saves_dropped,
         dropped_pins=pinned,
     )
     _ = write_tombstone(repo, tombstone)
+
+
+def pins_identity(pinned: Mapping[str, str]) -> str:
+    """Return the identity of a name holding the pins ``pinned`` alone: ``pins@<digest of them>``."""
+    listed = "\0".join(f"{leaf}={sha}" for leaf, sha in sorted(pinned.items()))
+    return f"pins@{hashlib.sha256(listed.encode('utf-8')).hexdigest()[:16]}"
 
 
 def drop_buried_pins(repo: Path, name: str) -> list[str]:
@@ -1180,7 +1225,15 @@ class EvidenceTombstone:
     the same path, is never touched, whatever any clock says. ``removed_at`` serves retention
     alone. ``whole`` says the stem folder itself went (``rm --evidence``, ``evidence-rm
     <stem>``), not chosen files (``--file``). ``copy`` names the copy whose ``rm`` wrote it
-    (``""`` for ``evidence-rm``): that name holding pins alone uses the stem nowhere.
+    (``""`` for ``evidence-rm``), ``identity`` that incarnation (:func:`copy_identity`;
+    :func:`pins_identity` for a name holding pins alone) and ``pins`` the ``(leaf, commit)``
+    pairs it owned at the removal (:class:`RemovedCopy`): that name holding pins alone uses
+    the stem nowhere while every pin under it is one of those. A record without an
+    ``identity`` exempts no name.
+
+    The file name digests the stem, the moment and the files, never ``whole``, ``copy``,
+    ``identity`` or ``pins``: an older script that relays the record drops the fields it does
+    not know under the same name, and the stripped record exempts nothing.
     """
 
     stem: str
@@ -1190,6 +1243,13 @@ class EvidenceTombstone:
     files: tuple[tuple[str, int, int], ...]
     whole: bool
     copy: str = ""
+    identity: str = ""
+    pins: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def removed(self) -> RemovedCopy | None:
+        """Return the removed copy this record exempts, ``None`` for an ``evidence-rm``."""
+        return RemovedCopy(self.copy, self.identity, self.pins) if self.copy else None
 
     @property
     def states(self) -> dict[str, tuple[int, int]]:
@@ -1222,6 +1282,8 @@ class EvidenceTombstone:
             "removedby": self.removed_by,
             "whole": self.whole,
             "copy": self.copy,
+            "identity": self.identity,
+            "pins": dict(self.pins),
             "files": {rel: [size, mtime] for rel, size, mtime in self.files},
         }
 
@@ -1229,14 +1291,20 @@ class EvidenceTombstone:
     def parse(cls, raw: object) -> EvidenceTombstone | None:
         """Return the record a JSON document holds, ``None`` for anything else.
 
-        A stem that is no plain folder name, or any path that is not canonical and relative,
-        refuses the whole record: it comes from another machine and fails closed.
+        A stem that is no plain folder name, any path that is not canonical and relative, or a
+        moment that is no real time (:func:`record_moment`) refuses the whole record: it comes
+        from another machine and fails closed. A record older than ``identity`` and ``pins``
+        reads with neither.
         """
         if not fleet.is_json_object(raw) or raw.get("kind") != "evidence":
             return None
         stem, home, removed_by = (raw.get(key) for key in ("stem", "home", "removedby"))
-        removed_at, whole, copy = raw.get("removedat"), raw.get("whole"), raw.get("copy", "")
-        listed = raw.get("files")
+        removed_at, whole, copy = (
+            record_moment(raw.get("removedat")),
+            raw.get("whole"),
+            raw.get("copy", ""),
+        )
+        identity, pinned, listed = raw.get("identity", ""), raw.get("pins", {}), raw.get("files")
         if (
             not isinstance(stem, str)
             or not valid_stem(stem)
@@ -1244,12 +1312,16 @@ class EvidenceTombstone:
             or not home
             or not isinstance(removed_by, str)
             or not removed_by
-            or isinstance(removed_at, bool)
-            or not isinstance(removed_at, (int, float))
+            or removed_at is None
             or not isinstance(whole, bool)
             or not isinstance(copy, str)
+            or not isinstance(identity, str)
+            or not fleet.is_json_object(pinned)
             or not fleet.is_json_object(listed)
         ):
+            return None
+        pairs = [(leaf, sha) for leaf, sha in pinned.items() if isinstance(sha, str) and sha]
+        if len(pairs) != len(pinned):
             return None
         files: list[tuple[str, int, int]] = []
         for rel, state in listed.items():
@@ -1265,7 +1337,60 @@ class EvidenceTombstone:
             ):
                 return None
             files.append((rel, size, mtime))
-        return cls(stem, home, float(removed_at), removed_by, tuple(sorted(files)), whole, copy)
+        return cls(
+            stem,
+            home,
+            removed_at,
+            removed_by,
+            tuple(sorted(files)),
+            whole,
+            copy,
+            identity,
+            tuple(sorted(pairs)),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class RemovedCopy:
+    """The incarnation of a copy an ``rm --evidence`` removed, and the pins it owned then.
+
+    ``identity`` is its note's (:func:`copy_identity`; :func:`pins_identity` for a name
+    holding pins alone), ``pins`` the ``(leaf, commit)`` pairs under the name it owned at
+    the removal (:func:`removed_copy`).
+    """
+
+    name: str
+    identity: str
+    pins: tuple[tuple[str, str], ...] = ()
+
+    def left_alone(self, name: str, held: Mapping[str, str]) -> bool:
+        """Return whether ``name`` holding the pins ``held`` (leaf to commit) is this copy's rest.
+
+        Only with an identity, under its own name, and while every pin ``held`` is one it
+        owned: a later copy's save under the name is another commit, so that name still uses
+        the stem.
+        """
+        owned = set(self.pins)
+        return (
+            bool(self.identity)
+            and name == self.name
+            and bool(held)
+            and all((leaf, sha) in owned for leaf, sha in held.items())
+        )
+
+
+def removed_copy(repo: Path, copy: Copy) -> RemovedCopy:
+    """Return what an evidence record says of ``copy``, read before its ``rm``: identity, own pins.
+
+    A copy's own pins are those its note attributes to it (:func:`pin_belongs`); a name
+    holding pins alone owns every pin under it.
+    """
+    held = pins(repo).get(copy.name, {})
+    if copy.form == "pins":
+        return RemovedCopy(copy.name, pins_identity(held), tuple(sorted(held.items())))
+    note = attributed_note(repo, copy.note)
+    owned = {leaf: sha for leaf, sha in held.items() if pin_belongs(note, leaf, sha)}
+    return RemovedCopy(copy.name, copy_identity(copy.note), tuple(sorted(owned.items())))
 
 
 def evidence_tombstones(repo: Path) -> list[EvidenceTombstone]:
@@ -1355,17 +1480,25 @@ def inside(root: Path, relative: str) -> Path:
     return root.joinpath(*parts)
 
 
-def evidence_users(repo: Path, stem: str, *, removed: str = "") -> list[str]:
+def evidence_users(repo: Path, stem: str, *, removed: RemovedCopy | None = None) -> list[str]:
     """Return the names whose stem is ``stem``: copies, replicas and names holding pins alone.
 
-    ``removed``, the copy an ``rm --evidence`` removes, is no user once it holds pins alone:
-    its own saves never keep the evidence its ``rm`` deletes. A ``-verify`` or ``-rN``
-    sibling, and any other name holding pins alone, is one.
+    ``removed``, the copy an ``rm --evidence`` removed, is no user while its name holds
+    only pins it owned at the removal (:meth:`RemovedCopy.left_alone`): its own saves never
+    keep the evidence its ``rm`` deletes, a later copy's under the name do. A ``-verify`` or
+    ``-rN`` sibling, and any other name holding pins alone, is one.
     """
+    found = discover(repo)
+    held = pins(repo) if removed is not None else {}
     return sorted(
         name
-        for name, copy in discover(repo).items()
-        if stem_of(name) == stem and not (name == removed and copy.form == "pins")
+        for name, copy in found.items()
+        if stem_of(name) == stem
+        and not (
+            removed is not None
+            and copy.form == "pins"
+            and removed.left_alone(name, held.get(name, {}))
+        )
     )
 
 
@@ -1400,6 +1533,73 @@ def fleet_lock(repo: Path, wait: float | None = None) -> Generator[None, None, N
         yield
     finally:
         os.close(descriptor)
+
+
+class StemBusyError(WorkError):
+    """Another command holds the stem's lock (:func:`stem_lock`) for the whole wait."""
+
+
+@contextlib.contextmanager
+def stem_lock(repo: Path, stem: str, wait: float) -> Generator[None, None, None]:
+    """Hold ``.work/stem-locks/<stem>.lock`` for the block, waiting up to ``wait`` seconds.
+
+    The stem's lifecycle lock: who uses a stem changes (``new``, ``adopt``) or its evidence
+    is deleted (``rm --evidence``, ``evidence-rm``, a fleet sync's ``evidence-apply``) only
+    under it, so an owner check and the moves it allows see one owner set. A kernel lock
+    (``scripts/_locks.py::try_lock``), released however its holder ends, never taken over.
+    The file is never deleted: one unlinked while a waiter has it open would give the next
+    opener another file, and two holders.
+
+    Raises:
+        StemBusyError: another holder kept it the whole wait (``0``: tried once).
+        WorkError: ``stem`` is no plain folder name, or the lock cannot be opened or taken.
+
+    """
+    if not valid_stem(stem):
+        msg = f"{stem!r} is no evidence folder name"
+        raise WorkError(msg)
+    lock = _container(repo, STEM_LOCKS, create=True) / f"{stem}.lock"
+    deadline = time.monotonic() + wait
+    try:
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as error:
+        msg = f"cannot open {lock}: {error}"
+        raise WorkError(msg) from error
+    try:
+        while True:
+            try:
+                locked = _locks.try_lock(descriptor)
+            except OSError as error:
+                msg = f"cannot lock {lock}: {error}"
+                raise WorkError(msg) from error
+            if locked:
+                break
+            if time.monotonic() >= deadline:
+                msg = (
+                    f"evidence {stem}: another command (a fleet sync deleting its evidence, a "
+                    f"`work.py new`, `adopt` or `rm --evidence`) holds {lock}; nothing changed, "
+                    "run it again once that ends"
+                )
+                raise StemBusyError(msg)
+            time.sleep(0.1)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
+def evidence_locks(repo: Path, stem: str) -> Generator[None, None, None]:
+    """Hold ``.work/fleet.lock`` (:func:`fleet_lock`), then the stem's lock, for an evidence deletion.
+
+    Always in that order, and a fleet sync's apply (under the sync's hold of
+    ``fleet.lock``) never waits for a stem's lock, so no two holders wait on each other.
+
+    Raises:
+        WorkError: either lock stayed held for its whole wait (:class:`StemBusyError` for the stem's).
+
+    """
+    with fleet_lock(repo), stem_lock(repo, stem, STEM_LOCK_WAIT_SECONDS):
+        yield
 
 
 def evidence_trash_entry(repo: Path, stem: str, *, make: bool) -> Path:
@@ -1476,39 +1676,19 @@ def move_evidence_file(
     return "moved"
 
 
-def move_tree_into(source: Path, target: Path) -> None:
-    """Move everything under ``source`` into ``target`` (merging folders), then remove ``source``.
-
-    Links are moved as links, never followed. A name both hold as files is refused.
-
-    Raises:
-        OSError: a rename failed, or ``target`` already holds a file of that name.
-
-    """
-    for child in sorted(source.iterdir()):
-        destination = target / child.name
-        both_folders = _is_kind(source, child, stat.S_ISDIR) and _is_kind(
-            target,
-            destination,
-            stat.S_ISDIR,
-        )
-        if both_folders:
-            move_tree_into(child, destination)
-        elif _present(target, destination):
-            msg = f"{destination} is already in the trash entry"
-            raise FileExistsError(msg)
-        else:
-            _ = child.rename(destination)
-    source.rmdir()
-
-
-def discard_evidence(repo: Path, stem: str, *, copy: str = "") -> tuple[EvidenceTombstone, Path]:
+def discard_evidence(
+    repo: Path,
+    stem: str,
+    *,
+    removed: RemovedCopy | None = None,
+) -> tuple[EvidenceTombstone, Path]:
     """Record every file of ``.work/evidence/<stem>`` in a tombstone, then move the folder to the trash.
 
     The record is written first: a crash after it leaves the files for the next full fleet
     sync to move (it applies this machine's own records too); before it nothing happened. The
-    folder goes into a fresh ``evidence-<stem>-<seconds>-kept`` entry in one rename. The caller
-    holds ``.work/fleet.lock``.
+    folder goes into a fresh ``evidence-<stem>-<seconds>-kept`` entry in one rename. The record
+    names ``removed``, the copy an ``rm --evidence`` removed. The caller holds
+    ``.work/fleet.lock`` and the stem's lock (:func:`evidence_locks`).
 
     Raises:
         WorkError: the folder could not be moved (the record stands; the files stay).
@@ -1518,7 +1698,18 @@ def discard_evidence(repo: Path, stem: str, *, copy: str = "") -> tuple[Evidence
     here = machine_id()
     listed = evidence_files(folder)
     files = tuple(sorted((rel, size, mtime) for rel, (size, mtime) in listed.items()))
-    grave = EvidenceTombstone(stem, here, time.time(), here, files, whole=True, copy=copy)
+    owner = removed or RemovedCopy("", "")
+    grave = EvidenceTombstone(
+        stem,
+        here,
+        time.time(),
+        here,
+        files,
+        whole=True,
+        copy=owner.name,
+        identity=owner.identity,
+        pins=owner.pins,
+    )
     _ = write_evidence_tombstone(repo, grave)
     entry = evidence_trash_entry(repo, stem, make=False)
     try:
@@ -3809,16 +4000,18 @@ def cmd_new(args: _Args) -> int:
         msg = f"less than {MIN_FREE_BYTES // 1024**3} GB free; free disk before making a copy"
         raise WorkError(msg)
     _ = ensure_sentinel(repo)
-    _ = claim_name(repo, name.text)
     container = CLONES if form == "clone" else WORKTREES
     path = work_dir(repo) / container / name.text
-    try:
-        _refuse_taken(repo, name.text)
-        _ = _container(repo, container, create=True)
-        path.mkdir()
-    except BaseException:
-        release_name(repo, name.text)
-        raise
+    # The stem's lock until the folder makes the name a user of the stem's evidence.
+    with stem_lock(repo, name.stem, STEM_LOCK_WAIT_SECONDS):
+        _ = claim_name(repo, name.text)
+        try:
+            _refuse_taken(repo, name.text)
+            _ = _container(repo, container, create=True)
+            path.mkdir()
+        except BaseException:
+            release_name(repo, name.text)
+            raise
     try:
         _build_copy(repo, name, form, path, args)
     except BaseException:
@@ -4009,12 +4202,13 @@ def cmd_adopt(args: _Args) -> int:
         msg = f"{path} is already registered"
         raise WorkError(msg)
     _ = ensure_sentinel(repo)
-    _ = claim_name(repo, name.text)
-    try:
-        _register(repo, name, path, form, parents, args)
-    except BaseException:
-        release_name(repo, name.text)
-        raise
+    with stem_lock(repo, name.stem, STEM_LOCK_WAIT_SECONDS):
+        _ = claim_name(repo, name.text)
+        try:
+            _register(repo, name, path, form, parents, args)
+        except BaseException:
+            release_name(repo, name.text)
+            raise
     print(path)
     return 0
 
@@ -5299,18 +5493,19 @@ def cmd_rm(args: _Args) -> int:
         refuse_replica_evidence(repo, stem, [copy])
     if not args.discard:
         refuse_replica(copy, "remove (or `rm --discard`, which drops the replica alone)")
-    with fleet_lock(repo) if args.evidence else contextlib.nullcontext():
+    with evidence_locks(repo, stem) if args.evidence else contextlib.nullcontext():
+        removed = removed_copy(repo, copy) if args.evidence else None
         kept = remove(repo, copy, discard=args.discard, drop_saves=args.drop_saves)
         days = TRASH_RETENTION_SECONDS // 86400
         trashed = f" (a replica: kept in .work/trash for {days} days)"
         trashed = trashed if is_replica(copy.note) else ""
         print(f"removed {copy.name}{trashed}{kept_pins_note(copy.name, kept)}")
-        if args.evidence:
-            _rm_evidence(repo, stem, copy.name)
+        if removed is not None:
+            _rm_evidence(repo, stem, removed)
     return 0
 
 
-def _rm_evidence(repo: Path, stem: str, removed: str) -> None:
+def _rm_evidence(repo: Path, stem: str, removed: RemovedCopy) -> None:
     """Delete the stem's evidence fleet-wide after ``rm --evidence`` unless another name uses it.
 
     Raises:
@@ -5322,7 +5517,7 @@ def _rm_evidence(repo: Path, stem: str, removed: str) -> None:
     if users:
         _say(f"evidence {evidence} kept: {', '.join(users)} still use it")
     elif evidence.is_dir() and copy_hazard(repo, evidence, EVIDENCE) is None:
-        grave, entry = discard_evidence(repo, stem, copy=removed)
+        grave, entry = discard_evidence(repo, stem, removed=removed)
         print(_discarded(grave, entry))
 
 
@@ -5416,7 +5611,7 @@ def cmd_evidence_rm(args: _Args) -> int:
     if hazard is not None:
         msg = f"evidence {stem}: {hazard}; never touched"
         raise WorkError(msg)
-    with contextlib.nullcontext() if args.dry_run else fleet_lock(repo):
+    with contextlib.nullcontext() if args.dry_run else evidence_locks(repo, stem):
         users = evidence_users(repo, stem)
         if users:
             found = discover(repo)
