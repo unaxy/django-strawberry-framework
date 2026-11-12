@@ -1841,7 +1841,8 @@ def _flat_limit_message(
 def test_a_set_whose_expansion_passes_max_flat_filters_fails_its_build(
     limit: int,
     crossing: tuple[str, str, tuple[str, ...]] | None,
-    hide_flat_filters: bool,  # noqa: FBT001
+    *,
+    hide_flat_filters: bool,
 ) -> None:
     """A set publishes up to ``MAX_FLAT_FILTERS`` flat filters; one more fails its build.
 
@@ -7658,7 +7659,8 @@ class _BindingOperations(SQLiteOperations):
 def test_temporal_value_is_held_to_the_database_the_queryset_runs_on(
     operations: type[BaseDatabaseOperations],
     value: datetime.datetime,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """The rule asks the connection of the queryset's own alias, not ``default``'s.
 
@@ -7898,8 +7900,9 @@ def test_compiled_predicate_is_held_to_the_utc_offsets_postgresql_refuses(
     mode: str,
     data: dict[str, object],
     form_key: str,
-    refused_as_text: bool,  # noqa: FBT001
-    refused_on_server: bool,  # noqa: FBT001
+    *,
+    refused_as_text: bool,
+    refused_on_server: bool,
 ) -> None:
     """The parameters a filter's compiled predicate binds are held to PostgreSQL's offset rule.
 
@@ -8144,7 +8147,8 @@ def test_integer_array_leaf_is_asked_wherever_django_contrib_postgres_is_unavail
     monkeypatch: pytest.MonkeyPatch,
     form_key: str,
     value: object,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """An integer array leaf is asked on the ``ArrayField`` double too.
 
@@ -8542,7 +8546,8 @@ def test_a_flat_copy_of_a_nested_array_in_over_a_child_annotation_holds_the_colu
 def test_nested_integer_array_leaf_past_its_range_is_asked(
     monkeypatch: pytest.MonkeyPatch,
     value: object,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """A nested integer member past the innermost column's range is ``FILTER_INVALID``.
 
@@ -8586,7 +8591,8 @@ _CLOCK_AT_PLUS_SIXTEEN = datetime.time(12, tzinfo=_PLUS_SIXTEEN)
 def test_annotation_offset_the_leaf_reads_never_refuses_its_time(
     mode: str,
     clock: datetime.time,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """A UTC offset a queryset annotation the leaf reads binds is the queryset's own, never asked.
 
@@ -8637,7 +8643,8 @@ def test_annotation_offset_the_leaf_reads_never_refuses_its_time(
 def test_annotation_decimal_the_leaf_reads_never_refuses_its_value(
     mode: str,
     price: str,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """A decimal a queryset annotation the leaf reads binds is the queryset's own, never asked.
 
@@ -8686,9 +8693,10 @@ def test_annotation_decimal_the_leaf_reads_never_refuses_its_value(
     ],
 )
 def test_annotation_list_parameter_the_leaf_reads_never_refuses_its_list(
-    client_side: bool,  # noqa: FBT001
+    *,
+    client_side: bool,
     clocks: list[datetime.time],
-    refused: bool,  # noqa: FBT001
+    refused: bool,
 ) -> None:
     """A list parameter a queryset annotation the leaf reads binds is the queryset's own, never asked.
 
@@ -9013,7 +9021,8 @@ def test_integer_is_held_to_the_range_of_the_type_its_lookup_binds(
     model: type[django_models.Model],
     data: dict[str, object],
     form_key: str,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """Each integer is held to the range the queryset's database stores for its lookup's type.
 
@@ -15462,7 +15471,8 @@ def test_apply_async_derives_nothing_for_an_inert_absent_walking_leaf_over_an_un
 )
 def test_absent_relation_key_leaf_on_one_forward_hop_answers_alike_on_both_colors(
     mode: str,
-    reads_queryset: bool,  # noqa: FBT001 - a parametrized row
+    *,
+    reads_queryset: bool,
     visible: list[str],
     filter_runs: int,
     hook_runs: int,

@@ -1674,7 +1674,8 @@ def test_resolver_helpers_edge_cases() -> None:
 @pytest.mark.parametrize("visibility_hook", [False, True], ids=["no-hook", "visibility-hook"])
 async def test_async_many_side_refuses_a_bound_that_is_not_a_queryset(
     monkeypatch: pytest.MonkeyPatch,
-    visibility_hook: bool,  # noqa: FBT001 - the parametrized branch
+    *,
+    visibility_hook: bool,
 ) -> None:
     """The async many side iterates the bound as a queryset and refuses any other value.
 

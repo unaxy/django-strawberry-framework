@@ -762,7 +762,8 @@ def _seal_items(seed: QuerySet[Model] | None, _info: object) -> QuerySet[Model]:
 )
 def test_builds_plan_is_true_only_when_apply_to_would_run_the_walker(
     state: str,
-    expected: bool,  # noqa: FBT001
+    *,
+    expected: bool,
 ) -> None:
     """The async plan hop's gate answers exactly ``apply_to``'s walker-run question.
 

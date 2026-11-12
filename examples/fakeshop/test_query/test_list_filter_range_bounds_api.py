@@ -193,10 +193,7 @@ def _refused(payload: JSONObject) -> None:
 @pytest.mark.django_db
 @pytest.mark.parametrize("column", sorted(_COLUMNS))
 @pytest.mark.parametrize("negated", [False, True], ids=["flat", "not"])
-def test_two_bounds_answer_the_rows_between_them(
-    column: str,
-    negated: bool,  # noqa: FBT001
-) -> None:
+def test_two_bounds_answer_the_rows_between_them(column: str, *, negated: bool) -> None:
     """Two bounds keep ``b`` .. ``d`` in one statement; ``not`` keeps the rest."""
     _seed_specimens()
     low, high, _third = _COLUMNS[column].bounds
@@ -238,11 +235,7 @@ def test_a_count_other_than_two_is_refused_before_any_query(column: str, count: 
     [(False, []), (True, _LABELS)],
     ids=["flat", "not"],
 )
-def test_an_empty_list_matches_no_row(
-    column: str,
-    negated: bool,  # noqa: FBT001
-    expected: list[str],
-) -> None:
+def test_an_empty_list_matches_no_row(column: str, *, negated: bool, expected: list[str]) -> None:
     """``[]`` keeps the filter's empty-list meaning: no row, every row under ``not``."""
     _seed_specimens()
     span: JSONObject = {"span": {"range": []}}

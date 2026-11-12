@@ -1298,7 +1298,8 @@ def test_coerce_field_value_or_none_refuses_an_offset_postgresql_refuses() -> No
 def test_coerce_field_value_or_none_holds_a_utc_offset_to_what_postgresql_binds(
     column: Callable[[], models.Field[object, object] | None],
     value: object,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """On an alias reading as PostgreSQL a value whose UTC offset its server refuses is ``None``.
 

@@ -112,7 +112,7 @@ class _ClaimsPromise(ClaimsClassBase):
         "class_claims_str",
     ],
 )
-def test_is_char_wise_asks_the_real_class(value: object, expected: bool) -> None:  # noqa: FBT001 - the expected verdict
+def test_is_char_wise_asks_the_real_class(*, value: object, expected: bool) -> None:
     """Text and bytes-like values pass, subclasses included; a ``__class__`` claim does not."""
     assert is_char_wise(value) is expected
 
@@ -142,7 +142,7 @@ def test_is_char_wise_asks_the_real_class(value: object, expected: bool) -> None
         "class_claims_promise",
     ],
 )
-def test_is_text_atom_counts_a_lazy_promise_as_text(value: object, expected: bool) -> None:  # noqa: FBT001 - the expected verdict
+def test_is_text_atom_counts_a_lazy_promise_as_text(*, value: object, expected: bool) -> None:
     """A Django lazy ``Promise`` is text, judged by its real class and never evaluated.
 
     Every ``Promise`` counts, whatever its result class, since the proxy does not
@@ -199,7 +199,8 @@ class _FrozensetSubclass(frozenset[object]):
 )
 def test_is_exact_tuple_or_frozenset_admits_exactly_the_two_builtins(
     value: object,
-    expected: bool,  # noqa: FBT001 - the expected verdict
+    *,
+    expected: bool,
 ) -> None:
     """Only an exact ``tuple`` or ``frozenset`` passes; a subclass of either is refused."""
     assert is_exact_tuple_or_frozenset(value) is expected

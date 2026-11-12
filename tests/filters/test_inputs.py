@@ -4468,7 +4468,8 @@ def test_a_list_filter_over_an_arrays_count_or_element_compared_by_one_value_is_
     filter_class: type[Filter],
     field_name: str,
     lookup_expr: str,
-    served: bool,  # noqa: FBT001
+    *,
+    served: bool,
 ) -> None:
     """``len`` and an index read one integer of the array, so their ``exact`` takes no list.
 

@@ -1315,7 +1315,8 @@ def test_nullable_condition_uses_the_installed_django_q_check_body() -> None:
 @pytest.mark.parametrize("duplicate", [False, True], ids=["available", "duplicate"])
 def test_discarded_predicate_with_an_equal_surviving_decimal_keeps_drfs_decision(
     short_circuit: str,
-    duplicate: bool,  # noqa: FBT001
+    *,
+    duplicate: bool,
 ) -> None:
     """Native result-set shortcuts drop the duration, despite an equal decimal surviving."""
     if duplicate:

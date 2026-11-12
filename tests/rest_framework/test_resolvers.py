@@ -7774,7 +7774,8 @@ def test_serializer_datetime_from_a_date_hook_is_held_to_its_default_zone_date(
 def test_serializer_duration_past_the_backend_integer_is_refused(
     sent: str,
     days: int,
-    fits_64_bits: bool,  # noqa: FBT001
+    *,
+    fits_64_bits: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A duration whose microsecond count SQLite cannot bind is the field's ``invalid`` error.
@@ -9306,7 +9307,8 @@ def _unique_amount_model() -> type[Model]:
 def test_serializer_unique_validator_without_django_stubs_runtime_patch(
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
-    duplicate: bool,  # noqa: FBT001
+    *,
+    duplicate: bool,
 ) -> None:
     """An ordinary consumer's unpatched Field class supports native uniqueness outcomes.
 
@@ -9337,7 +9339,8 @@ def test_serializer_unique_validator_without_django_stubs_runtime_patch(
 
 @pytest.mark.parametrize("unique", [False, True], ids=["ordinary-present", "unique-omitted"])
 def test_guard_installation_does_not_run_a_star_fields_native_source_lookup(
-    unique: bool,  # noqa: FBT001
+    *,
+    unique: bool,
 ) -> None:
     """Guard installation preserves native validators and inactive source lookup order.
 

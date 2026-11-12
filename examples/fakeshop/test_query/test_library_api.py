@@ -3773,7 +3773,8 @@ def test_library_whole_set_filterset_without_its_primary_key_filters_over_http()
 @pytest.mark.django_db
 @pytest.mark.parametrize("staff", [False, True], ids=["anonymous", "staff"])
 def test_library_secondary_sweep_types_keep_their_primary_types_visibility_over_http(
-    staff: bool,  # noqa: FBT001
+    *,
+    staff: bool,
 ) -> None:
     """``CatalogueBookType`` and ``DeskDirectoryType`` hide what ``BookType`` / ``CirculationDeskType`` hide.
 
@@ -12495,7 +12496,8 @@ def _absent_grandchild_filter_holder() -> tuple[strawberry.Schema, type[FilterSe
 @pytest.mark.django_db
 @pytest.mark.parametrize("named", [False, True], ids=["omitted", "named"])
 def test_library_grandparent_connection_runs_a_grandchild_edit_only_when_named_over_http(
-    named: bool,  # noqa: FBT001
+    *,
+    named: bool,
 ) -> None:
     """A copy projected through two child sets runs the deeper set's edited field only when named.
 

@@ -414,7 +414,8 @@ _UNREADABLE_ID_ATTRS = [
 @pytest.mark.parametrize(("make_id_attr", "custom"), _UNREADABLE_ID_ATTRS)
 def test_custom_id_detection_normalizes_the_resolve_id_attr_result_under_its_guard(
     make_id_attr: Callable[[], object],
-    custom: bool,  # noqa: FBT001 - a parametrized expectation, not a call flag
+    *,
+    custom: bool,
 ) -> None:
     """The ``resolve_id_attr`` result is read under the guard that contains the call.
 

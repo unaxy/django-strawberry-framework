@@ -1267,7 +1267,8 @@ def test_has_composite_pk_follows_a_rebound_pk(monkeypatch: pytest.MonkeyPatch) 
 def test_is_row_key_column_names_every_column_of_a_primary_key(
     model: type[Model],
     name: str,
-    expected: bool,  # noqa: FBT001 - a parametrized expectation
+    *,
+    expected: bool,
 ) -> None:
     """A column is a row key when it is the key itself or a member of a ``CompositePrimaryKey``.
 

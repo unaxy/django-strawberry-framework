@@ -842,7 +842,8 @@ def test_unstorable_temporal_holds_a_stored_instant_to_its_session_wall_clock(
     settings: dict[str, object],
     column: models.Field[object, object],
     value: object,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """On a backend storing aware datetimes, the session wall clock must stay in years 1..9999.
@@ -908,7 +909,8 @@ def test_unstorable_temporal_asks_the_write_alias_own_operations(
     operations: type[BaseDatabaseOperations],
     column: models.Field[object, object],
     value: object,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """A backend that does not store aware instants is held to its own adapter alone.
 
@@ -939,7 +941,8 @@ def test_unstorable_temporal_asks_the_write_alias_own_operations(
 def test_unstorable_temporal_holds_each_array_element_on_the_adapter(
     column: models.Field[object, object],
     value: object,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every element of an ``ArrayField`` of datetimes or times, at any depth, meets the adapter.
@@ -1071,7 +1074,8 @@ def test_unstorable_temporal_holds_a_date_or_naive_datetime_to_the_datetime_djan
     database_time_zone: str | None,
     column: models.Field[object, object],
     value: object,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A date or naive datetime a ``DateTimeField`` column holds is checked as Django binds it.
@@ -1121,7 +1125,8 @@ _YEAR_9999_EVENING_UTC = datetime.datetime(9999, 12, 31, 20, tzinfo=_UTC)
 def test_unstorable_temporal_holds_a_datetime_in_a_date_column_to_its_default_zone_date(
     settings: dict[str, object],
     value: datetime.datetime,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """An aware datetime a ``DateField`` column holds is refused when Django cannot cast it.
 
@@ -1167,7 +1172,8 @@ _LONGEST_DAYS_IN_64_BITS = 106_751_991
 )
 def test_unstorable_temporal_holds_a_duration_to_the_integer_the_backend_binds(
     value: datetime.timedelta,
-    refused_without_interval: bool,  # noqa: FBT001
+    *,
+    refused_without_interval: bool,
 ) -> None:
     """A duration is refused where its microsecond count leaves the backend's 64 bits.
 
@@ -1264,7 +1270,8 @@ def test_unstorable_temporal_on_postgresql(
     settings: dict[str, object],
     column: Callable[[], models.Field[object, object]],
     value: object,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """The real PostgreSQL connection stores the instant and is held to its session wall clock.
 
@@ -1356,7 +1363,8 @@ def test_unbindable_temporal_holds_a_utc_offset_to_postgresql_binding_mode(
 @pytest.mark.parametrize("offset", list(_POSTGRESQL_OFFSETS))
 def test_refuses_utc_offset_reads_each_aware_datetime_or_time_a_query_binds(
     mode: str,
-    is_time: bool,  # noqa: FBT001
+    *,
+    is_time: bool,
     offset: str,
 ) -> None:
     """The offset rule reads every datetime and time among the values a query binds.
@@ -1391,8 +1399,9 @@ def test_refuses_utc_offset_reads_each_aware_datetime_or_time_a_query_binds(
 )
 def test_refuses_utc_offset_reads_the_backend_and_the_text_binding(
     alias_kind: str,
-    bound_as_text: bool,  # noqa: FBT001
-    refused: bool,  # noqa: FBT001
+    *,
+    bound_as_text: bool,
+    refused: bool,
 ) -> None:
     """Only PostgreSQL refuses an offset, and ``bound_as_text`` holds it to the text rule.
 
@@ -1439,7 +1448,8 @@ _NUMERIC_SPELLINGS = [
 def test_refuses_numeric_format_holds_each_decimal_a_query_binds_to_numeric(
     mode: str,
     raw: str,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """PostgreSQL refuses a decimal whose spelling lies past ``numeric``'s format.
 
@@ -1493,8 +1503,9 @@ def test_numeric_positive_zero_exponent_uses_the_server_version(
 @pytest.mark.parametrize("nested", [False, True], ids=["list", "nested-tuple"])
 def test_refuses_numeric_format_reads_each_element_of_a_list_parameter(
     raw: str,
-    refused: bool,  # noqa: FBT001
-    nested: bool,  # noqa: FBT001
+    *,
+    refused: bool,
+    nested: bool,
 ) -> None:
     """Each decimal element of a list parameter, at any nesting depth, is held to ``numeric``."""
     elements: list[object] = [None, Decimal(1), Decimal(raw)]
@@ -1548,7 +1559,8 @@ def test_binds_integer_holds_a_number_to_the_range_the_backend_states(
     monkeypatch: pytest.MonkeyPatch,
     field: models.Field[int, int],
     number: int,
-    bound: bool,  # noqa: FBT001
+    *,
+    bound: bool,
 ) -> None:
     """An integer is held to the range the backend states for the field's internal type.
 
@@ -1705,7 +1717,8 @@ _INTEGER_ARRAY_PARAMS = [
 @pytest.mark.parametrize(("params", "refused"), _INTEGER_ARRAY_PARAMS)
 def test_refuses_integer_range_holds_each_integer_a_query_binds_to_the_element_range(
     params: list[object],
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """Each integer of a compiled predicate's parameters is held to the element's range.
 
@@ -1747,14 +1760,15 @@ def test_refuses_integer_range_reads_the_element_type_range(
     monkeypatch: pytest.MonkeyPatch,
     field: models.Field[int, int],
     params: list[object],
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """The range is the one the backend states for the element column's own internal type."""
     assert refuses_integer_range(_read_default_ranges(monkeypatch), field, params) is refused
 
 
 @pytest.mark.parametrize(("raw", "_refused"), _NUMERIC_SPELLINGS)
-def test_refuses_numeric_format_reads_only_postgresql(raw: str, _refused: bool) -> None:  # noqa: FBT001
+def test_refuses_numeric_format_reads_only_postgresql(*, raw: str, _refused: bool) -> None:
     """No other backend is read: SQLite binds every one of the PostgreSQL rows."""
     with _sqlite_alias(None) as alias:
         assert not refuses_numeric_format(
@@ -1827,7 +1841,8 @@ def test_unstorable_decimal_converts_before_asking_the_column_validators() -> No
 @pytest.mark.parametrize(("raw", "refused"), _NUMERIC_SPELLINGS)
 def test_unstorable_decimal_holds_an_unbounded_column_to_numeric(
     raw: str,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A decimal for a column with no ``max_digits`` is held to ``numeric``'s format.
@@ -1859,7 +1874,8 @@ def test_unstorable_decimal_holds_an_unbounded_column_to_numeric(
 )
 def test_unstorable_decimal_leaves_a_bounded_column_to_its_validator(
     raw: str,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """A bounded column's ``DecimalValidator`` answers what it refuses; a zero it passes is held.
 
@@ -1951,7 +1967,8 @@ _LARGEST_DOUBLE = "1.7976931348623157E+308"
 def test_unstorable_decimal_refuses_what_sqlite_cannot_read_back(
     column: models.Field[object, object],
     raw: str,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """SQLite stores a decimal as an integer or a double; one its re-fetch cannot read is refused.
 
@@ -2137,9 +2154,10 @@ def test_unstorable_decimal_asks_no_alias_without_a_decimal_its_column_validates
 @pytest.mark.parametrize("nested", [False, True], ids=["list", "nested-tuple"])
 def test_refuses_utc_offset_holds_a_list_parameter_to_the_text_rule(
     mode: str,
-    is_time: bool,  # noqa: FBT001
+    *,
+    is_time: bool,
     offset: str,
-    nested: bool,  # noqa: FBT001
+    nested: bool,
 ) -> None:
     """Each element of a list parameter is held to the text rule in every binding mode.
 
@@ -2231,7 +2249,8 @@ def _postgresql_refuses(alias: str, column: str, value: object) -> bool:
 @pytest.mark.parametrize("leaf", [*_OFFSET_LEAVES, "time-transform"])
 @pytest.mark.parametrize("offset", list(_POSTGRESQL_OFFSETS))
 def test_unbindable_temporal_answers_what_postgresql_refuses(
-    server_side_binding: bool,  # noqa: FBT001
+    *,
+    server_side_binding: bool,
     leaf: str,
     offset: str,
 ) -> None:
@@ -2280,7 +2299,8 @@ def test_unbindable_temporal_answers_what_postgresql_refuses(
 def test_unstorable_temporal_holds_array_elements_to_the_text_rule_on_server_side_binding(
     column: models.Field[object, object],
     value: object,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Under server-side binding an ``ArrayField`` element is still held to the text rule.
@@ -2302,7 +2322,8 @@ def test_unstorable_temporal_holds_array_elements_to_the_text_rule_on_server_sid
 @pytest.mark.parametrize("lookup", ["contains", "gt"])
 @pytest.mark.parametrize("offset", ["15-59-59", "16-00", "half-second"])
 def test_refuses_utc_offset_answers_postgresql_for_array_lookups(
-    server_side_binding: bool,  # noqa: FBT001
+    *,
+    server_side_binding: bool,
     lookup: str,
     offset: str,
 ) -> None:
@@ -2392,7 +2413,8 @@ def _psycopg3_driver(outcome: Exception | None, dumps: list[_Dump]) -> ModuleTyp
 )
 def test_unstorable_temporal_asks_psycopg_for_an_array_as_a_whole(
     outcome: Exception | None,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """On psycopg 3 an ``ArrayField`` list is dumped as text by the driver, and refused on its ``DataError``.
@@ -2545,8 +2567,9 @@ _OTHER_AWARE_TIME = datetime.time(11, tzinfo=datetime.timezone(datetime.timedelt
 )
 def test_unstorable_temporal_refuses_a_time_array_psycopg_cannot_dump(
     value: list[object],
-    nested: bool,  # noqa: FBT001
-    refused: bool,  # noqa: FBT001
+    *,
+    nested: bool,
+    refused: bool,
 ) -> None:
     """A time list is refused exactly when psycopg 3 itself cannot dump it.
 
@@ -2617,7 +2640,8 @@ def _postgresql_refuses_array(
 def test_unstorable_temporal_answers_postgresql_for_array_elements_on_server_side_binding(
     column: Callable[[], models.Field[object, object]],
     value: object,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """On the real server with ``server_side_binding`` the array elements are refused as text.
 

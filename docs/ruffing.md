@@ -17,14 +17,14 @@ Rules of the road:
 
 ## Status
 
-Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include items 42 and 43.
+Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include items 42-44.
 
 | | Count |
 | --- | --- |
 | Stable rules | 815: 806 on, 9 off by design |
 | Preview-only rules | 142, all off (`preview` is not enabled) |
-| Lines carrying `# noqa` | 440, in 121 files |
-| `# noqa` lines with no reason | 163 (see To do) |
+| Lines carrying `# noqa` | 376, in 121 files |
+| `# noqa` lines with no reason | 107 (see To do) |
 | `# ruff: disable[...]` fences | 9, every one `ERA001` around a TODO-anchored pseudo block |
 | File-level `# ruff: noqa` | 0 |
 | Complexity ratchets | `max-complexity` 45, `max-branches` 39, `max-returns` 20, `max-args` 18, `max-statements` 133, `max-positional-args` 10 |
@@ -40,8 +40,8 @@ per 1,000 lines of source.
 | Area | Files | Lines | `# noqa` lines | Per 1k lines | Per-file ignores |
 | --- | --- | --- | --- | --- | --- |
 | Package (`django_strawberry_framework/`) | 131 | 115,070 | 164 | 1.43 | none |
-| tests/ | 217 | 257,748 | 159 | 0.62 | 17 codes, plus `D102` / `D103` on `test_*.py` |
-| examples/ | 266 | 202,432 | 101 | 0.50 | 12 codes, plus `D102` / `D103` on `test_*.py`, `D` / `DJ008` on migrations, `INP001` / `UP031` by folder |
+| tests/ | 217 | 257,748 | 102 | 0.40 | 17 codes, plus `D102` / `D103` on `test_*.py` |
+| examples/ | 266 | 202,432 | 94 | 0.46 | 12 codes, plus `D102` / `D103` on `test_*.py`, `D` / `DJ008` on migrations, `INP001` / `UP031` by folder |
 | scripts/ | 46 | 45,205 | 12 | 0.27 | 6 codes |
 | Root (`conftest.py`, `line_count.py`, `docs/dry/export_dry_review.py`) | 3 | 2,254 | 4 | 1.77 | `TID253`, `T201`, `INP001` per file |
 
@@ -73,7 +73,7 @@ factories and the unittest mixin.
 | --- | --- | --- | --- | --- | --- | --- |
 | `PLC0415` | 121 | 80 | 27 | 6 | 8 | a local import: an import cycle, an optional dependency (Channels, DRF, the Postgres driver), or a subsystem bound only when imported |
 | `A002` | 71 | 9 | 2 | 60 | 0 | a `filter` / `id` parameter that is the GraphQL argument name or a public keyword |
-| `FBT001` | 69 | 2 | 59 | 8 | 0 | a parametrized bool column, or Django's positional `execute_wrapper(..., many, ...)` |
+| `FBT001` | 5 | 2 | 2 | 1 | 0 | Django's positional `execute_wrapper(..., many, ...)` |
 | `BLE001` | 24 | 21 | 1 | 1 | 1 | deliberate containment: consumer code may raise anything, a boundary fails closed, cleanup must not mask the primary error |
 | `N802` | 14 | 10 | 4 | 0 | 0 | PascalCase field factories (graphene-django parity), unittest vocabulary |
 | `FBT003` | 12 | 0 | 11 | 1 | 0 | the bool is the value under test, or mirrors `execute_wrapper` |
@@ -216,9 +216,8 @@ Ruff against itself:
 
 ## To do
 
-- [ ] 40. A reason on every `# noqa`. 163 lines carry a bare code:
+- [ ] 40. A reason on every `# noqa`. 107 lines carry a bare code:
   - 71 `A002`;
-  - 58 parametrized `FBT001` columns in tests and examples;
   - 10 `PLC0415`;
   - the rest one to three each.
 
@@ -288,6 +287,8 @@ Each item's commit holds the detail (`git log -S '<code>' -- pyproject.toml`).
     `rest_framework.serializer_converter`, `FieldError` / `NON_FIELD_ERROR_KEY` from `mutations.inputs` (10 lines).
     Every import names the defining module, `utils.inputs` or `utils.errors`; `FieldError` stays public at the
     package root and `mutations`.
+44. Parametrized boolean test columns are keyword-only (`*` before the first one), so `FBT001` no longer fires: 64
+    `# noqa` lines in 58 test functions.
 
 ## Measuring
 

@@ -2625,7 +2625,8 @@ def test_nested_value_a_uniqueness_validator_cannot_bind_is_the_item_field_error
 )
 def test_nested_uniqueness_uses_read_only_default_before_binding(
     opened_at: str,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """A read-only default completes the pair DRF queries; the refused value is field keyed."""
     document = (

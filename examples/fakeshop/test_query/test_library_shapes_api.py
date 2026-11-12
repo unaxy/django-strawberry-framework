@@ -2435,7 +2435,8 @@ _REFUSED_BOOK_TERM_HOOKS: dict[str, tuple[_BookShuffle, str]] = {
 @pytest.mark.django_db
 def test_unsealable_book_hook_term_is_refused_at_the_genre_books_connection(
     source: str,
-    optimizer: bool,  # noqa: FBT001 - a pytest parameter
+    *,
+    optimizer: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A hook term Django cannot serve as text is refused by the boundary, naming the term.

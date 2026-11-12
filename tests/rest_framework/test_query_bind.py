@@ -163,7 +163,8 @@ def _quantity_in(value: int) -> Callable[[QuerySet[OverrideSpecimen]], QuerySet[
 def test_server_bound_typed_integer_is_held_to_its_wrappers_width(
     mode: str,
     narrowed: Callable[[QuerySet[OverrideSpecimen]], QuerySet[OverrideSpecimen]],
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
 ) -> None:
     """A server-bound integer Django wrapped as ``integer`` is refused past 32 bits, under its source.
 
@@ -193,7 +194,7 @@ def test_server_bound_typed_integer_is_held_to_its_wrappers_width(
     ("value", "refused"),
     [pytest.param(2**35, False, id="fits-bigint"), pytest.param(2**63, True, id="past-bigint")],
 )
-def test_server_bound_bigint_is_held_to_its_own_width(value: int, refused: bool) -> None:  # noqa: FBT001
+def test_server_bound_bigint_is_held_to_its_own_width(*, value: int, refused: bool) -> None:
     """A ``BigIntegerField`` value is wrapped as ``bigint``, held to 64 bits, not 32."""
     with _postgresql("psycopg3-server") as connection:
         queryset = ScalarSpecimen.objects.all()
@@ -342,7 +343,8 @@ def test_array_cast_holds_each_element_to_the_signed_type_of_its_cast(
     element: models.Field[int, int],
     params: list[object],
     lookup_sql: str,
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An element an explicit ``::type[]`` cast binds is held to that signed SQL type's range.
@@ -375,7 +377,8 @@ def test_array_cast_holds_each_element_to_the_signed_type_of_its_cast(
 )
 def test_list_parameter_is_held_to_the_array_type_psycopg_selects(
     member: list[object],
-    refused: bool,  # noqa: FBT001
+    *,
+    refused: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A list parameter is held to the array type psycopg's dumper selects for it.
