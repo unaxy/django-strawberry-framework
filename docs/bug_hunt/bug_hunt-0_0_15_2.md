@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 516 done, 106 to do. The CHANGELOG entries filed here moved to
+Progress: 517 done, 106 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3054,13 +3054,20 @@ Progress: 516 done, 106 to do. The CHANGELOG entries filed here moved to
   `NullableScalarSpecimenJsonForm`), `test_kanban_mutations_api.py` (`setCardFiles`) and
   `test_json_filter_typing_api.py`, plus `tests/forms/test_resolvers.py` and `tests/utils/test_querysets.py`. spec-038,
   spec-027, spec-045, README, GLOSSARY `DjangoModelFormMutation`. Filed 935.
+- [x] 787. Not a defect: the premise does not hold. A `DjangoModelFormMutation` whose `ModelForm` declares a `DateField`
+  / `DateTimeField` / `TimeField` / `DecimalField` / `UUIDField` / `DurationField` (or a `Decimal`-coercing
+  `TypedChoiceField`) over a `JSONField` whose encoder cannot encode the cleaned kind never fails at save: Django's
+  `ModelForm._post_clean` runs `Model.full_clean`, whose `JSONField.validate` encodes with the column's encoder and
+  refuses (`BaseModelForm._update_errors` rewrites it to the form field's "Enter a valid ..."), so the request answers a
+  typed `FieldError` on the field with no row written; stock Django 6.1.3 and 5.2.16 answer the same, and the column
+  stores the value under `DjangoJSONEncoder` or an encoder that handles the kind (84 form cells: 30 stored, 26
+  `FieldError`, 0 save-time errors, unchanged at dd6b4c0c). The DRF flavor refuses a declared scalar that disagrees
+  with the column at build; the model flavor's generated `JSON` input cannot carry the kind, and a consumer
+  `input_class` declaring one answers a `FieldError`. The filter side refuses at build because a lookup runs no model
+  validation (item 94). Filed 937
 
 ## To do: found along the way
 
-- [ ] 787. (robustness, lead, unprobed) A `DateField` / `DecimalField` / `UUIDField` form field over a `JSONField` with
-  no encoder hands the column a value its JSON encoder cannot encode, failing at save; the filter side refuses the
-  same kind at build (`filters/inputs.py::_refuse_kind_json_cannot_encode`), the form side does not. Found researching
-  720
 - [ ] 789. (robustness) A shipped `ModelMultipleChoiceFilter(conjoined=True)` on a to-many relation key a flat leaf
   walks (a `RelatedFilter` on the relation, or a target type with its own `get_queryset`) answers no row where
   unwalked answers (`ScalarSpecimen.children` naming two children: walked `[]`, unwalked `['p1']`): each AND is re-read
@@ -3204,6 +3211,13 @@ Progress: 516 done, 106 to do. The CHANGELOG entries filed here moved to
 - [ ] 935. (robustness) A `SerializerMutation` over DRF `serializers.JSONField(binary=True)` types the input `JSON`,
   but DRF's `to_internal_value` with `binary=True` reads only JSON text: a number or object sent is refused and a
   string is parsed as JSON text. Type it `String`, or bind `json.dumps` of the value. Found researching 786
+- [ ] 937. (robustness) A `DjangoModelFormMutation` update omitting a `DateField` / `DateTimeField` / `TimeField` over
+  a `JSONField` whose row holds a non-string (`{"a": 1}`, `[1, 2]`, `5`) answers a masked top-level `AttributeError`
+  (`'dict' object has no attribute 'strip'`) under every encoder, where Django's own edit round trip posts the widget's
+  rendered text and answers the field's "Enter a valid date." (`forms/resolvers.py::_bind_omitted_json_presentations`
+  binds `prepare_value` of the initial, the pre-render object; spec-038 Decision 8 says such a field fails as Django's
+  own edit form does). Likely root: bind the widget's rendered value (`widget.format_value(prepare_value(initial))`).
+  Found researching 787
 
 ## To do: holes found re-checking the fixes
 
