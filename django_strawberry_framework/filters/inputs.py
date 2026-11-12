@@ -63,6 +63,7 @@ from django_strawberry_framework.types.converters import (
     _field_label,
     _generated_output_issue,
     _registered_scalar_entry,
+    convert_choices_to_enum,
     holds_values_as_given,
     refuse_nested_array,
     scalar_for_field,
@@ -101,7 +102,10 @@ from django_strawberry_framework.utils.inputs import (
     make_set_input_namespace,
     optional_field_kwargs,
 )
-from django_strawberry_framework.utils.querysets import joinless_relation_on
+from django_strawberry_framework.utils.querysets import (
+    _type_is_genuinely_django,
+    joinless_relation_on,
+)
 from django_strawberry_framework.utils.relations import generated_column_source
 from django_strawberry_framework.utils.strings import flatten_lookup_path, pascal_case_or_raise
 from django_strawberry_framework.utils.typing import object_result
@@ -1448,10 +1452,6 @@ def _refuse_unsealable_served_leaves(served: Iterable[type[FilterSet]]) -> None:
     no connection serves, applied from the project's own resolver, is never sealed and is
     not asked.
     """
-    from django_strawberry_framework.utils.querysets import (  # noqa: PLC0415 - import cycle
-        _type_is_genuinely_django,
-    )
-
     from .sets import _expansion_record, _runs_shipped_filter  # noqa: PLC0415 - import cycle
 
     for _root, filterset_cls, through in _served_reach(served):
@@ -1593,9 +1593,6 @@ def _choice_enum_from_filter(
     the filter instance - keeps the filter stateless and avoids the
     "side-effect on a filter during input-class construction" trap.
     """
-    # Local import to avoid a top-level cycle through ``types.converters``.
-    from django_strawberry_framework.types.converters import convert_choices_to_enum  # noqa: PLC0415 - import cycle
-
     # A reverse ``ForeignObjectRel`` declares no ``choices``, so it fails the same guard.
     if not is_concrete_field(model_field) or not getattr(model_field, "choices", None):
         raise _no_choices_refusal(filter_instance, model_field, filterset_cls)

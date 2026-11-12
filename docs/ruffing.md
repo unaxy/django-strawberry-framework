@@ -17,13 +17,13 @@ Rules of the road:
 
 ## Status
 
-Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4.
+Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include item 42.
 
 | | Count |
 | --- | --- |
 | Stable rules | 815: 806 on, 9 off by design |
 | Preview-only rules | 142, all off (`preview` is not enabled) |
-| Lines carrying `# noqa` | 452, in 124 files |
+| Lines carrying `# noqa` | 450, in 124 files |
 | `# noqa` lines with no reason | 163 (see To do) |
 | `# ruff: disable[...]` fences | 9, every one `ERA001` around a TODO-anchored pseudo block |
 | File-level `# ruff: noqa` | 0 |
@@ -39,7 +39,7 @@ per 1,000 lines of source.
 
 | Area | Files | Lines | `# noqa` lines | Per 1k lines | Per-file ignores |
 | --- | --- | --- | --- | --- | --- |
-| Package (`django_strawberry_framework/`) | 131 | 115,070 | 176 | 1.53 | none |
+| Package (`django_strawberry_framework/`) | 131 | 115,070 | 174 | 1.51 | none |
 | tests/ | 217 | 257,748 | 159 | 0.62 | 17 codes, plus `D102` / `D103` on `test_*.py` |
 | examples/ | 266 | 202,432 | 101 | 0.50 | 12 codes, plus `D102` / `D103` on `test_*.py`, `D` / `DJ008` on migrations, `INP001` / `UP031` by folder |
 | scripts/ | 46 | 45,205 | 12 | 0.27 | 6 codes |
@@ -51,7 +51,7 @@ per 1,000 lines of source.
 | --- | --- | --- | --- | --- |
 | top-level modules | 28 | 22,356 | 51 | 2.28 |
 | `utils/` | 28 | 21,571 | 10 | 0.46 |
-| `filters/` | 6 | 18,529 | 25 | 1.35 |
+| `filters/` | 6 | 18,529 | 23 | 1.24 |
 | `optimizer/` | 14 | 13,128 | 11 | 0.84 |
 | `rest_framework/` | 9 | 8,663 | 6 | 0.69 |
 | `types/` | 8 | 8,674 | 32 | 3.69 |
@@ -71,7 +71,7 @@ factories and the unittest mixin.
 
 | Code | Lines | Package | Tests | Examples | Scripts / root | Why |
 | --- | --- | --- | --- | --- | --- | --- |
-| `PLC0415` | 123 | 82 | 27 | 6 | 8 | a local import: an import cycle, an optional dependency (Channels, DRF, the Postgres driver), or a subsystem bound only when imported |
+| `PLC0415` | 121 | 80 | 27 | 6 | 8 | a local import: an import cycle, an optional dependency (Channels, DRF, the Postgres driver), or a subsystem bound only when imported |
 | `A002` | 71 | 9 | 2 | 60 | 0 | a `filter` / `id` parameter that is the GraphQL argument name or a public keyword |
 | `FBT001` | 69 | 2 | 59 | 8 | 0 | a parametrized bool column, or Django's positional `execute_wrapper(..., many, ...)` |
 | `BLE001` | 24 | 21 | 1 | 1 | 1 | deliberate containment: consumer code may raise anything, a boundary fails closed, cleanup must not mask the primary error |
@@ -283,6 +283,8 @@ Each item's commit holds the detail (`git log -S '<code>' -- pyproject.toml`).
 39. `PLC0415`: 2,074 imports hoisted; the rest are local with a reason.
 41. Two redundant re-export paths dropped before the first release, `types.relay.SyncMisuseError` and
     `filters.base.LazyRelatedClassMixin` (2 `PLC0414`); every public path to both names stays.
+42. Two `filters/inputs.py` local imports (`PLC0415`) moved to the module's existing top-level imports of
+    `types.converters` and `utils.querysets`; no cycle remained.
 
 ## Measuring
 
