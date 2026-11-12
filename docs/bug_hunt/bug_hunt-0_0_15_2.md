@@ -3150,9 +3150,11 @@ Progress: 523 done, 107 to do. The CHANGELOG entries filed here moved to
   under `null_label` answers it since 748. A to-many `ModelChoiceFilter(null_label=...)` overriding `filter`, sent
   `null` or its `null_value="0"`, answers `[]` at `fe4eb38f`, pinned as unchanged by
   `tests/filters/test_sets.py::test_a_declared_model_choice_override_keeps_its_null_value_routing`. Found fixing 748
+  - In progress (bug_hunt-0_0_15_2 - TOP): FIX phase 7 (clone fix-i844-nullwalk).
 - [ ] 864. (robustness) The `ArrayField` input gate judges a `method=` filter over an array by its key name: a
   `method=` `ListFilter` with `lookup_expr="in"` over an `ArrayField` is refused, though the method reads the list and
   applies no lookup. Found fixing 716
+  - In progress (bug_hunt-0_0_15_2 - TOP-2): FIX phase 3 (clone spike-i864-research).
 - [ ] 867. (robustness) A wired `OrderSet` whose `RelatedOrder` two sets down names a lazy target that cannot import
   raises a bare `ImportError` at `finalize_django_types()`, where a direct unresolved target is rewrapped as a
   `ConfigurationError` naming the declaration and the filter family rewraps both
