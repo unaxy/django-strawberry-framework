@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 238 to do.
+Progress: 0 done, 239 to do.
 
 ## From dry-0_0_15_3
 
@@ -1153,6 +1153,10 @@ Progress: 0 done, 238 to do.
   child of the relation's target (`venueFaults`, a class-level `filter` override on such a branch, a raw `FilterSet.qs`
   of such a set) answers the child's rows as the nested spelling does, where it raised Django's `FieldError` /
   `FieldDoesNotExist`; the published inputs are unchanged
+- [ ] 949. CHANGELOG entry for item 844: a walked declared model-choice or choice filter under `null_label` (forward
+  or to-many, by key or `to_field_name`, ending on a related column, a projected copy) answers its null value as the
+  relation's or column's null test over the rows the request may see, alone, beside other values, conjoined and under
+  `exclude=True`, where it matched nothing, dropped the null half, raised `TypeError` or excluded nothing
 
 ## From dry-upstream-0_0_15
 

@@ -14,6 +14,11 @@ A ``RelatedFilter`` head the form data names (``shelf=<pk>``, a flat copy such a
 does and validates its key against the rows its target type lets the actor see: a hidden row's
 key is refused with the body a key naming no row gets, and every hop runs its hook once, none
 for a request naming no head.
+
+A declared ``ModelChoiceFilter`` / ``ModelMultipleChoiceFilter`` under a ``null_label``
+(``ShelfFilter``'s ``*_or_none`` leaves, keyed by branch name) sent its null value answers its
+relation's null test over the branches the actor may see, alone, beside branch names and
+under ``exclude=True``, raw and over ``/graphql/`` alike.
 """
 
 import json
@@ -29,9 +34,11 @@ from apps.library.filters_genre import GenreFilter
 from apps.products.services import create_users
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AbstractBaseUser
+from django.db import connection
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, JsonResponse, QueryDict
 from django.test import Client, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django_filters.filterset import BaseFilterSet
 from django_filters.rest_framework import DjangoFilterBackend
@@ -1024,3 +1031,123 @@ def test_graphql_sets_walk_and_scope_no_head(monkeypatch: pytest.MonkeyPatch, sh
     assert _graphql_names(Client(), document)
     assert dict(calls) == cost
     assert dict(sets) == built
+
+
+def _null_label_world() -> None:
+    """Shelves reaching a visible, a hidden and no branch, forward and over ``alt_branches``.
+
+    ``BranchType`` hides ``Vault`` (city ``restricted``) from anonymous viewers. ``S-home``
+    sits on ``Home`` with no alternate branch, ``S-vault`` on ``Vault`` with ``Vault`` its only
+    alternate, ``S-annex`` on ``Annex`` with ``Home`` and ``Vault``. Every shelf is visible.
+    """
+    home = models.Branch.objects.create(name="Home", city="Boston")
+    annex = models.Branch.objects.create(name="Annex", city="Boston")
+    vault = models.Branch.objects.create(name="Vault", city="restricted")
+    _ = models.Shelf.objects.create(code="S-home", topic="general", branch=home)
+    s_vault = models.Shelf.objects.create(code="S-vault", topic="general", branch=vault)
+    s_annex = models.Shelf.objects.create(code="S-annex", topic="general", branch=annex)
+    s_vault.alt_branches.add(vault)
+    s_annex.alt_branches.add(home, vault)
+
+
+class _NullLabelRow(NamedTuple):
+    """A ``ShelfFilter`` null-label leaf, the names it is sent, and the shelves each viewer gets."""
+
+    leaf: str
+    names: tuple[str, ...]
+    anonymous: list[str]
+    staff: list[str]
+
+
+_NULL_LABEL_ROWS = {
+    "forward-sentinel": _NullLabelRow("branch_named_or_none", ("null",), ["S-vault"], []),
+    "forward-visible-key": _NullLabelRow(
+        "branch_named_or_none",
+        ("Home",),
+        ["S-home"],
+        ["S-home"],
+    ),
+    "forward-hidden-key": _NullLabelRow("branch_named_or_none", ("Vault",), [], ["S-vault"]),
+    "to-many-multiple-sentinel": _NullLabelRow(
+        "alt_branches_named_or_none",
+        ("null",),
+        ["S-home", "S-vault"],
+        ["S-home"],
+    ),
+    "to-many-multiple-sentinel-and-visible-key": _NullLabelRow(
+        "alt_branches_named_or_none",
+        ("null", "Home"),
+        ["S-annex", "S-home", "S-vault"],
+        ["S-annex", "S-home"],
+    ),
+    "to-many-multiple-sentinel-and-hidden-key": _NullLabelRow(
+        "alt_branches_named_or_none",
+        ("null", "Vault"),
+        ["S-home", "S-vault"],
+        ["S-annex", "S-home", "S-vault"],
+    ),
+    "to-many-excluded-sentinel": _NullLabelRow(
+        "alt_branches_named_not_none",
+        ("null",),
+        ["S-annex"],
+        ["S-annex", "S-vault"],
+    ),
+    "to-many-excluded-sentinel-and-visible-key": _NullLabelRow(
+        "alt_branches_named_not_none",
+        ("null", "Home"),
+        [],
+        ["S-vault"],
+    ),
+    "to-many-excluded-sentinel-and-hidden-key": _NullLabelRow(
+        "alt_branches_named_not_none",
+        ("null", "Vault"),
+        ["S-annex"],
+        [],
+    ),
+}
+
+
+def _camel(name: str) -> str:
+    head, *rest = name.split("_")
+    return head + "".join(part.title() for part in rest)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("viewer", ["anonymous", "staff"])
+@pytest.mark.parametrize("entry", _ENTRY_POINTS)
+@pytest.mark.parametrize("shape", sorted(_NULL_LABEL_ROWS))
+def test_a_model_choice_null_label_reads_its_null_value_as_the_visible_relations_null_test(
+    shape: str,
+    entry: str,
+    viewer: str,
+) -> None:
+    """A declared model-choice leaf's ``null_value`` is its relation's null test over visible rows.
+
+    django-filter sends the value its ``null_label`` cleans to as ``<relation>=None``, which
+    Django builds as ``<relation>__isnull=True``: a shelf whose related branches the request
+    may not see matches as one with none, and beside branch names the null test is ORed with
+    them (``exclude=True`` negating both), on every raw entry point and over ``/graphql/``,
+    each in the statements the same leaf sent only branch names runs.
+    """
+    create_users(1)
+    row = _NULL_LABEL_ROWS[shape]
+    _null_label_world()
+    client = _client(viewer)
+    expected = row.staff if viewer == "staff" else row.anonymous
+    sent = json.dumps(list(row.names) if "branches" in row.leaf else row.names[0])
+
+    with CaptureQueriesContext(connection) as raw:
+        response = _head_response(client, entry, "shelves", {row.leaf: list(row.names)})
+    with CaptureQueriesContext(connection) as served:
+        names = _graphql_names(
+            client,
+            f"{{ rows: allLibraryShelves(filter: {{{_camel(row.leaf)}: {{exact: {sent}}}}}) "
+            "{ k: code } }",
+        )
+
+    assert _head_answer(response, "code") == expected
+    assert names == expected
+    # One statement for the rows, one more validating any branch name the leaf is sent
+    # (never one for the null value alone), two more reading a staff session's user.
+    statements = 1 + (row.names != ("null",)) + 2 * (viewer == "staff")
+    assert (len(raw), len(served)) == (statements, statements)

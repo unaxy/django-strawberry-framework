@@ -1845,9 +1845,11 @@ class ProjectedChildFilter(Filter):
         that returns its input BY IDENTITY leaves the parent unchanged, and one
         returning a queryset that keeps every row it was given
         (``_constrains_nothing``: ``qs.distinct()``, ``qs.all()``) keeps every
-        parent (``FilterSet._apply_relation_leaf``).
+        parent (``FilterSet._apply_relation_leaf``). A null sentinel the child filter's
+        shipped comparison reads is read as the flat-leaf loop reads it
+        (``FilterSet._apply_walked_leaf``).
         """
-        return self.parent._apply_relation_leaf(qs, self, value, supplied=False)
+        return self.parent._apply_walked_leaf(qs, self, value, supplied=False)
 
 
 @cache
@@ -1867,26 +1869,151 @@ def _new_projected(filter_cls: type[Filter]) -> ProjectedChildFilter:
     return object.__new__(_projected_class_for(filter_cls))
 
 
-def _head_null_test(head: RelatedFilter, value: object) -> tuple[Filter, object]:
-    """Return the head and value a ``RelatedFilter`` head's walk runs for its cleaned ``value``.
+#: The shipped comparisons that read a null sentinel, by the class defining each, to whether
+#: it reads the value's members one at a time: django-filter's ``ChoiceFilter.filter``
+#: compares the whole value with ``null_value`` (``ModelChoiceFilter`` and ``RelatedFilter``
+#: keep it), and ``MultipleChoiceFilter.filter`` each member (``ModelMultipleChoiceFilter``
+#: keeps it); a value or member equal to it is sent to the lookup as ``None``.
+_NULL_SENTINEL_COMPARISONS: Mapping[type[Filter], bool] = MappingProxyType(
+    {ChoiceFilter: False, MultipleChoiceFilter: True},
+)
 
-    A value equal to the head's ``null_value`` (django-filter's null sentinel, which its
-    ``ModelChoiceField`` cleans to when the head declares a ``null_label``) is the one
-    ``ChoiceFilter.filter`` answers with ``<relation>__exact=None``, which Django builds as
-    ``<relation>__isnull=True`` (``Query.build_lookup``): the walk runs a copy of the head
-    whose ``lookup_expr`` is ``isnull`` with ``True``, the relation-key null test over the
-    rows each relation shows and each declaration's ``queryset=`` admits, so a parent
-    matches when no such row links it. Any other value runs the head as cleaned, as
-    ``ChoiceFilter.filter`` hands it on. Asked only for a head running shipped code
-    (``_runs_shipped_filter``): a class-level ``filter`` override receives its own null
-    value unchanged over its relation joined only to those rows (``_head_null_view`` on a
-    forward path, ``_KeyMatch.named_rows`` on a to-many one).
+
+def _sentinel_comparison(filter_instance: Filter) -> bool | None:
+    """Return whether ``filter_instance``'s shipped comparison reads a null sentinel per member.
+
+    The real MRO of its class is asked, past every ``filter`` it defines that is consumer
+    code (the comparison a class-level override replaces, as ``_shipped_filter_class``
+    reads it), for the first class that is one of ``_NULL_SENTINEL_COMPARISONS``; ``None``
+    when none is. A shipped ``filter`` ahead of it hands the value on to it or replaces it:
+    ``filters/base.py::EnumChoiceFilter``'s mixin applies an ``EnumMemberValue`` itself and
+    hands every other value, a raw form's sentinel included, to ``ChoiceFilter.filter``
+    (GraphQL sends a member, which never equals the sentinel), while ``DateRangeFilter``
+    replaces it; the leaf's own comparison, run for the sentinel
+    (``_null_sentinel_reading``), tells the two apart.
     """
-    if value != read_attr(head, "null_value", None):
-        return head, value
-    test = copy.copy(head)
-    test.lookup_expr = "isnull"
-    return test, True
+    for klass in truth.mro(truth.class_of(filter_instance)):
+        per_member = _NULL_SENTINEL_COMPARISONS.get(klass)
+        if per_member is not None:
+            return per_member
+    return None
+
+
+def _null_sentinel_members(filter_instance: Filter, value: object) -> list[object] | None:
+    """Return the members of ``value`` other than the null sentinel, ``None`` when it carries none.
+
+    Read as the shipped comparison of ``filter_instance``'s class reads it
+    (``_sentinel_comparison``): ``ChoiceFilter.filter`` the whole value (an empty list when
+    it is the sentinel), ``MultipleChoiceFilter.filter`` each member of a nonempty list.
+    """
+    per_member = _sentinel_comparison(filter_instance)
+    if per_member is None:
+        return None
+    null_value = read_attr(filter_instance, "null_value", None)
+    if not per_member:
+        return [] if value == null_value else None
+    if not is_list_or_tuple(value) or not value:
+        return None
+    members: list[object] = list(value)
+    if not any(member == null_value for member in members):
+        return None
+    return [member for member in members if member != null_value]
+
+
+@dataclass(frozen=True)
+class _NullSentinelReading:
+    """How a walked leaf running shipped code reads a value carrying its null sentinel.
+
+    ``null_test`` is the null test Django builds for the sentinel (``<path>__exact=None``
+    read as ``<path>__isnull=True``), bound as the leaf is and keeping its ``exclude``;
+    ``keys`` is the leaf for the value's other members, ``key_value``, ``None`` when the
+    value is the sentinel alone.
+    """
+
+    null_test: Filter
+    keys: Filter | None
+    key_value: object
+
+
+def _null_sentinel_reading(
+    filter_instance: Filter,
+    value: object,
+    source: models.QuerySet[models.Model, object],
+) -> _NullSentinelReading | None:
+    """Return how a walked leaf running shipped code reads ``value``'s null sentinel, else ``None``.
+
+    django-filter's ``ChoiceFilter.filter`` sends a value equal to the filter's
+    ``null_value`` (the sentinel its ``ChoiceField`` / ``ModelChoiceField`` cleans to under
+    a ``null_label``) to the lookup as ``None``, and ``MultipleChoiceFilter.filter`` each
+    such member, ORed with the others (``conjoined``: chained). Whether ``None`` is a null
+    test is Django's to say: it builds ``<path>__exact=None`` (``iexact`` on a column too)
+    as ``<path>__isnull=True`` (``Query.build_lookup``), raises for most other lookups, and
+    reads it as a value elsewhere (a JSON key's ``exact``). So the leaf's own positive
+    comparison runs on a fresh queryset of the model it is declared on, which runs no query
+    (Django raises what it raises unwalked): with the whole value first when it holds other
+    members, which the comparison may skip, returning that queryset by identity
+    (django-filter's ``is_noop``), so the leaf constrains nothing and runs as cleaned; then
+    with the sentinel alone, read as the null test only when it adds lookups and Django
+    built every one of them as ``IsNull(True)`` (the lookups its default manager's own
+    filter holds are not the comparison's).
+    The walk then runs a test of the leaf's walked path with ``isnull`` and ``True``: the
+    relation's null test over the rows each relation shows and each declaration's
+    ``queryset=`` admits (a parent matches when no such row links it), or, past the last
+    relation, the column's null test there, which keeps a parent no visible row links too.
+    Any other value, comparison or leaf (``_runs_shipped_filter``: consumer code receives
+    its sentinel unchanged) is ``None``, and the leaf runs as cleaned.
+    """
+    if not _runs_shipped_filter(filter_instance):
+        return None
+    others = _null_sentinel_members(filter_instance, value)
+    if others is None:
+        return None
+    null_value = read_attr(filter_instance, "null_value", None)
+    twin = copy.copy(filter_instance)
+    twin.exclude = False
+    model = require(read_attr(filter_instance, "model"), is_model_class)
+    seed = resolving_filtered_relations(base_queryset(model, using=source.db), source)
+    # A default manager's own filter is no part of the comparison: only the lookups the
+    # comparison adds are read (Django's ``WhereNode.clone`` carries each lookup over as is).
+    seeded = {id(lookup) for lookup in _where_lookups(seed.query.where)}
+    if others and twin.filter(seed, value) is seed:
+        # The comparison skips the whole value (``MultipleChoiceFilter.is_noop``): the leaf
+        # constrains nothing, as unwalked.
+        return None
+    built = require(
+        twin.filter(seed, [null_value] if _sentinel_comparison(filter_instance) else null_value),
+        is_queryset,
+    )
+    tested = [lookup for lookup in _where_lookups(built.query.where) if id(lookup) not in seeded]
+    if not tested or not all(
+        isinstance(lookup, model_lookups.IsNull) and read_attr(lookup, "rhs", None) is True
+        for lookup in tested
+    ):
+        return None
+    null_test = Filter(field_name=filter_instance.field_name, lookup_expr="isnull")
+    null_test.exclude = filter_instance.exclude
+    _bind_filter(
+        null_test,
+        require_instance(read_attr(filter_instance, "parent"), FilterSet),
+        model,
+    )
+    if not others:
+        return _NullSentinelReading(null_test, None, None)
+    return _NullSentinelReading(null_test, filter_instance, others)
+
+
+def _where_lookups(node: WhereNode) -> Iterator[object]:
+    """Yield every lookup of a ``WhereNode`` tree, depth first."""
+    for child in list_of(node.children):
+        if isinstance(child, WhereNode):
+            yield from _where_lookups(child)
+        else:
+            yield child
+
+
+def _carries_null_sentinel(filter_instance: Filter, value: object) -> bool:
+    """Whether ``value`` carries the null sentinel ``filter_instance``'s shipped comparison reads."""
+    return _null_sentinel_members(filter_instance, value) is not None
 
 
 def _head_null_view(leaf: Filter, hops: tuple[RelationHop, ...]) -> _LeafChain | None:
@@ -1897,9 +2024,11 @@ def _head_null_view(leaf: Filter, hops: tuple[RelationHop, ...]) -> _LeafChain |
     receives it unchanged and runs once, as declared, over the rows of the set declaring it,
     its ``field_name`` bound to its relation joined only to the rows each relation of
     ``hops`` shows and each declaration's ``queryset=`` admits (``_LeafChain.view``), as a
-    to-many head's null value runs (``_KeyMatch.named_rows``). ``None`` for every other
-    leaf: a head running shipped code walks its null value as the relation's null test
-    (``_head_null_test``), and any other leaf has no null sentinel of its own.
+    to-many leaf's null sentinel runs (``_KeyMatch.named_rows``). ``None`` for every other
+    leaf: a leaf running shipped code walks its null sentinel as the walk's null test
+    (``_null_sentinel_reading``), and a declared leaf overriding ``filter`` on a forward
+    path runs any value it is sent, its null sentinel included, by the overridden
+    relation-key rule (``_LeafChain.key_via``, or the stored key one relation away).
     """
     if not isinstance(leaf, RelatedFilter) or _runs_shipped_filter(leaf):
         return None
@@ -2457,8 +2586,9 @@ class _KeyMatch:
     to that column over the last hop's target rows, positive, whose class's shipped
     comparison (``_shipped_filter_class``) reads any other value. The consumer's code
     never runs a second time: a value that comparison would read through the consumer's
-    ``get_filter_predicate`` names no row. A value naming no row runs the leaf on its
-    chain's ``fallback`` instead (``_LeafChain.view``).
+    ``get_filter_predicate`` names no row, and neither does a value carrying the null
+    sentinel that comparison reads (``_carries_null_sentinel``). A value naming no row runs
+    the leaf on its chain's ``fallback`` instead (``_LeafChain.view``).
     """
 
     hop: RelationHop
@@ -2486,20 +2616,18 @@ class _KeyMatch:
         of the leaf's class keeps on the key column: one set for the whole value, or, when
         that comparison is django-filter's conjoined per-value loop (``_conjoined_reading``),
         one set per value, each the rows it keeps for that value alone, once the whole value
-        named rows. A value naming no row (a ``RelatedFilter``
-        head's ``null_value``, the null sentinel its overriding ``filter`` receives unchanged;
-        an empty or absent model-choice value; an instance of another model; a value the
+        named rows. A value naming no row (one carrying the null sentinel the shipped
+        comparison reads, ``_carries_null_sentinel``: a ``RelatedFilter`` head's or a declared
+        ``ModelChoiceFilter`` / ``ModelMultipleChoiceFilter``'s ``null_value``, alone or beside
+        keys, which its overriding ``filter`` receives unchanged; an empty or absent
+        model-choice value; an instance of another model; a value the
         shipped comparison skips, returning ``rows`` by identity, or refuses,
         ``_SHIPPED_COMPARISON_REFUSALS``) is ``None``: the leaf then runs its chain's
         ``fallback`` (``_LeafChain.view``: as declared over the rows of the set declaring it,
         its relation joined only to visible related rows).
         """
-        if isinstance(self.terminal, RelatedFilter) and value == read_attr(
-            self.terminal,
-            "null_value",
-            None,
-        ):
-            # A head's null value, which ``ChoiceFilter.filter`` answers with its relation's
+        if _carries_null_sentinel(self.terminal, value):
+            # A null sentinel, which the shipped comparison answers with its relation's
             # null test, names no row of the relation's target.
             return None
         shipped = _shipped_filter_class(self.terminal)
@@ -2555,18 +2683,21 @@ class _LeafChain:
     declared, and a row it matches must reach, through the visible rows of each hop of
     ``key_via``, a visible row of ``key_hop``: on a forward key any (the one its path
     reads), on a to-many key one its value names (``key_match``); for a value naming no
-    row (``_KeyMatch.named_rows``) the request reads ``fallback`` instead, the leaf as
-    declared, its relation read through ``view``. ``view`` holds the hops whose
-    relations such a leaf reads: it runs over the rows of the set declaring it (over the
-    last of ``hops``' visible rows when ``hops`` is not empty, a projected child's leaf)
-    with its ``field_name`` bound to a ``FilteredRelation`` alias of its relation that
-    joins only the rows each hop lets the request see (``FilterSet._relation_view``), so
-    its own value, default and path answer as unwalked, over visible rows.
+    row (``_KeyMatch.named_rows``, a null sentinel among them) the request reads
+    ``fallback`` instead, the leaf as declared, its relation read through ``view``.
+    ``view`` holds the hops whose relations such a leaf reads: it runs over the rows of
+    the set declaring it (over the last of ``hops``' visible rows when ``hops`` is not
+    empty, a projected child's leaf) with its ``field_name`` bound to a
+    ``FilteredRelation`` alias of its relation that joins only the rows each hop lets the
+    request see (``FilterSet._relation_view``), so its own value, default and path answer
+    as unwalked, over visible rows.
     ``owned_rows`` carries each projected child set's constructor restriction into the
     terminal filter and the outward correlation without replacing the shared
     request-wide target visibility queryset. ``null_view`` is the chain a forward
     ``RelatedFilter`` head overriding ``filter`` reads for its own ``null_value``
     (``_head_null_view``): the head as declared, its relation read through ``view``. A
+    null sentinel sent to a leaf running shipped code reaches no chain as a value: the walk
+    reads it as its null test first (``FilterSet._apply_walked_leaf``). A
     ``terminal`` returning rows that keep every row it was given (``_constrains_nothing``)
     constrains nothing, whichever chain it runs on.
     """
@@ -8427,10 +8558,11 @@ class FilterSet(
         here. A relation-key leaf running consumer code runs as declared (``_leaf_chain``);
         on a to-many key whose value names rows of the relation's target its copy here is
         read by the shipped comparison of its class (``_KeyMatch``). A class-level ``isnull``
-        override's copy here tests the target's primary key over the related rows. A
-        class-level override on a path into a target column runs over the last hop's
-        visible target rows with the path left on that target as its ``field_name`` and
-        the walked lookup as its ``lookup_expr``.
+        override's copy here tests the target's primary key over the related rows, as
+        does the null test a null sentinel runs in a leaf's place (``_null_sentinel_reading``,
+        an ``isnull`` filter of the leaf's walked path). A class-level override on a path
+        into a target column runs over the last hop's visible target rows with the path left
+        on that target as its ``field_name`` and the walked lookup as its ``lookup_expr``.
         """
         target_set = (
             # The walk continues only past a declared hop whose target resolved to a set class.
@@ -8473,6 +8605,8 @@ class FilterSet(
         self,
         filter_instance: Filter,
         aliases: Mapping[str, str] | None = None,
+        *,
+        runs: Filter | None = None,
     ) -> _LeafChain | None:
         """Return how an active leaf of this set reads the related rows, ``None`` for a leaf walking no hop.
 
@@ -8513,14 +8647,20 @@ class FilterSet(
         consumer code, one hop or more, carries as ``null_view`` the chain its own
         ``null_value`` reads (``_head_null_view``). Every declared hop's target set resolves: a
         caller derives the hops first, or checks ``_walks_unresolved_hop`` and leaves such a
-        leaf alone.
+        leaf alone. ``runs``, given only with a projected copy, is a filter bound to the set
+        holding the child filter the copy runs (``_projected_terminal``), which it runs in
+        that filter's place, hop by hop (``_apply_walked_leaf``: the null test of a null
+        sentinel, or the leaf for the value's other members).
         """
         if isinstance(filter_instance, ProjectedChildFilter):
             projection = filter_instance._projection
             hop = type(self)._projection_hop(projection)
             child = self._projection_child(projection.filterset, hop)
             child_filter = child._filter_named(projection.name)
-            inner = child._leaf_chain(child_filter)
+            if runs is not None and not isinstance(child_filter, ProjectedChildFilter):
+                # The child filter ``runs`` stands for is reached: it runs in its place.
+                child_filter, runs = runs, None
+            inner = child._leaf_chain(child_filter, runs=runs)
             visible = self._flat_hop_visibility
             using = require(self.queryset, is_queryset).db
             cached = None if visible is None else visible.get((id(hop.related_obj), using))
@@ -9001,7 +9141,7 @@ class FilterSet(
         Every other chain is returned as it is, naming nothing.
         """
         null_view = chain.null_view
-        if null_view is not None and value == read_attr(null_view.terminal, "null_value", None):
+        if null_view is not None and _carries_null_sentinel(null_view.terminal, value):
             return null_view, None
         match = chain.key_match
         if match is None:
@@ -9381,6 +9521,7 @@ class FilterSet(
         *,
         supplied: bool,
         name: str | None = None,
+        runs: Filter | None = None,
     ) -> models.QuerySet[_M]:
         """Apply a flat leaf walking declared hops as Django answers it over the visible rows.
 
@@ -9459,8 +9600,9 @@ class FilterSet(
         names. The rows it returns, its own ``distinct`` included, are the
         parents' multiplicity, as for a leaf walking no hop. A to-many key's
         leaf whose value names no row of the target (a predicate override's
-        always) runs its chain's ``fallback`` (``_LeafChain.view``): once, as
-        declared, over ``queryset`` (over the projection hop's visible rows for
+        always, a null sentinel's too) runs its chain's ``fallback``
+        (``_LeafChain.view``): once, as declared, over ``queryset`` (over the
+        projection hop's visible rows for
         a projected child's leaf), its ``field_name`` bound to its relation
         joined only to the rows each hop lets the request see
         (``_relation_view``), so a default, a queryset or an instance it reads,
@@ -9471,6 +9613,10 @@ class FilterSet(
         sent its own ``null_value`` runs the same way, over the rows each
         relation shows and each declaration's ``queryset=`` admits
         (``_LeafChain.null_view``).
+
+        ``runs``, given only with a projected copy and a supplied value, is the filter the
+        copy runs in its child set in place of its child filter (``_leaf_chain``), as
+        ``_apply_walked_leaf`` reads a null sentinel.
         """
         aliases = _query_aliases(queryset)
         if not supplied:
@@ -9495,7 +9641,7 @@ class FilterSet(
         for hop in type(self)._visibility_hops(filter_instance, aliases):
             _ = self._hop_visible_rows(hop, using)
         chain, named = self._request_chain(
-            require_instance(self._leaf_chain(filter_instance, aliases), _LeafChain),
+            require_instance(self._leaf_chain(filter_instance, aliases, runs=runs), _LeafChain),
             value,
             self._hop_visible_rows,
             using,
@@ -9595,6 +9741,93 @@ class FilterSet(
         for condition in conditions[1:]:
             kept &= condition
         return queryset.filter(kept)
+
+    def _apply_walked_leaf(
+        self,
+        queryset: models.QuerySet[_M],
+        filter_instance: Filter,
+        value: object,
+        *,
+        supplied: bool,
+        name: str | None = None,
+    ) -> models.QuerySet[_M]:
+        """Apply a walked flat leaf (``_apply_relation_leaf``), its null sentinel read as Django reads it.
+
+        The entry of every leaf the flat-leaf loop walks and of a projected copy's own
+        ``filter`` (``ProjectedChildFilter.filter``). A value carrying no null sentinel
+        Django builds as a null test (``_null_sentinel_reading``) runs the leaf as cleaned.
+        The sentinel alone runs the walk's null test in its place. A multiple-choice value
+        holding the sentinel and other members keeps, as django-filter's one ``Q`` does, a
+        parent the leaf keeps for those members or the null test keeps (``conjoined``: one
+        both keep, the members read one at a time); ``exclude`` negates at the parent the
+        unconjoined positive twin of both. A projected copy runs either in its child set in
+        place of the child filter it runs (``_projected_terminal``), whose reading it is.
+        Django builds a null test for the sentinel, so the leaf constrains whether or not
+        the request supplied it, as the absent-leaf probe (``_absent_leaf_applies``) finds
+        it: each part runs as supplied.
+        """
+        reads = _projected_terminal(filter_instance)
+        projected = reads is not filter_instance
+        reading = _null_sentinel_reading(
+            reads,
+            value,
+            require(read_attr(read_attr(reads, "parent"), "queryset"), is_queryset)
+            if projected
+            else queryset,
+        )
+        if reading is None:
+            return self._apply_relation_leaf(
+                queryset,
+                filter_instance,
+                value,
+                supplied=supplied,
+                name=name,
+            )
+
+        def apply(
+            rows: models.QuerySet[_M],
+            part: Filter,
+            part_value: object,
+        ) -> models.QuerySet[_M]:
+            # A projected copy runs ``part`` in its child set in place of its child filter.
+            if projected:
+                return self._apply_relation_leaf(
+                    rows,
+                    filter_instance,
+                    part_value,
+                    supplied=True,
+                    runs=part,
+                )
+            return self._apply_relation_leaf(rows, part, part_value, supplied=True)
+
+        if reading.keys is None:
+            return apply(queryset, reading.null_test, part_value=True)
+        negate = reads.exclude
+        keys = copy.copy(reading.keys)
+        keys.exclude = False
+        if negate and isinstance(keys, MultipleChoiceFilter):
+            # django-filter excludes each value in turn: the positive twin is unconjoined.
+            keys.conjoined = False
+        null_test = copy.copy(reading.null_test)
+        null_test.exclude = False
+        inner = correlated_inner_root(queryset)
+        reached = [
+            Q(Exists(apply(inner, part, part_value)))
+            for part, part_value in ((keys, reading.key_value), (null_test, True))
+        ]
+        if negate:
+            chain = (
+                self._leaf_chain(filter_instance, _query_aliases(queryset), runs=null_test)
+                if projected
+                else self._leaf_chain(null_test, _query_aliases(queryset))
+            )
+            return queryset.filter(
+                ~(reached[0] | reached[1])
+                & self._alias_joins(queryset, require_instance(chain, _LeafChain).hops[0]),
+            )
+        if isinstance(keys, MultipleChoiceFilter) and keys.conjoined:
+            return queryset.filter(reached[0] & reached[1])
+        return queryset.filter(reached[0] | reached[1])
 
     def _parent_condition(
         self,
@@ -9779,16 +10012,10 @@ class FilterSet(
                 _refuse_generated_filter_output(filter_instance, None, type(self))
             value = _held_integer_value(filter_instance, cleaned, queryset)
             if self._walks_on_request(name, filter_instance, _query_aliases(queryset)):
-                walked, walked_value = (
-                    _head_null_test(filter_instance, value)
-                    if isinstance(filter_instance, RelatedFilter)
-                    and _runs_shipped_filter(filter_instance)
-                    else (filter_instance, value)
-                )
-                queryset = self._apply_relation_leaf(
+                queryset = self._apply_walked_leaf(
                     queryset,
-                    walked,
-                    walked_value,
+                    filter_instance,
+                    value,
                     supplied=not self._leaf_absent(name),
                     name=name,
                 )

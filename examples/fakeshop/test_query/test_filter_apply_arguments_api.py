@@ -8143,6 +8143,20 @@ _ALIAS_CASES: dict[str, _AliasCase] = {
         ["bk2", "bk3"],
         ["bk3"],
     ),
+    "excluded-null-value-and-key-past-a-condition": _AliasCase(
+        models.Book,
+        _aliased(vshelf=_shelf(_TIER_TWO)),
+        partial(
+            MultipleChoiceFilter,
+            field_name="vshelf__code",
+            choices=[("B-2", "B-2")],
+            null_label="NONE",
+            exclude=True,
+        ),
+        {"exact": ["null", "B-2"]},
+        ["bk3"],
+        ["bk3"],
+    ),
     "overriding-to-many-key": _AliasCase(
         models.Shelf,
         _aliased(vbooks=django_models.FilteredRelation("books")),

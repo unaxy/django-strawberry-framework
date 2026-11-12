@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 523 done, 107 to do. The CHANGELOG entries filed here moved to
+Progress: 524 done, 107 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3141,16 +3141,26 @@ Progress: 523 done, 107 to do. The CHANGELOG entries filed here moved to
   (`test_ticket_keys_into_a_desk_set_read_the_desk_rows` and siblings), package rows in `tests/utils/test_relations.py`,
   `tests/utils/test_permissions.py`, `tests/filters/test_sets.py`, `tests/filters/test_inputs.py`; spec-027 Edge case and
   Test plan, GLOSSARY `RelatedFilter` / `FilterSet`. Filed 944, 945, 946; CHANGELOG 947
+- [x] 844. (robustness) fixed: a walked declared choice leaf running shipped code (a `ModelChoiceFilter` /
+  `ModelMultipleChoiceFilter` under `null_label`, forward or to-many, by key or `to_field_name`; a `ChoiceFilter` /
+  `MultipleChoiceFilter` ending on a related column, a generated `EnumChoiceFilter`'s raw `null` under
+  `FILTERS_NULL_CHOICE_LABEL` included; projected copies) read its null value as a key on the target column: alone it
+  matched nothing, under `exclude=True` it excluded nothing, a forward multiple value dropped the null half beside a key
+  and a to-many one raised `TypeError`. It now asks Django: the leaf's comparison is built for the null value alone (no
+  query) and read as the null test only when Django builds nothing but `IsNull(True)` (a JSON key's `exact=None` stays
+  JSON null), run over the visible rows as a `RelatedFilter` head's is (748), ORed with any other value (`conjoined`:
+  ANDed), `exclude=True` negating the unconjoined twin; a value the comparison skips as a whole (`is_noop`) runs as
+  cleaned, and a filtering default manager's own lookups are no part of the reading (`filters/sets.py::_null_sentinel_reading`,
+  `_sentinel_comparison`, `FilterSet._apply_walked_leaf`, `_KeyMatch.named_rows`, `FilterSet._request_chain`,
+  `ProjectedChildFilter.filter`). A to-many declared `filter` override receives its null value on the visible-join
+  fallback (the pin encoding the defect rewritten); a forward one is left as stated, 799's. 250 + 96 off-oracle grid
+  cells to 90 (all forward overrides), 0 non-sentinel cells moved. Pinned live by
+  `examples/fakeshop/test_query/test_direct_filter_actor_api.py::test_a_model_choice_null_label_reads_its_null_value_as_the_visible_relations_null_test`
+  over three `null_label` leaves on the fakeshop `ShelfFilter`, the alias row of `test_filter_apply_arguments_api.py`,
+  and `tests/filters/test_sets.py`. spec-027, README, GLOSSARY `RelatedFilter`. Filed 948.
 
 ## To do: found along the way
 
-- [ ] 844. (robustness) A walked relation-key null sentinel, a declared `ModelChoiceFilter` /
-  `ModelMultipleChoiceFilter` under `null_label` (forward or to-many, shipped or overriding `filter`) sent its
-  `null_value`, matches nothing, where django-filter answers the relation's null test (`<relation>=None`); a raw head
-  under `null_label` answers it since 748. A to-many `ModelChoiceFilter(null_label=...)` overriding `filter`, sent
-  `null` or its `null_value="0"`, answers `[]` at `fe4eb38f`, pinned as unchanged by
-  `tests/filters/test_sets.py::test_a_declared_model_choice_override_keeps_its_null_value_routing`. Found fixing 748
-  - In progress (bug_hunt-0_0_15_2 - TOP): FIX phase 7 (clone fix-i844-nullwalk).
 - [ ] 864. (robustness) The `ArrayField` input gate judges a `method=` filter over an array by its key name: a
   `method=` `ListFilter` with `lookup_expr="in"` over an `ArrayField` is refused, though the method reads the list and
   applies no lookup. Found fixing 716
@@ -3287,6 +3297,10 @@ Progress: 523 done, 107 to do. The CHANGELOG entries filed here moved to
   down the parent links (`venue` into a `LendingDesk` set beside `venue__lendingdesk__selfservedesk` into a
   `SelfServeDesk` set) fail the schema build with an `IndexError`, identically before and after 832; cause not traced.
   Found verifying 832
+- [ ] 948. (robustness) A `ModelChoiceFilter` under `null_label` with `null_value="0"` over an `Int` key cannot send its
+  null value over GraphQL: `exact: 0` is refused at form clean as `Invalid filter input` (django-filter's choice field
+  cleans the string `"0"` and refuses the integer `0`), so the null test is reachable over GraphQL only through a String
+  key (`to_field_name`). Found fixing 844
 
 ## To do: holes found re-checking the fixes
 
@@ -3352,7 +3366,11 @@ Progress: 523 done, 107 to do. The CHANGELOG entries filed here moved to
   forward fallback? The round-trip limits of 809 apply. (The maintainer chose "nothing breaks" for this pass; the routed
   design was built and verified) (Item 795 now reads every new queryset keeping every row as constraining
   nothing, and item 881 runs a consumer leaf on a forward key of any length as declared; the counts were measured
-  before both and need re-measuring.)
+  before both and need re-measuring.) Item 844 left the null-value slice of this question as it stands: a declared
+  `ModelChoiceFilter` / `ModelMultipleChoiceFilter` overriding `filter` on a forward path still runs its null value by
+  the overridden relation-key rule, not over the visible join as a forward `RelatedFilter` head's override does
+  (`_head_null_view`): 90 grid cells off the oracle (844's evidence), while a to-many declared override now joins the
+  head rule.
 - [ ] 800. Decide: a class-level `filter` override on a many-to-many key a flat leaf walks, where Django gives the
   through key onto the source no reverse name of its own (an auto-created self-referential many-to-many read forward,
   symmetrical or not; an explicit through whose two keys onto the model share `related_name="+"`), still runs on the

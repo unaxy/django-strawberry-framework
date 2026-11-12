@@ -221,6 +221,16 @@ class ShelfFilter(FilterSet):
 
     ``Meta.form`` is ``ShelfFilterForm``, whose ``clean`` refuses a request naming the
     home branch both by pk and by name.
+
+    The ``*_or_none`` filters are django-filter's model-choice filters under a
+    ``null_label`` keyed by branch ``name`` (``to_field_name``) over every branch:
+    ``branch_named_or_none`` over the forward ``branch``, ``alt_branches_named_or_none`` a
+    list over the many-to-many ``alt_branches`` (over its ``name`` column, as
+    ``home_branches_named``), and ``alt_branches_named_not_none`` the latter with
+    ``exclude=True``.
+    Their ``null_value`` (``"null"``) is the relation's null test, read over the branches
+    ``BranchType`` lets the request see: a shelf whose related branches are all hidden
+    matches as one with none, alone or beside branch names.
     """
 
     branch = RelatedFilter("BranchFilter", field_name="branch")
@@ -261,6 +271,25 @@ class ShelfFilter(FilterSet):
     pk_among = ListFilter(field_name="pk", lookup_expr="in")
     branch_pk_span = RangeFilter(field_name="branch__pk", lookup_expr="range")
     branch_pk_among = ListFilter(field_name="branch__pk", lookup_expr="in")
+    branch_named_or_none = ModelChoiceFilter(
+        field_name="branch",
+        queryset=models.Branch.objects.all(),
+        to_field_name="name",
+        null_label="No branch",
+    )
+    alt_branches_named_or_none = ModelMultipleChoiceFilter(
+        field_name="alt_branches__name",
+        queryset=models.Branch.objects.all(),
+        to_field_name="name",
+        null_label="No branch",
+    )
+    alt_branches_named_not_none = ModelMultipleChoiceFilter(
+        field_name="alt_branches__name",
+        queryset=models.Branch.objects.all(),
+        to_field_name="name",
+        null_label="No branch",
+        exclude=True,
+    )
 
     class Meta:
         model = models.Shelf

@@ -102,6 +102,7 @@ from django_filters import (
     BooleanFilter,
     CharFilter,
     ChoiceFilter,
+    DateRangeFilter,
     Filter,
     ModelChoiceFilter,
     ModelMultipleChoiceFilter,
@@ -20252,11 +20253,14 @@ class _NullAwareModelChoiceFilter(ModelChoiceFilter):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("null_value", ["null", "0"], ids=["default-null-value", "null-value-0"])
-def test_a_declared_model_choice_override_keeps_its_null_value_routing(null_value: str) -> None:
-    """A declared to-many ``ModelChoiceFilter`` overriding ``filter`` is no head.
+def test_a_declared_model_choice_override_receives_its_null_value_over_the_visible_join(
+    null_value: str,
+) -> None:
+    """A declared to-many ``ModelChoiceFilter`` overriding ``filter`` is sent its null value.
 
-    Its null value is read by the shipped comparison of its class, as a declared
-    relation-key leaf's value is, not as a head's value naming no row.
+    The null value names no row of the relation's target, so the override runs once, as
+    declared, over its relation joined only to the visible books (``_LeafChain.view``): a
+    shelf whose only book is hidden matches as one with none.
     """
     _ = _declare_hiding_types()
 
@@ -20283,17 +20287,931 @@ def test_a_declared_model_choice_override_keeps_its_null_value_routing(null_valu
     )
     _ = library_models.Book.objects.create(title="b-open", shelf=open_shelf)
     shelves = library_models.Shelf.objects.order_by("pk")
+    query = {"books_choice": null_value}
 
-    assert (
-        _raw_head_answer(
-            ChoiceShelfFilter,
-            shelves,
-            {"books_choice": null_value},
-            "code",
-            staff=False,
-        )
-        == []
+    assert _raw_head_answer(ChoiceShelfFilter, shelves, query, "code", staff=False) == [
+        "S-empty",
+        "S-repairs",
+    ]
+    assert _raw_head_answer(ChoiceShelfFilter, shelves, query, "code", staff=True) == ["S-empty"]
+
+
+def _null_sentinel_world() -> dict[str, str]:
+    """Branches whose shelves hold a visible, a hidden and no book; ``B-none`` holds no shelf.
+
+    ``B-empty``'s shelf holds no book, ``B-open``'s ``b-open``, ``B-mixed``'s one shelf
+    ``b-mixed`` and another none, ``B-repairs``'s only ``b-repair``, which non-staff cannot
+    see. ``b-open`` and ``b-repair`` carry the subtitle ``sub``, ``b-mixed`` none.
+    """
+    repair = library_models.Book.CirculationStatus.REPAIR
+    shelves: dict[str, library_models.Shelf] = {}
+    for branch_name, codes in (
+        ("B-empty", ("S-e",)),
+        ("B-open", ("S-o",)),
+        ("B-mixed", ("S-m1", "S-m2")),
+        ("B-repairs", ("S-r",)),
+        ("B-none", ()),
+    ):
+        branch = library_models.Branch.objects.create(name=branch_name, city="Boston")
+        for code in codes:
+            shelves[code] = library_models.Shelf.objects.create(
+                code=code,
+                topic="general",
+                branch=branch,
+            )
+    b_open = library_models.Book.objects.create(
+        title="b-open",
+        subtitle="sub",
+        shelf=shelves["S-o"],
     )
+    b_mixed = library_models.Book.objects.create(title="b-mixed", shelf=shelves["S-m1"])
+    b_repair = library_models.Book.objects.create(
+        title="b-repair",
+        subtitle="sub",
+        shelf=shelves["S-r"],
+        circulation_status=repair,
+    )
+    return {"b_open": str(b_open.pk), "b_mixed": str(b_mixed.pk), "b_repair": str(b_repair.pk)}
+
+
+def _null_sentinel_answer(
+    filterset_class: type[FilterSet],
+    queryset: QuerySet[django_models.Model],
+    key: str,
+    values: list[str],
+    column: str,
+    *,
+    staff: bool,
+) -> list[str]:
+    """Build ``filterset_class`` over ``key`` sent ``values`` with a request; answer the rows' ``column``."""
+    request = HttpRequest()
+    request.user = get_user_model()(username="staff", is_staff=True) if staff else AnonymousUser()
+    data = QueryDict(mutable=True)
+    data.setlist(key, values)
+    filterset = filterset_class(data, queryset=queryset, request=request)
+    assert filterset.is_valid(), filterset.form.errors
+    return sorted(filterset.qs.values_list(column, flat=True))
+
+
+# (values sent, conjoined, exclude, anonymous answer, staff answer): the null test over
+# ``shelves__books`` keeps a branch with no visible shelf or a visible shelf holding no
+# visible book, beside or (conjoined) with the parents the key keeps.
+_INT_KEY_NULL_ROWS: dict[str, tuple[list[str], bool, bool, list[str], list[str]]] = {
+    "sentinel": (
+        ["null"],
+        False,
+        False,
+        [
+            "B-empty",
+            "B-mixed",
+            "B-none",
+            "B-repairs",
+        ],
+        ["B-empty", "B-mixed", "B-none"],
+    ),
+    "sentinel-and-key": (
+        ["null", "{b_mixed}"],
+        False,
+        False,
+        [
+            "B-empty",
+            "B-mixed",
+            "B-none",
+            "B-repairs",
+        ],
+        ["B-empty", "B-mixed", "B-none"],
+    ),
+    "sentinel-and-other-key": (
+        ["null", "{b_open}"],
+        False,
+        False,
+        [
+            "B-empty",
+            "B-mixed",
+            "B-none",
+            "B-open",
+            "B-repairs",
+        ],
+        [
+            "B-empty",
+            "B-mixed",
+            "B-none",
+            "B-open",
+        ],
+    ),
+    "conjoined-sentinel-and-key": (
+        ["null", "{b_mixed}"],
+        True,
+        False,
+        ["B-mixed"],
+        ["B-mixed"],
+    ),
+    "conjoined-sentinel-and-other-key": (
+        ["null", "{b_open}"],
+        True,
+        False,
+        [],
+        [],
+    ),
+    "excluded-sentinel": (
+        ["null"],
+        False,
+        True,
+        ["B-open"],
+        ["B-open", "B-repairs"],
+    ),
+    "excluded-sentinel-and-key": (
+        ["null", "{b_open}"],
+        False,
+        True,
+        [],
+        ["B-repairs"],
+    ),
+    "excluded-conjoined-sentinel-and-two-keys": (
+        ["null", "{b_mixed}", "{b_open}"],
+        True,
+        True,
+        [],
+        ["B-repairs"],
+    ),
+    "excluded-conjoined-sentinel-and-key": (
+        ["null", "{b_mixed}"],
+        True,
+        True,
+        ["B-open"],
+        ["B-open", "B-repairs"],
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", sorted(_INT_KEY_NULL_ROWS))
+def test_a_walked_model_multiple_choice_null_sentinel_is_the_null_test_over_visible_rows(
+    shape: str,
+) -> None:
+    """A walked ``ModelMultipleChoiceFilter`` keyed by pk reads its sentinel as Django does.
+
+    django-filter ORs ``<path>=None`` (Django's ``<path>__isnull=True``) with the keys it is
+    sent (``conjoined``: chains them); walked two to-many hops, the null test reads only the
+    rows the request sees, and ``exclude=True`` drops the parents the unconjoined positive
+    twin keeps.
+    """
+    _ = _declare_hiding_types()
+    values, conjoined, exclude, anonymous, staff = _INT_KEY_NULL_ROWS[shape]
+
+    class NullKeyBranchFilter(FilterSet):
+        books_or_none = ModelMultipleChoiceFilter(
+            field_name="shelves__books",
+            queryset=library_models.Book.objects.all(),
+            null_label="NONE",
+            conjoined=conjoined,
+            exclude=exclude,
+        )
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    pks = _null_sentinel_world()
+    sent = [value.format(**pks) for value in values]
+    branches = library_models.Branch.objects.order_by("pk")
+
+    for viewer_is_staff, expected in ((False, anonymous), (True, staff)):
+        with CaptureQueriesContext(connection) as queries:
+            answer = _null_sentinel_answer(
+                NullKeyBranchFilter,
+                branches,
+                "books_or_none",
+                sent,
+                "name",
+                staff=viewer_is_staff,
+            )
+        assert answer == expected
+        # The keys' validation, then the rows: no statement for the sentinel itself.
+        assert len(queries) == 1 + (len(sent) > 1)
+
+
+@pytest.mark.django_db
+def test_a_walked_model_choice_null_sentinel_keyed_by_pk_is_the_null_test() -> None:
+    """A raw form's ``null`` for a walked ``ModelChoiceFilter`` keyed by pk is its null test."""
+    _ = _declare_hiding_types()
+
+    class SingleKeyBranchFilter(FilterSet):
+        book_or_none = ModelChoiceFilter(
+            field_name="shelves__books",
+            queryset=library_models.Book.objects.all(),
+            null_label="NONE",
+        )
+
+        class Meta:
+            model = library_models.Branch
+            fields = {"name": ["exact"]}
+
+    _ = _null_sentinel_world()
+    branches = library_models.Branch.objects.order_by("pk")
+
+    for viewer_is_staff, expected in (
+        (
+            False,
+            [
+                "B-empty",
+                "B-mixed",
+                "B-none",
+                "B-repairs",
+            ],
+        ),
+        (True, ["B-empty", "B-mixed", "B-none"]),
+    ):
+        assert (
+            _null_sentinel_answer(
+                SingleKeyBranchFilter,
+                branches,
+                "book_or_none",
+                ["null"],
+                "name",
+                staff=viewer_is_staff,
+            )
+            == expected
+        )
+
+
+@pytest.mark.django_db
+def test_a_walked_null_sentinel_over_a_filtering_default_manager_is_the_null_test() -> None:
+    """A set over a model whose default manager filters reads its sentinel as the null test.
+
+    ``VisibleBranch``'s manager excludes city-less branches; that filter is no part of the
+    leaf's comparison, so the sentinel still reads as ``shelves__books__isnull=True``.
+    """
+    _ = _declare_hiding_types()
+
+    class VisibleBranchType(DjangoType):
+        class Meta:
+            model = library_models.VisibleBranch
+            fields = ("id", "name")
+
+    class ManagedBranchFilter(FilterSet):
+        book_or_none = ModelChoiceFilter(
+            field_name="shelves__books",
+            queryset=library_models.Book.objects.all(),
+            null_label="NONE",
+        )
+
+        class Meta:
+            model = library_models.VisibleBranch
+            fields = {"name": ["exact"]}
+
+    _ = VisibleBranchType
+    _ = _null_sentinel_world()
+    branches = library_models.VisibleBranch.objects.order_by("pk")
+
+    for viewer_is_staff, expected in (
+        (
+            False,
+            [
+                "B-empty",
+                "B-mixed",
+                "B-none",
+                "B-repairs",
+            ],
+        ),
+        (True, ["B-empty", "B-mixed", "B-none"]),
+    ):
+        assert (
+            _null_sentinel_answer(
+                ManagedBranchFilter,
+                branches,
+                "book_or_none",
+                ["null"],
+                "name",
+                staff=viewer_is_staff,
+            )
+            == expected
+        )
+
+
+@pytest.mark.django_db
+@override_settings(FILTERS_NULL_CHOICE_LABEL="None")
+def test_a_walked_generated_enum_choice_leaf_reads_a_raw_null_as_the_columns_null_test() -> None:
+    """A generated ``EnumChoiceFilter`` past a hop reads a raw form's ``null`` as Django does.
+
+    Under django-filter's ``FILTERS_NULL_CHOICE_LABEL`` its choice field cleans ``null`` to the
+    sentinel, which its mixin hands to ``ChoiceFilter.filter``: ``books__circulation_status``
+    is the column's null test over the visible books, a shelf reaching none matching.
+    """
+    _ = _declare_hiding_types()
+
+    class StatusBookFilter(FilterSet):
+        class Meta:
+            model = library_models.Book
+            fields = {"circulation_status": ["exact"]}
+
+    class StatusShelfFilter(FilterSet):
+        books = RelatedFilter(StatusBookFilter, field_name="books")
+
+        class Meta:
+            model = library_models.Shelf
+            fields = {"code": ["exact"]}
+
+    assert isinstance(
+        StatusShelfFilter.get_filters()["books__circulation_status"],
+        EnumChoiceFilter,
+    )
+    _ = _null_sentinel_world()
+    shelves = library_models.Shelf.objects.order_by("pk")
+
+    for viewer_is_staff, expected in ((False, ["S-e", "S-m2", "S-r"]), (True, ["S-e", "S-m2"])):
+        assert (
+            _null_sentinel_answer(
+                StatusShelfFilter,
+                shelves,
+                "books__circulation_status",
+                ["null"],
+                "code",
+                staff=viewer_is_staff,
+            )
+            == expected
+        )
+
+
+@pytest.mark.django_db
+def test_a_walked_choice_subclass_replacing_the_comparison_answers_its_sentinel_as_unwalked() -> (
+    None
+):
+    """A shipped subclass of ``ChoiceFilter`` replacing its ``filter`` reads no null sentinel.
+
+    django-filter's ``DateRangeFilter`` keys its own ranges by value and asserts the value is
+    one of them, so its ``null_value`` under a ``null_label`` is refused there, walked as
+    unwalked, never read as the column's null test.
+    """
+
+    class SpecimenType(DjangoType):
+        class Meta:
+            model = scalar_models.ScalarSpecimen
+            fields = ("id", "label")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[scalar_models.ScalarSpecimen],
+            info: object,
+        ) -> QuerySet[scalar_models.ScalarSpecimen]:
+            return queryset if _viewer_is_staff(info) else queryset.exclude(label="hidden")
+
+    _ = SpecimenType
+    meta = {"model": scalar_models.NullableScalarSpecimen, "fields": {"label": ["exact"]}}
+    walked = type(
+        "RangedPartnerFilter",
+        (FilterSet,),
+        {
+            "leaf": DateRangeFilter(field_name="partner__occurred_on", null_label="NONE"),
+            "Meta": type("Meta", (), meta),
+        },
+    )
+    stock = type(
+        "StockRangedPartnerFilter",
+        (django_filters.FilterSet,),
+        {
+            "leaf": DateRangeFilter(field_name="partner__occurred_on", null_label="NONE"),
+            "Meta": type("Meta", (), meta),
+        },
+    )
+    _ = scalar_models.NullableScalarSpecimen.objects.create(
+        label="partnered",
+        partner=_make_scalar_specimen("hidden"),
+    )
+    partners = scalar_models.NullableScalarSpecimen.objects.order_by("pk")
+
+    with pytest.raises(AssertionError):
+        _ = list(stock(QueryDict("leaf=null"), queryset=partners).qs)
+    with pytest.raises(AssertionError):
+        _ = _null_sentinel_answer(walked, partners, "leaf", ["null"], "label", staff=False)
+
+
+# (parent model, path, filter class, values, exclude, anonymous, staff): past the last
+# relation the column's null test also keeps a parent no visible row links.
+_COLUMN_NULL_ROWS = {
+    "to-many-choice": (
+        "shelves",
+        "books__subtitle",
+        ChoiceFilter,
+        ["null"],
+        False,
+        [
+            "S-e",
+            "S-m1",
+            "S-m2",
+            "S-r",
+        ],
+        ["S-e", "S-m1", "S-m2"],
+    ),
+    "to-many-choice-excluded": (
+        "shelves",
+        "books__subtitle",
+        ChoiceFilter,
+        ["null"],
+        True,
+        ["S-o"],
+        ["S-o", "S-r"],
+    ),
+    "to-many-multiple-sentinel-and-value": (
+        "shelves",
+        "books__subtitle",
+        MultipleChoiceFilter,
+        ["null", "sub"],
+        False,
+        [
+            "S-e",
+            "S-m1",
+            "S-m2",
+            "S-o",
+            "S-r",
+        ],
+        [
+            "S-e",
+            "S-m1",
+            "S-m2",
+            "S-o",
+            "S-r",
+        ],
+    ),
+    "to-many-multiple-value": (
+        "shelves",
+        "books__subtitle",
+        MultipleChoiceFilter,
+        ["sub"],
+        False,
+        ["S-o"],
+        ["S-o", "S-r"],
+    ),
+    "forward-choice": (
+        "loans",
+        "book__subtitle",
+        ChoiceFilter,
+        ["null"],
+        False,
+        ["b-mixed", "b-repair"],
+        ["b-mixed"],
+    ),
+    "forward-multiple-sentinel-and-value": (
+        "loans",
+        "book__subtitle",
+        MultipleChoiceFilter,
+        ["null", "sub"],
+        False,
+        ["b-mixed", "b-open", "b-repair"],
+        ["b-mixed", "b-open", "b-repair"],
+    ),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", sorted(_COLUMN_NULL_ROWS))
+def test_a_walked_choice_leaf_ending_on_a_column_reads_its_null_value_as_the_columns_null_test(
+    shape: str,
+) -> None:
+    """A shipped ``ChoiceFilter`` / ``MultipleChoiceFilter`` on a related column reads its sentinel.
+
+    Django builds ``<relation>__<column>=None`` as the column's null test, which over the
+    visible rows also keeps a parent reaching no visible row, as unwalked it keeps one
+    reaching none at all.
+    """
+    _ = _declare_hiding_types()
+    route, path, filter_class, values, exclude, anonymous, staff = _COLUMN_NULL_ROWS[shape]
+    _ = _null_sentinel_world()
+    patron = library_models.Patron.objects.create(name="P")
+    for book in library_models.Book.objects.all():
+        _ = library_models.Loan.objects.create(book=book, patron=patron)
+    leaf = filter_class(
+        field_name=path,
+        choices=[("sub", "sub")],
+        null_label="NONE",
+        exclude=exclude,
+    )
+    model, column = (
+        (library_models.Shelf, "code")
+        if route == "shelves"
+        else (library_models.Loan, "book__title")
+    )
+    column_set = type(
+        "ColumnNullFilter",
+        (FilterSet,),
+        {"leaf": leaf, "Meta": type("Meta", (), {"model": model, "fields": {"id": ["exact"]}})},
+    )
+
+    for viewer_is_staff, expected in ((False, anonymous), (True, staff)):
+        assert (
+            _null_sentinel_answer(
+                column_set,
+                model.objects.order_by("pk"),
+                "leaf",
+                values,
+                column,
+                staff=viewer_is_staff,
+            )
+            == expected
+        )
+
+
+class _OptionalMultipleChoiceFilter(MultipleChoiceFilter):
+    """A ``MultipleChoiceFilter`` skipping a value naming every choice (``is_noop``)."""
+
+    always_filter = False
+
+
+class _OptionalModelMultipleChoiceFilter(ModelMultipleChoiceFilter):
+    """A ``ModelMultipleChoiceFilter`` skipping a value naming every choice (``is_noop``)."""
+
+    always_filter = False
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("shape", ["sentinel-as-every-choice", "sentinel-and-every-narrowed-key"])
+def test_a_walked_choice_leaf_reading_its_value_as_no_null_test_runs_as_cleaned(
+    shape: str,
+) -> None:
+    """A value the comparison skips, or builds as no null test, is the leaf's value, as unwalked.
+
+    A required multiple-choice filter whose ``always_filter`` is off reads a value naming
+    every choice as no constraint (django-filter's ``is_noop``): the sentinel as the only
+    choice besides none, or the sentinel and every book a ``queryset=`` narrower than the
+    relation admits. Either constrains nothing, so every shelf matches, a shelf holding only
+    a book outside that ``queryset=`` included.
+    """
+    _ = _declare_hiding_types()
+    pks = _null_sentinel_world()
+    if shape == "sentinel-as-every-choice":
+        leaf: Filter = _OptionalMultipleChoiceFilter(
+            field_name="books__subtitle",
+            choices=[],
+            null_label="NONE",
+            required=True,
+        )
+        values = ["null"]
+    else:
+        leaf = _OptionalModelMultipleChoiceFilter(
+            field_name="books",
+            queryset=library_models.Book.objects.exclude(title="b-repair"),
+            null_label="NONE",
+            required=True,
+        )
+        values = ["null", pks["b_open"], pks["b_mixed"]]
+    noop_set = type(
+        "NoopShelfFilter",
+        (FilterSet,),
+        {
+            "leaf": leaf,
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": library_models.Shelf, "fields": {"code": ["exact"]}},
+            ),
+        },
+    )
+    shelves = library_models.Shelf.objects.order_by("pk")
+
+    for viewer_is_staff in (False, True):
+        assert _null_sentinel_answer(
+            noop_set,
+            shelves,
+            "leaf",
+            values,
+            "code",
+            staff=viewer_is_staff,
+        ) == [
+            "S-e",
+            "S-m1",
+            "S-m2",
+            "S-o",
+            "S-r",
+        ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    (
+        "filter_class",
+        "values",
+        "anonymous",
+        "staff",
+    ),
+    [
+        pytest.param(
+            ChoiceFilter,
+            ["null"],
+            ["json-null"],
+            ["hidden-null", "json-null"],
+            id="choice",
+        ),
+        pytest.param(
+            MultipleChoiceFilter,
+            ["null", "a"],
+            ["json-null", "kind-a"],
+            ["hidden-null", "json-null", "kind-a"],
+            id="multiple-beside-a-value",
+        ),
+    ],
+)
+def test_a_walked_json_key_choice_leaf_reads_its_sentinel_as_a_json_null(
+    filter_class: type[Filter],
+    values: list[str],
+    anonymous: list[str],
+    staff: list[str],
+) -> None:
+    """Django builds a JSON key's ``exact=None`` as JSON ``null``, no null test: the walk keeps it.
+
+    A specimen matches through a visible partner whose payload holds ``kind: null`` (beside a
+    value, ORed with it, as unwalked), never through one whose payload lacks the key or one
+    the request may not see.
+    """
+
+    class PartnerType(DjangoType):
+        class Meta:
+            model = scalar_models.NullableScalarSpecimen
+            fields = ("id", "label")
+
+        @classmethod
+        @override
+        def get_queryset(
+            cls,
+            queryset: QuerySet[scalar_models.NullableScalarSpecimen],
+            info: object,
+        ) -> QuerySet[scalar_models.NullableScalarSpecimen]:
+            return queryset if _viewer_is_staff(info) else queryset.exclude(label="hidden")
+
+    _ = PartnerType
+    kind_set = type(
+        "KindSpecimenFilter",
+        (FilterSet,),
+        {
+            "kind": filter_class(
+                field_name="nullable_partners__payload__kind",
+                choices=[("a", "a")],
+                null_label="NONE",
+            ),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": scalar_models.ScalarSpecimen, "fields": {"label": ["exact"]}},
+            ),
+        },
+    )
+    for label, partner_label, payload in (
+        ("json-null", "visible-null", {"kind": None}),
+        ("no-key", "visible-empty", {}),
+        ("hidden-null", "hidden", {"kind": None}),
+        ("kind-a", "visible-a", {"kind": "a"}),
+    ):
+        _ = scalar_models.NullableScalarSpecimen.objects.create(
+            label=partner_label,
+            payload=payload,
+            partner=_make_scalar_specimen(label),
+        )
+    _ = _make_scalar_specimen("no-partner")
+    specimens = scalar_models.ScalarSpecimen.objects.order_by("pk")
+
+    for viewer_is_staff, expected in ((False, anonymous), (True, staff)):
+        assert (
+            _null_sentinel_answer(
+                kind_set,
+                specimens,
+                "kind",
+                values,
+                "label",
+                staff=viewer_is_staff,
+            )
+            == expected
+        )
+
+
+class _InitEditedNullShelfFilter(FilterSet):
+    """A shelf set customizing ``__init__``, so a parent set projects its leaves."""
+
+    books_or_none = ModelMultipleChoiceFilter(
+        field_name="books",
+        queryset=library_models.Book.objects.all(),
+        null_label="NONE",
+    )
+
+    class Meta:
+        model = library_models.Shelf
+        fields = {"code": ["exact"]}
+
+    def __init__(
+        self,
+        data: QueryDict | dict[str, object] | None = None,
+        queryset: QuerySet[django_models.Model] | None = None,
+        *,
+        request: HttpRequest | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        super().__init__(data=data, queryset=queryset, request=request, prefix=prefix)
+
+
+class _ProjectingNullBranchFilter(FilterSet):
+    """A branch set projecting ``_InitEditedNullShelfFilter``'s leaves through ``shelves``."""
+
+    shelves = RelatedFilter(_InitEditedNullShelfFilter, field_name="shelves")
+
+    class Meta:
+        model = library_models.Branch
+        fields = {"name": ["exact"]}
+
+
+class _ReProjectingNullShelfFilter(FilterSet):
+    """A shelf set re-projecting the branch set's projected leaves through ``branch``."""
+
+    branch = RelatedFilter(_ProjectingNullBranchFilter, field_name="branch")
+
+    class Meta:
+        model = library_models.Shelf
+        fields = {"code": ["exact"]}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("values", "anonymous", "staff"),
+    [
+        pytest.param(
+            ["null"],
+            [
+                "B-empty",
+                "B-mixed",
+                "B-none",
+                "B-repairs",
+            ],
+            ["B-empty", "B-mixed", "B-none"],
+            id="sentinel",
+        ),
+        pytest.param(
+            ["null", "{b_open}"],
+            [
+                "B-empty",
+                "B-mixed",
+                "B-none",
+                "B-open",
+                "B-repairs",
+            ],
+            [
+                "B-empty",
+                "B-mixed",
+                "B-none",
+                "B-open",
+            ],
+            id="sentinel-and-key",
+        ),
+    ],
+)
+def test_a_projected_null_sentinel_runs_its_null_test_in_the_child_set(
+    values: list[str],
+    anonymous: list[str],
+    staff: list[str],
+) -> None:
+    """A projected copy's sentinel is its child filter's null test, run inside the child set.
+
+    The copy (``ProjectedChildFilter``) runs the null test, and the leaf for the other keys,
+    in place of its child filter over the branch's visible shelves, a branch reaching none
+    kept as the null test keeps it.
+    """
+    _ = _declare_hiding_types()
+    pks = _null_sentinel_world()
+    sent = [value.format(**pks) for value in values]
+    branches = library_models.Branch.objects.order_by("pk")
+    projected = _ProjectingNullBranchFilter.get_filters()["shelves__books_or_none"]
+    assert isinstance(projected, ProjectedChildFilter)
+
+    for viewer_is_staff, expected in ((False, anonymous), (True, staff)):
+        assert (
+            _null_sentinel_answer(
+                _ProjectingNullBranchFilter,
+                branches,
+                "shelves__books_or_none",
+                sent,
+                "name",
+                staff=viewer_is_staff,
+            )
+            == expected
+        )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("values", "anonymous", "staff"),
+    [
+        pytest.param(
+            ["null"],
+            [
+                "S-e",
+                "S-m1",
+                "S-m2",
+                "S-r",
+            ],
+            ["S-e", "S-m1", "S-m2"],
+            id="sentinel",
+        ),
+        pytest.param(
+            ["null", "{b_open}"],
+            [
+                "S-e",
+                "S-m1",
+                "S-m2",
+                "S-o",
+                "S-r",
+            ],
+            [
+                "S-e",
+                "S-m1",
+                "S-m2",
+                "S-o",
+            ],
+            id="sentinel-and-key",
+        ),
+    ],
+)
+def test_a_re_projected_null_sentinel_runs_its_null_test_in_the_innermost_child_set(
+    values: list[str],
+    anonymous: list[str],
+    staff: list[str],
+) -> None:
+    """A copy of a projected copy runs its null test where the child filter it runs is held.
+
+    ``branch__shelves__books_or_none`` crosses two projections: the null test runs in the
+    shelf set holding ``books_or_none``, reached through the branch set's own projection.
+    """
+    _ = _declare_hiding_types()
+
+    class BranchType(DjangoType):
+        class Meta:
+            model = library_models.Branch
+            fields = ("id", "name")
+
+    _ = BranchType
+    pks = _null_sentinel_world()
+    sent = [value.format(**pks) for value in values]
+    shelves = library_models.Shelf.objects.order_by("pk")
+    projected = _ReProjectingNullShelfFilter.get_filters()["branch__shelves__books_or_none"]
+    assert isinstance(projected, ProjectedChildFilter)
+
+    for viewer_is_staff, expected in ((False, anonymous), (True, staff)):
+        assert (
+            _null_sentinel_answer(
+                _ReProjectingNullShelfFilter,
+                shelves,
+                "branch__shelves__books_or_none",
+                sent,
+                "code",
+                staff=viewer_is_staff,
+            )
+            == expected
+        )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        pytest.param(
+            ["null"],
+            [
+                "B-empty",
+                "B-mixed",
+                "B-none",
+                "B-repairs",
+            ],
+            id="sentinel",
+        ),
+        pytest.param(
+            ["null", "b_open"],
+            [
+                "B-empty",
+                "B-mixed",
+                "B-none",
+                "B-open",
+                "B-repairs",
+            ],
+            id="sentinel-and-key",
+        ),
+    ],
+)
+def test_a_projected_copys_own_filter_reads_its_null_sentinel(
+    values: list[str],
+    expected: list[str],
+) -> None:
+    """``ProjectedChildFilter.filter`` called directly reads its sentinel as the flat-leaf loop does.
+
+    The value is the one the child set's form cleans: the sentinel, then the books it names.
+    """
+    _ = _declare_hiding_types()
+    _ = _null_sentinel_world()
+    books = {book.title.replace("-", "_"): book for book in library_models.Book.objects.all()}
+    cleaned = [books.get(value, value) for value in values]
+    request = HttpRequest()
+    request.user = AnonymousUser()
+    branches = library_models.Branch.objects.order_by("pk")
+    filterset = _ProjectingNullBranchFilter(QueryDict(), queryset=branches, request=request)
+    projected = filterset.filters["shelves__books_or_none"]
+
+    assert sorted(projected.filter(branches, cleaned).values_list("name", flat=True)) == expected
 
 
 class _ImprintRelatedFilter(RelatedFilter):
