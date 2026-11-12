@@ -22,6 +22,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Generator, Sequence
 from pathlib import Path
@@ -3063,6 +3064,166 @@ def test_the_stop_flag_stops_the_timer_run_and_one_written_mid_run_its_main_pass
     ), document
 
 
+def _save(name: str = NAME) -> None:
+    copy = _new(name)
+    _ = _write(copy / "saved.txt", "saved\n")
+    assert work.main(["save", name]) == 0
+
+
+def _refused_tries(
+    patch: pytest.MonkeyPatch,
+    then: Callable[[], object] = lambda: None,
+) -> list[Path]:
+    """Record each refused try for a ``fleet.lock`` in this process; run ``then`` after each."""
+    real = fleet_sync._try_lock
+    refused: list[Path] = []
+
+    def spy(descriptor: int, lock: Path) -> bool:
+        taken = real(descriptor, lock)
+        if not taken and lock.name == work.FLEET_LOCK:
+            refused.append(lock)
+            _ = then()
+        return taken
+
+    patch.setattr(fleet_sync, "_try_lock", spy)
+    return refused
+
+
+def test_a_timer_run_whose_lock_stays_held_notes_the_pins_and_still_fast_forwards_main(
+    fleet: Fleet,
+) -> None:
+    fleet.monkeypatch.setattr(fleet_sync, "TIMER_LOCK_WAIT", 0.5)
+    fleet.monkeypatch.setattr(fleet_sync, "LOCK_POLL", 0.05)
+    _save()
+    ahead = _commit(fleet.repo_b, "new.txt", "from b\n")
+    with fleet_sync.holding(fleet.repo_a):
+        code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    assert _main(fleet.repo_a) == ahead
+    assert NAME not in work.pins(fleet.repo_b)
+    lock = fleet.repo_a / ".work" / work.FLEET_LOCK
+    expected = (
+        f"another fleet_sync run holds {lock}; this one skips (still held after a 0.5s wait)"
+    )
+    assert ("note", "sync", expected) in _results(document), document
+
+
+@pytest.mark.parametrize("lock", ["fleet", "land"])
+def test_the_timer_fast_forwards_main_from_a_peer_whose_lock_is_held(
+    fleet: Fleet,
+    lock: str,
+) -> None:
+    ahead = _commit(fleet.repo_b, "new.txt", "from b\n")
+    hold = fleet_sync.holding(fleet.repo_b) if lock == "fleet" else work.land_lock(fleet.repo_b)
+    with hold:
+        code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    expected = "another fleet_sync run holds" if lock == "fleet" else "land is in progress"
+    assert expected in str(_machines(document)["b"]["reason"])
+    assert _main(fleet.repo_a) == ahead
+
+
+@pytest.mark.parametrize("during", ["nothing", "stop"])
+def test_a_timer_run_waits_for_its_lock_and_carries_the_pins_once_it_frees(
+    fleet: Fleet,
+    during: str,
+) -> None:
+    """A lock freed during the wait carries the pins; a stop written during it carries none."""
+    fleet.monkeypatch.setattr(fleet_sync, "LOCK_POLL", 0.05)
+    _save()
+    before = _main(fleet.repo_a)
+    _ = _commit(fleet.repo_b, "new.txt", "from b\n")
+    held, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with fleet_sync.holding(fleet.repo_a):
+            held.set()
+            _ = release.wait(30)
+
+    stopped = during == "stop"
+
+    def free() -> None:
+        if stopped:
+            fleet_sync.write_stop(fleet.repo_a, "during the wait")
+        release.set()
+
+    refused = _refused_tries(fleet.monkeypatch, free)
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert held.wait(30)
+        code, document = fleet.run("sync", "--timer")
+    finally:
+        release.set()
+        holder.join(30)
+    assert code == 0, document
+    assert refused
+    assert not [row for row in _results(document) if "another fleet_sync run" in row[2]]
+    if stopped:
+        assert NAME not in work.pins(fleet.repo_b)
+        assert _main(fleet.repo_a) == before
+        detail = "the fleet is stopped (during the wait): no pins carried"
+        assert ("note", "sync", detail) in _results(document), document
+    else:
+        assert work.pins(fleet.repo_b)[NAME] == work.pins(fleet.repo_a)[NAME]
+
+
+@pytest.mark.parametrize("flags", [(), ("--main-only",), ("--pins-only",)])
+def test_without_the_timer_a_held_lock_is_tried_once_and_skips_with_exit_1(
+    fleet: Fleet,
+    flags: tuple[str, ...],
+) -> None:
+    fleet.monkeypatch.setattr(fleet_sync, "TIMER_LOCK_WAIT", 5.0)
+    fleet.monkeypatch.setattr(fleet_sync, "LOCK_POLL", 0.05)
+    _save()
+    before = _main(fleet.repo_a)
+    _ = _commit(fleet.repo_b, "new.txt", "from b\n")
+    with fleet_sync.holding(fleet.repo_a):
+        refused = _refused_tries(fleet.monkeypatch)
+        code, document = fleet.run("sync", *flags)
+    assert code == 1, document
+    lock = fleet.repo_a / ".work" / work.FLEET_LOCK
+    assert refused == [lock]
+    expected = f"another fleet_sync run holds {lock}; this one skips"
+    assert ("skip", "sync", expected) in _results(document), document
+    assert _main(fleet.repo_a) == before
+    assert NAME not in work.pins(fleet.repo_b)
+
+
+@pytest.mark.parametrize(
+    ("flag", "result", "expected"),
+    [("--timer", "note", 0), ("--pins-only", "failed", 1)],
+)
+def test_a_peer_whose_lock_is_taken_after_its_probe_is_a_note_for_the_timer_alone(
+    fleet: Fleet,
+    flag: str,
+    result: str,
+    expected: int,
+) -> None:
+    _save()
+    real = fleet_sync.find_machines
+    with contextlib.ExitStack() as stack:
+
+        def busy_after_probe(
+            scripts: str,
+            only: Sequence[str],
+            *,
+            member: bool = False,
+        ) -> tuple[fleet_sync.Machine, list[fleet_sync.Machine]]:
+            found = real(scripts, only, member=member)
+            _ = stack.enter_context(fleet_sync.holding(fleet.repo_b))
+            return found
+
+        fleet.monkeypatch.setattr(fleet_sync, "find_machines", busy_after_probe)
+        code, document = fleet.run("sync", flag)
+    assert code == expected, document
+    assert any(
+        row[:2] == (result, "pins") and "another fleet_sync run holds" in row[2]
+        for row in _results(document)
+    ), document
+    assert NAME not in work.pins(fleet.repo_b)
+
+
 # --------------------------------------------------------------------------------------------
 # Locks
 # --------------------------------------------------------------------------------------------
@@ -3237,6 +3398,8 @@ def test_the_macos_schedule_is_a_launchd_agent_running_sync_timer(tmp_path: Path
     program = json_list(agent, "ProgramArguments")
     assert program[:2] == ["/bin/sh", "-c"]
     assert "docs/fleet/scripts/fleet_sync.py sync --timer --json" in str(program[2])
+    assert program[2] == fleet_sync.schedule_line(fleet_sync.SCHEDULE_JITTER)
+    assert f"sleep $(( ${{n:-0}} % {fleet_sync.SCHEDULE_JITTER + 1} ))" in str(program[2])
     assert agent["StartInterval"] == 120
     assert agent["WorkingDirectory"] == str(fleet_sync.REPO_ROOT)
     assert agent["StandardOutPath"] == str(fleet_sync.REPO_ROOT / ".work" / "fleet-pins.log")
@@ -3253,7 +3416,10 @@ def test_the_linux_schedule_is_a_systemd_user_timer(tmp_path: Path) -> None:
     service = files[units / f"{fleet_sync.SCHEDULE_UNIT}.service"]
     timer = files[units / f"{fleet_sync.SCHEDULE_UNIT}.timer"]
     assert "sync --timer --json" in service
+    assert "sleep" not in service
     assert "OnUnitActiveSec=300s" in timer
+    assert f"RandomizedDelaySec={fleet_sync.SCHEDULE_JITTER}s" in timer.splitlines()
+    assert "AccuracySec=1s" in timer.splitlines()
     assert f">> {fleet_sync.REPO_ROOT / '.work' / 'fleet-pins.log'} 2>&1" in service
     assert fleet_sync.schedule_commands(files, "linux")[-1][-2:] == [
         "--now",
@@ -3343,6 +3509,32 @@ def test_the_timer_line_checks_the_stop_flag_before_any_python(
     (tmp_path / ".work" / "fleet-stop").unlink()
     ran = subprocess.run(["/bin/sh", "-c", line], capture_output=True, check=False)
     assert ran.returncode != 0
+
+
+def test_the_launchd_line_sleeps_only_past_the_stop_check_and_checks_again_after(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fleet_sync, "REPO_ROOT", tmp_path)
+    line = fleet_sync.schedule_line(fleet_sync.SCHEDULE_JITTER)
+    slept = tmp_path / "slept"
+    fake = f'#!/bin/sh\necho "$1" >> {slept}\n[ -z "$STOP_IN_SLEEP" ] || : > .work/fleet-stop\n'
+    _write(tmp_path / "bin" / "sleep", fake).chmod(0o755)
+    path = os.pathsep.join([str(tmp_path / "bin"), os.environ["PATH"]])
+    flag = _write(tmp_path / ".work" / "fleet-stop", "stopped\n")
+
+    def run(**extra: str) -> int:
+        env = {**os.environ, "PATH": path, **extra}
+        return subprocess.run(["/bin/sh", "-c", line], env=env, check=False).returncode
+
+    assert run() == 0
+    assert not slept.exists()
+    flag.unlink()
+    assert run(STOP_IN_SLEEP="1") == 0
+    assert 0 <= int(slept.read_text()) <= fleet_sync.SCHEDULE_JITTER
+    flag.unlink()
+    assert run() != 0
+    assert len(slept.read_text().split()) == 2
 
 
 def test_sync_pins_only_leaves_landed_pins_that_moved_alone(fleet: Fleet) -> None:

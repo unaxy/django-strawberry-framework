@@ -267,9 +267,15 @@ Safety
     reported and completed by the next run. Nothing is
     synced with a machine while a ``work.py land`` runs on either side. One run per
     machine at a time: ``.work/fleet.lock``, a kernel lock this run holds, and on
-    each peer a ``hold`` the peer's agent keeps for the run's length (released
+    each peer a ``hold`` the peer's agent keeps for the pair's length (released
     when the ssh pipe closes, however the run ends); every write a peer's agent
-    makes checks the hold's token. A run deletes nothing outside ``.work/`` and
+    makes checks the hold's token. A busy peer (its probe saw either lock held) is
+    left out of the run's pairs, and one whose hold finds a lock held is a ``failed``
+    row (a ``note`` in a ``--timer`` run, whose pair the next tick carries). A
+    ``--timer`` run's main pass alone runs outside ``.work/fleet.lock``: it writes
+    nothing a lock holder writes (only this checkout's main, under ``.work/land.lock``,
+    and objects a fetch brings), so every machine's main converges however busy the
+    locks are, busy peers' mains included. A run deletes nothing outside ``.work/`` and
     writes the main working tree only through the guarded fast-forward.
 
 Known gaps
@@ -301,7 +307,13 @@ Commands
         then main as a full sync does it (unless ``--copy``), each guard that holds
         main and each peer main it cannot fetch a ``note``: its main rows never set the
         exit code (a diverged main stays a ``conflict`` row in the log and exits 0,
-        since it lasts until someone merges by hand and would fail every tick).
+        since it lasts until someone merges by hand and would fail every tick). A
+        ``--timer`` run waits up to ``TIMER_LOCK_WAIT`` (60) seconds for this machine's
+        ``.work/fleet.lock``, still held a ``note`` (exit 0) that leaves the pins to the
+        next tick, and a peer whose hold finds its lock held is a ``note`` too; its main
+        pass runs either way, outside the lock, with every peer whose probe answered and
+        disqualified it only for a held lock. ``sync``, ``--main-only`` and
+        ``--pins-only`` try the lock once: held, the run skips (exit 1).
         ``--dry-run`` writes nothing but fetches peers' main commits into the
         object store so it can say what a fast-forward would do.
     ``fetch-pins NAME --machine M [--dry-run]``
@@ -322,11 +334,17 @@ Commands
         Print this machine's timer for ``sync --timer --json`` every
         ``--every`` seconds (default 120, at least 30): a launchd agent on macOS,
         a systemd user service and timer on Linux, each logging to the checkout's
-        ``.work/fleet-pins.log``.
+        ``.work/fleet-pins.log``. Each start is put off a random 0 to 30 seconds
+        (``SCHEDULE_JITTER``) so the fleet's timers never start in lockstep: the
+        systemd timer's ``RandomizedDelaySec=30s`` with ``AccuracySec=1s``, and in the
+        launchd agent's line a ``sleep`` after the stop-flag check (a stopped machine
+        never sleeps) and a second check after it.
         ``--install`` writes it and loads it (``launchctl bootstrap``,
         ``systemctl --user enable --now``); run it from the shared checkout, once
-        per machine. The timer's ``PATH`` is the folders git, ssh, rsync and
-        tailscale are found in when it is made.
+        per machine, and again on each machine whenever the timer files change (a
+        timer installed earlier keeps its own files: no jitter until then). The
+        timer's ``PATH`` is the folders git, ssh, rsync and tailscale are found in
+        when it is made.
     ``handoff <name> [--to M] [--force-offline-home]``
         Move a copy's home (above).
     ``--json`` on each prints one document for agents. Exit codes: ``0`` synced
@@ -349,13 +367,17 @@ Running it periodically
     there) and every machine's main converges on the fleet's newest by
     fast-forward; a timer installed before ``--timer`` existed runs ``sync
     --pins-only`` until ``schedule --install`` runs again. The full ``sync``
-    (replicas, evidence and its deletions) stays the maintainer's to run or time. A cron line
+    (replicas, evidence and its deletions) stays the maintainer's to run or time. With
+    every machine's timer pairing with every peer, locks are often held: a timer run waits
+    a bounded time for its own, notes the pins it could not carry (the next tick carries
+    them) and fast-forwards main regardless (``sync`` above). A cron line
     (``*/10 * * * * cd ~/projects/django-strawberry-framework &&
     .venv/bin/python docs/fleet/scripts/fleet_sync.py sync --json >> ~/.cache/fleet-sync.log
     2>&1``), a
     systemd user timer beside ``git-autosync.timer`` on Linux, or a launchd
     agent with ``StartInterval`` on macOS each fit; a run that finds another
-    holding the lock skips, so overlapping runs are harmless.
+    holding the lock skips (a ``--timer`` run after its wait), so overlapping runs are
+    harmless.
 
 Standard library plus ``scripts/work.py``, ``docs/fleet/scripts/fleet.py`` and
 ``scripts/_git.py`` for the copy, machine and git rules (``docs/fleet/scripts/fleet.py``
@@ -512,6 +534,12 @@ HOLD_TIMEOUT = 60.0
 RSYNC_IO_TIMEOUT = 120
 #: Seconds one ``git fetch`` of a peer's main may take.
 FETCH_TIMEOUT = 600.0
+#: Seconds a ``sync --timer`` run waits for this machine's ``.work/fleet.lock`` (another run's,
+#: or a peer's hold for its pair) before it leaves the pins to the next tick; well under the
+#: timer's interval (:data:`SCHEDULE_EVERY`) and its kill (:data:`SCHEDULE_TIME_LIMIT`).
+TIMER_LOCK_WAIT = 60.0
+#: Seconds between two tries for ``.work/fleet.lock`` while a wait lasts.
+LOCK_POLL = 1.0
 
 #: The wrapper a peer runs: find the checkout and its scripts, then the agent.
 REMOTE_WRAPPER = """\
@@ -536,6 +564,10 @@ class FleetError(Exception):
 
 class SetupError(FleetError):
     """The run cannot start here (exit 2)."""
+
+
+class BusyError(FleetError):
+    """A machine's ``.work/fleet.lock`` is held (another run, a peer's hold) or a ``land`` runs."""
 
 
 class ConflictError(FleetError):
@@ -613,25 +645,51 @@ def _lock_busy(path: Path) -> bool:
         os.close(descriptor)
 
 
+def _take_fleet_lock(repo: Path, lock: Path) -> tuple[int, str]:
+    """Open and lock ``lock``; return its descriptor and ``""``, else ``-1`` and why it is busy.
+
+    Busy is another holder of ``lock`` or of ``.work/land.lock``; a busy try keeps nothing open.
+    """
+    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    busy = "unread"
+    try:
+        if not _try_lock(descriptor, lock):
+            busy = f"another fleet_sync run holds {lock}; this one skips"
+        elif _lock_busy(work.work_dir(repo) / work.LAND_LOCK):
+            busy = "a work.py land is in progress; no sync until it ends"
+        else:
+            busy = ""
+    finally:
+        if busy:
+            os.close(descriptor)
+    return (-1, busy) if busy else (descriptor, "")
+
+
 @contextlib.contextmanager
-def holding(repo: Path) -> Generator[str, None, None]:
+def holding(repo: Path, wait: float = 0.0) -> Generator[str, None, None]:
     """Hold ``.work/fleet.lock`` and publish a fresh holder token; yield the token.
 
+    A busy lock is tried again every :data:`LOCK_POLL` seconds for up to ``wait`` seconds
+    (``0``: tried once), holding nothing between tries.
+
     Raises:
-        FleetError: another run (or another machine's hold) has it, or a ``land`` runs.
+        BusyError: another run (or another machine's hold) has it, or a ``land`` runs, for
+            the whole wait.
+        FleetError: the lock call failed for a reason but another holder.
 
     """
     _ = work.ensure_sentinel(repo)
     lock = work.work_dir(repo) / work.FLEET_LOCK
     work.check_layout(repo)
-    descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + wait
+    descriptor, busy = _take_fleet_lock(repo, lock)
+    while busy:
+        if time.monotonic() >= deadline:
+            msg = f"{busy} (still held after a {wait:g}s wait)" if wait else busy
+            raise BusyError(msg)
+        time.sleep(LOCK_POLL)
+        descriptor, busy = _take_fleet_lock(repo, lock)
     try:
-        if not _try_lock(descriptor, lock):
-            msg = f"another fleet_sync run holds {lock}; this one skips"
-            raise FleetError(msg)
-        if _lock_busy(work.work_dir(repo) / work.LAND_LOCK):
-            msg = "a work.py land is in progress; no sync until it ends"
-            raise FleetError(msg)
         folder = work._container(repo, work.FLEET, create=True)
         token = work._token()
         holder = folder / HOLDER
@@ -2073,6 +2131,9 @@ def agent_hold(repo: Path, stdin: IO[bytes], stdout: IO[str]) -> int:
             _ = stdout.write(json.dumps({"token": token}) + "\n")
             stdout.flush()
             _ = stdin.read()
+    except BusyError as error:
+        _ = stdout.write(json.dumps({"error": str(error), "busy": True}) + "\n")
+        return 1
     except (FleetError, work.WorkError) as error:
         _ = stdout.write(json.dumps({"error": str(error)}) + "\n")
         return 1
@@ -2283,7 +2344,8 @@ class Endpoint:
         """Hold this machine's fleet lock for the block; yield the token its writes carry.
 
         Raises:
-            FleetError: the machine is busy (another run, a land) or the hold failed.
+            BusyError: the machine is busy (another run, a land), as its agent answers.
+            FleetError: the hold failed (an older agent's busy answer reads as one).
 
         """
         if self.local:
@@ -2311,7 +2373,8 @@ class Endpoint:
                 if not token:
                     detail = _string(answer, "error") or "the hold printed no token"
                     msg = f"{self.label}: {detail}"
-                    raise FleetError(msg)
+                    # An older agent's busy answer carries no ``busy``: it reads as a failure.
+                    raise BusyError(msg) if answer.get("busy") is True else FleetError(msg)
                 yield token
             finally:
                 try:
@@ -2398,6 +2461,8 @@ class Machine:
     probe: Probe | None = None
     endpoint: Endpoint | None = None
     labels: tuple[str, ...] = ()
+    #: Its probe disqualified it only for a fleet run or a ``land`` holding a lock there.
+    busy: bool = False
 
     @property
     def id(self) -> str:
@@ -2578,11 +2643,13 @@ def qualify(machine: Machine, local: Probe | None) -> None:
     reasons = _disqualifications(probe, local)
     if reasons:
         machine.reason = "; ".join(reasons)
+        machine.busy = not _disqualifications(probe, local, busy=False)
         if not machine.local:
             machine.endpoint = None
 
 
-def _disqualifications(probe: Probe, local: Probe | None) -> list[str]:
+def _disqualifications(probe: Probe, local: Probe | None, *, busy: bool = True) -> list[str]:
+    """Return why ``probe``'s machine does not qualify; ``busy`` false leaves out a held lock."""
     reasons: list[str] = []
     if not probe.at_checkout:
         reasons.append(f"its checkout {probe.repo} is not ~/{CHECKOUT}")
@@ -2595,9 +2662,9 @@ def _disqualifications(probe: Probe, local: Probe | None) -> list[str]:
         )
     if not probe.rsync:
         reasons.append("no rsync")
-    if probe.land_busy:
+    if busy and probe.land_busy:
         reasons.append("a work.py land is in progress there")
-    if probe.fleet_busy:
+    if busy and probe.fleet_busy:
         reasons.append("another fleet_sync run holds its lock")
     if probe.stopped:
         reasons.append(f"the fleet is stopped there ({probe.stopped})")
@@ -4480,7 +4547,9 @@ def sync_pins_with_peer(
 
     Saves and ``start`` pins (:func:`fixed_pin`) and the tombstones that bury them move
     create-only as in a full sync; ``landed`` pins, replicas, evidence and main stay as
-    they are, so a run takes seconds and fits a short timer.
+    they are, so a run takes seconds and fits a short timer. A peer whose lock is held when
+    its hold is asked for is a ``failed`` row, a ``note`` in a ``--timer`` run: the pair is
+    carried by the next tick, or by the run holding that lock if it pairs with this machine.
     """
     rows: list[Row] = []
     try:
@@ -4520,6 +4589,8 @@ def sync_pins_with_peer(
                 tokens,
                 dry_run=args.dry_run,
             )
+    except BusyError as error:
+        rows.append(Row("pins", peer.label, "note" if args.timer else "failed", str(error)))
     except (FleetError, work.WorkError) as error:
         rows.append(Row("pins", peer.label, "failed", str(error)))
     return [row for row in rows if row.result != "none"]
@@ -4807,26 +4878,59 @@ def cmd_sync(args: _Args) -> int:
     for machine in peers:
         if machine.probe is not None:
             _REPOS[machine.id] = machine.probe.repo
-    lock = contextlib.nullcontext("") if args.dry_run else holding(REPO_ROOT)
-    try:
-        with lock as local_token:
-            if args.pins_only or args.timer:
-                for machine in peers:
-                    rows += sync_pins_with_peer(here, machine, local_token, args)
-                if args.timer and not args.copy:
-                    rows += sync_main(peers, dry_run=args.dry_run, timer=True)
-            else:
-                if not args.main_only:
+    if args.timer:
+        rows += timer_run(here, others, args)
+    else:
+        lock = contextlib.nullcontext("") if args.dry_run else holding(REPO_ROOT)
+        try:
+            with lock as local_token:
+                if args.pins_only:
                     for machine in peers:
-                        rows += sync_with_peer(here, machine, local_token, args)
-                if not args.copy:
-                    rows += sync_main(peers, dry_run=args.dry_run)
-    except FleetError as error:
-        rows.append(Row("sync", here.label, "skip", str(error)))
+                        rows += sync_pins_with_peer(here, machine, local_token, args)
+                else:
+                    if not args.main_only:
+                        for machine in peers:
+                            rows += sync_with_peer(here, machine, local_token, args)
+                    if not args.copy:
+                        rows += sync_main(peers, dry_run=args.dry_run)
+        except FleetError as error:
+            rows.append(Row("sync", here.label, "skip", str(error)))
     document = {"machines": machine_rows(here, others), "rows": [row.as_json() for row in rows]}
     _render(document, as_json=args.json)
     counted = [row for row in rows if not (args.timer and row.subject == "main")]
     return 1 if any(row.result in TROUBLE for row in counted) else 0
+
+
+def timer_run(here: Machine, others: Sequence[Machine], args: _Args) -> list[Row]:
+    """Do ``sync --timer``'s work: the pins under this machine's fleet lock, then main outside it.
+
+    The lock is waited for up to :data:`TIMER_LOCK_WAIT` seconds; held the whole wait, the
+    pins are a ``note`` for the next tick, and a stop written during the wait leaves them too.
+    The main pass needs no fleet lock, here or on a peer: it moves only this checkout's main,
+    under ``.work/land.lock`` and :func:`fast_forward`'s guards, and reads each peer's main from
+    its probe and a fetch into this repository's objects (no hold, no ref), so it runs whoever
+    holds a lock, and takes a peer whose probe disqualified it only for a held lock too.
+    """
+    rows: list[Row] = []
+    lock = contextlib.nullcontext("") if args.dry_run else holding(REPO_ROOT, TIMER_LOCK_WAIT)
+    try:
+        with lock as local_token:
+            stopped = stop_reason(REPO_ROOT)
+            if stopped:
+                detail = f"the fleet is stopped ({stopped}): no pins carried"
+                rows.append(Row("sync", here.label, "note", detail))
+            else:
+                for machine in others:
+                    if machine.qualified:
+                        rows += sync_pins_with_peer(here, machine, local_token, args)
+    except BusyError as error:
+        rows.append(Row("sync", here.label, "note", str(error)))
+    except FleetError as error:
+        rows.append(Row("sync", here.label, "skip", str(error)))
+    if not args.copy:
+        mains = [machine for machine in others if machine.qualified or machine.busy]
+        rows += sync_main(mains, dry_run=args.dry_run, timer=True)
+    return rows
 
 
 def cmd_fetch_pins(args: _Args) -> int:
@@ -4915,6 +5019,9 @@ SCHEDULE_EVERY = 120
 SCHEDULE_TIME_LIMIT = 900
 #: The shortest interval ``schedule`` accepts; a run reads every peer's inventory.
 SCHEDULE_SHORTEST = 30
+#: The most seconds a scheduled run is put off at random, so the fleet's timers never start
+#: in lockstep: systemd's ``RandomizedDelaySec``, a ``sleep`` in the launchd agent's line.
+SCHEDULE_JITTER = 30
 
 
 def schedule_path() -> str:
@@ -4927,19 +5034,30 @@ def schedule_path() -> str:
     return os.pathsep.join(folders)
 
 
-def schedule_line() -> str:
+def schedule_line(jitter: int = 0) -> str:
     """Return the shell line a scheduled run executes.
 
     It checks the stop flag (``docs/fleet/scripts/fleet_stop.py``) before any Python starts, so a
     broken ``fleet_sync.py`` cannot skip it, and kills a run past
-    :data:`SCHEDULE_TIME_LIMIT` seconds (``perl``'s ``alarm`` survives the ``exec``).
+    :data:`SCHEDULE_TIME_LIMIT` seconds (``perl``'s ``alarm`` survives the ``exec``). A
+    ``jitter`` sleeps a random ``0..jitter`` seconds (from ``/dev/urandom``, so two machines
+    started in one second differ) after that check, so a stopped machine never sleeps, and
+    checks the flag again before the run. Only the launchd agent passes one: systemd puts
+    ``$`` and ``%`` in ``ExecStart`` to its own use, and its timer has ``RandomizedDelaySec``.
     """
     python = shlex.quote(str(REPO_ROOT / ".venv" / "bin" / "python"))
     run = f"{python} docs/fleet/scripts/fleet_sync.py sync --timer --json"
     limit = f"perl -e 'alarm shift @ARGV; exec @ARGV or die' {SCHEDULE_TIME_LIMIT}"
+    stop = f"[ -e .work/{STOP_FLAG} ] && exit 0; "
+    pause = (
+        "n=$(od -An -N2 -tu2 /dev/urandom 2>/dev/null | tr -dc 0-9); "
+        f"sleep $(( ${{n:-0}} % {jitter + 1} )); {stop}"
+        if jitter
+        else ""
+    )
     return (
         f"cd {shlex.quote(str(REPO_ROOT))} || exit 1; "
-        f"[ -e .work/{STOP_FLAG} ] && exit 0; "
+        f"{stop}{pause}"
         f"command -v perl >/dev/null 2>&1 && exec {limit} {run}; "
         f"exec {run}"
     )
@@ -4950,15 +5068,19 @@ def schedule_files(home: Path, every: int, platform: str = sys.platform) -> dict
 
     A launchd agent on macOS, a systemd user service and timer on Linux; each runs the
     checkout's ``.venv`` Python from the checkout and appends to ``.work/fleet-pins.log``;
-    only the timer file itself sits outside the checkout, where the OS reads it.
+    only the timer file itself sits outside the checkout, where the OS reads it. Each start
+    is put off a random 0 to :data:`SCHEDULE_JITTER` seconds: launchd has no jitter of its
+    own, so its line sleeps (:func:`schedule_line`); the systemd timer has
+    ``RandomizedDelaySec`` and ``AccuracySec=1s`` (the default minute puts every elapse up to
+    a minute late, at one point of the window fixed per host, not random per run).
 
     Raises:
         SetupError: ``platform`` is neither.
 
     """
     log = REPO_ROOT / ".work" / SCHEDULE_LOG
-    command = ["/bin/sh", "-c", schedule_line()]
     if platform == "darwin":
+        command = ["/bin/sh", "-c", schedule_line(SCHEDULE_JITTER)]
         agent = {
             "Label": SCHEDULE_LABEL,
             "ProgramArguments": command,
@@ -4982,7 +5104,8 @@ def schedule_files(home: Path, every: int, platform: str = sys.platform) -> dict
         )
         timer = (
             "[Unit]\nDescription=Sync django-strawberry-framework saves across the fleet\n\n"
-            f"[Timer]\nOnBootSec=2min\nOnUnitActiveSec={every}s\n\n"
+            f"[Timer]\nOnBootSec=2min\nOnUnitActiveSec={every}s\n"
+            f"RandomizedDelaySec={SCHEDULE_JITTER}s\nAccuracySec=1s\n\n"
             "[Install]\nWantedBy=timers.target\n"
         )
         return {
