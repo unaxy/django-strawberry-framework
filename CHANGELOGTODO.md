@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 233 to do.
+Progress: 0 done, 234 to do.
 
 ## From dry-0_0_15_3
 
@@ -1128,6 +1128,13 @@ Progress: 0 done, 233 to do.
 - [ ] 931. CHANGELOG entry for item 766: the `ConfigurationError` raised for an active `RelatedFilter` branch, or at
   `finalize_django_types()` for a `RelatedFilter` target with no registered `DjangoType`, cites "spec-027 Decision 8"
   where it cited "spec-027 Decision 8 step 3"
+- [ ] 934. CHANGELOG entry for item 783: a package `FilterSet` reads every filter's lazily spelled `field_name` and
+  `lookup_expr` (`gettext_lazy`, `SimpleLazyObject`) as the text they render on every path: a lazily named
+  `MultipleChoiceFilter`, `ModelMultipleChoiceFilter` or `TypedMultipleChoiceFilter` (or one with a lazy
+  `lookup_expr`) answers its plain spelling's rows where it raised `TypeError` (masked over GraphQL) unless a relation
+  hop was walked, a `method=` receives the text and a class-level `filter` override reads `self.field_name` as text,
+  and a served `RangeFilter` with a lazy `field_name` builds where the schema build raised `TypeError` (item 920); a
+  `str` subclass name is kept as declared
 
 ## From dry-upstream-0_0_15
 

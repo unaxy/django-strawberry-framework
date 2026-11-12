@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 513 done, 106 to do. The CHANGELOG entries filed here moved to
+Progress: 515 done, 106 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3016,15 +3016,29 @@ Progress: 513 done, 106 to do. The CHANGELOG entries filed here moved to
   graphene-django 3.2.3 and django-graphene-filters 1.0.0 type the same declarations by their form and fail every
   request with the same `IsNull` `ValueError`; Django's `IsNull` (unchanged 4.0 to 6.1) checks its operand only in
   `as_sql`. Evidence: the 770 fact reports (repro grid of 364 declarations, 1344 raw cells; upstream probes).
+- [x] 783. fixed: a package `FilterSet` reads a declared filter's lazily spelled `field_name` and `lookup_expr` (a lazy
+  translation string, a `SimpleLazyObject`) as the text it renders on every path, walked or not:
+  `filters/sets.py::FilterSet._publish_filters` publishes, and `FilterSet._filter_table` answers for a set that cannot
+  publish yet, a deep copy through `_declared_as_text` holding each lazy name as text, so no instance copies a lazy
+  name, a `method=` receives the text and a class-level `filter` override reads `self.field_name` as text; a `str`
+  subclass (a `TextChoices` / `StrEnum` member) is kept as declared, and the declaration, `declared_filters` and a stock
+  `django_filters.FilterSet` sharing the instance keep the lazy object. A multiple-choice-family filter (and a lazy
+  `lookup_expr` on it) answered `TypeError: keywords must be strings` unwalked and rows walked; it now answers its plain
+  spelling's rows both ways (grid: 130 lazy walked/unwalked splits closed, 193 error cells now equal to their str twin,
+  0 cells answering rows at the parent changed), where stock django-filter still refuses some lazily spelled names.
+  Aligning the walked leaf to the error instead was rejected: it narrows rows that answered at the parent. Pinned live
+  by `examples/fakeshop/test_query/test_lazy_filter_names_api.py` (lazily named filters added to the scalars
+  `ScalarSpecimenFilter` / `NullableScalarSpecimenFilter` and library `BranchFilter`, a flat copy through
+  `allLibraryBooks`), package rows in `tests/filters/test_finalizer.py` (`method=` text, the shared declaration copy,
+  a set that cannot publish, a `str` subclass kept beside a lazy name); spec-027 (Decision, Slice checklist, Edge
+  cases, Test plan, Definition of done), GLOSSARY `FilterSet`, docs/README. Folds 920. Filed 932, 933; CHANGELOG 934
+- [x] 920. fixed by 783: a served `RangeFilter` with a lazy `field_name` builds and compares its column, since
+  publication hands `filters/inputs.py::_build_range_input_class` text. Pinned by the fakeshop
+  `NullableScalarSpecimenFilter.score_window` and
+  `test_lazy_filter_names_api.py::test_a_lazily_named_range_filter_serves_and_compares_its_column`
 
 ## To do: found along the way
 
-- [ ] 783. (robustness) A declared `MultipleChoiceFilter` / `ModelMultipleChoiceFilter` (`exact`) with a lazy
-  `field_name` (`gettext_lazy("children__label")`) gives one declaration two answers: unwalked, django-filter's
-  `MultipleChoiceFilter.get_filter_predicate` keys the predicate by the lazy object and the request raises
-  `TypeError: keywords must be strings`; walked, `filters/sets.py::FilterSet._bound_terminal` rebinds `field_name` to
-  a str path and the request answers rows. 780 aligns a to-many relation key only; a target path and a two-hop walk
-  still split. Found researching 780
 - [ ] 786. (robustness) A `ModelForm`'s default `forms.JSONField` over a `JSONField` re-parses a decoded JSON
   string as JSON text: the JSON string `"hi"` sent is refused "Enter a valid JSON.", the JSON string `'{"a": 1}'` is
   stored as the object, and an update omitting the field over a stored JSON string is refused the same way, though the
@@ -3038,7 +3052,10 @@ Progress: 513 done, 106 to do. The CHANGELOG entries filed here moved to
   walks (a `RelatedFilter` on the relation, or a target type with its own `get_queryset`) answers no row where
   unwalked answers (`ScalarSpecimen.children` naming two children: walked `[]`, unwalked `['p1']`): each AND is re-read
   on the target key column over a single target row (`filters/sets.py::FilterSet._leaf_chain`,
-  `_LeafChain.terminal_value`). One declaration, two answers (GOAL "Trust boundary"). Found researching 784
+  `_LeafChain.terminal_value`). One declaration, two answers (GOAL "Trust boundary"). Found researching 784.
+  The same split holds for `MultipleChoiceFilter(conjoined=True)` and on a to-many target column
+  (`children__label`, `shelves__code`) and a two-hop path ending to-many (`partner__children__label`), for every
+  spelling (783's grid: 36 cells per spelling)
 - [ ] 816. (robustness) A filter declared over a `GeneratedField` whose `output_field` no filter converts (a consumer
   column class with no `SCALAR_MAP` entry, or a `FileField`) is refused at build with the DjangoType advice
   (`types/converters.py::generated_output_field`: "Add an entry to SCALAR_MAP or exclude this field via Meta.exclude." /
@@ -3118,11 +3135,6 @@ Progress: 513 done, 106 to do. The CHANGELOG entries filed here moved to
   only an intermediate row holds, which no leaf row extends, sorts as present with its code instead of as missing,
   against the docstring and spec-028 Decision 8 step 4 ("a code only an intermediate row holds names no related row");
   a type on the root ancestor (the keys branch) answers it. Identical before 866. Found verifying 866
-- [ ] 920. (robustness) A served set declaring a `RangeFilter` whose `field_name` is a lazy string
-  (`RangeFilter(field_name=gettext_lazy("object_id"))` over a plain column) fails the schema build with
-  `TypeError: sequence item 0: expected str instance, __proxy__ found`: `filters/inputs.py::_build_range_input_class`
-  reaches `filters/base.py::_filterset_lookup_lhs_path` / `_query_lookup_lhs_path`, which join the raw lazy
-  `field_name`; the same set unserved builds. Same before 881. Found researching 881
 - [ ] 921. (robustness) `filters/base.py::refuse_unresolvable_lookup` and 877's `lookup_expr` branch of
   `filters/inputs.py::refuse_joinless_relation` refuse, when the set publishes, an argument an annotation named for the
   lookup could hold: `CharFilter(field_name="content_object", lookup_expr="name")` over
@@ -3165,6 +3177,17 @@ Progress: 513 done, 106 to do. The CHANGELOG entries filed here moved to
   (`spec-010 #"The unconditional deferral at step 7 is the load-bearing part"`,
   `tests/types/test_definition_order.py::test_reverse_fk_resolves_when_parent_declared_before_child`) is never
   checked, so its quote rots silently (30 in first-party .py at 0799c986). Found researching 766
+- [ ] 932. (robustness) `BooleanFilter(field_name="children" | "shelves", lookup_expr="isnull")` sent `false` on a
+  walked to-many key (a `RelatedFilter` on the relation, or a target type with `get_queryset`) answers distinct parents
+  (`['root']`, `['east', 'west']`) where unwalked answers Django's duplicated parents (`['root', 'root']`,
+  `['east', 'east', 'west']`), raw and over GraphQL, every spelling, against GLOSSARY `FilterSet` "Flat fields walking
+  a declared branch" ("answers as Django answers the same path") and `filters/sets.py::FilterSet._apply_relation_leaf`'s
+  docstring (the parents' multiplicity, as for a leaf walking no hop). Found researching 783
+- [ ] 933. (robustness) A `RelatedFilter` whose own `field_name` is lazily spelled (`gettext_lazy("shelves")`) stays
+  lazy (it lives in `related_filters`, not the published table 783 reads as text), and with no `DjangoType`
+  registered for its target model it skips spec-027 Decision 8's refusal that a plain `str` or `StrEnum` spelling
+  raises ("no DjangoType is registered for its target model Shelf") and answers rows; with a hiding target type every
+  spelling answers the same rows. Found verifying 783
 
 ## To do: holes found re-checking the fixes
 

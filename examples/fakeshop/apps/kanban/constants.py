@@ -209,6 +209,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "examples/fakeshop/test_query/test_keyset_api.py",
     "examples/fakeshop/test_query/test_keyset_order_terms_api.py",
     "examples/fakeshop/test_query/test_lateral_strategy_api.py",
+    "examples/fakeshop/test_query/test_lazy_filter_names_api.py",
     "examples/fakeshop/test_query/test_library_api.py",
     "examples/fakeshop/test_query/test_library_generated_api.py",
     "examples/fakeshop/test_query/test_library_inheritance_api.py",

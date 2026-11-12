@@ -110,12 +110,26 @@ specimen's ``occurred_at`` less its parent's), and ``child_count_among`` /
 They are the acceptance surface for a path only the queryset the filter runs on resolves:
 published ``String`` (no queryset exists when the schema is built), each member and bound
 is cleaned as that queryset compares it.
+
+``tag_label_among`` on ``ScalarSpecimenFilter`` is django-filter's ``MultipleChoiceFilter``
+whose ``field_name`` is lazy translation text (``gettext_lazy("tag__label")``), a flat leaf
+walked across the ``tag`` branch. ``NullableScalarSpecimenFilter`` declares the same filter
+two hops out (``partner_tag_label_any``, ``gettext_lazy("partner__tag__label")``), the same
+path with a lazy ``lookup_expr`` (``partner_tag_label_containing``,
+``gettext_lazy("icontains")``) and a ``RangeFilter`` with a lazy ``field_name``
+(``score_window``, ``gettext_lazy("score")``). They are the acceptance surface for a lazily
+spelled name: the set reads each as the text it renders, so each answers what its plain
+``str`` spelling answers.
 """
 
 from __future__ import annotations
 
+from typing import TypeVar
+
 import django_filters
 from django import forms
+from django.utils.functional import Promise
+from django.utils.translation import gettext_lazy
 from django_filters.widgets import SuffixedMultiWidget
 from typing_extensions import override
 
@@ -128,6 +142,22 @@ from django_strawberry_framework.filters import (
 )
 
 from . import models
+
+_FilterT = TypeVar("_FilterT", bound=django_filters.Filter)
+
+# The tag labels ``tag_label_among`` and ``partner_tag_label_any`` accept.
+_TAG_LABEL_CHOICES = (("hot", "hot"), ("cold", "cold"))
+
+
+def _spelled_lazily(filter_instance: _FilterT, **names: Promise) -> _FilterT:
+    """``filter_instance`` holding each of ``names`` as the lazy text a project may declare it with.
+
+    The stubs type ``field_name`` and ``lookup_expr`` as ``str``; a project hands Django's lazy
+    translation text (``gettext_lazy``) where a ``str`` is read.
+    """
+    for attribute, value in names.items():
+        setattr(filter_instance, attribute, value)
+    return filter_instance
 
 
 class UnderscoredRangeWidget(SuffixedMultiWidget):
@@ -223,6 +253,10 @@ class ScalarSpecimenFilter(FilterSet):
     payload_flag = django_filters.BooleanFilter(field_name="payload__flag")
     payload_price = django_filters.CharFilter(field_name="payload__price")
     payload_has_key = django_filters.CharFilter(field_name="payload", lookup_expr="has_key")
+    tag_label_among = _spelled_lazily(
+        django_filters.MultipleChoiceFilter(choices=_TAG_LABEL_CHOICES),
+        field_name=gettext_lazy("tag__label"),
+    )
 
     class Meta:
         model = models.ScalarSpecimen
@@ -255,6 +289,18 @@ class NullableScalarSpecimenFilter(FilterSet):
 
     partner = RelatedFilter(ScalarSpecimenFilter, field_name="partner")
     price_span = RangeFilter(field_name="price", lookup_expr="range")
+    partner_tag_label_any = _spelled_lazily(
+        django_filters.MultipleChoiceFilter(choices=_TAG_LABEL_CHOICES),
+        field_name=gettext_lazy("partner__tag__label"),
+    )
+    partner_tag_label_containing = _spelled_lazily(
+        django_filters.MultipleChoiceFilter(
+            field_name="partner__tag__label",
+            choices=(("ho", "ho"), ("co", "co")),
+        ),
+        lookup_expr=gettext_lazy("icontains"),
+    )
+    score_window = _spelled_lazily(RangeFilter(), field_name=gettext_lazy("score"))
 
     class Meta:
         model = models.NullableScalarSpecimen

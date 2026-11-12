@@ -25,12 +25,15 @@ from django import forms
 from django.contrib.auth.models import AbstractUser
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, QueryDict
+from django.utils.functional import Promise
+from django.utils.translation import gettext_lazy
 from django_filters import (
     BooleanFilter,
     CharFilter,
     Filter,
     ModelChoiceFilter,
     ModelMultipleChoiceFilter,
+    MultipleChoiceFilter,
 )
 from django_filters.filters import BaseInFilter
 from typing_extensions import override
@@ -56,6 +59,23 @@ def _validate_email_must_have_at_sign(value: str) -> None:
     """
     if "@" not in value:
         raise forms.ValidationError("missing @", code="missing_at_sign")
+
+
+_FilterT = TypeVar("_FilterT", bound=Filter)
+
+# The shelf codes ``BranchFilter.shelf_codes`` accepts.
+_SHELF_CODE_CHOICES = (("A1", "A1"), ("B1", "B1"), ("C1", "C1"))
+
+
+def _spelled_lazily(filter_instance: _FilterT, **names: Promise) -> _FilterT:
+    """``filter_instance`` holding each of ``names`` as the lazy text a project may declare it with.
+
+    The stubs type ``field_name`` and ``lookup_expr`` as ``str``; a project hands Django's lazy
+    translation text (``gettext_lazy``) where a ``str`` is read.
+    """
+    for attribute, value in names.items():
+        setattr(filter_instance, attribute, value)
+    return filter_instance
 
 
 _RequestScopedFilterT = TypeVar(
@@ -103,6 +123,11 @@ class BranchFilter(FilterSet):
     is a list of branch names. ``pks_for_request`` takes a list of branch pks the same
     way over Django's ``pk`` alias (``to_field_name="pk"`` too, so the predicate compares
     each value's key rather than the row), typed from ``Branch``'s key.
+
+    ``shelf_codes`` is django-filter's ``MultipleChoiceFilter`` whose ``field_name`` is lazy
+    translation text (``gettext_lazy("shelves__code")``), a flat leaf walked across the
+    ``shelves`` branch onto the reverse foreign key's target column: the set reads the name
+    as the text it renders, so it answers what ``field_name="shelves__code"`` answers.
     """
 
     shelves = RelatedFilter(
@@ -119,6 +144,10 @@ class BranchFilter(FilterSet):
         ModelMultipleChoiceFilter,
         "pk",
         to_field_name="pk",
+    )
+    shelf_codes = _spelled_lazily(
+        MultipleChoiceFilter(choices=_SHELF_CODE_CHOICES),
+        field_name=gettext_lazy("shelves__code"),
     )
 
     class Meta:

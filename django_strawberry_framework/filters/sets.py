@@ -3131,6 +3131,40 @@ def _builds_consumer_predicate(filter_instance: Filter, method: object) -> bool:
     )
 
 
+def _declared_as_text(filter_instance: Filter) -> Filter:
+    """Return ``filter_instance``, or a copy holding its ``field_name`` and ``lookup_expr`` as text.
+
+    A set reads a lazily spelled name (a lazy translation string, a ``SimpleLazyObject``)
+    as the exact ``str`` it renders (``utils/truth.py::text``), as
+    its publication's own checks read it (``filters/base.py::refuse_unresolvable_lookup``),
+    so django-filter and Django receive that text on every path, walked or not: a
+    ``MultipleChoiceFilter`` keys its ``Q`` by the name and joins it to the lookup, which
+    only a ``str`` passes. A name that already is a ``str``, a ``str`` subclass included,
+    is kept as declared, so consumer code comparing it to what it declared still sees
+    that object. Configuration is read when the set publishes
+    (``FilterSet._publish_filters``), and on each read of a set that cannot publish yet
+    (``FilterSet._filter_table``), so no instance copies a lazy name. A copy, never the
+    instance: django-filter's metaclass holds one declared instance in the
+    set's ``declared_filters`` and ``base_filters`` and in every subclass's, and another
+    set, a stock one included, may hold it too. A deep copy, as django-filter copies a
+    set's filters per request: what the filter holds bound to itself (the
+    ``FilterMethod`` a ``method=`` installs, a callable its ``__init__`` stores) is bound
+    to the copy, so it reads the copy's text and the set the copy is bound to.
+    """
+    field_name = filter_instance.field_name
+    lookup_expr = filter_instance.lookup_expr
+    lazy_field_name = field_name is not None and not truth.is_instance(field_name, str)
+    lazy_lookup_expr = not truth.is_instance(lookup_expr, str)
+    if not (lazy_field_name or lazy_lookup_expr):
+        return filter_instance
+    copied = copy.deepcopy(filter_instance)
+    if lazy_field_name:
+        copied.field_name = truth.text(field_name)
+    if lazy_lookup_expr:
+        copied.lookup_expr = truth.text(lookup_expr)
+    return copied
+
+
 def _runs_shipped_filter(filter_instance: Filter) -> bool:
     """Whether the ``filter`` ``filter_instance`` runs is django-filter's or this package's own code.
 
@@ -4869,7 +4903,10 @@ class FilterSet(
         (``_reshape``) so an override's additions, removals and renames are the
         published table: ``base_filters`` (every instance's copies), the
         snapshot's candidate rows, flat copies and form keys, and every package
-        read (``_filter_table``). A projected copy the set does not hold is
+        read (``_filter_table``). Every filter in the table holds its
+        ``field_name`` and ``lookup_expr`` as text (``_declared_as_text``), so
+        every check below, the input build, a walked hop and django-filter's own
+        ``filter`` read one name. A projected copy the set does not hold is
         refused first (``_reject_foreign_projection``), and so are a GlobalID or
         model-choice filter on a relation no row identity is compared on
         (``filters/base.py::refuse_identityless_relation``) and a leaf running a shipped
@@ -4884,7 +4921,10 @@ class FilterSet(
         request. A read of the set's table while it publishes answers the table being
         published.
         """
-        table = OrderedDict(cls._reshape(expansion))
+        table = OrderedDict(
+            (name, _declared_as_text(filter_instance))
+            for name, filter_instance in cls._reshape(expansion).items()
+        )
         # A set whose instances edit their filters or build their own form can supply a
         # model-choice queryset per request: trusted, not judged.
         builds_own_form = cls._customizes_instances() or truth.overrides(
@@ -5006,8 +5046,9 @@ class FilterSet(
         (a read re-entering its build, such as a captured-branch check walking
         back into it, or a set with no ``Meta.model`` whose ``RelatedFilter``
         target is still a lazy string) answers its ``get_filters()`` result,
-        unpublished; a read while the set publishes answers the table being
-        published (``_publishing``).
+        unpublished, each name read as the published table reads it
+        (``_declared_as_text``); a read while the set publishes answers the
+        table being published (``_publishing``).
         """
         snapshot = cls._expansion_snapshot()
         if snapshot is None:
@@ -5017,7 +5058,10 @@ class FilterSet(
             filters = cls.get_filters()
             snapshot = cls._expansion_snapshot()
             if snapshot is None:
-                return filters
+                return OrderedDict(
+                    (name, _declared_as_text(filter_instance))
+                    for name, filter_instance in filters.items()
+                )
         return snapshot.filters
 
     @classmethod

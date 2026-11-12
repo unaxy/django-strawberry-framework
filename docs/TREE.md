@@ -817,6 +817,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_keyset_api.py            # Live GraphQL HTTP tests for keyset (``Meta.cursor_field``) cursor pagination.
 ├── test_keyset_order_terms_api.py  # Live keyset ordering over consumer visibility hooks and a multi-column ForeignObject.
 ├── test_lateral_strategy_api.py  # Live PostgreSQL HTTP tests for lateral strategy parity, paging, visibility and custom joins.
+├── test_lazy_filter_names_api.py # Live GraphQL HTTP tests for declared filters whose ``field_name`` or ``lookup_expr`` is lazy text.
 ├── test_library_api.py           # Live GraphQL HTTP tests for the library app's read/write, Relay, keyset, and optimizer surface.
 ├── test_library_generated_api.py # Live GraphQL HTTP tests for the library ``Shelf``'s database-computed (``GeneratedField``) columns.
 ├── test_library_inheritance_api.py  # Live GraphQL HTTP tests for the library inheritance, proxy, and relation-shape surface.

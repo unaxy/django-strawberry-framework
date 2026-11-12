@@ -94,6 +94,7 @@ from django.db.models import (
     Lookup,
     Model,
     QuerySet,
+    TextChoices,
     TextField,
     Transform,
 )
@@ -7015,6 +7016,164 @@ def test_a_declared_leaf_spelled_lazily_builds_and_answers(declare: Callable[[],
     assert _labels(data) == ["large"]
 
 
+@pytest.mark.django_db
+def test_a_method_the_set_names_receives_a_lazily_spelled_field_name_as_text() -> None:
+    """A ``method=`` naming a method of the set receives the lazy ``field_name`` as its text.
+
+    The published copy's ``FilterMethod`` is bound to that copy, so the method the request
+    runs reads the copy's text, never the declaration's lazy object.
+    """
+    _ = cleaned_specimen("small", kept=True)
+    _ = cleaned_specimen("large", kept=False)
+    received: list[object] = []
+
+    class MethodSpecimenFilter(FilterSet):
+        probe = _respelled(CharFilter(method="by_label"), field_name=gettext_lazy("label"))
+
+        class Meta:
+            model = ScalarSpecimen
+            fields: ClassVar[list[str]] = []
+
+        def by_label(
+            self,
+            queryset: QuerySet[ScalarSpecimen],
+            name: str,
+            value: object,
+        ) -> QuerySet[ScalarSpecimen]:
+            received.append(name)
+            return queryset.filter(**{name: value})
+
+    instance = MethodSpecimenFilter(data={"probe": "large"}, queryset=ScalarSpecimen.objects.all())
+    rows = require(instance.qs, is_queryset)
+    assert sorted(str(read_attr(row, "label")) for row in rows) == ["large"]
+    assert received == ["label"]
+    assert type(received[0]) is str
+
+
+@pytest.mark.django_db
+def test_publication_reads_a_lazy_name_as_text_on_a_copy_of_the_shared_declaration() -> None:
+    """The published table holds text; the declaration, and a stock set holding it, keep it lazy.
+
+    django-filter hands one declared instance to every set holding it, so the package
+    publishes a copy: the class attribute and ``declared_filters`` keep the lazy object, and
+    a stock ``django_filters.FilterSet`` sharing the instance answers what django-filter
+    answers for it (its multiple-choice predicate keys a ``Q`` by the lazy name).
+    """
+    _ = cleaned_specimen("small", kept=True)
+    field_name = gettext_lazy("label")
+    lookup_expr = gettext_lazy("exact")
+    declared = _respelled(
+        django_filters.MultipleChoiceFilter(choices=[("small", "small")]),
+        field_name=field_name,
+        lookup_expr=lookup_expr,
+    )
+    filterset_cls = _specimen_set([], {"probe": declared})
+    stock_meta = type("Meta", (), {"model": ScalarSpecimen, "fields": []})
+    stock = type(
+        "StockSpecimenFilter",
+        (django_filters.FilterSet,),
+        {"probe": declared, "Meta": stock_meta},
+    )
+
+    published = filterset_cls._filter_table()["probe"]
+    assert published is not declared
+    assert filterset_cls.base_filters["probe"] is published
+    assert (published.field_name, published.lookup_expr) == ("label", "exact")
+    assert type(published.field_name) is str
+    assert type(published.lookup_expr) is str
+    assert filterset_cls.declared_filters["probe"] is declared
+    assert declared.field_name is field_name
+    assert declared.lookup_expr is lookup_expr
+    assert stock.base_filters["probe"] is declared
+    instance = filterset_cls(data={"probe": ["small"]}, queryset=ScalarSpecimen.objects.all())
+    rows = require(instance.qs, is_queryset)
+    assert sorted(str(read_attr(row, "label")) for row in rows) == ["small"]
+    with pytest.raises(TypeError, match="keywords must be strings"):
+        _ = list(stock(data={"probe": ["small"]}, queryset=ScalarSpecimen.objects.all()).qs)
+
+
+def test_a_set_that_cannot_publish_reads_a_lazy_name_as_text() -> None:
+    """A set that cannot publish yet reads, and its instances copy, a lazy name as its text.
+
+    A model-less set whose ``RelatedFilter`` target is still a lazy string answers its
+    ``get_filters()`` result on every read; each read holds the filter as the published
+    table would, and the declaration keeps its lazy object.
+    """
+    field_name = gettext_lazy("name")
+    declared = _respelled(
+        CharFilter(),
+        field_name=field_name,
+        lookup_expr=gettext_lazy("icontains"),
+    )
+
+    class UnpublishableLazyFilter(FilterSet):
+        probe = declared
+        later = RelatedFilter("NoSuchShelfFilter", field_name="later")
+
+    read = UnpublishableLazyFilter._filter_table()["probe"]
+    instance = UnpublishableLazyFilter(data={}, queryset=Branch.objects.all())
+    for held in (read, instance.filters["probe"]):
+        assert (held.field_name, held.lookup_expr) == ("name", "icontains")
+        assert type(held.field_name) is str
+        assert type(held.lookup_expr) is str
+    assert declared.field_name is field_name
+    assert UnpublishableLazyFilter._expansion_snapshot() is None
+
+
+class _SpecimenColumn(TextChoices):
+    """A ``str``-subclass spelling of a column name and a lookup, as a project may declare one."""
+
+    LABEL = "label"
+    EXACT = "exact"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("lazy_field_name", [False, True], ids=["member", "lazy-beside-member"])
+def test_a_str_subclass_field_name_reaches_a_filter_override_as_declared(
+    *,
+    lazy_field_name: bool,
+) -> None:
+    """A name that already is a ``str`` (a choices member) is published as declared.
+
+    It needs no reading as text: alone it leaves the declared instance published, and a
+    class-level ``filter`` override dispatching on the member it declared still finds it;
+    beside a lazy ``field_name`` the published copy reads only that name as text and
+    keeps the member ``lookup_expr``.
+    """
+    _ = cleaned_specimen("small", kept=True)
+    _ = cleaned_specimen("large", kept=False)
+
+    class DispatchingFilter(CharFilter):
+        @override
+        def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+            if (
+                self.field_name is _SpecimenColumn.LABEL
+                or self.lookup_expr is _SpecimenColumn.EXACT
+            ):
+                return qs.filter(label=value)
+            return qs.none()
+
+    if lazy_field_name:
+        declared = _respelled(
+            DispatchingFilter(lookup_expr=_SpecimenColumn.EXACT),
+            field_name=gettext_lazy("label"),
+        )
+    else:
+        declared = DispatchingFilter(field_name=_SpecimenColumn.LABEL)
+    filterset_cls = _specimen_set([], {"probe": declared})
+    published = filterset_cls._filter_table()["probe"]
+    if lazy_field_name:
+        assert published is not declared
+        assert type(published.field_name) is str
+        assert published.field_name == "label"
+        assert published.lookup_expr is _SpecimenColumn.EXACT
+    else:
+        assert published is declared
+    instance = filterset_cls(data={"probe": "large"}, queryset=ScalarSpecimen.objects.all())
+    rows = require(instance.qs, is_queryset)
+    assert sorted(str(read_attr(row, "label")) for row in rows) == ["large"]
+
+
 def test_a_lazily_spelled_lookup_django_resolves_nowhere_is_refused_naming_its_text() -> None:
     """A lazy ``lookup_expr`` naming no lookup is refused, naming the text it renders."""
     filterset_cls = _specimen_set(
@@ -7088,10 +7247,10 @@ def test_a_lazily_spelled_raw_to_many_key_leaf_answers_walked_as_unwalked(
 ) -> None:
     """A walked hop builds a lazily spelled to-many key leaf as Django builds it unwalked.
 
-    The walked leaf builds its declared predicate first, so whatever Django and
-    django-filter answer the lazy spelling with unwalked (rows, the error a lazy keyword
-    raises, or the refusal of a lookup the relation does not register at the set's first
-    construction), the walked request answers too.
+    The set reads the lazy name as the text it renders and the walked leaf builds its
+    declared predicate first, so whatever Django and django-filter answer that text with
+    unwalked (rows, or the refusal of a lookup the relation does not register at the
+    set's first construction), the walked request answers too.
     """
     key = _reverse_key()
     data: dict[str, object] = {"probe": [str(read_attr(key.target, "pk"))]}
