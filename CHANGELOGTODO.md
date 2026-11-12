@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 235 to do.
+Progress: 0 done, 236 to do.
 
 ## From dry-0_0_15_3
 
@@ -1141,6 +1141,10 @@ Progress: 0 done, 235 to do.
   omitting it; its decoder reads the value as Django's HTML round trip does. A declared filter whose `field_class` is
   `forms.JSONField` (and its CSV `in`, member by member) compares a JSON string as that string, where it was refused,
   read as its text's value or answered with an unexpected error
+- [ ] 938. CHANGELOG entry for item 854: a `RelatedFilter(queryset=...)` pinned with `.using()` to a database alias the
+  request does not read is refused with a `ConfigurationError` naming the filter and both aliases before the filtered
+  queryset is returned, as a target type's `get_queryset` pinned there already was, instead of Django's cross-database
+  `ValueError` when the queryset is evaluated; an unpinned or router-routed `queryset=` is unchanged
 
 ## From dry-upstream-0_0_15
 

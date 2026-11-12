@@ -23,7 +23,8 @@ The suite also owns the alias pins that only a second database can prove: the
 row-preserving relational leaf predicate executing wholly on ``shard_b``, a
 ``GenericRelation`` branch filter matching ``shard_b``'s own content-type pk, a
 ``RelatedFilter`` ``queryset=`` pinned by ``.using`` (admitted on the alias the request
-reads, refused on another), the write alias for generated and serializer mutations, and
+reads, refused on another, under a router reading ``shard_b`` too, where an unpinned one
+follows the request), the write alias for generated and serializer mutations, and
 the post-``OrderSet`` routing attestation. Four routing rows mount a consumer override
 on a ``.using("shard_b")`` list field and cover an alias change, a hints change, an
 in-place rewrite of the queryset the override was handed, and an equal-but-distinct hint
@@ -1294,8 +1295,9 @@ def test_a_related_filter_queryset_pinned_to_another_alias_is_refused_on_shard_b
     """A ``queryset=`` pinned to the alias the request reads admits its rows; another is refused.
 
     The request reads ``shard_b``; a declaration pinned to ``default`` names rows of a database
-    the request does not read, so the branch refuses it as Django refuses a subquery across
-    databases, before any branch row is read, rather than reading ``shard_b`` in its place.
+    the request does not read, so the branch refuses it with a ``ConfigurationError`` naming the
+    declaration and both aliases (masked on the wire unless ``DEBUG``), before any branch row is
+    read, rather than reading ``shard_b`` in its place.
     """
     for alias in ("default", "shard_b"):
         kept = models.Branch.objects.using(alias).create(name="Kept", city="Boston")
@@ -1328,6 +1330,176 @@ def test_a_related_filter_queryset_pinned_to_another_alias_is_refused_on_shard_b
     assert {
         alias: _touching_tables(sql, "library_branch") for alias, sql in refused_sql.items()
     } == {"default": [], "shard_b": []}
+    with override_settings(
+        ROOT_URLCONF=__name__,
+        DEBUG=True,
+        MIDDLEWARE=middleware_without_debug_toolbar(),
+    ):
+        clear_url_caches()
+        try:
+            unmasked, unmasked_sql = _capture_payload(
+                '{ branchesOnShardB(pinned: "default", code: "A-1") { name } }',
+            )
+        finally:
+            clear_url_caches()
+
+    _assert_one_refusal(
+        unmasked,
+        message=_pinned_refusal("_PinnedDefaultBranchFilter", "default", "shard_b"),
+        field="branchesOnShardB",
+    )
+    assert {
+        alias: _touching_tables(sql, "library_branch") for alias, sql in unmasked_sql.items()
+    } == {"default": [], "shard_b": []}
+
+
+def _pinned_refusal(owner: str, pinned: str, read: str) -> str:
+    """The typed refusal a ``shelves`` ``queryset=`` pinned to ``pinned`` answers on ``read``."""
+    return (
+        f"RelatedFilter {owner}.shelves: the explicit ``queryset=`` is pinned with ``.using()`` "
+        f"to database alias {pinned!r}, but this request reads alias {read!r}; one resolution "
+        "never spans two database connections. Remove the ``.using(...)`` call so the queryset "
+        "follows the request's alias."
+    )
+
+
+class _LibraryReadsToShardBRouter:
+    """Route every library read no ``.using()`` pins to ``shard_b``."""
+
+    def db_for_read(self, model: type[Model], **_hints: object) -> str | None:
+        return "shard_b" if model._meta.app_label == "library" else None
+
+    def db_for_write(self, _model: type[Model], **_hints: object) -> str | None:
+        return None
+
+    def allow_relation(self, _obj1: Model, _obj2: Model, **_hints: object) -> bool | None:
+        return None
+
+    def allow_migrate(
+        self,
+        _db: str,
+        _app_label: str,
+        **_hints: object,
+    ) -> bool | None:
+        return None
+
+
+@pytest.fixture
+def _build_routed_shelves_filter_test_schema() -> Iterator[None]:
+    """Build a per-test schema filtering branches a router reads from ``shard_b``.
+
+    The resolver's branch queryset is unpinned (the router reads it from ``shard_b``) or pinned
+    by ``.using("default")``; the ``RelatedFilter`` over ``shelves`` declares ``queryset=``
+    unpinned or pinned by ``.using("default")``.
+    """
+    make_django_type("RoutedShelfType", models.Shelf, ("id", "code"), node=False)
+    branch_type = make_django_type("RoutedBranchType", models.Branch, ("id", "name"), node=False)
+    finalize_django_types()
+
+    class _RoutedShelfFilter(FilterSet):
+        class Meta:
+            model = models.Shelf
+            fields = {"code": ["exact"]}
+
+    def _branch_filter(name: str, shelves: QuerySet[models.Shelf]) -> type[FilterSet]:
+        related = RelatedFilter(
+            _RoutedShelfFilter,
+            field_name="shelves",
+            queryset=shelves.filter(topic="permanent collection"),
+        )
+        meta = type("Meta", (), {"model": models.Branch, "fields": ()})
+        return type(name, (FilterSet,), {"shelves": related, "Meta": meta})
+
+    branch_filters = {
+        "unpinned": _branch_filter("_RoutedUnpinnedBranchFilter", models.Shelf.objects.all()),
+        "default": _branch_filter(
+            "_RoutedDefaultBranchFilter",
+            models.Shelf.objects.using("default"),
+        ),
+    }
+
+    @strawberry.type
+    class _RoutedShelvesQuery:
+        def _routed_branches(
+            self,
+            info: Info[object, object],
+            read: str,
+            pinned: str,
+        ) -> QuerySet[models.Branch]:
+            queryset = models.Branch.objects.order_by("name")
+            if read != "router":
+                queryset = queryset.using(read)
+            return branch_filters[pinned].apply_sync({"shelves": {"code": "A-1"}}, queryset, info)
+
+        routed_branches: QuerySet[models.Branch] = strawberry.field(
+            resolver=_routed_branches,
+            graphql_type=list[branch_type],
+        )
+
+    _current["schema"] = DjangoSchema(query=_RoutedShelvesQuery, config=strawberry_config())
+    yield
+    _current["schema"] = None
+
+
+@pytest.mark.usefixtures("private_registry", "_build_routed_shelves_filter_test_schema")
+@pytest.mark.django_db(databases=["default", "shard_b"])
+def test_a_related_filter_queryset_pinned_off_the_routed_read_alias_is_refused() -> None:
+    """Only an explicit ``.using()`` pin off the request's alias is refused, never a router's.
+
+    A router reads library rows from ``shard_b``. A ``queryset=`` pinned to ``default`` under
+    the routed request is the typed refusal; an unpinned one follows the request, reading
+    ``shard_b`` under the routed request and ``default`` under a request pinned there, though
+    the router would read the unpinned ``queryset=`` alone from ``shard_b``: Django compiles an
+    unpinned subquery on the outer query's connection and refuses only an explicit ``_db``.
+    """
+    for alias in ("default", "shard_b"):
+        kept = models.Branch.objects.using(alias).create(name=f"Kept-{alias}", city="Boston")
+        other = models.Branch.objects.using(alias).create(name=f"Other-{alias}", city="Boston")
+        models.Shelf.objects.using(alias).create(
+            code="A-1",
+            topic="permanent collection",
+            branch=kept,
+        )
+        models.Shelf.objects.using(alias).create(code="A-1", topic="seasonal", branch=other)
+    document = (
+        "query ($read: String!, $pinned: String!) "
+        "{ routedBranches(read: $read, pinned: $pinned) { name } }"
+    )
+    with override_settings(
+        ROOT_URLCONF=__name__,
+        DEBUG=True,
+        MIDDLEWARE=middleware_without_debug_toolbar(),
+        DATABASE_ROUTERS=[_LibraryReadsToShardBRouter()],
+    ):
+        clear_url_caches()
+        try:
+            routed, routed_sql = _capture_payload(
+                document,
+                variables={"read": "router", "pinned": "unpinned"},
+            )
+            refused, refused_sql = _capture_payload(
+                document,
+                variables={"read": "router", "pinned": "default"},
+            )
+            pinned_read, pinned_read_sql = _capture_payload(
+                document,
+                variables={"read": "default", "pinned": "unpinned"},
+            )
+        finally:
+            clear_url_caches()
+
+    assert routed == {"data": {"routedBranches": [{"name": "Kept-shard_b"}]}}, routed
+    _assert_read_alias(routed_sql, "shard_b", {"library_branch": 1})
+    _assert_one_refusal(
+        refused,
+        message=_pinned_refusal("_RoutedDefaultBranchFilter", "default", "shard_b"),
+        field="routedBranches",
+    )
+    assert {
+        alias: _touching_tables(sql, "library_branch") for alias, sql in refused_sql.items()
+    } == {"default": [], "shard_b": []}
+    assert pinned_read == {"data": {"routedBranches": [{"name": "Kept-default"}]}}, pinned_read
+    _assert_read_alias(pinned_read_sql, "default", {"library_branch": 1})
 
 
 # ---------------------------------------------------------------------------

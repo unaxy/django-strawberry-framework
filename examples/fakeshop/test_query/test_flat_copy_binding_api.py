@@ -26,7 +26,9 @@ either side reads ``distinct()``: child filters django-filter runs ``distinct()`
 and a target type's ``get_queryset`` returning ``distinct()`` rows, through a forward key, a
 reverse key, a many-to-many and a scoped second hop, flat, nested, under ``not``, ``and`` and
 ``or``, in pinned statement counts, on the sync and async views and through a raw ``FilterSet(data,
-queryset, request=...).qs``.
+queryset, request=...).qs``. One pinned by ``.using()`` to an alias the request does not read is
+refused with a ``ConfigurationError`` naming the declaration and both aliases, flat, nested, under
+``not``, on the sync and async views and through a raw ``.qs``, before any book row is read.
 """
 
 from collections.abc import Mapping
@@ -51,7 +53,14 @@ from django_filters import (
     MultipleChoiceFilter,
 )
 from django_filters.utils import get_model_field
-from graphql_client import JSONObject, graphql_payload, response_json
+from graphql_client import (
+    JSONObject,
+    graphql_payload,
+    json_list,
+    json_str,
+    middleware_without_debug_toolbar,
+    response_json,
+)
 from strawberry import relay
 from typing_extensions import override
 
@@ -776,6 +785,11 @@ _SCOPED_BOOK_SETS = {
         models.Shelf.objects.filter(code="C-3").union(models.Shelf.objects.filter(code="D-4")),
     ),
     "open": _scoped_book_filter("ScopedOpenBookFilter", None),
+    # Pinned to an alias the settings never configure: the refusal reads the pin alone.
+    "pinned": _scoped_book_filter(
+        "ScopedPinnedBookFilter",
+        models.Shelf.objects.using("elsewhere").exclude(code="A-1"),
+    ),
 }
 
 
@@ -1092,3 +1106,94 @@ def test_a_raw_filterset_walks_a_scoped_branch_to_the_rows_its_queryset_holds(ca
         _CURRENT["schema"] = None
 
     assert payload == {"data": {"rawBooks": expected}}, payload
+
+
+_PINNED_REFUSAL = (
+    "RelatedFilter ScopedPinnedBookFilter.shelf: the explicit ``queryset=`` is pinned with "
+    "``.using()`` to database alias 'elsewhere', but this request reads alias 'default'; one "
+    "resolution never spans two database connections. Remove the ``.using(...)`` call so the "
+    "queryset follows the request's alias."
+)
+
+
+@pytest.mark.django_db
+def test_a_scoped_branch_pinned_to_an_alias_the_request_does_not_read_is_refused() -> None:
+    """A ``queryset=`` pinned by ``.using`` to another alias is the typed refusal, each spelling."""
+    _world()
+    schema = _scoped_schema("pinned")
+    nested = {"shelf": {"codeContains": {"iContains": "-"}}}
+    _CURRENT["schema"] = schema
+    try:
+        with (
+            override_settings(
+                ROOT_URLCONF=__name__,
+                DEBUG=True,
+                MIDDLEWARE=middleware_without_debug_toolbar(),
+            ),
+            CaptureQueriesContext(connection) as sql,
+        ):
+            payloads = [
+                graphql_payload(
+                    _scoped_document("pinned", "books"),
+                    variables={"filter": filter_input},
+                    url="/graphql-flat-binding/",
+                )
+                for filter_input in (
+                    {"shelfCodeContains": {"iContains": "-"}},
+                    nested,
+                    {"not": nested},
+                )
+            ]
+            payloads.append(
+                graphql_payload(
+                    "query ($query: String!) { rawBooks(query: $query) }",
+                    variables={"query": "shelf__code_contains=-"},
+                    url="/graphql-flat-binding/",
+                ),
+            )
+    finally:
+        _CURRENT["schema"] = None
+
+    assert [len(json_list(payload, "errors")) for payload in payloads] == [1] * 4, payloads
+    assert [json_str(payload, "errors", 0, "message") for payload in payloads] == [
+        _PINNED_REFUSAL,
+    ] * 4
+    # No book row is read: the refusal comes before the request's query runs.
+    assert [q["sql"] for q in sql.captured_queries if '"library_book"."title"' in q["sql"]] == []
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_a_scoped_branch_pinned_to_an_alias_the_request_does_not_read_is_refused_async() -> (
+    None
+):
+    """Under the async view (``apply_async``) each spelling answers the same typed refusal."""
+    await sync_to_async(_world)()
+    schema = _scoped_schema("pinned")
+    nested = {"shelf": {"codeContains": {"iContains": "-"}}}
+    _CURRENT["schema"] = schema
+    payloads: list[JSONObject] = []
+    try:
+        with override_settings(
+            ROOT_URLCONF=__name__,
+            DEBUG=True,
+            MIDDLEWARE=middleware_without_debug_toolbar(),
+        ):
+            for filter_input in (
+                {"shelfCodeContains": {"iContains": "-"}},
+                nested,
+                {"not": nested},
+            ):
+                result = await AsyncTestClient().query(
+                    _scoped_document("pinned", "books"),
+                    variables={"filter": filter_input},
+                    assert_no_errors=False,
+                    url="/graphql-flat-binding-async/",
+                )
+                payloads.append(response_json(result.response))
+    finally:
+        _CURRENT["schema"] = None
+
+    assert [len(json_list(payload, "errors")) for payload in payloads] == [1] * 3, payloads
+    assert [json_str(payload, "errors", 0, "message") for payload in payloads] == [
+        _PINNED_REFUSAL,
+    ] * 3

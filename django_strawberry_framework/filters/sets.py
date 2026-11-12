@@ -129,6 +129,7 @@ from django_strawberry_framework.utils._narrowing import (
     require,
     require_instance,
 )
+from django_strawberry_framework.utils._queryset_private import queryset_db
 from django_strawberry_framework.utils.errors import (
     FIELD_ERROR_CODE_INVALID,
     FILTER_INVALID_ERROR_CODE,
@@ -2079,6 +2080,7 @@ def _admitted_rows(
     related_filter: RelatedFilter,
     child_rows: models.QuerySet[models.Model],
     request: object,
+    using: str,
 ) -> models.QuerySet[models.Model]: ...
 
 
@@ -2089,6 +2091,7 @@ def _admitted_rows(
     related_filter: RelatedFilter,
     child_rows: models.QuerySet[models.Model] | None,
     request: object,
+    using: str,
 ) -> models.QuerySet[models.Model] | None: ...
 
 
@@ -2098,6 +2101,7 @@ def _admitted_rows(
     related_filter: RelatedFilter,
     child_rows: models.QuerySet[models.Model] | None,
     request: object,
+    using: str,
 ) -> models.QuerySet[models.Model] | None:
     """Return the child rows a declared branch admits: ``child_rows`` within the explicit ``queryset=``.
 
@@ -2111,13 +2115,30 @@ def _admitted_rows(
     form Django's own ``QuerySet.__or__`` falls back to for a queryset it cannot filter),
     never combined with ``&``: a sliced, ``distinct()`` or combined (``union()``) one
     admits the ``child_rows`` among the rows it holds, whatever ``distinct()`` the child
-    filters or the target type's ``get_queryset`` put on ``child_rows``.
+    filters or the target type's ``get_queryset`` put on ``child_rows``. ``using`` is the
+    alias the request reads (the restricted queryset's ``db``): an explicit queryset pinned
+    by ``.using()`` to another alias is refused with a typed ``ConfigurationError`` before
+    the request's queryset is returned, as a target type's ``get_queryset`` pinned there is
+    (spec-045 Decision 4), where Django would refuse the ``IN`` subquery only once the
+    request's query compiles (``django/db/models/lookups.py::In.process_rhs``).
     """
     # ``_has_explicit_queryset`` records that ``queryset=`` was passed; without it
     # ``RelatedFilter.get_queryset`` answers the target's default rows instead.
     explicit = (
         related_filter.get_queryset(request) if related_filter._has_explicit_queryset else None
     )
+    # Django refuses a subquery whose explicit ``_db`` is not the compiling connection's
+    # alias, and only then (``In.process_rhs``): an unpinned queryset follows the request,
+    # whatever alias a router picks for it, so only a ``.using()`` pin is read here.
+    pinned = None if explicit is None else queryset_db(explicit)
+    if pinned is not None and pinned != using:
+        raise ConfigurationError(
+            f"RelatedFilter {truth.qualname(owner)}.{declared_attr}: "
+            f"the explicit ``queryset=`` is pinned with ``.using()`` to database alias "
+            f"{pinned!r}, but this request reads alias {using!r}; one resolution never "
+            "spans two database connections. Remove the ``.using(...)`` call so the "
+            "queryset follows the request's alias.",
+        )
     if child_rows is None:
         return explicit
     if explicit is None:
@@ -2170,7 +2191,14 @@ def _restrict_through_branch(
     keying off the declared name would name a non-existent relation and Django
     would raise ``FieldError``.
     """
-    admitted = _admitted_rows(owner, declared_attr, related_filter, child_rows, request)
+    admitted = _admitted_rows(
+        owner,
+        declared_attr,
+        related_filter,
+        child_rows,
+        request,
+        queryset.db,
+    )
     if admitted is None:
         return queryset
     return _restrict_to_related(queryset, _declared_field_name(related_filter), admitted, via)
@@ -8567,6 +8595,7 @@ class FilterSet(
                         related_filter,
                         visible,
                         self.request,
+                        using,
                     )
                 conditions[-1] = visible
             for segment, condition_rows in zip(segments, conditions, strict=True):
@@ -8681,7 +8710,14 @@ class FilterSet(
                 return self._reaches_alias(outer, hop, rows)
             return _reaches_related(outer, hop.declared_attr, rows)
         owner, related_filter = _filter_declaration(hop)
-        admitted = _admitted_rows(owner, hop.declared_attr, related_filter, rows, self.request)
+        admitted = _admitted_rows(
+            owner,
+            hop.declared_attr,
+            related_filter,
+            rows,
+            self.request,
+            outer.db,
+        )
         via = owner._via_rows(related_filter, self._apply_info, self._hop_visibility(), outer.db)
         return _reaches_related(outer, _declared_field_name(related_filter), admitted, via)
 

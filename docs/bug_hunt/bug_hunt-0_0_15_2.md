@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 518 done, 105 to do. The CHANGELOG entries filed here moved to
+Progress: 519 done, 104 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3076,6 +3076,19 @@ Progress: 518 done, 105 to do. The CHANGELOG entries filed here moved to
   by `tests/filters/test_inputs.py::test_generated_unmapped_filter_refuses_in_filterset_words_before_output_policy` and
   its siblings; `tests/types/test_converters.py::test_generated_column_refuses_an_output_no_conversion_publishes` now
   pins only the type-side reader (its `filterset_cls=None` call shape has no package caller)
+- [x] 854. fixed: a `RelatedFilter(queryset=...)` pinned with `.using()` to a database alias the request does not read
+  is refused with a `ConfigurationError` naming the declaration, the pinned alias and the request's alias before the
+  request's queryset is returned (`filters/sets.py::_admitted_rows`, which now takes the alias each caller's restriction
+  compiles on: `_restrict_through_branch`, `FilterSet._relation_view`, `FilterSet._reaches_hop`), as a target type's
+  `get_queryset` pinned there already was (spec-045 Decision 4), where Django's cross-database `ValueError` was raised
+  when the queryset was evaluated (a raw `.qs` / `apply_sync` returned a queryset that raised later). The predicate is
+  Django's own (`In.process_rhs`: an explicit `_db` only), so an unpinned or router-routed `queryset=` and a pin to the
+  request's alias answer as before (grid: 14 + 6 pin cells moved, every answering cell unchanged); the masked wire answer
+  is unchanged. Pinned live by `examples/fakeshop/test_query/test_flat_copy_binding_api.py::test_a_scoped_branch_pinned_to_an_alias_the_request_does_not_read_is_refused`
+  (and `_async`) and the sharded
+  `test_multi_db.py::test_a_related_filter_queryset_pinned_off_the_routed_read_alias_is_refused` /
+  `::test_a_related_filter_queryset_pinned_to_another_alias_is_refused_on_shard_b`; spec-027 (checklist, Decision 8,
+  Edge cases, Test plan, Definition of done), GLOSSARY `RelatedFilter`. CHANGELOG 938
 
 ## To do: found along the way
 
@@ -3087,11 +3100,6 @@ Progress: 518 done, 105 to do. The CHANGELOG entries filed here moved to
   The same split holds for `MultipleChoiceFilter(conjoined=True)` and on a to-many target column
   (`children__label`, `shelves__code`) and a two-hop path ending to-many (`partner__children__label`), for every
   spelling (783's grid: 36 cells per spelling)
-- [ ] 854. (robustness) A `RelatedFilter(queryset=...)` pinned with `.using()` to an alias the request does not read
-  is refused with Django's cross-database `ValueError` from the `IN` subquery (masked on the wire, bare from a raw
-  `FilterSet(...).qs`), where the same pin from a target type's `get_queryset` gets a typed `ConfigurationError`
-  naming the alias (`utils/querysets.py`). A primary/replica router with `queryset=Model.objects.using("default")`
-  while reads route to a replica reaches it. Found researching 818
 - [ ] 829. (robustness) On a set no connection serves (`FilterSet(data, queryset).qs`, `apply_sync`), a
   `Meta.filter_overrides={ArrayField: {"filter_class": ArrayFilter}}` text-pattern leaf over an `ArrayField`
   (`arr__icontains=1`, from a per-field `"__all__"` or listed) cleans its value into a list and compiles a match
