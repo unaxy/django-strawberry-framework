@@ -147,6 +147,7 @@ from django_strawberry_framework.filters import (
     _helper_referenced_filtersets,
     filter_input_type,
 )
+from django_strawberry_framework.filters import inputs as filter_inputs_module
 from django_strawberry_framework.filters.base import (
     IntegerRangeFilter,
     _lookup_operand,
@@ -4360,15 +4361,19 @@ def test_a_connection_declared_after_finalize_refuses_an_unsealable_leaf() -> No
 def test_the_seal_predicate_is_the_one_the_build_asks(monkeypatch: pytest.MonkeyPatch) -> None:
     """The build asks ``utils/querysets.py::_type_is_genuinely_django`` itself, never a copy.
 
-    With the predicate refusing Django's ``Abs``, a served leaf through ``Abs`` (registered
-    under another name) is refused naming it.
+    ``filters/inputs.py`` imports the predicate by name, so the build's own reference is the
+    one replaced, beside the defining module's. With the predicate refusing Django's
+    ``Abs``, a served leaf through ``Abs`` (registered under another name) is refused
+    naming it.
     """
     genuine = querysets_module._type_is_genuinely_django
+    assert read_attr(filter_inputs_module, "_type_is_genuinely_django") is genuine
 
     def genuine_but_abs(node_type: type[object]) -> bool:
         return node_type is not Abs and genuine(node_type)
 
     monkeypatch.setattr(querysets_module, "_type_is_genuinely_django", genuine_but_abs)
+    monkeypatch.setattr(filter_inputs_module, "_type_is_genuinely_django", genuine_but_abs)
     with register_lookup(BigIntegerField, Abs, lookup_name="magnitude"):
         _ = _serve_at_root(_specimen_set({"signed_big": ["magnitude"]}))
         with pytest.raises(ConfigurationError) as exc_info:
