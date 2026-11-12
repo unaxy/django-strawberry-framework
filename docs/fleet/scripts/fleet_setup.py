@@ -1,4 +1,4 @@
-"""Set up a new Ubuntu machine as a fleet member, from one command on a machine already in it.
+"""Set up a new fleet machine (Ubuntu; a Mac's PATH), from one command on a fleet machine.
 
 Usage, from ``~/projects/django-strawberry-framework`` on any fleet machine::
 
@@ -6,12 +6,13 @@ Usage, from ``~/projects/django-strawberry-framework`` on any fleet machine::
     python3 docs/fleet/scripts/fleet_setup.py add <host> --check  # read-only: what <host> still lacks
     python3 docs/fleet/scripts/fleet_setup.py mesh [--check]      # ssh both ways between every pair
     python3 docs/fleet/scripts/fleet_setup.py row <host>          # a machines.json row to paste
-    python3 docs/fleet/scripts/fleet_setup.py verify <host>       # fleet_sync / fleet_stop status
+    python3 docs/fleet/scripts/fleet_setup.py verify <host>       # status, and the tools ssh finds
 
 and on the new machine itself (``add`` copies this file there and runs it)::
 
     python3 fleet_setup.py box check
     python3 fleet_setup.py box install [--only STEP,...] [--skip KIND,...]
+    python3 fleet_setup.py box write-path-block   # the ``path-block`` step's writer
 
 ``docs/fleet/SETUP.md`` is the procedure around it: what to do before (Tailscale, an
 ssh alias, this machine's key on the box), what this script does, and what stays by hand
@@ -22,7 +23,8 @@ Steps
     what is missing) and the shell lines that make it done; ``install`` runs only the
     steps whose check fails, in order, and stops at the first that fails, so a rerun
     picks up where the last one stopped and a finished box reruns as a no-op. A step is
-    one of four kinds:
+    one of four kinds, and runs on the OSes its ``systems`` names (``platform.system()``:
+    every step on Ubuntu, only ``path-block`` on macOS, whose other steps stay by hand):
 
     ``sudo``
         Needs root (apt packages, user lingering). Every missing ``sudo`` step runs in
@@ -38,6 +40,18 @@ Steps
     ``hand``
         Never run: the check reports and the step prints what the maintainer does
         (logging in to Claude Code and Codex, installing the save-sync timer).
+
+``path-block``
+    The one PATH block every fleet machine carries, ``setup/files/path.sh`` between
+    ``# >>> dsf-fleet path >>>`` / ``# <<< dsf-fleet path <<<`` lines, first in the file the
+    login shell reads for every shell, a command ``ssh <host> <command>`` runs included:
+    ``~/.zshenv`` on macOS (zsh), ``~/.bashrc`` on Linux (bash reads it for an ssh command;
+    first, so above Ubuntu's interactive-only guard). The check (:func:`check_path_block`)
+    reads only: done when the file starts with the block. The writer (``box
+    write-path-block``, :func:`write_path_block`) creates the file when absent, else keeps it
+    as ``<name>.bak-<seconds>`` and replaces the marked block (moved to the top) or prepends
+    it; a file already as wanted is not touched. ``setup/ubuntu/personal.py``'s ``path-block``
+    step runs this same check and writer, so there is one block file, one check and one writer.
 
 ``mesh``
     Every ordered pair of machines in ``docs/fleet/machines.json`` (``--add HOST`` adds one
@@ -61,10 +75,14 @@ Steps
 
 ``verify``
     Runs ``docs/fleet/scripts/fleet_sync.py status`` here and on the box, and
-    ``docs/fleet/scripts/fleet_stop.py status`` here: read-only, nothing synced.
+    ``docs/fleet/scripts/fleet_stop.py status`` here, then requires plain (non-interactive)
+    ``ssh <box> 'command -v uv git python3 node claude codex gh'`` to find every one of
+    :data:`SSH_TOOLS`: read-only, nothing synced.
 
-Standard library only, Python 3.9 (macOS's system ``python3``; Ubuntu ships a newer one),
-so it runs on a box that has nothing else yet. Ubuntu is the only ``box`` OS so far.
+``add`` accepts an Ubuntu box or a Mac (``uname -s``) and copies :data:`PUSHED` (this file
+and the PATH block) under :data:`REMOTE_ROOT` there. Standard library only, Python 3.9
+(macOS's system ``python3``; Ubuntu ships a newer one), so it runs on a box that has nothing
+else yet.
 """
 
 from __future__ import annotations
@@ -74,11 +92,14 @@ import dataclasses
 import getpass
 import json
 import os
+import platform
+import re
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -112,8 +133,27 @@ APT_PACKAGES = {
     "tmux": "tmux",
     "rg": "ripgrep",
 }
-#: Where ``add`` puts this file on the box before the checkout exists.
-REMOTE_COPY = "~/.cache/dsf-fleet-setup/fleet_setup.py"
+#: Where ``add`` puts this file and the files it reads on the box before the checkout exists.
+REMOTE_ROOT = "~/.cache/dsf-fleet-setup"
+REMOTE_COPY = f"{REMOTE_ROOT}/fleet_setup.py"
+#: The ``platform.system()`` values ``box`` supports.
+LINUX = "Linux"
+MACOS = "Darwin"
+#: The one PATH block every fleet machine carries, whatever its OS (``path-block``).
+PATH_BLOCK_FILE = Path(__file__).resolve().parent / "setup" / "files" / "path.sh"
+PATH_MARK = "dsf-fleet path"
+#: What ``add`` copies to the box: each local file and its path under :data:`REMOTE_ROOT`.
+PUSHED = ((Path(__file__).resolve(), "fleet_setup.py"), (PATH_BLOCK_FILE, "setup/files/path.sh"))
+#: The tools ``verify`` requires a non-interactive ``ssh <host> <command>`` to find.
+SSH_TOOLS = (
+    "uv",
+    "git",
+    "python3",
+    "node",
+    "claude",
+    "codex",
+    "gh",
+)
 #: ``docs/fleet/scripts/fleet.py``'s ``SSH_OPTIONS``, repeated (this file imports nothing).
 SSH_OPTIONS = (
     "-o",
@@ -140,13 +180,15 @@ FACTS = "nproc; awk '/MemTotal/ {print $2}' /proc/meminfo"
 
 @dataclasses.dataclass(frozen=True)
 class Box:
-    """The machine ``box`` runs on: its home, account and the checkout path."""
+    """The machine ``box`` runs on: its home, account, the checkout path and its OS."""
 
     home: Path
     user: str
     repo: Path
     repo_url: str = REPO_URL
     python_version: str = PYTHONS[-1]
+    #: ``platform.system()``: :data:`LINUX` or :data:`MACOS`.
+    system: str = dataclasses.field(default_factory=platform.system)
 
     @classmethod
     def here(cls, repo_url: str = REPO_URL, python_version: str = PYTHONS[-1]) -> Box:
@@ -177,6 +219,8 @@ class Step:
     check: Callable[[Box], str | None]
     #: The ``bash -c`` lines that make it done (a ``hand`` step's are printed, never run).
     lines: Callable[[Box], list[str]]
+    #: The OSes (``platform.system()``) the step runs on.
+    systems: tuple[str, ...] = (LINUX,)
 
 
 def box_env(box: Box) -> dict[str, str]:
@@ -422,6 +466,96 @@ def _lines_timer(box: Box) -> list[str]:
     return [f"cd {repo} && uv run python docs/fleet/scripts/fleet_sync.py schedule --install"]
 
 
+def block(mark: str, body: str) -> str:
+    """Return ``body`` between the ``# >>> mark >>>`` and ``# <<< mark <<<`` lines."""
+    return f"# >>> {mark} >>>\n{body.rstrip()}\n# <<< {mark} <<<\n"
+
+
+def with_block(
+    text: str,
+    mark: str,
+    body: str,
+    *,
+    top: bool,
+) -> str:
+    """Return ``text`` holding exactly one ``mark`` block with ``body``, at the top or the end."""
+    wanted = block(mark, body)
+    pattern = re.compile(
+        rf"# >>> {re.escape(mark)} >>>\n.*?# <<< {re.escape(mark)} <<<\n",
+        re.DOTALL,
+    )
+    if top:  # above an interactive guard: always first, wherever an older copy sits
+        rest = pattern.sub("", text).lstrip("\n")
+        return wanted + ("\n" + rest if rest else "")
+    if pattern.search(text):
+        return pattern.sub(lambda _match: wanted, text, count=1)
+    return text + ("" if not text or text.endswith("\n") else "\n") + "\n" + wanted
+
+
+def startup_file(home: Path, system: str) -> Path:
+    """Return the file the login shell reads for every shell, a non-interactive ssh one included.
+
+    macOS's zsh reads ``~/.zshenv`` for every shell; Linux's bash reads ``~/.bashrc`` for a
+    command ssh runs, so the block goes above Ubuntu's interactive-only guard there.
+    """
+    return home / (".zshenv" if system == MACOS else ".bashrc")
+
+
+def _read_text(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
+def wanted_startup(text: str) -> str:
+    """Return a startup file's ``text`` with the PATH block first and nowhere else."""
+    return with_block(text, PATH_MARK, PATH_BLOCK_FILE.read_text(encoding="utf-8"), top=True)
+
+
+def check_path_block(home: Path, system: str) -> str | None:
+    """Return ``None`` when the startup file starts with the PATH block, else what is missing."""
+    target = startup_file(home, system)
+    wanted = block(PATH_MARK, PATH_BLOCK_FILE.read_text(encoding="utf-8"))
+    current = _read_text(target) or ""
+    return None if current.startswith(wanted) else f"PATH block at the top of ~/{target.name}"
+
+
+def write_path_block(home: Path, system: str, stamp: int) -> Path | None:
+    """Put the PATH block first in the startup file; return the backup made, if any.
+
+    A file that already reads as wanted is left alone; an existing file is copied to
+    ``<name>.bak-<stamp>`` first; the new text replaces the file in one rename.
+    """
+    target = startup_file(home, system)
+    current = _read_text(target)
+    wanted = wanted_startup(current or "")
+    if current == wanted:
+        return None
+    backup = None
+    temporary = target.with_name(f"{target.name}.dsf-tmp")
+    _ = temporary.write_text(wanted, encoding="utf-8")
+    if current is None:
+        temporary.chmod(0o644)
+    else:
+        backup = target.with_name(f"{target.name}.bak-{stamp}")
+        _ = shutil.copy2(target, backup)
+        shutil.copymode(target, temporary)
+    _ = temporary.replace(target)
+    return backup
+
+
+def path_block_lines() -> list[str]:
+    """Return the shell line running this file's ``box write-path-block`` with this Python."""
+    here = shlex.quote(str(Path(__file__).resolve()))
+    return [f"{shlex.quote(sys.executable)} {here} box write-path-block"]
+
+
+def _check_path_block(box: Box) -> str | None:
+    return check_path_block(box.home, box.system)
+
+
+def _lines_path_block(_box: Box) -> list[str]:
+    return path_block_lines()
+
+
 STEPS: tuple[Step, ...] = (
     Step("packages", "sudo", "apt packages", _check_packages, _lines_packages),
     Step("linger", "sudo", "user lingering", _check_linger, _lines_linger),
@@ -432,6 +566,14 @@ STEPS: tuple[Step, ...] = (
     Step("codex", "user", "Codex CLI", _check_codex, _lines_codex),
     Step("claude", "user", "Claude Code CLI", _check_claude, _lines_claude),
     Step("pre-commit", "user", "pre-commit uv tool", _check_pre_commit, _lines_pre_commit),
+    Step(
+        "path-block",
+        "user",
+        "PATH block for ssh commands",
+        _check_path_block,
+        _lines_path_block,
+        (LINUX, MACOS),
+    ),
     Step("ssh-key", "keys", "this box's ssh key", _check_ssh_key, _lines_ssh_key),
     Step("checkout", "user", "the checkout", _check_checkout, _lines_checkout),
     Step(
@@ -449,15 +591,23 @@ STEPS: tuple[Step, ...] = (
 )
 
 
-def select(only: Sequence[str], skip: Sequence[str]) -> list[Step]:
-    """Return the steps ``only`` names (every step when empty), less the kinds ``skip`` names."""
+def select(only: Sequence[str], skip: Sequence[str], system: str) -> list[Step]:
+    """Return the ``system`` steps ``only`` names (all when empty), less the kinds ``skip`` names."""
     keys = {step.key for step in STEPS}
     unknown = [key for key in only if key not in keys]
     unknown += [kind for kind in skip if kind not in KINDS]
     if unknown:
         msg = f"unknown step or kind: {', '.join(unknown)}"
         raise ValueError(msg)
-    return [step for step in STEPS if (not only or step.key in only) and step.kind not in skip]
+    elsewhere = [step.key for step in STEPS if step.key in only and system not in step.systems]
+    if elsewhere:
+        msg = f"not a {system} step: {', '.join(elsewhere)}"
+        raise ValueError(msg)
+    return [
+        step
+        for step in STEPS
+        if system in step.systems and (not only or step.key in only) and step.kind not in skip
+    ]
 
 
 def check(box: Box, steps: Sequence[Step]) -> list[tuple[Step, str | None]]:
@@ -608,10 +758,14 @@ def box_command(action: str, extra: Sequence[str] = ()) -> str:
 
 
 def push_self(host: str) -> int:
-    """Copy this file to :data:`REMOTE_COPY` on ``host``; return ssh's exit code."""
-    folder = REMOTE_COPY.rsplit("/", 1)[0]
-    line = f"mkdir -p {folder} && cat > {REMOTE_COPY}"
-    return on(host, line, stdin=Path(__file__).read_text(encoding="utf-8"))[0]
+    """Copy each of :data:`PUSHED` under :data:`REMOTE_ROOT` on ``host``; return ssh's worst code."""
+    worst = 0
+    for source, relative in PUSHED:
+        remote = f"{REMOTE_ROOT}/{relative}"
+        folder = remote.rsplit("/", 1)[0]
+        line = f"mkdir -p {folder} && cat > {remote}"
+        worst = max(worst, on(host, line, stdin=source.read_text(encoding="utf-8"))[0])
+    return worst
 
 
 def https_url(url: str) -> str:
@@ -644,6 +798,15 @@ def local_python_version() -> str:
     return pinned.read_text(encoding="utf-8").strip() if pinned.exists() else PYTHONS[-1]
 
 
+def system_of(host: str) -> str:
+    """Return ``host``'s :data:`LINUX` (Ubuntu only) or :data:`MACOS`, else what it is."""
+    code, system = on(host, "uname -s")
+    if code or system != LINUX:
+        return system if code == 0 else ""
+    code, release = on(host, ". /etc/os-release 2>/dev/null && echo $ID")
+    return LINUX if code == 0 and release == "ubuntu" else f"{LINUX} {release}".rstrip()
+
+
 def add(host: str, *, dry: bool, skip: Sequence[str]) -> int:
     """Copy this file to ``host`` and run ``box check`` (``dry``) or ``box install`` there."""
     if not reachable(host):
@@ -653,9 +816,12 @@ def add(host: str, *, dry: bool, skip: Sequence[str]) -> int:
             file=sys.stderr,
         )
         return 2
-    code, release = on(host, ". /etc/os-release 2>/dev/null && echo $ID")
-    if code or release != "ubuntu":
-        print(f"fleet_setup: {host} is not Ubuntu ({release or 'unknown'})", file=sys.stderr)
+    system = system_of(host)
+    if system not in (LINUX, MACOS):
+        print(
+            f"fleet_setup: {host} is neither Ubuntu nor macOS ({system or 'unknown'})",
+            file=sys.stderr,
+        )
         return 2
     if push_self(host):
         print(f"fleet_setup: could not copy this script to {host}", file=sys.stderr)
@@ -783,8 +949,30 @@ def row(host: str) -> int:
     return 0
 
 
+def tools_command() -> str:
+    """Return the line ``verify`` runs over plain ``ssh <host>``: ``command -v`` each tool."""
+    return f"command -v {' '.join(SSH_TOOLS)}"
+
+
+def missing_tools(output: str) -> list[str]:
+    """Return each of :data:`SSH_TOOLS` no line of ``command -v``'s ``output`` names."""
+    found = {line.strip().rsplit("/", 1)[-1] for line in output.splitlines()}
+    return [tool for tool in SSH_TOOLS if tool not in found]
+
+
+def check_tools(host: str) -> int:
+    """Print whether a non-interactive ``ssh <host>`` finds every tool; return 0 when it does."""
+    command = tools_command()
+    print(f"== {host}: {command}", flush=True)
+    _, out = on(host, command)
+    print(out)
+    absent = missing_tools(out)
+    print("ok      every tool on PATH" if not absent else f"missing {', '.join(absent)}")
+    return 1 if absent else 0
+
+
 def verify(host: str) -> int:
-    """Run ``fleet_sync.py status`` here and on ``host``, and ``fleet_stop.py status`` here."""
+    """Run ``fleet_sync.py status`` here and on ``host``, ``fleet_stop.py status`` here, the tools."""
     here = shlex.quote(str(ROOT))
     checks = [
         ("here", None, f"cd {here} && uv run python docs/fleet/scripts/fleet_sync.py status"),
@@ -797,7 +985,7 @@ def verify(host: str) -> int:
         code, out = on(where, command)
         print(out)
         worst = max(worst, code)
-    return worst
+    return max(worst, check_tools(host))
 
 
 def _csv(text: str) -> list[str]:
@@ -823,7 +1011,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Set up a new fleet machine.")
     sub = parser.add_subparsers(dest="command", required=True)
     box_parser = sub.add_parser("box", help="run on the new machine itself")
-    _ = box_parser.add_argument("action", choices=["check", "install"])
+    _ = box_parser.add_argument("action", choices=["check", "install", "write-path-block"])
     _ = box_parser.add_argument("--only", default="", help="comma-separated step keys")
     _ = box_parser.add_argument("--skip", default="", help="comma-separated kinds")
     _ = box_parser.add_argument("--repo-url", default=REPO_URL)
@@ -839,11 +1027,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         _ = sub.add_parser(name).add_argument("host")
     args = parser.parse_args(argv, namespace=_Args())
     if args.command == "box":
+        box = Box.here(args.repo_url, args.python_version)
         try:
-            steps = select(_csv(args.only), _csv(args.skip))
+            steps = select(_csv(args.only), _csv(args.skip), box.system)
         except ValueError as error:
             parser.error(str(error))
-        box = Box.here(args.repo_url, args.python_version)
+        if args.action == "write-path-block":
+            backup = write_path_block(box.home, box.system, int(time.time()))
+            kept = f" (the old file kept as ~/{backup.name})" if backup else ""
+            print(f"PATH block first in ~/{startup_file(box.home, box.system).name}{kept}")
+            return 0 if check_path_block(box.home, box.system) is None else 1
         if args.action == "check":
             results = check(box, steps)
             print("\n".join(report(results)))

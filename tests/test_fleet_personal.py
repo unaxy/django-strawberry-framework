@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from docs.fleet.scripts import fleet_setup
 from docs.fleet.scripts.setup.ubuntu import personal
 
 if TYPE_CHECKING:
@@ -29,7 +30,7 @@ FACTS = {
 
 
 def _box(tmp_path: Path) -> personal.Box:
-    return personal.Box(home=tmp_path, user="someone", facts=dict(FACTS))
+    return personal.Box(home=tmp_path, user="someone", facts=dict(FACTS), system="Linux")
 
 
 def test_limits_reproduce_rio_ubus_hand_tuned_values() -> None:
@@ -70,21 +71,30 @@ def test_render_refuses_an_unfilled_placeholder() -> None:
         _ = personal.render("a @HOST@ b @MISSING@", {"HOST": "x"})
 
 
-def test_the_path_block_goes_first_and_stays_single() -> None:
-    once = personal.with_block("guard\nrest\n", "m", "PATH=x", top=True)
-    assert once.startswith("# >>> m >>>\nPATH=x\n# <<< m <<<\n")
-    assert personal.with_block(once, "m", "PATH=x", top=True) == once
-    moved = personal.with_block("guard\n" + personal.block("m", "PATH=x"), "m", "PATH=y", top=True)
-    assert moved.startswith(personal.block("m", "PATH=y"))
-    assert moved.count("# >>> m >>>") == 1
+def test_the_path_block_step_is_fleet_setups_own_check_and_writer(tmp_path: Path) -> None:
+    box = _box(tmp_path)
+    step = next(step for step in personal.STEPS if step.key == "path-block")
+    assert step.lines(box) == fleet_setup.path_block_lines()
+    gap = "PATH block at the top of ~/.bashrc"
+    assert step.check(box) == fleet_setup.check_path_block(tmp_path, "Linux") == gap
+    _ = fleet_setup.write_path_block(tmp_path, "Linux", 1)
+    assert step.check(box) is None
 
 
-def test_the_interactive_block_goes_last_and_replaces_its_body() -> None:
-    once = personal.with_block("no newline", "m", "tmux", top=False)
-    assert once.endswith("no newline\n\n" + personal.block("m", "tmux"))
-    again = personal.with_block(once, "m", "tmux2", top=False)
-    assert again.count("# >>> m >>>") == 1
-    assert "tmux2" in again
+def test_the_interactive_block_goes_last_and_leaves_the_path_block_first(tmp_path: Path) -> None:
+    box = _box(tmp_path)
+    _ = fleet_setup.write_path_block(tmp_path, "Linux", 1)
+    _ = (tmp_path / ".bashrc").write_text((tmp_path / ".bashrc").read_text() + "guard\n")
+    wanted = personal._wanted_interactive(box)
+    path_body = fleet_setup.PATH_BLOCK_FILE.read_text()
+    interactive_body = (personal.FILES / "bashrc-interactive.sh").read_text()
+    assert wanted.startswith(fleet_setup.block(fleet_setup.PATH_MARK, path_body) + "guard\n")
+    assert wanted.endswith(
+        "guard\n\n" + fleet_setup.block(personal.INTERACTIVE_MARK, interactive_body),
+    )
+    again = fleet_setup.with_block(wanted, personal.INTERACTIVE_MARK, "tmux2", top=False)
+    assert again.count(f"# >>> {personal.INTERACTIVE_MARK} >>>") == 1
+    assert again.endswith(fleet_setup.block(personal.INTERACTIVE_MARK, "tmux2"))
 
 
 def test_select_refuses_an_unknown_step_or_kind() -> None:
@@ -123,12 +133,23 @@ def test_install_runs_root_steps_first_and_skips_done_ones(
     assert calls == [(["make pkg"], True), (["make tool"], False)]
 
 
-def test_the_bundle_carries_the_script_and_its_files_only() -> None:
+def test_the_bundle_carries_the_script_its_files_and_the_shared_path_step_only() -> None:
     with tarfile.open(fileobj=io.BytesIO(personal.bundle())) as archive:
         names = archive.getnames()
+        shared = {
+            name: archive.extractfile(name) for name in ("fleet_setup.py", "setup/files/path.sh")
+        }
+        bodies = {name: member.read() for name, member in shared.items() if member is not None}
     assert "setup/ubuntu/personal.py" in names
     assert "setup/ubuntu/files/bin/heavy.in" in names
-    assert all(name.startswith("setup/ubuntu/") for name in names)
+    assert sorted(name for name in names if not name.startswith("setup/ubuntu/")) == [
+        "fleet_setup.py",
+        "setup/files/path.sh",
+    ]
+    assert bodies == {
+        "fleet_setup.py": Path(fleet_setup.__file__).read_bytes(),
+        "setup/files/path.sh": fleet_setup.PATH_BLOCK_FILE.read_bytes(),
+    }
     assert not any("__pycache__" in name for name in names)
 
 

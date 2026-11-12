@@ -16,7 +16,8 @@ and on the machine itself (``apply`` copies this folder there and runs it)::
     python3 personal.py box install [--only STEP,...] [--skip KIND,...] [--git-name N --git-email E]
 
 ``apply`` copies this folder (``personal.py`` and ``files/``) to
-``~/.cache/dsf-fleet-setup/setup/ubuntu/`` on the target, then runs ``box`` there over ``ssh``
+``~/.cache/dsf-fleet-setup/setup/ubuntu/`` on the target, with ``fleet_setup.py`` and the PATH
+block where ``fleet_setup.py add`` puts them, then runs ``box`` there over ``ssh``
 (``-t`` for ``install``, so ``sudo`` can ask once). It passes the git ``user.name`` and
 ``user.email`` of the machine it runs on, so no identity is stored in this public repository.
 
@@ -35,8 +36,10 @@ Steps
     ``tailscale-operator``
         ``tailscale set --operator=<user>``: manage Tailscale without ``sudo``.
     ``path-block``
-        A marked block at the top of ``~/.bashrc``, above Ubuntu's interactive-only guard, putting
-        ``~/.local/bin``, ``~/.opencode/bin``, ``~/.grok/bin`` and the newest nvm node on ``PATH`` for
+        ``fleet_setup.py``'s own ``path-block`` step (its check and ``box write-path-block``
+        writer, the one block ``setup/files/path.sh``): a marked block at the top of
+        ``~/.bashrc``, above Ubuntu's interactive-only guard, putting ``~/.local/bin``,
+        ``~/.opencode/bin``, ``~/.grok/bin`` and the newest nvm node on ``PATH`` for
         non-interactive ``ssh`` commands too. Silent, so ssh pipes, rsync and git stay clean.
     ``interactive-block``
         A marked block at the end of ``~/.bashrc``: interactive ssh logins attach to tmux session
@@ -106,6 +109,7 @@ import dataclasses
 import io
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -117,6 +121,12 @@ import tarfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+if __package__:  # imported as ``docs.fleet.scripts.setup.ubuntu.personal`` (repo root on path)
+    from docs.fleet.scripts import fleet_setup
+else:  # run from its folder: ``fleet_setup.py`` sits two levels up, in the repo and in the bundle
+    sys.path.insert(1, str(Path(__file__).resolve().parents[2]))
+    import fleet_setup
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -151,7 +161,6 @@ KINDS = (
 )
 #: How much of each shell script ``install`` echoes (rendered files make long lines).
 ECHO_LIMIT = 400
-PATH_MARK = "dsf-fleet path"
 INTERACTIVE_MARK = "dsf-fleet interactive"
 PLACEHOLDER = re.compile(r"@[A-Z_]+@")
 #: ``scripts/fleet.py``'s ``SSH_OPTIONS``, repeated (this file imports nothing).
@@ -176,6 +185,8 @@ class Box:
     facts: dict[str, str]
     git_name: str = ""
     git_email: str = ""
+    #: ``platform.system()``, which picks the PATH block's startup file.
+    system: str = dataclasses.field(default_factory=platform.system)
 
     @property
     def bin(self) -> Path:
@@ -271,35 +282,6 @@ def render(template: str, mapping: dict[str, str]) -> str:
         msg = f"unfilled placeholders: {', '.join(left)}"
         raise ValueError(msg)
     return text
-
-
-def block(mark: str, body: str) -> str:
-    """Return ``body`` between the ``# >>> mark >>>`` and ``# <<< mark <<<`` lines."""
-    return f"# >>> {mark} >>>\n{body.rstrip()}\n# <<< {mark} <<<\n"
-
-
-def with_block(
-    text: str,
-    mark: str,
-    body: str,
-    *,
-    top: bool,
-) -> str:
-    """Return ``text`` holding exactly one ``mark`` block with ``body``, at the top or the end."""
-    wanted = block(mark, body)
-    pattern = re.compile(
-        rf"# >>> {re.escape(mark)} >>>\n.*?# <<< {re.escape(mark)} <<<\n",
-        re.DOTALL,
-    )
-    if top:  # above the interactive guard: always first, wherever an older copy sits
-        rest = pattern.sub("", text).lstrip("\n")
-        return wanted + "\n" + rest
-    if pattern.search(text):
-        return pattern.sub(lambda _match: wanted, text, count=1)
-    return text + ("" if not text or text.endswith("\n") else "\n") + "\n" + wanted
-
-
-# Desired file contents, shared by each step's check and its lines.
 
 
 def house_tools(box: Box) -> dict[str, str]:
@@ -402,26 +384,27 @@ def _bashrc(box: Box) -> Path:
     return box.home / ".bashrc"
 
 
-def _wanted_bashrc(box: Box) -> str:
-    text = _text(_bashrc(box))
-    text = with_block(text, PATH_MARK, _text(FILES / "bashrc-path.sh"), top=True)
-    return with_block(text, INTERACTIVE_MARK, _text(FILES / "bashrc-interactive.sh"), top=False)
-
-
 def _check_path_block(box: Box) -> str | None:
-    text = _text(_bashrc(box))
-    wanted = block(PATH_MARK, _text(FILES / "bashrc-path.sh"))
-    return None if text.startswith(wanted) else "PATH block at the top of ~/.bashrc"
+    return fleet_setup.check_path_block(box.home, box.system)
+
+
+def _lines_path_block(_box: Box) -> list[str]:
+    return fleet_setup.path_block_lines()
+
+
+def _wanted_interactive(box: Box) -> str:
+    body = _text(FILES / "bashrc-interactive.sh")
+    return fleet_setup.with_block(_text(_bashrc(box)), INTERACTIVE_MARK, body, top=False)
 
 
 def _check_interactive_block(box: Box) -> str | None:
-    wanted = block(INTERACTIVE_MARK, _text(FILES / "bashrc-interactive.sh"))
+    wanted = fleet_setup.block(INTERACTIVE_MARK, _text(FILES / "bashrc-interactive.sh"))
     return None if wanted in _text(_bashrc(box)) else "tmux and banner block in ~/.bashrc"
 
 
-def _lines_bashrc(box: Box) -> list[str]:
+def _lines_interactive(box: Box) -> list[str]:
     backup = f"cp -p ~/.bashrc ~/.bashrc.bak-{int(time.time())}"
-    return [f"{backup} 2>/dev/null || true", write_line(_bashrc(box), _wanted_bashrc(box))]
+    return [f"{backup} 2>/dev/null || true", write_line(_bashrc(box), _wanted_interactive(box))]
 
 
 def _check_tmux(box: Box) -> str | None:
@@ -875,8 +858,8 @@ STEPS: tuple[Step, ...] = (
     Step("apt-cli", "sudo", _check_apt, _lines_apt),
     Step("gh", "sudo", _check_gh, _lines_gh),
     Step("tailscale-operator", "sudo", _check_operator, _lines_operator),
-    Step("path-block", "user", _check_path_block, _lines_bashrc),
-    Step("interactive-block", "user", _check_interactive_block, _lines_bashrc),
+    Step("path-block", "user", _check_path_block, _lines_path_block),
+    Step("interactive-block", "user", _check_interactive_block, _lines_interactive),
     Step("tmux-conf", "user", _check_tmux, _lines_tmux),
     Step("gitconfig", "user", _check_git, _lines_git),
     Step("house-tools", "user", _check_house, _lines_house),
@@ -971,7 +954,7 @@ def install(box: Box, steps: Sequence[Step]) -> int:
 
     Each other step is checked just before its turn, not once up front: an earlier step can undo
     a later one (Toshy's installer rewrites a GNOME keybinding ``desktop-settings`` owns) or do
-    it (one ``.bashrc`` write serves two steps).
+    it.
     """
     root = [step for step in steps if step.kind == "sudo" and step.check(box) is not None]
     if root:
@@ -1001,13 +984,19 @@ def install(box: Box, steps: Sequence[Step]) -> int:
 
 
 def bundle() -> bytes:
-    """Return this folder (``personal.py`` and ``files/``) as a tar under ``setup/ubuntu``."""
+    """Return this folder (``personal.py`` and ``files/``) as a tar under ``setup/ubuntu``.
+
+    ``fleet_setup.py`` and the PATH block ride along at the paths ``fleet_setup.py add`` gives
+    them (``fleet_setup.PUSHED``): the ``path-block`` step runs their check and writer.
+    """
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w") as archive:
         for path in sorted(HERE.rglob("*")):
             if "__pycache__" in path.parts or path.is_dir():
                 continue
             archive.add(path, arcname=f"setup/ubuntu/{path.relative_to(HERE).as_posix()}")
+        for source, relative in fleet_setup.PUSHED:
+            archive.add(source, arcname=relative)
     return buffer.getvalue()
 
 

@@ -44,8 +44,9 @@ python3 docs/fleet/scripts/fleet_setup.py add <host> --check   # read-only: what
 python3 docs/fleet/scripts/fleet_setup.py add <host>           # install it; sudo asks once
 ```
 
-`add` checks that `<host>` answers batch-mode ssh and is Ubuntu, copies the script to
-`~/.cache/dsf-fleet-setup/` there, and runs its `box install` over `ssh -t`. Every step checks
+`add` checks that `<host>` answers batch-mode ssh and is Ubuntu or macOS (see [macOS](#macos)),
+copies the script and the shared PATH block (`setup/files/path.sh`) to `~/.cache/dsf-fleet-setup/`
+there, and runs its `box install` over `ssh -t`. Every step checks
 first and runs only when its check fails, so a rerun after a failure resumes and a finished
 machine reruns as a no-op. In order:
 
@@ -60,6 +61,7 @@ machine reruns as a no-op. In order:
 | `codex` | user | `npm install -g @openai/codex` under nvm |
 | `claude` | user | Claude Code's native installer into `~/.local/bin` |
 | `pre-commit` | user | `uv tool install pre-commit` (a stable interpreter for the git hook, START.md "Toolchain") |
+| `path-block` | user | the one PATH block of every fleet machine, `setup/files/path.sh`, first in the file the shell reads for a non-interactive `ssh <host> <command>`: `~/.bashrc` on Linux (above Ubuntu's interactive guard), `~/.zshenv` on macOS; a changed file is kept as `<name>.bak-<seconds>` |
 | `ssh-key` | keys | `~/.ssh/id_ed25519` with no passphrase (fleet ssh is batch mode) |
 | `checkout` | user | `git clone` of the public https URL to `~/projects/django-strawberry-framework` (no GitHub key needed; pushes stay the maintainer's) |
 | `python-version` | user | `.python-version` (git-ignored, so a clone lacks it), copied from the machine running `add` |
@@ -132,8 +134,8 @@ python3 docs/fleet/scripts/setup/ubuntu/personal.py apply <host>           # ins
 
 It copies its folder to `~/.cache/dsf-fleet-setup/setup/ubuntu/` on the target and runs the same
 checked, resumable steps: apt CLIs (build-essential, fd, btop, stress-ng, lm-sensors, `gh` from
-GitHub's apt repository), `tailscale set --operator`, a silent `PATH` block at the top of
-`~/.bashrc` (so `ssh <host> codex ...` finds the agent CLIs), tmux auto-attach and the shared-box
+GitHub's apt repository), `tailscale set --operator`, the core `path-block` step again (the same
+check, writer and block file, carried in its bundle), tmux auto-attach and the shared-box
 banner for interactive logins, `~/.tmux.conf`, git's `init.defaultBranch` and the identity of the
 machine running `apply`, the house tools `heavy` / `pressure` / `agent-status` / `git-autosync`
 (rendered for the target's threads and RAM; `git-autosync` takes `.work/land.lock` across its
@@ -160,17 +162,29 @@ Desktop GUI applications and rootless Docker are left out.
 ```sh
 python3 docs/fleet/scripts/fleet_setup.py add <host> --check   # every step ok but the hand ones
 python3 docs/fleet/scripts/fleet_setup.py mesh --check         # every pair ok
-python3 docs/fleet/scripts/fleet_setup.py verify <host>        # fleet_sync.py status here and there, fleet_stop.py status
+python3 docs/fleet/scripts/fleet_setup.py verify <host>        # fleet_sync.py status here and there, fleet_stop.py status, the tools
 ```
 
-`verify` is read-only: nothing is synced and no flag is written.
+`verify` also runs `ssh <host> 'command -v uv git python3 node claude codex gh'` (plain,
+non-interactive ssh, as `fleet_sync.py` and agents call it) and fails naming each tool it does
+not find. It is read-only: nothing is synced and no flag is written.
 
 ## macOS
 
-`fleet_setup.py box` supports Ubuntu only. A Mac follows the same list by hand: section 1
-with System Settings' Remote Login in place of openssh-server, Homebrew's `direnv` and
-`rsync` in place of apt, the direnv hook in `~/.zshrc`, and `launchd` instead of lingering
-(no step). Steps 3 to 6 are the same.
+On a Mac, `fleet_setup.py box` runs one step, `path-block`, which writes the shared PATH block
+to `~/.zshenv` (zsh reads it for every shell, a non-interactive ssh command's included), on
+the stock `/usr/bin/python3`:
+
+```sh
+python3 docs/fleet/scripts/fleet_setup.py add <mac> --check   # read-only: is the block first in ~/.zshenv
+python3 docs/fleet/scripts/fleet_setup.py add <mac>           # write it
+```
+
+The rest of the list stays by hand: section 1 with System Settings' Remote Login in place of
+openssh-server, Homebrew's `direnv`, `rsync` and `gh` in place of apt, uv, nvm's node, Codex
+and Claude Code from the same installers, the direnv hook in `~/.zshrc`, and `launchd`
+instead of lingering (no step). Steps 3 to 6 are the same; `verify` checks that the tools the
+block puts on `PATH` are found over plain ssh.
 
 <!-- LINK DEFINITIONS -->
 
