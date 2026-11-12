@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 522 done, 105 to do. The CHANGELOG entries filed here moved to
+Progress: 523 done, 107 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3128,16 +3128,22 @@ Progress: 522 done, 105 to do. The CHANGELOG entries filed here moved to
   stock django-filter lists the same rows, and the upstream seam already scopes them per request (a callable
   `queryset=` on the `RelatedFilter`, as the fakeshop library sets do for their model-choice filters). The contract
   question it hides is filed as 943.
+- [x] 832. fixed: a flat copy of a `RelatedFilter` into a set over a multi-table-inheritance descendant of the
+  relation's target reads the relation continued down Django's parent links (`Options.get_path_from_parent` behind
+  `utils/relations.py::descendant_relation_path`; `filters/sets.py::_branch_relation` feeds `_expand_related_filter`'s
+  copy path and the declared hop's `_hop_relation`, and `utils/permissions.py::walk_declared_relation_path` matches
+  either spelling for a filter set), so a key the descendant declares (`venueFaults`), a class-level `filter` override
+  on such a branch and a raw `.qs` of such a set (which failed every request) answer flat as they do nested (grid: 64
+  error entries fixed, flat == nested on 800/800, 0 answering cells changed); nested correlation and intermediate
+  visibility are untouched, and a hidden parent link (`related_name="+"`) keeps the declared path. The published input
+  of every flat copy stays as declared (`FilterSet._published_filter`; `venueWindowCount: exact: Decimal`; the
+  correction is 945). Pinned live by `examples/fakeshop/test_query/test_library_inheritance_api.py`
+  (`test_ticket_keys_into_a_desk_set_read_the_desk_rows` and siblings), package rows in `tests/utils/test_relations.py`,
+  `tests/utils/test_permissions.py`, `tests/filters/test_sets.py`, `tests/filters/test_inputs.py`; spec-027 Edge case and
+  Test plan, GLOSSARY `RelatedFilter` / `FilterSet`. Filed 944, 945, 946; CHANGELOG 947
 
 ## To do: found along the way
 
-- [ ] 832. (robustness) A flat key into a `RelatedFilter` target set over a multi-table-inheritance descendant
-  answers a Django `FieldError` for every nonempty value, whatever its GlobalID strategy: `RepairTicketFilter.venue =
-  RelatedFilter(SelfServeDeskFilter, field_name="venue")` publishes `venueFaults`, which applies `venue__faults` from a
-  `Venue` relation where only `venue__lendingdesk__selfservedesk__faults` resolves ("Unsupported lookup 'faults' for
-  ForeignKey or join on the field not permitted", `filters/sets.py::_apply_relation_leaf`; a class-level `filter`
-  override answers "Venue has no field named 'faults'" from `::_names_every_through`). The nested branch serves. Found
-  fact-finding 745
 - [ ] 844. (robustness) A walked relation-key null sentinel, a declared `ModelChoiceFilter` /
   `ModelMultipleChoiceFilter` under `null_label` (forward or to-many, shipped or overriding `filter`) sent its
   `null_value`, matches nothing, where django-filter answers the relation's null test (`<relation>=None`); a raw head
@@ -3267,12 +3273,29 @@ Progress: 522 done, 105 to do. The CHANGELOG entries filed here moved to
   comparison, the conjoined reading) drain the value before the override's fallback receives it. Root fix: make a
   one-shot cleaned value replayable once where `_apply_relation_leaf` enters and hand every reader a fresh iterator.
   Found verifying 789
+- [ ] 944. (robustness) A `RelatedOrder` into an `OrderSet` over a multi-table-inheritance descendant of the
+  relation's target prefixes the child's order paths with the declaration's `field_name` (`orders/inputs.py`
+  `f"{prefix}__{child_path}"`), so a column only the descendant declares (`orderBy: [{venue: {kioskCode: ASC}}]`)
+  answers `ConfigurationError` "invalid order path 'venue__kiosk_code'" on every request where the hand-spelled
+  declaration (`field_name="venue__lendingdesk__selfservedesk"`) orders; continuing the path down the parent links (as
+  832 does for filters, with `OrderSet._scoped_hops` counting the consumed segments) would move a working answer: an
+  inherited column (`name`) orders non-descendant rows by the ancestor's value today and by NULL spelled. Found fixing
+  832
+- [ ] 946. (robustness, lead) Two `RelatedFilter` declarations on one set whose spellings meet once one is continued
+  down the parent links (`venue` into a `LendingDesk` set beside `venue__lendingdesk__selfservedesk` into a
+  `SelfServeDesk` set) fail the schema build with an `IndexError`, identically before and after 832; cause not traced.
+  Found verifying 832
 
 ## To do: holes found re-checking the fixes
 
 
 ## Waiting on you
 
+- [ ] 945. Decide: should a flat copy of a descendant column (`venueWindowCount`, `RelatedFilter` into a set over a
+  multi-table-inheritance child) publish the column's `Int` like its nested twin instead of the `Decimal` the
+  declaration spelling types (832 kept `Decimal`: `FilterSet._published_filter`)? It narrows wire inputs that answer
+  today: `3` stays rows; `3.0` and `"3"` (rows today) and `1.5` (Django truncates to `1` today) become GraphQL
+  validation errors; `2147483648` (`[]` today) a validation error. Delete the seam to flip it. (Found fixing 832)
 - [ ] 943. Decide: should a rendered raw form (django-filter's `FilterView`, DRF's browsable API) list only the rows
   the viewer may see in a `RelatedFilter` head the request leaves out? Today such a head lists the declaration's
   queryset (spec-027 states it; stock django-filter does the same), so the page names rows the target type's

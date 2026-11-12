@@ -32,6 +32,7 @@ from django_strawberry_framework.utils._narrowing import (
     is_list_or_tuple,
     read_attr,
     require,
+    require_instance,
 )
 from django_strawberry_framework.utils.typing import MISSING_ATTRIBUTE
 
@@ -55,6 +56,7 @@ __all__ = [
     "RelationPathHop",
     "carrier_backed_link",
     "classify_path",
+    "descendant_relation_path",
     "generated_column",
     "generated_column_source",
     "has_composite_pk",
@@ -681,6 +683,38 @@ def leading_relation_hops(
         if hops is not None:
             return hops
     return ()
+
+
+def descendant_relation_path(
+    model: type[models.Model],
+    relation_path: str,
+    target_model: type[models.Model],
+) -> str:
+    """Return ``relation_path`` from ``model`` continued down the parent links to ``target_model``.
+
+    A relation reaching a model that ``target_model`` extends by multi-table
+    inheritance (its concrete model a strict subclass of the one reached) reaches a
+    ``target_model`` row only across the reverse parent links Django joins from the
+    ancestor down: ``Options.get_path_from_parent``, one ``PathInfo`` per link, each
+    named by its ``join_field`` as a query spells it (``venue`` reaching ``Venue`` reads
+    ``SelfServeDesk`` rows as ``venue__lendingdesk__selfservedesk``). Any other
+    ``target_model`` (the model reached, a proxy of it, an ancestor of it), a path whose
+    segments are not all relations, and a link whose reverse relation Django hides
+    (``related_name="+"``: ``get_field`` reads every hidden relation of a model under
+    that one name, so no query names the link alone) leave ``relation_path`` as it is.
+    """
+    hops = leading_relation_hops(model, relation_path)
+    if len(hops) != len(relation_path.split(LOOKUP_SEP)):
+        return relation_path
+    reached = require(hops[-1].target_model._meta.concrete_model, is_model_class)
+    target = require(target_model._meta.concrete_model, is_model_class)
+    if target is reached or not issubclass(target, reached):
+        return relation_path
+    links = [link.join_field for link in target._meta.get_path_from_parent(reached)]
+    if any(relation_bool(link, "hidden") for link in links):
+        return relation_path
+    names = [require_instance(read_attr(link, "name"), str) for link in links]
+    return LOOKUP_SEP.join((relation_path, *names))
 
 
 def _classified_hops(

@@ -1999,7 +1999,10 @@ def _json_publication(filter_instance: Filter, filterset_cls: type[FilterSet]) -
     ``_element_annotation`` (a bare ``TypedFilter``, the catch-all, and each member of a CSV
     filter), dispatched on the same kind table, asked for the scalar alone
     (``_element_scalar``: no choice enum is built); every other arm publishes no ``JSON``.
+    A flat copy is asked under its declaration's spelling, as the input builder types it
+    (``filters/sets.py::FilterSet._published_filter``).
     """
+    filter_instance = filterset_cls._published_filter(filter_instance)
     model_field = _filterset_value_field(filterset_cls, filter_instance)
 
     def _no_json(_filter: Filter) -> object:
@@ -3196,10 +3199,12 @@ def _build_input_fields(
             if not lookup_python_attr.isidentifier():
                 raise _unnameable_lookup_refusal(leaf_filter, lookup, filterset_cls)
             # A leaf is typed by the field each value is cleaned as: the output of any
-            # transform between column and lookup (``year``'s int, an index's element).
-            model_field = _filterset_value_field(filterset_cls, leaf_filter)
+            # transform between column and lookup (``year``'s int, an index's element),
+            # a flat copy under its declaration's spelling (``FilterSet._published_filter``).
+            published = filterset_cls._published_filter(leaf_filter)
+            model_field = _filterset_value_field(filterset_cls, published)
             annotation = convert_filter_to_input_annotation(
-                leaf_filter,
+                published,
                 model_field,
                 owner_definition,
                 filterset_cls,

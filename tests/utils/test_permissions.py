@@ -12,6 +12,7 @@ from typing import NoReturn
 
 import pytest
 import pytest_django
+from apps.library.models import RepairTicket, SelfServeDesk
 from apps.products.models import Category, Entry, Item, Property
 from django.contrib.auth import get_user_model
 from django.db.models import Model
@@ -771,6 +772,43 @@ def test_walk_declared_relation_path_returns_the_hops_and_the_path_left_on_the_l
     assert _walk("target_version__code") == ([(Item, "version", Version)], ("code",))
     assert _walk("dangling__name") == ([(Item, "dangling", None)], ("name",))
     assert _walk("undeclared__name") == ([], ("undeclared", "name"))
+
+
+def test_walk_matches_a_branch_into_a_descendant_set_by_either_spelling() -> None:
+    """A branch into a set over a multi-table descendant matches its path continued down the links.
+
+    ``venue`` reaches ``Venue``; the target set is over ``SelfServeDesk``, so the walk
+    reads ``venue__lendingdesk__selfservedesk`` as the same hop as ``venue``, leaving
+    the rest on the descendant. A path continuing only part of the way is the shorter
+    spelling, its remaining segments left on the target set.
+    """
+
+    class KioskSet:
+        related_filters: dict[str, object] = {}
+        _meta = SimpleNamespace(model=SelfServeDesk)
+
+    class TicketSet:
+        related_filters: dict[str, object] = {
+            "desk": _Rel("venue", KioskSet, target_attr="filterset"),
+        }
+        _meta = SimpleNamespace(model=RepairTicket)
+
+    def _walk(
+        path: str,
+    ) -> tuple[list[tuple[type[object] | None, str, type[object] | None]], tuple[str, ...]]:
+        hops, remainder = walk_declared_relation_path(
+            TicketSet,
+            path,
+            related_attr="related_filters",
+            target_attr="filterset",
+        )
+        return [(hop.owner, hop.declared_attr, hop.target) for hop in hops], remainder
+
+    hop = [(TicketSet, "desk", KioskSet)]
+    assert _walk("venue__faults") == (hop, ("faults",))
+    assert _walk("venue__lendingdesk__selfservedesk__faults") == (hop, ("faults",))
+    assert _walk("venue__lendingdesk__selfservedesk") == (hop, ())
+    assert _walk("venue__lendingdesk__window_count") == (hop, ("lendingdesk", "window_count"))
 
 
 def test_fire_flat_relation_path_gates_resolves_a_renamed_branch_by_field_name() -> None:

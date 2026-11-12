@@ -17337,8 +17337,8 @@ def _desk_ticket_parent() -> type[FilterSet]:
     """``TicketParent.desk`` targets ``Venue`` (``field_name="venue"``) with a child set on ``LendingDesk``.
 
     ``LendingDesk`` is a multi-table-inheritance child of ``Venue``, so the
-    expanded ``desk__window_count`` leaf's path resolves only on the child
-    set's model, never on the parent's ``venue`` relation.
+    expanded ``desk__window_count`` leaf reads ``venue__lendingdesk__window_count``:
+    the relation continued down the parent link to the child set's rows.
     """
 
     class DeskChild(FilterSet):
@@ -17355,6 +17355,106 @@ def _desk_ticket_parent() -> type[FilterSet]:
 
     TicketParent.get_filters()
     return TicketParent
+
+
+def test_a_flat_copy_into_a_descendant_set_is_published_under_its_declaration_spelling() -> None:
+    """The copy reads the child's rows down the parent link; the input types its declared path.
+
+    ``desk__window_count`` carries ``venue__lendingdesk__window_count`` and is published
+    as a copy under ``venue__window_count``, the path the declaration spells; the
+    ticket set's own ``code`` is published as itself.
+    """
+    parent = _desk_ticket_parent()
+    leaf = parent.base_filters["desk__window_count"]
+
+    published = parent._published_filter(leaf)
+
+    assert leaf.field_name == "venue__lendingdesk__window_count"
+    assert published is not leaf
+    assert published.field_name == "venue__window_count"
+    assert parent._published_filter(parent.base_filters["code"]) is parent.base_filters["code"]
+
+
+def test_a_flat_copy_through_two_descendant_branches_is_published_under_both_declarations() -> (
+    None
+):
+    """Each branch's continuation down the parent links leaves the published spelling.
+
+    ``venue`` into a kiosk set whose ``lead_ticket`` reaches a ticket set whose
+    ``venue`` is a kiosk set again: the copy reads both continuations and is published
+    as ``venue__lead_ticket__venue__window_count``.
+    """
+
+    class InnerKiosk(FilterSet):
+        class Meta:
+            model = library_models.SelfServeDesk
+            fields = {"window_count": ["exact"]}
+
+    class InnerTicket(FilterSet):
+        venue = RelatedFilter(InnerKiosk, field_name="venue")
+
+        class Meta:
+            model = library_models.RepairTicket
+            fields = {"code": ["exact"]}
+
+    class OuterKiosk(FilterSet):
+        lead_ticket = RelatedFilter(InnerTicket, field_name="lead_ticket")
+
+        class Meta:
+            model = library_models.SelfServeDesk
+            fields = {"kiosk_code": ["exact"]}
+
+    class OuterTicket(FilterSet):
+        venue = RelatedFilter(OuterKiosk, field_name="venue")
+
+        class Meta:
+            model = library_models.RepairTicket
+            fields = {"code": ["exact"]}
+
+    leaf = OuterTicket._filter_table()["venue__lead_ticket__venue__window_count"]
+
+    assert leaf.field_name == (
+        "venue__lendingdesk__selfservedesk__lead_ticket__venue__lendingdesk__selfservedesk"
+        "__window_count"
+    )
+    assert OuterTicket._published_filter(leaf).field_name == (
+        "venue__lead_ticket__venue__window_count"
+    )
+
+
+def test_a_flat_copy_an_override_rebinds_off_its_branch_is_published_as_rebound() -> None:
+    """A ``get_filters()`` override moving a copy off its branch's path keeps the copy's own path.
+
+    The rebound ``field_name`` no longer starts with the path the branch reads rows
+    by, so no declaration spells it and the copy is published as it is.
+    """
+
+    class DeskChild(FilterSet):
+        class Meta:
+            model = library_models.LendingDesk
+            fields = {"window_count": ["exact"]}
+
+    class RebindingTicket(FilterSet):
+        desk = RelatedFilter(DeskChild, field_name="venue")
+
+        @classmethod
+        @override
+        def get_filters(cls) -> OrderedDict[str, Filter]:
+            filters = OrderedDict(super().get_filters())
+            # The metaclass's first read is unexpanded: no copy is published yet.
+            if "desk__window_count" in filters:
+                filters["desk__window_count"].field_name = "code"
+            return filters
+
+        class Meta:
+            model = library_models.RepairTicket
+            fields = {"code": ["exact"]}
+
+    leaf = RebindingTicket._filter_table()["desk__window_count"]
+
+    assert leaf.field_name == "code"
+
+    assert RebindingTicket._published_filter(leaf) is leaf
 
 
 def test_omitted_mti_child_leaf_runs_no_visibility_hook() -> None:

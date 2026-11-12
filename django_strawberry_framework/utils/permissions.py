@@ -70,7 +70,7 @@ from .input_values import (
     related_declaration_mapping,
 )
 from .querysets import reject_async_in_sync_context, relation_target_type
-from .relations import leading_relation_hops
+from .relations import descendant_relation_path, is_model_class, leading_relation_hops
 from .strings import flatten_lookup_path
 
 if TYPE_CHECKING:
@@ -683,7 +683,14 @@ def walk_declared_relation_path(
     renamed branch (``visible_shelves = RelatedFilter(ShelfFilter,
     field_name="shelves")``) still resolves; a set declares each relation once
     (``sets_mixins.py::collect_related_declarations``), so no two declarations
-    claim one relation. A declaration whose ``field_name`` spans several ORM
+    claim one relation. A declaration whose target set carries a ``_meta.model`` (a
+    filter set) over a multi-table-inheritance descendant of the model its
+    ``field_name`` reaches also matches that path continued down the parent links
+    (``descendant_relation_path_of``: ``venue__lendingdesk__selfservedesk`` for
+    ``venue`` into a set over ``SelfServeDesk``), the longer spelling winning where
+    the path spells it; an ``OrderSet`` carries none, so its declared hops keep their
+    spelling (``orders/sets.py::OrderSet._scoped_hops`` counts the declared
+    segments). A declaration whose ``field_name`` spans several ORM
     segments (``target_version__milestone``) is one hop and wins over a shorter
     overlapping declaration (``target_version``); a set where a path through
     the shorter branch continues into the longer one is refused when it
@@ -722,8 +729,20 @@ def walk_declared_relation_path(
             if not truth.is_instance(field_name, str):
                 continue
             field_segments = tuple(field_name.split(LOOKUP_SEP))
-            if segments[index : index + len(field_segments)] == field_segments:
-                matches.append((len(field_segments), declared_attr, related_obj))
+            if segments[index : index + len(field_segments)] != field_segments:
+                continue
+            # The descendant spelling continues ``field_name``, so only a path it starts
+            # can spell it; the longer spelling it matches is the one the path walks.
+            relation = descendant_relation_path_of(
+                current_cls,
+                field_name,
+                related_obj,
+                target_attr,
+            )
+            extended = tuple(relation.split(LOOKUP_SEP))
+            if segments[index : index + len(extended)] == extended:
+                field_segments = extended
+            matches.append((len(field_segments), declared_attr, related_obj))
         if not matches:
             break
         consumed, declared_attr, related_obj = max(matches, key=lambda match: match[0])
@@ -737,6 +756,31 @@ def walk_declared_relation_path(
     if undeclared:
         index = _walk_undeclared_hops(current_cls, segments, index, hops, aliases)
     return tuple(hops), segments[index:]
+
+
+def descendant_relation_path_of(
+    owner: type[object],
+    field_name: str,
+    related_obj: object,
+    target_attr: str,
+) -> str:
+    """Return the ORM path a declaration's relation reaches its target set's rows by, from ``owner``.
+
+    ``field_name``, continued down the parent links to the target set's model where that
+    model is a multi-table-inheritance descendant of the one ``field_name`` reaches
+    (``utils/relations.py::descendant_relation_path``: ``venue`` into a set over
+    ``SelfServeDesk`` reads ``venue__lendingdesk__selfservedesk``). A flat path may spell
+    the branch either way (``walk_declared_relation_path``), and a ``RelatedFilter``'s
+    flat copy of a target filter carries the continued path
+    (``filters/sets.py::_expand_related_filter``), the one Django resolves from
+    ``owner``'s model. ``field_name`` alone for a set or target with no model.
+    """
+    target_cls: object = getattr(related_obj, target_attr, None)
+    model = _set_model(owner)
+    target = _set_model(target_cls) if truth.is_type(target_cls) else None
+    if not is_model_class(model) or not is_model_class(target):
+        return field_name
+    return descendant_relation_path(model, field_name, target)
 
 
 def _set_model(set_cls: type[object]) -> type[models.Model] | None:

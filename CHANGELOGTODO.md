@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 237 to do.
+Progress: 0 done, 238 to do.
 
 ## From dry-0_0_15_3
 
@@ -1149,6 +1149,10 @@ Progress: 0 done, 237 to do.
   target type with its own `get_queryset`) keeps a parent whose visible related rows meet each value, as django-filter
   does, where one related row had to meet them all; with `exclude=True` it drops a parent any value meets; a
   relation-key override receives `conjoined` off with `exclude` when negated
+- [ ] 947. CHANGELOG entry for item 832: a flat filter key into a `RelatedFilter` set over a multi-table-inheritance
+  child of the relation's target (`venueFaults`, a class-level `filter` override on such a branch, a raw `FilterSet.qs`
+  of such a set) answers the child's rows as the nested spelling does, where it raised Django's `FieldError` /
+  `FieldDoesNotExist`; the published inputs are unchanged
 
 ## From dry-upstream-0_0_15
 

@@ -150,6 +150,7 @@ from django_strawberry_framework.filters.inputs import (
     lookup_leaf_names,
     materialize_input_class,
     normalize_input_value,
+    publishes_json_value,
     range_form_keys,
 )
 from django_strawberry_framework.filters.sets import (
@@ -5190,6 +5191,59 @@ def test_a_filter_over_a_json_column_is_typed_by_what_its_form_cleans(
     cleans its members), and ``isnull`` stays ``Boolean``.
     """
     assert _value_leaves(_payload_set(declare())) == {lookup: expected}
+
+
+@isolate_apps("apps.library")
+def test_a_flat_copy_into_a_descendant_json_column_publishes_and_binds_as_declared() -> None:
+    """A flat copy's ``JSON`` question reads the declaration's spelling, as its input does.
+
+    The ticket set's ``venue`` reaches ``JsonVenue``; its set is over the multi-table child
+    ``JsonKiosk``, whose ``payload`` a bare ``TypedFilter`` publishes as ``JSON``. The flat
+    copy reads ``venue__jsonkiosk__payload``, but ``venue__payload``, the path its
+    declaration spells, names no ``JsonTicket`` column, so its input is ``String`` and an
+    object sent to it is no ``JSON`` value (``publishes_json_value``).
+    """
+
+    class JsonModel(models.Model):
+        class Meta:
+            abstract = True
+            app_label = "library"
+            managed = False
+
+    class JsonVenue(JsonModel):
+        pass
+
+    class JsonKiosk(JsonVenue):
+        payload: _JSON = models.JSONField(default=dict)
+
+    class JsonTicket(JsonModel):
+        venue: _FK[JsonVenue] = models.ForeignKey(JsonVenue, on_delete=models.CASCADE)
+
+    class JsonKioskFilter(FilterSet):
+        payload = TypedFilter(field_name="payload")
+
+        class Meta:
+            model = JsonKiosk
+            fields = []
+
+    class JsonTicketFilter(FilterSet):
+        venue = RelatedFilter(JsonKioskFilter, field_name="venue")
+
+        class Meta:
+            model = JsonTicket
+            fields = []
+
+    leaf = JsonTicketFilter._filter_table()["venue__payload"]
+    published = {
+        attr: _annotations(_class_arg(ann))
+        for attr, ann, _kwargs in _build_input_fields(JsonTicketFilter)
+        if attr == "venue_payload"
+    }
+
+    assert leaf.field_name == "venue__jsonkiosk__payload"
+    assert publishes_json_value(JsonKioskFilter._filter_table()["payload"], JsonKioskFilter)
+    assert published["venue_payload"] == {"exact": str | None}
+    assert not publishes_json_value(leaf, JsonTicketFilter)
 
 
 def test_a_filter_override_over_a_json_column_types_values_by_its_text_form() -> None:

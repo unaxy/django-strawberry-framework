@@ -19,12 +19,15 @@ from apps.library.models import (
     Book,
     Branch,
     Genre,
+    KioskFault,
     LendingDesk,
     Loan,
     MembershipCard,
+    OpenVenue,
     Patron,
     PatronProfile,
     ProxyBranch,
+    RepairTicket,
     SelfServeDesk,
     TaggedItem,
     Venue,
@@ -62,6 +65,7 @@ from django_strawberry_framework.utils.relations import (
     _lenient_traverses_to_many,
     carrier_backed_link,
     classify_path,
+    descendant_relation_path,
     generated_column,
     generated_column_source,
     has_composite_pk,
@@ -2199,3 +2203,152 @@ def test_a_generated_column_lives_exactly_as_long_as_its_field(*, read: bool) ->
 def test_unbound_transform_output_has_no_generated_column_source() -> None:
     """A transform's output field is concrete but has no model column to invert."""
     assert generated_column_source(models.IntegerField()) is None
+
+
+_descendant_apps = Apps([AppConfig("test_relations_descendant", sys.modules[__name__])])
+
+
+class _DrModel(models.Model):
+    """Abstract root registering each model below in ``_descendant_apps``.
+
+    Django resolves a model's ``Meta`` through its bases when it declares none, so the
+    multi-table pair below inherits this one's ``app_label`` and ``apps``.
+    """
+
+    class Meta:
+        abstract = True
+        app_label = "test_relations_descendant"
+        apps = _descendant_apps
+
+
+class _DrBase(_DrModel):
+    """A multi-table parent whose child hides its parent link's reverse relation."""
+
+    name: "models.TextField[str | Combinable, str]" = models.TextField()
+
+
+class _DrHiddenChild(_DrBase):
+    """Extends ``_DrBase`` through a parent link declared ``related_name="+"``."""
+
+    base: "models.OneToOneField[_DrBase | Combinable, _DrBase]" = models.OneToOneField(
+        _DrBase,
+        on_delete=models.CASCADE,
+        parent_link=True,
+        primary_key=True,
+        related_name="+",
+    )
+
+
+class _DrHolder(_DrModel):
+    """Reaches ``_DrBase`` through ``base``."""
+
+    base: "models.ForeignKey[_DrBase | Combinable, _DrBase]" = models.ForeignKey(
+        _DrBase,
+        on_delete=models.CASCADE,
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "model",
+        "relation_path",
+        "target",
+        "expected",
+    ),
+    [
+        (
+            RepairTicket,
+            "venue",
+            Venue,
+            "venue",
+        ),
+        (
+            RepairTicket,
+            "venue",
+            OpenVenue,
+            "venue",
+        ),
+        (
+            KioskFault,
+            "kiosk",
+            Venue,
+            "kiosk",
+        ),
+        (
+            KioskFault,
+            "kiosk",
+            LendingDesk,
+            "kiosk",
+        ),
+        (
+            RepairTicket,
+            "venue",
+            Book,
+            "venue",
+        ),
+        (
+            RepairTicket,
+            "venue",
+            LendingDesk,
+            "venue__lendingdesk",
+        ),
+        (
+            RepairTicket,
+            "venue",
+            SelfServeDesk,
+            "venue__lendingdesk__selfservedesk",
+        ),
+        (
+            KioskFault,
+            "kiosk__lead_ticket__venue",
+            SelfServeDesk,
+            "kiosk__lead_ticket__venue__lendingdesk__selfservedesk",
+        ),
+        (
+            RepairTicket,
+            "code",
+            SelfServeDesk,
+            "code",
+        ),
+        (
+            RepairTicket,
+            "venue__name",
+            SelfServeDesk,
+            "venue__name",
+        ),
+        (
+            _DrHolder,
+            "base",
+            _DrHiddenChild,
+            "base",
+        ),
+    ],
+    ids=[
+        "reached-model",
+        "proxy",
+        "ancestor",
+        "middle-ancestor",
+        "unrelated",
+        "one-level",
+        "two-levels",
+        "multi-segment-relation",
+        "column",
+        "past-a-column",
+        "hidden-parent-link",
+    ],
+)
+def test_descendant_relation_path_continues_down_the_parent_links_to_a_descendant(
+    model: type[Model],
+    relation_path: str,
+    target: type[Model],
+    expected: str,
+) -> None:
+    """A relation reaching a model ``target`` extends is continued down Django's parent links.
+
+    ``Options.get_path_from_parent`` names each link as a query spells it. The model
+    reached, a proxy of it, an ancestor of it and an unrelated model leave the path as
+    it is, as do a path not made of relations alone and a parent link whose reverse
+    relation is hidden (``related_name="+"``: Django names every hidden relation of a
+    model ``'+'``, so no query names that link).
+    """
+    assert descendant_relation_path(model, relation_path, target) == expected

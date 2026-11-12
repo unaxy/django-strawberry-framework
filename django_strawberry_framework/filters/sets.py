@@ -167,6 +167,7 @@ from django_strawberry_framework.utils.permissions import (
     DeclaredHop,
     RelationHop,
     UndeclaredHop,
+    descendant_relation_path_of,
     relation_path_gates,
     set_bound_definition,
     set_bound_type,
@@ -2673,10 +2674,60 @@ def _hop_model(hop: RelationHop) -> type[models.Model]:
 
 
 def _hop_relation(hop: RelationHop) -> str:
-    """Return the ORM path a hop crosses from the model it starts on."""
+    """Return the ORM path a hop crosses from the model it starts on to the model it reaches.
+
+    A declared hop's is its branch's (``_branch_relation``): the target set's rows, a
+    multi-table-inheritance descendant's reached down the parent links.
+    """
     if isinstance(hop, DeclaredHop):
-        return _declared_field_name(_filter_declaration(hop)[1])
+        owner, related_filter = _filter_declaration(hop)
+        return _branch_relation(owner, related_filter)
     return hop.declared_attr
+
+
+def _branch_relation(owner: type[FilterSet], related_filter: RelatedFilter) -> str:
+    """Return the ORM path ``related_filter`` reaches its target set's rows by from ``owner``'s model.
+
+    Its ``field_name``, continued down the parent links where the target set is over a
+    multi-table-inheritance descendant of the model ``field_name`` reaches
+    (``utils/permissions.py::descendant_relation_path_of``): a flat copy of a target
+    filter carries this path (``_expand_related_filter``), so it resolves on ``owner``'s
+    model as its nested twin's rows do, whatever the descendant declares below the model
+    reached.
+    """
+    return descendant_relation_path_of(
+        owner,
+        _declared_field_name(related_filter),
+        related_filter,
+        "filterset",
+    )
+
+
+def _published_path(owner: type[FilterSet], filter_instance: Filter) -> str | None:
+    """Return the ``field_name`` ``owner``'s published input types ``filter_instance`` by.
+
+    A flat copy ``owner`` expands (``_is_flat_copy``) is typed by its declaration's
+    spelling: the ``RelatedFilter``'s own ``field_name`` followed by the child filter's
+    path as the child set publishes it (``venue__window_count``), never the path
+    ``_branch_relation`` continues down the parent links into a multi-table-inheritance
+    descendant (``venue__lendingdesk__selfservedesk__window_count``). That continuation
+    changes where the copy reads rows, never its published input. Any other filter, and a
+    copy whose ``field_name`` no longer starts with its branch's path (rebound by a
+    ``get_filters()`` override), answers its own ``field_name``.
+    """
+    field_name = filter_instance.field_name
+    record = _expansion_record(filter_instance)
+    if record is None or not record.holds_in(owner) or not is_str(field_name):
+        return field_name
+    related_filter = owner.related_filters[record.branch]
+    prefix = f"{_branch_relation(owner, related_filter)}{LOOKUP_SEP}"
+    if not field_name.startswith(prefix):
+        return field_name
+    rest = field_name.removeprefix(prefix)
+    child = _projection_child_filter(record)
+    if child.field_name == rest:
+        rest = _published_path(record.filterset, child) or rest
+    return f"{_declared_field_name(related_filter)}{LOOKUP_SEP}{rest}"
 
 
 def _hop_source_model(hops: tuple[RelationHop, ...], index: int) -> type[models.Model]:
@@ -3933,7 +3984,7 @@ def _expand_related_filter(
     if not target_filterset:
         return expanded
     target_filters = target_filterset._filters_along(path, scope)
-    relation = _declared_field_name(f)
+    relation = _branch_relation(path[-1], f)
     via = f"{truth.qualname(path[-1])}.{filter_name}"
     for child_name, field in target_filters.items():
         new_name = _branch_key(filter_name, child_name)
@@ -5173,6 +5224,25 @@ class FilterSet(
                     for name, filter_instance in filters.items()
                 )
         return snapshot.filters
+
+    @classmethod
+    def _published_filter(cls, filter_instance: Filter) -> Filter:
+        """Return ``filter_instance``, a leaf of this set, as the published input types it.
+
+        The leaf itself, except a flat copy whose rows are read down the parent links
+        into a multi-table-inheritance descendant: a shallow copy of it under its
+        declaration's spelling (``_published_path``), so the input builder
+        (``inputs.py::_build_input_fields``) and the ``JSON`` publication question
+        (``inputs.py::_json_publication``) type it by the declaration's spelling, never by
+        the continued path. The published type of a flat copy is decided by the
+        declaration's spelling.
+        """
+        path = _published_path(cls, filter_instance)
+        if path == filter_instance.field_name:
+            return filter_instance
+        published = copy.copy(filter_instance)
+        published.field_name = path
+        return published
 
     @classmethod
     def _unexpanded_filters(cls) -> OrderedDict[str, Filter]:

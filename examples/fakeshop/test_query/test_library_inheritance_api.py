@@ -26,6 +26,12 @@ query shape, off the SQL the request emitted:
   filter hops, an undeclared hooked path and relation key, related orderings,
   the cascade on list and connection roots, and the non-null ``branch``
   optimized and unoptimized, each sync and async.
+- A ``RelatedFilter`` set over a multi-table descendant of its relation's target:
+  ``RepairTicket.venue`` into a set over ``SelfServeDesk`` (or ``LendingDesk``) answers a
+  flat key (``venueFaults``, ``venueKioskCode``, ``venueWindowCount``, ``venueName``,
+  ``venueSelfservedesk``) with the rows its nested spelling does, generated or overridden
+  at class level, in one statement; ``venueWindowCount`` keeps the ``Decimal`` input its
+  declaration's spelling types, and the set's plain django-filter ``.qs`` builds.
 - ``CirculationDesk``, one model carrying every relation kind: its reverse
   ``children`` / ``profile`` resolve, and its cascade scoped to ``branch`` /
   ``shelf`` serves rows despite the generic foreign key a full walk refuses.
@@ -89,6 +95,7 @@ from django.http import HttpRequest, HttpResponseBase
 from django.test import Client, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
+from django_filters import CharFilter
 from graphql_client import (
     DeleteAfterAuthorization,
     JSONObject,
@@ -106,6 +113,7 @@ from graphql_client import (
     statement_shapes_after_last_delete,
 )
 from strategy_schemas import make_django_type
+from strawberry import relay
 from typing_extensions import override
 
 from django_strawberry_framework import (
@@ -122,7 +130,7 @@ from django_strawberry_framework import (
     finalize_django_types,
 )
 from django_strawberry_framework.connection import _connection_type_for
-from django_strawberry_framework.filters import FilterSet, RelatedFilter
+from django_strawberry_framework.filters import FilterSet, GlobalIDFilter, RelatedFilter
 from django_strawberry_framework.orders import OrderSet, RelatedOrder
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
@@ -927,6 +935,311 @@ def test_signage_branch_through_a_hooked_branch_type_resolves_every_branch(
         },
     }, payload
     assert len(recorded) == statements, recorded
+
+
+class _OverriddenText(CharFilter):
+    """A ``CharFilter`` overriding ``filter`` at class level, delegating to its own."""
+
+    @override
+    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+        return super().filter(qs, value)
+
+
+class _OverriddenGlobalID(GlobalIDFilter):
+    """A ``GlobalIDFilter`` overriding ``filter`` at class level, delegating to its own."""
+
+    @override
+    def filter(self, qs: QuerySet[Model], value: object) -> QuerySet[Model]:
+        return super().filter(qs, value)
+
+
+def _seed_desk_tickets() -> dict[str, str]:
+    """A ticket on a plain venue, a lending desk and two kiosks; one fault on kiosk ``kc``.
+
+    Answers the GlobalIDs the rows below send: the fault's and kiosk ``kc``'s.
+    """
+    venue = models.Venue.objects.create(name="pv")
+    desk = models.LendingDesk.objects.create(name="ld", window_count=2)
+    kiosk = models.SelfServeDesk.objects.create(name="ss", window_count=3, kiosk_code="kc")
+    other = models.SelfServeDesk.objects.create(name="ss2", window_count=3, kiosk_code="kc2")
+    for code, at in (
+        ("t-pv", venue),
+        ("t-ld", desk),
+        ("t-ss", kiosk),
+        ("t-ss2", other),
+    ):
+        models.RepairTicket.objects.create(code=code, venue=at)
+    fault = models.KioskFault.objects.create(kiosk=kiosk, note="jammed")
+    return {
+        "fault": str(relay.GlobalID("library.kioskfault", str(fault.pk))),
+        "kiosk": str(relay.GlobalID("library.selfservedesk", str(kiosk.pk))),
+    }
+
+
+def _desk_child_filterset(model: type[Model], *, overridden: bool) -> type[FilterSet]:
+    """A set over ``model``, ``SelfServeDesk`` or ``LendingDesk``, keyed on its own and inherited fields.
+
+    ``overridden`` declares the text and key filters as subclasses overriding ``filter``.
+    """
+    names = (
+        (
+            "kiosk_code",
+            "window_count",
+            "name",
+            "faults",
+        )
+        if model is models.SelfServeDesk
+        else ("window_count", "name", "selfservedesk")
+    )
+    namespace: dict[str, object] = {}
+    fields: dict[str, list[str]] = {}
+    for name in names:
+        if overridden and name in {"kiosk_code", "name"}:
+            namespace[name] = _OverriddenText(field_name=name)
+        elif overridden and name in {"faults", "selfservedesk"}:
+            namespace[name] = _OverriddenGlobalID(field_name=name)
+        else:
+            fields[name] = ["exact"]
+    namespace["Meta"] = type("Meta", (), {"model": model, "fields": fields})
+    return type(f"Ticket{model.__name__}Filter", (FilterSet,), namespace)
+
+
+def _ticket_filterset(child: type[FilterSet]) -> type[FilterSet]:
+    """``RepairTicket``'s set: ``venue = RelatedFilter(child, field_name="venue")``."""
+    return type(
+        "TicketDeskFilter",
+        (FilterSet,),
+        {
+            "venue": RelatedFilter(child, field_name="venue"),
+            "Meta": type(
+                "Meta",
+                (),
+                {"model": models.RepairTicket, "fields": {"code": ["exact"]}},
+            ),
+        },
+    )
+
+
+def _desk_ticket_schema(child: type[FilterSet]) -> tuple[DjangoSchema, type[FilterSet]]:
+    """A ``RepairTicket`` connection (``rows``) filtered by ``_ticket_filterset(child)``."""
+    model_strategy = {"globalid_strategy": "model"}
+    make_django_type(
+        "TicketFaultNode",
+        models.KioskFault,
+        ("id", "note"),
+        meta_extra=model_strategy,
+    )
+    make_django_type("TicketVenueNode", models.Venue, ("id", "name"), meta_extra=model_strategy)
+    make_django_type(
+        "TicketDeskNode",
+        models.LendingDesk,
+        ("id", "window_count"),
+        meta_extra=model_strategy,
+    )
+    make_django_type(
+        "TicketKioskNode",
+        models.SelfServeDesk,
+        ("id", "kiosk_code"),
+        meta_extra=model_strategy,
+    )
+    tickets = _ticket_filterset(child)
+    ticket = make_django_type(
+        "TicketNode",
+        models.RepairTicket,
+        ("id", "code", "venue"),
+        meta_extra={**model_strategy, "filterset_class": tickets},
+    )
+    finalize_django_types()
+    query = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {
+                    "rows": _connection_type_for(ticket, ticket.__django_strawberry_definition__),
+                },
+                "rows": DjangoConnectionField(ticket),
+            },
+        ),
+    )
+    return DjangoSchema(query=query, error_policy={"enabled": False}), tickets
+
+
+def _ticket_rows(*codes: str) -> JSONObject:
+    return {"data": {"rows": {"edges": [{"node": {"code": code}} for code in codes]}}}
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("overridden", [False, True], ids=["plain", "overridden"])
+@pytest.mark.parametrize("spelling", ["flat", "nested"])
+@pytest.mark.parametrize(
+    (
+        "child_model",
+        "key",
+        "value",
+        "codes",
+        "statements",
+    ),
+    [
+        (
+            models.SelfServeDesk,
+            "faults",
+            "[{fault}]",
+            ("t-ss",),
+            1,
+        ),
+        (
+            models.SelfServeDesk,
+            "kioskCode",
+            '"kc"',
+            ("t-ss",),
+            1,
+        ),
+        (
+            models.SelfServeDesk,
+            "windowCount",
+            "3",
+            ("t-ss", "t-ss2"),
+            1,
+        ),
+        (
+            models.SelfServeDesk,
+            "name",
+            '"ss"',
+            ("t-ss",),
+            1,
+        ),
+        (
+            models.LendingDesk,
+            "selfservedesk",
+            "{kiosk}",
+            ("t-ss",),
+            1,
+        ),
+    ],
+    ids=[
+        "descendant-to-many",
+        "descendant-column",
+        "inherited-int",
+        "inherited",
+        "child-link",
+    ],
+)
+def test_ticket_keys_into_a_desk_set_read_the_desk_rows(
+    *,
+    child_model: type[Model],
+    key: str,
+    value: str,
+    codes: tuple[str, ...],
+    statements: int,
+    spelling: str,
+    overridden: bool,
+    record_compiled_sql: RecordCompiledSql,
+) -> None:
+    """A key into a ``RelatedFilter`` set over a multi-table descendant reads that descendant's rows.
+
+    ``RepairTicket.venue`` reaches ``Venue``; its set is over ``SelfServeDesk`` (or
+    ``LendingDesk``), so a flat key (``venueFaults``) reads the rows its nested spelling
+    (``venue: {faults: ...}``) does, down the parent links: a reverse relation the
+    descendant declares, its own and inherited columns, and a child's parent link, with
+    the filter as generated and overridden at class level alike.
+    """
+    gids = _seed_desk_tickets()
+    schema, _tickets = _desk_ticket_schema(
+        _desk_child_filterset(child_model, overridden=overridden),
+    )
+    sent = value.format(fault=f'"{gids["fault"]}"', kiosk=f'"{gids["kiosk"]}"')
+    if overridden:
+        # The overriding ``GlobalIDFilter`` takes one key where the generated one takes a list.
+        sent = sent.removeprefix("[").removesuffix("]")
+    term = f"{{exact: {sent}}}"
+    where = (
+        f"{{venue{key[0].upper()}{key[1:]}: {term}}}"
+        if spelling == "flat"
+        else f"{{venue: {{{key}: {term}}}}}"
+    )
+    recorded = record_compiled_sql()
+
+    payload = _branch_reads(
+        schema,
+        f"{{ rows(filter: {where}) {{ edges {{ node {{ code }} }} }} }}",
+        "sync",
+    )
+
+    assert payload == _ticket_rows(*codes), payload
+    assert len(recorded) == statements, recorded
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
+def test_a_flat_copy_of_a_descendant_column_keeps_the_input_its_declaration_types() -> None:
+    """``venueWindowCount`` publishes the input ``venue__window_count`` types on ``RepairTicket``.
+
+    The flat copy reads ``SelfServeDesk`` rows down the parent links, but its published
+    input is decided by the declaration's spelling, which names no ``RepairTicket``
+    column: ``NumberFilter``'s ``Decimal``, so ``3.0`` answers the kiosks with three
+    windows. The nested spelling is typed from the column itself (``Int``).
+    """
+    _seed_desk_tickets()
+    schema, _tickets = _desk_ticket_schema(
+        _desk_child_filterset(models.SelfServeDesk, overridden=False),
+    )
+    bag = "{ inputFields { name type { name } } }"
+
+    payload = _branch_reads(
+        schema,
+        f'{{ flat: __type(name: "TicketDeskFilterVenueWindowCountFilterInputType") {bag} '
+        f'nested: __type(name: "TicketSelfServeDeskFilterWindowCountFilterInputType") {bag} '
+        "rows(filter: {venueWindowCount: {exact: 3.0}}) { edges { node { code } } } }",
+        "sync",
+    )
+
+    assert payload == {
+        "data": {
+            "flat": {"inputFields": [{"name": "exact", "type": {"name": "Decimal"}}]},
+            "nested": {"inputFields": [{"name": "exact", "type": {"name": "Int"}}]},
+            "rows": {"edges": [{"node": {"code": "t-ss"}}, {"node": {"code": "t-ss2"}}]},
+        },
+    }, payload
+
+
+@pytest.mark.usefixtures("private_registry")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("data", "codes"),
+    [
+        (
+            {},
+            [
+                "t-ld",
+                "t-pv",
+                "t-ss",
+                "t-ss2",
+            ],
+        ),
+        ({"code": "t-ss"}, ["t-ss"]),
+    ],
+    ids=["empty", "own-key"],
+)
+def test_a_set_over_an_overridden_descendant_branch_filters_as_a_plain_filterset(
+    data: dict[str, str],
+    codes: list[str],
+) -> None:
+    """django-filter's ``FilterSet(data, queryset).qs`` builds over a descendant branch.
+
+    The ticket set's flat copies of the kiosk set's overridden filters read their
+    relation down the parent links, so the plain django-filter entry point answers its
+    rows for every request, one sending no key included.
+    """
+    _seed_desk_tickets()
+    _schema, tickets = _desk_ticket_schema(
+        _desk_child_filterset(models.SelfServeDesk, overridden=True),
+    )
+
+    rows = tickets(data, models.RepairTicket.objects.all()).qs
+
+    assert sorted(rows.values_list("code", flat=True)) == codes
 
 
 @pytest.mark.django_db
