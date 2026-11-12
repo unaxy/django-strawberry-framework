@@ -413,6 +413,41 @@ def test_growth_walk_refuses_each_unapproved_rise_of_a_total(
     ]
 
 
+def test_growth_walk_takes_the_ledgers_first_commit_as_its_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The commit that creates the ledger records its counts; a re-add after a deletion is a rise."""
+    _repository(tmp_path, monkeypatch)
+    identity = (
+        "-c",
+        "user.name=probe",
+        "-c",
+        "user.email=probe@example.com",
+    )
+    _ = _git.run_git(
+        tmp_path,
+        *identity,
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "base",
+        check=True,
+    )
+    base = _git.run_git(tmp_path, "rev-parse", "HEAD", check=True).stdout.strip()
+    _ = _commit(tmp_path, '"a.py" = { cast = 2 }\n', "create")
+    _ = _git.run_git(tmp_path, "rm", "-q", cts.LEDGER, check=True)
+    _ = _git.run_git(tmp_path, *identity, "commit", "-q", "-m", "drop", check=True)
+    _ = (tmp_path / "scripts").mkdir()  # git rm took the emptied directory with the ledger
+    readded = _commit(tmp_path, '"a.py" = { cast = 2 }\n', "re-add")
+
+    consent = f"without a `{cts.TRAILER}:` trailer (the maintainer's consent)"
+    assert [v.message for v in cts.growth_violations(base, "HEAD")] == [
+        f"{readded[:12]} raises `cast` from 0 to 2 {consent}",
+    ]
+
+
 @pytest.mark.parametrize("since", ["", "0" * 40], ids=["no-base", "unknown-base"])
 def test_growth_walk_has_no_range_without_a_known_base(
     tmp_path: Path,

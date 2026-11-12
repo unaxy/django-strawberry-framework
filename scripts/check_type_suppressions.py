@@ -335,6 +335,27 @@ def _ledger_at(rev: str, ledger_path: str = LEDGER) -> Counter[Entry]:
     return Counter() if result.returncode else parse_ledger(result.stdout, frozenset())
 
 
+def _ledger_birth(until: str, ledger_path: str) -> str:
+    """Return the first-parent commit before ``until`` that first added ``ledger_path``; empty if none.
+
+    That commit records the ledger's starting counts, so the growth walk does not read it as a
+    rise from zero. A later re-add after a deletion is not the birth and is walked as usual.
+    """
+    result = _git.run_git(
+        REPO_ROOT,
+        "log",
+        "--first-parent",
+        "--diff-filter=A",
+        "--format=%H",
+        until,
+        "--",
+        ledger_path,
+        check=True,
+    )
+    added = result.stdout.split()
+    return added[-1] if added else ""
+
+
 def _approved(commit: str) -> bool:
     """Return whether ``commit``'s message carries a non-empty consent trailer."""
     result = _git.run_git(
@@ -352,8 +373,8 @@ def growth_violations(since: str, until: str, ledger_path: str = LEDGER) -> Iter
     """Yield one violation per kind each unapproved commit after ``since`` raises in ``ledger_path``.
 
     The walk follows ``until``'s first parents back to ``since``, comparing each
-    commit's ledger totals with its parent's. ``since`` empty or not in the history
-    yields nothing.
+    commit's ledger totals with its parent's; the commit that first added the ledger
+    sets its baseline and is skipped. ``since`` empty or not in the history yields nothing.
 
     Raises:
         subprocess.CalledProcessError: git cannot list the range.
@@ -369,7 +390,10 @@ def growth_violations(since: str, until: str, ledger_path: str = LEDGER) -> Iter
         f"{since}..{until}",
         check=True,
     ).stdout.split()
+    birth = _ledger_birth(until, ledger_path)
     for commit in commits:
+        if commit == birth:
+            continue
         before = kind_totals(_ledger_at(f"{commit}^", ledger_path))
         after = kind_totals(_ledger_at(commit, ledger_path))
         grown = sorted(kind for kind in after if after[kind] > before[kind])
