@@ -4,7 +4,7 @@ The procedure for a new machine, from a bare Ubuntu install to a fleet member th
 [docs/fleet/scripts/fleet_sync.py][fleet-sync], [docs/fleet/scripts/fleet_stop.py][fleet-stop] and
 [docs/fleet/scripts/load_balancing.py][load-balancing] reach. [docs/fleet/scripts/fleet_setup.py][fleet-setup] does
 every step it can; its module docstring is the full rule. What it cannot do (sudo's password,
-logins, the timer) is the maintainer's, marked **by hand** below. The machines themselves are
+logins, the timers, the sudoers rule) is the maintainer's, marked **by hand** below. The machines themselves are
 in [MACHINES.md][machines]; the North Star in [FLEET.md][fleet].
 
 `<host>` is the new machine's one name: its hostname, its Tailscale name, its ssh alias and its
@@ -45,8 +45,8 @@ python3 docs/fleet/scripts/fleet_setup.py add <host>           # install it; sud
 ```
 
 `add` checks that `<host>` answers batch-mode ssh and is Ubuntu or macOS (see [macOS](#macos)),
-copies the script and the shared PATH block (`setup/files/path.sh`) to `~/.cache/dsf-fleet-setup/`
-there, and runs its `box install` over `ssh -t`. Every step checks
+copies the script, the shared PATH block (`setup/files/path.sh`) and the pins
+(`setup/versions.json`, section 7) to `~/.cache/dsf-fleet-setup/` there, and runs its `box install` over `ssh -t`. Every step checks
 first and runs only when its check fails, so a rerun after a failure resumes and a finished
 machine reruns as a no-op. In order:
 
@@ -54,13 +54,13 @@ machine reruns as a no-op. In order:
 | --- | --- | --- |
 | `packages` | sudo | `git rsync curl direnv tmux ripgrep` from apt (a fresh Ubuntu Desktop lacks git) |
 | `linger` | sudo | `loginctl enable-linger`: the save-sync timer is a systemd user timer, which stops at logout without it |
-| `uv` | user | uv's installer into `~/.local/bin` |
+| `uv` | user | uv's installer for the pinned release into `~/.local/bin` |
 | `pythons` | user | CPython 3.10 to 3.13, then 3.14 with `--default` (one version per `--default` call) |
 | `direnv-hook` | user | `eval "$(direnv hook bash)"` in `~/.bashrc` |
-| `node` | user | nvm (pinned release), node LTS as its default |
-| `codex` | user | `npm install -g @openai/codex` under nvm |
-| `claude` | user | Claude Code's native installer into `~/.local/bin` |
-| `pre-commit` | user | `uv tool install pre-commit` (a stable interpreter for the git hook, START.md "Toolchain") |
+| `node` | user | nvm and node at their pins, node as nvm's default |
+| `codex` | user | `npm install -g @openai/codex@<pin>` under nvm's default node |
+| `claude` | user | Claude Code's native installer for the pinned release into `~/.local/bin` |
+| `pre-commit` | user | `uv tool install pre-commit==<pin>` (a stable interpreter for the git hook, START.md "Toolchain") |
 | `path-block` | user | the one PATH block of every fleet machine, `setup/files/path.sh`, first in the file the shell reads for a non-interactive `ssh <host> <command>`: `~/.bashrc` on Linux (above Ubuntu's interactive guard), `~/.zshenv` on macOS; a changed file is kept as `<name>.bak-<seconds>` |
 | `ssh-key` | keys | `~/.ssh/id_ed25519` with no passphrase (fleet ssh is batch mode) |
 | `checkout` | user | `git clone` of the public https URL to `~/projects/django-strawberry-framework` (no GitHub key needed; pushes stay the maintainer's) |
@@ -162,12 +162,61 @@ Desktop GUI applications and rootless Docker are left out.
 ```sh
 python3 docs/fleet/scripts/fleet_setup.py add <host> --check   # every step ok but the hand ones
 python3 docs/fleet/scripts/fleet_setup.py mesh --check         # every pair ok
-python3 docs/fleet/scripts/fleet_setup.py verify <host>        # fleet_sync.py status here and there, fleet_stop.py status, the tools
+python3 docs/fleet/scripts/fleet_setup.py verify <host>        # fleet_sync.py status here and there, fleet_stop.py status, version drift, the tools
 ```
 
-`verify` also runs `ssh <host> 'command -v uv git python3 node claude codex gh'` (plain,
-non-interactive ssh, as `fleet_sync.py` and agents call it) and fails naming each tool it does
-not find. It is read-only: nothing is synced and no flag is written.
+`verify` runs the box's own `fleet_update.py check` (section 7; exit 1 on version drift) and `ssh <host> 'command -v uv git python3 node claude codex gh'` (plain,
+non-interactive ssh, as `fleet_sync.py` and agents call it), failing naming each tool it does
+not find. It is read-only: nothing is synced or installed and no flag is written.
+
+## 7. Keep every machine updated: `fleet_update.py`
+
+[fleet_update.py][fleet-update] brings each machine to the versions pinned in
+[setup/versions.json][versions] (nvm, node, npm, Codex, Claude Code, uv, pre-commit, osv-scanner;
+OpenCode, Muse, grok and Antigravity read `latest`: their installers take no version) and updates
+the OS packages. Its module docstring is the full rule.
+
+```sh
+uv run python docs/fleet/scripts/fleet_update.py check --all   # read-only: one table, every machine; exit 1 on drift
+uv run python docs/fleet/scripts/fleet_update.py apply         # this machine, one line per step
+uv run python docs/fleet/scripts/fleet_update.py apply --all   # every machine at once
+```
+
+`check` shows pinned against installed per tool, a `shadowed` row for a file that runs instead of
+the managed tool (with the command that removes it; nothing is deleted), the apt and snap updates
+pending on Linux, and `brew outdated --greedy` plus `softwareupdate -l` on macOS. `apply` never
+downgrades Claude Code past its pin (it updates itself: `ahead`), runs a `latest` tool's installer
+every time, runs `brew update` and `brew upgrade --greedy` on macOS but never a macOS system update,
+holds `.work/update.lock` and stops at the fleet stop flag.
+
+**Bump a version**: edit its one line in `setup/versions.json` (the current release: `npm view <package>
+version`, the project's GitHub releases), run `fleet_update.py check` to see the drift, commit on
+main. The save-sync timers fast-forward every machine's main and each machine's next daily
+`apply` installs it.
+
+**By hand, once per Linux machine**: the sudoers rule letting `apply` run exactly
+`/usr/bin/apt-get update`, `/usr/bin/apt-get upgrade -y` and `/usr/bin/snap refresh` without a
+password ([setup/files/sudoers-fleet-update][sudoers]). Print it, then paste the command it prints
+(it validates with `visudo -cf` before the rule goes live):
+
+```sh
+python3 docs/fleet/scripts/fleet_update.py sudoers
+```
+
+Without it `apply` reports a `refused` row and prompts for nothing.
+
+**By hand, once per machine**: the daily timer (launchd agent on macOS, systemd user timer on
+Linux; 04:30 local plus up to 30 minutes of jitter, a 90-minute limit, logging to
+`.work/fleet-update.log`). `schedule` alone prints what it would install:
+
+```sh
+cd ~/projects/django-strawberry-framework && uv run python docs/fleet/scripts/fleet_update.py schedule --install
+```
+
+**By hand, once per Mac**: Codex is npm under nvm's default node everywhere. A Mac's older Codex
+(rio-air: npm with prefix `~/.local`; rio-mini: a standalone binary in `~/.local/bin`) shows as a
+`codex shadow` row naming the file and the command that removes it; run that command after `apply`
+has installed the pinned Codex under nvm.
 
 ## macOS
 
@@ -195,10 +244,13 @@ block puts on `PATH` are found over plain ssh.
 [fleet-setup]: scripts/fleet_setup.py
 [fleet-stop]: scripts/fleet_stop.py
 [fleet-sync]: scripts/fleet_sync.py
+[fleet-update]: scripts/fleet_update.py
 [load-balancing]: scripts/load_balancing.py
 [machines]: MACHINES.md
 [machines-json]: machines.json
 [personal]: scripts/setup/ubuntu/personal.py
+[sudoers]: scripts/setup/files/sudoers-fleet-update
+[versions]: scripts/setup/versions.json
 
 <!-- docs/SPECS/ -->
 

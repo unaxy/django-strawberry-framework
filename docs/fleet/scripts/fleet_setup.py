@@ -74,13 +74,25 @@ Steps
     The list records no account names, so the row has none.
 
 ``verify``
-    Runs ``docs/fleet/scripts/fleet_sync.py status`` here and on the box, and
-    ``docs/fleet/scripts/fleet_stop.py status`` here, then requires plain (non-interactive)
-    ``ssh <box> 'command -v uv git python3 node claude codex gh'`` to find every one of
-    :data:`SSH_TOOLS`: read-only, nothing synced.
+    Runs ``docs/fleet/scripts/fleet_sync.py status`` here and on the box,
+    ``docs/fleet/scripts/fleet_stop.py status`` here and the box's own
+    ``docs/fleet/scripts/fleet_update.py check`` (every pinned tool against
+    :data:`VERSIONS_FILE`, and its OS updates pending; it exits 1 on version drift), then
+    requires plain (non-interactive) ``ssh <box> 'command -v uv git python3 node claude codex
+    gh'`` to find every one of :data:`SSH_TOOLS`: read-only, nothing synced or installed.
 
-``add`` accepts an Ubuntu box or a Mac (``uname -s``) and copies :data:`PUSHED` (this file
-and the PATH block) under :data:`REMOTE_ROOT` there. Standard library only, Python 3.9
+Versions
+    ``setup/versions.json`` (:data:`VERSIONS_FILE`) pins the version of every tool setup
+    installs that can be pinned (nvm, node, npm, Codex, Claude Code, uv, pre-commit,
+    osv-scanner); a tool whose vendor installer takes no version reads :data:`LATEST`
+    (:data:`VENDOR_INSTALLERS`). :func:`load_versions` is its one reader, and the line
+    builders below it (:func:`node_lines`, :func:`claude_lines`, ...) are the one way each
+    tool is installed: the ``box`` steps here, ``setup/ubuntu/personal.py``'s osv-scanner and
+    vendor steps, and ``docs/fleet/scripts/fleet_update.py apply`` all call them. ``add``
+    copies the file with the script, so a new box installs the pins.
+
+``add`` accepts an Ubuntu box or a Mac (``uname -s``) and copies :data:`PUSHED` (this file,
+the PATH block and the pins) under :data:`REMOTE_ROOT` there. Standard library only, Python 3.9
 (macOS's system ``python3``; Ubuntu ships a newer one), so it runs on a box that has nothing
 else yet.
 """
@@ -122,8 +134,20 @@ PYTHONS = (
     "3.13",
     "3.14",
 )
-#: The nvm release whose installer a box runs.
-NVM_VERSION = "v0.40.3"
+#: The one file of pinned tool versions (module docstring, "Versions").
+VERSIONS_FILE = Path(__file__).resolve().parent / "setup" / "versions.json"
+#: A ``versions.json`` value for a tool whose vendor installer takes no version.
+LATEST = "latest"
+#: The shape of an exact pin: digits and dots, an optional leading ``v`` (each pin goes into
+#: shell lines and URLs, so nothing else is accepted).
+PIN = re.compile(r"v?\d+(?:\.\d+)+")
+#: The installer of each tool pinned to :data:`LATEST`: it installs whatever is current.
+VENDOR_INSTALLERS = {
+    "opencode": "https://opencode.ai/install",
+    "muse": "https://dev.meta.ai/install.sh",
+    "grok": "https://x.ai/cli/install.sh",
+    "agy": "https://antigravity.google/cli/install.sh",
+}
 #: Apt packages a fresh Ubuntu Desktop lacks, keyed by the command each provides.
 APT_PACKAGES = {
     "git": "git",
@@ -143,7 +167,11 @@ MACOS = "Darwin"
 PATH_BLOCK_FILE = Path(__file__).resolve().parent / "setup" / "files" / "path.sh"
 PATH_MARK = "dsf-fleet path"
 #: What ``add`` copies to the box: each local file and its path under :data:`REMOTE_ROOT`.
-PUSHED = ((Path(__file__).resolve(), "fleet_setup.py"), (PATH_BLOCK_FILE, "setup/files/path.sh"))
+PUSHED = (
+    (Path(__file__).resolve(), "fleet_setup.py"),
+    (PATH_BLOCK_FILE, "setup/files/path.sh"),
+    (VERSIONS_FILE, "setup/versions.json"),
+)
 #: The tools ``verify`` requires a non-interactive ``ssh <host> <command>`` to find.
 SSH_TOOLS = (
     "uv",
@@ -154,6 +182,8 @@ SSH_TOOLS = (
     "codex",
     "gh",
 )
+#: The update script whose ``check`` ``verify`` runs on the box, relative to its checkout.
+UPDATE_SCRIPT = "docs/fleet/scripts/fleet_update.py"
 #: ``docs/fleet/scripts/fleet.py``'s ``SSH_OPTIONS``, repeated (this file imports nothing).
 SSH_OPTIONS = (
     "-o",
@@ -259,6 +289,139 @@ def missing(names: Iterable[str]) -> str | None:
     return ", ".join(listed) if listed else None
 
 
+#: ``json.loads``, its result typed ``object`` for the caller to narrow.
+_loads: Callable[[str], object] = json.loads
+
+
+def _is_object(value: object) -> TypeIs[dict[str, object]]:
+    return isinstance(value, dict)
+
+
+def _is_list(value: object) -> TypeIs[list[object]]:
+    return isinstance(value, list)
+
+
+def load_versions(path: Path = VERSIONS_FILE) -> dict[str, str]:
+    """Return every tool's pinned version from ``path``: an exact release, or :data:`LATEST`.
+
+    Raises:
+        ValueError: the file is not JSON, its ``versions`` is not an object of non-empty
+            strings, or a version is neither :data:`LATEST` nor an exact release (:data:`PIN`)
+            (``OSError`` when it cannot be read).
+
+    """
+    document = _loads(path.read_text(encoding="utf-8"))
+    versions = document.get("versions") if _is_object(document) else None
+    if not _is_object(versions) or not versions:
+        msg = f"{path}: 'versions' must be a non-empty object"
+        raise ValueError(msg)
+    pins: dict[str, str] = {}
+    for tool, version in versions.items():
+        if not isinstance(version, str) or not version.strip():
+            msg = f"{path}: {tool}'s version must be a non-empty string"
+            raise ValueError(msg)
+        if version.strip() != LATEST and not PIN.fullmatch(version.strip()):
+            msg = (
+                f"{path}: {tool}'s version {version!r} is neither {LATEST!r} nor an exact release"
+            )
+            raise ValueError(msg)
+        pins[tool] = version.strip()
+    return pins
+
+
+def pinned(tool: str, path: Path = VERSIONS_FILE) -> str:
+    """Return ``tool``'s pinned version (:func:`load_versions`).
+
+    Raises:
+        ValueError: as :func:`load_versions`, or ``path`` pins no ``tool``.
+
+    """
+    pins = load_versions(path)
+    if tool not in pins:
+        msg = f"{path} pins no {tool!r}"
+        raise ValueError(msg)
+    return pins[tool]
+
+
+def nvm_lines(version: str, profile: str = "~/.bashrc") -> list[str]:
+    """Return the line installing nvm ``version`` (an update keeps the shell files: ``/dev/null``)."""
+    url = f"https://raw.githubusercontent.com/nvm-sh/nvm/{version}/install.sh"
+    return [f"curl -fsSL {url} | PROFILE={profile} bash"]
+
+
+def node_lines(version: str, previous: str = "") -> list[str]:
+    """Return the line installing node ``version`` through nvm and making it nvm's default.
+
+    ``previous`` (a node nvm holds) has its global packages installed again under the new one.
+    """
+    carry = f" --reinstall-packages-from={shlex.quote(previous)}" if previous else ""
+    wanted = shlex.quote(version)
+    return [nvm(f"nvm install {wanted}{carry} && nvm alias default {wanted}")]
+
+
+def npm_global_lines(package: str, version: str) -> list[str]:
+    """Return the line installing ``package`` at ``version`` globally under nvm's default node."""
+    return [nvm(f"npm install -g {shlex.quote(f'{package}@{version}')}")]
+
+
+def claude_lines(version: str) -> list[str]:
+    """Return the line running Claude Code's native installer for ``version``."""
+    return [f"curl -fsSL https://claude.ai/install.sh | bash -s {shlex.quote(version)}"]
+
+
+def uv_lines(version: str, *, modify_path: bool = True) -> list[str]:
+    """Return the line running uv's installer for ``version`` (``modify_path`` off: no shell file)."""
+    keep = "" if modify_path else "UV_NO_MODIFY_PATH=1 "
+    return [f"curl -LsSf https://astral.sh/uv/{version}/install.sh | {keep}sh"]
+
+
+def pre_commit_lines(version: str) -> list[str]:
+    """Return the line installing pre-commit ``version`` as a uv tool."""
+    return [f"uv tool install {shlex.quote(f'pre-commit=={version}')}"]
+
+
+#: osv-scanner's release asset suffix per ``platform.system()`` and ``platform.machine()``.
+OSV_ASSETS = {
+    (LINUX, "x86_64"): "linux_amd64",
+    (LINUX, "aarch64"): "linux_arm64",
+    (MACOS, "arm64"): "darwin_arm64",
+    (MACOS, "x86_64"): "darwin_amd64",
+}
+
+
+def osv_lines(
+    folder: Path,
+    version: str,
+    system: str,
+    machine: str,
+) -> list[str]:
+    """Return the lines putting osv-scanner ``version``'s release binary in ``folder``.
+
+    Raises:
+        ValueError: osv-scanner publishes no binary for ``system`` on ``machine``.
+
+    """
+    asset = OSV_ASSETS.get((system, machine))
+    if asset is None:
+        msg = f"osv-scanner has no release binary for {system} {machine}"
+        raise ValueError(msg)
+    base = "https://github.com/google/osv-scanner/releases/download"
+    target = shlex.quote(str(folder / "osv-scanner"))
+    url = f"{base}/{version}/osv-scanner_{asset}"
+    return [
+        f"mkdir -p {shlex.quote(str(folder))}",
+        (
+            f"curl -fsSL --retry 3 -o {target}.dsf-tmp {url} && chmod 755 {target}.dsf-tmp "
+            f"&& mv {target}.dsf-tmp {target}"
+        ),
+    ]
+
+
+def vendor_lines(url: str) -> list[str]:
+    """Return the line piping a vendor's installer (a :data:`LATEST` tool's) into bash."""
+    return [f"curl -fsSL --retry 3 --proto '=https' {url} | bash"]
+
+
 def _check_packages(_box: Box) -> str | None:
     return missing(pkg for command, pkg in APT_PACKAGES.items() if shutil.which(command) is None)
 
@@ -291,7 +454,7 @@ def _check_uv(box: Box) -> str | None:
 
 
 def _lines_uv(_box: Box) -> list[str]:
-    return ["curl -LsSf https://astral.sh/uv/install.sh | sh"]
+    return uv_lines(pinned("uv"))
 
 
 def _check_pythons(box: Box) -> str | None:
@@ -339,11 +502,7 @@ def _check_node(box: Box) -> str | None:
 
 
 def _lines_node(_box: Box) -> list[str]:
-    url = f"https://raw.githubusercontent.com/nvm-sh/nvm/{NVM_VERSION}/install.sh"
-    return [
-        f"curl -fsSL {url} | PROFILE=~/.bashrc bash",
-        nvm("nvm install --lts && nvm alias default 'lts/*'"),
-    ]
+    return [*nvm_lines(pinned("nvm")), *node_lines(pinned("node"))]
 
 
 def _check_codex(box: Box) -> str | None:
@@ -352,7 +511,7 @@ def _check_codex(box: Box) -> str | None:
 
 
 def _lines_codex(_box: Box) -> list[str]:
-    return [nvm("npm install -g @openai/codex")]
+    return npm_global_lines("@openai/codex", pinned("codex"))
 
 
 def _check_claude(box: Box) -> str | None:
@@ -360,7 +519,7 @@ def _check_claude(box: Box) -> str | None:
 
 
 def _lines_claude(_box: Box) -> list[str]:
-    return ["curl -fsSL https://claude.ai/install.sh | bash"]
+    return claude_lines(pinned("claude"))
 
 
 def _check_pre_commit(box: Box) -> str | None:
@@ -368,7 +527,7 @@ def _check_pre_commit(box: Box) -> str | None:
 
 
 def _lines_pre_commit(_box: Box) -> list[str]:
-    return ["uv tool install pre-commit"]
+    return pre_commit_lines(pinned("pre-commit"))
 
 
 def _check_ssh_key(box: Box) -> str | None:
@@ -674,18 +833,6 @@ def install(box: Box, steps: Sequence[Step]) -> int:
 # The fleet side: run in a checkout on a machine already in the fleet.
 
 
-#: ``json.loads``, its result typed ``object`` for the caller to narrow.
-_loads: Callable[[str], object] = json.loads
-
-
-def _is_object(value: object) -> TypeIs[dict[str, object]]:
-    return isinstance(value, dict)
-
-
-def _is_list(value: object) -> TypeIs[list[object]]:
-    return isinstance(value, list)
-
-
 def machine_names(path: Path = MACHINES_FILE) -> list[str]:
     """Return the ``name`` of every row in the machine list."""
     document = _loads(path.read_text(encoding="utf-8"))
@@ -972,12 +1119,13 @@ def check_tools(host: str) -> int:
 
 
 def verify(host: str) -> int:
-    """Run ``fleet_sync.py status`` here and on ``host``, ``fleet_stop.py status`` here, the tools."""
+    """Run the sync and stop statuses, ``host``'s ``fleet_update.py check``, then the tools."""
     here = shlex.quote(str(ROOT))
     checks = [
         ("here", None, f"cd {here} && uv run python docs/fleet/scripts/fleet_sync.py status"),
         (host, host, f"cd {REPO} && .venv/bin/python docs/fleet/scripts/fleet_sync.py status"),
         ("here", None, f"cd {here} && python3 docs/fleet/scripts/fleet_stop.py status"),
+        (host, host, f"cd {REPO} && .venv/bin/python {UPDATE_SCRIPT} check"),
     ]
     worst = 0
     for label, where, command in checks:

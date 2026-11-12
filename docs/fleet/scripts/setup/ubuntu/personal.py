@@ -61,7 +61,8 @@ Steps
         ``git-autosync`` every 3 minutes as a systemd user timer (lingering, which the core setup
         turns on, keeps it running logged out).
     ``opencode``, ``muse``, ``grok``, ``agy``, ``osv-scanner``
-        Each vendor's own installer (``osv-scanner``: its release binary, :data:`OSV_VERSION`).
+        Each vendor's own installer (``fleet_setup.VENDOR_INSTALLERS``); ``osv-scanner``: its
+        release binary at the version ``setup/versions.json`` pins (``fleet_setup.osv_lines``).
     ``rules``
         ``~/MACHINE.md``, ``~/AGENTS_READ_THIS_FIRST.md``, ``~/projects/AGENTS.md`` and
         ``~/projects/AGENTS_READ_THIS_FIRST.md``: one agent rules file rendered from
@@ -152,7 +153,6 @@ APT_PACKAGES = (
     "dconf-cli",
     "gnome-shell-extensions",
 )
-OSV_VERSION = "v2.7.0"
 KINDS = (
     "sudo",
     "tty",
@@ -499,24 +499,16 @@ def _exists(*parts: str) -> Callable[[Box], str | None]:
     return check
 
 
-def _installer(url: str) -> Callable[[Box], list[str]]:
+def _installer(tool: str) -> Callable[[Box], list[str]]:
     def lines(_box: Box) -> list[str]:
-        return [f"curl -fsSL --retry 3 --proto '=https' {url} | bash"]
+        return fleet_setup.vendor_lines(fleet_setup.VENDOR_INSTALLERS[tool])
 
     return lines
 
 
 def _lines_osv(box: Box) -> list[str]:
-    base = "https://github.com/google/osv-scanner/releases/download"
-    target = shlex.quote(str(box.bin / "osv-scanner"))
-    url = f"{base}/{OSV_VERSION}/osv-scanner_linux_amd64"
-    return [
-        f"mkdir -p {shlex.quote(str(box.bin))}",
-        (
-            f"curl -fsSL --retry 3 -o {target}.dsf-tmp {url} && chmod 755 {target}.dsf-tmp "
-            f"&& mv {target}.dsf-tmp {target}"
-        ),
-    ]
+    version = fleet_setup.pinned("osv-scanner")
+    return fleet_setup.osv_lines(box.bin, version, fleet_setup.LINUX, "x86_64")
 
 
 def _check_rules(box: Box) -> str | None:
@@ -868,25 +860,25 @@ STEPS: tuple[Step, ...] = (
         "opencode",
         "user",
         _exists(".opencode", "bin", "opencode"),
-        _installer("https://opencode.ai/install"),
+        _installer("opencode"),
     ),
     Step(
         "muse",
         "user",
         _exists(".local", "bin", "muse"),
-        _installer("https://dev.meta.ai/install.sh"),
+        _installer("muse"),
     ),
     Step(
         "grok",
         "user",
         _exists(".grok", "bin", "grok"),
-        _installer("https://x.ai/cli/install.sh"),
+        _installer("grok"),
     ),
     Step(
         "agy",
         "user",
         _exists(".local", "bin", "agy"),
-        _installer("https://antigravity.google/cli/install.sh"),
+        _installer("agy"),
     ),
     Step("osv-scanner", "user", _exists(".local", "bin", "osv-scanner"), _lines_osv),
     Step("rules", "user", _check_rules, _lines_rules),

@@ -133,11 +133,12 @@ def test_install_runs_root_steps_first_and_skips_done_ones(
     assert calls == [(["make pkg"], True), (["make tool"], False)]
 
 
-def test_the_bundle_carries_the_script_its_files_and_the_shared_path_step_only() -> None:
+def test_the_bundle_carries_the_script_its_files_the_shared_path_step_and_the_pins_only() -> None:
     with tarfile.open(fileobj=io.BytesIO(personal.bundle())) as archive:
         names = archive.getnames()
         shared = {
-            name: archive.extractfile(name) for name in ("fleet_setup.py", "setup/files/path.sh")
+            name: archive.extractfile(name)
+            for name in ("fleet_setup.py", "setup/files/path.sh", "setup/versions.json")
         }
         bodies = {name: member.read() for name, member in shared.items() if member is not None}
     assert "setup/ubuntu/personal.py" in names
@@ -145,10 +146,12 @@ def test_the_bundle_carries_the_script_its_files_and_the_shared_path_step_only()
     assert sorted(name for name in names if not name.startswith("setup/ubuntu/")) == [
         "fleet_setup.py",
         "setup/files/path.sh",
+        "setup/versions.json",
     ]
     assert bodies == {
         "fleet_setup.py": Path(fleet_setup.__file__).read_bytes(),
         "setup/files/path.sh": fleet_setup.PATH_BLOCK_FILE.read_bytes(),
+        "setup/versions.json": fleet_setup.VERSIONS_FILE.read_bytes(),
     }
     assert not any("__pycache__" in name for name in names)
 

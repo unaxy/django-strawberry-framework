@@ -550,6 +550,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_fleet_setup.py           # Script tests for ``docs/fleet/scripts/fleet_setup.py``, the one-command setup of a new fleet machine.
 ├── test_fleet_stop.py            # Script tests for ``docs/fleet/scripts/fleet_stop.py``, the one-command stop of fleet syncing.
 ├── test_fleet_sync.py            # Repo-tooling tests for the fleet sync of private working copies, pins, evidence and main.
+├── test_fleet_update.py          # Script tests for ``docs/fleet/scripts/fleet_update.py``, the fleet's pinned-version updater.
 ├── test_git.py                   # Repo-tooling tests for the scripts' one git runner and every site that reads through it.
 ├── test_idioms.py                # Smoke tests proving the shared ``tests/_idioms.py`` order helpers hand out what they promise.
 ├── test_info.py                  # Smoke tests proving the shared ``tests/_info.py`` builders hand out what they promise.
@@ -946,6 +947,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_fleet_setup.py           # Script tests for ``docs/fleet/scripts/fleet_setup.py``, the one-command setup of a new fleet machine.
 ├── test_fleet_stop.py            # Script tests for ``docs/fleet/scripts/fleet_stop.py``, the one-command stop of fleet syncing.
 ├── test_fleet_sync.py            # Repo-tooling tests for the fleet sync of private working copies, pins, evidence and main.
+├── test_fleet_update.py          # Script tests for ``docs/fleet/scripts/fleet_update.py``, the fleet's pinned-version updater.
 ├── test_git.py                   # Repo-tooling tests for the scripts' one git runner and every site that reads through it.
 ├── test_idioms.py                # Smoke tests proving the shared ``tests/_idioms.py`` order helpers hand out what they promise.
 ├── test_info.py                  # Smoke tests proving the shared ``tests/_info.py`` builders hand out what they promise.

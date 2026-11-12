@@ -340,7 +340,9 @@ def test_add_tells_a_mac_from_ubuntu_and_anything_else(
     assert answers == []
 
 
-def test_add_copies_the_script_and_the_path_block(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_add_copies_the_script_the_path_block_and_the_pins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pushed: list[tuple[str, str | None]] = []
 
     def fake(host: str | None, command: str, **options: str | None) -> tuple[int, str]:
@@ -359,6 +361,10 @@ def test_add_copies_the_script_and_the_path_block(monkeypatch: pytest.MonkeyPatc
         (
             f"mkdir -p {root}/setup/files && cat > {root}/setup/files/path.sh",
             fleet_setup.PATH_BLOCK_FILE.read_text(),
+        ),
+        (
+            f"mkdir -p {root}/setup && cat > {root}/setup/versions.json",
+            fleet_setup.VERSIONS_FILE.read_text(),
         ),
     ]
 

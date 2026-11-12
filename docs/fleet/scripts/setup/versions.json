@@ -1,0 +1,16 @@
+{
+  "versions": {
+    "nvm": "v0.41.0",
+    "node": "v26.13.1",
+    "npm": "12.2.2",
+    "codex": "0.167.2",
+    "claude": "2.1.322",
+    "uv": "0.13.7",
+    "pre-commit": "4.7.0",
+    "osv-scanner": "v2.7.1",
+    "opencode": "latest",
+    "muse": "latest",
+    "grok": "latest",
+    "agy": "latest"
+  }
+}
