@@ -153,8 +153,9 @@ your own copy after reverse-applying <latest item diff>`.
    the maintainer owes when any item or the gate row is blocked, else `complete` or `partial (<scope>)`.
 3. Remove this run's `docs/review/temp-tests/<stem>/` dirs bar a sensitive blocked item's, and the
    `docs/review/worker-memory/` contents, each by explicit path; `workspace.py gc review`.
-4. Report to the maintainer in five lines or fewer: result, blocked items with the decision owed, what is
-   uncommitted. Never commit.
+4. Unless the plan is `blocked`, commit the `## Owned changes` paths, the plan and this run's `rev-*.md`
+   as `REVIEW.md` "Final gate and closeout" describes. Report to the maintainer in five lines or fewer:
+   result, blocked items with the decision owed, the commit, what is uncommitted.
 
 Beside a HUNT or DRY Worker-0 under [MUSE.md][muse]: REVIEW.md's last paragraph.
 

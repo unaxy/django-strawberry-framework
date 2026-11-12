@@ -6,7 +6,7 @@ Worker-0 stays in the main thread; Worker-1, Worker-2 and Worker-3 run as fresh 
 
 ## Required reading
 
-The docs marked `yes` in the **Worker-0** column of the Required reading per worker table in `docs/builder/BUILD.md`. For closeout only, additionally: every completed `docs/builder/bld-*.md` artifact, the build-cycle commit diffs (or the maintainer-provided range), and all four worker-memory files (the one-time read).
+The docs marked `yes` in the **Worker-0** column of the Required reading per worker table in `docs/builder/BUILD.md`. For closeout only, additionally: every completed `docs/builder/bld-*.md` artifact, the build-cycle commit diffs (the range ending at the build commit), and all four worker-memory files (the one-time read).
 
 If any instruction conflicts with `AGENTS.md` or `START.md`, follow `AGENTS.md` and `START.md`.
 
@@ -24,7 +24,7 @@ Must not:
 - write dispatch prompts that instruct a worker to run `pytest` with `--cov*` flags or chase coverage gates (`docs/builder/BUILD.md` `## Coverage is the maintainer's gate, not a worker's tool`). Do not add exception clauses ("a focused coverage command for review concerns" or similar); the rule has no carve-outs
 - dispatch a builder against a finding Worker-0 has not verified against source, or against a contract choice the maintainer has not decided (`## Review-round dispatch`)
 - let any worker edit the maintainer's incoming review document — it is evidence of what was found; the contract is the round artifact
-- commit. Only the maintainer commits; Worker-0 never commits, even if asked
+- commit anything but its own finished, gated work at the build commit (`docs/builder/BUILD.md` `## Slice handoff (no maintainer pause between slices)`) and the post-closeout commit (`## Closeout job` step 6); push, branch, or edit `CHANGELOG.md` (the maintainer's alone)
 
 ## Slice status legend
 
@@ -40,7 +40,7 @@ Every `bld-*.md` artifact carries a `Status:` line Worker-0 reads to decide what
 
 Pre-flight is Worker-0's alone, and it **gates plan creation** — run it before creating `docs/builder/build-<NNN>-<topic>-<0_0_X>.md` (`docs/builder/BUILD.md` `## Pre-flight checks`):
 
-1. **Working-tree baseline is explicit.** Run `git status --short`. If unrelated uncommitted changes exist, stop and ask the maintainer to commit, move aside, or include them in the baseline.
+1. **Working-tree baseline is explicit.** Run `git status --short`. If unrelated uncommitted changes exist, stop and ask the maintainer to commit, move aside, or include them in the baseline; they are another session's work, which Worker-0 never commits.
 2. **`scripts/review_inspect.py` runs.** Smoke invocation: `uv run python scripts/review_inspect.py <pick_a_dst_module>.py --output-dir <scratch>/inspect --stdout`. Escalate if broken — planning and review passes for `types/` or `optimizer/` slices cannot run as specified without it.
 3. **The prior cycle is closed out on disk.** For each prior `docs/builder/build-*.md` whose final checkbox reads `- [x]`: confirm its `## Closing record` exists, append the `git show <sha>:<artifact path>` line per artifact, `mv -n` the plan into `docs/builder/DONE/`, rebase its link definitions and sweep its citers, then delete its `docs/builder/bld-<NNN>-*.md` — every path explicit, never a glob (`docs/builder/BUILD.md` `### Archiving a plan`, which lists the three obligations in order). An open final box is another session's live cycle, so stop and ask. Then verify every path Worker-0 intends to create does not already exist. The spec's `-rationale.md` sibling is tracked and durable — never delete it. **Not for a review round:** a round's input is already-built work, so the prior cycle's `bld-*.md` artifacts are the record of what is now under review and must survive (`docs/builder/BUILD.md` `### Cohorting, naming, and closure`, "Pre-flight for a round"). Deleting them is the one irreversible pre-flight mistake, and this step is where someone stands when they would make it.
 4. **Scratch paths are known.** `.gitignore` lists `docs/builder/worker-memory/` and `docs/builder/temp-tests/`; this cycle uses only `worker-memory/<NNN>-worker-<N>.md` and `temp-tests/<NNN>/` inside them (`docs/builder/BUILD.md` `### Worker memory`); the session scratchpad `<scratch>` (outside the repo) is recorded in the plan preamble for helper output, proof copies, and the floor venv.
@@ -142,7 +142,7 @@ Assemble every spawn prompt by ticking this list, per spawn. It is mechanical on
 
 ### Mid-flight instructions are mirrored into the artifact
 
-A correction, amendment, forced design change, or maintainer decision sent *after* the spawn prompt went out is recorded in the cycle artifact: one bullet naming what was sent and why, under the active pass's section — or under `### Notes for Worker-1 (spec reconciliation)` when it changes the contract rather than the mechanics. An instruction living only in the dispatch transcript leaves the artifact describing a contract the worker did not build against, unreconstructable by Worker-3, Worker-1's final verification, and the maintainer at commit. This does not loosen the courier rule: it covers Worker-0's **own** out-of-band messages, the ones no artifact section would otherwise capture.
+A correction, amendment, forced design change, or maintainer decision sent *after* the spawn prompt went out is recorded in the cycle artifact: one bullet naming what was sent and why, under the active pass's section — or under `### Notes for Worker-1 (spec reconciliation)` when it changes the contract rather than the mechanics. An instruction living only in the dispatch transcript leaves the artifact describing a contract the worker did not build against, unreconstructable by Worker-3, Worker-1's final verification, and the maintainer reviewing the build. This does not loosen the courier rule: it covers Worker-0's **own** out-of-band messages, the ones no artifact section would otherwise capture.
 
 ### Ownership partition (precondition for concurrent dispatch)
 
@@ -178,7 +178,7 @@ After every spec slice is checked:
 5. If final tests fail, dispatch the owning slice loop again.
 6. Mark the final checkbox only once `bld-<NNN>-final.md` reads `final-accepted`, then append `## Closing record` to the plan — the gate table and `### Deferred work catalog` copied verbatim from `bld-<NNN>-final.md`, each deferred item with a named owner (`docs/builder/BUILD.md` `## Final test-run gate`).
 
-Step 3 transitions to step 4 immediately; do NOT stop between the integration pass and the final gate. The build's only stop point is **after step 6**: with the final checkbox ticked and the closing record written, Worker-0 hands off to the maintainer for commit.
+Step 3 transitions to step 4 immediately; do NOT stop between the integration pass and the final gate. The build's only stop point is **after step 6**: with the final checkbox ticked and the closing record written, Worker-0 commits the build (`docs/builder/BUILD.md` `## Slice handoff (no maintainer pause between slices)`) and hands off to the maintainer.
 
 ## Memory entry shape
 
@@ -195,14 +195,14 @@ Append-only. Approaching ~50 lines, consolidate similar entries into one pattern
 
 ## Closeout job
 
-Closeout does NOT begin at the final checkbox. It begins when every checklist item is `- [x]` **and** the maintainer has committed the build and supplied the build-cycle commit range, because the diff scan operates on a fixed range. If the maintainer has not committed when Worker-0 reaches this section, stop and wait for the commit and the range; if no range is offered, ask rather than guess (`docs/builder/BUILD.md` `## Closeout`).
+Closeout does NOT begin at the final checkbox. It begins when every checklist item is `- [x]` **and** Worker-0 has made the build commit, because the diff scan operates on a fixed range ending at that commit. If the range's start is unclear (a review round over already-committed work), ask rather than guess (`docs/builder/BUILD.md` `## Closeout`).
 
-1. Scan all build-cycle commit diffs over the maintainer-provided range.
+1. Scan all build-cycle commit diffs over that range.
 2. Read all four worker-memory files — the one-time closeout read, and the only time Worker-0 reads another worker's memory — to surface patterns the workers themselves noticed.
 3. Identify recurring DRY patterns, repeated bug classes, and workflow stumbling blocks, and give the maintainer a brief retrospective.
 4. **After maintainer approval**, fold general retrospective notes into `docs/builder/BUILD.md` or the role files — recurring patterns and workflow improvements, **never naming specific already-shipped fixes** — subject to `docs/builder/BUILD.md` `## The corpus ratchet: every edit names the bytes it retires`, which binds these edits exactly as it binds any other.
 5. Delete `<scratch>/inspect/`, `docs/builder/temp-tests/<NNN>/`, and this cycle's four `docs/builder/worker-memory/<NNN>-worker-<N>.md` files once the retrospective is complete — by explicit path; another card's files under the same directories belong to a live cycle.
-6. The maintainer commits the post-closeout updates **separately** from the build commit. The build commit already carried the source/test changes, the completed plan, and every `bld-*.md` artifact — it is what step 1 scanned. The post-closeout commit carries only the approved workflow-doc edits from step 4 plus any new closeout artifact. Splitting them keeps the scanned commit range fixed rather than a moving target, and keeps the retrospective attributable to its own commit for `git log` archaeology.
+6. Worker-0 commits the post-closeout updates **separately** from the build commit, the same way (`docs/builder/BUILD.md` `## Slice handoff (no maintainer pause between slices)`). The build commit already carried the source/test changes, the completed plan, and every `bld-*.md` artifact — it is what step 1 scanned. The post-closeout commit carries only the approved workflow-doc edits from step 4 plus any new closeout artifact. Splitting them keeps the scanned commit range fixed rather than a moving target, and keeps the retrospective attributable to its own commit for `git log` archaeology.
 
 ## Closing out a kanban card (DB-backed — `KANBAN.md` / `KANBAN.html` / `docs/GLOSSARY.md` are GENERATED)
 
@@ -234,7 +234,7 @@ Run DB edits via `uv run python examples/fakeshop/manage.py shell`; regenerate f
 7. **Regenerate all four docs** from the repo root: `uv run python scripts/build_kanban_md.py`, `uv run python scripts/build_kanban_html.py`, `uv run python scripts/build_glossary_md.py`, `uv run python scripts/build_tree_md.py` (`docs/TREE.md` renders planned rows from WIP/TODO cards, so a card move changes it too).
 8. **Verify:** `import_spec_terms --check` reports OK for all done cards; `git diff docs/GLOSSARY.md` is **clean**, proving the DB regenerates the committed glossary identically (a non-empty diff means a DB body still drifts from the committed file — fix in step 1); prove "no further drift" by hashing the regenerated docs across **two consecutive regenerates**, since `git diff` alone shows the cumulative HEAD diff and not whether a second regenerate is stable; a *baseline* regenerate-to-temp diff run **before** any DB edit separates a file-only staged anchor that auto-clears on regenerate from real DB drift to fix; `KANBAN.md` shows `DONE-<NNN>` in the Done section with its DoD ticked; `uv run python examples/fakeshop/manage.py check` passes.
 
-Workers never commit — hand the regenerated `KANBAN.md` / `KANBAN.html` / `docs/GLOSSARY.md` plus `examples/fakeshop/db.sqlite3` to the maintainer for review and commit.
+Workers never commit — the regenerated `KANBAN.md` / `KANBAN.html` / `docs/GLOSSARY.md` plus `examples/fakeshop/db.sqlite3` ride Worker-0's build commit (`docs/builder/BUILD.md` `## Slice handoff (no maintainer pause between slices)`); a database another session also holds dirty goes to the maintainer to reconcile first (`docs/builder/BUILD.md` `### Tracked binary / generated files: churn and concurrent-writer handling`).
 
 ## Stop conditions
 

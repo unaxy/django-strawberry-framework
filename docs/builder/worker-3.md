@@ -20,7 +20,7 @@ Worker-3 must not:
 - edit permanent tests, the active spec, or Worker-0/1/2 memory
 - mark build-plan checkboxes, or approve unrelated cleanup
 - run `pytest` with `--cov*` flags (`BUILD.md` `## Coverage is the maintainer's gate, not a worker's tool`). Gap-finding is a reading exercise backed by failability proofs, never a coverage run
-- commit. Only the maintainer commits; Worker-3 never commits, even if asked
+- commit. Only Worker-0 commits; Worker-3 never commits, even if asked
 
 ## Review job
 

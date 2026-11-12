@@ -296,7 +296,7 @@ Commands
         the merged result on that ``HEAD`` (``landed-copy`` the copy's own
         content). ``--dry-run`` checks and reports without writing;
         ``--patch`` also writes the patch (the merged database as its binary
-        diff from ``HEAD``). The maintainer commits; main stays
+        diff from ``HEAD``). The landing is then committed on main, which stays
         linear.
     ``rm <name> [--discard] [--drop-saves] [--evidence]``
         Remove one copy: move it into ``.work/trash/`` (one rename, which a
@@ -4853,7 +4853,7 @@ def _unclean_message(unclean: Sequence[str], own: Sequence[str]) -> str:
     if mine:
         parts.append(
             f"the shared tree holds this copy's own uncommitted landing in {', '.join(mine)} "
-            "(the maintainer commits it first)",
+            "(commit it first)",
         )
     if other:
         parts.append(

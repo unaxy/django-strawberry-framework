@@ -71,9 +71,9 @@ Each phase finishes completely (every agent it dispatched has reported) before t
    questions take the next number unused in both the tracker and [CHANGELOGTODO.md][changelogtodo]. When consumers
    can see the change, add a "CHANGELOG entry for item N" item under CHANGELOGTODO.md's "From bug_hunt-0_0_15_2" and
    update its Progress line. Then make ONE commit holding the fix and the tracker edits together (conventional
-   subject, a body that states the new behaviour); never a separate tracker commit after the fix. When another
-   session has the tree dirty, commit from a private index (START "Concurrent sessions") so only the item's bytes
-   ride. The tick names no hash, because a commit cannot name itself: the commit that ticks an item
+   subject, a body that states the new behaviour); never a separate tracker commit after the fix. Commit from a
+   private index (START "Concurrent sessions") so only the item's bytes ride, even when no other session
+   has the tree dirty. The tick names no hash, because a commit cannot name itself: the commit that ticks an item
    is its fix (`git log -S '- [x] N.' -- docs/bug_hunt/` finds it). No push, no branches, no CHANGELOG edit.
 9. **Close.** Ask the implementer for `<id>-impl-feedback.md` (helpful / misleading / missing about the brief and the
    standing docs). `work.py rm` the item's copies (and delete its grids and patches); keep the reports, briefs and feedback. Print three

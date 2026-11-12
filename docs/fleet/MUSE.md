@@ -418,7 +418,7 @@ prompts and vice versa.
   rule). A finding about another flow's hunk is recorded `blocked-on-<flow>` with the exact hunk.
 - MIXED files exist (e.g. `tests/utils/test_errors.py`: DRY census + hunt hostile-class tests);
   attribution is by hunk content vs `git show HEAD:<path>`.
-- Only the maintainer commits (AGENTS.md commit rule). Worker-0s never `git commit`, never branch
+- Only the maintainer pushes (AGENTS.md commit rule). A Worker-0 commits only its own finished work and never branches
   (AGENTS.md no-branches rule).
 - The 08:45-style "freshness reconciliation" (HEAD moved under a running agent) is Worker-0's
   own job per its flow; the supervisor only tells it the new HEAD in the next prompt.

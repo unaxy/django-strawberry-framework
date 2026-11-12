@@ -31,7 +31,7 @@ the current source.
    pass on the paths you touched.
 6. Report as `HUNT.md` "Worker-1" lists, including every scratch path and run id left in place
    and the digests of the inputs inspected. Never clean up, never edit the progress file, never
-   touch `CHANGELOG.md`, never commit.
+   touch `CHANGELOG.md`, never commit, even if asked (Worker-0 alone commits).
 
 A client-reachable isolation or authorization defect is reported abstractly with its evidence held
 in scratch; the maintainer decides disclosure before any reproducer lands in a tracked file.

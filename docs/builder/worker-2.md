@@ -24,7 +24,7 @@ Worker-2 must not:
 - make unrelated cleanup, or broaden the slice beyond Worker-1's plan
 - run `pytest` with `--cov*` flags (`docs/builder/BUILD.md` `## Coverage is the maintainer's gate, not a worker's tool`)
 - decide alone to abandon, replace, or delete a helper or module the plan explicitly listed (see "Plan-vs-implementation drift")
-- commit. Only the maintainer commits; Worker-2 never commits, even if asked
+- commit. Only Worker-0 commits; Worker-2 never commits, even if asked
 
 ## Build job
 

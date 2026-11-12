@@ -454,7 +454,8 @@ scope. After an edit: `uv run ruff check --fix .`, then `uv run ruff format .` l
 `uv run ruff format --check <paths touched>` and `uv run ruff check <paths touched>` both pass.
 Test runs only as
 "Tests" authorizes; worker prose never converts dispatch into more. Changelog edits need explicit
-authorization. Only the maintainer commits.
+authorization. Worker-0 alone commits, at "Final gate and closeout"; Worker-1 and Worker-2 never
+commit, even if asked. Only the maintainer pushes and branches.
 
 ### Artifact
 
@@ -536,7 +537,10 @@ record; cells unverified; blocked items w/ the decision owed; concurrent work un
 remove only this run's `docs/dry/temp-tests/<scope>/` dirs + `docs/dry/worker-memory/` contents, by
 explicit path, then `uv run python scripts/workspace.py gc dry` (copies, evidence, databases).
 Never recursively clear `docs/dry/`; never delete another run's scratch. Never remove `DRY.md`, the
-role files, the planner, or the plan. Do not commit.
+role files, the planner, or the plan. Unless the plan is `blocked`, commit, as one commit, the
+`## Owned changes` paths and the plan, every hunk attributed by content (a mixed path carved,
+concurrent hunks left dirty; [START.md][start] "Concurrent sessions": explicit paths from a
+private `GIT_INDEX_FILE`, gates shown, guarded `update-ref`, no attribution footer). No push.
 
 <!-- LINK DEFINITIONS -->
 

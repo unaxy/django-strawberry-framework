@@ -91,7 +91,8 @@ only; this doc is canonical.
   [SECURITY.md][security] maintainer path before its reproducer lands in any tracked file: record
   the item `blocked` w/ the defect named abstractly, evidence held in scratch, the maintainer decides
   disclosure. A card plus a failing test is not a parked vulnerability.
-- Only the maintainer commits, branches, pushes, edits the changelog.
+- Worker-0 commits the hunt's owned changes at "Closeout"; Worker-1 and Worker-2
+  never commit, even if asked. Only the maintainer pushes, branches, edits the changelog.
 
 ## Progress file
 
@@ -160,8 +161,8 @@ included, and takes that copy) and records it + `git status --short`. Item-scope
 the workspace copies leave out, such as `*-ws/` folders, `output/` and `temp-tests/`, keeps its
 baseline content).
 
-Fixes accumulate uncommitted. Each verified item's tracked edits + new files go to the `## Owned
-changes` ledger (path, item, symbols). A later item may build on a ledgered path. Attribute by
+Fixes accumulate uncommitted until the closeout commit. Each verified item's tracked edits + new
+files go to the `## Owned changes` ledger (path, item, symbols). A later item may build on a ledgered path. Attribute by
 content: before editing a dirty path, diff vs `git show HEAD:<path>` and match every hunk to the
 ledger or the cycle baseline; a hunk in neither = external edit → stop, report to Worker-0, who
 reconciles w/ the maintainer. Same stop when the item-scoped diff carries hunks the worker didn't make.
@@ -409,7 +410,10 @@ record; net source change vs cycle baseline; concurrent work untouched. "Selecte
 complete" + the unexamined list, never whole-package clearance. Then `Status: complete`; remove
 only this run's `docs/bug_hunt/temp-tests/<scope>/` dirs by explicit path, then `uv run python
 scripts/workspace.py gc hunt` (copies, evidence, databases). Never remove `HUNT.md`, `dicta.md`,
-the progress file, `pbugs.md`, or `docs/shadow/`. Do not commit.
+the progress file, `pbugs.md`, or `docs/shadow/`. Then commit, as one commit, the `## Owned
+changes` paths and the progress file, every hunk attributed to the ledger by content (a mixed path
+carved, concurrent hunks left dirty; [START.md][start] "Concurrent sessions": explicit paths from
+a private `GIT_INDEX_FILE`, gates shown, guarded `update-ref`, no attribution footer). No push.
 
 The progress file's own closing audit is not evidence. Worker-0 derives the leftovers list, the
 item grades and the owned-changes attribution from `git status`, `git log -- <path>` and the

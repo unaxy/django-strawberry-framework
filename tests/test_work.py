@@ -1020,7 +1020,7 @@ def test_a_second_landing_before_main_commits_the_first_is_refused(
     _ = capsys.readouterr()
     assert work.main(["land", "fix-uncommitted"]) == 1
     err = capsys.readouterr().err
-    assert OWN + f"{PACKAGE}/core.py (the maintainer commits it first)" in err
+    assert OWN + f"{PACKAGE}/core.py (commit it first)" in err
     assert "other changes" not in err
     assert (repo / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 3\n"
 
@@ -1110,7 +1110,7 @@ def test_a_landing_onto_its_own_and_another_writers_changes_names_each(
     _ = capsys.readouterr()
     assert work.main(["land", "fix-mixed"]) == 1
     err = capsys.readouterr().err
-    assert OWN + f"{PACKAGE}/core.py (the maintainer commits it first)" in err
+    assert OWN + f"{PACKAGE}/core.py (commit it first)" in err
     assert "the shared tree holds other changes in gone.txt (land after" in err
     assert (repo / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 3\n"
     assert (repo / "gone.txt").read_text(encoding="utf-8") == "main\n"

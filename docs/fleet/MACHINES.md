@@ -94,7 +94,7 @@ machine itself rather than trusting a number written here.
   fast-forwards those). Machines do not share a working tree: work moves between them through
   the remote, or through a clone on the target machine whose `parent` remote is the source
   checkout over SSH (push disabled), its work handed back as a patch ([START.md][start] "Private
-  working copies"). Only the maintainer commits.
+  working copies"). Only the maintainer pushes.
 - The full test suite runs in GitHub Actions (AGENTS.md); a machine runs targeted tests unless
   the maintainer asks for more.
 - Before moving a long flow to another machine, check that machine's row in §2 has the tool the

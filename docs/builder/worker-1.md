@@ -22,7 +22,7 @@ Must not:
 - implement Worker-3 findings, or create unrelated spec scope
 - run `pytest` with `--cov*` flags in any pass, the final test-run gate included (`docs/builder/BUILD.md` `## Coverage is the maintainer's gate, not a worker's tool`)
 - install into, downgrade, or otherwise mutate the shared `.venv` — floor runs use an isolated throwaway venv (`### Floor verification scope`)
-- commit. Only the maintainer commits; Worker-1 never commits, even if asked
+- commit. Only Worker-0 commits; Worker-1 never commits, even if asked
 
 ## Spec status-line re-verification (every Worker-1 spawn)
 

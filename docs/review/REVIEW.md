@@ -125,8 +125,9 @@ this item like the target's), their tests, the ledger rows the item lands.
       pytest <node> --no-cov
   uv run python scripts/workspace.py run review/<item>/<role> --cell pg -- pytest <node> --no-cov
   ```
-- Only the maintainer commits, branches, pushes, edits the changelog. Concurrent work is preserved
-  ("Baseline and ownership").
+- Worker-0 commits the run's owned changes and records at "Final gate and closeout";
+  Worker-1 and Worker-2 never commit, even if asked. Only the maintainer pushes, branches, edits
+  the changelog. Concurrent work is preserved ("Baseline and ownership").
 
 ## Scripts
 
@@ -743,7 +744,7 @@ Blocked: <condition and the decision the maintainer must make>.
 
 ## Artifacts
 
-Four per file item, all under `docs/review/`, untracked until the maintainer commits them,
+Four per file item, all under `docs/review/`, untracked until Worker-0's closeout commit,
 protected by the [AGENTS.md][agents] `docs/review/` rule from bulk deletion. Names take the source
 path relative to the package, `/` → `__`, `.py` dropped: `optimizer/walker.py` →
 `rev-optimizer__walker.md` + `rev-optimizer__walker.performance.md`, `.mechanics.md`,
@@ -871,7 +872,11 @@ record; concurrent work untouched; "Scope of this run" for a scoped run. Then `S
 `docs/review/worker-memory/` contents, by explicit path, then
 `uv run python scripts/workspace.py gc review`: copies, gate copy, evidence, databases, and the
 Postgres container once no flow holds a database. Never recursively clear `docs/review/`; never
-remove `REVIEW.md`, the role files, the plan, or any `rev-*.md`. Do not commit.
+remove `REVIEW.md`, the role files, the plan, or any `rev-*.md`. Unless the plan is `blocked`,
+commit, as one commit, the `## Owned changes` paths, the plan and this run's `rev-*.md`, every hunk
+attributed by content (a mixed path carved, concurrent hunks left dirty; [START.md][start]
+"Concurrent sessions": explicit paths from a private `GIT_INDEX_FILE`, gates shown, guarded
+`update-ref`, no attribution footer). No push.
 
 Under [MUSE.md][muse], a REVIEW Worker-0 running beside a hunt or DRY Worker-0 states the
 production files its open items own in the sibling prompts, and honours theirs: a path another
