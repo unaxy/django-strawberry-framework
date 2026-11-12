@@ -46,11 +46,7 @@ from typing_extensions import override
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.forms.converter import (
     _SCALAR_FORM_FIELDS,
-    FILE,
     FORM_FIELD_SCALARS,
-    RELATION_MULTI,
-    RELATION_SINGLE,
-    SCALAR,
     _null_boolean_converter,
     _postgres_form_field_class,
     convert_form_field,
@@ -61,6 +57,12 @@ from django_strawberry_framework.forms.converter import (
     form_field_scalar,
 )
 from django_strawberry_framework.utils._narrowing import list_of
+from django_strawberry_framework.utils.inputs import (
+    FILE,
+    RELATION_MULTI,
+    RELATION_SINGLE,
+    SCALAR,
+)
 from tests._soft_dependency import blocked_modules
 
 

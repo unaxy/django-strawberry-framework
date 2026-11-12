@@ -88,14 +88,17 @@ from django_strawberry_framework.rest_framework.inputs import (
 from django_strawberry_framework.rest_framework.serializer_converter import (
     NESTED_MULTI,
     NESTED_SINGLE,
-    RELATION_SINGLE,
-    SCALAR,
 )
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_choices_to_enum
 from django_strawberry_framework.utils._narrowing import dict_of, read_attr
 from django_strawberry_framework.utils.input_values import UNSET
-from django_strawberry_framework.utils.inputs import InputFieldSpec, normalize_field_name_sequence
+from django_strawberry_framework.utils.inputs import (
+    RELATION_SINGLE,
+    SCALAR,
+    InputFieldSpec,
+    normalize_field_name_sequence,
+)
 from tests._idioms import (
     ClassReadRaises,
     ModelSerializerBase,

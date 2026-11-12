@@ -29,10 +29,10 @@ from django_strawberry_framework import (
     ResourcePolicy,
     finalize_django_types,
 )
-from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.utils._narrowing import dict_of
+from django_strawberry_framework.utils.errors import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.utils.typing import call_forwarded
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._catalog_data import categories_from_seed, items_from_seed

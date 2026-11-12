@@ -109,18 +109,16 @@ from django_strawberry_framework.utils.converters import (
 
 # The decode kinds the reverse-map record carries. The four base kinds are
 # single-sourced in ``utils/inputs.py`` (one conceptual enum,
-# not a per-flavor copy); re-exported here (the ``as`` form marks the explicit
-# re-export) so the resolver + the tests keep addressing them on this
-# module. ``NESTED_SINGLE`` / ``NESTED_MULTI`` are the serializer-only
+# not a per-flavor copy). ``NESTED_SINGLE`` / ``NESTED_MULTI`` are the serializer-only
 # nested-serializer kinds: an EXPLICITLY-opted-in nested
 # ``Serializer`` (single) / ``ListSerializer`` (many), whose recursion is owned
 # by ``rest_framework/inputs.py`` (this converter module has no knowledge of
 # the recursion; it only names the kinds + detects a nested field).
-from django_strawberry_framework.utils.inputs import FILE as FILE  # noqa: PLC0414 - explicit re-export
-from django_strawberry_framework.utils.inputs import RELATION_MULTI as RELATION_MULTI  # noqa: PLC0414 - explicit re-export
-from django_strawberry_framework.utils.inputs import RELATION_SINGLE as RELATION_SINGLE  # noqa: PLC0414 - explicit re-export
-from django_strawberry_framework.utils.inputs import SCALAR as SCALAR  # noqa: PLC0414 - explicit re-export
 from django_strawberry_framework.utils.inputs import (
+    FILE,
+    RELATION_MULTI,
+    RELATION_SINGLE,
+    SCALAR,
     FieldConversionBase,
     InputFieldSpec,
     predicted_input_field_name,

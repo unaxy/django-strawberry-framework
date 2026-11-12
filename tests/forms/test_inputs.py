@@ -68,12 +68,6 @@ from typing_extensions import override
 
 from django_strawberry_framework import DjangoFormMutation, DjangoType, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.forms.converter import (
-    FILE,
-    RELATION_MULTI,
-    RELATION_SINGLE,
-    SCALAR,
-)
 from django_strawberry_framework.forms.inputs import (
     _TEMPORAL_COLUMN_FORM_CLASSES,
     FORM,
@@ -102,7 +96,13 @@ from django_strawberry_framework.types import converters
 from django_strawberry_framework.types.converters import convert_choices_to_enum
 from django_strawberry_framework.utils._narrowing import enum_value, list_of, require
 from django_strawberry_framework.utils.input_values import UNSET
-from django_strawberry_framework.utils.inputs import InputFieldSpec
+from django_strawberry_framework.utils.inputs import (
+    FILE,
+    RELATION_MULTI,
+    RELATION_SINGLE,
+    SCALAR,
+    InputFieldSpec,
+)
 from django_strawberry_framework.utils.relations import is_model_class
 from tests._idioms import ClassReadRaises, module_binding, str_subclass_name
 from tests._postgres_fields import FakeArrayField, patch_array_field

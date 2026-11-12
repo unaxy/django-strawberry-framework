@@ -77,7 +77,6 @@ from django_strawberry_framework import (
 )
 from django_strawberry_framework import schema as schema_module
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.mutations.permissions import DjangoModelPermission
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils import querysets as querysets_module
@@ -92,6 +91,7 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
 )
+from django_strawberry_framework.utils.errors import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.utils.querysets import (
     pks_present,
     visible_related_object,

@@ -105,7 +105,6 @@ from django_strawberry_framework.forms.resolvers import (
     _is_empty_form_value,
     _reconstruct_partial_data,
 )
-from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, FieldError
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
@@ -117,6 +116,10 @@ from django_strawberry_framework.utils._narrowing import (
     pk_of,
     read_attr,
     require_instance,
+)
+from django_strawberry_framework.utils.errors import (
+    NON_FIELD_ERROR_KEY,
+    FieldError,
 )
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import SyncMisuseError, visible_related_object

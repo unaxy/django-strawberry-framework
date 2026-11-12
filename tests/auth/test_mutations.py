@@ -144,7 +144,7 @@ if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
 
     from django_strawberry_framework.auth.mutations import _RegisterDecoded
-    from django_strawberry_framework.mutations.inputs import FieldError
+    from django_strawberry_framework.utils.errors import FieldError
 
     # Each field's descriptor types as django-stubs declares them (set type, get type), spelled
     # out because the checker runs without the django-stubs mypy plugin that would infer them.

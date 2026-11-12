@@ -59,9 +59,9 @@ from django_strawberry_framework import (
     finalize_django_types,
 )
 from django_strawberry_framework.auth import register_mutation
-from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing.relay import global_id_for
+from django_strawberry_framework.utils.errors import NON_FIELD_ERROR_KEY
 from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import ModelSerializerBase, is_object_dict, is_object_list, saved_pk
 

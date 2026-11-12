@@ -139,7 +139,10 @@ from django_strawberry_framework import (
     finalize_django_types,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.mutations.inputs import CREATE, NON_FIELD_ERROR_KEY, PARTIAL
+from django_strawberry_framework.mutations.inputs import (
+    CREATE,
+    PARTIAL,
+)
 from django_strawberry_framework.mutations.resolvers import StepFailure
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
@@ -164,7 +167,6 @@ from django_strawberry_framework.rest_framework.inputs import (
 from django_strawberry_framework.rest_framework.serializer_converter import (
     NESTED_MULTI,
     NESTED_SINGLE,
-    SCALAR,
 )
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types import relay as relay_module
@@ -183,12 +185,13 @@ from django_strawberry_framework.utils._narrowing import (
 from django_strawberry_framework.utils._queryset_private import (
     queryset_db,
 )
-from django_strawberry_framework.utils.errors import build_error_key_map
+from django_strawberry_framework.utils.errors import NON_FIELD_ERROR_KEY, build_error_key_map
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
     FILE,
     RELATION_MULTI,
     RELATION_SINGLE,
+    SCALAR,
     InputFieldSpec,
 )
 from django_strawberry_framework.utils.querysets import SyncMisuseError
@@ -225,14 +228,13 @@ if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
     from typing_extensions import TypeIs
 
-    from django_strawberry_framework.mutations.inputs import FieldError
     from django_strawberry_framework.rest_framework.resolvers import _WrittenRow
     from django_strawberry_framework.rest_framework.serializer_converter import (
         DRFField,
         DRFRelatedField,
         DRFSerializer,
     )
-    from django_strawberry_framework.utils.errors import ErrorKeyMap
+    from django_strawberry_framework.utils.errors import ErrorKeyMap, FieldError
 
     _ModelT = TypeVar("_ModelT", bound=Model)
 

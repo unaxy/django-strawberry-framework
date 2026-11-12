@@ -81,7 +81,6 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations import resolvers
 from django_strawberry_framework.mutations import resolvers as mutation_resolvers
 from django_strawberry_framework.mutations.inputs import (
-    NON_FIELD_ERROR_KEY,
     _relation_field_index,
     mutation_input_field_specs,
 )
@@ -96,7 +95,10 @@ from django_strawberry_framework.utils._narrowing import (
     require,
     require_instance,
 )
-from django_strawberry_framework.utils.errors import validation_error_to_field_errors
+from django_strawberry_framework.utils.errors import (
+    NON_FIELD_ERROR_KEY,
+    validation_error_to_field_errors,
+)
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.querysets import SyncMisuseError, visible_related_object
 from django_strawberry_framework.utils.relations import is_model_class

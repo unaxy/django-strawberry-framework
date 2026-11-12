@@ -37,14 +37,13 @@ from typing_extensions import override
 
 from django_strawberry_framework.forms import resolvers as form_resolvers
 from django_strawberry_framework.mutations import resolvers as mutation_resolvers
-from django_strawberry_framework.mutations.inputs import FieldError
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import resolvers as serializer_resolvers
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types.base import DjangoType
 from django_strawberry_framework.types.finalizer import finalize_django_types
 from django_strawberry_framework.utils import write_values
-from django_strawberry_framework.utils.errors import field_error
+from django_strawberry_framework.utils.errors import FieldError, field_error
 from django_strawberry_framework.utils.inputs import (
     FILE,
     RELATION_MULTI,

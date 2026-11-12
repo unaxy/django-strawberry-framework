@@ -17,13 +17,13 @@ Rules of the road:
 
 ## Status
 
-Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include item 42.
+Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include items 42 and 43.
 
 | | Count |
 | --- | --- |
 | Stable rules | 815: 806 on, 9 off by design |
 | Preview-only rules | 142, all off (`preview` is not enabled) |
-| Lines carrying `# noqa` | 450, in 124 files |
+| Lines carrying `# noqa` | 440, in 121 files |
 | `# noqa` lines with no reason | 163 (see To do) |
 | `# ruff: disable[...]` fences | 9, every one `ERA001` around a TODO-anchored pseudo block |
 | File-level `# ruff: noqa` | 0 |
@@ -39,7 +39,7 @@ per 1,000 lines of source.
 
 | Area | Files | Lines | `# noqa` lines | Per 1k lines | Per-file ignores |
 | --- | --- | --- | --- | --- | --- |
-| Package (`django_strawberry_framework/`) | 131 | 115,070 | 174 | 1.51 | none |
+| Package (`django_strawberry_framework/`) | 131 | 115,070 | 164 | 1.43 | none |
 | tests/ | 217 | 257,748 | 159 | 0.62 | 17 codes, plus `D102` / `D103` on `test_*.py` |
 | examples/ | 266 | 202,432 | 101 | 0.50 | 12 codes, plus `D102` / `D103` on `test_*.py`, `D` / `DJ008` on migrations, `INP001` / `UP031` by folder |
 | scripts/ | 46 | 45,205 | 12 | 0.27 | 6 codes |
@@ -53,10 +53,10 @@ per 1,000 lines of source.
 | `utils/` | 28 | 21,571 | 10 | 0.46 |
 | `filters/` | 6 | 18,529 | 23 | 1.24 |
 | `optimizer/` | 14 | 13,128 | 11 | 0.84 |
-| `rest_framework/` | 9 | 8,663 | 6 | 0.69 |
+| `rest_framework/` | 9 | 8,663 | 2 | 0.23 |
 | `types/` | 8 | 8,674 | 32 | 3.69 |
-| `forms/` | 5 | 5,725 | 5 | 0.87 |
-| `mutations/` | 7 | 5,111 | 14 | 2.74 |
+| `forms/` | 5 | 5,725 | 1 | 0.17 |
+| `mutations/` | 7 | 5,111 | 12 | 2.35 |
 | `extensions/` | 5 | 4,431 | 3 | 0.68 |
 | `orders/` | 5 | 2,141 | 1 | 0.47 |
 | `auth/` | 4 | 2,084 | 7 | 3.36 |
@@ -76,7 +76,6 @@ factories and the unittest mixin.
 | `FBT001` | 69 | 2 | 59 | 8 | 0 | a parametrized bool column, or Django's positional `execute_wrapper(..., many, ...)` |
 | `BLE001` | 24 | 21 | 1 | 1 | 1 | deliberate containment: consumer code may raise anything, a boundary fails closed, cleanup must not mask the primary error |
 | `N802` | 14 | 10 | 4 | 0 | 0 | PascalCase field factories (graphene-django parity), unittest vocabulary |
-| `PLC0414` | 10 | 10 | 0 | 0 | 0 | explicit re-exports basedpyright needs |
 | `FBT003` | 12 | 0 | 11 | 1 | 0 | the bool is the value under test, or mirrors `execute_wrapper` |
 | `S101` | 11 | 11 | 0 | 0 | 0 | django-filter's own asserts, upstream invariants |
 | `S102` | 11 | 0 | 11 | 0 | 0 | `exec` of a literal program the test runs |
@@ -285,6 +284,10 @@ Each item's commit holds the detail (`git log -S '<code>' -- pyproject.toml`).
     `filters.base.LazyRelatedClassMixin` (2 `PLC0414`); every public path to both names stays.
 42. Two `filters/inputs.py` local imports (`PLC0415`) moved to the module's existing top-level imports of
     `types.converters` and `utils.querysets`; no cycle remained.
+43. The last `PLC0414` re-export paths dropped: the four decode kinds from `forms.converter` and
+    `rest_framework.serializer_converter`, `FieldError` / `NON_FIELD_ERROR_KEY` from `mutations.inputs` (10 lines).
+    Every import names the defining module, `utils.inputs` or `utils.errors`; `FieldError` stays public at the
+    package root and `mutations`.
 
 ## Measuring
 

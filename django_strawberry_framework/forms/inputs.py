@@ -90,6 +90,10 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.inputs import (
+    FILE,
+    RELATION_MULTI,
+    RELATION_SINGLE,
+    SCALAR,
     GeneratedFieldSources,
     InputFieldSpec,
     build_strawberry_input_class,
@@ -113,10 +117,6 @@ from django_strawberry_framework.utils.relations import (
 )
 
 from .converter import (
-    FILE,
-    RELATION_MULTI,
-    RELATION_SINGLE,
-    SCALAR,
     convert_form_field,
     form_field_kind,
     form_field_reads_one_value,

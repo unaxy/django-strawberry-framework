@@ -5,8 +5,8 @@ pure, finalizer-free machinery: given a Django model + an operation kind + an
 effective field set + the resolved primary ``DjangoType``, it produces the
 ``<Model>Input`` / ``<Model>PartialInput`` ``@strawberry.input`` classes and a
 generated ``<Name>Payload`` ``@strawberry.type`` whose ``errors`` member is the
-public ``FieldError`` (defined in ``utils/errors.py`` with ``NON_FIELD_ERROR_KEY``
-and re-exported here). No metaclass, no resolver, no finalizer wiring lives here
+public ``FieldError`` (defined in ``utils/errors.py`` with ``NON_FIELD_ERROR_KEY``).
+No metaclass, no resolver, no finalizer wiring lives here
 - those live in ``sets.py`` (the base + the phase-2.5 bind) and in
 ``resolvers.py`` + ``fields.py``. The generators here are callable and
 unit-testable in isolation; the bind calls them.
@@ -58,11 +58,8 @@ from django_strawberry_framework.utils._narrowing import (
 )
 
 # ``FieldError`` and ``NON_FIELD_ERROR_KEY`` are defined in ``utils/errors.py``
-# (below every write flavor, so the shared constructors import nothing upward);
-# re-exported here (the ``as`` form marks the explicit re-export) so
-# ``mutations.inputs`` keeps addressing the same class object and sentinel.
-from django_strawberry_framework.utils.errors import NON_FIELD_ERROR_KEY as NON_FIELD_ERROR_KEY  # noqa: PLC0414 - explicit re-export
-from django_strawberry_framework.utils.errors import FieldError as FieldError  # noqa: PLC0414 - explicit re-export
+# (below every write flavor, so the shared constructors import nothing upward).
+from django_strawberry_framework.utils.errors import FieldError
 from django_strawberry_framework.utils.inputs import (
     FILE,
     RELATION_MULTI,

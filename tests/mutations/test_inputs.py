@@ -89,9 +89,7 @@ from django_strawberry_framework.mutations.inputs import (
     CREATE,
     EXCLUDED,
     INPUTS_MODULE_PATH,
-    NON_FIELD_ERROR_KEY,
     PARTIAL,
-    FieldError,
     annotate_queryset_relation,
     build_mutation_input,
     build_payload_type,
@@ -119,6 +117,10 @@ from django_strawberry_framework.rest_framework.inputs import (
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_scalar
 from django_strawberry_framework.utils._narrowing import read_attr
+from django_strawberry_framework.utils.errors import (
+    NON_FIELD_ERROR_KEY,
+    FieldError,
+)
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
     FILE,

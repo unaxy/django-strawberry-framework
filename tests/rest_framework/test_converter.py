@@ -80,10 +80,6 @@ from django_strawberry_framework.registry import registry
 from django_strawberry_framework.rest_framework import serializer_converter
 from django_strawberry_framework.rest_framework.accessors import base_fields, bound_fields
 from django_strawberry_framework.rest_framework.serializer_converter import (
-    FILE,
-    RELATION_MULTI,
-    RELATION_SINGLE,
-    SCALAR,
     SerializerFieldConversion,
     backing_model_field,
     convert_serializer_field,
@@ -98,6 +94,12 @@ from django_strawberry_framework.rest_framework.serializer_converter import (
 from django_strawberry_framework.scalars import Upload
 from django_strawberry_framework.types.converters import convert_choices_to_enum
 from django_strawberry_framework.utils._narrowing import dict_of, enum_value, read_attr
+from django_strawberry_framework.utils.inputs import (
+    FILE,
+    RELATION_MULTI,
+    RELATION_SINGLE,
+    SCALAR,
+)
 from django_strawberry_framework.utils.typing import call_forwarded
 from tests._idioms import ModelSerializerBase, bind_unparented
 from tests._postgres_fields import FakeArrayField, patch_array_field

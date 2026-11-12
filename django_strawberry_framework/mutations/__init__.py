@@ -23,8 +23,9 @@ shape (filters / orders add Decision-11 helpers this file does not need).
 
 from __future__ import annotations
 
+from django_strawberry_framework.utils.errors import FieldError
+
 from .fields import DjangoMutationField
-from .inputs import FieldError
 from .permissions import DjangoModelPermission
 from .sets import DjangoMutation
 

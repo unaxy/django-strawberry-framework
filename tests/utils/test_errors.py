@@ -57,7 +57,6 @@ from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from typing_extensions import override
 
-from django_strawberry_framework.mutations.inputs import NON_FIELD_ERROR_KEY, FieldError
 from django_strawberry_framework.utils import errors as errors_module
 from django_strawberry_framework.utils._narrowing import (
     call_method,
@@ -77,7 +76,9 @@ from django_strawberry_framework.utils.errors import (
     FILTER_INVALID_ERROR_CODE,
     GLOBALID_INVALID_ERROR_CODE,
     GLOBALID_UNVALIDATABLE_ERROR_CODE,
+    NON_FIELD_ERROR_KEY,
     PAGINATION_INVALID_ERROR_CODE,
+    FieldError,
     binds_integer,
     build_error_key_map,
     coded_error_extensions,

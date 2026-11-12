@@ -67,16 +67,15 @@ from django_strawberry_framework.utils.converters import (
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 
-# The four decode kinds the reverse-map record carries. Single-sourced in
-# ``utils/inputs.py`` (one conceptual enum, not a per-flavor
-# copy); re-exported here (the ``as`` form marks the explicit re-export) so the
-# form resolver, the input builder, and the tests keep addressing them on
-# this module (spec-038 Decision 7).
-from django_strawberry_framework.utils.inputs import FILE as FILE  # noqa: PLC0414 - explicit re-export
-from django_strawberry_framework.utils.inputs import RELATION_MULTI as RELATION_MULTI  # noqa: PLC0414 - explicit re-export
-from django_strawberry_framework.utils.inputs import RELATION_SINGLE as RELATION_SINGLE  # noqa: PLC0414 - explicit re-export
-from django_strawberry_framework.utils.inputs import SCALAR as SCALAR  # noqa: PLC0414 - explicit re-export
-from django_strawberry_framework.utils.inputs import FieldConversionBase
+# The four decode kinds the reverse-map record carries are single-sourced in
+# ``utils/inputs.py`` (one conceptual enum, not a per-flavor copy).
+from django_strawberry_framework.utils.inputs import (
+    FILE,
+    RELATION_MULTI,
+    RELATION_SINGLE,
+    SCALAR,
+    FieldConversionBase,
+)
 
 
 class FormFieldConversion(FieldConversionBase):
