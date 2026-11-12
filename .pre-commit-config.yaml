@@ -84,6 +84,15 @@ repos:
         files: ^(.*\.py|pyproject\.toml|scripts/type_suppressions\.toml)$
         pass_filenames: false
 
+      - id: check-noqa-suppressions
+        name: ruff noqa suppressions (no file-level or blanket noqa, on the site ledger)
+        entry: uv run python scripts/check_noqa_suppressions.py
+        language: system
+        # Every tracked file, as in CI: the ledger covers the whole tree. Fires on any
+        # staged `.py` or the ledger.
+        files: ^(.*\.py|scripts/noqa_suppressions\.toml)$
+        pass_filenames: false
+
       - id: check-public-types
         name: public API type completeness (basedpyright --verifytypes, 100%)
         entry: uv run python scripts/check_public_types.py

@@ -14,10 +14,14 @@ Rules of the road:
 - A folder the rule is wrong about gets a per-file ignore, with its reason in `pyproject.toml`.
 - A rule is off only by design (see [Off by design](#off-by-design)).
 - Update the numbers below in the same change that moves them; [Measuring](#measuring) has the commands.
+- `scripts/check_noqa_suppressions.py` (pre-commit and the CI lint job) holds every site to the generated ledger
+  `scripts/noqa_suppressions.toml`: each code suppressed there, and its `# noqa` lines with no reason (`bare`). A
+  count may only fall; a new suppression, or a new one without a reason, fails. It also refuses a file-level
+  `# ruff: noqa` and a blanket `# noqa`.
 
 ## Status
 
-Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include items 42-44.
+Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include items 42-45.
 
 | | Count |
 | --- | --- |
@@ -25,6 +29,7 @@ Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts inc
 | Preview-only rules | 142, all off (`preview` is not enabled) |
 | Lines carrying `# noqa` | 376, in 121 files |
 | `# noqa` lines with no reason | 107 (see To do) |
+| Site ledger (`scripts/noqa_suppressions.toml`) | 386 suppressed codes and 118 `bare` lines, at 314 sites |
 | `# ruff: disable[...]` fences | 9, every one `ERA001` around a TODO-anchored pseudo block |
 | File-level `# ruff: noqa` | 0 |
 | Complexity ratchets | `max-complexity` 45, `max-branches` 39, `max-returns` 20, `max-args` 18, `max-statements` 133, `max-positional-args` 10 |
@@ -221,8 +226,9 @@ Ruff against itself:
   - 10 `PLC0415`;
   - the rest one to three each.
 
-  Write each reason, then add a check (to `scripts/check_trailing_commas.py` or its own hook) that refuses a bare
-  `# noqa: CODE`.
+  The ledger counts 118 `bare`: it also counts a `# noqa` whose only text after the codes is another comment
+  (`# noqa: F821  # pyright: ignore[...]`). No new one can land (item 45). Write each reason with its real cause,
+  then `check_noqa_suppressions.py --write` drops the `bare` entries.
 
 ## Waiting on you
 
@@ -289,6 +295,9 @@ Each item's commit holds the detail (`git log -S '<code>' -- pyproject.toml`).
     package root and `mutations`.
 44. Parametrized boolean test columns are keyword-only (`*` before the first one), so `FBT001` no longer fires: 64
     `# noqa` lines in 58 test functions.
+45. The `# noqa` site ledger, `scripts/noqa_suppressions.toml`, held by `scripts/check_noqa_suppressions.py` (hook
+    and CI lint) the way `check_type_suppressions.py` holds basedpyright's: counts per site and code, plus `bare`,
+    may only fall, and a commit raising a total needs the `Suppression-Growth-Approved:` trailer.
 
 ## Measuring
 
@@ -299,7 +308,11 @@ uv run ruff check --show-settings django_strawberry_framework/__init__.py   # li
 uv run ruff check --exit-zero --statistics --config 'lint.per-file-ignores={}' --select <codes> tests   # sites a per-file ignore hides
 uv run ruff check --exit-zero --statistics --select SLF001,TRY003,EM101,EM102,CPY001,FIX002,TD003 .
 git grep -c '# noqa' -- '*.py'                  # then group by path prefix
+uv run python scripts/check_noqa_suppressions.py   # suppressed codes and bare lines, from comment tokens
 ```
+
+Sum `scripts/noqa_suppressions.toml` by path prefix or by code for the per-area and per-code tables: each key is a
+site (`path::QualifiedName`), each value its counts.
 
 Count `# noqa` from comment tokens, not raw grep, so a docstring that quotes one is not counted. Run every
 command in a `work.py` copy, never in the shared checkout.

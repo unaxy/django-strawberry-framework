@@ -524,6 +524,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_all_spec_glossaries.py  # Script tests for the every-spec glossary gate in ``scripts/check_all_spec_glossaries.py``.
 ├── test_check_annotation_subscripts.py  # Script tests for the ``annotation-subscripts`` gate in ``scripts/check_annotation_subscripts.py``.
 ├── test_check_citations.py       # Script tests for the ``path::Symbol`` citation gate.
+├── test_check_noqa_suppressions.py  # Script tests for the ``check-noqa-suppressions`` gate in ``scripts/check_noqa_suppressions.py``.
 ├── test_check_public_types.py    # Script tests for the public-API type-completeness gate in ``scripts/check_public_types.py``.
 ├── test_check_spec_glossary.py   # Script tests for the spec terms-CSV glossary gate.
 ├── test_check_trailing_commas.py # Script tests for the ``source-layout`` gate in ``scripts/check_trailing_commas.py``.
@@ -918,6 +919,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_check_all_spec_glossaries.py  # Script tests for the every-spec glossary gate in ``scripts/check_all_spec_glossaries.py``.
 ├── test_check_annotation_subscripts.py  # Script tests for the ``annotation-subscripts`` gate in ``scripts/check_annotation_subscripts.py``.
 ├── test_check_citations.py       # Script tests for the ``path::Symbol`` citation gate.
+├── test_check_noqa_suppressions.py  # Script tests for the ``check-noqa-suppressions`` gate in ``scripts/check_noqa_suppressions.py``.
 ├── test_check_public_types.py    # Script tests for the public-API type-completeness gate in ``scripts/check_public_types.py``.
 ├── test_check_spec_glossary.py   # Script tests for the spec terms-CSV glossary gate.
 ├── test_check_trailing_commas.py # Script tests for the ``source-layout`` gate in ``scripts/check_trailing_commas.py``.

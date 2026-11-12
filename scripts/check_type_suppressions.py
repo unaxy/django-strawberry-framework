@@ -190,8 +190,8 @@ def parse_ledger(text: str, locked: frozenset[str]) -> Counter[Entry]:
     return counts
 
 
-def render_ledger(counts: Counter[Entry]) -> str:
-    """Return the ledger text for ``counts``: one sorted line per site."""
+def render_ledger(counts: Counter[Entry], header: str = _HEADER) -> str:
+    """Return the ledger text for ``counts`` under ``header``: one sorted line per site."""
     sites: dict[str, dict[str, int]] = {}
     for (site, kind), count in sorted(counts.items()):
         if count:
@@ -202,7 +202,7 @@ def render_ledger(counts: Counter[Entry]) -> str:
         + " }"
         for site, kinds in sites.items()
     ]
-    return _HEADER + "\n" + "".join(f"{line}\n" for line in lines)
+    return header + "\n" + "".join(f"{line}\n" for line in lines)
 
 
 def _pyright_comments(source: str) -> Iterator[tuple[int, str]]:
@@ -276,14 +276,24 @@ def suppressions(path: str, source: str) -> Iterator[tuple[int, Entry]]:
         yield line, (path if symbol is None else f"{path}::{symbol}", kind)
 
 
+def _fix_the_diagnostic(_kind: str) -> str:
+    """Return what to do about a new ignore or cast of any kind."""
+    return "fix the new diagnostic instead of suppressing it"
+
+
 def ledger_violations(
     measured: Iterable[tuple[str, int, Entry]],
     ledger: Counter[Entry],
+    *,
+    ledger_path: str = LEDGER,
+    script: str = "scripts/check_type_suppressions.py",
+    over_hint: Callable[[str], str] = _fix_the_diagnostic,
 ) -> Iterator[Violation]:
     """Yield each ``(site, kind)`` count, in site order, that differs from its ledger entry.
 
     ``measured`` holds one ``(path, line, entry)`` per suppression; an over-count points at
-    the entry's first line in the tree, an under-count at the ledger.
+    the entry's first line in the tree with ``over_hint(kind)``, an under-count at
+    ``ledger_path`` with the ``script --write`` that lowers it.
     """
     counts: Counter[Entry] = Counter()
     first: dict[Entry, tuple[str, int]] = {}
@@ -298,15 +308,13 @@ def ledger_violations(
             yield Violation(
                 path,
                 line,
-                f"`{kind}` at `{site}`: {count}, ledger {allowed}: "
-                "fix the new diagnostic instead of suppressing it",
+                f"`{kind}` at `{site}`: {count}, ledger {allowed}: {over_hint(kind)}",
             )
         elif count < allowed:
             yield Violation(
-                LEDGER,
+                ledger_path,
                 1,
-                f"`{kind}` at `{site}`: {count}, ledger {allowed}: "
-                f"run `scripts/check_type_suppressions.py --write`",
+                f"`{kind}` at `{site}`: {count}, ledger {allowed}: run `{script} --write`",
             )
 
 
@@ -318,12 +326,12 @@ def kind_totals(counts: Counter[Entry]) -> Counter[str]:
     return totals
 
 
-def _ledger_at(rev: str) -> Counter[Entry]:
-    """Return the ledger as commit ``rev`` recorded it; a commit without one is empty.
+def _ledger_at(rev: str, ledger_path: str = LEDGER) -> Counter[Entry]:
+    """Return the ledger at ``ledger_path`` as commit ``rev`` recorded it; absent, it is empty.
 
     Locks are not applied: a rule locked since ``rev`` may still be listed there.
     """
-    result = _git.run_git(REPO_ROOT, "show", f"{rev}:{LEDGER}")
+    result = _git.run_git(REPO_ROOT, "show", f"{rev}:{ledger_path}")
     return Counter() if result.returncode else parse_ledger(result.stdout, frozenset())
 
 
@@ -340,8 +348,8 @@ def _approved(commit: str) -> bool:
     return bool(result.stdout.strip())
 
 
-def growth_violations(since: str, until: str) -> Iterator[Violation]:
-    """Yield one violation per kind each unapproved commit after ``since`` raises.
+def growth_violations(since: str, until: str, ledger_path: str = LEDGER) -> Iterator[Violation]:
+    """Yield one violation per kind each unapproved commit after ``since`` raises in ``ledger_path``.
 
     The walk follows ``until``'s first parents back to ``since``, comparing each
     commit's ledger totals with its parent's. ``since`` empty or not in the history
@@ -362,12 +370,13 @@ def growth_violations(since: str, until: str) -> Iterator[Violation]:
         check=True,
     ).stdout.split()
     for commit in commits:
-        before, after = kind_totals(_ledger_at(f"{commit}^")), kind_totals(_ledger_at(commit))
+        before = kind_totals(_ledger_at(f"{commit}^", ledger_path))
+        after = kind_totals(_ledger_at(commit, ledger_path))
         grown = sorted(kind for kind in after if after[kind] > before[kind])
         if grown and not _approved(commit):
             for kind in grown:
                 yield Violation(
-                    LEDGER,
+                    ledger_path,
                     1,
                     f"{commit[:12]} raises `{kind}` from {before[kind]} to {after[kind]} "
                     f"without a `{TRAILER}:` trailer (the maintainer's consent)",
