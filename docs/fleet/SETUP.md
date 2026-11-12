@@ -332,6 +332,35 @@ and Claude Code from the same installers, the direnv hook in `~/.zshrc`, and `la
 instead of lingering (no step). Steps 3 to 6 are the same; `verify` checks that the tools the
 block puts on `PATH` are found over plain ssh.
 
+### Reachable before anyone logs in
+
+A Mac's sshd runs before login, but `Tailscale.app` (App Store or standalone) connects only once a
+user logs in, so a restarted Mac drops off the tailnet until someone logs in at it. On a fleet Mac,
+by hand:
+
+1. Quit and remove `Tailscale.app`, then run the open-source daemon, which launchd starts at boot
+   (sign in with the same account; the machine keeps its tailnet name):
+
+   ```sh
+   brew install tailscale
+   sudo tailscaled install-system-daemon
+   sudo tailscale up --ssh   # --ssh adds Tailscale SSH beside sshd; leave it out to use sshd alone
+   ```
+
+   The app and the daemon fight over the tunnel, so never run both.
+2. System Settings > General > Sharing > Remote Login on (sshd, a system service).
+3. FileVault stops a restart at the unlock screen, before launchd starts anything. Restart on
+   purpose with `sudo fdesetup authrestart` (it unlocks the next boot once), or turn FileVault off
+   on that machine.
+4. Stay awake and come back after a power cut:
+
+   ```sh
+   sudo pmset -a sleep 0 disksleep 0 womp 1 autorestart 1
+   ```
+
+Check from another machine after a restart with nobody logged in: `tailscale status` lists the
+Mac as online and `ssh <mac> true` succeeds.
+
 <!-- LINK DEFINITIONS -->
 
 <!-- Root -->
