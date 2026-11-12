@@ -16,10 +16,12 @@ request has no wire shape for syncing machines, so there is no live sibling in
 
 import contextlib
 import dataclasses
+import io
 import json
 import os
 import plistlib
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -3343,6 +3345,318 @@ def test_a_hold_on_a_silent_peer_times_out_with_a_fleet_error(
     ):
         pass
     assert time.monotonic() - started < 10
+
+
+# --------------------------------------------------------------------------------------------
+# Holds: a peer's lock lasts no longer than the run that keeps it
+# --------------------------------------------------------------------------------------------
+
+#: A ``hold`` that prints its own pid as the token and then ignores its stdin for 20 seconds:
+#: only a kill ends it before then.
+DEAF_HOLD = (
+    "import json, os, time; print(json.dumps({'token': str(os.getpid())}), flush=True); "
+    "time.sleep(20)"
+)
+
+
+def _holder_file(repo: Path) -> Path:
+    return work.work_dir(repo) / work.FLEET / fleet_sync.HOLDER
+
+
+def _gone(pid: int, within: float = 5.0) -> bool:
+    """Return whether process ``pid`` is gone (reaped) within ``within`` seconds."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _hold_in_thread(
+    repo: Path,
+    lifetime: float,
+    *,
+    renew_for: float = 0.0,
+    close: bool = False,
+) -> tuple[int | None, str, float]:
+    """Run ``agent_hold`` on ``repo`` over a pipe; return its exit (``None``: held), stdout, seconds.
+
+    ``renew_for`` seconds of renewals (a newline every 0.1 s) come first, then the pipe's write
+    end closes at once (``close``) or only once the hold ended or 10 seconds passed.
+    """
+    read, write = os.pipe()
+    stdout = io.StringIO()
+    codes: list[int] = []
+    ended: list[float] = []
+    with os.fdopen(read, "rb") as stdin:
+
+        def hold() -> None:
+            codes.append(fleet_sync.agent_hold(repo, stdin, stdout, lifetime))
+            ended.append(time.monotonic())
+
+        holder = threading.Thread(target=hold, daemon=True)
+        started = time.monotonic()
+        holder.start()
+        try:
+            renewed_until = started + renew_for
+            while time.monotonic() < renewed_until:
+                _ = os.write(write, b"\n")
+                time.sleep(0.1)
+            if close:
+                os.close(write)
+                write = -1
+            holder.join(10)
+            held = not ended
+        finally:
+            if write != -1:
+                os.close(write)
+            holder.join(10)
+    took = ended[0] - started if ended else float("inf")
+    return (None if held else codes[0]), stdout.getvalue(), took
+
+
+def test_a_hold_whose_client_never_renews_releases_the_lock_at_its_deadline(
+    fleet: Fleet,
+) -> None:
+    _ = fleet.capsys.readouterr()
+    code, out, took = _hold_in_thread(fleet.repo_b, 0.3)
+    assert code == 1, out
+    assert took < 5
+    assert json_object(json_loads(out))["token"]
+    assert fleet.capsys.readouterr().err.splitlines() == [
+        "fleet_sync hold: released .work/fleet.lock: no renewal and no end from its client in 0.3s",
+    ]
+    assert not _holder_file(fleet.repo_b).exists()
+    with fleet_sync.holding(fleet.repo_b):
+        pass
+
+
+def test_a_hold_ends_at_once_and_quietly_when_its_stdin_ends(fleet: Fleet) -> None:
+    _ = fleet.capsys.readouterr()
+    code, out, took = _hold_in_thread(fleet.repo_b, 30.0, close=True)
+    assert code == 0, out
+    assert took < 5
+    assert not fleet.capsys.readouterr().err
+    with fleet_sync.holding(fleet.repo_b):
+        pass
+
+
+def test_each_renewal_puts_a_holds_deadline_off_by_its_whole_lifetime(fleet: Fleet) -> None:
+    """Renewed for twice its lifetime, the hold still ends at its deadline after the last one."""
+    _ = fleet.capsys.readouterr()
+    code, out, took = _hold_in_thread(fleet.repo_b, 0.5, renew_for=1.2)
+    assert code == 1, out
+    assert 1.2 <= took < 5
+    assert "no renewal and no end from its client in 0.5s" in fleet.capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["SIGHUP", "SIGPIPE", "SIGTERM"])
+def test_a_hold_its_session_signals_releases_the_lock_and_says_why(
+    fleet: Fleet,
+    name: str,
+) -> None:
+    with subprocess.Popen(
+        [
+            sys.executable,
+            fleet_sync.__file__,
+            "agent",
+            "--repo",
+            str(fleet.repo_b),
+            "hold",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        try:
+            assert process.stdout is not None
+            assert process.stderr is not None
+            line = os.read(process.stdout.fileno(), 4096).decode()
+            assert json_object(json_loads(line))["token"]
+            process.send_signal(signal.Signals[name])
+            assert process.wait(timeout=20) == 1
+            err = os.read(process.stderr.fileno(), 65536).decode()
+        finally:
+            if process.poll() is None:
+                process.kill()
+    assert err.splitlines() == [
+        f"fleet_sync hold: released .work/fleet.lock: {name} from its session",
+    ]
+    assert not _holder_file(fleet.repo_b).exists()
+    with fleet_sync.holding(fleet.repo_b):
+        pass
+
+
+@dataclasses.dataclass(frozen=True)
+class _ShortHoldPeer(fleet_sync.Endpoint):
+    """A peer whose ``hold`` is the real agent on ``repo`` with a half-second lifetime."""
+
+    repo: str = ""
+
+    @override
+    def argv(self, *args: str) -> list[str]:
+        code = (
+            "import sys; sys.path.insert(0, sys.argv[1]); import fleet_sync; "
+            "fleet_sync.HOLD_LIFETIME = 0.5; "
+            "raise SystemExit(fleet_sync.main(['agent', '--repo', sys.argv[2], *sys.argv[3:]]))"
+        )
+        return [
+            sys.executable,
+            "-c",
+            code,
+            SCRIPTS,
+            self.repo,
+            *args,
+        ]
+
+
+@pytest.mark.parametrize("renewals", ["every 0.1s", "none"])
+def test_a_run_renews_its_hold_so_a_pair_longer_than_the_hold_lifetime_keeps_it(
+    fleet: Fleet,
+    renewals: str,
+) -> None:
+    """Renewed, a pair three times the hold's lifetime keeps it; unrenewed, its writes are refused."""
+    renewed = renewals != "none"
+    fleet.monkeypatch.setattr(fleet_sync, "HOLD_RENEW_EVERY", 0.1 if renewed else 60.0)
+    peer = _ShortHoldPeer("b", "b", "b-ssh", repo=str(fleet.repo_b))
+    with peer.hold("local") as token:
+        time.sleep(1.5)
+        if renewed:
+            fleet_sync.check_token(fleet.repo_b, token)
+        else:
+            with pytest.raises(fleet_sync.FleetError, match="not part of the fleet_sync run"):
+                fleet_sync.check_token(fleet.repo_b, token)
+    with fleet_sync.holding(fleet.repo_b):
+        pass
+
+
+@dataclasses.dataclass(frozen=True)
+class _ScriptPeer(fleet_sync.Endpoint):
+    """A peer whose ``hold`` is the Python ``code`` given, with ``extra`` as its arguments."""
+
+    code: str = ""
+    extra: tuple[str, ...] = ()
+
+    @override
+    def argv(self, *args: str) -> list[str]:
+        return [
+            sys.executable,
+            "-c",
+            self.code,
+            *self.extra,
+        ]
+
+
+def test_an_older_agents_hold_reads_the_renewals_with_its_stdin_and_the_pair_goes_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hold an agent without renewals runs: its token, then its whole stdin read to the end."""
+    monkeypatch.setattr(fleet_sync, "HOLD_RENEW_EVERY", 0.05)
+    seen = tmp_path / "stdin"
+    older = (
+        "import json, sys; print(json.dumps({'token': 't'}), flush=True); "
+        "open(sys.argv[1], 'wb').write(sys.stdin.buffer.read())"
+    )
+    with _ScriptPeer("b", "b", "b-ssh", code=older, extra=(str(seen),)).hold("local") as held:
+        time.sleep(0.5)
+    assert held == "t"
+    renewals = seen.read_bytes()
+    assert renewals
+    assert renewals == b"\n" * len(renewals)
+
+
+def test_a_pair_that_raises_kills_a_hold_that_outlasts_the_release_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fleet_sync, "HOLD_RELEASE_WAIT", 0.3)
+    pids: list[int] = []
+
+    def failing_pair() -> None:
+        with _ScriptPeer("b", "b", "b-ssh", code=DEAF_HOLD).hold("local") as token:
+            pids.append(int(token))
+            msg = "the pair failed"
+            raise RuntimeError(msg)
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="the pair failed"):
+        failing_pair()
+    assert time.monotonic() - started < 10
+    assert _gone(pids[0])
+
+
+#: A run in a process of its own keeping a deaf hold (:data:`DEAF_HOLD`) under
+#: ``_holds_die_with_run``: it prints the hold's pid, then sends itself the signal ``argv[3]``.
+RUN_KILLED_MID_PAIR = """import os, signal, sys, time
+sys.path.insert(0, sys.argv[1])
+import fleet_sync
+
+peer = fleet_sync.Endpoint("b", "b", "b-ssh")
+argv = [sys.executable, "-c", sys.argv[2]]
+object.__setattr__(peer, "argv", lambda *args: argv)
+with fleet_sync._holds_die_with_run(), peer.hold("local") as token:
+    print(token, flush=True)
+    os.kill(os.getpid(), signal.Signals[sys.argv[3]])
+    time.sleep(30)
+"""
+
+
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP", "SIGALRM"])
+def test_a_run_killed_by_a_signal_kills_its_hold_processes_first(name: str) -> None:
+    with subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            RUN_KILLED_MID_PAIR,
+            SCRIPTS,
+            DEAF_HOLD,
+            name,
+        ],
+        stdout=subprocess.PIPE,
+    ) as run:
+        assert run.stdout is not None
+        pid = int(os.read(run.stdout.fileno(), 64))
+        try:
+            assert run.wait(timeout=20) == -signal.Signals[name]
+            assert _gone(pid)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_a_command_runs_with_the_fatal_signals_killing_its_holds_and_none_after(
+    fleet: Fleet,
+) -> None:
+    """While a command runs, SIGTERM, SIGHUP and SIGALRM left at their default kill its holds first."""
+    seen: list[bool] = []
+
+    def command(_args: object) -> int:
+        seen.extend(
+            signal.getsignal(signal.Signals[name]) is not signal.SIG_DFL
+            for name in ("SIGTERM", "SIGHUP", "SIGALRM")
+        )
+        return 0
+
+    fleet.monkeypatch.setattr(fleet_sync, "cmd_status", command)
+    previous = {
+        name: signal.signal(signal.Signals[name], signal.SIG_DFL)
+        for name in ("SIGTERM", "SIGHUP", "SIGALRM")
+    }
+    try:
+        assert fleet_sync.main(["status"]) == 0
+        after = [
+            signal.getsignal(signal.Signals[name]) is signal.SIG_DFL
+            for name in ("SIGTERM", "SIGHUP", "SIGALRM")
+        ]
+    finally:
+        for name, handler in previous.items():
+            if handler is not None:
+                _ = signal.signal(signal.Signals[name], handler)
+    assert seen == [True, True, True]
+    assert after == [True, True, True]
 
 
 def test_sync_pins_only_carries_saves_both_ways_and_nothing_else(fleet: Fleet) -> None:

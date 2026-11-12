@@ -267,11 +267,23 @@ Safety
     reported and completed by the next run. Nothing is
     synced with a machine while a ``work.py land`` runs on either side. One run per
     machine at a time: ``.work/fleet.lock``, a kernel lock this run holds, and on
-    each peer a ``hold`` the peer's agent keeps for the pair's length (released
-    when the ssh pipe closes, however the run ends); every write a peer's agent
-    makes checks the hold's token. A busy peer (its probe saw either lock held) is
-    left out of the run's pairs, and one whose hold finds a lock held is a ``failed``
-    row (a ``note`` in a ``--timer`` run, whose pair the next tick carries). A
+    each peer a ``hold`` the peer's agent keeps for the pair's length; every write a
+    peer's agent makes checks the hold's token. A hold releases the peer's lock and
+    exits when its stdin ends (the run closes it at the pair's end, an exception
+    included, or the ssh session closes), at a SIGHUP, SIGPIPE or SIGTERM, and at the
+    latest ``HOLD_LIFETIME`` (600) seconds after its start or its run's latest
+    renewal; each end but the first logs one line to stderr. The deadline is the
+    backstop for a run whose ssh connection went half-open (its machine asleep or off
+    the tailnet as the run ended): its end never reaches the peer, whose hold never
+    writes and so never notices. The run renews each hold every ``HOLD_RENEW_EVERY``
+    (60) seconds, so a pair of any length keeps it; an agent older than the renewal
+    reads it with its stdin and ignores it, and a run older than it keeps a newer
+    peer's hold for 600 seconds, past any timer pair. A SIGTERM, SIGHUP or SIGALRM
+    (the timer's kill) the run leaves at its default first kills every ``hold``
+    process the run keeps, then ends it as the default would. A busy peer (its probe
+    saw either lock held) is left out of the run's pairs, and one whose hold finds a
+    lock held is a ``failed`` row (a ``note`` in a ``--timer`` run, whose pair the
+    next tick carries). A
     ``--timer`` run's main pass alone runs outside ``.work/fleet.lock``: it writes
     nothing a lock holder writes (only this checkout's main, under ``.work/land.lock``,
     and objects a fetch brings), so every machine's main converges however busy the
@@ -401,9 +413,11 @@ import plistlib
 import selectors
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path, PurePosixPath
 from typing import IO, TYPE_CHECKING, NoReturn
@@ -421,6 +435,7 @@ else:  # run or imported from its own folder: work.py and its plumbing live in s
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Generator, Iterable, Mapping, Sequence
+    from types import FrameType
 
 #: ``json.loads``, its result typed ``object`` for the caller to narrow.
 _loads: Callable[[str], object] = json.loads
@@ -530,6 +545,18 @@ CALL_TIMEOUT = 600.0
 PROBE_TIMEOUT = 60.0
 #: Seconds a peer's ``hold`` may take to print its token.
 HOLD_TIMEOUT = 60.0
+#: Seconds a ``hold`` keeps ``.work/fleet.lock`` past its start or its client's latest renewal
+#: (any bytes on its stdin) before it releases the lock and exits: the backstop for a client
+#: that vanished without its connection closing (a half-open ssh, which a hold that never
+#: writes cannot notice). Under the timer's kill (:data:`SCHEDULE_TIME_LIMIT`) with five
+#: minutes to spare, and far past a pair of a client that never renews (a timer run's pair
+#: takes seconds); a run renews every hold it keeps, so a pair of any length keeps its hold.
+HOLD_LIFETIME = 600.0
+#: Seconds between two renewals a run sends each hold it keeps: a tenth of
+#: :data:`HOLD_LIFETIME`, so a renewal or two delayed costs nothing.
+HOLD_RENEW_EVERY = 60.0
+#: Seconds a released hold (its stdin closed) may take to exit before the run kills it.
+HOLD_RELEASE_WAIT = 30.0
 #: Seconds rsync may go without moving data before it gives up (its ``--timeout``).
 RSYNC_IO_TIMEOUT = 120
 #: Seconds one ``git fetch`` of a peer's main may take.
@@ -2124,20 +2151,105 @@ def _write_link(
         raise
 
 
-def agent_hold(repo: Path, stdin: IO[bytes], stdout: IO[str]) -> int:
-    """Hold this machine's fleet lock until ``stdin`` closes; print the token first."""
+class _HoldSignalError(Exception):
+    """A signal from the hold's session ended it; the message names the signal."""
+
+
+def _signals(*names: str) -> tuple[signal.Signals, ...]:
+    """Return the signals ``names`` names that this platform has (Windows lacks most)."""
+    return tuple(signal.Signals[name] for name in names if name in signal.Signals.__members__)
+
+
+#: The signals that end a hold early: its ssh session hanging up or going away, or a stop.
+HOLD_SIGNALS = _signals("SIGHUP", "SIGPIPE", "SIGTERM")
+
+
+def _end_hold_on(signum: int, _frame: FrameType | None) -> None:
+    msg = f"{signal.Signals(signum).name} from its session"
+    raise _HoldSignalError(msg)
+
+
+@contextlib.contextmanager
+def _hold_signals() -> Generator[None, None, None]:
+    """For the block, each of :data:`HOLD_SIGNALS` raises :class:`_HoldSignalError` (main thread only).
+
+    So the hold leaves through ``holding``'s cleanup and logs why, then the handlers in place
+    before come back.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = {signum: signal.signal(signum, _end_hold_on) for signum in HOLD_SIGNALS}
     try:
-        with holding(repo) as token:
-            _ = stdout.write(json.dumps({"token": token}) + "\n")
-            stdout.flush()
-            _ = stdin.read()
+        yield
+    finally:
+        for signum, handler in previous.items():
+            if handler is not None:  # ``None``: a handler not set from Python, left as it is
+                _ = signal.signal(signum, handler)
+
+
+def _await_release(stdin: IO[bytes], lifetime: float) -> str:
+    """Wait while ``stdin`` stays open; return ``""`` at its end, else why the hold ends.
+
+    Any bytes read are a renewal: the hold lasts ``lifetime`` seconds past the latest one (or
+    its start), then ends.
+    """
+    descriptor = stdin.fileno()
+    deadline = time.monotonic() + lifetime
+    with selectors.DefaultSelector() as selector:
+        _ = selector.register(descriptor, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return f"no renewal and no end from its client in {lifetime:g}s"
+            if not selector.select(remaining):
+                continue
+            try:
+                chunk = os.read(descriptor, 4096)
+            except OSError as error:
+                return f"its stdin failed: {error}"
+            if not chunk:
+                return ""
+            deadline = time.monotonic() + lifetime
+
+
+def agent_hold(
+    repo: Path,
+    stdin: IO[bytes],
+    stdout: IO[str],
+    lifetime: float | None = None,
+) -> int:
+    """Hold this machine's fleet lock while its client lasts; print the token first.
+
+    The hold ends at ``stdin``'s end (its client closed it, or the ssh session did), at a
+    signal of :data:`HOLD_SIGNALS`, at a failed token write (its client gone), or once
+    ``lifetime`` (:data:`HOLD_LIFETIME`) seconds pass with no renewal from its client (any
+    bytes on ``stdin``). Each end but the first logs one line to stderr and exits 1.
+    """
+    limit = HOLD_LIFETIME if lifetime is None else lifetime
+    ended = ""
+    try:
+        with _hold_signals(), holding(repo) as token:
+            try:
+                _ = stdout.write(json.dumps({"token": token}) + "\n")
+                stdout.flush()
+            except OSError as error:
+                ended = f"its client is gone: {error}"
+            else:
+                ended = _await_release(stdin, limit)
     except BusyError as error:
         _ = stdout.write(json.dumps({"error": str(error), "busy": True}) + "\n")
         return 1
     except (FleetError, work.WorkError) as error:
         _ = stdout.write(json.dumps({"error": str(error)}) + "\n")
         return 1
-    return 0
+    except _HoldSignalError as error:
+        ended = str(error)
+    if not ended:
+        return 0
+    with contextlib.suppress(OSError):
+        print(f"fleet_sync hold: released .work/{work.FLEET_LOCK}: {ended}", file=sys.stderr)
+    return 1
 
 
 def run_agent(args: _Args) -> int:
@@ -2351,12 +2463,15 @@ class Endpoint:
         if self.local:
             yield local_token
             return
+        stop = threading.Event()
+        renewer: threading.Thread | None = None
         with subprocess.Popen(
             self.argv("hold"),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         ) as process:
+            _LIVE_HOLDS.add(process)
             try:
                 line = (
                     _read_line(process.stdout, HOLD_TIMEOUT) if process.stdout is not None else b""
@@ -2375,13 +2490,90 @@ class Endpoint:
                     msg = f"{self.label}: {detail}"
                     # An older agent's busy answer carries no ``busy``: it reads as a failure.
                     raise BusyError(msg) if answer.get("busy") is True else FleetError(msg)
+                renewer = threading.Thread(target=_renew_hold, args=(process, stop), daemon=True)
+                renewer.start()
                 yield token
             finally:
-                try:
-                    _ = process.communicate(timeout=30)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    _ = process.communicate()
+                stop.set()
+                if renewer is not None:
+                    renewer.join(HOLD_RELEASE_WAIT)
+                _end_hold(process)
+                _LIVE_HOLDS.discard(process)
+
+
+#: The ``hold`` processes this run keeps open, which a fatal signal kills first
+#: (:func:`_holds_die_with_run`).
+_LIVE_HOLDS: set[subprocess.Popen[bytes]] = set()
+
+
+def _renew_hold(process: subprocess.Popen[bytes], stop: threading.Event) -> None:
+    """Renew ``process``'s hold (one newline on its stdin) every :data:`HOLD_RENEW_EVERY` seconds.
+
+    Until ``stop`` is set, or a write fails (the hold has ended). An agent older than the
+    renewal reads the newlines with the rest of its stdin and ignores them.
+    """
+    stream = process.stdin
+    if stream is None:
+        return
+    while not stop.wait(HOLD_RENEW_EVERY):
+        try:
+            _ = stream.write(b"\n")
+            stream.flush()
+        except (OSError, ValueError):
+            return
+
+
+def _end_hold(process: subprocess.Popen[bytes]) -> None:
+    """Release a hold: close its stdin, wait up to :data:`HOLD_RELEASE_WAIT` seconds, then kill it.
+
+    Killed too when the wait is interrupted (an exception or a signal), so no ``hold`` process
+    outlives the block that kept it.
+    """
+    try:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            _ = process.communicate(timeout=HOLD_RELEASE_WAIT)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            _ = process.wait()
+
+
+#: The signals that end a run whose handler, left at the default, would leave its holds behind:
+#: a stop, a hangup, and the timer's kill (``perl``'s ``alarm``, :func:`schedule_line`).
+RUN_FATAL_SIGNALS = _signals("SIGTERM", "SIGHUP", "SIGALRM")
+
+
+def _kill_holds_and_die(signum: int, _frame: FrameType | None) -> None:
+    """Kill every hold this run keeps, then die of ``signum`` as its default would have."""
+    for process in list(_LIVE_HOLDS):
+        with contextlib.suppress(OSError):
+            process.kill()
+    _ = signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+@contextlib.contextmanager
+def _holds_die_with_run() -> Generator[None, None, None]:
+    """For the block, a :data:`RUN_FATAL_SIGNALS` signal at its default kills the run's holds first.
+
+    The default ends the process without unwinding, so no ``finally`` would release a hold:
+    its ``ssh`` lived on, and with it the peer's lock while the connection stayed up. A
+    signal this process ignores or handles otherwise is left so (main thread only).
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = {
+        signum: signal.signal(signum, _kill_holds_and_die)
+        for signum in RUN_FATAL_SIGNALS
+        if signal.getsignal(signum) is signal.SIG_DFL
+    }
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            if handler is not None:  # ``None``: a handler not set from Python, left as it is
+                _ = signal.signal(signum, handler)
 
 
 def _read_line(stream: IO[bytes], timeout: float) -> bytes | None:
@@ -5643,7 +5835,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         work.check_layout(REPO_ROOT)
         if args.command in STOPPED_COMMANDS:
             refuse_stopped(REPO_ROOT)
-        return handlers[args.command](args)
+        with _holds_die_with_run():
+            return handlers[args.command](args)
     except (SetupError, work.WorkError) as error:
         print(f"fleet_sync: {error}", file=sys.stderr)
         return 2
