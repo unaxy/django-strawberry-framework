@@ -121,11 +121,13 @@ cd ~/projects/django-strawberry-framework && uv run python docs/fleet/scripts/fl
 ## 5a. Personalize (optional): `setup/ubuntu/personal.py`
 
 The core above makes a fleet member. [personal.py][personal] adds the layer `rio-ubu` carries,
-installing no GUI application: CLI tools, dotfiles and GNOME settings:
+CLI tools, dotfiles, GNOME settings, Toshy and the GNOME Shell extensions; no desktop GUI
+application. Run `apply` from a real terminal: sudo asks once, and Toshy's installer asks its own
+questions:
 
 ```sh
 python3 docs/fleet/scripts/setup/ubuntu/personal.py apply <host> --check   # what <host> lacks
-python3 docs/fleet/scripts/setup/ubuntu/personal.py apply <host>           # install it; sudo asks once
+python3 docs/fleet/scripts/setup/ubuntu/personal.py apply <host>           # install it
 ```
 
 It copies its folder to `~/.cache/dsf-fleet-setup/setup/ubuntu/` on the target and runs the same
@@ -140,9 +142,18 @@ the agent rules file `~/MACHINE.md` rendered from the target's measured facts, a
 GNOME settings (`files/desktop/dconf.ini`: fonts, clock, input, window buttons and keybindings,
 Nautilus and file-chooser views, Ptyxis and Text Editor, the dock on the left at 40 px, no sleep on
 AC, location off) plus the Files sidebar's `~/projects`, four New Document templates and the
-"Copy Path" script; the dock keeps only the favourites the target has installed. The logins
+"Copy Path" script; the dock keeps only the favourites the target has installed. Before the
+desktop settings come Toshy (release `Toshy_v26.11.0`, through its own `setup_toshy.py install`;
+it adds the user to `input`) with `rio-ubu`'s keyboard-type slice and preferences, and the GNOME
+Shell extensions `rio-ubu` runs, pinned to its versions (Vitals, Executor, Clipboard Indicator,
+Focused Window D-Bus, Move Clock, Pinned Apps in AppGrid, Workspace Islands, plus apt's
+`gnome-shell-extensions` set). Toshy's installer stops once to show that Focused Window D-Bus is
+installed but not running and asks for the code it prints: type it. Log out and back in after
+the run: new extensions, Toshy's keymapper and the `input` group start only with a new login.
+Each step is checked again right before its turn, so a step an earlier one disturbed (Toshy's
+installer rewrites the Overview shortcut) is put back in the same run. The logins
 (`gh auth login`, `opencode auth login`, then `muse`, `grok` and `agy` once each) stay by hand.
-Rootless Docker is left out.
+Desktop GUI applications and rootless Docker are left out.
 
 ## 6. Verify
 

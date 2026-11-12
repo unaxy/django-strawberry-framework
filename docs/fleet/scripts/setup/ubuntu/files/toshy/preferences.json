@@ -1,0 +1,18 @@
+{
+  "autoload_tray_icon": "True",
+  "gui_dark_theme": "True",
+  "gui_theme_mode": "auto",
+  "override_kbtype": "Auto-Adapt",
+  "overlay_mask": "255",
+  "optspec_layout": "Disabled",
+  "forced_numpad": "True",
+  "altgr_on_menu_key": "True",
+  "media_arrows_fix": "False",
+  "multi_lang": "False",
+  "capslock_mode": "caps_is_caps",
+  "Enter2Ent_Cmd": "False",
+  "l_cmd_is_sup_and_cmd": "False",
+  "l_opt_is_sup_and_opt": "False",
+  "ST3_in_VSCode": "False",
+  "swap_spotlight_and_input": "False"
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import re
 import shutil
+import subprocess
 import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -106,16 +107,7 @@ def test_install_runs_root_steps_first_and_skips_done_ones(
         calls.append((list(lines), sudo))
         return 0
 
-    answers = {
-        "done": [None, None],
-        "tool": [
-            "tool",
-            "tool",
-            None,
-            None,
-        ],
-        "pkg": ["pkg", None],
-    }
+    answers = {"done": [None, None], "tool": ["tool", None, None], "pkg": ["pkg", None]}
 
     def step(key: str, kind: str) -> personal.Step:
         return personal.Step(
@@ -157,6 +149,7 @@ def test_the_setup_folder_holds_no_private_value() -> None:
         f"{path.relative_to(SETUP)}: {match.group(0)}"
         for path in files
         for match in PRIVATE.finditer(_without_extension_lists(path.read_text(encoding="utf-8")))
+        if not _is_pinned_extension(match.group(0))
     ]
     assert hits == []
 
@@ -164,6 +157,11 @@ def test_the_setup_folder_holds_no_private_value() -> None:
 #: GNOME Shell extension UUIDs are public ids shaped like emails (``ding@rastersoft.com``).
 EXTENSION_LIST = re.compile(r"^(?:enabled|disabled)-extensions=\[(.*)\]$", re.MULTILINE)
 EXTENSION_UUID = re.compile(r"'[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+'")
+
+
+def _is_pinned_extension(found: str) -> bool:
+    """Return whether ``found`` is (the start of) a UUID ``personal.EXTENSIONS`` pins."""
+    return any(uuid.startswith(found) for uuid in personal.EXTENSIONS)
 
 
 def _without_extension_lists(text: str) -> str:
@@ -286,3 +284,100 @@ def test_dconf_cli_is_installed_before_the_desktop_steps() -> None:
     keys = [step.key for step in personal.STEPS]
     assert "dconf-cli" in personal.APT_PACKAGES
     assert keys.index("apt-cli") < keys.index("desktop-settings")
+
+
+TOSHY_CONFIG = """head
+###  SLICE_MARK_START: kbtype_override  ###  EDITS OUTSIDE THESE MARKS WILL BE LOST ON UPGRADE
+
+keyboards_UserCustom_dct = {
+    'My Keyboard Device Name': 'Apple',
+}
+
+
+###  SLICE_MARK_END: kbtype_override  ###  EDITS OUTSIDE THESE MARKS WILL BE LOST ON UPGRADE
+tail
+"""
+
+
+def test_the_toshy_slice_replaces_only_its_own_marks_and_settles() -> None:
+    once = personal.with_slice(TOSHY_CONFIG)
+    assert "'Logitech USB Receiver': 'Apple'" in once
+    assert once.startswith("head\n###  SLICE_MARK_START: kbtype_override")
+    assert once.endswith(
+        "###  SLICE_MARK_END: kbtype_override  ###" + TOSHY_CONFIG.rsplit("###", maxsplit=1)[-1],
+    )
+    assert personal.with_slice(once) == once
+    assert personal.with_slice("no marks here\n") == "no marks here\n"
+
+
+def test_toshy_sync_writes_the_slice_and_preferences(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    box = _box(tmp_path)
+    config = tmp_path / personal.TOSHY_CONFIG
+    config.parent.mkdir(parents=True)
+    _ = config.write_text(TOSHY_CONFIG)
+    assert personal._check_toshy_config(box) is not None
+
+    def no_systemctl(*_args: object, **_kwargs: object) -> object:
+        raise OSError
+
+    monkeypatch.setattr(subprocess, "run", no_systemctl)
+    assert personal.toshy_sync(box) == 0
+    assert personal._check_toshy_config(box) is None
+
+
+def test_every_pinned_extension_is_enabled_by_the_desktop_settings(tmp_path: Path) -> None:
+    keys = personal.dconf_keys(personal.dconf_text(_box(tmp_path)))
+    enabled = keys["/org/gnome/shell/enabled-extensions"]
+    pinned_enabled = [uuid for uuid in personal.EXTENSIONS if f"'{uuid}'" in enabled]
+    # rio-ubu installs Workspace Islands but leaves it off; every other pinned one is enabled.
+    assert sorted(set(personal.EXTENSIONS) - set(pinned_enabled)) == [
+        "workspace-islands@danielbernalo.github.io",
+    ]
+
+
+def test_an_extension_counts_only_at_its_pinned_version(tmp_path: Path) -> None:
+    box = _box(tmp_path)
+    folder = personal._extension_folder(box, "moveclock@kuvaus.org")
+    folder.mkdir(parents=True)
+    _ = (folder / "metadata.json").write_text('{"version": 10}')
+    assert "moveclock@kuvaus.org" in personal._missing_extensions(box)
+    _ = (folder / "metadata.json").write_text('{"version": 11}')
+    assert "moveclock@kuvaus.org" not in personal._missing_extensions(box)
+
+
+def test_toshy_runs_in_a_terminal_and_before_the_extensions_and_settings() -> None:
+    keys = [step.key for step in personal.STEPS]
+    assert next(step.kind for step in personal.STEPS if step.key == "toshy") == "tty"
+    assert keys.index("toshy") < keys.index("toshy-config") < keys.index("shell-extensions")
+    assert keys.index("shell-extensions") < keys.index("desktop-settings")
+
+
+def test_a_step_an_earlier_step_undid_runs_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = {"settings": "set"}
+    ran: list[str] = []
+
+    def fake(lines: Sequence[str], _box: personal.Box, *, sudo: bool = False) -> int:
+        del sudo
+        ran.extend(lines)
+        state["settings"] = "toshy" if lines == ["make toshy"] else "set"
+        return 0
+
+    toshy_done = iter(["missing", None, None])
+    steps = [
+        personal.Step("toshy", "tty", lambda _box: next(toshy_done), lambda _box: ["make toshy"]),
+        personal.Step(
+            "settings",
+            "user",
+            lambda _box: None if state["settings"] == "set" else "drifted",
+            lambda _box: ["make settings"],
+        ),
+    ]
+    monkeypatch.setattr(personal, "run_lines", fake)
+    assert personal.install(_box(tmp_path), steps) == 0
+    assert ran == ["make toshy", "make settings"]

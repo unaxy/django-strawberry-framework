@@ -24,7 +24,9 @@ Steps
     Ordered like ``fleet_setup.py``'s: each has a read-only check and the shell lines that make it
     pass; ``install`` runs the ``sudo`` steps first in one ``sudo sh -c``, then every other failing
     step in order, and stops at the first that still fails, so a rerun resumes. Kinds: ``sudo``
-    (root), ``user`` (the home folder), ``hand`` (reported, never run: the logins).
+    (root), ``tty`` (a vendor installer that asks questions and runs ``sudo`` itself: needs a
+    terminal; an agent testing the script passes ``--skip tty``), ``user`` (the home folder),
+    ``hand`` (reported, never run: the logins).
 
     ``apt-cli``
         ``build-essential unzip zip jq fd-find btop gnupg stress-ng lm-sensors``.
@@ -61,6 +63,20 @@ Steps
         ``~/MACHINE.md``, ``~/AGENTS_READ_THIS_FIRST.md``, ``~/projects/AGENTS.md`` and
         ``~/projects/AGENTS_READ_THIS_FIRST.md``: one agent rules file rendered from
         ``files/MACHINE.md.in`` with this machine's measured facts.
+    ``toshy``
+        Toshy (Mac-style keyboard shortcuts) from its release :data:`TOSHY_TAG`, through its own
+        ``setup_toshy.py install``. Its keymapper service, tray icon and the user's ``input``
+        group take effect at the next login.
+    ``toshy-config``
+        rio-ubu's Toshy choices into Toshy's own files: the ``kbtype_override`` slice of
+        ``~/.config/toshy/toshy_config.py`` (the one slice rio-ubu changed; Toshy keeps slices
+        across its upgrades) and ``files/toshy/preferences.json`` into its preferences database;
+        then ``toshy-config.service`` restarts.
+    ``shell-extensions``
+        The GNOME Shell extensions rio-ubu runs (:data:`EXTENSIONS`, pinned to rio-ubu's
+        versions), through ``gnome-shell-extensions install``; ``apt-cli`` adds the
+        ``gnome-shell-extensions`` set. ``desktop-settings`` enables them; a new one loads at the
+        next login. Runs after Toshy so Toshy's own extension install cannot shadow a version.
     ``desktop-settings``
         GNOME as ``rio-ubu`` has it, from ``files/desktop/dconf.ini`` (``dconf load /``): fonts,
         clock, mouse/keyboard/touchpad, window buttons and behaviour, keybindings, Nautilus and
@@ -77,8 +93,8 @@ Steps
     ``logins``
         By hand: ``gh auth login``, ``opencode``, ``muse``, ``grok`` and ``agy`` each sign in once.
 
-Left out on purpose: GUI applications (and the Claude Desktop Nautilus scripts that need one),
-GNOME Shell extensions the target lacks, and rootless Docker.
+Left out on purpose: desktop GUI applications (and the Claude Desktop Nautilus scripts that need
+one) and rootless Docker.
 
 Standard library only, Python 3.9, so it runs from the system ``python3`` with nothing else.
 """
@@ -88,11 +104,13 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import io
+import json
 import os
 import re
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -102,6 +120,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    from typing_extensions import TypeIs
 
 HERE = Path(__file__).resolve().parent
 FILES = HERE / "files"
@@ -120,9 +140,15 @@ APT_PACKAGES = (
     "lm-sensors",
     "wl-clipboard",
     "dconf-cli",
+    "gnome-shell-extensions",
 )
 OSV_VERSION = "v2.7.0"
-KINDS = ("sudo", "user", "hand")
+KINDS = (
+    "sudo",
+    "tty",
+    "user",
+    "hand",
+)
 #: How much of each shell script ``install`` echoes (rendered files make long lines).
 ECHO_LIMIT = 400
 PATH_MARK = "dsf-fleet path"
@@ -521,6 +547,214 @@ def _lines_rules(box: Box) -> list[str]:
     return [write_line(path, text) for path in rules_targets(box)]
 
 
+# Toshy (Mac-style keys) and the GNOME Shell extensions rio-ubu runs.
+
+TOSHY = FILES / "toshy"
+TOSHY_TAG = "Toshy_v26.11.0"
+TOSHY_CONFIG = ".config/toshy/toshy_config.py"
+TOSHY_PREFERENCES = ".config/toshy/toshy_user_preferences.sqlite"
+SLICE = "kbtype_override"
+EGO = (
+    "https://extensions.gnome.org/download-extension/{uuid}.shell-extension.zip?version_tag={tag}"
+)
+#: uuid -> (version its metadata.json names, download URL); rio-ubu's versions, GNOME Shell 50.
+EXTENSIONS = {
+    "Vitals@CoreCoding.com": ("86", EGO.format(uuid="Vitals@CoreCoding.com", tag=76696)),
+    "executor@raujonas.github.io": (
+        "32",
+        EGO.format(uuid="executor@raujonas.github.io", tag=77158),
+    ),
+    "clipboard-indicator@tudmotu.com": (
+        "72",
+        EGO.format(uuid="clipboard-indicator@tudmotu.com", tag=77939),
+    ),
+    "focused-window-dbus@flexagoon.com": (
+        "12",
+        EGO.format(uuid="focused-window-dbus@flexagoon.com", tag=76809),
+    ),
+    "moveclock@kuvaus.org": ("11", EGO.format(uuid="moveclock@kuvaus.org", tag=75265)),
+    "pinned-apps-in-appgrid@brunosilva.io": (
+        "9",
+        EGO.format(uuid="pinned-apps-in-appgrid@brunosilva.io", tag=75582),
+    ),
+    "workspace-islands@danielbernalo.github.io": (
+        "0.1.2",
+        (
+            "https://github.com/danielbernalo/gnome-workspace-islands/releases/download/v0.1.2/"
+            "workspace-islands%40danielbernalo.github.io.shell-extension.zip"
+        ),
+    ),
+}
+SLICE_BLOCK = re.compile(
+    rf"(^###  SLICE_MARK_START: {SLICE}  ###[^\n]*\n)(.*?)(^###  SLICE_MARK_END: {SLICE}  ###)",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+#: ``json.loads`` and an sqlite row read, their results typed ``object`` for the caller to narrow.
+_loads: Callable[[str], object] = json.loads
+
+
+def _is_object(value: object) -> TypeIs[dict[str, object]]:
+    return isinstance(value, dict)
+
+
+def _rows(connection: sqlite3.Connection, query: str) -> list[tuple[object, ...]]:
+    cursor = connection.execute(query)
+    rows: list[tuple[object, ...]] = cursor.fetchall()
+    return rows
+
+
+def _check_toshy(box: Box) -> str | None:
+    if not (box.home / TOSHY_CONFIG).exists():
+        return "Toshy not installed"
+    enabled = _read(
+        [
+            "systemctl",
+            "--user",
+            "is-enabled",
+            "toshy-config.service",
+        ],
+    )
+    return None if enabled == "enabled" else "toshy-config.service not enabled"
+
+
+def _lines_toshy(_box: Box) -> list[str]:
+    folder = f"{REMOTE_ROOT}/toshy"
+    archive = f"https://codeload.github.com/RedBearAK/toshy/tar.gz/refs/tags/{TOSHY_TAG}"
+    return [
+        f"rm -rf {folder} && mkdir -p {folder}",
+        f"curl -fsSL --retry 3 --proto '=https' {archive} | tar -xzf - --strip-components=1 -C {folder}",
+        # Toshy's own installer: it asks before each change and runs sudo itself.
+        f"cd {folder} && ./setup_toshy.py install --admin-capable yes --skip-update-check",
+    ]
+
+
+def toshy_preferences() -> dict[str, str]:
+    """Return rio-ubu's Toshy preferences (``files/toshy/preferences.json``)."""
+    loaded = _loads((TOSHY / "preferences.json").read_text(encoding="utf-8"))
+    if not _is_object(loaded):
+        msg = "preferences.json must hold one object"
+        raise TypeError(msg)
+    return {str(key): str(value) for key, value in loaded.items()}
+
+
+def _slice_body() -> str:
+    return "\n" + (TOSHY / f"{SLICE}.slice").read_text(encoding="utf-8").strip("\n") + "\n\n\n"
+
+
+def with_slice(config: str) -> str:
+    """Return Toshy's config with this repo's ``kbtype_override`` slice (unchanged without one)."""
+    return SLICE_BLOCK.sub(
+        lambda match: match.group(1) + _slice_body() + match.group(3),
+        config,
+        count=1,
+    )
+
+
+def _stored_preferences(box: Box) -> dict[str, str]:
+    path = box.home / TOSHY_PREFERENCES
+    if not path.exists():
+        return {}
+    connection = sqlite3.connect(str(path))
+    try:
+        rows = _rows(connection, "SELECT name, value FROM config_preferences")
+    except sqlite3.Error:
+        return {}
+    finally:
+        connection.close()
+    return {str(row[0]): str(row[1]) for row in rows}
+
+
+def _check_toshy_config(box: Box) -> str | None:
+    config = _text(box.home / TOSHY_CONFIG)
+    if not config:
+        return "no Toshy config (the toshy step installs it)"
+    gaps = [] if with_slice(config) == config else [SLICE]
+    stored = _stored_preferences(box)
+    gaps += [name for name, value in toshy_preferences().items() if stored.get(name) != value]
+    return ", ".join(gaps) if gaps else None
+
+
+def _lines_toshy_config(_box: Box) -> list[str]:
+    return [f"python3 {shlex.quote(str(Path(__file__).resolve()))} box toshy-sync"]
+
+
+def toshy_sync(box: Box) -> int:
+    """Write the slice and the preferences into Toshy's own files, then restart its keymapper."""
+    config = box.home / TOSHY_CONFIG
+    text = _text(config)
+    if not text:
+        print("personal: no Toshy config to edit", file=sys.stderr)
+        return 1
+    _ = config.write_text(with_slice(text), encoding="utf-8")
+    connection = sqlite3.connect(str(box.home / TOSHY_PREFERENCES))
+    try:
+        _ = connection.execute(
+            "CREATE TABLE IF NOT EXISTS config_preferences (name TEXT PRIMARY KEY, value TEXT)",
+        )
+        _ = connection.executemany(
+            "INSERT OR REPLACE INTO config_preferences (name, value) VALUES (?, ?)",
+            sorted(toshy_preferences().items()),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    try:  # no systemd user manager (or no Toshy service yet): nothing to restart
+        return subprocess.run(
+            [
+                "systemctl",
+                "--user",
+                "try-restart",
+                "toshy-config.service",
+            ],
+            check=False,
+        ).returncode
+    except OSError:
+        return 0
+
+
+def _extension_folder(box: Box, uuid: str) -> Path:
+    return box.home / ".local" / "share" / "gnome-shell" / "extensions" / uuid
+
+
+def _extension_version(folder: Path) -> str:
+    meta = folder / "metadata.json"
+    if not meta.exists():
+        return ""
+    loaded = _loads(meta.read_text(encoding="utf-8"))
+    if not _is_object(loaded):
+        return ""
+    version = loaded.get("version-name") or loaded.get("version")
+    return str(version) if version is not None else ""
+
+
+def _missing_extensions(box: Box) -> list[str]:
+    return [
+        uuid
+        for uuid, (version, _url) in EXTENSIONS.items()
+        if _extension_version(_extension_folder(box, uuid)) != version
+    ]
+
+
+def _check_extensions(box: Box) -> str | None:
+    absent = _missing_extensions(box)
+    return ", ".join(absent) if absent else None
+
+
+def _lines_extensions(box: Box) -> list[str]:
+    folder = f"{REMOTE_ROOT}/extensions"
+    lines = [f"mkdir -p {folder}"]
+    for uuid in _missing_extensions(box):
+        zipped = f"{folder}/{uuid}.zip"
+        url = shlex.quote(EXTENSIONS[uuid][1])
+        lines.append(
+            f"curl -fsSL --retry 3 --proto '=https' -o {zipped} {url} "
+            f"&& gnome-extensions install --force {zipped}",
+        )
+    return lines
+
+
 # The GNOME desktop: settings and Nautilus extras, no application installed.
 
 DESKTOP = FILES / "desktop"
@@ -673,6 +907,9 @@ STEPS: tuple[Step, ...] = (
     ),
     Step("osv-scanner", "user", _exists(".local", "bin", "osv-scanner"), _lines_osv),
     Step("rules", "user", _check_rules, _lines_rules),
+    Step("toshy", "tty", _check_toshy, _lines_toshy),
+    Step("toshy-config", "user", _check_toshy_config, _lines_toshy_config),
+    Step("shell-extensions", "user", _check_extensions, _lines_extensions),
     Step("desktop-settings", "user", _check_desktop_settings, _lines_desktop_settings),
     Step("desktop-files", "user", _check_desktop_files, _lines_desktop_files),
     Step("logins", "hand", _check_logins, _lines_logins),
@@ -730,21 +967,26 @@ def run_lines(lines: Sequence[str], box: Box, *, sudo: bool = False) -> int:
 
 
 def install(box: Box, steps: Sequence[Step]) -> int:
-    """Run every failing step, ``sudo`` ones first in one call; stop at one that still fails."""
-    gaps = [(step, step.check(box)) for step in steps]
-    root = [step for step, gap in gaps if gap is not None and step.kind == "sudo"]
+    """Run every failing step, ``sudo`` ones first in one call; stop at one that still fails.
+
+    Each other step is checked just before its turn, not once up front: an earlier step can undo
+    a later one (Toshy's installer rewrites a GNOME keybinding ``desktop-settings`` owns) or do
+    it (one ``.bashrc`` write serves two steps).
+    """
+    root = [step for step in steps if step.kind == "sudo" and step.check(box) is not None]
     if root:
         print(f"== sudo: {', '.join(step.key for step in root)}", flush=True)
         if run_lines([line for step in root for line in step.lines(box)], box, sudo=True):
             return 1
-    for step, gap in gaps:
-        if gap is None or step.kind == "sudo":
+    for step in steps:
+        if step.kind == "sudo":
+            continue
+        gap = step.check(box)
+        if gap is None:
             continue
         if step.kind == "hand":
             print(f"== {step.key}: by hand ({gap}):")
             print("\n".join(f"   {line}" for line in step.lines(box)))
-            continue
-        if step.check(box) is None:  # an earlier step's lines made it pass (one .bashrc write)
             continue
         print(f"== {step.key}", flush=True)
         if run_lines(step.lines(box), box) or step.check(box) is not None:
@@ -851,7 +1093,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     box_parser = sub.add_parser("box", help="run on the machine itself")
-    _ = box_parser.add_argument("action", choices=["check", "install"])
+    _ = box_parser.add_argument("action", choices=["check", "install", "toshy-sync"])
     apply_parser = sub.add_parser("apply", help="run on <host> from this fleet machine")
     _ = apply_parser.add_argument("host")
     _ = apply_parser.add_argument("--check", action="store_true", help="report only")
@@ -874,6 +1116,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         git_name=args.git_name,
         git_email=args.git_email,
     )
+    if args.action == "toshy-sync":
+        return toshy_sync(box)
     if args.action == "check":
         lines, done = report(box, steps)
         print("\n".join(lines))
