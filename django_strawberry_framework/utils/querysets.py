@@ -1387,12 +1387,12 @@ async def run_in_one_sync_boundary(
 ) -> _R:
     """Run ``fn(*args, **kwargs)`` in ONE ``sync_to_async(thread_sensitive=True)`` worker.
 
-    The generic one-boundary primitive (spec-040 D17): every async surface
+    The generic one-boundary primitive (spec-040 Decision 10): every async surface
     that must keep a consumer-overridable sync hook off the event loop shares
     this call, so the boundary discipline (``thread_sensitive=True``, never
     per-step hops inside one unit of work) cannot drift. The unit differs by
     surface. An auth or mutation resolution enters it exactly once, with its
-    permission gate and write pipeline inside (spec-040 D17 pins that count for
+    permission gate and write pipeline inside (spec-040 Decision 10 pins that count for
     auth). A sidecar ``apply_async`` enters it once for its permission pass. A
     read path enters it once per custom synchronous ``get_queryset`` call
     (``apply_type_visibility_async``; a cascade walk inside that hook rides the

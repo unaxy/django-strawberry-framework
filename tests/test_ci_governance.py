@@ -1332,7 +1332,7 @@ def test_no_comment_docstring_name_or_package_string_carries_a_provenance_phrase
 
     Deliberate limits. Only those phrases are read; the wider history vocabulary
     ("now", "no longer", "the fix", version banners) needs judgment site by site and
-    is not gated here; the optimizer plan labels have their own row below. Outside
+    is not gated here; the spec plan labels have their own row below. Outside
     the package only string statements are read: an error message, an assigned
     constant or a fixture string in a test or script may quote a phrase. A statement
     built with ``+`` is not read (ruff B018 and basedpyright
@@ -1776,14 +1776,31 @@ def test_the_release_pattern_widens_with_the_version() -> None:
     assert [text for text in ("2.2.0", "3.0.0", "12.1.0") if pattern.search(text)] == []
 
 
-#: The optimizer plan labels: ``O[1-6]`` title spec-002's headings (the
-#: optimizer foundation), ``B[1-8]`` spec-004's (the optimizer beyond it) and
-#: ``G[1-3]`` spec-035's decisions (the robustness guards). Case-sensitive: a
-#: lowercase ``b1`` in prose is a seed value or a local, never a label.
-PLAN_LABEL_PATTERN = re.compile(r"(?<!\w)(?:B[1-8]|O[1-6]|G[1-3])(?!\w)")
+#: The labels specs give their own items. The optimizer specs title headings and
+#: decisions: ``O[1-6]`` spec-002's (the optimizer foundation), ``B[1-8]``
+#: spec-004's (the optimizer beyond it) and ``G[1-3]`` spec-035's (the
+#: robustness guards). The Helper-reuse obligations of spec-040 to spec-044
+#: label their bullets ``D<N>``, ``D-N<N>`` (a deliberate non-reuse),
+#: ``D-P<N>`` (a shared helper's one home, or a prohibition) and ``P<N>`` (a
+#: second label on a ``D<N>`` bullet), and spec-055 its work packages ``D<N>``:
+#: at most two digits, so a code point such as ``U+D800`` is not one.
+#: Case-sensitive: a lowercase ``b1`` in prose is a seed value or a local, never
+#: a label.
+_PLAN_LABEL_UNHYPHENATED = r"B[1-8]|O[1-6]|G[1-3]|D\d{1,2}|P\d{1,2}"
+
+#: The labels in prose: a ``D-N<N>`` / ``D-P<N>`` label wrapped at its hyphen
+#: across comment or docstring lines is still one label.
+_PLAN_LABEL = rf"{_PLAN_LABEL_UNHYPHENATED}|D-\s*[NP]\d{{1,2}}"
+
+PLAN_LABEL_PATTERN = re.compile(rf"(?<!\w)(?:{_PLAN_LABEL})(?!\w)")
 
 #: The same labels in a def or class name, read with its underscores as spaces.
-PLAN_LABEL_NAME_PATTERN = re.compile(r"(?<!\w)(?:B[1-8]|O[1-6]|G[1-3])(?!\w)", re.IGNORECASE)
+#: A name holds no hyphen, so a ``D-N<N>`` label is spelled ``d_n<N>`` (read
+#: ``d n<N>``) or ``DN<N>`` (one camel-case word).
+PLAN_LABEL_NAME_PATTERN = re.compile(
+    rf"(?<!\w)(?:{_PLAN_LABEL_UNHYPHENATED}|D[-\s]?[NP]\d{{1,2}})(?!\w)",
+    re.IGNORECASE,
+)
 
 #: An inline code span closed on its line. It quotes a value (a seed row, a
 #: branch code, a computed genre key), so a token inside it is not a label,
@@ -1793,7 +1810,7 @@ PLAN_LABEL_NAME_PATTERN = re.compile(r"(?<!\w)(?:B[1-8]|O[1-6]|G[1-3])(?!\w)", r
 CODE_SPAN_PATTERN = re.compile(r"(``?)([^`\n]+?)\1")
 
 #: A code span's content that is a bare label.
-PLAN_LABEL_SPAN_PATTERN = re.compile(r"(?:B[1-8]|O[1-6]|G[1-3])")
+PLAN_LABEL_SPAN_PATTERN = re.compile(rf"(?:{_PLAN_LABEL})")
 
 #: A camel-case word boundary in a def or class name: a lowercase letter
 #: followed by an uppercase one (``TestB8``), or an uppercase letter followed by
@@ -1813,7 +1830,7 @@ def _plan_label_entries_in(
     paths: Iterable[Path],
     package_root: Path = PACKAGE_ROOT,
 ) -> tuple[list[str], int]:
-    """Return one formatted violation per optimizer plan label, and the texts read.
+    """Return one formatted violation per spec plan label, and the texts read.
 
     The texts are ``_swept_texts``: every file's prose, plus a package file's
     runtime strings. Prose and strings are read with their value code spans
@@ -1840,27 +1857,32 @@ def _plan_label_entries_in(
     return violations, read
 
 
-def test_no_comment_docstring_name_or_package_string_carries_an_optimizer_plan_label() -> None:
-    """No first-party prose, and no package string, names an optimizer plan label.
+def test_no_comment_docstring_name_or_package_string_carries_a_plan_label() -> None:
+    """No first-party prose, and no package string, names a spec's plan label.
 
     START.md "Style the maintainer cares about": plan and slice numbering is
     process provenance, and a contract is cited by content, never by ordinal.
-    The optimizer specs title their headings with labels (``PLAN_LABEL_PATTERN``);
-    code names the behaviour instead (the plan cache, FK-id elision, the
-    evaluated-queryset guard), and a spec-035 guard is cited as
-    ``spec-035 Decision N``, the gated pointer. This row reads every comment,
-    string statement and def/class name of the sweep corpus, plus every other
-    ``str`` constant in ``django_strawberry_framework/``, and refuses a label.
+    Specs label their own items (``PLAN_LABEL_PATTERN``): the optimizer specs'
+    headings and guards, the Helper-reuse obligations' bullets, a work package.
+    Code names the behaviour instead (the plan cache, FK-id elision, the
+    password capture seam, the actor-not-lookup rule), and where exactly one
+    Decision owns the claim it is cited as ``spec-NNN Decision N``, the gated
+    pointer. This row reads every comment, string statement and def/class name
+    of the sweep corpus, plus every other ``str`` constant in
+    ``django_strawberry_framework/``, and refuses a label.
 
     Deliberate limits. A label inside an inline code span that quotes more than
-    the label is not read: seed rows, branch codes and computed values share the
-    spelling, so a value is quoted as its literal (``"B1"``), and a value written
-    bare in prose is quoted, not exempted. A span holding a bare label is read.
-    A def or class name is read at its underscores and camel-case boundaries
-    (``TestB8Diffing``), never inside one word (``O2OField``). Only these three
-    families are read; another plan's labels (requirement ids, a lateral
-    strategy's arms) are judged by hand. A non-statement string outside the
-    package (test data, fixtures) is not read.
+    the label is not read: seed rows, branch codes, desk names and computed
+    values share the spelling, so a value is quoted as its literal (``"B1"``),
+    and a value written bare in prose is quoted, not exempted. A span holding a
+    bare label is read. A def or class name is read at its underscores and
+    camel-case boundaries (``TestB8Diffing``), never inside one word
+    (``O2OField``, ``P2PLink``). Only the families ``PLAN_LABEL_PATTERN`` lists
+    are read; another plan's labels (requirement ids ``R<N>``, spec-055's
+    ``C<N>`` and ``A<N>`` work packages, ``S<N>`` shape ids, review-round ids
+    such as ``AR-H3``) share their letters with seed data and are judged by
+    hand. A non-statement string outside the package (test data, fixtures) is
+    not read.
     """
     corpus = _sweep_corpus()
     violations, read = _plan_label_entries_in(corpus)
@@ -1868,12 +1890,11 @@ def test_no_comment_docstring_name_or_package_string_carries_an_optimizer_plan_l
     assert PACKAGE_ROOT / "__init__.py" in corpus, "the sweep corpus does not hold the package"
     assert read, "no comment, docstring, name or string was read; the sweep read nothing"
     assert not violations, (
-        "optimizer plan label(s) in first-party code:\n"
+        "spec plan label(s) in first-party code:\n"
         + "\n".join(violations)
-        + "\nName the behaviour the label stood for, cite a spec-035 guard as "
-        "'spec-035 Decision N', or quote a data value as its literal in a code span "
-        "(START.md, "
-        "'Style the maintainer cares about')."
+        + "\nName the behaviour the label stood for, cite the one Decision that owns "
+        "the claim as 'spec-NNN Decision N', or quote a data value as its literal in a "
+        "code span (START.md, 'Style the maintainer cares about')."
     )
 
 
@@ -1935,6 +1956,84 @@ PLANTED_PLAN_LABEL_SHAPES = [
         "MESSAGE = 'the B5 stash is empty'\n",
         ["1: string: 'B5'"],
     ),
+    (
+        "helper-reuse-beside-a-spec",
+        "other",
+        "# the spec-040 D6 exclusion seam\n",
+        ["1: comment: 'D6'"],
+    ),
+    (
+        "helper-reuse-two-digit",
+        "other",
+        'def run():\n    """Run in one boundary (spec-040 D17)."""\n',
+        ["2: docstring: 'D17'"],
+    ),
+    (
+        "helper-reuse-non-reuse-and-promotion",
+        "other",
+        "# the actor-not-lookup rule, D-N1; the hint owner, D-P2\n",
+        ["1: comment: 'D-N1'", "1: comment: 'D-P2'"],
+    ),
+    (
+        "helper-reuse-pair-wrapped",
+        "other",
+        'def run():\n    """Run.\n\n    Shared (spec-040 Helper-reuse\n    D12 / P1 / P2).\n    """\n',
+        ["5: docstring: 'D12'", "5: docstring: 'P1'", "5: docstring: 'P2'"],
+    ),
+    (
+        "helper-reuse-range",
+        "other",
+        "# deliberate test rules (spec-044 D4-D5)\n",
+        ["1: comment: 'D4'", "1: comment: 'D5'"],
+    ),
+    (
+        "helper-reuse-test-name",
+        "other",
+        "def test_d6_seam_captures():\n    pass\n",
+        ["1: name: 'd6'"],
+    ),
+    (
+        "helper-reuse-bare-label-code-span",
+        "other",
+        "# Desk ``D1`` leads\n",
+        ["1: comment: 'D1'"],
+    ),
+    (
+        "helper-reuse-non-reuse-in-a-test-name",
+        "other",
+        "def test_d_n1_rule():\n    pass\n",
+        ["1: name: 'd n1'"],
+    ),
+    (
+        "helper-reuse-non-reuse-in-a-camel-case-class-name",
+        "other",
+        "class TestDN1Rule:\n    pass\n",
+        ["1: name: 'DN1'"],
+    ),
+    (
+        "helper-reuse-placement-in-a-camel-case-class-name",
+        "other",
+        "class TestDP2Owner:\n    pass\n",
+        ["1: name: 'DP2'"],
+    ),
+    (
+        "helper-reuse-non-reuse-wrapped-at-its-hyphen-in-a-comment",
+        "other",
+        "# the actor-not-lookup rule, D-\n# N1, holds\n",
+        ["1: comment: 'D-\\nN1'"],
+    ),
+    (
+        "helper-reuse-placement-wrapped-at-its-hyphen-in-a-docstring",
+        "other",
+        'def run():\n    """Run.\n\n    The hint owner, D-\n    P2, holds.\n    """\n',
+        ["4: docstring: 'D-\\n    P2'"],
+    ),
+    (
+        "helper-reuse-package-message",
+        "package",
+        "MESSAGE = 'see P4'\n",
+        ["1: string: 'P4'"],
+    ),
 ]
 
 
@@ -1964,23 +2063,29 @@ def test_the_plan_label_sweep_reports_nothing_for_a_planted_permitted_form(
     """The negative direction: the forms the gate leaves alone are not reported.
 
     A value quoted as its literal in a double or single code span, a code span
-    holding more than a label, a token outside the three families or glued to a
-    word (``B9``, ``O7``, ``G4``, ``AB1``, ``B1a``), a lowercase seed value in
-    prose, the gated ``spec-035 Decision N`` pointer, a label-shaped run inside
-    one camel-case word of a class name, and a test-data string outside the
-    package.
+    holding more than a label, a token outside the families, glued to a word or
+    past two digits (``B9``, ``O7``, ``G4``, ``AB1``, ``B1a``, ``U+D800``,
+    ``P100``, ``D-4``, ``WD3``), a lowercase seed value in prose, the gated
+    ``spec-035 Decision N`` / ``spec-040 Decision N`` pointer, a label-shaped run
+    inside one camel-case word of a class name, and a test-data string outside
+    the package.
     """
     planted = _plant_prose(
         tmp_path,
         '# rows ``A1`` and ``"B1"``; the key `"G1"`, ``"G2"`` and ``B3 rows``\n'
+        '# desks ``"D1"`` and ``D2 desks``; the genre ``"P1"``\n'
         "# B9, O7, G4, AB1 and B1a are not labels; nor is the seed b2\n"
-        "# spec-035 Decision 3 is the pointer\n"
+        "# U+D800, P100, D-4 and WD3 are not labels; nor is the seed d1 or p1\n"
+        "# spec-035 Decision 3 and spec-040 Decision 6 are the pointers\n"
         "class O2OField:\n"
         "    pass\n"
-        "FIXTURE = 'B1'\n",
+        "class P2PLink:\n"
+        "    pass\n"
+        "FIXTURE = 'B1'\n"
+        "DESK = 'D1'\n",
     )
     violations, read = _plan_label_entries_in([planted])
-    assert read == 2, read
+    assert read == 3, read
     assert violations == [], violations
 
 

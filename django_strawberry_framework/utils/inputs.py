@@ -383,7 +383,7 @@ def emit_set_input_field_triples(
 # Single-sourced here next to ``InputFieldSpec`` (their type-level consumer);
 # the serializer flavor extends with its ``NESTED_SINGLE`` / ``NESTED_MULTI``
 # pair (nested writes are DRF-only) and the model flavor with ``EXCLUDED``
-# (the spec-040 D6 capture seam). Each flavor's converter module re-exports
+# (the spec-040 Decision 6 capture seam). Each flavor's converter module re-exports
 # them, so ``from .converter import SCALAR`` resolves in each flavor.
 SCALAR: str = "scalar"
 RELATION_SINGLE: str = "relation_single"
@@ -449,7 +449,7 @@ class InputFieldSpec:
       field name for a scalar / M2M).
     - ``kind`` - one of the flavor's decode kinds (``scalar`` /
       ``relation_single`` / ``relation_multi`` / ``file``; serializer also uses
-      nested kinds; the model flavor uses ``excluded`` for the spec-040 D6
+      nested kinds; the model flavor uses ``excluded`` for the spec-040 Decision 6
       capture seam).
     - ``source`` - the serializer-only extra axis: the one-segment ``source`` the
       backing ``models.Field`` was resolved through (``category`` for a

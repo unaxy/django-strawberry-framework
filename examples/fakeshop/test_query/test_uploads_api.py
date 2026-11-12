@@ -136,7 +136,7 @@ def test_media_specimen_output_sdl_is_default_nullable_over_http() -> None:
 
 @pytest.mark.parametrize("type_name", ["DjangoFileType", "DjangoImageType"], ids=["file", "image"])
 def test_default_file_output_objects_expose_no_filesystem_path_over_http(type_name: str) -> None:
-    """Neither default output object publishes ``path`` in the live schema (spec-048 D1).
+    """Neither default output object publishes ``path`` in the live schema (spec-048 Decision 1).
 
     Introspection over the real endpoint, not a rendered SDL string: this is the
     surface an untrusted client actually sees, and an absent field is exactly

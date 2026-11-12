@@ -35,7 +35,7 @@ instances, coordinator restore, list ordering), and the acknowledgement factory
 ``lambda: DjangoDebugExtension(allow_unsafe_production=True)`` only where
 keeping ``DEBUG`` false is itself the point.
 
-Deliberate test rules (spec-044 D4-D5):
+Deliberate test rules:
 
 * Wire keys and the 10-second slow threshold are re-spelled as INDEPENDENT
   literals - never imported from the production module and never built
@@ -106,8 +106,8 @@ from django_strawberry_framework.utils._narrowing import (
 from tests._execution import execution_result, make_execution_context
 from tests._idioms import json_at, json_list, json_object
 
-# The payload caps re-spelled as INDEPENDENT literals (the module's spec-044
-# D4 rule extended to spec-048 Decision 6's constants): a cap that silently
+# The payload caps re-spelled as INDEPENDENT literals (the module's wire-key
+# rule extended to spec-048 Decision 6's constants): a cap that silently
 # widened must fail these rows, which importing the production constants would
 # make impossible.
 _SQL_ROW_CAP = 100

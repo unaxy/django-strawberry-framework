@@ -671,7 +671,7 @@ def _decode_relations(
       (spec-037: no file-specific resolver branch).
     - RELATION_MULTI -> a separate ``{m2m_name: keys}`` dest; ``.items()``
       preserves assignment order for the post-save write step.
-    - EXCLUDED (spec-040 D6) -> ``excluded_values``; the raw value never
+    - EXCLUDED (spec-040 Decision 6) -> ``excluded_values``; the raw value never
       reaches ``model(**scalar_and_fk_attrs)``.
 
     Relation ids (a GlobalID string or a raw pk, by target) are type-checked +
@@ -1291,7 +1291,7 @@ def _model_decode_step(
     so an unsent column keeps its stored value, both keep running every uniqueness and
     constraint check an unprovided field joins with a provided one.
 
-    Specs with kind ``EXCLUDED`` are the spec-040 D6 exclusion seam (the register
+    Specs with kind ``EXCLUDED`` are the spec-040 Decision 6 exclusion seam (the register
     flavor's ``password``): those provided attrs are captured OUT of the model
     construction by the EXCLUDED handler (the raw value never becomes a model
     attr) **with their provided-marker preserved** - the captured names are folded
@@ -1357,8 +1357,8 @@ def _model_write_step(
     re-INSERTed).
 
     ``decoded`` is the THREE-tuple contract exactly. ``_model_decode_step``
-    returns a four-tuple when the mutation's specs carry the spec-040 D6
-    ``EXCLUDED`` kind, but an excluded value is by definition one this generic
+    returns a four-tuple when the mutation's specs carry the ``EXCLUDED`` kind
+    (spec-040 Decision 6), but an excluded value is by definition one this generic
     tail cannot write - only a flavor that knows what the value MEANS can. The
     register flavor hashes its ``password`` and calls this with a re-packed
     three-tuple (``auth/mutations.py::_register_write_step``). A four-tuple

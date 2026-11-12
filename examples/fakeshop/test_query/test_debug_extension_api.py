@@ -3,7 +3,8 @@
 The request-visible half of the debug extension's coverage: every case posts a
 real operation over HTTP to a debug-enabled probe schema mounted on this
 module's URLconf (the ``test_multi_db.py`` holder plumbing precedent,
-deliberately copied - not promoted - per spec-044 DRY D3), built over the
+deliberately copied, not promoted: that module is import-gated by
+``FAKESHOP_SHARDED`` and this one is always collected), built over the
 freshly-reloaded fakeshop apps, seeded through ``seed_data`` /
 ``create_users``, and posted through the package ``TestClient``.
 
@@ -98,8 +99,8 @@ def _rows(payload: JSONObject, key: str) -> list[JSONObject]:
     return [json_object(row) for row in json_list(payload, key)]
 
 
-# One module-level URLconf activation covering every request-driving scenario
-# (spec-044 DRY D3) - never per-test override_settings/clear_url_caches blocks.
+# One module-level URLconf activation covering every request-driving scenario,
+# never per-test override_settings/clear_url_caches blocks.
 pytestmark = pytest.mark.urls(__name__)
 
 # ---------------------------------------------------------------------------
@@ -162,7 +163,7 @@ _CREATE_ITEM = (
 _EXCEPTION_MESSAGE_CAP = 4096
 _TRUNCATION_MARKER = "... [truncated]"
 
-# Wire keys re-spelled as independent literals (spec-044 D4): a rename in the
+# Wire keys re-spelled as independent literals: a rename in the
 # serializer must fail every payload-expecting row here, not only a unit test.
 _SQL_ROW_KEYS = {
     "vendor",

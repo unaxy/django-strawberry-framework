@@ -3850,7 +3850,7 @@ def test_restore_is_two_sided_and_the_present_path_works_again() -> None:
     routers_binding = read_attr(django_strawberry_framework, "routers")
     assert routers_binding is sys.modules["django_strawberry_framework.routers"]
     assert routers_binding is routers_module
-    # No stale negative caching (spec-041 Helper-reuse D3): the present path works again
+    # No stale negative caching: the present path works again
     # in the same process, through both access paths, yielding one class.
     assert _router_class() is routers_module.DjangoGraphQLProtocolRouter
 

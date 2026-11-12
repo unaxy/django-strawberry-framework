@@ -1899,7 +1899,7 @@ def test_generated_input_over_a_foreign_object_model_binds_its_carriers() -> Non
 
 
 # ---------------------------------------------------------------------------
-# mutation_input_field_specs - bind-time reverse map (spec-055 D3)
+# mutation_input_field_specs - bind-time reverse map
 # ---------------------------------------------------------------------------
 
 
@@ -2105,9 +2105,9 @@ def test_build_mutation_input_rejects_bare_string_overrides(
 def test_mutation_input_field_specs_rejects_bare_string_excluded_attrs(
     make_value: Callable[[], Collection[str]],
 ) -> None:
-    """A bare text atom ``excluded_attrs`` fails loud, keeping the D6 seam honest.
+    """A bare text atom ``excluded_attrs`` fails loud, keeping the capture seam honest.
 
-    ``excluded_attrs`` records the spec-040 D6 capture attrs; frozen through
+    ``excluded_attrs`` records the spec-040 Decision 6 capture attrs; frozen through
     ``frozenset``, an unchecked bare string would split into characters that
     match no attr, silently leaving every spec kind as its column/relation
     kind (the ``password`` capture seam would simply not fire). Sets of names

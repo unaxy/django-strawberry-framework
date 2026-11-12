@@ -139,10 +139,10 @@ if TYPE_CHECKING:
 
 
 # The one family label the three fixed auth fields resolve their request under
-# (the spec-040 D1 reuse directive): a single module-level constant, never a
-# per-field string literal, so the ``request_from_info`` resolution wording cannot
-# drift between ``login`` / ``logout`` / ``me`` (``register`` rides the write
-# skeleton, whose permission classes resolve under their own labels).
+# (spec-040 Decision 5): a single module-level constant, never a per-field string
+# literal, so the ``request_from_info`` resolution wording cannot drift between
+# ``login`` / ``logout`` / ``me`` (``register`` rides the write skeleton, whose
+# permission classes resolve under their own labels).
 _AUTH_FAMILY_LABEL = "AuthMutation"
 
 # The single undifferentiated login-failure message (the upstream borrow, spec-040
@@ -220,7 +220,7 @@ _SURFACE_FACTORY_NAMES = {
     "current_user": "current_user()",
 }
 
-# The auth DECLARATION ledger (spec-040 Decision 9 / D14): a
+# The auth DECLARATION ledger (spec-040 Decision 9): a
 # ``make_declaration_registry`` instance - the same identity-deduped ``register``
 # / post-finalize reject / ``clear`` mechanics the model / form flavors use, over
 # its own disjoint store. Cleared by ``TypeRegistry.clear()`` ONLY (the
@@ -314,8 +314,8 @@ def _make_permission_holder(
 ) -> _SealedAuthHolderMeta:
     """Synthesize the module-internal permission holder for one fixed auth surface.
 
-    The ONE holder-synthesis site the three fixed factories share (spec-040 D3 /
-    P4): a tiny zero-arg-constructible class carrying the duck-typed shape
+    The ONE holder-synthesis site the three fixed factories share (spec-040 Decision 5):
+    a tiny zero-arg-constructible class carrying the duck-typed shape
     ``authorize_or_raise`` requires - a ``_mutation_meta``-shaped snapshot (the
     normalized ``permission_classes`` + the pinned ``operation`` string), a
     ``_primary_type`` slot (set at bind for ``login`` / ``current_user``; left
@@ -465,7 +465,7 @@ def _declare_fixed_auth_surface(
 def _sync_bridged_async_body(
     sync_body: Callable[..., object],
 ) -> Callable[..., Coroutine[object, object, object]]:
-    """Build the async resolver body that runs ``sync_body`` in one sync boundary (spec-040 D17).
+    """Build the async body that runs ``sync_body`` in one sync boundary (spec-040 Decision 10).
 
     ``_make_auth_field`` carries a real sync resolver body and a real *async*
     resolver body as separate seams, so native per-transport async work can be
@@ -499,8 +499,7 @@ def _make_auth_field(
 ) -> object:
     """Build one fixed auth field around split sync / async gate-then-session-work bodies.
 
-    The ONE auth field-construction helper the three fixed factories share
-    (spec-040 D12): the
+    The ONE auth field-construction helper the three fixed factories share: the
     dispatcher resolves sync-vs-async per call via ``async_execution()`` (the
     ``DjangoMutationField`` runtime dispatch). The sync path calls ``sync_body``
     directly; the async path calls ``async_body`` - a real coroutine function whose
@@ -589,7 +588,7 @@ def _failed_login_payload(payload_cls: type[object], slot: str) -> object:
 
     ``node``/``result`` is ``None`` and ``errors`` carries a single non-field-keyed
     entry - the ``field_error("", ...)`` empty-path leaf owns the ``"__all__"``
-    sentinel (the D8 reuse directive). No error code, deliberately: the public
+    sentinel (no ``"__all__"`` literal here). No error code, deliberately: the public
     failed-login contract is ``field: "__all__"`` + the one message ONLY, so both
     wrong-password / unknown-user / inactive-under-``ModelBackend`` / unstorable
     credential collapse to a byte-identical payload (the enumeration guard).
@@ -666,7 +665,7 @@ def _login_authenticate(
        undifferentiated envelope (``user`` ``None``) without calling ``authenticate``,
        reusing the ONE write-side ``unstorable_text_error`` primitive;
     5. exactly ONE ``authenticate(request, username=, password=)`` call - no local
-       user-model query (the actor-not-lookup rule, D-N1).
+       user-model query (the actor-not-lookup rule).
 
     Returns ``(request, transport, session, payload_cls, slot, user)``; ``user`` is
     ``None`` for both the unstorable and the failed-authentication cases (the caller
@@ -1226,7 +1225,7 @@ def _register_decode_step(
     """Run the register ``decode_step``: the shared model decode + the password capture.
 
     Rides ``_model_decode_step``; bind stashes ``password`` as kind ``EXCLUDED``
-    (spec-040 D6) so the ONE shared UNSET-strip walk captures it out of the
+    (spec-040 Decision 6) so the ONE shared UNSET-strip walk captures it out of the
     constructed model attrs (the raw value never touches
     ``model(**scalar_and_fk_attrs)``) while the exclude calculation still
     counts it as provided. Returns the extended decoded tuple
@@ -1278,7 +1277,7 @@ def _register_write_step(
     instance so ``UserAttributeSimilarityValidator`` compares against the
     submitted username/email (the deliberate improvement over upstream's
     user-less call). A failure is keyed to the ``password`` input field DIRECTLY at the
-    call site (the D-N2 deliberate non-reuse: ``validate_password`` raises a list-style
+    call site (a deliberate non-reuse: ``validate_password`` raises a list-style
     ``ValidationError`` with no ``error_dict``, and the generic
     ``validation_error_to_field_errors`` mapper would key it to the ``"__all__"``
     sentinel), under the name the executing schema published for it
@@ -1303,7 +1302,7 @@ def _register_write_step(
         return resolvers.StepFailure(
             [field_error(password, "Invalid password.", codes=FIELD_ERROR_CODE_INVALID)],
         )
-    # ``password`` rides the D6 exclusion seam, so it bypasses the shared decode's
+    # ``password`` rides the ``EXCLUDED`` capture seam, so it bypasses the shared decode's
     # scalar storability preflight (``decode_scalar_leaf``) that every other input
     # scalar - including this register's own ``username`` - runs through. A
     # lone-surrogate password passes ``validate_password`` (none of its validators
@@ -1410,7 +1409,7 @@ def _synthesize_register_rider(
         class Meta:
             model = user_model
             operation = "create"
-            # The narrowing wires NO relation-visibility helper of its own (D-N3): the
+            # The narrowing wires NO relation-visibility helper of its own: the
             # stock user model's narrowed ``Meta.fields`` carries no relation input at
             # all, and a custom model whose ``REQUIRED_FIELDS`` names a forward FK gets
             # the standard ``<field>_id`` input through the shared decode's own relation
@@ -1444,7 +1443,7 @@ def _synthesize_register_rider(
             Materialized onto the standard ``mutations.inputs`` emit ledger so the
             distinct-shape collision raise still guards a consumer's own
             ``RegisterInput``. Stashes specs with ``password`` as kind ``EXCLUDED``
-            (spec-040 D6) so the shared model decode captures it out of construction.
+            (spec-040 Decision 6) so the shared model decode captures it out of construction.
             """
             model = backing_model_of(meta)
             shape = mutation_input_shape(model, CREATE, fields=meta.fields)
@@ -1543,7 +1542,7 @@ def _resolve_user_primary_or_raise(
     """Resolve the user model's primary ``DjangoType``, or raise the auth-specific fix.
 
     Rides ``registry.get(user_model)`` - the SAME getter ``_resolve_primary_type``
-    uses, so "what counts as a registered primary" stays single-sited (D16);
+    uses, so "what counts as a registered primary" stays single-sited (spec-040 Decision 8);
     ``registry.types_for`` is consulted only to split the no-registered-type
     message from the multiple-types-without-primary ambiguity. Fired from
     ``bind_auth_mutations()`` BEFORE ``bind_mutations()`` so the register rider's
@@ -1582,7 +1581,7 @@ def bind_auth_mutations() -> None:
     type registered at all and a partial schema emits no orphan sibling payloads.
     Payload materialization rides the ONE ``build_payload_type`` builder + the
     existing ``mutations.inputs`` emit ledger; the ``current_user`` return
-    alias rides the ``auth.queries`` namespace trio (D13). Everything lands
+    alias rides the ``auth.queries`` ``make_input_namespace`` trio. Everything lands
     before ``strawberry.Schema(...)`` resolves the fields' lazy forward-refs.
     """
     # The auth ledger records only fixed-surface holders and the register rider,

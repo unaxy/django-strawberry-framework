@@ -5,12 +5,12 @@ authenticated, ``null`` otherwise - typed as the consumer's primary user
 ``DjangoType`` through a bind-materialized ``strawberry.lazy`` alias
 (spec-040 Decision 7). The resolver performs NO queryset work: no
 ``get_queryset`` re-run (a directory-shaped visibility hook must not make ``me``
-return ``null`` for a logged-in user - the actor-not-lookup rule, D-N1) and no
+return ``null`` for a logged-in user - the actor-not-lookup rule) and no
 re-fetch (the middleware already loaded the row, lazily).
 
 The ``CurrentUserAlias`` module global is an EMIT artifact owned by a
-``make_input_namespace`` trio (the D13 reuse directive - the blessed
-parked-global lifecycle, never a hand-rolled ``setattr`` / ``delattr`` pair):
+``make_input_namespace`` trio (the blessed parked-global lifecycle, never a
+hand-rolled ``setattr`` / ``delattr`` pair):
 ``bind_auth_mutations()`` pins the alias to the resolved user primary each
 finalize, and the trio's ``clear_fn`` is this module's pre-bind
 ``register_subsystem_clear`` row, so the ledger is empty before each
@@ -59,7 +59,7 @@ CURRENT_USER_ALIAS_NAME = "CurrentUserAlias"
 # unbound until ``materialize_current_user_alias`` pins the resolved user primary here.
 CurrentUserAlias: type[DjangoType]
 
-# The alias-namespace lifecycle trio (spec-040 D13): ``materialize_current_user_alias``
+# The alias-namespace lifecycle trio: ``materialize_current_user_alias``
 # pins the resolved user primary as this module's ``CurrentUserAlias`` global via
 # the blessed ``materialize_generated_input_class`` parked-global path;
 # ``clear_current_user_alias_namespace`` empties the ledger.

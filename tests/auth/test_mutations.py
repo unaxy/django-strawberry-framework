@@ -1884,7 +1884,7 @@ def test_derive_register_fields_rejects_a_non_string_username_field() -> None:
 
 
 def test_exclusion_seam_captures_password_and_preserves_the_provided_marker() -> None:
-    """The spec-040 D6 seam: value captured, marker preserved, attr never constructed."""
+    """The password capture seam: value captured, marker preserved, attr never constructed."""
 
     @strawberry.input
     class ProbeRegisterInput:

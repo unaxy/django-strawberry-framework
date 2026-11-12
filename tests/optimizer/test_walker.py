@@ -4822,7 +4822,7 @@ def test_skip_hint_with_sidecar_does_not_log_sidecar(caplog: pytest.LogCaptureFi
     Relation-level SKIP runs before the arguments-derived sidecar gate, so
     this shape returns unplanned at SKIP with no ``sidecar arguments`` debug
     log. Plan output is the same unplanned result the sidecar gate returns;
-    only the diagnostic differs (spec-055 D1).
+    only the diagnostic differs.
     """
     registry.clear()
     try:

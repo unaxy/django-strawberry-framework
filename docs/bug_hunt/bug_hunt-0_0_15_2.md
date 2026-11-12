@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 510 done, 106 to do. The CHANGELOG entries filed here moved to
+Progress: 511 done, 106 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -2974,6 +2974,18 @@ Progress: 510 done, 106 to do. The CHANGELOG entries filed here moved to
   moved, all the defect; 0 narrowed. Pinned by `examples/fakeshop/test_query/test_required_filter_omission_api.py`
   (32 rows). spec-030 Decision 7 step 3, spec-033 Decision 6, spec-027 empty-filter edge, README, GLOSSARY `FilterSet`,
   `DjangoConnectionField`, connection-aware optimizer planning. Filed 926.
+- [x] 767. fixed: the plan-label governance row also reads the labels specs give their own checklist items: the
+  Helper-reuse `D<N>`, `D-N<N>`, `D-P<N>` and `P<N>` of spec-040 to spec-044 and spec-055's `D<N>` work packages, up to
+  two digits, through one shared alternation in `tests/test_ci_governance.py` (a def or class name read as `d n<N>` /
+  `DN<N>`, a label wrapped at its hyphen read across the line), and the row is renamed
+  `test_no_comment_docstring_name_or_package_string_carries_a_plan_label`. Measured population at HEAD: 34 spec-040
+  tokens (not the 26 / 17 / 2 filed) in 9 files, 12 other-spec tokens (spec-041 `D3`, spec-044 `D3`-`D5`, spec-055
+  `D1` / `D3`, a dangling spec-048 `D1`) and 2 desk-name data spans; each label is restated by the behaviour it named,
+  as `spec-NNN Decision N` only where its bullet has one owning Decision whose body carries the claim (spec-048 `D1`
+  as `spec-048 Decision 1`), and the desk names quoted as `"D1"` / `"D2"`. Only `tests/test_ci_governance.py` changes
+  executable code; 13 planted refused shapes and the widened permitted row pin it. START.md Style bullet and its
+  label-vocabulary example restated; requirement ids, other work packages and review-round ids stay judged by hand.
+  Filed 928.
 
 ## To do: found along the way
 
@@ -2982,10 +2994,6 @@ Progress: 510 done, 106 to do. The CHANGELOG entries filed here moved to
   restate each by content and refuse `Decision N step M` in the citation gate, amending START.md's "a Decision's step
   ... judged by hand" in the same change; resolving step ordinals in `scripts/check_citations.py` would make them a
   second gated ordinal against START.md's "Cite contract by CONTENT, never ordinal". Found fixing 703
-- [ ] 767. spec-040's Helper-reuse labels in first-party prose: `spec-040 D<N>` 26 sites, bare `D<N>` 17, `P<N>` 2
-  (mainly `auth/mutations.py`, `mutations/resolvers.py`, `mutations/fields.py`, `mutations/inputs.py`); a plan-label
-  family (565's class): name the behaviour and widen the plan-label row (START.md "Rule w/o gate rots"). Found
-  fixing 703
 - [ ] 770. (robustness) A declared non-Boolean filter with `lookup_expr="isnull"` publishes `Boolean`, and its own
   form cleans the bool as its own kind: 205 of 240 grid cells answer every value with an error (96 masked). Django's
   `IsNull` refuses a non-bool only at SQL compile, so 708's probe does not decide it
@@ -3121,6 +3129,11 @@ Progress: 510 done, 106 to do. The CHANGELOG entries filed here moved to
   `filters/sets.py::FilterSet._requires_bound_form` reads requiredness only from the set's own non-deferred filters
   (`extra["required"]`), never from a consumer form, while README says such a form "still validates it (a `required`
   one refuses the request)". Probe cell X2 `child_req=True flat=True form=dj` in the 852 research grid. Found fixing 852
+- [ ] 928. Requirement ids `R<N>` in first-party prose (spec-035 Decision 6's `R1`-`R3` at
+  `optimizer/walker.py` x2, `tests/optimizer/test_walker.py`, `tests/optimizer/test_extension.py`, and
+  `tests/filters/test_sets.py`'s "the R4 contract", a review-round id that resolves nowhere): restate each by content
+  and decide whether the plan-label row reads `R<N>` (no data collisions measured), after 766 lands its gate on the
+  beside-a-Decision form. Found fixing 767
 
 ## To do: holes found re-checking the fixes
 

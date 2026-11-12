@@ -223,8 +223,8 @@ def test_views_module_imports_with_channels_absent() -> None:
     entry in ``_ABSENCE_PREFIXES``: re-executing a third-party package body rebinds
     ``django`` on the ``strawberry`` package object, and only the ``(parent, attr)``
     two-sided restore puts the attribute path and the import path back on ONE
-    module object afterwards (spec-041 D3, the divergence ``evicted_modules``
-    exists to prevent). Composing the helper twice is the file-local idiom for
+    module object afterwards (the divergence ``evicted_modules`` exists to
+    prevent). Composing the helper twice is the file-local idiom for
     that; no new eviction machinery.
     """
     with (

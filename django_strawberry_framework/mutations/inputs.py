@@ -112,7 +112,7 @@ if TYPE_CHECKING:
 INPUTS_MODULE_PATH: str = "django_strawberry_framework.mutations.inputs"
 
 # Model-local decode kind: a provided input attr captured out of model
-# construction (the spec-040 D6 exclusion seam; the register flavor's ``password``).
+# construction (the spec-040 Decision 6 exclusion seam; the register flavor's ``password``).
 # ``utils/inputs.py`` does not own this kind - nested writes are serializer-only;
 # exclusion is model-only. Bind writes it onto the stashed ``InputFieldSpec``.
 EXCLUDED: str = "excluded"
@@ -690,7 +690,7 @@ def mutation_input_field_specs(
     (a non-column override, a ``GenericForeignKey``) is a ``ConfigurationError``
     at bind, never a request-time ``FieldDoesNotExist``.
 
-    ``excluded_attrs`` is the spec-040 D6 exclusion seam: those python attrs are
+    ``excluded_attrs`` is the spec-040 Decision 6 exclusion seam: those python attrs are
     recorded with kind ``EXCLUDED`` so the decode capture handler runs instead of
     the column/relation handler. A bare text atom (a ``str``, a bytes-like value,
     or a lazy translation ``Promise``) is rejected

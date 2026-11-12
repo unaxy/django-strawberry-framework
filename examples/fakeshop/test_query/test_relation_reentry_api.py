@@ -351,7 +351,7 @@ def test_a_relation_declared_to_a_proxy_of_the_roots_table_answers_with_the_root
 
 
 def _venue_world() -> None:
-    """Desk ``D1``'s lead ticket is at desk ``H``; desk ``D2``'s at the plain venue ``Closed``."""
+    """Desk ``"D1"``'s lead ticket is at desk ``H``; ``"D2"``'s at the plain venue ``Closed``."""
     hidden_desk = LendingDesk.objects.create(name="H")
     closed = Venue.objects.create(name="Closed")
     for desk_name, venue in (("D1", hidden_desk), ("D2", closed)):

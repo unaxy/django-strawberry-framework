@@ -53,8 +53,8 @@ def evicted_modules(
     restored on exit through ``vars(parent).pop`` / ``setattr`` - every read and write
     goes through ``__dict__`` directly so a package ``__getattr__`` never fires, not even
     on teardown (a ``hasattr(parent, attr)`` probe there would). This two-sided restore
-    (spec-041 D3) keeps the attribute path and the import path pointing at one module
-    object under ``pytest-xdist``.
+    keeps the attribute path and the import path pointing at one module object under
+    ``pytest-xdist``.
     """
     missing = object()
     saved_attr = truth.instance_state(parent).get(attr, missing)

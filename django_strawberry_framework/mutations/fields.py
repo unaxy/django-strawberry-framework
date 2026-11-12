@@ -189,7 +189,7 @@ def _lazy_ref(type_name: str, module_path: str) -> object:
     ``mutations.inputs`` (both flavors materialize their payload there - spec-038
     Decision 5, the load-bearing namespace divergence).
 
-    Shared field-factory machinery (spec-040 Helper-reuse D12):
+    Shared field-factory machinery:
     the auth fixed-field factories (``login_mutation`` / ``logout_mutation`` /
     ``current_user``) build their ``strawberry.lazy`` payload / alias return refs
     through THIS helper rather than re-spelling ``Annotated[..., strawberry.lazy(...)]``
@@ -204,11 +204,11 @@ def build_lazy_field_signature(
 ) -> tuple[inspect.Signature, dict[str, object]]:
     """Build the ``(__signature__, __annotations__)`` a fixed root-field dispatcher needs.
 
-    The signature-injection idiom as shared machinery (spec-040 Helper-reuse
-    D12 / P1 / P2): a root field whose return type only materializes at phase 2.5
-    cannot annotate its class attribute, so its synthesized resolver carries an
-    injected ``inspect.Signature`` + ``__annotations__`` with a ``strawberry.lazy``
-    return forward-ref. ``DjangoMutationField`` (via
+    The signature-injection idiom as shared machinery: a root field whose return
+    type only materializes at phase 2.5 cannot annotate its class attribute, so its
+    synthesized resolver carries an injected ``inspect.Signature`` +
+    ``__annotations__`` with a ``strawberry.lazy`` return forward-ref.
+    ``DjangoMutationField`` (via
     ``_synthesized_mutation_signature``) AND the auth fixed-field factories both use
     this ONE builder so the reserved ``info`` + the keyword-only GraphQL argument shape
     cannot drift between the write factory and the auth factories. The dispatcher reads
