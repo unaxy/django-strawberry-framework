@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 512 done, 107 to do. The CHANGELOG entries filed here moved to
+Progress: 513 done, 106 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3004,13 +3004,21 @@ Progress: 512 done, 107 to do. The CHANGELOG entries filed here moved to
   8 `prove_failability.py` mutants each fail exactly their rows; docstring-stripped ASTs unchanged outside the
   governance module, the two message constants and the live test pinning one. START.md's Source-refs sentence says
   what the row reads. Filed 929, 930; CHANGELOG 931
+- [x] 770. (robustness) A declared non-Boolean filter with `lookup_expr="isnull"` publishes `Boolean`, and its own
+  form cleans the bool as its own kind, so no value answers: `NumberFilter`, `UUIDFilter`, `DurationFilter` refuse
+  every value with `FILTER_INVALID`, `DateFilter` / `DateTimeFilter` / `TimeFilter` raise Django's own
+  `BaseTemporalField.to_python` `AttributeError` on the bool (masked), and a `CharFilter` (or a model-choice or choice
+  filter) hands `IsNull` a non-bool it refuses only when the SQL compiles (masked `ValueError`): 98 cells, 196 of 196
+  requests, 51 cells masked; `BooleanFilter`, a bare `Filter`, `TypedFilter` and a bool-coercing `TypedChoiceFilter`
+  work. Found fixing 708. Closed with no change, as its siblings 771 and 772 were (maintainer, 2026-11-11: items not
+  worth completing): upstream-matching. Stock django-filter 26.2 has no value that works for these declarations
+  (a string the form accepts reaches `IsNull` and raises `ValueError` unhandled; a refused one drops out), and
+  graphene-django 3.2.3 and django-graphene-filters 1.0.0 type the same declarations by their form and fail every
+  request with the same `IsNull` `ValueError`; Django's `IsNull` (unchanged 4.0 to 6.1) checks its operand only in
+  `as_sql`. Evidence: the 770 fact reports (repro grid of 364 declarations, 1344 raw cells; upstream probes).
 
 ## To do: found along the way
 
-- [ ] 770. (robustness) A declared non-Boolean filter with `lookup_expr="isnull"` publishes `Boolean`, and its own
-  form cleans the bool as its own kind: 205 of 240 grid cells answer every value with an error (96 masked). Django's
-  `IsNull` refuses a non-bool only at SQL compile, so 708's probe does not decide it
-  (`filters/inputs.py::_catchall_element`'s null test). Found fixing 708
 - [ ] 783. (robustness) A declared `MultipleChoiceFilter` / `ModelMultipleChoiceFilter` (`exact`) with a lazy
   `field_name` (`gettext_lazy("children__label")`) gives one declaration two answers: unwalked, django-filter's
   `MultipleChoiceFilter.get_filter_predicate` keys the predicate by the lazy object and the request raises
