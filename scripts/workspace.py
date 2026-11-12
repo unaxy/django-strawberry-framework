@@ -444,7 +444,7 @@ COMPOSE_PROJECT = "dsf-ws-postgres"
 #: its order, each without its ``uv run`` prefix. A package change that passes every pytest
 #: suite still reddens CI through a stale generated doc or a layout rewrite, so the gate runs
 #: these too; ``tests/test_workspace.py`` holds this list to the workflow. A gate run sets
-#: neither ``SINCE`` nor ``UNTIL``, so the suppression check skips its growth walk, as a
+#: neither ``SINCE`` nor ``UNTIL``, so the two suppression checks skip their growth walks, as a
 #: manual CI run does.
 LINT_COMMANDS = (
     "ruff check .",
@@ -452,6 +452,7 @@ LINT_COMMANDS = (
     "basedpyright",
     "basedpyright -p pyrightconfig.floor.json",
     'python scripts/check_type_suppressions.py --since "$SINCE" --until "$UNTIL"',
+    'python scripts/check_noqa_suppressions.py --since "$SINCE" --until "$UNTIL"',
     "python scripts/check_public_types.py",
     "python scripts/check_trailing_commas.py --check",
     "python scripts/check_truthful_reads.py --check",
