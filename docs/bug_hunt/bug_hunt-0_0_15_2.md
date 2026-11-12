@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 521 done, 105 to do. The CHANGELOG entries filed here moved to
+Progress: 522 done, 105 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3116,6 +3116,18 @@ Progress: 521 done, 105 to do. The CHANGELOG entries filed here moved to
   conjoined field now follows Django where its nested branch keeps one-row-per-branch: README, GLOSSARY and spec-027
   list `conjoined=True` beside `isNull: true` and `exclude=True` as where the spellings part. Pinned live by
   `examples/fakeshop/test_query/test_conjoined_walked_leaf_api.py` (67 rows). Filed 939, 940, 941; widened 932.
+- [x] 838. (robustness) An unbound or absent `RelatedFilter` head's rendered form field (django-filter's `FilterView`
+  page, DRF's browsable API through `DjangoFilterBackend.to_html`, which always binds, so every head the query string
+  leaves out) lists every row of the declaration's queryset, rows the target type's `get_queryset` hides included
+  (anonymous viewer: 10 to 12 of 21 to 23 heads per fakeshop library set name a hidden row); a bound named head is
+  narrowed and a hidden key refused (748), so no filtering result is wrong and GraphQL exposes no choices. Not a defect
+  under the AGENTS defect rule: no contract row is broken. spec-027's raw-form-head Edge case states it ("The unbound
+  form a `FilterView` or DRF's browsable API renders still lists the declaration's choices"), README and GLOSSARY
+  promise only that a head the form data leaves out runs no `get_queryset` (pinned by
+  `examples/fakeshop/test_query/test_direct_filter_actor_api.py::test_a_raw_head_runs_each_hops_hook_once_and_an_absent_one_none`),
+  stock django-filter lists the same rows, and the upstream seam already scopes them per request (a callable
+  `queryset=` on the `RelatedFilter`, as the fakeshop library sets do for their model-choice filters). The contract
+  question it hides is filed as 943.
 
 ## To do: found along the way
 
@@ -3126,10 +3138,6 @@ Progress: 521 done, 105 to do. The CHANGELOG entries filed here moved to
   ForeignKey or join on the field not permitted", `filters/sets.py::_apply_relation_leaf`; a class-level `filter`
   override answers "Venue has no field named 'faults'" from `::_names_every_through`). The nested branch serves. Found
   fact-finding 745
-- [ ] 838. (robustness) An unbound or absent `RelatedFilter` head's rendered form field (django-filter's `FilterView`
-  page, DRF's browsable API through `DjangoFilterBackend.to_html`) lists every row of the declaration's queryset as a
-  choice, rows the target type's `get_queryset` hides included, so the rendered page names hidden rows; a bound named
-  head narrows its choices to the visible rows (748). Found fixing 748
 - [ ] 844. (robustness) A walked relation-key null sentinel, a declared `ModelChoiceFilter` /
   `ModelMultipleChoiceFilter` under `null_label` (forward or to-many, shipped or overriding `filter`) sent its
   `null_value`, matches nothing, where django-filter answers the relation's null test (`<relation>=None`); a raw head
@@ -3265,6 +3273,15 @@ Progress: 521 done, 105 to do. The CHANGELOG entries filed here moved to
 
 ## Waiting on you
 
+- [ ] 943. Decide: should a rendered raw form (django-filter's `FilterView`, DRF's browsable API) list only the rows
+  the viewer may see in a `RelatedFilter` head the request leaves out? Today such a head lists the declaration's
+  queryset (spec-027 states it; stock django-filter does the same), so the page names rows the target type's
+  `get_queryset` hides, while a named head is narrowed (748). Options: (a) keep it and document the callable
+  `queryset=` seam as the way to scope rendered choices; (b) scope every head lazily at render time (a
+  `ModelChoiceField` iterator reading the hop's visible rows only when the choices are iterated, so a filtering request
+  still runs no hook for an absent head; one hook chain per rendered head, 21 to 23 heads per library set counting
+  flat copies), rewriting spec-027's Edge case and README's "runs no `get_queryset`" sentence for rendering. Evidence:
+  the 838 fact reports (`.work/evidence/fix-i838-headchoices/repro/out.txt`, probe source beside it). Found closing 838
 - [ ] 839. Decide: a declared hop whose target model has no registered `DjangoType`. A walked key through it is refused
   (spec-027 Decision 8, `FilterSet._branch_visibility_seed`'s `ConfigurationError`); since 836 a raw `FilterSet`
   (`FilterSet(data=...)`, `DjangoFilterBackend`, `FilterView`) carries its walked keys, so a raw walked key over such a
