@@ -960,15 +960,54 @@ def tombstones(repo: Path) -> list[Tombstone]:
     folder = work_dir(repo) / TOMBSTONES
     if not folder.is_dir():
         return []
-    found: list[Tombstone] = []
-    for path in sorted(folder.glob("*.json")):
-        try:
-            tombstone = Tombstone.parse(_loads(path.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            continue
-        if tombstone is not None and tombstone.file_name == path.name:
-            found.append(tombstone)
-    return found
+    found = (read_tombstone(repo, path.name) for path in sorted(folder.glob("*.json")))
+    return [tombstone for tombstone in found if tombstone is not None]
+
+
+def _record_file(folder: Path, file_name: str) -> Path | None:
+    """Return ``folder / file_name`` for a record's own file name, ``None`` for any other name.
+
+    A record's name is one plain ``*.json`` file name (no separator, not a staged dot name),
+    so a name another machine sends never reaches a path outside ``folder``.
+    """
+    if (
+        not file_name.endswith(".json")
+        or file_name.startswith(".")
+        or Path(file_name).name != file_name
+        or "\\" in file_name
+        or "\0" in file_name
+    ):
+        return None
+    return folder / file_name
+
+
+def _record_text(folder: Path, file_name: str) -> object:
+    """Return the JSON the record file ``file_name`` holds, ``None`` when it is unreadable."""
+    path = _record_file(folder, file_name)
+    if path is None:
+        return None
+    try:
+        return _loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def read_tombstone(repo: Path, file_name: str) -> Tombstone | None:
+    """Return the tombstone published as ``file_name``, ``None`` when none reads back as it.
+
+    A file whose body names another file (:attr:`Tombstone.file_name`) is no tombstone.
+    """
+    tombstone = Tombstone.parse(_record_text(work_dir(repo) / TOMBSTONES, file_name))
+    return tombstone if tombstone is not None and tombstone.file_name == file_name else None
+
+
+def past_retention(removed_at: float, retention: float, now: float | None = None) -> bool:
+    """Return whether a record removed at ``removed_at`` outlived ``retention`` seconds.
+
+    ``gc`` deletes such a record, and no fleet sync carries one to a machine lacking it, so a
+    record ``gc`` deleted never comes back from a machine that has not run ``gc`` yet.
+    """
+    return removed_at < (time.time() if now is None else now) - retention
 
 
 def write_tombstone(repo: Path, tombstone: Tombstone) -> bool:
@@ -1234,15 +1273,14 @@ def evidence_tombstones(repo: Path) -> list[EvidenceTombstone]:
     folder = work_dir(repo) / EVIDENCE_GRAVES
     if not folder.is_dir():
         return []
-    found: list[EvidenceTombstone] = []
-    for path in sorted(folder.glob("*.json")):
-        try:
-            grave = EvidenceTombstone.parse(_loads(path.read_text(encoding="utf-8")))
-        except (OSError, ValueError):
-            continue
-        if grave is not None and grave.file_name == path.name:
-            found.append(grave)
-    return found
+    found = (read_evidence_tombstone(repo, path.name) for path in sorted(folder.glob("*.json")))
+    return [grave for grave in found if grave is not None]
+
+
+def read_evidence_tombstone(repo: Path, file_name: str) -> EvidenceTombstone | None:
+    """Return the evidence tombstone published as ``file_name`` (as :func:`read_tombstone`)."""
+    grave = EvidenceTombstone.parse(_record_text(work_dir(repo) / EVIDENCE_GRAVES, file_name))
+    return grave if grave is not None and grave.file_name == file_name else None
 
 
 def write_evidence_tombstone(repo: Path, grave: EvidenceTombstone) -> bool:
@@ -1497,9 +1535,9 @@ def discard_evidence(repo: Path, stem: str, *, copy: str = "") -> tuple[Evidence
 def _gc_evidence_tombstones(repo: Path, *, dry_run: bool) -> int:
     """Delete evidence tombstones older than their retention; return 1 on a failure."""
     status = 0
-    cutoff = time.time() - EVIDENCE_TOMBSTONE_RETENTION_SECONDS
+    now = time.time()
     for grave in evidence_tombstones(repo):
-        if grave.removed_at >= cutoff:
+        if not past_retention(grave.removed_at, EVIDENCE_TOMBSTONE_RETENTION_SECONDS, now):
             continue
         if dry_run:
             print(f"would delete evidence tombstone {grave.file_name}")
@@ -5758,9 +5796,9 @@ def cmd_gc(args: _Args) -> int:
 def _gc_tombstones(repo: Path, *, dry_run: bool) -> int:
     """Delete tombstones older than :data:`TOMBSTONE_RETENTION_SECONDS`; return 1 on a failure."""
     status = 0
-    cutoff = time.time() - TOMBSTONE_RETENTION_SECONDS
+    now = time.time()
     for tombstone in tombstones(repo):
-        if tombstone.removed_at >= cutoff:
+        if not past_retention(tombstone.removed_at, TOMBSTONE_RETENTION_SECONDS, now):
             continue
         if dry_run:
             print(f"would delete tombstone {tombstone.file_name}")

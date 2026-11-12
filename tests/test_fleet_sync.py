@@ -2195,7 +2195,7 @@ def test_apply_is_idempotent_and_two_records_for_one_stem_use_separate_trash_ent
 def test_an_evidence_tombstone_adds_about_one_listing_of_its_stem_to_the_inventory(
     fleet: Fleet,
 ) -> None:
-    """A large stem's record costs the inventory about what the stem's own listing costs."""
+    """A large stem's record costs an older run's inventory about what the stem's listing costs."""
     fleet.at_b()
     evidence = _evidence(fleet.repo_b, "lead-merge")
     for index in range(1000):
@@ -2206,6 +2206,292 @@ def test_an_evidence_tombstone_adds_about_one_listing_of_its_stem_to_the_invento
     assert work.write_evidence_tombstone(fleet.repo_b, _grave("lead-merge", files))
     after = len(json.dumps(fleet_sync.agent_inventory(fleet.repo_b, [])))
     assert listing < after - before < listing * 1.1
+
+
+@dataclasses.dataclass(frozen=True)
+class _Call:
+    """One agent call a run made: the machine, its argv after ``agent --repo``, stdin, stdout."""
+
+    machine: str
+    args: tuple[str, ...]
+    stdin: bytes
+    stdout: bytes
+
+
+def _record_calls(patch: pytest.MonkeyPatch) -> list[_Call]:
+    """Record every agent call the run makes (in order) and let each one through."""
+    seen: list[_Call] = []
+    run = fleet_sync.Endpoint.run
+
+    def recording(
+        self: fleet_sync.Endpoint,
+        *args: str,
+        stdin: bytes | None = None,
+        timeout: float = fleet_sync.CALL_TIMEOUT,
+    ) -> subprocess.CompletedProcess[bytes]:
+        completed = run(self, *args, stdin=stdin, timeout=timeout)
+        seen.append(_Call(self.machine, args, stdin or b"", completed.stdout))
+        return completed
+
+    patch.setattr(fleet_sync.Endpoint, "run", recording)
+    return seen
+
+
+def _without_feature(patch: pytest.MonkeyPatch, machine: str, feature: str) -> None:
+    """Make machine ``machine``'s probe lack ``feature``, as an older script's does."""
+    parse = fleet_sync.Probe.parse
+
+    def older(answer: dict[str, object]) -> fleet_sync.Probe:
+        probe = parse(answer)
+        if probe.id != machine:
+            return probe
+        return dataclasses.replace(
+            probe,
+            features=tuple(name for name in probe.features if name != feature),
+        )
+
+    patch.setattr(fleet_sync.Probe, "parse", staticmethod(older))
+
+
+def _tombstone(name: str, *, removed_at: float | None = None, pins: int = 1) -> work.Tombstone:
+    """Return a pins-alone tombstone of ``name`` recording ``pins`` dropped pins, as ``a`` writes."""
+    dropped = tuple((f"save-{index}", f"{index:040x}") for index in range(1, pins + 1))
+    at = time.time() if removed_at is None else removed_at
+    return work.Tombstone(name, "a", f"pins@{name}", at, "a", dropped_pins=dropped)
+
+
+def _records(repo: Path) -> tuple[set[str], set[str]]:
+    """Return the file names of ``repo``'s tombstones and evidence tombstones."""
+    return (
+        {grave.file_name for grave in work.tombstones(repo)},
+        {grave.file_name for grave in work.evidence_tombstones(repo)},
+    )
+
+
+def test_the_timer_lists_tombstone_ids_alone_and_moves_no_body_both_machines_hold(
+    fleet: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Records both machines hold cost the timer's inventories one id each, and no body moves."""
+    held = _write(_evidence(fleet.repo_a) / "f.txt", "proof\n")
+    grave = _grave(NAME, {"f.txt": held}, whole=False)
+    tombstone = _tombstone("spike-fleet-gone")
+    for repo in (fleet.repo_a, fleet.repo_b):
+        assert work.write_evidence_tombstone(repo, grave)
+        assert work.write_tombstone(repo, tombstone)
+    seen = _record_calls(monkeypatch)
+    code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    inventories = [call for call in seen if call.args[0] == "inventory"]
+    assert sorted(call.machine for call in inventories) == ["a", "b"]
+    for call in inventories:
+        assert {"--ids", "--no-evidence"} <= set(call.args)
+        answer = json_object(json_loads(call.stdout.decode()))
+        assert answer["evidence"] == {}
+        assert answer["tombstones"] == {tombstone.file_name: tombstone.removed_at}
+        assert answer["evidence_tombstones"] == {grave.file_name: grave.removed_at}
+    assert [call for call in seen if call.args[0].startswith(("tombstones-", "evidence-"))] == []
+
+
+def test_a_missing_tombstone_body_moves_by_id_both_ways_and_reaches_the_planning(
+    fleet: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a record one side lacks moves, asked for by id and sent under it."""
+    held = _write(_evidence(fleet.repo_b) / "f.txt", "proof\n")
+    theirs = _grave(NAME, {"f.txt": held}, whole=False)
+    from_b = _tombstone("spike-fleet-b")
+    from_a = _tombstone("spike-fleet-a")
+    both = _tombstone("spike-fleet-both")
+    assert work.write_evidence_tombstone(fleet.repo_b, theirs)
+    assert work.write_tombstone(fleet.repo_b, from_b)
+    assert work.write_tombstone(fleet.repo_a, from_a)
+    for repo in (fleet.repo_a, fleet.repo_b):
+        assert work.write_tombstone(repo, both)
+    seen = _record_calls(monkeypatch)
+    code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    names = {from_a.file_name, from_b.file_name, both.file_name}
+    assert _records(fleet.repo_a) == _records(fleet.repo_b) == (names, {theirs.file_name})
+    exports = [
+        (call.machine, json_object(json_loads(call.stdin.decode())))
+        for call in seen
+        if call.args[0] == "tombstones-export"
+    ]
+    assert exports == [
+        ("a", {"tombstones": [from_a.file_name], "evidence_tombstones": []}),
+        ("b", {"tombstones": [from_b.file_name], "evidence_tombstones": [theirs.file_name]}),
+    ]
+    imports = [call for call in seen if call.args[0].endswith("-import")]
+    assert [(call.machine, call.args[0]) for call in imports] == [
+        ("b", "tombstones-import"),
+        ("a", "tombstones-import"),
+        ("a", "evidence-tombstones-import"),
+    ]
+    sent = {
+        (call.machine, key): sorted(str(rel) for rel in json_object(value))
+        for call in imports
+        for key, value in json_object(json_loads(call.stdin.decode())).items()
+    }
+    assert sent == {
+        ("b", "tombstones"): [from_a.file_name],
+        ("a", "tombstones"): [from_b.file_name],
+        ("a", "evidence_tombstones"): [theirs.file_name],
+    }
+
+
+def test_a_tombstone_body_that_does_not_match_its_id_is_refused_by_the_run(
+    fleet: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A peer sending another record's body under an id writes nothing and fails the pair."""
+    first, second = _tombstone("spike-fleet-one"), _tombstone("spike-fleet-two")
+    for tombstone in (first, second):
+        assert work.write_tombstone(fleet.repo_b, tombstone)
+    call = fleet_sync.Endpoint.call
+
+    def swapping(
+        self: fleet_sync.Endpoint,
+        *args: str,
+        stdin: bytes | None = None,
+    ) -> dict[str, object]:
+        answer = call(self, *args, stdin=stdin)
+        if args[0] == "tombstones-export":
+            bodies = json_object(answer["tombstones"])
+            answer["tombstones"] = dict.fromkeys(bodies, bodies[second.file_name])
+        return answer
+
+    monkeypatch.setattr(fleet_sync.Endpoint, "call", swapping)
+    code, document = fleet.run("sync", "--timer")
+    assert code == 1, document
+    assert (
+        "failed",
+        "pins",
+        f"b: tombstone {first.file_name} does not match its id; refused",
+    ) in _results(document)
+    assert work.tombstones(fleet.repo_a) == []
+
+
+def test_an_agent_refuses_an_imported_body_sent_under_another_id(fleet: Fleet) -> None:
+    """The importing machine checks each body against the id it came under; a list has none."""
+    held = _write(_evidence(fleet.repo_a) / "f.txt", "proof\n")
+    grave = _grave(NAME, {"f.txt": held}, whole=False)
+    other = _grave(NAME, {"f.txt": held}, whole=True)
+    first, second = _tombstone("spike-fleet-one"), _tombstone("spike-fleet-two")
+    fleet.at_b()
+    document = {"tombstones": {first.file_name: second.as_json()}}
+    answer = fleet_sync.agent_tombstones_import(fleet.repo_b, json.dumps(document).encode())
+    assert (answer["created"], answer["refused"]) == ([], [first.file_name])
+    document = {"evidence_tombstones": {grave.file_name: other.as_json()}}
+    answer = fleet_sync.agent_evidence_tombstones_import(
+        fleet.repo_b,
+        json.dumps(document).encode(),
+    )
+    assert (answer["created"], answer["refused"]) == ([], [grave.file_name])
+    assert _records(fleet.repo_b) == (set(), set())
+    document = {"tombstones": [first.as_json()], "evidence_tombstones": [grave.as_json()]}
+    data = json.dumps(document).encode()
+    assert fleet_sync.agent_tombstones_import(fleet.repo_b, data)["created"] == [first.file_name]
+    created = fleet_sync.agent_evidence_tombstones_import(fleet.repo_b, data)["created"]
+    assert created == [grave.file_name]
+
+
+def test_a_peer_without_tombstone_ids_gets_the_full_exchange_and_both_sides_still_converge(
+    fleet: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An older peer is never sent ``--ids``, an export or an id-keyed import, and still syncs."""
+    held = _write(_evidence(fleet.repo_b) / "f.txt", "proof\n")
+    theirs = _grave(NAME, {"f.txt": held}, whole=False)
+    from_b, from_a = _tombstone("spike-fleet-b"), _tombstone("spike-fleet-a")
+    assert work.write_evidence_tombstone(fleet.repo_b, theirs)
+    assert work.write_tombstone(fleet.repo_b, from_b)
+    assert work.write_tombstone(fleet.repo_a, from_a)
+    _without_feature(monkeypatch, "b", fleet_sync.IDS_FEATURE)
+    seen = _record_calls(monkeypatch)
+    code, document = fleet.run("sync", "--timer")
+    assert code == 0, document
+    names = {from_a.file_name, from_b.file_name}
+    assert _records(fleet.repo_a) == _records(fleet.repo_b) == (names, {theirs.file_name})
+    at_b = [call for call in seen if call.machine == "b"]
+    assert [call.args for call in at_b if call.args[0] == "inventory"] == [("inventory",)]
+    assert [call for call in at_b if call.args[0] == "tombstones-export"] == []
+    sent = [call for call in at_b if call.args[0] == "tombstones-import"]
+    assert [
+        json_list(json_object(json_loads(call.stdin.decode())), "tombstones") for call in sent
+    ] == [
+        [from_a.as_json()],
+    ]
+
+
+def test_a_record_gc_deleted_never_comes_back_from_a_machine_that_still_holds_it(
+    fleet: Fleet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past its retention a record moves neither way, and no agent imports one."""
+    held = _write(_evidence(fleet.repo_a) / "f.txt", "proof\n")
+    day = 86400
+    expired = _grave(
+        NAME,
+        {"f.txt": held},
+        whole=False,
+        removed_at=time.time() - work.EVIDENCE_TOMBSTONE_RETENTION_SECONDS - day,
+    )
+    old = _tombstone(
+        "spike-fleet-old",
+        removed_at=time.time() - work.TOMBSTONE_RETENTION_SECONDS - day,
+    )
+    for repo in (fleet.repo_a, fleet.repo_b):
+        assert work.write_evidence_tombstone(repo, expired)
+        assert work.write_tombstone(repo, old)
+    fleet.at_b()
+    assert work.main(["gc"]) == 0
+    assert _records(fleet.repo_b) == (set(), set())
+    fleet.at_a()
+    seen = _record_calls(monkeypatch)
+    for _run in range(2):
+        code, document = fleet.run("sync", "--timer")
+        assert code == 0, document
+        assert _records(fleet.repo_b) == (set(), set())
+    assert [call for call in seen if call.args[0].startswith(("tombstones-", "evidence-"))] == []
+    fleet.at_b()
+    document = {"tombstones": [old.as_json()], "evidence_tombstones": [expired.as_json()]}
+    data = json.dumps(document).encode()
+    answer = fleet_sync.agent_tombstones_import(fleet.repo_b, data)
+    assert (answer["created"], answer["expired"]) == ([], [old.file_name])
+    answer = fleet_sync.agent_evidence_tombstones_import(fleet.repo_b, data)
+    assert (answer["created"], answer["expired"]) == ([], [expired.file_name])
+    assert _records(fleet.repo_b) == (set(), set())
+
+
+@pytest.mark.parametrize("kind", ["evidence", "pins"])
+def test_an_inventory_by_id_stays_one_size_however_many_files_or_pins_a_record_lists(
+    fleet: Fleet,
+    kind: str,
+) -> None:
+    """The ids answer's size depends on how many records there are, never on their bodies."""
+    fleet.at_b()
+    evidence = _evidence(fleet.repo_b, "lead-merge")
+    for index in range(1000):
+        _ = _write(evidence / "proofs" / f"run-{index:04}" / "out.txt", f"{index}\n")
+    files = {rel: evidence / rel for rel in work.evidence_files(evidence)}
+    sizes: list[tuple[int, int]] = []
+    for count in (1, 1000):
+        for folder in ("tombstones", "evidence-tombstones"):
+            shutil.rmtree(fleet.repo_b / ".work" / folder, ignore_errors=True)
+        if kind == "evidence":
+            listed = dict(sorted(files.items())[:count])
+            record = _grave("lead-merge", listed, removed_at=1_700_000_000.0)
+            assert work.write_evidence_tombstone(fleet.repo_b, record)
+        else:
+            tombstone = _tombstone("spike-fleet-gone", removed_at=1_700_000_000.0, pins=count)
+            assert work.write_tombstone(fleet.repo_b, tombstone)
+        body = len(json.dumps(fleet_sync.agent_inventory(fleet.repo_b, [], evidence=False)))
+        ids = fleet_sync.agent_inventory(fleet.repo_b, [], ids=True, evidence=False)
+        sizes.append((body, len(json.dumps(ids))))
+    (small_body, small_ids), (large_body, large_ids) = sizes
+    assert large_body > small_body * 10
+    assert large_ids == small_ids
 
 
 # --------------------------------------------------------------------------------------------

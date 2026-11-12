@@ -168,6 +168,23 @@ two other machines hold is reported, for their own runs)
     a tombstone reaches drops the pins it records while it holds no copy under the
     name.
 
+    Tombstones move by id. A record's file name (``<name>@<digest>.json``,
+    ``<stem>@<digest>.json``) is its id; each side's inventory lists its ids with their
+    ``removedat`` alone (``inventory --ids``), so the inventory never grows with the
+    files a record lists. A body moves only to a side lacking its id, or to the run for
+    a name a copy or a pin of either side has (an evidence stem either listing holds, in
+    a full sync): fetched by id (``tombstones-export``, this machine first) and checked
+    on arrival, the run refusing a body whose own file name is not the id it was asked
+    for (a failed pair) and the importing agent one sent under another id (a ``failed``
+    row). A record past its retention (``work.past_retention``: 30 days, 90 for an
+    evidence tombstone, by its ``removedat`` against the carrying machine's clock) is
+    carried neither way and no agent imports one, so a record ``gc`` deleted never
+    comes back from a machine that has not run ``gc``. A peer whose probe lacks the
+    ``tombstone-ids`` feature (an older script) gets the inventory, imports and no
+    export call it knows: it sends every body, the run sends it a body list. The timer's
+    and ``--pins-only``'s inventories carry no evidence listing either (``--no-evidence``,
+    the same feature).
+
     Evidence tombstones: ``.work/evidence-tombstones/<stem>@<digest>.json``, written
     only by ``work.py rm --evidence`` (never on a replica) and ``work.py evidence-rm``: the
     stem, machine,
@@ -458,7 +475,10 @@ WRITES = frozenset(
 #: What this script's agent can do beyond the operations every version has; a peer's probe
 #: lists its own, and an operation a peer does not list is never sent to it.
 EVIDENCE_FEATURE = "evidence-tombstones"
-FEATURES = (EVIDENCE_FEATURE,)
+#: ``inventory --ids`` / ``--no-evidence``, ``tombstones-export``, and the imports' ``{id: body}``
+#: form (:func:`Inventory.read`, :func:`with_graves`).
+IDS_FEATURE = "tombstone-ids"
+FEATURES = (EVIDENCE_FEATURE, IDS_FEATURE)
 CALL_TIMEOUT = 600.0
 PROBE_TIMEOUT = 60.0
 #: Seconds a peer's ``hold`` may take to print its token.
@@ -768,11 +788,21 @@ def copy_record(repo: Path, copy: work.Copy) -> dict[str, object]:
     return record
 
 
-def agent_inventory(repo: Path, names: Sequence[str]) -> dict[str, object]:
+def agent_inventory(
+    repo: Path,
+    names: Sequence[str],
+    *,
+    ids: bool = False,
+    evidence: bool = True,
+) -> dict[str, object]:
     """Return every copy (or those ``names``), their pins, evidence and tombstones.
 
     Evidence and evidence tombstones are filtered by the stems of ``names`` (a ``-verify``
-    copy's stem is its purpose's), copy tombstones by the names themselves.
+    copy's stem is its purpose's), copy tombstones by the names themselves. With ``ids``
+    each kind of tombstone is ``{file name: removedat}`` (its body comes from
+    ``tombstones-export``, by id), so the answer's size never grows with the files a record
+    lists; without ``evidence`` the evidence listing is ``{}`` (a run that carries no
+    evidence file).
     """
     work.check_layout(repo)
     wanted = set(names)
@@ -788,28 +818,29 @@ def agent_inventory(repo: Path, names: Sequence[str]) -> dict[str, object]:
         for leaf, sha in leaves.items()
     }
     stems = {_stem(name) for name in wanted}
-    evidence: dict[str, object] = {}
+    listed: dict[str, object] = {}
     root = work.work_dir(repo) / work.EVIDENCE
     if root.is_dir():
         for folder in sorted(root.iterdir()):
             if work.copy_hazard(repo, folder, work.EVIDENCE) is not None or not folder.is_dir():
                 continue
-            if not wanted or folder.name in stems:
-                evidence[folder.name] = work.evidence_files(folder)
-    graves = [
-        tombstone.as_json()
-        for tombstone in work.tombstones(repo)
-        if not wanted or tombstone.name in wanted
+            if evidence and (not wanted or folder.name in stems):
+                listed[folder.name] = work.evidence_files(folder)
+    held = [
+        tombstone for tombstone in work.tombstones(repo) if not wanted or tombstone.name in wanted
     ]
-    evidence_graves = [
-        grave.as_json()
-        for grave in work.evidence_tombstones(repo)
-        if not wanted or grave.stem in stems
+    evidence_held = [
+        grave for grave in work.evidence_tombstones(repo) if not wanted or grave.stem in stems
     ]
+    graves: object = [tombstone.as_json() for tombstone in held]
+    evidence_graves: object = [grave.as_json() for grave in evidence_held]
+    if ids:
+        graves = {tombstone.file_name: tombstone.removed_at for tombstone in held}
+        evidence_graves = {grave.file_name: grave.removed_at for grave in evidence_held}
     return {
         "copies": copies,
         "pins": pin_map,
-        "evidence": evidence,
+        "evidence": listed,
         "tombstones": graves,
         "evidence_tombstones": evidence_graves,
     }
@@ -1486,38 +1517,91 @@ def agent_remove(
     return {"removed": True, "kept": kept}
 
 
-def agent_tombstones_import(repo: Path, data: bytes) -> dict[str, object]:
-    """Write every tombstone a JSON list carries that this machine lacks; return their files.
+def _arrived(listed: object) -> list[tuple[str, object]]:
+    """Return the ``(id, body)`` pairs an import carries: ``{id: body}``, or an id-less list.
 
-    Each new tombstone's recorded pins are dropped here while no copy holds the name
-    (``work.drop_buried_pins``).
+    A list (an older run's form) gives each body the id ``""``: nothing to check it against.
+    """
+    if fleet.is_json_object(listed):
+        return list(listed.items())
+    return [("", raw) for raw in (listed if fleet.is_json_array(listed) else [])]
+
+
+def agent_tombstones_import(repo: Path, data: bytes) -> dict[str, object]:
+    """Write every tombstone the JSON carries that this machine lacks; return their files.
+
+    A body sent under an id (``{id: body}``) that names another file (``file_name``) is
+    ``refused``, unwritten; one past ``work.TOMBSTONE_RETENTION_SECONDS`` is ``expired``,
+    unwritten (``gc`` deleted it here or will). Each new tombstone's recorded pins are dropped
+    here while no copy holds the name (``work.drop_buried_pins``).
     """
     created: list[str] = []
-    listed = _decode(data, "tombstones").get("tombstones")
+    refused: list[str] = []
+    expired: list[str] = []
     names: set[str] = set()
-    for raw in listed if fleet.is_json_array(listed) else []:
+    now = time.time()
+    for key, raw in _arrived(_decode(data, "tombstones").get("tombstones")):
         tombstone = work.Tombstone.parse(raw)
-        if tombstone is not None and work.write_tombstone(repo, tombstone):
+        if tombstone is None or (key and tombstone.file_name != key):
+            refused.append(key or "?")
+        elif work.past_retention(tombstone.removed_at, work.TOMBSTONE_RETENTION_SECONDS, now):
+            expired.append(tombstone.file_name)
+        elif work.write_tombstone(repo, tombstone):
             created.append(tombstone.file_name)
             names.add(tombstone.name)
     dropped = [
         f"{name}/{leaf}" for name in sorted(names) for leaf in work.drop_buried_pins(repo, name)
     ]
-    return {"created": created, "dropped": dropped}
+    return {
+        "created": created,
+        "dropped": dropped,
+        "refused": refused,
+        "expired": expired,
+    }
 
 
 def agent_evidence_tombstones_import(repo: Path, data: bytes) -> dict[str, object]:
-    """Write every evidence tombstone a JSON list carries that this machine lacks.
+    """Write every evidence tombstone the JSON carries that this machine lacks.
 
     Create-only, and nothing is applied: only a full sync's ``evidence-apply`` moves a file.
+    ``refused`` and ``expired`` as :func:`agent_tombstones_import` (its retention
+    ``work.EVIDENCE_TOMBSTONE_RETENTION_SECONDS``).
     """
     created: list[str] = []
+    refused: list[str] = []
+    expired: list[str] = []
+    now = time.time()
     listed = _decode(data, "evidence tombstones").get("evidence_tombstones")
-    for raw in listed if fleet.is_json_array(listed) else []:
+    for key, raw in _arrived(listed):
         grave = work.EvidenceTombstone.parse(raw)
-        if grave is not None and work.write_evidence_tombstone(repo, grave):
+        if grave is None or (key and grave.file_name != key):
+            refused.append(key or "?")
+        elif work.past_retention(grave.removed_at, work.EVIDENCE_TOMBSTONE_RETENTION_SECONDS, now):
+            expired.append(grave.file_name)
+        elif work.write_evidence_tombstone(repo, grave):
             created.append(grave.file_name)
-    return {"created": created}
+    return {"created": created, "refused": refused, "expired": expired}
+
+
+def agent_tombstones_export(repo: Path, data: bytes) -> dict[str, object]:
+    """Return the body of each tombstone and evidence tombstone a JSON id list names.
+
+    A read, so not token-checked (:data:`WRITES`). An id names a record's own file
+    (``<name>@<digest>.json``); one this machine does not hold under that name (absent,
+    unreadable, a body naming another file, a name that is no plain file name) is left out.
+    """
+    asked = _decode(data, "tombstone ids")
+    graves = (work.read_tombstone(repo, key) for key in _strings(asked.get("tombstones")))
+    evidence = (
+        work.read_evidence_tombstone(repo, key)
+        for key in _strings(asked.get("evidence_tombstones"))
+    )
+    return {
+        "tombstones": {grave.file_name: grave.as_json() for grave in graves if grave is not None},
+        "evidence_tombstones": {
+            grave.file_name: grave.as_json() for grave in evidence if grave is not None
+        },
+    }
 
 
 def agent_evidence_apply(repo: Path, names: Sequence[str]) -> dict[str, object]:
@@ -1897,7 +1981,9 @@ def _agent_output(repo: Path, args: _Args) -> dict[str, object] | bytes:
     if operation == "probe":
         return agent_probe(repo)
     if operation == "inventory":
-        return agent_inventory(repo, args.copy)
+        return agent_inventory(repo, args.copy, ids=args.ids, evidence=not args.no_evidence)
+    if operation == "tombstones-export":
+        return agent_tombstones_export(repo, sys.stdin.buffer.read())
     if operation in {"prepare", "finish"}:
         carried = _string_map(_decode(args.note.encode("utf-8"), "--note"))
         if operation == "finish":
@@ -2580,22 +2666,48 @@ class CopyInfo:
 
 @dataclasses.dataclass(frozen=True)
 class Inventory:
-    """One machine's copies, pins and evidence."""
+    """One machine's copies, pins and evidence, and the tombstones it holds.
+
+    ``tombstone_ids`` and ``evidence_tombstone_ids`` are every record it holds, each file name
+    (its id) to its ``removedat``; ``tombstones`` and ``evidence_tombstones`` are the bodies a
+    run has in hand, by id: all of them from a peer without :data:`IDS_FEATURE`, else only
+    those :func:`with_graves` fetched.
+    """
 
     copies: Mapping[str, CopyInfo]
     pins: Mapping[str, str]
     evidence: Mapping[str, Mapping[str, tuple[int, int]]]
     tombstones: Mapping[str, work.Tombstone]
     evidence_tombstones: Mapping[str, work.EvidenceTombstone]
+    tombstone_ids: Mapping[str, float] = dataclasses.field(default_factory=dict[str, float])
+    evidence_tombstone_ids: Mapping[str, float] = dataclasses.field(
+        default_factory=dict[str, float],
+    )
 
     @classmethod
-    def read(cls, endpoint: Endpoint, names: Sequence[str]) -> Inventory:
-        """Ask ``endpoint`` for its inventory (of ``names`` only, when given)."""
+    def read(
+        cls,
+        endpoint: Endpoint,
+        names: Sequence[str],
+        *,
+        evidence: bool = True,
+    ) -> Inventory:
+        """Ask ``endpoint`` for its inventory (of ``names`` only, when given).
+
+        An endpoint with :data:`IDS_FEATURE` lists its tombstones by id (bodies stay there
+        until :func:`with_graves` asks for one) and, without ``evidence``, no evidence
+        listing; an older one answers with every body and its whole listing.
+        """
         args = ["inventory"]
         for name in names:
             args += ["--copy", name]
+        by_id = IDS_FEATURE in endpoint.features
+        if by_id:
+            args.append("--ids")
+            if not evidence:
+                args.append("--no-evidence")
         answer = endpoint.call(*args)
-        evidence: dict[str, dict[str, tuple[int, int]]] = {}
+        listing: dict[str, dict[str, tuple[int, int]]] = {}
         for stem, files in _object(answer.get("evidence")).items():
             entries: dict[str, tuple[int, int]] = {}
             for rel, state in _object(files).items():
@@ -2603,7 +2715,21 @@ class Inventory:
                     size, mtime = state
                     if isinstance(size, int) and isinstance(mtime, int):
                         entries[rel] = (size, mtime)
-            evidence[stem] = entries
+            listing[stem] = entries
+        copies = {
+            name: CopyInfo.parse(name, raw) for name, raw in _object(answer.get("copies")).items()
+        }
+        pins = _string_map(answer.get("pins"))
+        if by_id:
+            return cls(
+                copies=copies,
+                pins=pins,
+                evidence=listing,
+                tombstones={},
+                evidence_tombstones={},
+                tombstone_ids=_moments(answer.get("tombstones")),
+                evidence_tombstone_ids=_moments(answer.get("evidence_tombstones")),
+            )
         graves = answer.get("tombstones")
         parsed = [
             work.Tombstone.parse(raw) for raw in (graves if fleet.is_json_array(graves) else [])
@@ -2613,18 +2739,194 @@ class Inventory:
             work.EvidenceTombstone.parse(raw)
             for raw in (listed if fleet.is_json_array(listed) else [])
         ]
+        bodies = {grave.file_name: grave for grave in parsed if grave is not None}
+        evidence_bodies = {
+            grave.file_name: grave for grave in evidence_graves if grave is not None
+        }
         return cls(
-            copies={
-                name: CopyInfo.parse(name, raw)
-                for name, raw in _object(answer.get("copies")).items()
-            },
-            pins=_string_map(answer.get("pins")),
-            evidence=evidence,
-            tombstones={grave.file_name: grave for grave in parsed if grave is not None},
-            evidence_tombstones={
-                grave.file_name: grave for grave in evidence_graves if grave is not None
+            copies=copies,
+            pins=pins,
+            evidence=listing,
+            tombstones=bodies,
+            evidence_tombstones=evidence_bodies,
+            tombstone_ids={key: grave.removed_at for key, grave in bodies.items()},
+            evidence_tombstone_ids={
+                key: grave.removed_at for key, grave in evidence_bodies.items()
             },
         )
+
+
+def _moments(value: object) -> dict[str, float]:
+    """Return an ``{id: removedat}`` answer's entries whose moment is a number."""
+    return {
+        key: float(moment)
+        for key, moment in _object(value).items()
+        if isinstance(moment, (int, float)) and not isinstance(moment, bool)
+    }
+
+
+def _record_key(file_name: str) -> str:
+    """Return the name (a tombstone) or stem (an evidence tombstone) a record's id leads with."""
+    return file_name.rpartition("@")[0]
+
+
+def _carried(
+    have: Mapping[str, float],
+    want: Mapping[str, float],
+    retention: float,
+    now: float,
+) -> list[str]:
+    """Return the ids ``have`` holds and ``want`` lacks, less those past ``retention``.
+
+    A record past its retention is one ``gc`` deletes (``work.past_retention``): it is never
+    carried, so a machine that ran ``gc`` never gets it back from one that has not.
+    """
+    return sorted(
+        key for key in set(have) - set(want) if not work.past_retention(have[key], retention, now)
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class _Wanted:
+    """The tombstone ids whose bodies a run needs, each kind apart."""
+
+    tombstones: frozenset[str]
+    evidence: frozenset[str]
+
+
+def _wanted(
+    pair: tuple[Endpoint, Endpoint],
+    inventories: tuple[Inventory, Inventory],
+    *,
+    evidence: bool,
+    carry: bool,
+) -> _Wanted:
+    """Return the ids :func:`with_graves` fetches for one pair.
+
+    The planning reads a copy tombstone only for a name a copy or a pin of either side has,
+    and an evidence tombstone only for a stem either side's listing holds (``evidence``: a
+    full sync); ``carry`` adds every id one side holds that the other lacks and a sync
+    carries (:func:`_carried`; evidence ones only to a peer with :data:`EVIDENCE_FEATURE`).
+    """
+    (here, peer), (mine, theirs) = pair, inventories
+    now = time.time()
+    names = {*mine.copies, *theirs.copies}
+    names |= {ref.partition("/")[0] for ref in (*mine.pins, *theirs.pins)}
+    held = {**theirs.tombstone_ids, **mine.tombstone_ids}
+    graves = {key for key in held if _record_key(key) in names}
+    stems = {*mine.evidence, *theirs.evidence} if evidence else set[str]()
+    evidence_held = {**theirs.evidence_tombstone_ids, **mine.evidence_tombstone_ids}
+    evidence_graves = {key for key in evidence_held if _record_key(key) in stems}
+    if carry:
+        for have, want in ((mine, theirs), (theirs, mine)):
+            graves.update(
+                _carried(
+                    have.tombstone_ids,
+                    want.tombstone_ids,
+                    work.TOMBSTONE_RETENTION_SECONDS,
+                    now,
+                ),
+            )
+            if EVIDENCE_FEATURE in here.features and EVIDENCE_FEATURE in peer.features:
+                evidence_graves.update(
+                    _carried(
+                        have.evidence_tombstone_ids,
+                        want.evidence_tombstone_ids,
+                        work.EVIDENCE_TOMBSTONE_RETENTION_SECONDS,
+                        now,
+                    ),
+                )
+    return _Wanted(frozenset(graves), frozenset(evidence_graves))
+
+
+def _fetch_graves(
+    endpoint: Endpoint,
+    graves: Collection[str],
+    evidence_graves: Collection[str],
+) -> tuple[dict[str, work.Tombstone], dict[str, work.EvidenceTombstone]]:
+    """Fetch the bodies of the named ids from ``endpoint`` and check each against its id.
+
+    Raises:
+        FleetError: a body that does not read back as its id (``file_name``, the digest its
+            name carries), or one ``endpoint`` holds but did not send.
+
+    """
+    answer = endpoint.call(
+        "tombstones-export",
+        stdin=json.dumps(
+            {"tombstones": sorted(graves), "evidence_tombstones": sorted(evidence_graves)},
+        ).encode("utf-8"),
+    )
+    bodies: dict[str, work.Tombstone] = {}
+    for key, raw in _object(answer.get("tombstones")).items():
+        tombstone = work.Tombstone.parse(raw)
+        if key not in graves or tombstone is None or tombstone.file_name != key:
+            msg = f"{endpoint.label}: tombstone {key} does not match its id; refused"
+            raise FleetError(msg)
+        bodies[key] = tombstone
+    evidence_bodies: dict[str, work.EvidenceTombstone] = {}
+    for key, raw in _object(answer.get("evidence_tombstones")).items():
+        grave = work.EvidenceTombstone.parse(raw)
+        if key not in evidence_graves or grave is None or grave.file_name != key:
+            msg = f"{endpoint.label}: evidence tombstone {key} does not match its id; refused"
+            raise FleetError(msg)
+        evidence_bodies[key] = grave
+    lost = sorted({*graves} - set(bodies)) + sorted({*evidence_graves} - set(evidence_bodies))
+    if lost:
+        msg = f"{endpoint.label}: listed but did not send {', '.join(lost)}"
+        raise FleetError(msg)
+    return bodies, evidence_bodies
+
+
+def with_graves(
+    pair: tuple[Endpoint, Endpoint],
+    inventories: tuple[Inventory, Inventory],
+    *,
+    evidence: bool = False,
+    carry: bool = False,
+    known: Sequence[Inventory] = (),
+) -> tuple[Inventory, Inventory]:
+    """Return both inventories holding the tombstone bodies the run needs (:func:`_wanted`).
+
+    Each body missing from both comes by id from a side listing it, this machine first (no
+    network), checked against its id on arrival (:func:`_fetch_graves`); a body already in
+    hand (a peer without :data:`IDS_FEATURE` sent all of its own, or ``known``, an earlier
+    read's: a record never changes under its id) is not asked for again. Each side then
+    holds the bodies of the ids it lists.
+
+    Raises:
+        FleetError: a fetched body does not match its id, or a side did not send one.
+
+    """
+    wanted = _wanted(pair, inventories, evidence=evidence, carry=carry)
+    bodies: dict[str, work.Tombstone] = {}
+    evidence_bodies: dict[str, work.EvidenceTombstone] = {}
+    for inventory in (*known, *inventories):
+        bodies.update(inventory.tombstones)
+        evidence_bodies.update(inventory.evidence_tombstones)
+    order = sorted(zip(pair, inventories, strict=True), key=lambda side: not side[0].local)
+    for endpoint, inventory in order:
+        graves = {key for key in wanted.tombstones if key in inventory.tombstone_ids} - set(bodies)
+        evidence_graves = {
+            key for key in wanted.evidence if key in inventory.evidence_tombstone_ids
+        } - set(evidence_bodies)
+        if graves or evidence_graves:
+            fetched, fetched_evidence = _fetch_graves(endpoint, graves, evidence_graves)
+            bodies.update(fetched)
+            evidence_bodies.update(fetched_evidence)
+    mine, theirs = (
+        dataclasses.replace(
+            inventory,
+            tombstones={key: bodies[key] for key in inventory.tombstone_ids if key in bodies},
+            evidence_tombstones={
+                key: evidence_bodies[key]
+                for key in inventory.evidence_tombstone_ids
+                if key in evidence_bodies
+            },
+        )
+        for inventory in inventories
+    )
+    return mine, theirs
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3252,6 +3554,39 @@ def _pin_rows(
     ]
 
 
+def _import_document(
+    target: Endpoint,
+    key: str,
+    bodies: Mapping[str, work.Tombstone | work.EvidenceTombstone],
+) -> bytes:
+    """Return an import's stdin: ``{id: body}`` for a target with :data:`IDS_FEATURE`, else a list.
+
+    The id lets the target check each body against it on arrival; an older target reads the
+    list alone.
+    """
+    if IDS_FEATURE in target.features:
+        listed: object = {grave.file_name: grave.as_json() for grave in bodies.values()}
+    else:
+        listed = [grave.as_json() for grave in bodies.values()]
+    return json.dumps({key: listed}).encode("utf-8")
+
+
+def _import_rows(
+    answer: Mapping[str, object],
+    subjects: Mapping[str, str],
+    peer: Endpoint,
+    detail: str,
+) -> list[Row]:
+    """Return a ``synced`` row per id the import ``created``, a ``failed`` one per ``refused``."""
+    created = set(_strings(answer.get("created")))
+    rows = [Row(subjects[key], peer.label, "synced", detail) for key in subjects if key in created]
+    rows += [
+        Row(key, peer.label, "failed", f"{detail}: refused there, its body does not match its id")
+        for key in _strings(answer.get("refused"))
+    ]
+    return rows
+
+
 def sync_tombstones(
     here: Endpoint,
     peer: Endpoint,
@@ -3261,44 +3596,48 @@ def sync_tombstones(
     *,
     dry_run: bool,
 ) -> list[Row]:
-    """Copy every tombstone one side lacks to it, both ways; never delete one."""
+    """Copy every tombstone one side lacks to it, both ways; never delete one.
+
+    Sides compare ids; only a missing record's body moves (``mine`` and ``theirs`` through
+    :func:`with_graves` with ``carry``), and one past its retention moves neither way
+    (:func:`_carried`).
+    """
     rows: list[Row] = []
+    now = time.time()
     for source, target, have, want in (
         (
             here,
             peer,
-            mine.tombstones,
-            theirs.tombstones,
+            mine,
+            theirs,
         ),
         (
             peer,
             here,
-            theirs.tombstones,
-            mine.tombstones,
+            theirs,
+            mine,
         ),
     ):
-        missing = [have[key] for key in sorted(set(have) - set(want))]
+        missing = _carried(
+            have.tombstone_ids,
+            want.tombstone_ids,
+            work.TOMBSTONE_RETENTION_SECONDS,
+            now,
+        )
         if not missing:
             continue
+        detail = f"tombstone {source.label} -> {target.label}"
         if dry_run:
-            rows.extend(
-                Row(grave.name, peer.label, "would", f"tombstone {source.label} -> {target.label}")
-                for grave in missing
-            )
+            rows.extend(Row(_record_key(key), peer.label, "would", detail) for key in missing)
             continue
-        document = json.dumps({"tombstones": [grave.as_json() for grave in missing]})
+        bodies = {key: have.tombstones[key] for key in missing}
         answer = target.call(
             "tombstones-import",
             "--token",
             tokens[target.machine],
-            stdin=document.encode("utf-8"),
+            stdin=_import_document(target, "tombstones", bodies),
         )
-        created = set(_strings(answer.get("created")))
-        rows.extend(
-            Row(grave.name, peer.label, "synced", f"tombstone {source.label} -> {target.label}")
-            for grave in missing
-            if grave.file_name in created
-        )
+        rows += _import_rows(answer, {key: _record_key(key) for key in missing}, peer, detail)
     return rows
 
 
@@ -3313,12 +3652,12 @@ def sync_evidence_tombstones(
 ) -> list[Row]:
     """Copy every evidence tombstone one side lacks to it, both ways; apply none, delete none.
 
-    A peer whose probe lacks :data:`EVIDENCE_FEATURE` (an older script, which would refuse the
-    operation and fail the pair) gets no call: one ``note`` row says so while this side holds
-    a record, and the sync goes on.
+    By id, as :func:`sync_tombstones`. A peer whose probe lacks :data:`EVIDENCE_FEATURE` (an
+    older script, which would refuse the operation and fail the pair) gets no call: one
+    ``note`` row says so while this side holds a record, and the sync goes on.
     """
     if EVIDENCE_FEATURE not in peer.features:
-        if not mine.evidence_tombstones:
+        if not mine.evidence_tombstone_ids:
             return []
         return [
             Row(
@@ -3329,40 +3668,41 @@ def sync_evidence_tombstones(
             ),
         ]
     rows: list[Row] = []
+    now = time.time()
     for source, target, have, want in (
         (
             here,
             peer,
-            mine.evidence_tombstones,
-            theirs.evidence_tombstones,
+            mine,
+            theirs,
         ),
         (
             peer,
             here,
-            theirs.evidence_tombstones,
-            mine.evidence_tombstones,
+            theirs,
+            mine,
         ),
     ):
-        missing = [have[key] for key in sorted(set(have) - set(want))]
+        missing = _carried(
+            have.evidence_tombstone_ids,
+            want.evidence_tombstone_ids,
+            work.EVIDENCE_TOMBSTONE_RETENTION_SECONDS,
+            now,
+        )
         if not missing:
             continue
         detail = f"evidence tombstone {source.label} -> {target.label}"
         if dry_run:
-            rows.extend(Row(grave.stem, peer.label, "would", detail) for grave in missing)
+            rows.extend(Row(_record_key(key), peer.label, "would", detail) for key in missing)
             continue
-        document = json.dumps({"evidence_tombstones": [grave.as_json() for grave in missing]})
+        bodies = {key: have.evidence_tombstones[key] for key in missing}
         answer = target.call(
             "evidence-tombstones-import",
             "--token",
             tokens[target.machine],
-            stdin=document.encode("utf-8"),
+            stdin=_import_document(target, "evidence_tombstones", bodies),
         )
-        created = set(_strings(answer.get("created")))
-        rows.extend(
-            Row(grave.stem, peer.label, "synced", detail)
-            for grave in missing
-            if grave.file_name in created
-        )
+        rows += _import_rows(answer, {key: _record_key(key) for key in missing}, peer, detail)
     return rows
 
 
@@ -3910,8 +4250,14 @@ def sync_pins_with_peer(
         hold = contextlib.nullcontext("") if args.dry_run else their_end.hold(local_token)
         with hold as remote_token:
             tokens = {mine_end.machine: local_token, their_end.machine: remote_token}
-            mine = Inventory.read(mine_end, args.copy)
-            theirs = Inventory.read(their_end, args.copy)
+            mine, theirs = with_graves(
+                (mine_end, their_end),
+                (
+                    Inventory.read(mine_end, args.copy, evidence=False),
+                    Inventory.read(their_end, args.copy, evidence=False),
+                ),
+                carry=not args.dry_run,
+            )
             rows += sync_tombstones(
                 mine_end,
                 their_end,
@@ -3957,8 +4303,13 @@ def _sync_pair(
     hold = contextlib.nullcontext("") if args.dry_run else their_end.hold(local_token)
     with hold as remote_token:
         tokens = {mine_end.machine: local_token, their_end.machine: remote_token}
-        mine = Inventory.read(mine_end, args.copy)
-        theirs = Inventory.read(their_end, args.copy)
+        ends = (mine_end, their_end)
+        mine, theirs = with_graves(
+            ends,
+            (Inventory.read(mine_end, args.copy), Inventory.read(their_end, args.copy)),
+            evidence=True,
+            carry=not args.dry_run,
+        )
         rows += sync_tombstones(mine_end, their_end, mine, theirs, tokens, dry_run=args.dry_run)
         rows += sync_evidence_tombstones(
             mine_end,
@@ -3995,8 +4346,13 @@ def _sync_pair(
                 peer,
                 dry_run=args.dry_run,
             )
-        mine = Inventory.read(mine_end, args.copy) if not args.dry_run else mine
-        theirs = Inventory.read(their_end, args.copy) if not args.dry_run else theirs
+        if not args.dry_run:
+            mine, theirs = with_graves(
+                ends,
+                (Inventory.read(mine_end, args.copy), Inventory.read(their_end, args.copy)),
+                evidence=True,
+                known=(mine, theirs),
+            )
         rows += sync_pins(mine_end, their_end, mine, theirs, tokens, dry_run=args.dry_run)
         rows += sync_evidence(
             mine_end,
@@ -4135,12 +4491,16 @@ def cmd_status(args: _Args) -> int:
     here, others = find_machines(args.remote_scripts, args.machine)
     reached = [machine for machine in others if machine.qualified]
     inventories: dict[str, Inventory] = {
-        here.label: Inventory.read(_endpoint(here), _scope_args(args)),
+        here.label: Inventory.read(_endpoint(here), _scope_args(args), evidence=False),
     }
     rows: list[Row] = []
     for machine in reached:
         try:
-            inventories[machine.label] = Inventory.read(_endpoint(machine), _scope_args(args))
+            inventories[machine.label] = Inventory.read(
+                _endpoint(machine),
+                _scope_args(args),
+                evidence=False,
+            )
         except FleetError as error:
             rows.append(Row("inventory", machine.label, "failed", str(error)))
     copies = copy_overview(inventories)
@@ -4249,8 +4609,13 @@ def cmd_fetch_pins(args: _Args) -> int:
             with lock as local_token:
                 hold = contextlib.nullcontext("") if args.dry_run else remote.hold(local_token)
                 with hold:
-                    mine = Inventory.read(local, [args.name])
-                    theirs = Inventory.read(remote, [args.name])
+                    mine, theirs = with_graves(
+                        (local, remote),
+                        (
+                            Inventory.read(local, [args.name], evidence=False),
+                            Inventory.read(remote, [args.name], evidence=False),
+                        ),
+                    )
                     graves = [*mine.tombstones.values(), *theirs.tombstones.values()]
                     live = [
                         ref
@@ -4528,7 +4893,7 @@ def handoff(
     held: dict[str, tuple[Machine, CopyInfo]] = {}
     inventories: dict[str, Inventory] = {}
     for machine in [here, *peers]:
-        inventory = Inventory.read(_endpoint(machine), [name])
+        inventory = Inventory.read(_endpoint(machine), [name], evidence=False)
         inventories[machine.id] = inventory
         info = inventory.copies.get(name)
         if info is not None:
@@ -4599,7 +4964,9 @@ def handoff(
             )
             target_main = target.probe.main if target.probe is not None else ""
             rows.append(Row(name, target.label, "synced", replicate(step, tokens, target_main)))
-            target_info = Inventory.read(_endpoint(target), [name]).copies.get(name)
+            target_info = Inventory.read(_endpoint(target), [name], evidence=False).copies.get(
+                name,
+            )
             if target_info is None or not target_info.fresh_against(home_info):
                 rows.append(
                     Row(
@@ -4704,6 +5071,7 @@ def handoff_pins(
     home ``save`` no sync carried yet). A pin a tombstone buries (:func:`buried_pin`) stays.
     """
     (source, mine), (peer, theirs) = home, target
+    mine, theirs = with_graves((source, peer), (mine, theirs))
     graves = [*mine.tombstones.values(), *theirs.tombstones.values()]
     missing = sorted(
         ref
@@ -4769,6 +5137,8 @@ class _Args(argparse.Namespace):
     former: str
     ref: list[str]
     have: list[str]
+    ids: bool
+    no_evidence: bool
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -4861,6 +5231,7 @@ def build_parser() -> argparse.ArgumentParser:
             "pins-link",
             "evidence-tombstones-import",
             "evidence-apply",
+            "tombstones-export",
         ),
     )
     _ = agent.add_argument("name", nargs="?", default="")
@@ -4880,6 +5251,8 @@ def build_parser() -> argparse.ArgumentParser:
     _ = agent.add_argument("--former", default="")
     _ = agent.add_argument("--ref", action="append", default=[])
     _ = agent.add_argument("--have", action="append", default=[])
+    _ = agent.add_argument("--ids", action="store_true", help="tombstones as ids alone")
+    _ = agent.add_argument("--no-evidence", action="store_true", help="no evidence listing")
     return parser
 
 
