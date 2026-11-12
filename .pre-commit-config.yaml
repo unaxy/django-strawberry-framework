@@ -85,12 +85,14 @@ repos:
         pass_filenames: false
 
       - id: check-noqa-suppressions
-        name: ruff noqa suppressions (no file-level or blanket noqa, on the site ledger)
+        name: ruff suppressions (no file-level or blanket noqa; noqa and config on their ledgers)
         entry: uv run python scripts/check_noqa_suppressions.py
         language: system
-        # Every tracked file, as in CI: the ledger covers the whole tree. Fires on any
-        # staged `.py` or the ledger.
-        files: ^(.*\.py|scripts/noqa_suppressions\.toml)$
+        # Every tracked file, as in CI: the ledgers cover the whole tree and ruff's effective
+        # config. Fires on anything that can change either: a staged `.py` / `.pyi` / notebook,
+        # any ruff config, `.gitignore` (ruff skips ignored files), `uv.lock` (the ruff
+        # version decides the stable rules), or a ledger.
+        files: ^(.*\.(py|pyi|ipynb)|(.*/)?(pyproject\.toml|\.?ruff\.toml|\.gitignore)|uv\.lock|scripts/(noqa|ruff_config)_suppressions\.toml)$
         pass_filenames: false
 
       - id: check-public-types

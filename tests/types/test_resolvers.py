@@ -882,7 +882,7 @@ def test_forward_resolver_without_related_model_propagates_attribute_error() -> 
 #
 # Mock pattern (per spec-023 Decision 5 + ``Mock contract`` block):
 #
-# ruff: disable[ERA001]
+# ruff: disable[ERA001] - the mock pattern, quoted as prose
 #     from unittest.mock import Mock
 #     import django_strawberry_framework.types.resolvers as resolvers_module
 #     mock_router = Mock()

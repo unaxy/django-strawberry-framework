@@ -369,12 +369,27 @@ def _approved(commit: str) -> bool:
     return bool(result.stdout.strip())
 
 
-def growth_violations(since: str, until: str, ledger_path: str = LEDGER) -> Iterator[Violation]:
+def _labelled(counts: Counter[Entry], *, per_entry: bool) -> Counter[str]:
+    """Return ``counts`` keyed for the growth walk: per kind, or per site and kind."""
+    if not per_entry:
+        return Counter({f"`{kind}`": total for kind, total in kind_totals(counts).items()})
+    return Counter({f"`{kind}` at `{site}`": count for (site, kind), count in counts.items()})
+
+
+def growth_violations(
+    since: str,
+    until: str,
+    ledger_path: str = LEDGER,
+    *,
+    per_entry: bool = False,
+) -> Iterator[Violation]:
     """Yield one violation per kind each unapproved commit after ``since`` raises in ``ledger_path``.
 
     The walk follows ``until``'s first parents back to ``since``, comparing each
     commit's ledger totals with its parent's; the commit that first added the ledger
     sets its baseline and is skipped. ``since`` empty or not in the history yields nothing.
+    ``per_entry`` compares each site's count instead of each kind's total, for a ledger
+    whose sites differ in reach, so moving an entry to another site is growth too.
 
     Raises:
         subprocess.CalledProcessError: git cannot list the range.
@@ -394,15 +409,15 @@ def growth_violations(since: str, until: str, ledger_path: str = LEDGER) -> Iter
     for commit in commits:
         if commit == birth:
             continue
-        before = kind_totals(_ledger_at(f"{commit}^", ledger_path))
-        after = kind_totals(_ledger_at(commit, ledger_path))
-        grown = sorted(kind for kind in after if after[kind] > before[kind])
+        before = _labelled(_ledger_at(f"{commit}^", ledger_path), per_entry=per_entry)
+        after = _labelled(_ledger_at(commit, ledger_path), per_entry=per_entry)
+        grown = sorted(label for label in after if after[label] > before[label])
         if grown and not _approved(commit):
-            for kind in grown:
+            for label in grown:
                 yield Violation(
                     ledger_path,
                     1,
-                    f"{commit[:12]} raises `{kind}` from {before[kind]} to {after[kind]} "
+                    f"{commit[:12]} raises {label} from {before[label]} to {after[label]} "
                     f"without a `{TRAILER}:` trailer (the maintainer's consent)",
                 )
 

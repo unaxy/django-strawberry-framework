@@ -82,7 +82,7 @@ class ItemFilter(FilterSet):
     #   spec-034 ships cascade row-visibility and keeps the filter gates unchanged (its
     #   Decision 11), so this variant has no owning card yet. Uncomment in the change that lands
     #   the hook contract and drop the ERA001 fence around it.
-    # ruff: disable[ERA001]
+    # ruff: disable[ERA001] - a hook to uncomment when its contract lands
     # def check_entries_permission(self, queryset, request):
     #     """Only staff users may filter by Item.entries."""
     #     user = getattr(request, "user", None)

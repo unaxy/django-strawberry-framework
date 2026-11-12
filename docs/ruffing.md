@@ -15,9 +15,15 @@ Rules of the road:
 - A rule is off only by design (see [Off by design](#off-by-design)).
 - Update the numbers below in the same change that moves them; [Measuring](#measuring) has the commands.
 - `scripts/check_noqa_suppressions.py` (pre-commit and the CI lint job) holds every site to the generated ledger
-  `scripts/noqa_suppressions.toml`: each code suppressed there, and its `# noqa` lines with no reason (`bare`). A
-  count may only fall; a new suppression, or a new one without a reason, fails. It also refuses a file-level
-  `# ruff: noqa` and a blanket `# noqa`.
+  `scripts/noqa_suppressions.toml`: each code suppressed there, and its `# noqa` lines and `# ruff: disable[...]`
+  fences with no reason (`bare`). A count may only fall; a new suppression, or a new one without a reason, fails.
+  It also refuses a file-level `# ruff: noqa`, a blanket or malformed `# noqa`, and every way a file escapes ruff
+  (an exclude, `lint.exclude`, a nested ruff config, a tracked notebook).
+- The same script holds ruff's effective config to `scripts/ruff_config_suppressions.toml`, read from
+  `ruff check --show-settings` so every spelling counts the same: each stable rule no file runs (unselected or
+  ignored), and each rule a per-file ignore turns off, per glob, a prefix expanded to its codes. A new entry fails,
+  and in CI a commit that adds one, even by moving a per-file ignore to a wider glob, needs the
+  `Suppression-Growth-Approved:` trailer.
 
 ## Status
 
@@ -30,7 +36,8 @@ Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts inc
 | Lines carrying `# noqa` | 375, in 121 files |
 | `# noqa` lines with no reason | 0 |
 | Site ledger (`scripts/noqa_suppressions.toml`) | 385 suppressed codes and 0 `bare` lines, at 313 sites |
-| `# ruff: disable[...]` fences | 9, every one `ERA001` around a TODO-anchored pseudo block |
+| Config ledger (`scripts/ruff_config_suppressions.toml`) | 9 rules off everywhere, 112 per-file entries over 14 globs |
+| `# ruff: disable[...]` fences | 9, every one `ERA001` around a TODO-anchored pseudo block, each with its reason |
 | File-level `# ruff: noqa` | 0 |
 | Complexity ratchets | `max-complexity` 45, `max-branches` 39, `max-returns` 20, `max-args` 18, `max-statements` 133, `max-positional-args` 10 |
 
@@ -160,7 +167,8 @@ Each row gives the number of sites the ignore hides today and the reason.
 
 ## Files ruff skips
 
-`ruff check --show-files` lists exactly the tracked Python files plus `pyproject.toml`. The files it skips are:
+`ruff check --show-files` lists exactly the tracked Python files plus `pyproject.toml`;
+`scripts/check_noqa_suppressions.py` fails if a tracked `.py` or `.pyi` drops out of it. The files it skips are:
 
 - git-ignored scratch trees (`docs/shadow/`, `.venv/`, `.work/`), through `respect-gitignore`;
 - `hunt-ws/` (`extend-exclude`), the untracked bug-hunt evidence copies, which a repo-wide `--fix` would otherwise
@@ -295,6 +303,11 @@ Each item's commit holds the detail (`git log -S '<code>' -- pyproject.toml`).
 40. A reason on every `# noqa`: the last 47 bare lines carry one, and one redundant test-local import in
     `tests/test_resource_policy.py` joined its module's top-level import. The ledger holds `bare` at 0, so a new bare
     `# noqa` fails.
+47. The gate hardened past comments: the config ledger `scripts/ruff_config_suppressions.toml` (rules off
+    everywhere and per glob, from ruff's effective settings, walked per entry in CI); a tracked file ruff skips,
+    `lint.exclude`, a nested ruff config or a notebook is refused; fences in any spacing ruff reads are counted and
+    need a reason (the nine `ERA001` fences got theirs); a malformed `# noqa` (`# noqa : X`, `# noqa X`) is refused;
+    a test runs each comment form through ruff and fails if one it honours goes uncounted.
 
 ## Measuring
 
@@ -305,7 +318,7 @@ uv run ruff check --show-settings django_strawberry_framework/__init__.py   # li
 uv run ruff check --exit-zero --statistics --config 'lint.per-file-ignores={}' --select <codes> tests   # sites a per-file ignore hides
 uv run ruff check --exit-zero --statistics --select SLF001,TRY003,EM101,EM102,CPY001,FIX002,TD003 .
 git grep -c '# noqa' -- '*.py'                  # then group by path prefix
-uv run python scripts/check_noqa_suppressions.py   # suppressed codes and bare lines, from comment tokens
+uv run python scripts/check_noqa_suppressions.py   # suppressed codes, bare lines, config off / per-file entries
 ```
 
 Sum `scripts/noqa_suppressions.toml` by path prefix or by code for the per-area and per-code tables: each key is a

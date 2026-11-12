@@ -33,7 +33,7 @@ present `filters.py` / `orders.py` modules; `aggregate_class` /
 
 # Future imports (uncomment as Layer-3 subsystems ship):
 #
-# ruff: disable[ERA001]
+# ruff: disable[ERA001] - imports to uncomment as each subsystem ships
 # needs the aggregates card:
 # from apps.products import aggregates
 # needs spec-061:
@@ -90,7 +90,7 @@ class CategoryType(DjangoType):
         filterset_class = filters.CategoryFilter
         orderset_class = orders.CategoryOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
-        # ruff: disable[ERA001]
+        # ruff: disable[ERA001] - fields to uncomment as each card ships
         # needs spec-062:
         # search_fields = ("name", "description")
         # needs the aggregates card + aggregates.py:
@@ -140,7 +140,7 @@ class ItemType(DjangoType):
         filterset_class = filters.ItemFilter
         orderset_class = orders.ItemOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
-        # ruff: disable[ERA001]
+        # ruff: disable[ERA001] - fields to uncomment as each card ships
         # needs spec-062:
         # search_fields = ("name", "description", "category__name", "category__description")
         # needs the aggregates card + aggregates.py:
@@ -190,7 +190,7 @@ class PropertyType(DjangoType):
         filterset_class = filters.PropertyFilter
         orderset_class = orders.PropertyOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
-        # ruff: disable[ERA001]
+        # ruff: disable[ERA001] - fields to uncomment as each card ships
         # needs spec-062:
         # search_fields = ("name", "description", "category__name", "category__description")
         # needs the aggregates card + aggregates.py:
@@ -241,7 +241,7 @@ class EntryType(DjangoType):
         filterset_class = filters.EntryFilter
         orderset_class = orders.EntryOrder
         # Future Layer-3 additions - uncomment each as the relevant card ships:
-        # ruff: disable[ERA001]
+        # ruff: disable[ERA001] - fields to uncomment as each card ships
         # needs spec-062:
         # search_fields = ("value", "property__name", "item__name")
         # needs the aggregates card + aggregates.py:

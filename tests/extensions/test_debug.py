@@ -975,7 +975,7 @@ def test_nested_sync_operations_share_the_log_and_cross_attribute(
 # test - selected by node id, never a copied script - in an isolated
 # ``strawberry-graphql==0.328.0`` environment:
 #
-# ruff: disable[ERA001]
+# ruff: disable[ERA001] - a shell recipe, not code
 #   uv run pytest -o addopts="-v -n0" \
 #     "tests/extensions/test_debug.py::test_concurrent_sync_operations_use_isolated_instances"
 # ruff: enable[ERA001]

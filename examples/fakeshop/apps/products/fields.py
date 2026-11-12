@@ -241,7 +241,7 @@ class EntryFieldSet(fieldsets.AdvancedFieldSet):  # pyright: ignore[reportAny]
         """Return created_date truncated to the viewer's visibility tier."""
         return _resolve_date(root.created_date, info, "products.view_entry")
 
-    # ruff: disable[ERA001]
+    # ruff: disable[ERA001] - a permission hook to uncomment when its card lands
     # def check_updated_date_permission(self, info):
     #     """Gate: anonymous users cannot see updated_date."""
     #     user = _user(info)

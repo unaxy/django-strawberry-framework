@@ -76,10 +76,13 @@ jobs:
           UNTIL: ${{ github.event.pull_request.head.sha || github.sha }}
         run: uv run python scripts/check_type_suppressions.py --since "$SINCE" --until "$UNTIL"
       - name: Ruff noqa suppressions
-        # No file-level `# ruff: noqa` or blanket `# noqa`, and every site's suppressed
-        # codes and reasonless `# noqa` lines match scripts/noqa_suppressions.toml. A
-        # commit may raise a ledger total only with the same `Suppression-Growth-Approved:`
-        # trailer; a scheduled or manual run has no base and skips the walk.
+        # No file-level `# ruff: noqa` or blanket `# noqa`; every site's suppressed codes
+        # and reasonless `# noqa` lines and fences match scripts/noqa_suppressions.toml; the
+        # rules ruff's effective config turns off, everywhere or per glob, match
+        # scripts/ruff_config_suppressions.toml; and ruff lints every tracked `.py`. A commit
+        # may raise a noqa total, or add any config entry, only with the same
+        # `Suppression-Growth-Approved:` trailer; a scheduled or manual run has no base and
+        # skips the walk.
         env:
           SINCE: ${{ github.event.pull_request.base.sha || github.event.before }}
           UNTIL: ${{ github.event.pull_request.head.sha || github.sha }}
