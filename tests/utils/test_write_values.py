@@ -1499,7 +1499,7 @@ def test_refused_save_follows_a_cause_or_the_handlers_reraise_never_another_fram
             if link == "handler-from-none":
                 raise IntegrityError(msg) from None
             if link == "handler-reraise":
-                raise IntegrityError(msg)  # noqa: B904
+                raise IntegrityError(msg)  # noqa: B904 - the unchained re-raise is the case under test
             if link == "helper-database-error":
                 _translate(IntegrityError)
             if link == "helper-other-error":

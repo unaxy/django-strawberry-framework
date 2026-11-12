@@ -117,7 +117,7 @@ def test_unwrap_return_type_handles_bare_typing_list() -> None:
     """
     # basedpyright: the bare deprecated ``typing.List`` alias is the input under test; ``list``
     # is covered by the next test and cannot reach the ``get_args(...) == ()`` list-origin branch
-    assert unwrap_return_type(typing.List) is Any  # noqa: UP006  # pyright: ignore[reportDeprecated]
+    assert unwrap_return_type(typing.List) is Any  # noqa: UP006 - the deprecated alias is the value under test  # pyright: ignore[reportDeprecated]
 
 
 def test_unwrap_return_type_handles_bare_builtin_list() -> None:

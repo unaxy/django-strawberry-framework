@@ -419,7 +419,7 @@ def test_relation_connection_teardown_inverts_a_replaced_annotations_dict() -> N
 
     # Raw ``__dict__`` on purpose: this asserts IDENTITY of the stored dict, and
     # ``inspect.get_annotations`` returns a copy.
-    assert CategoryType.__dict__["__annotations__"] is replaced  # noqa: RUF063
+    assert CategoryType.__dict__["__annotations__"] is replaced  # noqa: RUF063 - asserts identity of the stored dict
     assert replaced == {"name": str, "items": list[Item]}
 
 

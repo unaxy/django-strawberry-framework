@@ -201,7 +201,7 @@ def numeric_refusing_postgresql(*routed: type[models.Model]) -> Generator[str, N
         ],
         sql: str,
         params: object,
-        many: bool,  # noqa: FBT001
+        many: bool,  # noqa: FBT001 - Django's execute_wrapper signature
         context: dict[str, object],
     ) -> object:
         if refuses_numeric_format(wrapper, [params]):

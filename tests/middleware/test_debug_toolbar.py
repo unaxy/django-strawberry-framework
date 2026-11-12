@@ -84,7 +84,7 @@ def middleware(toolbar_leaf: ModuleType) -> DebugToolbarMiddleware:
     ``get_response`` the stock ``__init__`` inspects (sync -> not async mode).
     """
     # The leaf imports only once ``toolbar_leaf`` has installed the toolbar app.
-    from django_strawberry_framework.middleware.debug_toolbar import (  # noqa: PLC0415
+    from django_strawberry_framework.middleware.debug_toolbar import (  # noqa: PLC0415 - importable only once the toolbar app is installed
         DebugToolbarMiddleware,
     )
 

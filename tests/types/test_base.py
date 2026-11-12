@@ -3583,7 +3583,7 @@ def test_auto_string_spelling_accepted_without_future_import() -> None:
             fields = ("id", "name")
 
         # basedpyright: the unimported string spelling of auto is the marker under test
-        name: "auto"  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+        name: "auto"  # noqa: F821 - the unresolvable annotation is under test  # pyright: ignore[reportUndefinedVariable]
 
     assert StringAutoType.__annotations__["name"] is str
     finalize_django_types()

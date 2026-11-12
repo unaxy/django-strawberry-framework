@@ -2835,7 +2835,7 @@ def _global_id_from_filter_text(value: object) -> relay.GlobalID:
     # Strawberry's own decode reads the value as ``str`` and raises ``ValueError`` for
     # anything else, so a non-string takes the same malformed-payload route.
     if not isinstance(value, str):
-        raise ValueError("a GlobalID filter value is a base64 string")  # noqa: TRY004
+        raise ValueError("a GlobalID filter value is a base64 string")  # noqa: TRY004 - Strawberry's decode raises ValueError; callers catch that
     return relay.GlobalID.from_id(value)
 
 

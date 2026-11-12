@@ -659,8 +659,8 @@ class GraphQLTestMixin:
         """
         details = msg if msg is not None else {"errors": resp.errors, "data": resp.data}
         # The mixin delegates to the host TestCase's assertions, so a bare `assert` would be wrong.
-        self.assertEqual(resp.response.status_code, 200, details)  # noqa: PT009
-        self.assertIsNone(resp.errors, details)  # noqa: PT009
+        self.assertEqual(resp.response.status_code, 200, details)  # noqa: PT009 - the mixin delegates to the host TestCase
+        self.assertIsNone(resp.errors, details)  # noqa: PT009 - the mixin delegates to the host TestCase
 
     def assertResponseHasErrors(  # noqa: N802 - unittest/graphene assertion vocabulary
         self: _GraphQLTestHost,

@@ -3,7 +3,7 @@
 # suppresses each ruff code (`# noqa` lines and `# ruff: disable[...]` fences) and
 # its `# noqa` lines with no reason (`bare`); a count may only fall.
 
-"conftest.py::_django_db_signature" = { FBT002 = 3, bare = 3 }
+"conftest.py::_django_db_signature" = { FBT002 = 3 }
 "conftest.py::_install_postgres_connection_tracking" = { PLC0415 = 1 }
 "django_strawberry_framework/__init__.py::__getattr__" = { ANN401 = 1, PLC0415 = 1 }
 "django_strawberry_framework/_completion.py::_gather_with_cancel" = { PERF203 = 1 }
@@ -19,7 +19,7 @@
 "django_strawberry_framework/auth/mutations.py::_channels_logout" = { PLC0415 = 1 }
 "django_strawberry_framework/auth/mutations.py::_django_http_login_establish" = { B904 = 1, BLE001 = 1 }
 "django_strawberry_framework/auth/mutations.py::bind_auth_mutations" = { PLC0415 = 1 }
-"django_strawberry_framework/connection.py::DjangoConnectionField" = { N802 = 1, bare = 1 }
+"django_strawberry_framework/connection.py::DjangoConnectionField" = { N802 = 1 }
 "django_strawberry_framework/connection.py::_synthesized_signature" = { PLC0415 = 3 }
 "django_strawberry_framework/consumers.py::DjangoWebSocketHostValidator.__call__" = { PLC0415 = 1, TRY401 = 1 }
 "django_strawberry_framework/consumers.py::_refreshed_actor" = { PLC0415 = 1 }
@@ -35,7 +35,7 @@
 "django_strawberry_framework/filters/base.py::RangeField.default_validators" = { RUF012 = 1 }
 "django_strawberry_framework/filters/base.py::_filter_set_class" = { PLC0415 = 1 }
 "django_strawberry_framework/filters/base.py::_filterset_lookup_operand" = { PLC0415 = 1 }
-"django_strawberry_framework/filters/base.py::_global_id_from_filter_text" = { TRY004 = 1, bare = 1 }
+"django_strawberry_framework/filters/base.py::_global_id_from_filter_text" = { TRY004 = 1 }
 "django_strawberry_framework/filters/base.py::_refuses_deep_copy" = { BLE001 = 1 }
 "django_strawberry_framework/filters/base.py::_walks_declared_lookup" = { PLC0415 = 1 }
 "django_strawberry_framework/filters/inputs.py::_answers_sample" = { PLC0415 = 1 }
@@ -56,12 +56,12 @@
 "django_strawberry_framework/filters/sets.py::_widget_keys" = { BLE001 = 1 }
 "django_strawberry_framework/forms/resolvers.py::_blank_type_errors" = { BLE001 = 1 }
 "django_strawberry_framework/keyset.py::_cursor_crypto_types" = { PLC0415 = 2 }
-"django_strawberry_framework/list_field.py::DjangoListField" = { N802 = 1, bare = 1 }
+"django_strawberry_framework/list_field.py::DjangoListField" = { N802 = 1 }
 "django_strawberry_framework/list_field.py::_order_normalization_scope" = { PLC0415 = 1 }
 "django_strawberry_framework/list_field.py::_synthesized_list_signature" = { PLC0415 = 1 }
 "django_strawberry_framework/middleware/debug_toolbar.py::DebugToolbarMiddleware._postprocess" = { BLE001 = 1 }
-"django_strawberry_framework/middleware/debug_toolbar.py::_DebugToolbarMiddleware" = { E402 = 1, bare = 1 }
-"django_strawberry_framework/mutations/fields.py::DjangoMutationField" = { N802 = 1, bare = 1 }
+"django_strawberry_framework/middleware/debug_toolbar.py::_DebugToolbarMiddleware" = { E402 = 1 }
+"django_strawberry_framework/mutations/fields.py::DjangoMutationField" = { N802 = 1 }
 "django_strawberry_framework/mutations/permissions.py::DjangoModelPermission.has_permission" = { ANN401 = 2, PLC0415 = 1 }
 "django_strawberry_framework/mutations/resolvers.py::_AsyncResolverEntry.__call__" = { A002 = 1 }
 "django_strawberry_framework/mutations/resolvers.py::_SyncResolverEntry.__call__" = { A002 = 1 }
@@ -76,32 +76,32 @@
 "django_strawberry_framework/optimizer/nested_fetch.py::WindowedPrefetchStrategy.plan" = { PLC0415 = 1 }
 "django_strawberry_framework/optimizer/nested_fetch.py::_builtin_strategies" = { PLC0415 = 1 }
 "django_strawberry_framework/optimizer/nested_planner.py::_every_backend_supports_index_column_ordering" = { BLE001 = 1 }
-"django_strawberry_framework/optimizer/nested_planner.py::plan_connection_relation" = { B009 = 1, bare = 1 }
+"django_strawberry_framework/optimizer/nested_planner.py::plan_connection_relation" = { B009 = 1 }
 "django_strawberry_framework/optimizer/walker.py::_has_custom_id_resolver" = { PLC0415 = 1 }
 "django_strawberry_framework/optimizer/walker.py::_relay_id_field" = { PLC0415 = 2 }
 "django_strawberry_framework/orders/base.py::_order_set_class" = { PLC0415 = 1 }
 "django_strawberry_framework/registry.py::TypeRegistry.definition_for_graphql_name" = { PLC0415 = 1 }
-"django_strawberry_framework/relay.py::DjangoNodeField" = { N802 = 1, bare = 1 }
-"django_strawberry_framework/relay.py::DjangoNodesField" = { N802 = 1, bare = 1 }
+"django_strawberry_framework/relay.py::DjangoNodeField" = { N802 = 1 }
+"django_strawberry_framework/relay.py::DjangoNodesField" = { N802 = 1 }
 "django_strawberry_framework/relay.py::_decode_and_coerce" = { BLE001 = 1 }
 "django_strawberry_framework/resource_policy.py::ResourceLimitExceeded" = { N818 = 1 }
-"django_strawberry_framework/resource_policy.py::_attach_cleanup_note" = { B010 = 1, bare = 1 }
+"django_strawberry_framework/resource_policy.py::_attach_cleanup_note" = { B010 = 1 }
 "django_strawberry_framework/resource_policy.py::_cleanup_rejected_async_iterable" = { BLE001 = 1 }
 "django_strawberry_framework/rest_framework/inputs.py::_default_full_shape_identity" = { BLE001 = 1 }
 "django_strawberry_framework/rest_framework/resolvers.py::_scope_specs_over_serializer" = { S101 = 1 }
 "django_strawberry_framework/routers.py::_build_router_class_uncached" = { PLC0415 = 4, PLW0603 = 1 }
 "django_strawberry_framework/schema.py::DjangoSchema.get_extensions" = { BLE001 = 1 }
 "django_strawberry_framework/testing/client.py::GraphQLTestMixin.assertResponseHasErrors" = { N802 = 1, PT009 = 1 }
-"django_strawberry_framework/testing/client.py::GraphQLTestMixin.assertResponseNoErrors" = { N802 = 1, PT009 = 2, bare = 2 }
+"django_strawberry_framework/testing/client.py::GraphQLTestMixin.assertResponseNoErrors" = { N802 = 1, PT009 = 2 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestHost.assertEqual" = { N802 = 1 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestHost.assertIsNone" = { N802 = 1 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestHost.assertTrue" = { N802 = 1 }
 "django_strawberry_framework/testing/relay.py::global_id_for" = { A002 = 1 }
-"django_strawberry_framework/types/base.py::DjangoType.get_queryset" = { ANN401 = 1, bare = 1 }
+"django_strawberry_framework/types/base.py::DjangoType.get_queryset" = { ANN401 = 1 }
 "django_strawberry_framework/types/base.py::_validate_filterset_class" = { PLC0415 = 1 }
 "django_strawberry_framework/types/base.py::_validate_orderset_class" = { PLC0415 = 1 }
 "django_strawberry_framework/types/base.py::auto" = { PYI042 = 1 }
-"django_strawberry_framework/types/definition.py::DjangoTypeDefinition.related_target_for" = { PLC0415 = 1, bare = 1 }
+"django_strawberry_framework/types/definition.py::DjangoTypeDefinition.related_target_for" = { PLC0415 = 1 }
 "django_strawberry_framework/types/finalizer.py::_audit_filter_copies" = { PLC0415 = 2 }
 "django_strawberry_framework/types/finalizer.py::_audit_filterset_subpass_2_5" = { PLC0415 = 2 }
 "django_strawberry_framework/types/finalizer.py::_audit_globalid_filter_strategies" = { PLC0415 = 3 }
@@ -109,17 +109,17 @@
 "django_strawberry_framework/types/finalizer.py::_audit_unregistered_related_filter_targets" = { PLC0415 = 1 }
 "django_strawberry_framework/types/finalizer.py::_bind_filtersets" = { PLC0415 = 3 }
 "django_strawberry_framework/types/finalizer.py::_bind_ordersets" = { PLC0415 = 3 }
-"django_strawberry_framework/types/finalizer.py::_bind_sidecar_sets" = { PERF203 = 1, bare = 1 }
+"django_strawberry_framework/types/finalizer.py::_bind_sidecar_sets" = { PERF203 = 1 }
 "django_strawberry_framework/types/finalizer.py::_expand_orderset" = { PLC0415 = 1 }
 "django_strawberry_framework/types/finalizer.py::_synthesize_relation_connections" = { PLC0415 = 1 }
 "django_strawberry_framework/types/finalizer.py::finalize_django_types" = { PLC0415 = 3 }
 "django_strawberry_framework/types/relay.py::_node_value_or_none" = { PLC0415 = 1 }
 "django_strawberry_framework/types/relay.py::_node_values" = { PLC0415 = 1 }
 "django_strawberry_framework/types/relay.py::_resolve_globalid_strategy" = { PLC0415 = 1 }
-"django_strawberry_framework/types/relay.py::_validated_globalid_setting" = { PLC0415 = 1, bare = 1 }
+"django_strawberry_framework/types/relay.py::_validated_globalid_setting" = { PLC0415 = 1 }
 "django_strawberry_framework/types/resolvers.py::_build_fk_id_stub" = { BLE001 = 1 }
 "django_strawberry_framework/utils/connections.py::UnwindowableConnection" = { N818 = 1 }
-"django_strawberry_framework/utils/errors.py::_refused_read_back" = { S608 = 1, bare = 1 }
+"django_strawberry_framework/utils/errors.py::_refused_read_back" = { S608 = 1 }
 "django_strawberry_framework/utils/permissions.py::_permission_mixin" = { PLC0415 = 1 }
 "django_strawberry_framework/utils/querysets.py::_bake_deferred_filter_or_defect" = { BLE001 = 2 }
 "django_strawberry_framework/utils/querysets.py::_reconstruction_defect" = { BLE001 = 1 }
@@ -164,9 +164,9 @@
 "examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_work_attempts" = { A002 = 1 }
 "examples/fakeshop/apps/kanban/schema.py::Query._ready_cards" = { A002 = 1 }
 "examples/fakeshop/apps/library/models.py::Book.subtitle" = { DJ001 = 1 }
-"examples/fakeshop/apps/library/models.py::Consignment.distributorRef" = { N815 = 1, bare = 1 }
-"examples/fakeshop/apps/library/models.py::Distributor.consignmentItems" = { N815 = 1, bare = 1 }
-"examples/fakeshop/apps/library/models.py::Distributor.displayName" = { N815 = 1, bare = 1 }
+"examples/fakeshop/apps/library/models.py::Consignment.distributorRef" = { N815 = 1 }
+"examples/fakeshop/apps/library/models.py::Distributor.consignmentItems" = { N815 = 1 }
+"examples/fakeshop/apps/library/models.py::Distributor.displayName" = { N815 = 1 }
 "examples/fakeshop/apps/library/schema.py" = { E501 = 1 }
 "examples/fakeshop/apps/library/schema.py::Query._all_library_books" = { A002 = 1 }
 "examples/fakeshop/apps/library/schema.py::Query._all_library_branches" = { A002 = 1 }
@@ -193,9 +193,9 @@
 "examples/fakeshop/apps/scalars/schema.py::Query._all_scalar_specimen_tags" = { A002 = 1 }
 "examples/fakeshop/apps/scalars/schema.py::Query._all_scalar_specimens" = { A002 = 1 }
 "examples/fakeshop/apps/scalars/schema.py::Query._all_scalar_specimens_by_parent_stamp" = { A002 = 1 }
-"examples/fakeshop/config/test_settings.py::*" = { F403 = 1, bare = 1 }
+"examples/fakeshop/config/test_settings.py::*" = { F403 = 1 }
 "examples/fakeshop/test_query/test_converter_outputs_api.py::_choice_model.ChoiceCarrier" = { DJ001 = 1 }
-"examples/fakeshop/test_query/test_filter_absence_api.py::_absence_schema" = { N806 = 1, bare = 1 }
+"examples/fakeshop/test_query/test_filter_absence_api.py::_absence_schema" = { N806 = 1 }
 "examples/fakeshop/test_query/test_filter_apply_arguments_api.py::test_nested_logic_and_real_related_hops_share_the_same_depth_budget" = { PLC0415 = 2 }
 "examples/fakeshop/test_query/test_filter_declarations_api.py::test_a_path_member_beside_a_declared_filter_the_converter_names_alike_names_the_path.PathNamingFilter" = { N815 = 1 }
 "examples/fakeshop/test_query/test_filter_widget_binding_api.py::test_a_split_widget_leaves_disabled_and_explicit_physical_values_in_control" = { PLC0415 = 1 }
@@ -209,9 +209,9 @@
 "examples/fakeshop/test_query/test_library_shapes_api.py::_BOOK_NAME_TERM_HOOKS" = { S610 = 1 }
 "examples/fakeshop/test_query/test_library_shapes_api.py::_BOOK_TEXT_TERM_HOOKS" = { FBT003 = 1, S610 = 5, S611 = 5 }
 "examples/fakeshop/test_query/test_multi_db.py::_build_loan_filter_test_schema._LoanFilterShardQuery._loans_on_shard_b" = { A002 = 1 }
-"examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::array_consumer" = { PLC0415 = 1, bare = 1 }
-"examples/fakeshop/test_query/test_raw_filter_forms_api.py::_split_widget_schema" = { PLC0415 = 1, bare = 1 }
-"examples/fakeshop/test_query/test_save_time_refused_row_api.py::_consumer_write" = { B904 = 1, bare = 1 }
+"examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::array_consumer" = { PLC0415 = 1 }
+"examples/fakeshop/test_query/test_raw_filter_forms_api.py::_split_widget_schema" = { PLC0415 = 1 }
+"examples/fakeshop/test_query/test_save_time_refused_row_api.py::_consumer_write" = { B904 = 1 }
 "examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::_typed_queryset_path_holder.Query._rows" = { A002 = 1 }
 "examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_project_lookup_over_an_integer_annotation_receives_the_number_as_sent.Query._rows" = { A002 = 1 }
 "examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_reverse_alias_added_only_by_filter_queryset_keeps_its_integer_target.Query._rows" = { A002 = 1 }
@@ -220,19 +220,19 @@
 "examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_projected_child_lookup_crossing_relations_uses_its_declaring_model.Query._rows" = { A002 = 1 }
 "examples/fakeshop/test_query/test_scalars_mutation_api.py::_amount_select_decimal_spellings.observe" = { FBT001 = 1 }
 "scripts/_locks.py::try_lock" = { PLC0415 = 2 }
-"scripts/check_trailing_commas.py::_format_graphql" = { PLC0415 = 1, bare = 1 }
+"scripts/check_trailing_commas.py::_format_graphql" = { PLC0415 = 1 }
 "scripts/review_historical_package_snapshot_at_commit.py::_publish_staged_snapshot" = { BLE001 = 1 }
 "scripts/work.py::_abs" = { PTH100 = 1 }
 "scripts/work.py::_prove_state" = { PLC0415 = 2 }
 "scripts/work.py::_workspace_state" = { PLC0415 = 2 }
 "scripts/workspace.py::PG_PASSWORD" = { S105 = 1 }
-"scripts/workspace.py::_copy_entry" = { PTH115 = 1, bare = 1 }
-"scripts/workspace.py::file_hash" = { PTH115 = 1, bare = 1 }
+"scripts/workspace.py::_copy_entry" = { PTH115 = 1 }
+"scripts/workspace.py::file_hash" = { PTH115 = 1 }
 "tests/_idioms.py::consumer_module" = { S102 = 1 }
 "tests/_idioms.py::run_capturing" = { BLE001 = 1 }
 "tests/_postgres_fields.py::real_array_of" = { PLC0415 = 1 }
-"tests/_postgresql_stand_in.py::numeric_refusing_postgresql.refuse" = { FBT001 = 1, bare = 1 }
-"tests/auth/test_sessions.py::test_classify_channels_scope_without_channels_raises_the_install_hint" = { PLC0415 = 1, bare = 1 }
+"tests/_postgresql_stand_in.py::numeric_refusing_postgresql.refuse" = { FBT001 = 1 }
+"tests/auth/test_sessions.py::test_classify_channels_scope_without_channels_raises_the_install_hint" = { PLC0415 = 1 }
 "tests/base/test_init.py::test_dynamic_drf_soft_exports_via_getattr" = { PLC0415 = 1 }
 "tests/base/test_init.py::test_star_import_preserves_namespace_hygiene" = { S102 = 1 }
 "tests/extensions/test_debug.py" = { ERA001 = 1 }
@@ -248,7 +248,7 @@
 "tests/forms/test_converter.py::test_postgres_array_form_fields_read_a_list" = { PLC0415 = 1 }
 "tests/forms/test_inputs.py::_pg_tag_list_field" = { PLC0415 = 1 }
 "tests/forms/test_inputs.py::_pg_tags_model" = { PLC0415 = 1 }
-"tests/forms/test_resolvers.py::_ExcludedPrivateForm.Meta.exclude" = { DJ006 = 1, bare = 1 }
+"tests/forms/test_resolvers.py::_ExcludedPrivateForm.Meta.exclude" = { DJ006 = 1 }
 "tests/forms/test_resolvers.py::_array_column_and_field" = { PLC0415 = 2 }
 "tests/forms/test_resolvers.py::_blank_tags_model" = { PLC0415 = 1 }
 "tests/forms/test_resolvers.py::_nullable_array_column" = { PLC0415 = 2 }
@@ -256,12 +256,12 @@
 "tests/forms/test_resolvers.py::test_is_unstorable_blank_on_postgres_columns" = { PLC0415 = 1 }
 "tests/forms/test_resolvers.py::test_modelform_disabled_split_array_field_keeps_a_stored_list_past_size" = { PLC0415 = 1 }
 "tests/forms/test_resolvers.py::test_modelform_unrelated_save_data_error_propagates" = { PLC0415 = 1 }
-"tests/middleware/test_debug_toolbar.py::middleware" = { PLC0415 = 1, bare = 1 }
+"tests/middleware/test_debug_toolbar.py::middleware" = { PLC0415 = 1 }
 "tests/middleware/test_debug_toolbar.py::test_package_and_middleware_imports_stay_clean_without_toolbar" = { S102 = 1 }
 "tests/mutations/test_inputs.py::_camel_collide_write_input.CamelCollide" = { N815 = 1 }
 "tests/mutations/test_inputs.py::_camel_collide_write_input.CamelCollideForm" = { N815 = 1 }
 "tests/mutations/test_inputs.py::_camel_collide_write_input.CamelCollideSer" = { N815 = 1 }
-"tests/mutations/test_write_transaction.py::_window_router" = { PLC0415 = 1, bare = 1 }
+"tests/mutations/test_write_transaction.py::_window_router" = { PLC0415 = 1 }
 "tests/mutations/test_write_transaction.py::test_a_window_cancelled_during_its_enter_still_exits_the_transaction_it_opened" = { PLW0108 = 1 }
 "tests/optimizer/_link_models.py::LnkOptionalPairChild.p_code" = { DJ001 = 1 }
 "tests/optimizer/test_extension.py" = { E501 = 4 }
@@ -274,9 +274,8 @@
 "tests/test_lateral_pg_parity.py::test_stray_executor_thread_connections_are_tracked_for_session_close" = { PLC0415 = 1 }
 "tests/test_prove_failability.py::_load_probe" = { S102 = 1 }
 "tests/test_relay_connection.py" = { E501 = 1 }
-"tests/test_relay_connection.py::test_relation_connection_teardown_inverts_a_replaced_annotations_dict" = { RUF063 = 1, bare = 1 }
-"tests/test_resource_policy.py::test_a_budget_spent_between_frames_fails_every_later_frames_relation_hop" = { PLC0415 = 1, bare = 1 }
-"tests/test_routers.py::_router_class" = { PLC0415 = 1, bare = 1 }
+"tests/test_relay_connection.py::test_relation_connection_teardown_inverts_a_replaced_annotations_dict" = { RUF063 = 1 }
+"tests/test_routers.py::_router_class" = { PLC0415 = 1 }
 "tests/test_routers.py::test_degraded_partial_install_raises_the_split_actionable_errors" = { S102 = 1 }
 "tests/test_routers.py::test_restore_is_two_sided_and_the_present_path_works_again" = { S102 = 1 }
 "tests/test_routers.py::test_root_package_and_star_import_stay_channels_free" = { S102 = 2 }
@@ -286,17 +285,17 @@
 "tests/testing/test_client.py::_MixinProbe.assertEqual" = { N802 = 1 }
 "tests/testing/test_client.py::_MixinProbe.assertIsNone" = { N802 = 1 }
 "tests/testing/test_client.py::_MixinProbe.assertTrue" = { N802 = 1 }
-"tests/testing/test_client.py::test_export_surface_is_the_testing_root_not_the_package_root" = { F401 = 1, PLC0415 = 1, bare = 1 }
+"tests/testing/test_client.py::test_export_surface_is_the_testing_root_not_the_package_root" = { F401 = 1, PLC0415 = 1 }
 "tests/types/test_base.py::_exec_pep563_module" = { S102 = 1 }
 "tests/types/test_base.py::_make_override_model._OverrideOwner" = { DJ001 = 2 }
-"tests/types/test_base.py::test_auto_string_spelling_accepted_without_future_import.StringAutoType" = { F821 = 1, bare = 1 }
+"tests/types/test_base.py::test_auto_string_spelling_accepted_without_future_import.StringAutoType" = { F821 = 1 }
 "tests/types/test_converters.py::_blank_choice_model.NullableBlankChoiceFixture" = { DJ001 = 1 }
 "tests/types/test_converters.py::choice_fixture_model.ChoiceFixture" = { DJ001 = 1 }
 "tests/types/test_definition_order.py::_camel_collide_type.CamelCollide" = { N815 = 1 }
-"tests/types/test_definition_order.py::test_consumer_id_resolved_relay_nodeid_with_unresolved_sibling_annotation_is_accepted.CategoryNode" = { F821 = 1, bare = 1 }
-"tests/types/test_definition_order.py::test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises.CategoryNodeMy" = { F821 = 1, bare = 1 }
-"tests/types/test_definition_order.py::test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises.CategoryNodeNot" = { F821 = 1, bare = 1 }
-"tests/types/test_definition_order.py::test_consumer_id_unresolved_non_nodeid_string_on_relay_node_type_raises.CategoryNode" = { F821 = 1, bare = 1 }
+"tests/types/test_definition_order.py::test_consumer_id_resolved_relay_nodeid_with_unresolved_sibling_annotation_is_accepted.CategoryNode" = { F821 = 1 }
+"tests/types/test_definition_order.py::test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises.CategoryNodeMy" = { F821 = 1 }
+"tests/types/test_definition_order.py::test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises.CategoryNodeNot" = { F821 = 1 }
+"tests/types/test_definition_order.py::test_consumer_id_unresolved_non_nodeid_string_on_relay_node_type_raises.CategoryNode" = { F821 = 1 }
 "tests/types/test_definition_order.py::test_filterset_class_resolves_across_module_boundary" = { PLC0415 = 1 }
 "tests/types/test_definition_order.py::test_generated_set_input_pair_is_refused_only_where_the_schema_names_it_alike.CamelCollideSetModel" = { N815 = 1 }
 "tests/types/test_definition_order.py::test_relay_suppressed_pk_does_not_collide_with_real_consumer_field.RenamedPrimaryKeyType.legacyId" = { N802 = 1 }
@@ -306,7 +305,7 @@
 "tests/types/test_resolvers.py::test_reverse_one_to_one_propagates_plain_attribute_error.FakeDoesNotExist" = { N818 = 1 }
 "tests/utils/test_errors.py::_NAIVE_YEAR_ONE" = { DTZ001 = 1 }
 "tests/utils/test_errors.py::test_field_error_handles_scalar_integers_booleans_and_floats" = { FBT003 = 1 }
-"tests/utils/test_errors.py::test_unstorable_decimal_read_back_trial_runs_no_query_on_a_django_connection._record" = { FBT001 = 1, bare = 1 }
+"tests/utils/test_errors.py::test_unstorable_decimal_read_back_trial_runs_no_query_on_a_django_connection._record" = { FBT001 = 1 }
 "tests/utils/test_errors.py::test_unstorable_temporal_holds_a_stored_instant_to_its_session_wall_clock" = { DTZ001 = 1 }
 "tests/utils/test_errors.py::test_unstorable_temporal_refuses_a_time_array_psycopg_cannot_dump" = { DTZ001 = 1 }
 "tests/utils/test_input_values.py::test_is_inactive_value_is_identity_based_not_truthiness" = { FBT003 = 1 }
@@ -314,6 +313,6 @@
 "tests/utils/test_querysets.py::_MEMBER_TERM_SHAPES" = { S610 = 3, S611 = 3 }
 "tests/utils/test_querysets.py::test_extra_where_executable_sql_fails_closed_before_clone" = { S610 = 1 }
 "tests/utils/test_querysets.py::test_extra_where_non_sequence_sqls_fails_closed" = { S610 = 1 }
-"tests/utils/test_typing.py::test_unwrap_return_type_handles_bare_typing_list" = { UP006 = 1, bare = 1 }
+"tests/utils/test_typing.py::test_unwrap_return_type_handles_bare_typing_list" = { UP006 = 1 }
 "tests/utils/test_widgets.py::test_the_postgres_split_array_widget_reads_one_key_per_index" = { PLC0415 = 1 }
-"tests/utils/test_write_values.py::test_refused_save_follows_a_cause_or_the_handlers_reraise_never_another_frames_context" = { B904 = 1, bare = 1 }
+"tests/utils/test_write_values.py::test_refused_save_follows_a_cause_or_the_handlers_reraise_never_another_frames_context" = { B904 = 1 }

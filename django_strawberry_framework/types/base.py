@@ -927,7 +927,7 @@ class DjangoType:
         queryset: models.QuerySet[Any, Any],  # pyright: ignore[reportExplicitAny]
         # basedpyright: an override annotates ``info: strawberry.Info``, which object rejects; the
         # shared visibility runners also serve public helpers taking any info, which Info rejects
-        info: Any,  # pyright: ignore[reportExplicitAny, reportAny]  # noqa: ANN401
+        info: Any,  # pyright: ignore[reportExplicitAny, reportAny]  # noqa: ANN401 - consumer hook; an override narrows it
         # basedpyright: an override returns ``super().get_queryset(...)`` as its own model's
         # queryset, which a concrete return rejects and a TypeVar return forbids non-generically
     ) -> models.QuerySet[Any, Any]:  # pyright: ignore[reportExplicitAny]

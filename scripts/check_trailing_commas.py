@@ -1180,7 +1180,7 @@ def _format_graphql(content: str) -> str | None:
     (fixpoint-safe).
     """
     try:  # graphql-core (~65 ms) loads only when a GraphQL file is checked
-        from graphql import (  # noqa: PLC0415
+        from graphql import (  # noqa: PLC0415 - graphql-core loads only for a GraphQL file
             ArgumentNode,
             DefinitionNode,
             DirectiveNode,

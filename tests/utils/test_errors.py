@@ -1996,7 +1996,7 @@ def test_unstorable_decimal_read_back_trial_runs_no_query_on_a_django_connection
         execute: Callable[..., object],
         sql: str,
         params: object,
-        many: bool,  # noqa: FBT001
+        many: bool,  # noqa: FBT001 - Django's execute_wrapper signature
         context: object,
     ) -> object:
         statements.append(sql)

@@ -623,7 +623,7 @@ urlpatterns = [path(_LOGOUT_PROBE_PATH, _logout_probe)]
 
 def _router_class() -> type[routers_module.DjangoGraphQLProtocolRouter]:
     # Each call re-resolves the lazy module ``__getattr__`` name; the cache tests depend on it.
-    from django_strawberry_framework.routers import DjangoGraphQLProtocolRouter  # noqa: PLC0415
+    from django_strawberry_framework.routers import DjangoGraphQLProtocolRouter  # noqa: PLC0415 - re-resolves the lazy module __getattr__ name
 
     return DjangoGraphQLProtocolRouter
 

@@ -1439,7 +1439,7 @@ def file_hash(path: Path) -> str:
     """Return a sha1 of a file's bytes, or of a symlink's target text."""
     if path.is_symlink():
         # os.readlink keeps the link text verbatim; Path.readlink() would normalize it.
-        target = os.readlink(path).encode("utf-8", "surrogateescape")  # noqa: PTH115
+        target = os.readlink(path).encode("utf-8", "surrogateescape")  # noqa: PTH115 - Path.readlink() would normalize the link text
         return "link:" + hashlib.sha1(target, usedforsecurity=False).hexdigest()
     digest = hashlib.sha1(usedforsecurity=False)
     with path.open("rb") as handle:
@@ -1484,7 +1484,7 @@ def _copy_entry(source: Path, destination: Path, repo_root: Path) -> None:
     parent.mkdir(parents=True, exist_ok=True)
     if source.is_symlink():
         # os.readlink keeps the link text verbatim; Path.readlink() would normalize it.
-        target = os.readlink(source)  # noqa: PTH115
+        target = os.readlink(source)  # noqa: PTH115 - Path.readlink() would normalize the link text
         if Path(target).is_absolute() and _is_within(Path(target), repo_root):
             msg = f"{source} links into the shared tree by absolute path; a copy would share it"
             raise WorkspaceError(msg)

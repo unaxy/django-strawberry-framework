@@ -806,7 +806,7 @@ def test_export_surface_is_the_testing_root_not_the_package_root(name: str) -> N
         # The import statement is the probe; it raises, so the name is never bound.
         # basedpyright: the package root's PEP 562 __getattr__ returns Any; the statement
         # under test raises before it binds anything
-        from django_strawberry_framework import TestClient as _  # noqa: F401, PLC0415  # pyright: ignore[reportAny]
+        from django_strawberry_framework import TestClient as _  # noqa: F401, PLC0415 - the import is the probe  # pyright: ignore[reportAny]
 
 
 # ---------------------------------------------------------------------------

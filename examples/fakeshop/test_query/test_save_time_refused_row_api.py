@@ -192,7 +192,7 @@ def _consumer_write(row: product_models.ItemHold) -> None:
                     raise IntegrityError(msg) from exc
                 if swallow == "reraise_from_none":
                     raise IntegrityError(msg) from None
-                raise IntegrityError(msg)  # noqa: B904
+                raise IntegrityError(msg)  # noqa: B904 - the unchained re-raise is the case under test
         elif swallow == "helper_translate":
             try:
                 with transaction.atomic():

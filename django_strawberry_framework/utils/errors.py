@@ -1184,7 +1184,7 @@ def _refused_read_back(
             [(value,) for value in prepared],
         )
         # Django quotes the trusted model column name; decimal values remain bound parameters.
-        selection = f"SELECT {quoted_column} FROM stored"  # noqa: S608
+        selection = f"SELECT {quoted_column} FROM stored"  # noqa: S608 - Django-quoted model column; values stay bound
         rows = list_of(
             call_method(call_method(scratch, "execute", selection), "fetchall"),
         )

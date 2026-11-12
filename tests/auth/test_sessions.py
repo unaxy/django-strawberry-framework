@@ -157,7 +157,7 @@ def test_classify_channels_scope_without_channels_raises_the_install_hint() -> N
         attr="sessions",
     ):
         # Re-import under absence so the classification re-runs its lazy guard.
-        from django_strawberry_framework.auth import sessions as reloaded  # noqa: PLC0415
+        from django_strawberry_framework.auth import sessions as reloaded  # noqa: PLC0415 - re-import under the patched absence
 
         with pytest.raises(ImportError, match=r"channels>=4\.3\.2") as exc_info:
             reloaded.classify_transport(_adapter({"type": "http"}))

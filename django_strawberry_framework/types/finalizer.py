@@ -1801,7 +1801,7 @@ def _bind_sidecar_sets(spec: _SidecarBindingSpec[_SetT]) -> None:
         # attributes the failure to this specific set_cls.
         try:
             spec.expand(set_cls)
-        except ImportError as exc:  # noqa: PERF203
+        except ImportError as exc:  # noqa: PERF203 - attributes the failure to this set
             raise ConfigurationError(
                 f"Cannot finalize Django types: {spec.expand_label_noun} "
                 f"{truth.qualname(set_cls)} references an unresolved "

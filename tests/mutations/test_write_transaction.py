@@ -674,7 +674,7 @@ class _NoHttpApplication(ASGIHandler):
 
 def _window_router(schema: strawberry.Schema) -> DjangoGraphQLProtocolRouter:
     # The router class is a lazy module ``__getattr__`` name, built on first access.
-    from django_strawberry_framework.routers import DjangoGraphQLProtocolRouter  # noqa: PLC0415
+    from django_strawberry_framework.routers import DjangoGraphQLProtocolRouter  # noqa: PLC0415 - lazy module __getattr__ name
 
     return DjangoGraphQLProtocolRouter(schema, django_application=_NoHttpApplication())
 

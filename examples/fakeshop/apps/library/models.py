@@ -771,11 +771,11 @@ class Distributor(models.Model):
     # Typed here: django-stubs types ``Model.pk`` as ``Any``. ``None`` until the row is saved.
     pk: int | None
 
-    displayName: _Text = models.TextField(unique=True)  # noqa: N815
+    displayName: _Text = models.TextField(unique=True)  # noqa: N815 - the mixed-case column is the fixture
     display_name: _Text = models.TextField()
 
     # Reverse accessor Django adds at class creation, declared for the type checker.
-    consignmentItems: RelatedManager[Consignment]  # noqa: N815
+    consignmentItems: RelatedManager[Consignment]  # noqa: N815 - the mixed-case relation is the fixture
 
     @override
     def __str__(self) -> str:
@@ -794,7 +794,7 @@ class Consignment(models.Model):
     pk: int | None
 
     label: _Text = models.TextField()
-    distributorRef: _FK[Distributor] = models.ForeignKey(  # noqa: N815
+    distributorRef: _FK[Distributor] = models.ForeignKey(  # noqa: N815 - the mixed-case relation is the fixture
         Distributor,
         related_name="consignmentItems",
         on_delete=models.CASCADE,

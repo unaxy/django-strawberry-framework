@@ -1319,7 +1319,7 @@ def test_a_consumer_select_multiple_widget_reads_each_repeated_query_key(
 
 
 def _split_widget_schema(mode: str) -> DjangoSchema:
-    from django.contrib.postgres.forms import SplitArrayWidget  # noqa: PLC0415
+    from django.contrib.postgres.forms import SplitArrayWidget  # noqa: PLC0415 - PostgreSQL-only optional driver
 
     class SplitShelfChild(FilterSet):
         arr = django_filters.Filter(

@@ -94,7 +94,7 @@ from strawberry.types import Info
 from typing_extensions import override
 
 import django_strawberry_framework.resource_policy as rp
-from django_strawberry_framework import DjangoSchema, Upload
+from django_strawberry_framework import DjangoSchema, DjangoType, Upload, finalize_django_types
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.extensions.resource_policy import (
     _CLOSE_TOKEN_KINDS,
@@ -3628,7 +3628,6 @@ async def test_a_budget_spent_between_frames_fails_every_later_frames_relation_h
     row was loaded with the item. A stream whose deadline is not narrowed, and a
     stream whose policy configures no deadline at all, deliver every frame whole.
     """
-    from django_strawberry_framework import DjangoType, finalize_django_types  # noqa: PLC0415
 
     class CategoryT(DjangoType):
         class Meta:

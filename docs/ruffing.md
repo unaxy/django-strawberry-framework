@@ -21,15 +21,15 @@ Rules of the road:
 
 ## Status
 
-Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include items 42-46.
+Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include items 42-47.
 
 | | Count |
 | --- | --- |
 | Stable rules | 815: 806 on, 9 off by design |
 | Preview-only rules | 142, all off (`preview` is not enabled) |
-| Lines carrying `# noqa` | 376, in 121 files |
-| `# noqa` lines with no reason | 36 (see To do) |
-| Site ledger (`scripts/noqa_suppressions.toml`) | 386 suppressed codes and 47 `bare` lines, at 314 sites |
+| Lines carrying `# noqa` | 375, in 121 files |
+| `# noqa` lines with no reason | 0 |
+| Site ledger (`scripts/noqa_suppressions.toml`) | 385 suppressed codes and 0 `bare` lines, at 313 sites |
 | `# ruff: disable[...]` fences | 9, every one `ERA001` around a TODO-anchored pseudo block |
 | File-level `# ruff: noqa` | 0 |
 | Complexity ratchets | `max-complexity` 45, `max-branches` 39, `max-returns` 20, `max-args` 18, `max-statements` 133, `max-positional-args` 10 |
@@ -221,13 +221,7 @@ Ruff against itself:
 
 ## To do
 
-- [ ] 40. A reason on every `# noqa`. 36 lines carry a bare code:
-  - 10 `PLC0415`;
-  - the rest one to three each.
-
-  The ledger counts 47 `bare`: it also counts a `# noqa` whose only text after the codes is another comment
-  (`# noqa: F821  # pyright: ignore[...]`). No new one can land (item 45). Write each reason with its real cause,
-  then `check_noqa_suppressions.py --write` drops the `bare` entries.
+Nothing open.
 
 ## Waiting on you
 
@@ -298,6 +292,9 @@ Each item's commit holds the detail (`git log -S '<code>' -- pyproject.toml`).
     and CI lint) the way `check_type_suppressions.py` holds basedpyright's: counts per site and code, plus `bare`,
     may only fall, and a commit raising a total needs the `Suppression-Growth-Approved:` trailer.
 46. Every `A002` carries its reason (71 lines): the `filter` / `id` parameter name is the GraphQL argument name.
+40. A reason on every `# noqa`: the last 47 bare lines carry one, and one redundant test-local import in
+    `tests/test_resource_policy.py` joined its module's top-level import. The ledger holds `bare` at 0, so a new bare
+    `# noqa` fails.
 
 ## Measuring
 

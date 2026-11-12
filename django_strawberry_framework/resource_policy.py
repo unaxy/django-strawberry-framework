@@ -1293,7 +1293,7 @@ def _attach_cleanup_note(primary_error: BaseException, note: str) -> None:
     with contextlib.suppress(Exception):
         # ``setattr``, not an attribute write: 3.10's typeshed declares no ``__notes__``
         # (the attribute is 3.11+ API), and the floor check reads 3.10's.
-        setattr(primary_error, "__notes__", [*existing, note])  # noqa: B010
+        setattr(primary_error, "__notes__", [*existing, note])  # noqa: B010 - 3.10's typeshed has no __notes__
 
 
 async def _close_async_iterator(

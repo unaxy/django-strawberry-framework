@@ -341,7 +341,7 @@ class DjangoTypeDefinition:
         # module does not depend on it at import time (no load cycle exists
         # either way -- ``registry.py`` keeps its ``types.*`` edges
         # ``TYPE_CHECKING``-only). Do NOT hoist to module top.
-        from django_strawberry_framework.registry import registry  # noqa: PLC0415
+        from django_strawberry_framework.registry import registry  # noqa: PLC0415 - keeps registry off this module's import edges
 
         # Memoize the lookup per field name. ``_meta.get_field`` is
         # cheap but not free, and the registry lookup is two calls

@@ -830,7 +830,7 @@ def DjangoNodeField(
     deprecation_reason: str | None = None,
     directives: Sequence[object] = (),
 ) -> _TargetT | None: ...
-def DjangoNodeField(  # noqa: N802  # PascalCase for graphene-django parity - consumer usage is `DjangoNodeField(GenreType)`
+def DjangoNodeField(  # noqa: N802 - PascalCase for graphene-django parity
     target_type: type[object] | None = None,
     *,
     description: str | None = None,
@@ -943,7 +943,7 @@ def DjangoNodesField(
     deprecation_reason: str | None = None,
     directives: Sequence[object] = (),
 ) -> list[_TargetT | None]: ...
-def DjangoNodesField(  # noqa: N802  # PascalCase for graphene-django parity - consumer usage is `DjangoNodesField(GenreType)`
+def DjangoNodesField(  # noqa: N802 - PascalCase for graphene-django parity
     target_type: type[object] | None = None,
     *,
     description: str | None = None,

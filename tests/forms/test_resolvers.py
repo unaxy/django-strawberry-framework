@@ -4604,7 +4604,7 @@ class _ExcludedPrivateForm(forms.ModelForm[product_models.Item]):
     class Meta:
         model = product_models.Item
         # ``Meta.exclude`` is the shape under test.
-        exclude = ("is_private", "attachment")  # noqa: DJ006
+        exclude = ("is_private", "attachment")  # noqa: DJ006 - Meta.exclude is the shape under test
 
 
 @pytest.mark.parametrize(

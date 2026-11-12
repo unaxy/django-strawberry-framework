@@ -283,7 +283,7 @@ def _synthesized_mutation_signature(
     return build_lazy_field_signature(arguments, return_annotation)
 
 
-def DjangoMutationField(  # noqa: N802  # PascalCase for the field-factory family (DjangoConnectionField / DjangoNodeField parity)
+def DjangoMutationField(  # noqa: N802 - PascalCase like the other field factories
     mutation_cls: WriteMutationClass,
     *,
     description: str | None = None,

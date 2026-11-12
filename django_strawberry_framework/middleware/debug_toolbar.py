@@ -147,7 +147,7 @@ if not apps.is_installed("debug_toolbar"):
 # The toolbar imports need the optional dependency, so the guard above must run
 # first and they stay beneath it (spec-042 Decision 5); ``E402`` is the
 # deliberate price of the import-time-guard shape.
-from debug_toolbar.middleware import (  # noqa: E402
+from debug_toolbar.middleware import (  # noqa: E402 - imports stay beneath the INSTALLED_APPS guard
     DebugToolbarMiddleware as _DebugToolbarMiddleware,
 )
 

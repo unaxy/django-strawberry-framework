@@ -160,7 +160,7 @@ def _absence_schema(
     }
     if form_builder == "django-filter":
         namespace["get_form_class"] = get_form_class
-    AbsencePeriodicalFilter = type("AbsencePeriodicalFilter", (FilterSet,), namespace)  # noqa: N806
+    AbsencePeriodicalFilter = type("AbsencePeriodicalFilter", (FilterSet,), namespace)  # noqa: N806 - a class built with type()
 
     class AbsenceIssueType(DjangoType):
         class Meta:

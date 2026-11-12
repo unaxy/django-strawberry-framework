@@ -1,6 +1,6 @@
 """Pytest-only settings layered over the shipped fakeshop configuration."""
 
-from config.settings import *  # noqa: F403
+from config.settings import *  # noqa: F403 - test settings extend the project settings
 
 # Password strength is validated separately from hashing. A fast hasher keeps
 # repeated create_users()/login acceptance setup from spending time on PBKDF2.

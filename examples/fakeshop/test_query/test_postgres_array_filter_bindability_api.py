@@ -77,7 +77,7 @@ class _ArrayConsumer(NamedTuple):
 @pytest.fixture
 def array_consumer() -> Iterator[_ArrayConsumer]:
     # PostgreSQL-only fixture: the module's pg mark skips before importing this optional driver.
-    from django.contrib.postgres.fields import ArrayField  # noqa: PLC0415
+    from django.contrib.postgres.fields import ArrayField  # noqa: PLC0415 - PostgreSQL-only optional driver
 
     with isolate_apps():
 

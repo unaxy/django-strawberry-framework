@@ -1597,7 +1597,7 @@ async def _execute_queryset_pipeline_async(
     return wrap_async_queryset_adapter(bounded)
 
 
-def DjangoListField(  # noqa: N802  # PascalCase for graphene-django parity - consumer usage is `DjangoListField(BranchType)`
+def DjangoListField(  # noqa: N802 - PascalCase for graphene-django parity
     target_type: type[_TargetT],
     *,
     resolver: Callable[..., object] | None = None,

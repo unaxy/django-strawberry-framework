@@ -2669,7 +2669,7 @@ def _build_relation_connection_resolver(
     return _resolve
 
 
-def DjangoConnectionField(  # noqa: N802  # PascalCase for graphene-django parity - consumer usage is `DjangoConnectionField(GenreType)`
+def DjangoConnectionField(  # noqa: N802 - PascalCase for graphene-django parity
     target_type: type[NodeType],
     *,
     resolver: Callable[..., object] | None = None,

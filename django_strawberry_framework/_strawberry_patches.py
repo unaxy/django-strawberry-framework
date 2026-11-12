@@ -426,7 +426,7 @@ see "Five lifecycles" above):
            p._original_parse_json(BaseView(), bytes([0x7b, 0x80]))
        except (UnicodeDecodeError, RecursionError):
            print("DECODE-FAILURE PATCH STILL NEEDED")  # upstream catch is still too narrow
-       except Exception as exc:  # noqa: BLE001
+       except Exception as exc:  # noqa: BLE001 - any other outcome means the patch is retirable
            print("DECODE-FAILURE PATCH RETIRABLE:", type(exc).__name__)  # e.g. HTTPException
 
        # The non-envelope-body gap lives in ``parse_http_body``, not

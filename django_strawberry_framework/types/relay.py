@@ -448,7 +448,7 @@ def _validated_globalid_setting() -> GlobalIDStrategy | None:
     # load - so the local import resolves cheaply. Same cycle-dodge justification
     # ``base.py`` documents for its ``FilterSet`` / ``OrderSet`` in-function
     # imports. Do NOT hoist to module top.
-    from .base import _validate_globalid_strategy  # noqa: PLC0415
+    from .base import _validate_globalid_strategy  # noqa: PLC0415 - import cycle
 
     setting = relay_globalid_strategy_setting()
     if setting is None:

@@ -1305,7 +1305,7 @@ def plan_connection_relation(
         # Diverging aliases exist only on the walker's merged ``SimpleNamespace``, whose
         # alias merge stored this map; read by name because the other selection shape
         # declares no such attribute.
-        getattr(sel, "_optimizer_response_key_arguments")  # noqa: B009
+        getattr(sel, "_optimizer_response_key_arguments")  # noqa: B009 - the attribute exists only on the merged namespace
         if divergent
         else {None: python_arguments(sel)}
     )

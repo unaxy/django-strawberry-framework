@@ -1376,7 +1376,7 @@ def test_consumer_id_unresolved_non_nodeid_string_on_relay_node_type_raises() ->
         @definition_raises
         class CategoryNode(DjangoType):
             # basedpyright: the unresolvable id annotation is the rejected input
-            id: "MissingType"  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+            id: "MissingType"  # noqa: F821 - the unresolvable annotation is under test  # pyright: ignore[reportUndefinedVariable]
 
             class Meta:
                 model = Category
@@ -1395,7 +1395,7 @@ def test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises() ->
         @definition_raises
         class CategoryNodeNot(DjangoType):
             # basedpyright: the NodeID lookalike is the input the regex rejects
-            id: "NotNodeID[int]"  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+            id: "NotNodeID[int]"  # noqa: F821 - the unresolvable annotation is under test  # pyright: ignore[reportUndefinedVariable]
 
             class Meta:
                 model = Category
@@ -1411,7 +1411,7 @@ def test_consumer_id_typo_lookalike_nodeid_string_on_relay_node_type_raises() ->
         @definition_raises
         class CategoryNodeMy(DjangoType):
             # basedpyright: the NodeID lookalike is the input the regex rejects
-            id: "MyNodeID[int]"  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+            id: "MyNodeID[int]"  # noqa: F821 - the unresolvable annotation is under test  # pyright: ignore[reportUndefinedVariable]
 
             class Meta:
                 model = Category
@@ -1510,7 +1510,7 @@ def test_consumer_id_resolved_relay_nodeid_with_unresolved_sibling_annotation_is
     class CategoryNode(DjangoType):
         id: relay.NodeID[int]
         # basedpyright: an unresolvable sibling must not mask the resolved id
-        items: list["AdminItemType"]  # noqa: F821  # pyright: ignore[reportUndefinedVariable]
+        items: list["AdminItemType"]  # noqa: F821 - the unresolvable annotation is under test  # pyright: ignore[reportUndefinedVariable]
 
         class Meta:
             model = Category
