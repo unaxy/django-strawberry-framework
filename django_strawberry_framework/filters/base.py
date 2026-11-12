@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from functools import cache
 from itertools import takewhile
 from types import MappingProxyType
@@ -469,7 +470,9 @@ class _KeyLeaf:
     """
 
     leaf: Filter
-    aliases: Mapping[str, str] = _NO_ALIASES
+    # A factory, not a default: Python 3.11's dataclasses refuse any unhashable default,
+    # and ``mappingproxy`` is hashable only from 3.12.
+    aliases: Mapping[str, str] = dataclass_field(default_factory=lambda: _NO_ALIASES)
 
 
 def _key_leaf_of(filter_instance: Filter) -> _KeyLeaf | None:
