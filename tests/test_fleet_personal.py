@@ -197,8 +197,8 @@ def _without_extension_lists(text: str) -> str:
     "sample",
     [
         "someone@example.com",
-        "100.72.164.56",
-        "192.168.86.49",
+        "100.64.0.1",
+        "192.168.0.10",
         "/home/someone/x",
         "/Users/someone",
     ],
