@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 519 done, 104 to do. The CHANGELOG entries filed here moved to
+Progress: 520 done, 103 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3089,6 +3089,18 @@ Progress: 519 done, 104 to do. The CHANGELOG entries filed here moved to
   `test_multi_db.py::test_a_related_filter_queryset_pinned_off_the_routed_read_alias_is_refused` /
   `::test_a_related_filter_queryset_pinned_to_another_alias_is_refused_on_shard_b`; spec-027 (checklist, Decision 8,
   Edge cases, Test plan, Definition of done), GLOSSARY `RelatedFilter`. CHANGELOG 938
+- [x] 829. (robustness) On a set no connection serves (`FilterSet(data, queryset).qs`, `apply_sync`), a
+  `Meta.filter_overrides={ArrayField: {"filter_class": ArrayFilter}}` text-pattern leaf over an `ArrayField`
+  (`arr__icontains=1`, from a per-field `"__all__"` or listed) cleans its value into a list and compiles a match
+  against that list's Python repr (`UPPER("arr"::text) LIKE '%[DECIMAL('1')]%'`), silently matching nothing a consumer
+  means; Django compares the column's text rendering (`{1,2}`) with a string. Found fixing 739 Closed with no change, as its sibling 862 was (maintainer, 2026-11-11:
+  items not worth completing): upstream-matching. The served set refuses all four text lookups at
+  `finalize_django_types()` ("only exact, contains, contained_by and overlap take one array"); on a set no connection
+  serves there is no build step, and the raw path runs only the declared `ArrayFilter`, whose own contract cleans a list
+  (`filters/base.py::_ElementField`): the SQL and parameters equal a stock `django_filters.FilterSet` with the same
+  override, a stock `BaseCSVFilter` + `NumberFilter`, and Django's own `qs.filter(arr__icontains=[Decimal("1")])`
+  (`icontains` / `startswith` bind the list's text and match nothing; `iexact` / `regex` bind the list itself).
+  Evidence: the 829 fact report (compiled on the postgresql backend without a connection)
 
 ## To do: found along the way
 
@@ -3100,11 +3112,6 @@ Progress: 519 done, 104 to do. The CHANGELOG entries filed here moved to
   The same split holds for `MultipleChoiceFilter(conjoined=True)` and on a to-many target column
   (`children__label`, `shelves__code`) and a two-hop path ending to-many (`partner__children__label`), for every
   spelling (783's grid: 36 cells per spelling)
-- [ ] 829. (robustness) On a set no connection serves (`FilterSet(data, queryset).qs`, `apply_sync`), a
-  `Meta.filter_overrides={ArrayField: {"filter_class": ArrayFilter}}` text-pattern leaf over an `ArrayField`
-  (`arr__icontains=1`, from a per-field `"__all__"` or listed) cleans its value into a list and compiles a match
-  against that list's Python repr (`UPPER("arr"::text) LIKE '%[DECIMAL('1')]%'`), silently matching nothing a consumer
-  means; Django compares the column's text rendering (`{1,2}`) with a string. Found fixing 739
 - [ ] 832. (robustness) A flat key into a `RelatedFilter` target set over a multi-table-inheritance descendant
   answers a Django `FieldError` for every nonempty value, whatever its GlobalID strategy: `RepairTicketFilter.venue =
   RelatedFilter(SelfServeDeskFilter, field_name="venue")` publishes `venueFaults`, which applies `venue__faults` from a
