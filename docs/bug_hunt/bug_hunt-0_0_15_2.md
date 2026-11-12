@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 517 done, 106 to do. The CHANGELOG entries filed here moved to
+Progress: 518 done, 105 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3065,6 +3065,17 @@ Progress: 517 done, 106 to do. The CHANGELOG entries filed here moved to
   with the column at build; the model flavor's generated `JSON` input cannot carry the kind, and a consumer
   `input_class` declaring one answers a `FieldError`. The filter side refuses at build because a lookup runs no model
   validation (item 94). Filed 937
+- [x] 816. Already fixed by 84af64c0 (no tracker tick then): a filter over a `GeneratedField` whose output no filter
+  converts is refused in the `FilterSet`'s words before the type-side reader runs
+  (`filters/inputs.py::_refuse_generated_filter_output` from `convert_filter_to_input_annotation` and the apply loop,
+  `filters/sets.py::FilterSet.filter_for_lookup` for `Meta.fields`). A 100-cell probe at 5aba0840 (file, image,
+  unregistered and consumer outputs, array base-field choices; declared, `Meta.fields` dict and `"__all__"`, a flat copy,
+  a crossed path; finalize, served schema, raw `.qs`, `apply_sync`) answered the DjangoType "Meta.exclude" advice in 0
+  cells and a refusal naming the filter with a `FilterSet` remedy in 97; the other 3 are a raw `CharFilter` over a
+  `DurationField` output raising Django's own `AttributeError`, as over a plain `DurationField`. The filter path is pinned
+  by `tests/filters/test_inputs.py::test_generated_unmapped_filter_refuses_in_filterset_words_before_output_policy` and
+  its siblings; `tests/types/test_converters.py::test_generated_column_refuses_an_output_no_conversion_publishes` now
+  pins only the type-side reader (its `filterset_cls=None` call shape has no package caller)
 
 ## To do: found along the way
 
@@ -3076,13 +3087,6 @@ Progress: 517 done, 106 to do. The CHANGELOG entries filed here moved to
   The same split holds for `MultipleChoiceFilter(conjoined=True)` and on a to-many target column
   (`children__label`, `shelves__code`) and a two-hop path ending to-many (`partner__children__label`), for every
   spelling (783's grid: 36 cells per spelling)
-- [ ] 816. (robustness) A filter declared over a `GeneratedField` whose `output_field` no filter converts (a consumer
-  column class with no `SCALAR_MAP` entry, or a `FileField`) is refused at build with the DjangoType advice
-  (`types/converters.py::generated_output_field`: "Add an entry to SCALAR_MAP or exclude this field via Meta.exclude." /
-  "Exclude the field via Meta.exclude."), raised inside `_registered_scalar_entry` before the FilterSet's own refusal
-  (`filters/inputs.py::_unscalared_field_refusal`) can name the filter and a remedy a `FilterSet` has. Pinned on the
-  filter path by `tests/types/test_converters.py::test_generated_column_refuses_an_output_no_conversion_publishes`.
-  Found fixing 730
 - [ ] 854. (robustness) A `RelatedFilter(queryset=...)` pinned with `.using()` to an alias the request does not read
   is refused with Django's cross-database `ValueError` from the `IN` subquery (masked on the wire, bare from a raw
   `FilterSet(...).qs`), where the same pin from a target type's `get_queryset` gets a typed `ConfigurationError`
