@@ -21,15 +21,15 @@ Rules of the road:
 
 ## Status
 
-Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include items 42-45.
+Measured 2026-11-11 on the tree after 21cc9c7f, ruff 0.17.4; `# noqa` counts include items 42-46.
 
 | | Count |
 | --- | --- |
 | Stable rules | 815: 806 on, 9 off by design |
 | Preview-only rules | 142, all off (`preview` is not enabled) |
 | Lines carrying `# noqa` | 376, in 121 files |
-| `# noqa` lines with no reason | 107 (see To do) |
-| Site ledger (`scripts/noqa_suppressions.toml`) | 386 suppressed codes and 118 `bare` lines, at 314 sites |
+| `# noqa` lines with no reason | 36 (see To do) |
+| Site ledger (`scripts/noqa_suppressions.toml`) | 386 suppressed codes and 47 `bare` lines, at 314 sites |
 | `# ruff: disable[...]` fences | 9, every one `ERA001` around a TODO-anchored pseudo block |
 | File-level `# ruff: noqa` | 0 |
 | Complexity ratchets | `max-complexity` 45, `max-branches` 39, `max-returns` 20, `max-args` 18, `max-statements` 133, `max-positional-args` 10 |
@@ -221,12 +221,11 @@ Ruff against itself:
 
 ## To do
 
-- [ ] 40. A reason on every `# noqa`. 107 lines carry a bare code:
-  - 71 `A002`;
+- [ ] 40. A reason on every `# noqa`. 36 lines carry a bare code:
   - 10 `PLC0415`;
   - the rest one to three each.
 
-  The ledger counts 118 `bare`: it also counts a `# noqa` whose only text after the codes is another comment
+  The ledger counts 47 `bare`: it also counts a `# noqa` whose only text after the codes is another comment
   (`# noqa: F821  # pyright: ignore[...]`). No new one can land (item 45). Write each reason with its real cause,
   then `check_noqa_suppressions.py --write` drops the `bare` entries.
 
@@ -298,6 +297,7 @@ Each item's commit holds the detail (`git log -S '<code>' -- pyproject.toml`).
 45. The `# noqa` site ledger, `scripts/noqa_suppressions.toml`, held by `scripts/check_noqa_suppressions.py` (hook
     and CI lint) the way `check_type_suppressions.py` holds basedpyright's: counts per site and code, plus `bare`,
     may only fall, and a commit raising a total needs the `Suppression-Growth-Approved:` trailer.
+46. Every `A002` carries its reason (71 lines): the `filter` / `id` parameter name is the GraphQL argument name.
 
 ## Measuring
 

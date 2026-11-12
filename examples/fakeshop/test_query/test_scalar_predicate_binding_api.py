@@ -629,7 +629,7 @@ def _typed_queryset_path_holder() -> DjangoSchema:
         def _rows(
             self,
             info: Info[object, object],
-            filter: FilterInput[_QuerysetIntegerPathFilter],  # noqa: A002
+            filter: FilterInput[_QuerysetIntegerPathFilter],  # noqa: A002 - the GraphQL argument name
         ) -> QuerySet[scalar_models.ScalarSpecimen]:
             queryset = (
                 scalar_models.ScalarSpecimen.objects.annotate(
@@ -892,7 +892,7 @@ def test_a_project_lookup_over_an_integer_annotation_receives_the_number_as_sent
             def _rows(
                 self,
                 info: Info[object, object],
-                filter: FilterInput[_DivisibleAnnotationFilter],  # noqa: A002
+                filter: FilterInput[_DivisibleAnnotationFilter],  # noqa: A002 - the GraphQL argument name
             ) -> QuerySet[scalar_models.ScalarSpecimen]:
                 queryset = scalar_models.ScalarSpecimen.objects.annotate(
                     n=F("unsigned_big"),
@@ -1373,7 +1373,7 @@ def test_a_reverse_alias_added_only_by_filter_queryset_keeps_its_integer_target(
         def _rows(
             self,
             info: Info[object, object],
-            filter: FilterInput[ReverseAliasFilter],  # noqa: A002
+            filter: FilterInput[ReverseAliasFilter],  # noqa: A002 - the GraphQL argument name
         ) -> QuerySet[scalar_models.ScalarSpecimen]:
             rows = scalar_models.ScalarSpecimen.objects.order_by("pk")
             if not late_alias:
@@ -1432,7 +1432,7 @@ def test_a_typed_decimal_past_an_annotation_only_the_applied_queryset_holds_is_h
         def _rows(
             self,
             info: Info[object, object],
-            filter: FilterInput[_LateAnnotationFilter],  # noqa: A002
+            filter: FilterInput[_LateAnnotationFilter],  # noqa: A002 - the GraphQL argument name
         ) -> QuerySet[scalar_models.ScalarSpecimen]:
             return _LateAnnotationFilter.apply_sync(
                 filter,
@@ -2262,7 +2262,7 @@ def test_projected_child_lookup_crossing_relations_uses_its_declaring_model() ->
         def _rows(
             self,
             info: Info[object, object],
-            filter: FilterInput[BookByShelf],  # noqa: A002
+            filter: FilterInput[BookByShelf],  # noqa: A002 - the GraphQL argument name
         ) -> QuerySet[library_models.Book]:
             return BookByShelf.apply_sync(
                 filter,

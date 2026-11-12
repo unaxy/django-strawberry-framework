@@ -372,7 +372,7 @@ class Query:
     def _all_scalar_specimens(
         self,
         info: Info,
-        filter: FilterInput[filters.ScalarSpecimenFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.ScalarSpecimenFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.ScalarSpecimenOrder]] | None = None,
     ) -> QuerySet[models.ScalarSpecimen]:
         """Root field listing scalar specimens, filtered and ordered by the optional arguments."""
@@ -391,7 +391,7 @@ class Query:
     def _all_scalar_specimens_by_parent_stamp(
         self,
         info: Info,
-        filter: FilterInput[filters.ScalarSpecimenParentStampFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.ScalarSpecimenParentStampFilter] | None = None,  # noqa: A002 - the GraphQL argument name
     ) -> QuerySet[models.ScalarSpecimen]:
         """Root field listing scalar specimens over a queryset aliasing ``parent`` as ``par``.
 
@@ -439,7 +439,7 @@ class Query:
     def _all_nullable_scalar_specimens(
         self,
         info: Info,
-        filter: FilterInput[filters.NullableScalarSpecimenFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.NullableScalarSpecimenFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.NullableScalarSpecimenOrder]] | None = None,
     ) -> QuerySet[models.NullableScalarSpecimen]:
         """Root field listing nullable scalar specimens, filtered and ordered by the optional arguments."""
@@ -458,7 +458,7 @@ class Query:
     def _all_scalar_specimen_tags(
         self,
         info: Info,
-        filter: FilterInput[filters.ScalarSpecimenTagFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.ScalarSpecimenTagFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.ScalarSpecimenTagOrder]] | None = None,
     ) -> QuerySet[models.ScalarSpecimenTag]:
         """Root field listing scalar specimen tags, filtered and ordered by the optional arguments."""

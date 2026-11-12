@@ -6930,7 +6930,7 @@ def _unstorable_text_holder_schema() -> strawberry.Schema:
         def _printings(
             self,
             info: Info,
-            filter: FilterInput[HolderUnstorablePrintingFilter] | None = None,  # noqa: A002
+            filter: FilterInput[HolderUnstorablePrintingFilter] | None = None,  # noqa: A002 - the GraphQL argument name
             lazy_imprint: str | None = None,
         ) -> QuerySet[models.Printing]:
             queryset = models.Printing.objects.order_by("run_size")
@@ -7311,7 +7311,7 @@ def _colliding_leaf_holder_schema() -> strawberry.Schema:
         def _shelves(
             self,
             info: Info,
-            filter: FilterInput[HolderCollidingShelfFilter] | None = None,  # noqa: A002
+            filter: FilterInput[HolderCollidingShelfFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         ) -> QuerySet[models.Shelf]:
             queryset = models.Shelf.objects.order_by("code")
             if filter is not None:
@@ -7952,7 +7952,7 @@ def _own_pk_hop_key_holder_schema() -> strawberry.Schema:
         def _books(
             self,
             info: Info,
-            filter: FilterInput[HolderHopBookFilter] | None = None,  # noqa: A002
+            filter: FilterInput[HolderHopBookFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         ) -> QuerySet[models.Book]:
             queryset = models.Book.objects.order_by("title")
             if filter is not None:
@@ -11772,7 +11772,7 @@ def _relay_relation_isnull_holder_schema() -> strawberry.Schema:
         def _books(
             self,
             info: Info,
-            filter: FilterInput[HolderBookIsnullFilter] | None = None,  # noqa: A002
+            filter: FilterInput[HolderBookIsnullFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         ) -> QuerySet[models.Book]:
             queryset = models.Book.objects.order_by("title")
             if filter is not None:
@@ -11850,7 +11850,7 @@ def _relation_pk_global_id_holder_schema(hidden_barcode: str | None = None) -> s
         def _profiles(
             self,
             info: Info,
-            filter: FilterInput[HolderRelationPkProfileFilter] | None = None,  # noqa: A002
+            filter: FilterInput[HolderRelationPkProfileFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         ) -> QuerySet[models.PatronProfile]:
             queryset = models.PatronProfile.objects.order_by("postal_code")
             if filter is not None:
@@ -26675,7 +26675,7 @@ def _multiple_choice_holder_schema(received: list[tuple[str, object]]) -> strawb
         def _shelves(
             self,
             info: Info,
-            filter: FilterInput[HolderPicksShelfFilter] | None = None,  # noqa: A002
+            filter: FilterInput[HolderPicksShelfFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         ) -> QuerySet[models.Shelf]:
             queryset = models.Shelf.objects.order_by("code")
             if filter is not None:

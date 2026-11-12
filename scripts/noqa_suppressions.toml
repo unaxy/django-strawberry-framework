@@ -63,13 +63,13 @@
 "django_strawberry_framework/middleware/debug_toolbar.py::_DebugToolbarMiddleware" = { E402 = 1, bare = 1 }
 "django_strawberry_framework/mutations/fields.py::DjangoMutationField" = { N802 = 1, bare = 1 }
 "django_strawberry_framework/mutations/permissions.py::DjangoModelPermission.has_permission" = { ANN401 = 2, PLC0415 = 1 }
-"django_strawberry_framework/mutations/resolvers.py::_AsyncResolverEntry.__call__" = { A002 = 1, bare = 1 }
-"django_strawberry_framework/mutations/resolvers.py::_SyncResolverEntry.__call__" = { A002 = 1, bare = 1 }
-"django_strawberry_framework/mutations/resolvers.py::make_resolver_entries.resolve_async" = { A002 = 1, bare = 1 }
-"django_strawberry_framework/mutations/resolvers.py::make_resolver_entries.resolve_sync" = { A002 = 1, bare = 1 }
+"django_strawberry_framework/mutations/resolvers.py::_AsyncResolverEntry.__call__" = { A002 = 1 }
+"django_strawberry_framework/mutations/resolvers.py::_SyncResolverEntry.__call__" = { A002 = 1 }
+"django_strawberry_framework/mutations/resolvers.py::make_resolver_entries.resolve_async" = { A002 = 1 }
+"django_strawberry_framework/mutations/resolvers.py::make_resolver_entries.resolve_sync" = { A002 = 1 }
 "django_strawberry_framework/mutations/sets.py::DjangoMutation.check_permission" = { ANN401 = 2 }
-"django_strawberry_framework/mutations/sets.py::_ModelResolverSeams.resolve_async" = { A002 = 1, bare = 1 }
-"django_strawberry_framework/mutations/sets.py::_ModelResolverSeams.resolve_sync" = { A002 = 1, bare = 1 }
+"django_strawberry_framework/mutations/sets.py::_ModelResolverSeams.resolve_async" = { A002 = 1 }
+"django_strawberry_framework/mutations/sets.py::_ModelResolverSeams.resolve_sync" = { A002 = 1 }
 "django_strawberry_framework/optimizer/lateral_fetch.py::build_lateral_sql" = { S608 = 2 }
 "django_strawberry_framework/optimizer/nested_fetch.py::AutoNestedConnectionStrategy.plan" = { PLC0415 = 1 }
 "django_strawberry_framework/optimizer/nested_fetch.py::RecognizedFetchQuerySet.rebind" = { PLC0415 = 1 }
@@ -96,7 +96,7 @@
 "django_strawberry_framework/testing/client.py::_GraphQLTestHost.assertEqual" = { N802 = 1 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestHost.assertIsNone" = { N802 = 1 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestHost.assertTrue" = { N802 = 1 }
-"django_strawberry_framework/testing/relay.py::global_id_for" = { A002 = 1, bare = 1 }
+"django_strawberry_framework/testing/relay.py::global_id_for" = { A002 = 1 }
 "django_strawberry_framework/types/base.py::DjangoType.get_queryset" = { ANN401 = 1, bare = 1 }
 "django_strawberry_framework/types/base.py::_validate_filterset_class" = { PLC0415 = 1 }
 "django_strawberry_framework/types/base.py::_validate_orderset_class" = { PLC0415 = 1 }
@@ -127,58 +127,58 @@
 "django_strawberry_framework/utils/write_transaction.py::pipeline_alias_guard._reject_writes_outside_write_phase" = { FBT001 = 1 }
 "django_strawberry_framework/utils/write_values.py::decode_visible_relation_ids" = { PLC0415 = 1 }
 "django_strawberry_framework/utils/write_values.py::type_check_relation_id" = { PLC0415 = 1 }
-"django_strawberry_framework/write_mixins.py::_id_resolver_seams.resolve_async" = { A002 = 1, bare = 1 }
-"django_strawberry_framework/write_mixins.py::_id_resolver_seams.resolve_sync" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_aliases" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_categories" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_category_memberships" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_documents" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_source_links" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_spec_mentions" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_statuses" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_term_link_kinds" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_term_links" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_terms" = { A002 = 1, bare = 1 }
+"django_strawberry_framework/write_mixins.py::_id_resolver_seams.resolve_async" = { A002 = 1 }
+"django_strawberry_framework/write_mixins.py::_id_resolver_seams.resolve_sync" = { A002 = 1 }
+"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_aliases" = { A002 = 1 }
+"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_categories" = { A002 = 1 }
+"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_category_memberships" = { A002 = 1 }
+"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_documents" = { A002 = 1 }
+"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_source_links" = { A002 = 1 }
+"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_spec_mentions" = { A002 = 1 }
+"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_statuses" = { A002 = 1 }
+"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_term_link_kinds" = { A002 = 1 }
+"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_term_links" = { A002 = 1 }
+"examples/fakeshop/apps/glossary/schema.py::Query._all_glossary_terms" = { A002 = 1 }
 "examples/fakeshop/apps/kanban/management/commands/import_card_files.py::Command.handle" = { TRY301 = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_cards" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_actors" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_attempt_outcomes" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_board_doc_kinds" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_board_docs" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_card_glossary_terms" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_card_items" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_card_transitions" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_decisions" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_labels" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_milestones" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_parity_levels" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_priorities" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_reference_kinds" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_relative_sizes" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_sections" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_statuses" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_target_versions" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_tracked_paths" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_upstreams" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_verification_kinds" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_work_attempts" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/kanban/schema.py::Query._ready_cards" = { A002 = 1, bare = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_cards" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_actors" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_attempt_outcomes" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_board_doc_kinds" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_board_docs" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_card_glossary_terms" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_card_items" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_card_transitions" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_decisions" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_labels" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_milestones" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_parity_levels" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_priorities" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_reference_kinds" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_relative_sizes" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_sections" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_statuses" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_target_versions" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_tracked_paths" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_upstreams" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_verification_kinds" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._all_kanban_work_attempts" = { A002 = 1 }
+"examples/fakeshop/apps/kanban/schema.py::Query._ready_cards" = { A002 = 1 }
 "examples/fakeshop/apps/library/models.py::Book.subtitle" = { DJ001 = 1 }
 "examples/fakeshop/apps/library/models.py::Consignment.distributorRef" = { N815 = 1, bare = 1 }
 "examples/fakeshop/apps/library/models.py::Distributor.consignmentItems" = { N815 = 1, bare = 1 }
 "examples/fakeshop/apps/library/models.py::Distributor.displayName" = { N815 = 1, bare = 1 }
 "examples/fakeshop/apps/library/schema.py" = { E501 = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_books" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_branches" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_catalogue_books" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_circulation_desks_filtered" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_desk_directory" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_genres" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_loans" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_patrons" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_routed_books" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_shelf_labels_filtered" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/library/schema.py::Query._all_library_shelves" = { A002 = 1, bare = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_books" = { A002 = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_branches" = { A002 = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_catalogue_books" = { A002 = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_circulation_desks_filtered" = { A002 = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_desk_directory" = { A002 = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_genres" = { A002 = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_loans" = { A002 = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_patrons" = { A002 = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_routed_books" = { A002 = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_shelf_labels_filtered" = { A002 = 1 }
+"examples/fakeshop/apps/library/schema.py::Query._all_library_shelves" = { A002 = 1 }
 "examples/fakeshop/apps/products/fields.py::EntryFieldSet" = { ERA001 = 1 }
 "examples/fakeshop/apps/products/filters.py" = { ERA001 = 1 }
 "examples/fakeshop/apps/products/schema.py" = { ERA001 = 1 }
@@ -189,35 +189,35 @@
 "examples/fakeshop/apps/products/services.py" = { E501 = 1 }
 "examples/fakeshop/apps/products/services.py::_is_safe_generator" = { BLE001 = 1 }
 "examples/fakeshop/apps/products/services.py::seed_data" = { S311 = 1 }
-"examples/fakeshop/apps/scalars/schema.py::Query._all_nullable_scalar_specimens" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/scalars/schema.py::Query._all_scalar_specimen_tags" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/scalars/schema.py::Query._all_scalar_specimens" = { A002 = 1, bare = 1 }
-"examples/fakeshop/apps/scalars/schema.py::Query._all_scalar_specimens_by_parent_stamp" = { A002 = 1, bare = 1 }
+"examples/fakeshop/apps/scalars/schema.py::Query._all_nullable_scalar_specimens" = { A002 = 1 }
+"examples/fakeshop/apps/scalars/schema.py::Query._all_scalar_specimen_tags" = { A002 = 1 }
+"examples/fakeshop/apps/scalars/schema.py::Query._all_scalar_specimens" = { A002 = 1 }
+"examples/fakeshop/apps/scalars/schema.py::Query._all_scalar_specimens_by_parent_stamp" = { A002 = 1 }
 "examples/fakeshop/config/test_settings.py::*" = { F403 = 1, bare = 1 }
 "examples/fakeshop/test_query/test_converter_outputs_api.py::_choice_model.ChoiceCarrier" = { DJ001 = 1 }
 "examples/fakeshop/test_query/test_filter_absence_api.py::_absence_schema" = { N806 = 1, bare = 1 }
 "examples/fakeshop/test_query/test_filter_apply_arguments_api.py::test_nested_logic_and_real_related_hops_share_the_same_depth_budget" = { PLC0415 = 2 }
 "examples/fakeshop/test_query/test_filter_declarations_api.py::test_a_path_member_beside_a_declared_filter_the_converter_names_alike_names_the_path.PathNamingFilter" = { N815 = 1 }
 "examples/fakeshop/test_query/test_filter_widget_binding_api.py::test_a_split_widget_leaves_disabled_and_explicit_physical_values_in_control" = { PLC0415 = 1 }
-"examples/fakeshop/test_query/test_library_api.py::_colliding_leaf_holder_schema.Query._shelves" = { A002 = 1, bare = 1 }
-"examples/fakeshop/test_query/test_library_api.py::_multiple_choice_holder_schema.Query._shelves" = { A002 = 1, bare = 1 }
-"examples/fakeshop/test_query/test_library_api.py::_own_pk_hop_key_holder_schema.Query._books" = { A002 = 1, bare = 1 }
+"examples/fakeshop/test_query/test_library_api.py::_colliding_leaf_holder_schema.Query._shelves" = { A002 = 1 }
+"examples/fakeshop/test_query/test_library_api.py::_multiple_choice_holder_schema.Query._shelves" = { A002 = 1 }
+"examples/fakeshop/test_query/test_library_api.py::_own_pk_hop_key_holder_schema.Query._books" = { A002 = 1 }
 "examples/fakeshop/test_query/test_library_api.py::_related_order_pair_schema.PairBranchOrder" = { N815 = 1 }
-"examples/fakeshop/test_query/test_library_api.py::_relation_pk_global_id_holder_schema.Query._profiles" = { A002 = 1, bare = 1 }
-"examples/fakeshop/test_query/test_library_api.py::_relay_relation_isnull_holder_schema.Query._books" = { A002 = 1, bare = 1 }
-"examples/fakeshop/test_query/test_library_api.py::_unstorable_text_holder_schema.Query._printings" = { A002 = 1, bare = 1 }
+"examples/fakeshop/test_query/test_library_api.py::_relation_pk_global_id_holder_schema.Query._profiles" = { A002 = 1 }
+"examples/fakeshop/test_query/test_library_api.py::_relay_relation_isnull_holder_schema.Query._books" = { A002 = 1 }
+"examples/fakeshop/test_query/test_library_api.py::_unstorable_text_holder_schema.Query._printings" = { A002 = 1 }
 "examples/fakeshop/test_query/test_library_shapes_api.py::_BOOK_NAME_TERM_HOOKS" = { S610 = 1 }
 "examples/fakeshop/test_query/test_library_shapes_api.py::_BOOK_TEXT_TERM_HOOKS" = { FBT003 = 1, S610 = 5, S611 = 5 }
-"examples/fakeshop/test_query/test_multi_db.py::_build_loan_filter_test_schema._LoanFilterShardQuery._loans_on_shard_b" = { A002 = 1, bare = 1 }
+"examples/fakeshop/test_query/test_multi_db.py::_build_loan_filter_test_schema._LoanFilterShardQuery._loans_on_shard_b" = { A002 = 1 }
 "examples/fakeshop/test_query/test_postgres_array_filter_bindability_api.py::array_consumer" = { PLC0415 = 1, bare = 1 }
 "examples/fakeshop/test_query/test_raw_filter_forms_api.py::_split_widget_schema" = { PLC0415 = 1, bare = 1 }
 "examples/fakeshop/test_query/test_save_time_refused_row_api.py::_consumer_write" = { B904 = 1, bare = 1 }
-"examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::_typed_queryset_path_holder.Query._rows" = { A002 = 1, bare = 1 }
-"examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_project_lookup_over_an_integer_annotation_receives_the_number_as_sent.Query._rows" = { A002 = 1, bare = 1 }
-"examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_reverse_alias_added_only_by_filter_queryset_keeps_its_integer_target.Query._rows" = { A002 = 1, bare = 1 }
-"examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_typed_decimal_past_an_annotation_only_the_applied_queryset_holds_is_held.Query._rows" = { A002 = 1, bare = 1 }
+"examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::_typed_queryset_path_holder.Query._rows" = { A002 = 1 }
+"examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_project_lookup_over_an_integer_annotation_receives_the_number_as_sent.Query._rows" = { A002 = 1 }
+"examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_reverse_alias_added_only_by_filter_queryset_keeps_its_integer_target.Query._rows" = { A002 = 1 }
+"examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_a_typed_decimal_past_an_annotation_only_the_applied_queryset_holds_is_held.Query._rows" = { A002 = 1 }
 "examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_project_transform_without_a_backend_range_keeps_its_integer_members" = { PLC0415 = 1 }
-"examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_projected_child_lookup_crossing_relations_uses_its_declaring_model.Query._rows" = { A002 = 1, bare = 1 }
+"examples/fakeshop/test_query/test_scalar_predicate_binding_api.py::test_projected_child_lookup_crossing_relations_uses_its_declaring_model.Query._rows" = { A002 = 1 }
 "examples/fakeshop/test_query/test_scalars_mutation_api.py::_amount_select_decimal_spellings.observe" = { FBT001 = 1 }
 "scripts/_locks.py::try_lock" = { PLC0415 = 2 }
 "scripts/check_trailing_commas.py::_format_graphql" = { PLC0415 = 1, bare = 1 }
@@ -241,9 +241,9 @@
 "tests/filters/test_all_lookups.py::test_contrib_postgres_field_keeps_its_own_contains_and_drops_text_patterns" = { PLC0415 = 1 }
 "tests/filters/test_all_lookups.py::test_contrib_postgres_fields_keep_their_own_lookups" = { PLC0415 = 1 }
 "tests/filters/test_all_lookups.py::test_core_text_field_omits_contrib_postgres_text_lookups" = { PLC0415 = 1 }
-"tests/filters/test_finalizer.py::_build_unserved_filter_input.rows" = { A002 = 1, bare = 1 }
+"tests/filters/test_finalizer.py::_build_unserved_filter_input.rows" = { A002 = 1 }
 "tests/filters/test_finalizer.py::test_a_list_filter_over_a_postgres_column_taking_the_list_builds" = { PLC0415 = 1 }
-"tests/filters/test_finalizer.py::test_an_unserved_set_with_a_project_leaf_answers_through_its_own_resolver.rows" = { A002 = 1, bare = 1 }
+"tests/filters/test_finalizer.py::test_an_unserved_set_with_a_project_leaf_answers_through_its_own_resolver.rows" = { A002 = 1 }
 "tests/filters/test_finalizer.py::test_phase_2_5_admits_a_declared_reentry_decoding_against_the_bound_secondary.__init__" = { N807 = 1 }
 "tests/forms/test_converter.py::test_postgres_array_form_fields_read_a_list" = { PLC0415 = 1 }
 "tests/forms/test_inputs.py::_pg_tag_list_field" = { PLC0415 = 1 }

@@ -211,7 +211,7 @@ class Query:
     def _all_glossary_terms(
         self,
         info: Info,
-        filter: FilterInput[filters.GlossaryTermFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.GlossaryTermFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.GlossaryTermOrder]] | None = None,
     ) -> QuerySet[models.GlossaryTerm]:
         """Return ``GlossaryTerm`` rows, filtered and ordered by the arguments."""
@@ -230,7 +230,7 @@ class Query:
     def _all_glossary_statuses(
         self,
         info: Info,
-        filter: FilterInput[filters.GlossaryStatusFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.GlossaryStatusFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.GlossaryStatusOrder]] | None = None,
     ) -> QuerySet[models.GlossaryStatus]:
         """Return ``GlossaryStatus`` rows, filtered and ordered by the arguments."""
@@ -249,7 +249,7 @@ class Query:
     def _all_glossary_categories(
         self,
         info: Info,
-        filter: FilterInput[filters.GlossaryCategoryFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.GlossaryCategoryFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.GlossaryCategoryOrder]] | None = None,
     ) -> QuerySet[models.GlossaryCategory]:
         """Return ``GlossaryCategory`` rows, filtered and ordered by the arguments."""
@@ -268,7 +268,7 @@ class Query:
     def _all_glossary_category_memberships(
         self,
         info: Info,
-        filter: FilterInput[filters.GlossaryCategoryMembershipFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.GlossaryCategoryMembershipFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.GlossaryCategoryMembershipOrder]] | None = None,
     ) -> QuerySet[models.GlossaryCategoryMembership]:
         """Return ``GlossaryCategoryMembership`` rows, filtered and ordered by the arguments."""
@@ -289,7 +289,7 @@ class Query:
     def _all_glossary_aliases(
         self,
         info: Info,
-        filter: FilterInput[filters.GlossaryAliasFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.GlossaryAliasFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.GlossaryAliasOrder]] | None = None,
     ) -> QuerySet[models.GlossaryAlias]:
         """Return ``GlossaryAlias`` rows, filtered and ordered by the arguments."""
@@ -308,7 +308,7 @@ class Query:
     def _all_glossary_term_link_kinds(
         self,
         info: Info,
-        filter: FilterInput[filters.GlossaryTermLinkKindFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.GlossaryTermLinkKindFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.GlossaryTermLinkKindOrder]] | None = None,
     ) -> QuerySet[models.GlossaryTermLinkKind]:
         """Return ``GlossaryTermLinkKind`` rows, filtered and ordered by the arguments."""
@@ -327,7 +327,7 @@ class Query:
     def _all_glossary_term_links(
         self,
         info: Info,
-        filter: FilterInput[filters.GlossaryTermLinkFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.GlossaryTermLinkFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.GlossaryTermLinkOrder]] | None = None,
     ) -> QuerySet[models.GlossaryTermLink]:
         """Return ``GlossaryTermLink`` rows, filtered and ordered by the arguments."""
@@ -346,7 +346,7 @@ class Query:
     def _all_glossary_spec_mentions(
         self,
         info: Info,
-        filter: FilterInput[filters.GlossarySpecMentionFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.GlossarySpecMentionFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.GlossarySpecMentionOrder]] | None = None,
     ) -> QuerySet[models.GlossarySpecMention]:
         """Return ``GlossarySpecMention`` rows, filtered and ordered by the arguments."""
@@ -365,7 +365,7 @@ class Query:
     def _all_glossary_source_links(
         self,
         info: Info,
-        filter: FilterInput[filters.GlossarySourceLinkFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.GlossarySourceLinkFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.GlossarySourceLinkOrder]] | None = None,
     ) -> QuerySet[models.GlossarySourceLink]:
         """Return ``GlossarySourceLink`` rows, filtered and ordered by the arguments."""
@@ -384,7 +384,7 @@ class Query:
     def _all_glossary_documents(
         self,
         info: Info,
-        filter: FilterInput[filters.GlossaryDocumentFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.GlossaryDocumentFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.GlossaryDocumentOrder]] | None = None,
     ) -> QuerySet[kanban_models.BoardDoc]:
         """Return the ``glossary``-namespace ``BoardDoc`` rows, filtered and ordered by the arguments."""

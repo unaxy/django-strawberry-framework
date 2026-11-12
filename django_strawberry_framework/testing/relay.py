@@ -65,7 +65,7 @@ __all__ = ["decode_global_id", "global_id_for"]
 
 def global_id_for(
     type_cls: type[object],
-    id: object,  # noqa: A002
+    id: object,  # noqa: A002 - the GraphQL argument name
     *,
     schema: "Schema | None" = None,
 ) -> str:

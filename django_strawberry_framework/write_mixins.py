@@ -441,7 +441,7 @@ def _id_resolver_seams(
         info: Info[object, object],
         *,
         data: object,
-        id: object,  # noqa: A002
+        id: object,  # noqa: A002 - the GraphQL argument name
     ) -> object:
         """Delegate to the flavor's sync resolver entry (function-local import cycle guard)."""
         return dispatch_resolver_entry(module_path, sync_name, cls, info, data=data, id=id)
@@ -451,7 +451,7 @@ def _id_resolver_seams(
         info: Info[object, object],
         *,
         data: object,
-        id: object,  # noqa: A002
+        id: object,  # noqa: A002 - the GraphQL argument name
     ) -> object:
         """Delegate to the flavor's async resolver entry (function-local import cycle guard)."""
         return dispatch_resolver_entry(module_path, async_name, cls, info, data=data, id=id)

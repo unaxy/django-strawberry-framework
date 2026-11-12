@@ -314,7 +314,7 @@ if TYPE_CHECKING:
             info: Info,
             *,
             data: object,
-            id: object,  # noqa: A002
+            id: object,  # noqa: A002 - the GraphQL argument name
         ) -> object:
             """Dispatch the mutation synchronously."""
             return dispatch_resolver_entry(
@@ -332,7 +332,7 @@ if TYPE_CHECKING:
             info: Info,
             *,
             data: object,
-            id: object,  # noqa: A002
+            id: object,  # noqa: A002 - the GraphQL argument name
         ) -> object:
             """Dispatch the mutation asynchronously."""
             return dispatch_resolver_entry(

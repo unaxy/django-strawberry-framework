@@ -1593,7 +1593,7 @@ class Query:
     def _all_library_branches(
         self,
         info: strawberry.Info,
-        filter: FilterInput[filters.BranchFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.BranchFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.BranchOrder]] | None = None,
     ) -> QuerySet[models.Branch]:
         """Return the visibility-scoped library branches, optionally filtered and ordered."""
@@ -1666,7 +1666,7 @@ class Query:
     def _all_library_shelves(
         self,
         info: strawberry.Info,
-        filter: FilterInput[filters.ShelfFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.ShelfFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.ShelfOrder]] | None = None,
     ) -> QuerySet[models.Shelf]:
         """Return the visibility-scoped shelves, optionally filtered and ordered."""
@@ -1680,7 +1680,7 @@ class Query:
     def _all_library_circulation_desks_filtered(
         self,
         info: strawberry.Info,
-        filter: FilterInput[filters.CirculationDeskFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.CirculationDeskFilter] | None = None,  # noqa: A002 - the GraphQL argument name
     ) -> QuerySet[models.CirculationDesk]:
         """Acceptance surface for the whole-set ``"__all__"`` filter sweep over every relation kind.
 
@@ -1699,7 +1699,7 @@ class Query:
     def _all_library_catalogue_books(
         self,
         info: strawberry.Info,
-        filter: FilterInput[filters.CatalogueBookFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.CatalogueBookFilter] | None = None,  # noqa: A002 - the GraphQL argument name
     ) -> QuerySet[models.Book]:
         """Acceptance surface for a filterset declaring only ``Meta.exclude``.
 
@@ -1715,7 +1715,7 @@ class Query:
     def _all_library_desk_directory(
         self,
         info: strawberry.Info,
-        filter: FilterInput[filters.DeskDirectoryFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.DeskDirectoryFilter] | None = None,  # noqa: A002 - the GraphQL argument name
     ) -> QuerySet[models.CirculationDesk]:
         """Acceptance surface for a whole-set filterset whose ``Meta.exclude`` names the pk.
 
@@ -1732,7 +1732,7 @@ class Query:
     def _all_library_shelf_labels_filtered(
         self,
         info: strawberry.Info,
-        filter: FilterInput[filters.ShelfLabelFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.ShelfLabelFilter] | None = None,  # noqa: A002 - the GraphQL argument name
     ) -> QuerySet[models.ShelfLabel]:
         """Acceptance surface for filtering by the multi-column ``ForeignObject`` ``shelf``.
 
@@ -1748,7 +1748,7 @@ class Query:
     def _all_library_books(
         self,
         info: strawberry.Info,
-        filter: FilterInput[filters.BookFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.BookFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.BookOrder]] | None = None,
     ) -> QuerySet[models.Book]:
         """Return the visibility-scoped books, optionally filtered and ordered."""
@@ -1815,7 +1815,7 @@ class Query:
     def _all_library_genres(
         self,
         info: strawberry.Info,
-        filter: FilterInput[filters_genre.GenreFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters_genre.GenreFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders_genre.GenreOrder]] | None = None,
     ) -> QuerySet[models.Genre]:
         """Return genres through the type's ``get_queryset`` hook, optionally filtered and ordered."""
@@ -1845,7 +1845,7 @@ class Query:
     def _all_library_patrons(
         self,
         info: strawberry.Info,
-        filter: FilterInput[filters.PatronFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.PatronFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.PatronOrder]] | None = None,
     ) -> QuerySet[models.Patron]:
         """Return patrons through the type's ``get_queryset`` hook, optionally filtered and ordered."""
@@ -1874,7 +1874,7 @@ class Query:
     def _all_library_loans(
         self,
         info: strawberry.Info,
-        filter: FilterInput[filters.LoanFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.LoanFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.LoanOrder]] | None = None,
     ) -> QuerySet[models.Loan]:
         """Return loans through the type's ``get_queryset`` hook, optionally filtered and ordered."""
@@ -1890,7 +1890,7 @@ class Query:
         def _all_library_routed_books(
             self,
             info: strawberry.Info,
-            filter: FilterInput[filters.RoutedBookFilter] | None = None,  # noqa: A002
+            filter: FilterInput[filters.RoutedBookFilter] | None = None,  # noqa: A002 - the GraphQL argument name
             order_by: list[OrderInput[orders.BookOrder]] | None = None,
         ) -> QuerySet[models.Book]:
             """Acceptance surface for generated M2M leaves without a declared relation hop."""

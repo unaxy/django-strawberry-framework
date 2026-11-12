@@ -896,7 +896,7 @@ def _build_loan_filter_test_schema(
         def _loans_on_shard_b(
             self,
             info: Info[object, object],
-            filter: FilterInput[library_filters.LoanFilter] | None = None,  # noqa: A002
+            filter: FilterInput[library_filters.LoanFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         ) -> QuerySet[models.Loan]:
             queryset = models.Loan.objects.using("shard_b").order_by("id")
             if filter is not None:

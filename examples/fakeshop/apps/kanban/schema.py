@@ -654,7 +654,7 @@ class Query:
     def _all_cards(
         self,
         info: Info,
-        filter: FilterInput[filters.CardFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.CardFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.CardOrder]] | None = None,
     ) -> QuerySet[models.Card]:
         """Every ``Card`` row, ordered by ``number`` by default."""
@@ -673,7 +673,7 @@ class Query:
     def _ready_cards(
         self,
         info: Info,
-        filter: FilterInput[filters.CardFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.CardFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.CardOrder]] | None = None,
     ) -> QuerySet[models.Card]:
         """Cards ready to start now: ``todo``, unblocked, all dependencies done.
@@ -706,7 +706,7 @@ class Query:
     def _all_kanban_card_items(
         self,
         info: Info,
-        filter: FilterInput[filters.CardItemFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.CardItemFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.CardItemOrder]] | None = None,
     ) -> QuerySet[models.CardItem]:
         """Every ``CardItem`` row, ordered by ``id`` by default."""
@@ -725,7 +725,7 @@ class Query:
     def _all_kanban_card_glossary_terms(
         self,
         info: Info,
-        filter: FilterInput[filters.CardGlossaryTermFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.CardGlossaryTermFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.CardGlossaryTermOrder]] | None = None,
     ) -> QuerySet[models.CardGlossaryTerm]:
         """Every ``CardGlossaryTerm`` row, ordered by card number, then ``order``."""
@@ -744,7 +744,7 @@ class Query:
     def _all_kanban_statuses(
         self,
         info: Info,
-        filter: FilterInput[filters.StatusFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.StatusFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.StatusOrder]] | None = None,
     ) -> QuerySet[models.Status]:
         """Every ``Status`` row, ordered by ``order`` by default."""
@@ -763,7 +763,7 @@ class Query:
     def _all_kanban_priorities(
         self,
         info: Info,
-        filter: FilterInput[filters.PriorityFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.PriorityFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.PriorityOrder]] | None = None,
     ) -> QuerySet[models.Priority]:
         """Every ``Priority`` row, ordered by ``order`` by default."""
@@ -782,7 +782,7 @@ class Query:
     def _all_kanban_milestones(
         self,
         info: Info,
-        filter: FilterInput[filters.MilestoneFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.MilestoneFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.MilestoneOrder]] | None = None,
     ) -> QuerySet[models.Milestone]:
         """Every ``Milestone`` row, ordered by ``order`` by default."""
@@ -801,7 +801,7 @@ class Query:
     def _all_kanban_upstreams(
         self,
         info: Info,
-        filter: FilterInput[filters.UpstreamFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.UpstreamFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.UpstreamOrder]] | None = None,
     ) -> QuerySet[models.Upstream]:
         """Every ``Upstream`` row, ordered by ``order`` by default."""
@@ -820,7 +820,7 @@ class Query:
     def _all_kanban_parity_levels(
         self,
         info: Info,
-        filter: FilterInput[filters.ParityLevelFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.ParityLevelFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.ParityLevelOrder]] | None = None,
     ) -> QuerySet[models.ParityLevel]:
         """Every ``ParityLevel`` row, ordered by ``order`` by default."""
@@ -839,7 +839,7 @@ class Query:
     def _all_kanban_sections(
         self,
         info: Info,
-        filter: FilterInput[filters.SectionFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.SectionFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.SectionOrder]] | None = None,
     ) -> QuerySet[models.Section]:
         """Every ``Section`` row, ordered by ``order`` by default."""
@@ -858,7 +858,7 @@ class Query:
     def _all_kanban_reference_kinds(
         self,
         info: Info,
-        filter: FilterInput[filters.CardReferenceKindFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.CardReferenceKindFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.CardReferenceKindOrder]] | None = None,
     ) -> QuerySet[models.CardReferenceKind]:
         """Every ``CardReferenceKind`` row, ordered by ``order`` by default."""
@@ -877,7 +877,7 @@ class Query:
     def _all_kanban_board_doc_kinds(
         self,
         info: Info,
-        filter: FilterInput[filters.BoardDocKindFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.BoardDocKindFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.BoardDocKindOrder]] | None = None,
     ) -> QuerySet[models.BoardDocKind]:
         """Kanban-namespace ``BoardDocKind`` rows, ordered by ``order`` by default."""
@@ -897,7 +897,7 @@ class Query:
     def _all_kanban_target_versions(
         self,
         info: Info,
-        filter: FilterInput[filters.TargetVersionFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.TargetVersionFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.TargetVersionOrder]] | None = None,
     ) -> QuerySet[models.TargetVersion]:
         """Every ``TargetVersion`` row, ordered by ``number`` by default."""
@@ -916,7 +916,7 @@ class Query:
     def _all_kanban_labels(
         self,
         info: Info,
-        filter: FilterInput[filters.LabelFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.LabelFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.LabelOrder]] | None = None,
     ) -> QuerySet[models.Label]:
         """Every ``Label`` row, ordered by ``key`` by default."""
@@ -935,7 +935,7 @@ class Query:
     def _all_kanban_tracked_paths(
         self,
         info: Info,
-        filter: FilterInput[filters.TrackedPathFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.TrackedPathFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.TrackedPathOrder]] | None = None,
     ) -> QuerySet[models.TrackedPath]:
         """Every ``TrackedPath`` row, ordered by ``path`` by default."""
@@ -954,7 +954,7 @@ class Query:
     def _all_kanban_relative_sizes(
         self,
         info: Info,
-        filter: FilterInput[filters.RelativeSizeFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.RelativeSizeFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.RelativeSizeOrder]] | None = None,
     ) -> QuerySet[models.RelativeSize]:
         """Every ``RelativeSize`` row, ordered by ``order`` by default."""
@@ -973,7 +973,7 @@ class Query:
     def _all_kanban_board_docs(
         self,
         info: Info,
-        filter: FilterInput[filters.BoardDocFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.BoardDocFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.BoardDocOrder]] | None = None,
     ) -> QuerySet[models.BoardDoc]:
         """Every kanban-namespace ``BoardDoc`` row, ordered by ``order`` by default."""
@@ -992,7 +992,7 @@ class Query:
     def _all_kanban_actors(
         self,
         info: Info,
-        filter: FilterInput[filters.ActorFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.ActorFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.ActorOrder]] | None = None,
     ) -> QuerySet[models.Actor]:
         """Every ``Actor`` row, ordered by ``order``, then ``key``."""
@@ -1011,7 +1011,7 @@ class Query:
     def _all_kanban_attempt_outcomes(
         self,
         info: Info,
-        filter: FilterInput[filters.AttemptOutcomeFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.AttemptOutcomeFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.AttemptOutcomeOrder]] | None = None,
     ) -> QuerySet[models.AttemptOutcome]:
         """Every ``AttemptOutcome`` row, ordered by ``order`` by default."""
@@ -1030,7 +1030,7 @@ class Query:
     def _all_kanban_verification_kinds(
         self,
         info: Info,
-        filter: FilterInput[filters.VerificationKindFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.VerificationKindFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.VerificationKindOrder]] | None = None,
     ) -> QuerySet[models.VerificationKind]:
         """Every ``VerificationKind`` row, ordered by ``order`` by default."""
@@ -1049,7 +1049,7 @@ class Query:
     def _all_kanban_card_transitions(
         self,
         info: Info,
-        filter: FilterInput[filters.CardTransitionFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.CardTransitionFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.CardTransitionOrder]] | None = None,
     ) -> QuerySet[models.CardTransition]:
         """Every ``CardTransition`` row, ordered by card number, then ``occurred_at``."""
@@ -1068,7 +1068,7 @@ class Query:
     def _all_kanban_work_attempts(
         self,
         info: Info,
-        filter: FilterInput[filters.WorkAttemptFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.WorkAttemptFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.WorkAttemptOrder]] | None = None,
     ) -> QuerySet[models.WorkAttempt]:
         """Every ``WorkAttempt`` row, ordered by card number, then ``started_at``."""
@@ -1087,7 +1087,7 @@ class Query:
     def _all_kanban_decisions(
         self,
         info: Info,
-        filter: FilterInput[filters.DecisionFilter] | None = None,  # noqa: A002
+        filter: FilterInput[filters.DecisionFilter] | None = None,  # noqa: A002 - the GraphQL argument name
         order_by: list[OrderInput[orders.DecisionOrder]] | None = None,
     ) -> QuerySet[models.Decision]:
         """Every ``Decision`` row, ordered by ``decided_at`` by default."""

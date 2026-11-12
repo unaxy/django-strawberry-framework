@@ -4568,7 +4568,7 @@ def test_an_unserved_set_with_a_project_leaf_answers_through_its_own_resolver() 
 
         def rows(
             info: strawberry.Info,
-            filter: FilterInput[_DoubledSpecimenFilter],  # noqa: A002
+            filter: FilterInput[_DoubledSpecimenFilter],  # noqa: A002 - the GraphQL argument name
         ) -> list[ScalarSpecimen]:
             queryset = ScalarSpecimen.objects.order_by("label")
             return list(_DoubledSpecimenFilter.apply_sync(filter, queryset, info))
@@ -5246,7 +5246,7 @@ def _build_unserved_filter_input(filterset_cls: type[FilterSet]) -> None:
 
     def rows(
         info: strawberry.Info,
-        filter: object,  # noqa: A002
+        filter: object,  # noqa: A002 - the GraphQL argument name
     ) -> list[Model]:
         return list(filterset_cls.apply_sync(filter, model._default_manager.all(), info))
 

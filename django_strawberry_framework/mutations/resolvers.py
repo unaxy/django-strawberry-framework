@@ -281,7 +281,7 @@ if TYPE_CHECKING:
             info: Info[object, object],
             *,
             data: object = UNSET,
-            id: object = UNSET,  # noqa: A002
+            id: object = UNSET,  # noqa: A002 - the GraphQL argument name
         ) -> object: ...
 
     class _AsyncResolverEntry(Protocol[_MutationClassT_contra]):
@@ -293,7 +293,7 @@ if TYPE_CHECKING:
             info: Info[object, object],
             *,
             data: object = UNSET,
-            id: object = UNSET,  # noqa: A002
+            id: object = UNSET,  # noqa: A002 - the GraphQL argument name
         ) -> Coroutine[object, object, object]: ...
 
 
@@ -2146,7 +2146,7 @@ def make_resolver_entries(
         info: Info[object, object],
         *,
         data: object = UNSET,
-        id: object = UNSET,  # noqa: A002
+        id: object = UNSET,  # noqa: A002 - the GraphQL argument name
     ) -> object:
         """Normalize the ``UNSET``-default kwargs to ``sync_body``'s positional args."""
         return sync_body(mutation_cls, info, data, id)
@@ -2156,7 +2156,7 @@ def make_resolver_entries(
         info: Info[object, object],
         *,
         data: object = UNSET,
-        id: object = UNSET,  # noqa: A002
+        id: object = UNSET,  # noqa: A002 - the GraphQL argument name
     ) -> object:
         """Run ``sync_body`` in one ``sync_to_async(thread_sensitive=True)`` call."""
         return await run_in_one_sync_boundary(sync_body, mutation_cls, info, data, id)
