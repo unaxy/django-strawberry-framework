@@ -771,6 +771,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_client_api.py            # Live GraphQL HTTP acceptance tests for the ``testing`` package's test-client family.
 ├── test_combined_visibility_api.py  # Live GraphQL HTTP tests for a combined ``get_queryset`` result served as its primary-key set.
 ├── test_completion_lifecycle.py  # Live HTTP acceptance for owned async mutation completion and stable error delivery.
+├── test_conjoined_walked_leaf_api.py  # A walked ``conjoined`` multiple-choice leaf keeps a parent reaching a visible row for each value.
 ├── test_connection_fields_api.py # Live HTTP root-connection sources, pagination, sidecars and visibility contracts.
 ├── test_connection_names_api.py  # Live connection selection names and row-fetch elision under schema name conversion.
 ├── test_connection_pagination_api.py  # Live /graphql pagination error containment and ``totalCount`` gating for connections.

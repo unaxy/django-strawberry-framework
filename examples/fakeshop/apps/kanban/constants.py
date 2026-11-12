@@ -163,6 +163,7 @@ TRACKED_FILE_PATHS: tuple[str, ...] = (
     "examples/fakeshop/test_query/test_client_api.py",
     "examples/fakeshop/test_query/test_combined_visibility_api.py",
     "examples/fakeshop/test_query/test_completion_lifecycle.py",
+    "examples/fakeshop/test_query/test_conjoined_walked_leaf_api.py",
     "examples/fakeshop/test_query/test_connection_fields_api.py",
     "examples/fakeshop/test_query/test_connection_names_api.py",
     "examples/fakeshop/test_query/test_connection_pagination_api.py",

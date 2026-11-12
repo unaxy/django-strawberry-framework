@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 520 done, 103 to do. The CHANGELOG entries filed here moved to
+Progress: 521 done, 105 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3101,17 +3101,24 @@ Progress: 520 done, 103 to do. The CHANGELOG entries filed here moved to
   override, a stock `BaseCSVFilter` + `NumberFilter`, and Django's own `qs.filter(arr__icontains=[Decimal("1")])`
   (`icontains` / `startswith` bind the list's text and match nothing; `iexact` / `regex` bind the list itself).
   Evidence: the 829 fact report (compiled on the postgresql backend without a connection)
+- [x] 789. (robustness) fixed: a walked flat leaf (a `RelatedFilter` hop, a hooked target type, a nested branch's child
+  leaf walking a to-many hop, the flat copy of a conjoined child leaf) of a `MultipleChoiceFilter` /
+  `ModelMultipleChoiceFilter` (and `GlobalIDMultipleChoiceFilter` off its `in` lookup) with `conjoined=True` ran its
+  terminal once over the visible target rows, so one related row had to match every value: too few parents positive,
+  too many with `exclude=True`, on every to-many shape (key, target column, M2M, two hops, a forward key past a to-many
+  hop). After the whole-value call (still the empty / no-op / GlobalID-error gate), the terminal now runs once per
+  value over the same visible rows, each folded to the parent on its own and ANDed (one iteration of django-filter's
+  loop: some visible related row per value), and conjoined `exclude` negates the unconjoined twin, a key override
+  getting `conjoined=False` beside `exclude=False` (`filters/sets.py::_conjoined_reading` / `_ConjoinedReading`, which
+  replays a one-shot cleaned value, `FilterSet._apply_relation_leaf`, `FilterSet._parent_condition`,
+  `_KeyMatch.named_rows` per value for a raw key or GlobalID). 414 conjoined walked grid cells moved to the stock /
+  unwalked answer, hidden members keep their visibility answer, 0 unconjoined cells and 0 query counts moved. A flat
+  conjoined field now follows Django where its nested branch keeps one-row-per-branch: README, GLOSSARY and spec-027
+  list `conjoined=True` beside `isNull: true` and `exclude=True` as where the spellings part. Pinned live by
+  `examples/fakeshop/test_query/test_conjoined_walked_leaf_api.py` (67 rows). Filed 939, 940, 941; widened 932.
 
 ## To do: found along the way
 
-- [ ] 789. (robustness) A shipped `ModelMultipleChoiceFilter(conjoined=True)` on a to-many relation key a flat leaf
-  walks (a `RelatedFilter` on the relation, or a target type with its own `get_queryset`) answers no row where
-  unwalked answers (`ScalarSpecimen.children` naming two children: walked `[]`, unwalked `['p1']`): each AND is re-read
-  on the target key column over a single target row (`filters/sets.py::FilterSet._leaf_chain`,
-  `_LeafChain.terminal_value`). One declaration, two answers (GOAL "Trust boundary"). Found researching 784.
-  The same split holds for `MultipleChoiceFilter(conjoined=True)` and on a to-many target column
-  (`children__label`, `shelves__code`) and a two-hop path ending to-many (`partner__children__label`), for every
-  spelling (783's grid: 36 cells per spelling)
 - [ ] 832. (robustness) A flat key into a `RelatedFilter` target set over a multi-table-inheritance descendant
   answers a Django `FieldError` for every nonempty value, whatever its GlobalID strategy: `RepairTicketFilter.venue =
   RelatedFilter(SelfServeDeskFilter, field_name="venue")` publishes `venueFaults`, which applies `venue__faults` from a
@@ -3221,7 +3228,9 @@ Progress: 520 done, 103 to do. The CHANGELOG entries filed here moved to
   (`['root']`, `['east', 'west']`) where unwalked answers Django's duplicated parents (`['root', 'root']`,
   `['east', 'east', 'west']`), raw and over GraphQL, every spelling, against GLOSSARY `FilterSet` "Flat fields walking
   a declared branch" ("answers as Django answers the same path") and `filters/sets.py::FilterSet._apply_relation_leaf`'s
-  docstring (the parents' multiplicity, as for a leaf walking no hop). Found researching 783
+  docstring (the parents' multiplicity, as for a leaf walking no hop). Found researching 783. The same root with
+  `MultipleChoiceFilter(conjoined=False, distinct=False)` through a walked to-many leaf: unwalked repeats the parent
+  per matching join row (`['Pa', 'Pa']`), walked folds through EXISTS to one (`['Pa']`) (789's grid)
 - [ ] 933. (robustness) A `RelatedFilter` whose own `field_name` is lazily spelled (`gettext_lazy("shelves")`) stays
   lazy (it lives in `related_filters`, not the published table 783 reads as text), and with no `DjangoType`
   registered for its target model it skips spec-027 Decision 8's refusal that a plain `str` or `StrEnum` spelling
@@ -3237,6 +3246,19 @@ Progress: 520 done, 103 to do. The CHANGELOG entries filed here moved to
   binds `prepare_value` of the initial, the pre-render object; spec-038 Decision 8 says such a field fails as Django's
   own edit form does). Likely root: bind the widget's rendered value (`widget.format_value(prepare_value(initial))`).
   Found researching 787
+- [ ] 939. (robustness) A consumer class-level `filter` override on a walked to-many target column (a
+  `MultipleChoiceFilter` subclass, `conjoined=True`, positive) still runs once over the visible target rows as its
+  documented override contract says, so one related row must meet every value (`children__label` `r1`+`r2`: walked
+  `[]`, unwalked `['Pa']`). Linked to 799. Found fixing 789
+- [ ] 940. (robustness, low) A walked to-many key `ModelMultipleChoiceFilter(required=True, always_filter=False)` runs
+  one more statement than unwalked (4 against 3): `_LeafChain.terminal_value` builds the declared predicate, asking
+  django-filter's `is_noop` (a COUNT), and the terminal asks it again; rows are unchanged, `conjoined` or not. Found
+  fixing 789
+- [ ] 941. (robustness, low) A walked to-many key override (class-level `filter`) whose form field cleans to a one-shot
+  iterator constrains nothing (every row; unwalked `['Pa']` / `[]`): the package's own reads (the `_KeyMatch` shipped
+  comparison, the conjoined reading) drain the value before the override's fallback receives it. Root fix: make a
+  one-shot cleaned value replayable once where `_apply_relation_leaf` enters and hand every reader a fresh iterator.
+  Found verifying 789
 
 ## To do: holes found re-checking the fixes
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 from collections import OrderedDict
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
@@ -301,8 +302,6 @@ if TYPE_CHECKING:
         Collection,
         Generator,
         ItemsView,
-        Iterable,
-        Iterator,
         Mapping,
         Sequence,
     )
@@ -1772,7 +1771,9 @@ class ProjectedChildFilter(Filter):
     spec-027 Decision 8), then answers at the parent through the rows the declaration's
     explicit ``queryset=`` admits (``FilterSet._apply_relation_leaf``, the
     application every flat leaf walking a declared hop shares): a positive child
-    filter keeps the parents reaching a matching child row, an ``isnull=True``
+    filter keeps the parents reaching a matching child row (a ``conjoined`` one,
+    a matching child row for each value, the rows two values match possibly
+    different), an ``isnull=True``
     one also the parents reaching no visible child row, and an ``exclude=True``
     one the parents its positive twin does not keep (a child filter holding a
     ``filter`` of its own, ``method=`` included, stays positive: its ``filter``
@@ -2481,7 +2482,10 @@ class _KeyMatch:
         names a row only when Django's relation lookup accepts it for the relation's target
         (``check_rel_lookup_compatibility``: the target's concrete model, a parent or a child
         of it). Any other value (a raw key, a GlobalID) keeps the rows the shipped comparison
-        of the leaf's class keeps on the key column. A value naming no row (a ``RelatedFilter``
+        of the leaf's class keeps on the key column: one set for the whole value, or, when
+        that comparison is django-filter's conjoined per-value loop (``_conjoined_reading``),
+        one set per value, each the rows it keeps for that value alone, once the whole value
+        named rows. A value naming no row (a ``RelatedFilter``
         head's ``null_value``, the null sentinel its overriding ``filter`` receives unchanged;
         an empty or absent model-choice value; an instance of another model; a value the
         shipped comparison skips, returning ``rows`` by identity, or refuses,
@@ -2498,20 +2502,28 @@ class _KeyMatch:
             # null test, names no row of the relation's target.
             return None
         shipped = _shipped_filter_class(self.terminal)
-        if _builds_consumer_predicate(
-            self.terminal,
-            truth.stored_function(truth.class_dict(shipped)["filter"]),
-        ):
+        shipped_filter = truth.stored_function(truth.class_dict(shipped)["filter"])
+        if _builds_consumer_predicate(self.terminal, shipped_filter):
             return None
         members = _model_choice_members(value)
         if members is None:
+            reading = _conjoined_reading(self.terminal, shipped_filter, value)
             try:
-                kept = shipped.filter(self.terminal, rows, value)
+                kept = shipped.filter(
+                    self.terminal,
+                    rows,
+                    value if reading is None else reading.sent,
+                )
             except _SHIPPED_COMPARISON_REFUSALS:
                 # The shipped comparison cannot read the value, so it names no row; the
                 # consumer's ``filter`` answers it on the chain's ``fallback``.
                 return None
-            return None if kept is rows else [kept]
+            if kept is rows:
+                return None
+            if reading is None:
+                return [kept]
+            # A conjoined leaf names one set of rows per value, a parent reaching each.
+            return [shipped.filter(reading.reader, rows, [each]) for each in reading.values]
         target = rows.model._meta
         if not members or not all(
             check_rel_lookup_compatibility(truth.class_of(member), target, self.relation)
@@ -3159,6 +3171,76 @@ def _builds_consumer_predicate(filter_instance: Filter, method: object) -> bool:
     )
 
 
+@dataclass(frozen=True)
+class _ConjoinedReading:
+    """How a ``conjoined`` multiple-choice filter reads its value one value at a time.
+
+    ``sent`` is the value its call with every value receives: the value as cleaned, or for
+    a one-shot iterator (a consumer form field cleaning to a generator) a fresh iterator
+    over the items it held, so that call reads it as it would read the cleaned value and the
+    per-value calls still see every item. ``items`` are those items; ``values`` reads them
+    in the order sent, each once, as django-filter's loop iterates ``set(value)``, once that
+    call has read (or refused) them. ``reader`` is a copy of the
+    filter whose ``filter``, handed one of ``values`` in a list, runs that value's turn of the
+    loop: django-filter asks ``is_noop`` once, of the whole value, before it loops, so the
+    copy has ``always_filter`` on and the default ``is_noop`` never compares a one-value list
+    against the field's choices (a count query on a model-choice field, and a skipped value
+    for a required filter offering one choice).
+    """
+
+    reader: MultipleChoiceFilter
+    sent: object
+    items: Iterable[object]
+
+    @property
+    def values(self) -> list[object]:
+        """The items in the order sent, each once."""
+        return list(dict.fromkeys(self.items))
+
+
+def _conjoined_reading(
+    filter_instance: Filter,
+    method: object,
+    value: object,
+) -> _ConjoinedReading | None:
+    """Return how a ``conjoined`` filter's ``method`` reads ``value`` one value at a time, else ``None``.
+
+    django-filter's ``MultipleChoiceFilter.filter`` with ``conjoined=True`` chains one
+    ``filter()`` call per distinct value (``exclude()`` with ``exclude=True``), so Django
+    gives each value a join of its own across a multi-valued relation: a parent is kept when
+    SOME related row matches EACH value. ``method`` is the ``filter`` that runs for
+    ``filter_instance`` (its class's, or the shipped comparison a class-level override
+    replaces); only a ``method`` reaching that per-value loop (``_predicate_hook``:
+    ``MultipleChoiceFilter.filter``, and ``GlobalIDMultipleChoiceFilter.filter`` off its
+    ``in`` lookup, which applies the whole list in one predicate) reads its values one at a
+    time, and never one the filter holds of its own (``_own_filter``). A value the loop
+    cannot iterate (``None``, which the call with every value skips) reads none. Asked
+    before that call, which receives ``sent`` (``_ConjoinedReading``).
+    """
+    if not (isinstance(filter_instance, MultipleChoiceFilter) and filter_instance.conjoined):
+        return None
+    if (
+        _own_filter(filter_instance) is not None
+        or _predicate_hook(filter_instance, method) is None
+        or not isinstance(value, Iterable)
+    ):
+        return None
+    held: Iterable[object] = value
+    items = list(held) if isinstance(held, Iterator) else held
+    reader = copy.copy(filter_instance)
+    reader.always_filter = True
+    return _ConjoinedReading(
+        reader,
+        iter(items) if items is not held else held,
+        items,
+    )
+
+
+def _class_filter(filter_instance: Filter) -> object:
+    """Return the ``filter`` function ``filter_instance``'s class resolves through its real MRO."""
+    return truth.stored_function(truth.mro_attr(truth.class_of(filter_instance), "filter"))
+
+
 def _declared_as_text(filter_instance: Filter) -> Filter:
     """Return ``filter_instance``, or a copy holding its ``field_name`` and ``lookup_expr`` as text.
 
@@ -3211,7 +3293,7 @@ def _runs_shipped_filter(filter_instance: Filter) -> bool:
     """
     if _own_filter(filter_instance) is not None:
         return False
-    method = truth.stored_function(truth.mro_attr(truth.class_of(filter_instance), "filter"))
+    method = _class_filter(filter_instance)
     return _is_shipped_function(method) and not _builds_consumer_predicate(filter_instance, method)
 
 
@@ -8505,6 +8587,9 @@ class FilterSet(
             return _LeafChain(hops, terminal, to_many_key=to_many_key)
         key_terminal = copy.copy(terminal)
         key_terminal.exclude = False
+        if filter_instance.exclude and isinstance(key_terminal, MultipleChoiceFilter):
+            # Negated at the parent as its unconjoined positive twin (``_apply_relation_leaf``).
+            key_terminal.conjoined = False
         return _LeafChain(
             (),
             filter_instance,
@@ -9245,7 +9330,8 @@ class FilterSet(
         ``queryset`` unchanged and derives nothing. Then every hop is derived
         (``_hop_visible_rows``) and the leaf's chain (``_leaf_chain``) runs its
         terminal once, over the last hop's visible rows: a supplied leaf's filter
-        runs once per value. A terminal that returns its input BY IDENTITY
+        runs once per value, a ``conjoined`` one then once more for each of the
+        value's members (below). A terminal that returns its input BY IDENTITY
         (django-filter's empty-value skip, ``MultipleChoiceFilter.is_noop``, a
         ``FilterMethod`` short circuit) applied no constraint, and ``queryset``
         is returned unchanged. One returning a new queryset that keeps every row
@@ -9267,8 +9353,18 @@ class FilterSet(
           row at some hop (Django's ``LEFT JOIN`` null extension over the visible
           rows: a ``NULL`` key or a hidden target alike), where the nested twin
           stays existential;
+        - a ``conjoined`` multiple-choice lookup (one whose ``filter`` runs
+          django-filter's per-value loop, ``_conjoined_reading``) keeps a parent
+          reaching, for EACH member of its value, a visible chain whose terminal
+          matches that member: after the call with the whole value (which skips
+          or refuses it as a whole), the terminal runs once per member over the
+          same visible rows, each row set folded to the parent on its own, as
+          django-filter's chained ``filter()`` calls give each value a join of
+          its own, so two members may be met by different related rows;
         - an ``exclude=True`` filter keeps the parents its positive twin (the
-          same filter with ``exclude`` off) does not keep, negated at the parent
+          same filter with ``exclude`` off, and a ``conjoined`` one with
+          ``conjoined`` off: django-filter excludes each value in turn, dropping a
+          parent ANY value matches) does not keep, negated at the parent
           (Django's exclude across a relation), never the child rows the
           excluding filter keeps.
 
@@ -9283,9 +9379,10 @@ class FilterSet(
 
         A relation-key leaf running consumer code (a class-level ``filter`` or
         ``get_filter_predicate`` override) runs once over ``queryset`` as
-        declared, with ``exclude`` off when it is set (the parent negation above
-        applies its ``exclude``, so an override honours ``self.exclude`` through
-        the package), and keeps the parents it matched that reach a visible
+        declared, with ``exclude`` off when it is set, and ``conjoined`` off with
+        it (the parent negation above applies its ``exclude``, the unconjoined
+        twin's, so an override honours ``self.exclude`` through the package),
+        and keeps the parents it matched that reach a visible
         last-hop row (``_reaches_key``): on a forward key any, through each
         hop's visible rows; on a to-many key, its value naming rows of the
         relation's target (``_KeyMatch``, ``_request_chain``), one its value
@@ -9338,6 +9435,11 @@ class FilterSet(
         if negate:
             terminal = copy.copy(terminal)
             terminal.exclude = False
+            if isinstance(terminal, MultipleChoiceFilter):
+                # django-filter excludes each value of a conjoined filter in turn, which drops
+                # a parent ANY value matches: the positive twin negated at the parent is the
+                # unconjoined one.
+                terminal.conjoined = False
         value = chain.terminal_value(value, queryset)
         null_extends = (
             terminal.method is None and terminal.lookup_expr == "isnull" and value is True
@@ -9386,11 +9488,66 @@ class FilterSet(
         source = visible[-1]
         if chain.view:
             source, terminal = self._relation_view(chain.view, terminal, source, using)
-        rows = self._filter_child_rows(terminal, source, value)
+        # A conjoined leaf reads each value alone, as its ``filter`` chains one call per value
+        # over the parent's relation: one row set per value, each folded to the parent on its
+        # own. The call with every value stays the one that skips or refuses the value.
+        reading = _conjoined_reading(terminal, _class_filter(terminal), value)
+        rows = self._filter_child_rows(
+            terminal,
+            source,
+            value if reading is None else reading.sent,
+        )
         if _constrains_nothing(rows, source):
             return queryset
-        if key_hop is not None and not chain.view:
-            rows = rows.filter(self._reaches_key(rows, chain, key_hop, named, using))
+        row_sets = (
+            [rows]
+            if reading is None
+            else [
+                self._filter_child_rows(reading.reader, source, [each]) for each in reading.values
+            ]
+        )
+        conditions = [
+            self._parent_condition(
+                queryset,
+                chain,
+                visible,
+                matched,
+                named,
+                using,
+                null_extends=null_extends,
+            )
+            for matched in row_sets
+        ]
+        if negate:
+            # A negated terminal is unconjoined (above): one row set, negated at the parent.
+            return queryset.filter(~conditions[0] & self._alias_joins(queryset, chain.hops[0]))
+        kept = conditions[0]
+        for condition in conditions[1:]:
+            kept &= condition
+        return queryset.filter(kept)
+
+    def _parent_condition(
+        self,
+        queryset: models.QuerySet[_M],
+        chain: _LeafChain,
+        visible: Sequence[models.QuerySet[models.Model]],
+        rows: models.QuerySet[models.Model],
+        named: list[models.QuerySet[models.Model]] | None,
+        using: str,
+        *,
+        null_extends: bool,
+    ) -> Q:
+        """Return the condition keeping a parent whose chain reaches one of the last hop's ``rows``.
+
+        ``rows`` are rows of the last of ``chain.hops`` the leaf's terminal matched, over
+        ``visible`` (each hop's visible rows); a forward relation key's rows must also reach a
+        visible row of ``chain.key_hop`` (``_reaches_key``) unless the terminal read them
+        through ``chain.view``. Each hop folds outward with ``_reaches_hop`` onto the previous
+        hop's visible rows, then onto ``queryset``; ``null_extends`` also keeps, at each hop,
+        a row reaching no visible related row (``_reaches_none``: an ``isnull=True`` lookup).
+        """
+        if chain.key_hop is not None and not chain.view:
+            rows = rows.filter(self._reaches_key(rows, chain, chain.key_hop, named, using))
         condition = Q()
         for index in range(len(chain.hops) - 1, -1, -1):
             outer = visible[index - 1] if index else queryset
@@ -9399,9 +9556,7 @@ class FilterSet(
                 condition |= self._reaches_none(outer, chain.hops[index], visible[index])
             if index:
                 rows = outer.filter(condition)
-        return queryset.filter(
-            ~condition & self._alias_joins(queryset, chain.hops[0]) if negate else condition,
-        )
+        return condition
 
     def _leaf_absent(self, name: str) -> bool:
         """Whether the request's data carries no key the form field of leaf ``name`` reads.
@@ -9451,7 +9606,8 @@ class FilterSet(
         running inside its own filter set over the branch's visible rows,
         projected back through the relation. Each is told
         whether the request supplied it (``_leaf_absent``): a supplied leaf's
-        filter runs once, an absent one's first over unscoped rows to learn
+        filter runs once (a ``conjoined`` multiple-choice one then once more per
+        value), an absent one's first over unscoped rows to learn
         whether it constrains anything.
         Otherwise a name is routed through the correlated ``EXISTS`` adapter ONLY
         when its frozen candidate row says so: ``candidate.routable``, the
