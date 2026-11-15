@@ -8,7 +8,7 @@ dry-upstream-0_0_15 tracker files no entries of its own, so its entries are numb
 The test-compliance-review entries have no tracker in the repository; they continue from 106, clear of every other
 section's numbers. Tick an entry once it is written into `CHANGELOG.md`.
 
-Progress: 0 done, 241 to do.
+Progress: 0 done, 242 to do.
 
 ## From dry-0_0_15_3
 
@@ -1172,6 +1172,12 @@ Progress: 0 done, 241 to do.
   `resolve_nodes`, its coroutine closed; a type overriding `resolve_node` keeps it. Documented: a node id names its row
   by the key column's exact value, so an id matching only through a case-insensitive collation (SQLite `NOCASE`, a
   MySQL `_ci` collation, a PostgreSQL nondeterministic collation) is `null` from `node` / `nodes`
+- [ ] 958. CHANGELOG entry for item 957: one `DjangoOptimizerExtension` instance installed on several schemas, or
+  behind a `DjangoResourcePolicyExtension` factory whose page cap changes per operation, no longer serves a nested
+  connection a plan built under another schema's `relay_max_results`, page cap or `NameConverter` ("Unplanned N+1 ...
+  planned window unservable" and `data: null` under `strictness="raise"`, per-parent or deferred-column queries
+  otherwise): the plan cache keys each plan by the executing schema and the operation's connection cap, so two schemas
+  never share a cached plan, even with identical settings
 
 ## From dry-upstream-0_0_15
 

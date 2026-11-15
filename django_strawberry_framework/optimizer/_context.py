@@ -53,9 +53,10 @@ if TYPE_CHECKING:
     #: triple whose payload is a library-owned scalar, a nested frozen structure,
     #: or an opaque ``object()`` token.
     FrozenVariableValue: TypeAlias = tuple[str, int, object]
-    #: The operation-constant plan-cache-key parts: the rendered document key and
-    #: the frozen ``(variable name, value)`` pairs that can change a plan.
-    CacheKeyParts: TypeAlias = tuple[str, frozenset[tuple[str, FrozenVariableValue]]]
+    #: The operation-constant plan-cache-key parts: the rendered document key, the
+    #: frozen ``(variable name, value)`` pairs that can change a plan, the effective
+    #: connection cap and the executing schema's token.
+    CacheKeyParts: TypeAlias = tuple[str, frozenset[tuple[str, FrozenVariableValue]], int, object]
     #: The full plan-cache key (``extension.py::DjangoOptimizerExtension._build_cache_key``).
     PlanCacheKey: TypeAlias = tuple[
         str,
@@ -63,6 +64,8 @@ if TYPE_CHECKING:
         type[models.Model],
         tuple[str, ...],
         type[DjangoType] | None,
+        int,
+        object,
     ]
     #: A converted-selection memo key: one field node's id, or a group's ids.
     ConvertedMemoKey: TypeAlias = int | tuple[int, ...]

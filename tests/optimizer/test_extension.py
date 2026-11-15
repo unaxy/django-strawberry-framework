@@ -5756,11 +5756,18 @@ def test_an_execution_frame_a_task_copied_answers_nothing_once_the_execution_end
             Category,
             (),
             None,
+            100,
+            object(),
         )
         plans_memo[plan_key] = plan
         key_parts_memo = cache_key_parts_memo()
         assert key_parts_memo is not None
-        key_parts_memo[1] = ("probe", frozen_variables)
+        key_parts_memo[1] = (
+            "probe",
+            frozen_variables,
+            100,
+            object(),
+        )
         selections_memo = converted_selections_memo()
         assert selections_memo is not None
         selections_memo[1] = [node]

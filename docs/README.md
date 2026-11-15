@@ -52,7 +52,7 @@ schema = DjangoSchema(
 )
 ```
 
-The optimizer is a module-level singleton wrapped in a factory. That preserves the instance-bound [plan cache][glossary-plan-cache] (Strawberry runs the callable once per request and gets the same instance back) and emits no deprecation warning, because the entry is a callable rather than an instance.
+The optimizer is a module-level singleton wrapped in a factory. That preserves the instance-bound [plan cache][glossary-plan-cache] (Strawberry runs the callable once per request and gets the same instance back) and emits no deprecation warning, because the entry is a callable rather than an instance. One instance may serve several schemas: each plan is keyed by the schema that executes it and the connection cap it was planned under, so a schema is never answered from a plan built under another schema's `relay_max_results`, page caps or published names.
 
 The extension list obeys three separate rules.
 

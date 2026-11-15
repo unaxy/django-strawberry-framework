@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 526 done, 110 to do. The CHANGELOG entries filed here moved to
+Progress: 527 done, 110 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3184,6 +3184,24 @@ Progress: 526 done, 110 to do. The CHANGELOG entries filed here moved to
   `::test_node_refetch_calls_a_consumer_resolve_node_over_its_resolve_nodes`,
   `::test_refetch_finds_a_text_key_by_its_value_not_its_collation`. spec-032, spec-015, spec-031, spec-034, README,
   GLOSSARY `DjangoNodeField`. Filed 955, 956; CHANGELOG 954
+- [x] 957. fixed: a `DjangoOptimizerExtension` instance installed on several schemas keys every cached plan by the
+  executing schema (a per-schema token minted once in `optimizer/extension.py::_schema_cache_record`, a
+  `WeakKeyDictionary` on the graphql-core schema that also holds the pagination wire names) and by the operation's
+  effective connection cap (`utils/connections.py::resolve_relay_max_results`), both carried in the memoized key parts
+  of `DjangoOptimizerExtension._build_cache_key` (`optimizer/_context.py::PlanCacheKey`): a schema whose
+  `relay_max_results` or resource-policy page cap differs, a per-operation `DjangoResourcePolicyExtension` factory on a
+  plain `strawberry.Schema`, and a schema whose `NameConverter` publishes other names are never served another plan's
+  window or column mask, where `strictness="raise"` answered "Unplanned N+1 ... planned window unservable" with
+  `data: null` and `off` read per parent; two identically configured schemas no longer share a plan, a repeat
+  operation on one schema still hits. Pinned by
+  `examples/fakeshop/test_query/test_relation_connections_api.py::test_one_optimizer_on_two_schemas_plans_each_schemas_own_window`,
+  `::test_one_optimizer_on_two_schemas_plans_each_resource_policys_own_window`,
+  `::test_one_optimizer_on_two_identically_configured_schemas_keeps_their_plans_apart`,
+  `::test_a_second_request_on_one_schema_reuses_its_cached_plan`,
+  `::test_one_optimizer_on_two_schemas_plans_each_schemas_own_window_async`,
+  `::test_one_optimizer_on_two_schemas_reads_each_schemas_published_names` (and `_async`),
+  `::test_a_per_operation_resource_policy_plans_each_operations_window`. spec-004, spec-018, spec-023, spec-033,
+  README, GLOSSARY Plan cache. CHANGELOG 958
 
 ## To do: found along the way
 

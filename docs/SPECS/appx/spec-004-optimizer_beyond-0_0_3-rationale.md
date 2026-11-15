@@ -29,9 +29,10 @@ against the consumer's queryset. The dependencies themselves are contract and li
 - **The printed operation, not a hash.** A hash admits a collision, and a collision here serves one
   document's plan to a structurally different document with no failure a test can catch. Storing the
   printed text removes the class; the longer key is memoized per document.
-- **Five key components.** The model separates root fields over different models; the root path and
+- **Seven key components.** The model separates root fields over different models; the root path and
   the origin type close the same collision one level further (two root fields over one model, a
-  primary and a secondary type over one model).
+  primary and a secondary type over one model). The connection cap and the schema token close it
+  across the caps a window bakes and the schemas one extension instance serves.
 - **Only selection-affecting variables.** Keying on every variable explodes the cache (ten filter
   variables, 1024 entries for one shape). Collection over-collects by name, because a duplicate entry
   is the cost of over-collecting and a wrong plan the cost of under-collecting; values are kept as

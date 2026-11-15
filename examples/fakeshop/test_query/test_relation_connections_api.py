@@ -2,8 +2,10 @@
 
 The holder graph deliberately omits the target visibility hook that fakeshop's
 BookType carries: the cases compare a consumer's hook-free planned window with
-its per-parent pipeline under the same published field names. Private planted
-window records and exception identities remain in tests/test_relay_connection.py.
+its per-parent pipeline under the same published field names. One optimizer
+instance installed on several schemas plans each schema's window under that
+schema's own ``relay_max_results``. Private planted window records and exception
+identities remain in tests/test_relay_connection.py.
 """
 
 import re
@@ -27,6 +29,7 @@ from graphql_client import RecordCompiledSql, middleware_without_debug_toolbar
 from strategy_schemas import make_django_type
 from strategy_schemas import make_django_type as _make_type
 from strawberry import relay
+from strawberry.schema.name_converter import NameConverter
 from strawberry.test.client import Response as GraphQLResponse
 from typing_extensions import override
 
@@ -36,6 +39,7 @@ from django_strawberry_framework import (
     DjangoOptimizerExtension,
     DjangoSchema,
     OptimizerHint,
+    ResourcePolicy,
     finalize_django_types,
     strawberry_config,
 )
@@ -43,6 +47,7 @@ from django_strawberry_framework.connection import (
     _connection_type_cache,
     _connection_type_for,
 )
+from django_strawberry_framework.extensions import DjangoResourcePolicyExtension
 from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
@@ -1917,3 +1922,358 @@ def test_nested_fallback_preserves_a_sibling_fk_id_elision_over_http(
     genre_sql = _table_selects(captured, "library_genre")
     assert shelf_sql == []
     assert len(genre_sql) == 2, genre_sql
+
+
+#: Every genre's books as a nested connection with no ``first``: the planned window is
+#: bounded by the executing schema's ``relay_max_results``.
+_CAPPED_BOOKS = (
+    "{ objs { booksConnection { edges { node { title } } pageInfo { hasNextPage } } } }"
+)
+_CAPPED_TITLES = [
+    "apple",
+    "banana",
+    "avocado",
+    "cherry",
+    "date",
+]
+
+
+def _genres_schemas_sharing_one_optimizer(
+    strictness: str,
+    *caps: int,
+    page_caps: bool = False,
+) -> tuple[DjangoOptimizerExtension, list[strawberry.Schema]]:
+    """One ``objs: [GenreType]`` schema per cap, every one installing the same optimizer.
+
+    Each cap is the schema's ``relay_max_results``, or with ``page_caps`` its resource
+    policy's ``max_page_size`` under the default ``relay_max_results``.
+    """
+    make_django_type("BookType", Book, ("id", "title"))
+    genre_type = _make_type("GenreType", Genre, ("id", "name", "books"))
+    finalize_django_types()
+    query_cls = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"objs": list[genre_type]},
+                "objs": DjangoListField(genre_type, resolver=_ordered_genres_root),
+            },
+        ),
+    )
+    optimizer = DjangoOptimizerExtension(strictness=strictness)
+    schemas: list[strawberry.Schema] = [
+        DjangoSchema(
+            error_policy={"enabled": False},
+            query=query_cls,
+            config=strawberry_config() if page_caps else strawberry_config(relay_max_results=cap),
+            resource_policy=ResourcePolicy(max_page_size=cap) if page_caps else None,
+            extensions=[lambda: optimizer],
+        )
+        for cap in caps
+    ]
+    return optimizer, schemas
+
+
+def _ordered_genres_root(_root: object, _info: strawberry.Info) -> djmodels.QuerySet[Genre]:
+    """Every genre in pk order, so the parent order is the consumer's, not the plan's."""
+    return Genre.objects.order_by("pk")
+
+
+def _capped_page(cap: int) -> dict[str, object]:
+    """The ``booksConnection`` page a schema capped at ``cap`` serves each genre."""
+    return {
+        "edges": [{"node": {"title": title}} for title in _CAPPED_TITLES[:cap]],
+        "pageInfo": {"hasNextPage": cap < len(_CAPPED_TITLES)},
+    }
+
+
+def _post_capped(schema: strawberry.Schema) -> object:
+    """Post ``_CAPPED_BOOKS``: one parent read and ONE batched window, no per-parent read."""
+    with _capture_relations():
+        result = _exec(schema, _CAPPED_BOOKS)
+    assert result.data is not None
+    _assert_same_partitions(result.data)
+    return json_at(result.data, "objs", 0, "booksConnection")
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("strictness", ["off", "raise"])
+@pytest.mark.parametrize(
+    ("first_cap", "second_cap"),
+    [(2, 4), (4, 2)],
+    ids=["smaller-cap-first", "larger-cap-first"],
+)
+def test_one_optimizer_on_two_schemas_plans_each_schemas_own_window(
+    strictness: str,
+    first_cap: int,
+    second_cap: int,
+) -> None:
+    """A plan cached for one schema's window never serves a schema with another cap.
+
+    The nested connection carries no ``first``, so its planned window is the
+    executing schema's ``relay_max_results``. Served from the other schema's plan
+    the window would be unservable: one read per parent under ``"off"``, an
+    "Unplanned N+1" refusal with no data under ``"raise"``. Each request instead
+    reads its children in one window, answers its own cap and builds its own plan.
+    """
+    _seed_window_books(_CAPPED_TITLES)
+    optimizer, (first, second) = _genres_schemas_sharing_one_optimizer(
+        strictness,
+        first_cap,
+        second_cap,
+    )
+
+    assert _post_capped(first) == _capped_page(first_cap)
+    assert _post_capped(second) == _capped_page(second_cap)
+    assert (optimizer.cache_info().hits, optimizer.cache_info().misses) == (0, 2)
+    assert optimizer.cache_info().size == 2
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("strictness", ["off", "raise"])
+@pytest.mark.parametrize(
+    ("first_cap", "second_cap"),
+    [(2, 4), (4, 2)],
+    ids=["smaller-cap-first", "larger-cap-first"],
+)
+def test_one_optimizer_on_two_schemas_plans_each_resource_policys_own_window(
+    strictness: str,
+    first_cap: int,
+    second_cap: int,
+) -> None:
+    """A plan cached under one schema's page cap never serves a schema with another.
+
+    Both schemas keep the default ``relay_max_results``; their resource policies'
+    ``max_page_size`` bounds the window instead, so the same plan-sharing would
+    leave one schema's window unservable on the other.
+    """
+    _seed_window_books(_CAPPED_TITLES)
+    optimizer, (first, second) = _genres_schemas_sharing_one_optimizer(
+        strictness,
+        first_cap,
+        second_cap,
+        page_caps=True,
+    )
+
+    assert _post_capped(first) == _capped_page(first_cap)
+    assert _post_capped(second) == _capped_page(second_cap)
+    assert (optimizer.cache_info().hits, optimizer.cache_info().misses) == (0, 2)
+    assert optimizer.cache_info().size == 2
+
+
+@pytest.mark.django_db
+def test_one_optimizer_on_two_identically_configured_schemas_keeps_their_plans_apart() -> None:
+    """Two schemas with the same settings still build one plan each, by design.
+
+    A plan is keyed by the schema that executes it, not by a digest of its
+    settings: the planner reads the schema's published names and type map as well
+    as its caps, so no subset of settings can vouch that two schemas plan alike.
+    """
+    _seed_window_books(_CAPPED_TITLES)
+    optimizer, (first, second) = _genres_schemas_sharing_one_optimizer("raise", 4, 4)
+
+    assert _post_capped(first) == _post_capped(second) == _capped_page(4)
+    assert (optimizer.cache_info().hits, optimizer.cache_info().misses) == (0, 2)
+    assert optimizer.cache_info().size == 2
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("strictness", ["off", "raise"])
+def test_a_second_request_on_one_schema_reuses_its_cached_plan(strictness: str) -> None:
+    """The executing schema keys its plans by an identity stable across its requests."""
+    _seed_window_books(_CAPPED_TITLES)
+    optimizer, (schema,) = _genres_schemas_sharing_one_optimizer(strictness, 2)
+
+    assert _post_capped(schema) == _post_capped(schema) == _capped_page(2)
+    assert (optimizer.cache_info().hits, optimizer.cache_info().misses) == (1, 1)
+    assert optimizer.cache_info().size == 1
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("first_cap", "second_cap"),
+    [(2, 4), (4, 2)],
+    ids=["smaller-cap-first", "larger-cap-first"],
+)
+async def test_one_optimizer_on_two_schemas_plans_each_schemas_own_window_async(
+    record_compiled_sql: RecordCompiledSql,
+    first_cap: int,
+    second_cap: int,
+) -> None:
+    """The asynchronous view keys its cached plans by the executing schema too."""
+    await sync_to_async(_seed_window_books)(_CAPPED_TITLES)
+    optimizer, (first, second) = await sync_to_async(_genres_schemas_sharing_one_optimizer)(
+        "raise",
+        first_cap,
+        second_cap,
+    )
+    children = record_compiled_sql('FROM "library_book"')
+
+    pages: list[object] = []
+    for schema in (first, second):
+        result = await _exec_async(schema, _CAPPED_BOOKS)
+        assert result.errors is None, result.errors
+        assert result.data is not None
+        _assert_same_partitions(result.data)
+        pages.append(json_at(result.data, "objs", 0, "booksConnection"))
+
+    assert pages == [_capped_page(first_cap), _capped_page(second_cap)]
+    assert len(children) == 2, children
+    assert all("ROW_NUMBER() OVER" in sql.upper() for sql in children), children
+    assert (optimizer.cache_info().hits, optimizer.cache_info().misses) == (0, 2)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("strictness", ["off", "raise"])
+def test_a_per_operation_resource_policy_plans_each_operations_window(strictness: str) -> None:
+    """A policy a plain schema builds per operation keys the plan by its page cap.
+
+    One plain ``strawberry.Schema`` installs the resource-policy extension through a
+    factory whose ``max_page_size`` changes between two operations. The planned
+    window bakes the operation's cap, so the second operation plans its own window
+    instead of reusing the first's, which its cap could not serve.
+    """
+    _seed_window_books(_CAPPED_TITLES)
+    page_cap = {"value": 2}
+    make_django_type("BookType", Book, ("id", "title"))
+    genre_type = _make_type("GenreType", Genre, ("id", "name", "books"))
+    finalize_django_types()
+    query_cls = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"objs": list[genre_type]},
+                "objs": DjangoListField(genre_type, resolver=_ordered_genres_root),
+            },
+        ),
+    )
+    optimizer = DjangoOptimizerExtension(strictness=strictness)
+    schema = strawberry.Schema(
+        query=query_cls,
+        config=strawberry_config(),
+        extensions=[
+            lambda: DjangoResourcePolicyExtension(
+                policy=ResourcePolicy(max_page_size=page_cap["value"]),
+            ),
+            lambda: optimizer,
+        ],
+    )
+
+    assert _post_capped(schema) == _capped_page(2)
+    page_cap["value"] = 4
+    assert _post_capped(schema) == _capped_page(4)
+    page_cap["value"] = 2
+    assert _post_capped(schema) == _capped_page(2)
+    assert (optimizer.cache_info().hits, optimizer.cache_info().misses) == (1, 2)
+    assert optimizer.cache_info().size == 2
+
+
+class _SwappedTitleConverter(NameConverter):
+    """Publish ``title`` as ``subtitle`` and ``subtitle`` as ``title``."""
+
+    @override
+    def apply_naming_config(self, name: str) -> str:
+        converted = super().apply_naming_config(name)
+        return {"title": "subtitle", "subtitle": "title"}.get(converted, converted)
+
+
+def _ordered_books_root(_root: object, _info: strawberry.Info) -> djmodels.QuerySet[Book]:
+    """Every book in pk order."""
+    return Book.objects.order_by("pk")
+
+
+def _books_schemas_sharing_one_optimizer(
+    strictness: str,
+) -> tuple[DjangoOptimizerExtension, strawberry.Schema, strawberry.Schema]:
+    """A ``books`` list published by the default converter and by a swapping one."""
+    branch = Branch.objects.create(name="central")
+    shelf = Shelf.objects.create(code="A1", branch=branch)
+    for index in range(3):
+        Book.objects.create(title=f"T{index}", subtitle=f"S{index}", shelf=shelf)
+    book_type = make_django_type("BookType", Book, ("id", "title", "subtitle"), node=False)
+    finalize_django_types()
+    query_cls = strawberry.type(
+        type(
+            "Query",
+            (),
+            {
+                "__annotations__": {"books": list[book_type]},
+                "books": DjangoListField(book_type, resolver=_ordered_books_root),
+            },
+        ),
+    )
+    optimizer = DjangoOptimizerExtension(strictness=strictness)
+    default, swapped = (
+        DjangoSchema(
+            error_policy={"enabled": False},
+            query=query_cls,
+            config=config,
+            extensions=[lambda: optimizer],
+        )
+        for config in (
+            strawberry_config(),
+            strawberry_config(name_converter=_SwappedTitleConverter()),
+        )
+    )
+    return optimizer, default, swapped
+
+
+#: What each schema answers for each document: the swapped schema publishes the
+#: ``subtitle`` column as ``title`` and the ``title`` column as ``subtitle``.
+_PUBLISHED_COLUMNS = {
+    ("default", "title"): "T",
+    ("default", "subtitle"): "S",
+    ("swapped", "title"): "S",
+    ("swapped", "subtitle"): "T",
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("strictness", ["off", "raise"])
+@pytest.mark.parametrize("field", ["title", "subtitle"])
+@pytest.mark.parametrize("order", [("default", "swapped"), ("swapped", "default")], ids="-".join)
+def test_one_optimizer_on_two_schemas_reads_each_schemas_published_names(
+    strictness: str,
+    field: str,
+    order: tuple[str, str],
+) -> None:
+    """A plan built under one schema's published names never answers another schema.
+
+    The two schemas publish the same two columns under each other's names, so the
+    same document selects a different column on each. Each request reads the
+    column its own schema published, in one statement.
+    """
+    optimizer, default, swapped = _books_schemas_sharing_one_optimizer(strictness)
+    schemas = {"default": default, "swapped": swapped}
+
+    for name in order:
+        with CaptureQueriesContext(db_connection) as captured:
+            result = _exec(schemas[name], f"{{ books {{ {field} }} }}")
+        prefix = _PUBLISHED_COLUMNS[name, field]
+        assert result.data == {"books": [{field: f"{prefix}{index}"} for index in range(3)]}
+        assert len(_table_selects(captured, "library_book")) == 1
+    assert (optimizer.cache_info().hits, optimizer.cache_info().misses) == (0, 2)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("order", [("default", "swapped"), ("swapped", "default")], ids="-".join)
+async def test_one_optimizer_on_two_schemas_reads_each_schemas_published_names_async(
+    record_compiled_sql: RecordCompiledSql,
+    order: tuple[str, str],
+) -> None:
+    """The asynchronous view reads each schema's own published names too."""
+    optimizer, default, swapped = await sync_to_async(_books_schemas_sharing_one_optimizer)(
+        "raise",
+    )
+    schemas = {"default": default, "swapped": swapped}
+    books = record_compiled_sql('FROM "library_book"')
+
+    for name in order:
+        result = await _exec_async(schemas[name], "{ books { title } }")
+        assert result.errors is None, result.errors
+        prefix = _PUBLISHED_COLUMNS[name, "title"]
+        assert result.data == {"books": [{"title": f"{prefix}{index}"} for index in range(3)]}
+    assert len(books) == 2, books
+    assert (optimizer.cache_info().hits, optimizer.cache_info().misses) == (0, 2)

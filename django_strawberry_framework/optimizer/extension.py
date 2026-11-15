@@ -74,6 +74,7 @@ from django_strawberry_framework.utils._narrowing import (
     read_attr,
     require,
 )
+from django_strawberry_framework.utils.connections import resolve_relay_max_results
 from django_strawberry_framework.utils.execution_mode import operation_is_async
 from django_strawberry_framework.utils.private_state import PrivateAuthority
 from django_strawberry_framework.utils.querysets import (
@@ -232,7 +233,7 @@ def _matched_strictness(strictness: object) -> str | None:
 # planner bakes those resolved values into windowed prefetch querysets, so two
 # requests differing only in a nested ``first: $n`` value need distinct cached
 # plans -- spec-033 Decision 7). The document names them by the wire names the
-# executing schema published them under (``_pagination_wire_names``). Single
+# executing schema published them under (``_SchemaCacheRecord.pagination_wire_names``). Single
 # source of truth for the family; a future ``search:`` extension
 # would extend it here, not re-spell it inline.
 _PAGINATION_PARAMETERS = frozenset(
@@ -244,37 +245,59 @@ _PAGINATION_PARAMETERS = frozenset(
     },
 )
 
-#: ``{executable schema: wire names of its pagination arguments}``, built once per
-#: schema and dropped with it. Keyed per schema because one document can be
-#: executed against schemas whose ``NameConverter`` spells the arguments differently.
-_pagination_wire_name_sets: "WeakKeyDictionary[GraphQLSchema, frozenset[str]]" = (
-    WeakKeyDictionary()
-)
+
+class _SchemaCacheRecord(NamedTuple):
+    """What the plan cache reads off one executable schema, built once per schema."""
+
+    #: A fresh ``object()`` naming the schema in every plan-cache key. A plan bakes
+    #: values the schema decides (its ``relay_max_results`` and resource-policy page
+    #: caps, its published names), so one optimizer instance serving two schemas
+    #: must never hand one schema's plan to the other. Neither ``id(schema)``
+    #: (reused once the schema is collected) nor the schema itself (a strong
+    #: reference from a long-lived cache would pin it).
+    token: object
+    #: Every wire name the schema publishes a pagination argument under.
+    pagination_wire_names: frozenset[str]
 
 
-def _pagination_wire_names(schema: "GraphQLSchema") -> frozenset[str]:
-    """Return every wire name ``schema`` publishes a pagination argument under.
+#: ``{executable schema: its _SchemaCacheRecord}``, built once per schema and
+#: dropped with it. Keyed per schema because one document can be executed against
+#: schemas whose ``NameConverter`` spells the arguments differently, and because
+#: one optimizer instance can serve several schemas.
+_schema_cache_records: "WeakKeyDictionary[GraphQLSchema, _SchemaCacheRecord]" = WeakKeyDictionary()
 
-    Read back off the published field maps: an argument whose declaration's
-    Python name (``published_python_name``) is one of ``_PAGINATION_PARAMETERS``
-    contributes the name a client sends it under, so a converter renaming
-    ``first`` keys the renamed variable and a converter swapping ``first`` and
-    ``last`` keys both. The set spans every field, which keeps the collection
-    a superset by name (spec-033 Decision 7). Memoized for the schema's lifetime.
+
+def _schema_cache_record(schema: "GraphQLSchema") -> _SchemaCacheRecord:
+    """Return ``schema``'s plan-cache record, building it on first sight.
+
+    The pagination wire names are read back off the published field maps: an
+    argument whose declaration's Python name (``published_python_name``) is one
+    of ``_PAGINATION_PARAMETERS`` contributes the name a client sends it under,
+    so a converter renaming ``first`` keys the renamed variable and a converter
+    swapping ``first`` and ``last`` keys both. The set spans every field, which
+    keeps the collection a superset by name (spec-033 Decision 7). Memoized for
+    the schema's lifetime, so the schema's token stays the same across its
+    operations.
     """
-    memoized = _pagination_wire_name_sets.get(schema)
+    memoized = _schema_cache_records.get(schema)
     if memoized is not None:
         return memoized
-    wire_names = frozenset(
-        wire_name
-        for named_type in schema.type_map.values()
-        if isinstance(named_type, (GraphQLObjectType, GraphQLInterfaceType))
-        for field in graphql_fields(named_type).values()
-        for wire_name, argument in field.args.items()
-        if published_python_name(argument) in _PAGINATION_PARAMETERS
+    # ``setdefault`` publishes the first record built for ``schema``: two threads
+    # meeting a new schema at once both answer with one token.
+    return _schema_cache_records.setdefault(
+        schema,
+        _SchemaCacheRecord(
+            token=object(),
+            pagination_wire_names=frozenset(
+                wire_name
+                for named_type in schema.type_map.values()
+                if isinstance(named_type, (GraphQLObjectType, GraphQLInterfaceType))
+                for field in graphql_fields(named_type).values()
+                for wire_name, argument in field.args.items()
+                if published_python_name(argument) in _PAGINATION_PARAMETERS
+            ),
+        ),
     )
-    _pagination_wire_name_sets[schema] = wire_names
-    return wire_names
 
 
 # Only exact immutable scalar types whose equality/hash is *library* code have a
@@ -343,8 +366,8 @@ def _walk_cache_relevant_vars(
     * **Nested pagination variables** - variable references under an argument
       named one of ``pagination_wire_names`` (the wire names the executing
       schema publishes ``first`` / ``last`` / ``before`` / ``after`` under,
-      ``_pagination_wire_names``) only when the current node is a ``FieldNode``
-      at response-path depth >= 1 (root-field pagination stays out: a root
+      ``_SchemaCacheRecord.pagination_wire_names``) only when the current node
+      is a ``FieldNode`` at response-path depth >= 1 (root-field pagination stays out: a root
       connection's slicing happens post-plan in ``ConnectionExtension`` and plan
       content is invariant in those, so hashing them would fragment the cache
       across every page of a pagination loop).
@@ -637,7 +660,7 @@ _MAX_DOC_KEY_CACHE_SIZE = 256
 # Cross-request memo for the two document-derived cache-key ingredients - the
 # rendered document key AND the cache-relevant variable-NAME frozenset - keyed by
 # the operation's raw source text, its name, and the executing schema's
-# pagination wire names (``_pagination_wire_names``). Both values are pure
+# pagination wire names (``_SchemaCacheRecord.pagination_wire_names``). Both values are pure
 # functions of those: two requests with byte-identical document text parse to
 # structurally identical ASTs, so the printed key and the ``@skip``/``@include``
 # plus nested-pagination name set are identical under one wire vocabulary. Caching them together means a
@@ -1707,11 +1730,23 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         5. The resolver's origin Strawberry type so primary-return and
            secondary-return resolvers for the same model do not share a
            cached plan. Direct/test-only callers may pass ``None``.
+        6. The operation's effective connection cap
+           (``utils/connections.py::resolve_relay_max_results``: the schema's
+           ``relay_max_results`` under the operation's resource-policy
+           ``max_page_size``). A planned nested window bakes it, and a policy
+           a plain ``strawberry.Schema`` builds per operation can change it
+           between two operations on one schema.
+        7. The executing schema's token (``_SchemaCacheRecord.token``), so one
+           optimizer instance installed on several schemas keeps each schema's
+           plans apart: a plan reads the schema's published names and type
+           map as well as its caps. Two schemas with identical settings do not
+           share a plan either; a second operation on the same schema does.
         """
         operation = info.operation
         fragments = info.fragments or {}
         # Memoize the operation-constant key parts per execution: the rendered
-        # document key AND the resolved ``(name, value)`` variable frozenset.
+        # document key, the resolved ``(name, value)`` variable frozenset, the
+        # effective connection cap and the schema's token.
         # Many root resolvers in one operation share the same operation node,
         # and a nested fallback connection pipeline calls this once per parent
         # row - both the document rendering and the variable resolution are
@@ -1728,10 +1763,11 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         memo = _cache_key_parts_memo()
         parts = memo.get(id(operation)) if memo is not None else None
         if parts is None:
+            schema_record = _schema_cache_record(info.schema)
             doc_key, relevant_var_names = _doc_cache_entry(
                 operation,
                 fragments,
-                _pagination_wire_names(info.schema),
+                schema_record.pagination_wire_names,
             )
             variable_values: Mapping[str, object] = dict[str, object](get_variable_values(info))
             # The name-keyed pagination collector deliberately over-collects, so
@@ -1743,16 +1779,23 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
                 for k in relevant_var_names
                 if k in variable_values
             )
-            parts = (doc_key, relevant_vars)
+            parts = (
+                doc_key,
+                relevant_vars,
+                resolve_relay_max_results(info, None),
+                schema_record.token,
+            )
             if memo is not None:
                 memo[id(operation)] = parts
-        doc_key, relevant_vars = parts
+        doc_key, relevant_vars, connection_cap, schema_token = parts
         return (
             doc_key,
             relevant_vars,
             target_model,
             runtime_path_from_info(info),
             origin,
+            connection_cap,
+            schema_token,
         )
 
 

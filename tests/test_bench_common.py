@@ -556,7 +556,9 @@ def test_reset_plan_cache_clears_the_plan_cache_and_the_document_key_cache(
     assert isinstance(operation, OperationDefinitionNode)
     extension_module._doc_cache_entry(operation, {}, frozenset({"first"}))
     optimizer = DjangoOptimizerExtension()
-    optimizer._plan_cache["k", frozenset(), models.Model, (), None] = OptimizationPlan()
+    optimizer._plan_cache["k", frozenset(), models.Model, (), None, 100, object()] = (
+        OptimizationPlan()
+    )
     optimizer._cache_hits, optimizer._cache_misses = 4, 2
 
     _bench_common.reset_plan_cache(optimizer)
