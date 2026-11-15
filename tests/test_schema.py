@@ -577,6 +577,50 @@ def _optimizer_singleton_factory() -> DjangoOptimizerExtension:
     return _SHARED_OPTIMIZER_EXTENSION
 
 
+def test_a_factory_entrys_own_policy_configures_nothing_under_a_django_schema() -> None:
+    """Every pass, the pre-parse token scan included, runs under the schema's policy.
+
+    A six-token document passes the schema's wider bound although the entry's own
+    policy admits five; on a plain ``strawberry.Schema`` the same entry refuses it.
+    """
+    document = "{ hello hello hello hello }"
+
+    def narrow_entry() -> DjangoResourcePolicyExtension:
+        return DjangoResourcePolicyExtension(policy=ResourcePolicy(max_document_tokens=5))
+
+    schema = DjangoSchema(
+        query=DummyQuery,
+        resource_policy=ResourcePolicy(max_document_tokens=50),
+        extensions=[narrow_entry],
+    )
+    plain = strawberry.Schema(query=DummyQuery, extensions=[narrow_entry])
+
+    assert schema.execute_sync(document).data == {"hello": "world"}
+    refused = plain.execute_sync(document)
+    assert refused.data is None
+    assert refused.errors is not None
+    assert [error.extensions for error in refused.errors] == [
+        {
+            "code": "RESOURCE_LIMIT_EXCEEDED",
+            "bound": "max_document_tokens",
+            "limit": 5,
+            "charged": 6,
+        },
+    ]
+
+
+def test_a_resource_policy_that_is_no_policy_is_refused_at_construction() -> None:
+    """``resource_policy=`` takes a ``ResourcePolicy`` or a mapping, nothing else."""
+    with pytest.raises(ConfigurationError, match="resource policy must be a ResourcePolicy"):
+        DjangoSchema(query=DummyQuery, resource_policy=MagicMock())
+
+
+def test_an_error_policy_that_is_no_policy_is_refused_at_construction() -> None:
+    """``error_policy=`` takes an ``ErrorPolicy`` or a mapping, nothing else."""
+    with pytest.raises(ConfigurationError, match="error policy must be an ErrorPolicy"):
+        DjangoSchema(query=DummyQuery, error_policy=MagicMock())
+
+
 @pytest.mark.parametrize(
     "entry",
     [_narrow_resource_factory, _first_error_factory],

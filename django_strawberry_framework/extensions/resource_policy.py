@@ -123,6 +123,7 @@ from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types.scalar import ScalarDefinition
 from typing_extensions import override
 
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.mutations.fields import MUTATION_CLASS_MARKER
 from django_strawberry_framework.resource_policy import (
     DEFAULT_RESOURCE_POLICY,
@@ -138,6 +139,7 @@ from django_strawberry_framework.resource_policy import (
     end_resource_budget,
     record_admission_rejection,
 )
+from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
     is_list_or_tuple,
     is_mapping,
@@ -1503,29 +1505,38 @@ class DjangoResourcePolicyExtension(_OperationBoundExtension[OperationState]):
     extension per call - or the bare class, when no override is needed - is
     operation-local on any schema, because the instance itself is.
 
-    Without an explicit policy the extension reads the one the schema resolved at
-    construction, falling back to the package defaults for a schema that carries
-    none. There is no configuration under which the extension is installed and
-    enforces nothing.
+    The policy is the schema's wherever the schema carries one: on a ``DjangoSchema``
+    an entry's own ``policy=`` configures nothing, so a subclass or factory entry runs
+    every pass under the policy the schema's own extension arms. On a schema that
+    carries none the explicit policy applies, else the package defaults. There is no
+    configuration under which the extension is installed and enforces nothing.
     """
 
     def __init__(self, *, policy: ResourcePolicy | None = None) -> None:
-        """Hold the policy this extension enforces; ``None`` defers to the schema's policy."""
+        """Hold the policy this extension enforces; ``None`` defers to the schema's policy.
+
+        A ``policy`` that is no ``ResourcePolicy`` is refused here, at construction.
+        """
         super().__init__()
+        if policy is not None and not truth.is_one_of(policy, (ResourcePolicy,)):
+            raise ConfigurationError(
+                "DjangoResourcePolicyExtension(policy=...) takes a ResourcePolicy; "
+                f"got {truth.describe(policy)}.",
+            )
         self._explicit_policy: ResourcePolicy | None = policy
 
     def _resolved_policy(self) -> ResourcePolicy:
-        """Return the explicit policy, else the schema's, else the package defaults.
+        """Return the schema's policy, else the explicit policy, else the package defaults.
 
         Consulted once per operation, by :meth:`on_operation`, which arms what
         it returns; every later charge in that operation reads the armed
         policy instead (:func:`resource_policy.armed_resource_policy`).
         """
-        if self._explicit_policy is not None:
-            return self._explicit_policy
         schema_policy = read_attr(self._hook_context().schema, "resource_policy", None)
         if isinstance(schema_policy, ResourcePolicy):
             return schema_policy
+        if self._explicit_policy is not None:
+            return self._explicit_policy
         return DEFAULT_RESOURCE_POLICY
 
     @override

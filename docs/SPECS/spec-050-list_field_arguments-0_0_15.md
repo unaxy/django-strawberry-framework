@@ -1830,7 +1830,7 @@ Where each part of the surface lives, keyed to the slice checklist:
 
 | Slice | Files | Carries |
 |---|---|---|
-| 1 | [`django_strawberry_framework/list_field.py`][list-field], [`django_strawberry_framework/resource_policy.py`][resource-policy], [`django_strawberry_framework/__init__.py`][package-init] | `list_field.py`: the synthesized list signature (`_synthesized_list_signature`), argument normalization into `_ListArguments` with independent supplied/window/order fields and the no-argument fast path (`_normalize_list_arguments`), wire names read from the executable schema only on the error path (`_resolve_argument_wire_name` over `utils/typing.py::published_argument`), and `ListArgumentError`. `resource_policy.py`: the package-private window seams `_windowed_rows` / `_windowed_rows_async` beneath the exported coordinate-free `bounded_rows` / `bounded_rows_async`, and the shared async-iterator cleanup (`_cleanup_rejected_async_iterable` over `_close_async_iterator`) that keeps control signals out of its note path. `__init__.py`: the root `ListArgumentError` export. |
+| 1 | [`django_strawberry_framework/list_field.py`][list-field], [`django_strawberry_framework/resource_policy.py`][resource-policy], [`django_strawberry_framework/__init__.py`][package-init] | `list_field.py`: the synthesized list signature (`_synthesized_list_signature`), argument normalization into `_ListArguments` with independent supplied/window/order fields and the no-argument fast path (`_normalize_list_arguments`), wire names read from the executable schema only on the error path (`_resolve_argument_wire_name` over `utils/typing.py::published_argument`), and `ListArgumentError`. `resource_policy.py`: the package-private window seams `_windowed_rows` / `_windowed_rows_async` beneath the exported coordinate-free `bounded_rows` / `bounded_rows_async`, and the shared async-iterator cleanup (`_cleanup_rejected_async_iterable` over `_close_async_iterator`). `__init__.py`: the root `ListArgumentError` export. |
 | 2 | [`django_strawberry_framework/list_field.py`][list-field], [`django_strawberry_framework/orders/sets.py`][orders-sets], [`django_strawberry_framework/utils/querysets.py`][querysets], [`django_strawberry_framework/optimizer/extension.py::DjangoOptimizerExtension._optimize`][optimizer-extension] | `list_field.py`: the sync/async queryset pipelines, the positive-offset guard and its order-normalization scope. `orders/sets.py`: `OrderSet._input_has_active_terms` and the invocation-scoped attestation ledger (`capture_applied_order_normalization`). `utils/querysets.py`: `apply_orderset_sync` / `apply_orderset_async`, the post-apply seal under `_SIDECAR_RESULT_POLICY`, `selected_order`, and the async-only queryset completion adapter (`wrap_async_queryset_adapter` / `unwrap_async_queryset_adapter`). `optimizer/extension.py`: the one unwrap/rewrap arm that preserves optimization through the adapter. |
 | 3 | [`tests/test_list_field.py`][test-list-field], [`tests/test_resource_policy.py`][test-resource-policy], [`tests/orders/test_sets.py`][test-orders-sets], [`tests/base/test_init.py`][test-base-init] | Package-tier rows HTTP cannot isolate: construction/direct-call mechanics, naming fallback, the `ListArgumentError` pickle round trip, active-term/override call counts, post-apply validator arms, exact iterator consumption and cleanup precedence, model-order state, query low/high marks, and the root export. |
 | 4 | `examples/fakeshop/test_query/test_list_field_api.py`, [`examples/fakeshop/test_query/test_list_field_async_api.py`][fakeshop-test-list-field-async], [`examples/fakeshop/test_query/test_resource_policy_api.py`][fakeshop-test-resource-policy], [`examples/fakeshop/test_query/test_multi_db.py`][fakeshop-test-multi-db], [`examples/fakeshop/apps/kanban/constants.py`][fakeshop-kanban-constants] | Live rows over the library schema's three Branch list fields (`allLibraryBranchesViaListField` and its nullable and manager-resolver variants), with exceptional fields mounted only in test-local schemas: ordered pages, visibility, caps, errors, naming, sync/async shapes, routing, and SQL. The kanban constants module carries both list-field suites' tracked paths. |
@@ -1845,13 +1845,13 @@ Where each part of the surface lives, keyed to the slice checklist:
   [`django_strawberry_framework/resource_policy.py::bounded_rows`][resource-policy] and
   [`django_strawberry_framework/resource_policy.py::bounded_rows_async`][resource-policy]
   are coordinate-free delegations to it rather than a second body. Relation-list callers pass
-  no client window and get the coordinate-free bound. The iterator-close/error-note logic is
+  no client window and get the coordinate-free bound. The iterator-close logic is
   one package-private utility beside them,
   `django_strawberry_framework/resource_policy.py::_cleanup_rejected_async_iterable` over
   `django_strawberry_framework/resource_policy.py::_close_async_iterator`, below every caller:
   the list pipeline rejecting an async-only source before bounding, and the bounding seam's own
   deadline/row rejection, which abandons a source the resolver has already produced. Neither
-  restates the acquisition, diagnostic-note or close policy, and no second cleanup
+  restates the acquisition or close policy, and no second cleanup
   implementation exists. The seam reads the deadline once; a rejection is routed through the
   utility rather than met by a second clock check or a caller-local catch, which would leave
   every other caller of the shared seam uncovered.
@@ -2131,11 +2131,9 @@ Where each part of the surface lives, keyed to the slice checklist:
 - An async-only iterable's iterator is closed when it exposes `aclose` and consumption does
   not reach natural exhaustion: the accepted exclusive stop (`offset + effective_limit`) is
   reached, iteration errors, or the source is otherwise stopped/rejected early. A naturally
-  exhausted iterator is deliberately left alone. Cleanup failure precedence is as
-  [`django_strawberry_framework/resource_policy.py::bounded_rows_async`][resource-policy]
-  specifies for ordinary `Exception` failures. A control signal raised during cleanup -
-  `asyncio.CancelledError` and the other non-`Exception` `BaseException` values - propagates
-  rather than becoming a note, at either cleanup seam.
+  exhausted iterator is deliberately left alone. Whatever `aclose` raises - an ordinary
+  `Exception` or a control signal such as `asyncio.CancelledError` - propagates from either
+  cleanup seam, with the failure that led to the close as its `__context__`.
 - `limit: 0` guarantees framework-owned work only: after the resolver returns, no source
   advancement and no row-fetch query occurs. It consumes no lazy sync or async iterable item
   and still invokes `aclose` when available. It is not a guarantee of zero database work - the

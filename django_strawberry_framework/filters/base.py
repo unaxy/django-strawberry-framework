@@ -119,7 +119,6 @@ from django_strawberry_framework.utils._narrowing import (
     dict_of,
     is_concrete_field,
     is_dict,
-    is_list,
     is_list_or_tuple,
     is_str,
     optional_instance,
@@ -128,7 +127,6 @@ from django_strawberry_framework.utils._narrowing import (
     require_instance,
 )
 from django_strawberry_framework.utils.errors import (
-    FILTER_INVALID_ERROR_CODE,
     GLOBALID_INVALID_ERROR_CODE,
     GLOBALID_UNVALIDATABLE_ERROR_CODE,
     coded_error_extensions,
@@ -284,26 +282,6 @@ class _EmptyListAwareFilterMethod(FilterMethod):
         return _applied_filter_method(self.method, qs, self.f.field_name, value)
 
 
-def _install_empty_list_aware_method(
-    filter_instance: TypedFilter,
-    value: object,
-    method_cls: type[FilterMethod],
-) -> None:
-    """Install ``method_cls`` when a consumer ``method=`` is set.
-
-    Single owner of the ArrayFilter / ListFilter ``method`` setter body: both
-    filters must swap django-filter's default ``FilterMethod`` (which treats ``[]``
-    as EMPTY) for an empty-list-aware wrapper. The named ``*FilterMethod``
-    subclass remains a per-filter type identity (graphene-parity public names);
-    only the install sequence is shared.
-    """
-    _FILTER_METHOD_PROPERTY.__set__(filter_instance, value)
-    if value is not None:
-        # django-filter's own ``method`` setter shadows ``filter`` per instance the same way
-        # (``self.filter = FilterMethod(self)``).
-        filter_instance.filter = method_cls(filter_instance)
-
-
 def _apply_lookups(
     filter_instance: Filter,
     qs: models.QuerySet[_M],
@@ -365,24 +343,6 @@ def _match_none_queryset(filter_instance: Filter, qs: models.QuerySet[_M]) -> mo
     ``not`` of it matches no rows.
     """
     return qs.exclude(pk__in=[]) if filter_instance.exclude else qs.none()
-
-
-def _materialize_list_shaped_values(value: object, *, message: str, code: str) -> list[object]:
-    """Fail-closed materialization of a filter's list-shaped input.
-
-    A FilterSet hands each filter its form field's cleaned value, a plain
-    list, but a caller can invoke a filter's ``filter`` directly with an
-    arbitrary object. Only the list/tuple shapes accepted by
-    the form contract are meaningful; every other shape fails closed with the
-    caller's coded GraphQL error instead of leaking a raw ``TypeError`` from a
-    ``len()`` / iteration the shape can never satisfy.
-
-    Iterating an accepted ``list`` / ``tuple`` (subclass included) is the
-    value's own behaviour, so whatever its ``__iter__`` raises propagates.
-    """
-    if not is_list_or_tuple(value):
-        raise GraphQLError(message, extensions=coded_error_extensions(code))
-    return list(value)
 
 
 # Private instance-attribute slot a generated GlobalID RELATION filter carries a
@@ -664,21 +624,15 @@ def _query_lookup_operand(
         )
         if isinstance(start, models.ForeignObjectRel):
             walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover) or "exact")
-            return _LookupOperand(
-                start,
-                issubclass(walk.lookup, models.lookups.IsNull),
-                walk.lookup,
-                walk.node_types,
-            )
+            return _LookupOperand.resolved(start, walk.lookup, walk.node_types)
         walk = _walk_lookup_expr(start, LOOKUP_SEP.join(leftover) or "exact")
         output = read_attr(walk.lhs, "output_field", None)
     except (FieldError, LookupValidationError):
         return None
-    return _LookupOperand(
-        # Past a start that is no reverse relation, the left-hand side is a ``Col`` or an
-        # expression, whose resolved ``output_field`` is a model ``Field``.
+    # Past a start that is no reverse relation, the left-hand side is a ``Col`` or an
+    # expression, whose resolved ``output_field`` is a model ``Field``.
+    return _LookupOperand.resolved(
         require(output, is_concrete_field),
-        issubclass(walk.lookup, models.lookups.IsNull),
         walk.lookup,
         walk.node_types,
     )
@@ -788,6 +742,16 @@ class _LookupOperand(NamedTuple):
     lookup: type[models.lookups.Lookup] | None = None
     node_types: tuple[type[object], ...] = ()
 
+    @classmethod
+    def resolved(
+        cls,
+        field: ModelField | None,
+        lookup: type[models.lookups.Lookup],
+        node_types: tuple[type[object], ...],
+    ) -> _LookupOperand:
+        """Build the operand a walk resolved ``lookup`` for, its null test read off the class."""
+        return cls(field, issubclass(lookup, models.lookups.IsNull), lookup, node_types)
+
 
 @cache
 def _lookup_operand(column: ConcreteField, lookup_expr: str) -> _LookupOperand | None:
@@ -818,7 +782,7 @@ def _lookup_operand(column: ConcreteField, lookup_expr: str) -> _LookupOperand |
         )
     except (LookupValidationError, FieldError):
         return None
-    return _LookupOperand(output, issubclass(lookup, models.lookups.IsNull), lookup, node_types)
+    return _LookupOperand.resolved(output, lookup, node_types)
 
 
 class _ResolvedField(NamedTuple):
@@ -936,10 +900,12 @@ def _model_resolved_field(model: type[models.Model], field_path: str) -> _Resolv
     return _ResolvedField(column, LOOKUP_SEP.join((field_path, *links)))
 
 
-def _filterset_model(
-    filterset: type[BaseFilterSet] | BaseFilterSet | None,
-) -> type[models.Model] | None:
-    """Return ``filterset``'s ``Meta.model``; ``None`` for no filterset or one without a model."""
+def _filterset_model(filterset: object) -> type[models.Model] | None:
+    """Return ``filterset``'s ``Meta.model``; ``None`` for no filterset or one without a model.
+
+    ``filterset`` is a filter set class or instance, or an undeclared hop's face
+    (``filters/sets.py::_UndeclaredHopSet``), which carries its ``_meta`` on itself.
+    """
     # django-filter's metaclass stores ``_meta = FilterSetOptions(...)`` on every filterset.
     meta = optional_instance(truth.static_attr(filterset, "_meta", None), FilterSetOptions)
     return getattr(meta, "model", None)
@@ -1049,12 +1015,7 @@ def _model_lookup_operand(
             walk = _walk_lookup_expr(column, lookup_expr)
         except LookupValidationError:
             return _LookupOperand(column, _names_null_test(lookup_expr))
-        return _LookupOperand(
-            column,
-            issubclass(walk.lookup, models.lookups.IsNull),
-            walk.lookup,
-            walk.node_types,
-        )
+        return _LookupOperand.resolved(column, walk.lookup, walk.node_types)
     operand = _lookup_operand(column, lookup_expr)
     return _LookupOperand(column, _names_null_test(lookup_expr)) if operand is None else operand
 
@@ -1577,6 +1538,22 @@ class _ElementCleanedFilter(_ColumnCleanedFilter):
     """``ListFilter`` / ``ArrayFilter`` half: each element is cleaned as ``gte`` cleans one."""
 
     field_class: type[Field] = _ElementField
+    method_class: type[FilterMethod]
+
+    # basedpyright: the stub declares ``Filter.method`` a plain attribute, not the property it is
+    @_FILTER_METHOD_PROPERTY.setter
+    @override
+    def method(self, value: object) -> None:  # pyright: ignore[reportIncompatibleVariableOverride]
+        """Swap in the filter's empty-list-aware ``method_class`` when a ``method=`` is set.
+
+        django-filter's default ``FilterMethod`` treats ``[]`` as empty; the named
+        ``*FilterMethod`` subclass stays a per-filter type identity (graphene-parity names).
+        django-filter's own ``method`` setter shadows ``filter`` in the instance dict the
+        same way.
+        """
+        _FILTER_METHOD_PROPERTY.__set__(self, value)
+        if value is not None:
+            vars(self)["filter"] = self.method_class(self)
 
     @override
     def _hand_column_field(self, field: Field, query: Query | None = None, /) -> None:
@@ -1588,6 +1565,26 @@ class _ElementCleanedFilter(_ColumnCleanedFilter):
             field.depth = array_leaf_field(operand.field)[1]
             field.members_are_arrays = _runs_shipped_filter(self) and is_array_in_lookup(lookup)
             field.bounds = truth.is_subclass(lookup, models.lookups.Range)
+
+    def _filter_elements(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
+        """Apply ``value`` held to its column, keeping only the members that can name a row.
+
+        A decimal past the column's integer range is held to the integer one past the same
+        end (``_held_column_value``). An ``in`` over an integer column, or a relation
+        compared on one (``_integer_in_column``), keeps only the elements inside the
+        column's integer range on the queryset's database and not fractional
+        (``_identifying_members``); a list with none left matches nothing, or every row
+        under ``exclude`` (``_match_none_queryset``). Every other value goes to
+        django-filter's own ``Filter.filter``.
+        """
+        value = _held_column_value(self, qs, value)
+        column = _integer_in_column(self, qs.query)
+        if column is not None and is_list_or_tuple(value):
+            kept = _identifying_members(column, list(value), qs.db)
+            if not kept:
+                return _match_none_queryset(self, qs)
+            return super().filter(qs, kept)
+        return super().filter(qs, value)
 
 
 class ArrayFilterMethod(_EmptyListAwareFilterMethod):
@@ -1650,35 +1647,19 @@ class ArrayFilter(_ElementCleanedFilter):
     ``lookup_expr``, each cleaned as one element.
     """
 
-    # basedpyright: the stub declares ``Filter.method`` a plain attribute, not the property it is
-    @_FILTER_METHOD_PROPERTY.setter
-    @override
-    def method(self, value: object) -> None:  # pyright: ignore[reportIncompatibleVariableOverride]
-        """Swap in `ArrayFilterMethod` when a consumer `method=` is set."""
-        _install_empty_list_aware_method(self, value, ArrayFilterMethod)
+    method_class: type[FilterMethod] = ArrayFilterMethod
 
     @override
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
         """Apply the lookup; `[]` is a real value (not `EMPTY_VALUES`-ish).
 
-        An ``in`` over an integer column, or a relation compared on one
-        (``_integer_in_column``), keeps only the elements that can name a row, those inside
-        the column's integer range on the queryset's database and not fractional
-        (``_identifying_members``); a list with none left matches nothing, or every row
-        under ``exclude``. Every other value goes to django-filter's own ``Filter.filter``.
-        The ``value == []`` comparison runs the value's own ``__eq__``; whatever it
-        raises propagates.
+        Every other value goes through ``_ElementCleanedFilter._filter_elements``. The
+        ``value == []`` comparison runs the value's own ``__eq__``; whatever it raises
+        propagates.
         """
         if value == []:
             return _apply_lookup_predicate(self, qs, value)
-        value = _held_column_value(self, qs, value)
-        column = _integer_in_column(self, qs.query)
-        if column is not None and is_list_or_tuple(value):
-            kept = _identifying_members(column, list(value), qs.db)
-            if not kept:
-                return _match_none_queryset(self, qs)
-            return super().filter(qs, kept)
-        return super().filter(qs, value)
+        return self._filter_elements(qs, value)
 
 
 @dataclass(frozen=True)
@@ -2194,46 +2175,20 @@ class ListFilter(_ElementCleanedFilter):
     applies no constraint.
     """
 
-    # basedpyright: the stub declares ``Filter.method`` a plain attribute, not the property it is
-    @_FILTER_METHOD_PROPERTY.setter
-    @override
-    def method(self, value: object) -> None:  # pyright: ignore[reportIncompatibleVariableOverride]
-        """Swap in `ListFilterMethod` when a consumer `method=` is set."""
-        _install_empty_list_aware_method(self, value, ListFilterMethod)
+    method_class: type[FilterMethod] = ListFilterMethod
 
     @override
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
         """Short-circuit empty-list inputs to `qs.none()` (every row when excluding).
 
-        The raw input is shape-gated through
-        ``_materialize_list_shaped_values`` before the emptiness probe, so a
-        scalar, a one-shot iterator, or a generator never reaches ``len()``,
-        and a string value under an ``in`` lookup is never iterated
-        char-by-char (``in: "26"`` compiling to ``IN ('2','6')``). Only the list/tuple
-        shapes the form contract delivers are meaningful; everything else is
-        a coded reject. An ``in`` over an integer column, or a relation compared on one
-        (``_integer_in_column``), then keeps only the elements naming a row, those inside
-        the column's integer range on the queryset's database and not fractional
-        (``_identifying_members``); a list with none left matches nothing, or every
-        row under ``exclude`` (``_match_none_queryset``).
+        ``value`` is the list the form field cleans; a non-empty one goes through
+        ``_ElementCleanedFilter._filter_elements``.
         """
         if value is None:
             return super().filter(qs, value)
-        value = _materialize_list_shaped_values(
-            value,
-            message="Invalid filter value: expected a list.",
-            code=FILTER_INVALID_ERROR_CODE,
-        )
-        if len(value) == 0:
+        if not value:
             return _match_none_queryset(self, qs)
-        value = require(_held_column_value(self, qs, value), is_list)
-        column = _integer_in_column(self, qs.query)
-        if column is not None:
-            kept = _identifying_members(column, value, qs.db)
-            if not kept:
-                return _match_none_queryset(self, qs)
-            return super().filter(qs, kept)
-        return super().filter(qs, value)
+        return self._filter_elements(qs, value)
 
 
 class _MembershipCSVField(BaseCSVField):
@@ -2258,23 +2213,12 @@ class MembershipInFilter(BaseInFilter):
 
     @override
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
-        """Match nothing for an explicit ``[]``; otherwise django-filter's ``__in``.
-
-        The raw input is shape-gated through ``_materialize_list_shaped_values``
-        (``ListFilter`` / ``IntegerInFilter`` containment): only the list/tuple
-        shapes the form contract delivers are meaningful; everything else is a
-        coded reject.
-        """
+        """Match nothing for an explicit ``[]``; otherwise django-filter's ``__in``."""
         if value is None:
             return qs
-        members = _materialize_list_shaped_values(
-            value,
-            message="Invalid filter value: expected a list.",
-            code=FILTER_INVALID_ERROR_CODE,
-        )
-        if not members:
+        if not value:
             return _match_none_queryset(self, qs)
-        return super().filter(qs, members)
+        return super().filter(qs, value)
 
 
 def membership_in_filter_class(in_filter_class: type[BaseInFilter]) -> type[MembershipInFilter]:
@@ -2336,19 +2280,11 @@ class IntegerInFilter(MembershipInFilter, NumberFilter):
     def filter(self, qs: models.QuerySet[_M], value: object) -> models.QuerySet[_M]:
         """Coerce members, matching nothing when the input is empty or fully drops.
 
-        The raw input is shape-gated through ``_materialize_list_shaped_values``
-        first, so a scalar never reaches the coercion loop and a string value is
-        never iterated char-by-char (``in: "26"`` coercing to ``[2, 6]`` would be
-        a wrong-result membership). Only the list/tuple shapes the form contract
-        delivers are meaningful; everything else is a coded reject.
+        ``value`` is the list the form field cleans.
         """
         if value is None:
             return super().filter(qs, value)
-        value = _materialize_list_shaped_values(
-            value,
-            message="Invalid filter value: expected a list of integers.",
-            code=FILTER_INVALID_ERROR_CODE,
-        )
+        value = list(require(value, is_list_or_tuple))
         if _reads_integer_transform(self, qs.query):
             # A transform's output names no stored column: each member binds as the
             # lookup prepares it, so one past the integer range the database stores for
@@ -2576,8 +2512,9 @@ def _globalid_target(
     if "_owner_definition" in face:
         # A face's ids name the type registered for its model, as the unwalked relation's
         # leaf names them (``related_target_for``), whichever type answers for its rows.
-        face_meta = require_instance(face["_meta"], FilterSetOptions)
-        owner = registry.get_definition(registry.get(require(face_meta.model, is_model_class)))
+        owner = registry.get_definition(
+            registry.get(require(_filterset_model(parent), is_model_class)),
+        )
         foreign_rows = owner is not _rows_definition(parent)
     else:
         owner = set_bound_definition(truth.class_of(parent))
@@ -2590,8 +2527,7 @@ def _globalid_target(
         # their relation's model, so they validate from that primary once the registry is
         # stable; an unbound set's own key stays the upstream scalar shape, never a
         # GlobalID of its model's primary.
-        meta = optional_instance(truth.static_attr(parent, "_meta", None), FilterSetOptions)
-        model = getattr(meta, "model", None)
+        model = _filterset_model(parent)
         if not (stable or registry.is_finalized()) or not is_model_class(model):
             return None
         start_model = model
@@ -2633,8 +2569,7 @@ def _rows_definition(parent: object) -> DjangoTypeDefinition | None:
     bound = set_bound_definition(truth.class_of(parent))
     if bound is not None:
         return bound
-    meta = require_instance(truth.static_attr(parent, "_meta", None), FilterSetOptions)
-    return registry.get_definition(registry.get(require(meta.model, is_model_class)))
+    return registry.get_definition(registry.get(require(_filterset_model(parent), is_model_class)))
 
 
 def _compares_target_annotation(
@@ -2936,6 +2871,7 @@ def _decode_and_validate_global_id(
     threads the filter's ``_globalid_target`` through a list so it resolves once per
     call; when omitted it is resolved here.
     """
+    suffix = "" if index is None else f" at index {index}"
     if isinstance(value, relay.GlobalID):
         decoded = value
     else:
@@ -2944,7 +2880,6 @@ def _decode_and_validate_global_id(
         except ValueError as exc:
             # Malformed payload: ``ValueError`` is the superset
             # ``types/relay.py::decode_global_id`` catches too.
-            suffix = "" if index is None else f" at index {index}"
             raise GraphQLError(
                 f"Invalid GlobalID: {truth.render(value)} is not a valid GlobalID (malformed "
                 f"base64 or not a 'type_name:node_id' shape){suffix}.",
@@ -2965,7 +2900,6 @@ def _decode_and_validate_global_id(
             # serves and for a leaf whose path starts at a ``FilteredRelation``
             # alias. A finalized non-Relay target can reach this refusal through
             # an ordinary request because the audit admits it.
-            suffix = "" if index is None else f" at index {index}"
             if strategy in ENCODE_ONLY_GLOBALID_STRATEGIES:
                 message = (
                     f"GlobalID for a {strategy}-strategy type "
@@ -2990,7 +2924,6 @@ def _decode_and_validate_global_id(
     ):
         # A ``relay.NodeID`` over an attribute no model column holds (an annotation the
         # type's ``get_queryset`` adds) is comparable only on that type's own rows.
-        suffix = "" if index is None else f" at index {index}"
         raise GraphQLError(
             f"GlobalID filter target {target.definition.graphql_type_name} carries its id in "
             f"{target.slot.id_attr!r}, which no model column holds, so a filter across a "
@@ -3004,7 +2937,6 @@ def _decode_and_validate_global_id(
         and definition is not None
         and not _slot_names_target(definition, decoded.type_name, schema)
     ):
-        suffix = "" if index is None else f" at index {index}"
         expected = " or ".join(sorted(accepted))
         # An accepted spelling refused anyway names a different type in this schema.
         shadowed = (
@@ -3018,7 +2950,6 @@ def _decode_and_validate_global_id(
         )
     if decoded.node_id in EMPTY_VALUES:
         # Empty node id: accepting it would widen a restrictive filter.
-        suffix = "" if index is None else f" at index {index}"
         raise GraphQLError(
             f"Invalid GlobalID: {truth.render(value)} decodes to an empty node id, which is not a "
             f"valid resource identifier{suffix}.",
@@ -3035,7 +2966,6 @@ def _decode_and_validate_global_id(
             alias=alias,
         )
         if coerced_slot_value is None:
-            suffix = "" if index is None else f" at index {index}"
             raise GraphQLError(
                 f"Invalid GlobalID: {truth.render(value)} carries a node id that is not a valid "
                 f"{truth.kind(target_model)} id value{suffix}.",
@@ -3046,7 +2976,6 @@ def _decode_and_validate_global_id(
     if isinstance(target_pk, models.Field):
         coerced_node_id = coerce_field_value_or_none(target_pk, decoded.node_id, alias=alias)
         if coerced_node_id is None:
-            suffix = "" if index is None else f" at index {index}"
             raise GraphQLError(
                 f"Invalid GlobalID: {truth.render(value)} carries a node id that is not a valid "
                 f"{truth.kind(target_model)} primary-key value{suffix}.",
@@ -3309,9 +3238,7 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
         queryset; an explicit ``[]`` is the match-none membership predicate
         (``ListFilter`` empty-set semantics for every list-shaped lookup, not
         upstream ``MultipleChoiceFilter``'s ``if not value: return qs`` skip).
-        A container that is not a ``list`` / ``tuple`` is refused before the
-        emptiness probe, under the ``GLOBALID_INVALID`` code a malformed member
-        gets. All three run BEFORE decode. Every remaining element is decoded
+        Both run BEFORE decode. Every remaining element is decoded
         and validated by ``_decode_and_validate_global_id``, which rejects a
         malformed payload, a wrong ``type_name``, AND a well-typed empty-id
         GlobalID (an empty decoded id is ``GLOBALID_INVALID`` with its list
@@ -3333,12 +3260,7 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
         """
         if value is None:
             return super().filter(qs, None)
-        value = _materialize_list_shaped_values(
-            value,
-            message="Invalid GlobalID list: expected a list of GlobalIDs.",
-            code=GLOBALID_INVALID_ERROR_CODE,
-        )
-        if len(value) == 0:
+        if not value:
             return _match_none_queryset(self, qs)
         target = _globalid_target(self, aliases=_query_aliases(qs))
         node_ids = [
@@ -3350,7 +3272,7 @@ class GlobalIDMultipleChoiceFilter(MultipleChoiceFilter):
                 alias=qs.db,
                 query=qs.query,
             )
-            for idx, item in enumerate(value)
+            for idx, item in enumerate(require(value, is_list_or_tuple))
         ]
         path = _globalid_predicate_path(self, target)
         lookup_expr = _bound_lookup_expr(self)
@@ -3764,14 +3686,12 @@ class RelationPkMultipleFilter(Filter):
         """
         if value is None:
             return qs
-        members = _materialize_list_shaped_values(
-            value,
-            message="Invalid filter value: expected a list of primary keys.",
-            code=FILTER_INVALID_ERROR_CODE,
-        )
         kept = [
             coerced
-            for coerced in (_coerce_relation_identity(self, member, qs.db) for member in members)
+            for coerced in (
+                _coerce_relation_identity(self, member, qs.db)
+                for member in require(value, is_list_or_tuple)
+            )
             if coerced is not None
         ]
         if not kept:
@@ -4525,8 +4445,7 @@ class RelatedFilter(RelatedSetTargetMixin["FilterSet"], ModelChoiceFilter):
         queryset is preserved verbatim.
         """
         if self.queryset is None:
-            target = self.filterset
-            model = read_attr(truth.static_attr(target, "_meta", None), "model", None)
+            model = _filterset_model(self.filterset)
             if model is not None:
                 return base_queryset(require(model, is_model_class))
         return super().get_queryset(request)

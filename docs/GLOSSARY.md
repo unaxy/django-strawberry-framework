@@ -24,8 +24,8 @@ Current package version: `0.0.15`. Alpha-quality — suitable for internal tools
 Symbols re-exported from `django_strawberry_framework`:
 
 - [`BigInt`](#bigint-scalar) — JSON-safe scalar for 64-bit integer fields.
-- [`DEFAULT_ERROR_POLICY`](#errorpolicy) — the all-defaults `ErrorPolicy` instance, exported as an inspectable value template; what a deployment that configures nothing is masked by.
-- [`DEFAULT_RESOURCE_POLICY`](#resourcepolicy) — the all-defaults `ResourcePolicy` instance, exported as an inspectable value template; what a deployment that configures nothing is bounded by.
+- [`DEFAULT_ERROR_POLICY`](#errorpolicy) — the all-defaults `ErrorPolicy` instance, the fallback a deployment that configures nothing is masked by.
+- [`DEFAULT_RESOURCE_POLICY`](#resourcepolicy) — the all-defaults `ResourcePolicy` instance, the fallback a deployment that configures nothing is bounded by.
 - [`DjangoConnection`](#djangoconnection) — generic Relay connection return-type alias (`DjangoConnection[T]`).
 - [`DjangoConnectionField`](#djangoconnectionfield) — Relay connection field factory over a Relay-Node-shaped `DjangoType`.
 - [`DjangoErrorPolicyExtension`](#djangoerrorpolicyextension) — response-side enforcement of the [production error policy](#production-error-policy); built by `DjangoSchema` first in every operation's chain, never an entry in `extensions=`, so it masks after every other teardown.
@@ -44,7 +44,7 @@ Symbols re-exported from `django_strawberry_framework`:
 - [`DjangoNodesField`](#djangonodesfield) — root Relay `nodes(ids:)` batch refetch field factory.
 - [`DjangoType`](#djangotype) — model-backed Strawberry type base class.
 - [`DjangoOptimizerExtension`](#djangooptimizerextension) — Strawberry schema extension that does ORM optimization.
-- [`DjangoResourcePolicyExtension`](#djangoresourcepolicyextension) — schema extension that spends the [execution resource policy](#execution-resource-policy); appended by `DjangoSchema` as a CLASS so each request gets its own charge counters.
+- [`DjangoResourcePolicyExtension`](#djangoresourcepolicyextension) — schema extension that spends the [execution resource policy](#execution-resource-policy); `DjangoSchema` builds one per operation, so each request gets its own charge counters.
 - [`DjangoSchema`](#djangoschema) — the `strawberry.Schema` subclass required for any schema exposing generated mutations; resolves the production error and execution resource policies once at construction.
 - [`ErrorPolicy`](#errorpolicy) — frozen production error policy (`enabled` / `message` / `correlation_extension_key`), resolved once at schema construction; exported alongside `DEFAULT_ERROR_POLICY`.
 - [`FieldError`](#fielderror-envelope) — public typed validation-error type (`field` + `messages`) in the shared mutation-payload envelope.

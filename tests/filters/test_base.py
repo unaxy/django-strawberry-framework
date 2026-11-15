@@ -735,8 +735,7 @@ def test_declared_list_filter_under_django_filter_backend_reads_raw_form_members
     """A raw ``?name=`` reads as the generated ``in`` reads it, under either parent.
 
     ``?name=a,b`` splits on commas and an empty ``?name=`` applies no constraint
-    (``_MembershipCSVWidget``), so the backend answers the rows in one query instead of a
-    list-shape refusal it cannot map to a response.
+    (``_MembershipCSVWidget``), so the backend answers the rows in one query.
     """
     _ = _cleaned_specimen("kept", kept=True)
     _ = _cleaned_specimen("other", kept=False)
@@ -2039,8 +2038,7 @@ def test_list_filter_field_cleans_each_element_with_its_element_field(
 
     Over an array of arrays (``depth`` past 1), outside an ``in`` over it, a list or tuple
     member is descended at any depth, a ``None`` at any depth stays ``None`` and every other
-    member is cleaned by ``element_field``. A non-list reaches ``ListFilter.filter``, whose
-    list-shape gate refuses it. Live refusal of an element the column cannot hold:
+    member is cleaned by ``element_field``. Live refusal of an element the column cannot hold:
     ``test_scalars_filter_api.py::test_price_among_element_the_column_cannot_hold_is_filter_invalid``.
     """
     assert ListFilter.field_class is ArrayFilter.field_class is _ElementField
@@ -2201,25 +2199,6 @@ def test_global_id_multiple_choice_filter_passes_through_none() -> None:
     assert result is qs
 
 
-@pytest.mark.parametrize(
-    "value",
-    [iter(["not-a-global-id"]), object()],
-    ids=["iterator", "opaque-object"],
-)
-def test_globalid_list_primitive_refuses_python_only_containers(value: object) -> None:
-    """Python iterators and opaque objects cannot be posted as native JSON containers.
-
-    Native scalar/string refusal belongs to
-    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_refuse_scalar_containers``.
-    """
-    f = GlobalIDMultipleChoiceFilter(field_name="id", lookup_expr="in")
-
-    with pytest.raises(GraphQLError, match="expected a list of GlobalIDs") as exc_info:
-        f.filter(_RecordingQs(), value)
-
-    assert exc_info.value.extensions == {"code": "GLOBALID_INVALID"}
-
-
 def test_global_id_multiple_choice_field_distinguishes_absent_from_explicit_empty() -> None:
     """Form cleaning keeps omission as ``None`` and a supplied empty list as ``[]``."""
     field = GlobalIDMultipleChoiceFilter(field_name="id").field
@@ -2257,8 +2236,8 @@ def test_membership_in_field_reads_a_raw_empty_string_as_omission() -> None:
 def test_membership_wrapper_keeps_the_upstream_name_and_builds_a_fresh_class() -> None:
     """Exact dynamic Python class identity, name and MRO stay construction observations.
 
-    Direct scalar rejection and admitted membership run through native HTTP at
-    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_refuse_scalar_containers``.
+    Admitted membership runs through native HTTP at
+    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_admit_lists``.
     """
     wrapped = membership_in_filter_class(_CharInFilter)
     assert wrapped is not membership_in_filter_class(_CharInFilter)
@@ -3580,8 +3559,8 @@ def test_validate_range_rejects_non_two_element_sequences(invalid_value: object)
 def test_a_standalone_integer_primitive_keeps_parent_and_omission_identity() -> None:
     """The absent parent slot and exact queryset identity are Python observations.
 
-    Native direct primitive acceptance and scalar refusal are owned by
-    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_refuse_scalar_containers``.
+    Native direct primitive acceptance is owned by
+    ``examples/fakeshop/test_query/test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_admit_lists``.
     """
     queryset = models.Shelf.objects.none()
     primitive = IntegerInFilter(field_name="id", lookup_expr="in")
@@ -3802,39 +3781,6 @@ def test_related_filter_gate_passes_none_placeholder_through_bfs_enqueue() -> No
     factory = FilterArgumentsFactory(Parent)
     factory._ensure_built()
     assert factory.input_object_types
-
-
-def test_list_filter_one_shot_iterator_is_a_coded_reject() -> None:
-    """A Python-only one-shot iterator is refused without being consumed as a JSON list.
-
-    Native scalar-container refusals live in
-    ``test_direct_filter_primitives_api.py::test_direct_public_membership_primitives_refuse_scalar_containers``.
-    """
-    visited: list[str] = []
-
-    def members() -> Iterator[str]:
-        visited.append("iterated")
-        yield "a"
-        yield "b"
-
-    f = ListFilter(field_name="code")
-    with pytest.raises(GraphQLError) as exc_info:
-        f.filter(models.Shelf.objects.none(), members())
-    assert exc_info.value.extensions == {"code": "FILTER_INVALID"}
-    assert visited == []
-
-
-def test_globalid_multiple_choice_list_subclass_iteration_error_propagates() -> None:
-    """A ``list`` subclass passes the shape gate; its own ``__iter__`` exception propagates."""
-
-    class RaisingIter(list[object]):
-        @override
-        def __iter__(self) -> Iterator[object]:
-            raise RuntimeError("list subclass __iter__ raised")
-
-    f = GlobalIDMultipleChoiceFilter(field_name="id")
-    with pytest.raises(RuntimeError, match="list subclass __iter__ raised"):
-        f.filter(models.Shelf.objects.none(), RaisingIter(["ShelfNode:1"]))
 
 
 def test_array_filter_emptiness_probe_propagates_the_value_eq_error() -> None:

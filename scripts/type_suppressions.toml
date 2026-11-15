@@ -33,12 +33,11 @@
 "django_strawberry_framework/extensions/operation_state.py::_OperationBoundExtension.execution_context" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/extensions/operation_state.py::_bound_state" = { cast = 1 }
 "django_strawberry_framework/extensions/resource_policy.py::_declared_input_type" = { reportUnknownMemberType = 1 }
-"django_strawberry_framework/filters/base.py::ArrayFilter.method" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/base.py::EnumChoiceFilter" = { reportUnsafeMultipleInheritance = 1 }
-"django_strawberry_framework/filters/base.py::ListFilter.method" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/base.py::RelatedFilter.__init__" = { reportArgumentType = 1 }
 "django_strawberry_framework/filters/base.py::RelatedFilter.filterset" = { reportPropertyTypeMismatch = 1 }
 "django_strawberry_framework/filters/base.py::RelatedFilter.get_queryset" = { reportIncompatibleMethodOverride = 1 }
+"django_strawberry_framework/filters/base.py::_ElementCleanedFilter.method" = { reportIncompatibleVariableOverride = 1 }
 "django_strawberry_framework/filters/base.py::_EnumCharField" = { reportUnsafeMultipleInheritance = 1 }
 "django_strawberry_framework/filters/base.py::_EnumChoiceField" = { reportUnsafeMultipleInheritance = 1 }
 "django_strawberry_framework/filters/base.py::_GlobalIDMultipleChoiceField.to_python" = { reportIncompatibleMethodOverride = 1 }

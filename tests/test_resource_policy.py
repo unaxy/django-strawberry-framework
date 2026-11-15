@@ -67,6 +67,7 @@ from dataclasses import fields as dataclass_fields
 from itertools import islice
 from types import MappingProxyType, SimpleNamespace
 from typing import NoReturn, TypeVar
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_django
@@ -2860,6 +2861,15 @@ def test_the_context_is_cleared_even_when_the_document_scan_rejects() -> None:
     with pytest.raises(ResourceLimitExceeded):
         next(extension.on_operation())
     assert DST_RESOURCE_POLICY not in context
+
+
+def test_an_extension_policy_that_is_no_resource_policy_is_refused_at_construction() -> None:
+    """``policy=`` is validated where the configuration is accepted, not at the first request."""
+    with pytest.raises(
+        ConfigurationError,
+        match=r"DjangoResourcePolicyExtension\(policy=\.\.\.\) takes a ResourcePolicy; got ",
+    ):
+        DjangoResourcePolicyExtension(policy=MagicMock())
 
 
 def test_an_extension_configured_with_no_policy_reads_the_schemas() -> None:
