@@ -293,8 +293,7 @@ def _check_n1(
     the instance accessor in ``fields_cache`` for a single-valued relation, and
     ``_prefetch_cache_name``'s answer in ``_prefetched_objects_cache`` for a
     many side. Both diverge from ``field.name`` for reverse relations without
-    ``related_name``. Production callers always supply it; ``None`` falls back
-    to ``field_name`` for test-double direct callers.
+    ``related_name``. ``None`` falls back to ``field_name``.
 
     Connection contract (spec-033 Decision 8): the synthesized
     relation-connection resolver calls this with ``kind="connection_to_attr"``

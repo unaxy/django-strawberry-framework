@@ -829,7 +829,7 @@ def finalize_django_types() -> None:
         # definition is always set; pending records are added after
         # register_with_definition in DjangoType.__init_subclass__
         # (see types/base.py register_with_definition / add_pending_relation
-        # ordering). The ``is not None`` guard is kept as defense-in-depth.
+        # ordering).
         definition = registry.get_definition(pending.source_type)
         target_type = registry.get(pending.related_model)
         if target_type is None:
@@ -854,15 +854,13 @@ def finalize_django_types() -> None:
     if unresolved:
         raise ConfigurationError(_format_unresolved_targets_error(unresolved))
 
-    resolved_pending: list[PendingRelation] = []
     for pending, target_type, field_meta in resolved:
         pending.source_type.__annotations__[pending.field_name] = resolved_relation_annotation(
             pending.django_field,
             target_type,
             field_meta=field_meta,
         )
-        resolved_pending.append(pending)
-    registry.discard_pending(resolved_pending)
+    registry.discard_pending([pending for pending, _, _ in resolved])
 
     # Phase 2 runs BEFORE Phase 2.5; interface base injection cannot
     # supersede framework resolvers attached here. No Strawberry interface

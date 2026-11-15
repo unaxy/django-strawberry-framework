@@ -90,8 +90,6 @@ from .relations import PendingRelation, PendingRelationAnnotation
 from .relay import install_is_type_of
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
     from typing_extensions import TypeIs
 
     from django_strawberry_framework.filters.sets import FilterSet
@@ -721,24 +719,6 @@ class DjangoType:
 
         field_map = {f.name: FieldMeta.from_django_field(f) for f in fields}
         consumer_annotations = dict(cls.__annotations__)
-        # Class-body syntax can only produce string annotation keys, but a
-        # metaclass may inject arbitrary keys into the namespace before
-        # ``type.__new__`` runs. Downstream every annotation key is treated as
-        # a field NAME (membership tests, ``sorted`` over the auto-name sets,
-        # the final ``{**synthesized, **consumer_annotations}`` merge), so a
-        # non-string key would raise raw ``TypeError``/``KeyError`` from those
-        # walks. The string-keys contract is validated HERE, once, at the
-        # collection boundary, so the walks below see only field names.
-        annotation_keys: Iterable[object] = consumer_annotations
-        non_string_annotation_keys = sorted(
-            truth.render(key) for key in annotation_keys if not truth.is_instance(key, str)
-        )
-        if non_string_annotation_keys:
-            raise ConfigurationError(
-                f"{type_name}: class annotations must have string names; got non-string "
-                f"keys [{', '.join(non_string_annotation_keys)}]. Annotation keys are field names; "
-                "non-string keys cannot be synthesized or exposed.",
-            )
         # ``field: auto`` is the "declare-but-infer" marker (the fifth corner of the
         # override surface): the field is written as a class annotation for
         # readability / IDE visibility / co-location with sibling overrides, but its

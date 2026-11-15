@@ -583,17 +583,13 @@ def encode_typename(
                 f"returned {truth.render(result)}; a (type_cls, model, root) -> str encoder "
                 "must return a non-empty string for the GlobalID type-name slot.",
             )
-        # A str subclass can override ``__str__`` / ``__format__`` and escape
-        # later in Strawberry's base64 encoder. Normalize it through the base
-        # descriptor so the validated return contract is an inert exact str.
-        normalized = truth.text(result)
-        if not normalized:
+        if not result:
             raise ConfigurationError(
                 f"{definition.graphql_type_name}: the Meta.globalid_strategy callable "
                 f"returned {truth.render(result)}; a (type_cls, model, root) -> str encoder "
                 "must return a non-empty string for the GlobalID type-name slot.",
             )
-        return normalized
+        return result
     if strategy in MODEL_LABEL_STRATEGIES:
         return definition.model._meta.label_lower
     # ``type`` (the only remaining string strategy): the GraphQL type name as

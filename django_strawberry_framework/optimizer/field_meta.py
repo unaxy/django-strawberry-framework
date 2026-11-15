@@ -265,7 +265,7 @@ class FieldMeta:
         field: object,
         *,
         is_relation: bool,
-        field_name: object = None,
+        field_name: str,
     ) -> FieldMeta:
         """Build a ``FieldMeta`` from a guard-cleared field-shaped descriptor.
 
@@ -280,12 +280,6 @@ class FieldMeta:
         ``getattr``-defaulted relation-shape reads and the derived FK-id
         elision metadata.
         """
-        if field_name is None:
-            field_name = read_attr(field, "name", None)
-        if not truth.is_instance(field_name, str):
-            raise OptimizerError(
-                f"FieldMeta expected a string field name; got {truth.kind(field_name)}.",
-            )
         kind = relation_kind(field)
         link = relation_link(field) if is_relation else RelationLink()
         # A source-carried link's target column (a forward relation's, a reverse
@@ -300,7 +294,7 @@ class FieldMeta:
         else:
             target_field = read_attr(field, "target_field", None)
         # Trusted, not checked: a Django relation's ``related_model`` is a model class
-        # or ``None`` (a resolver-path stand-in may carry a lighter class that
+        # or ``None`` (a duck-typed descriptor may carry a lighter class that
         # ``_target_pk_name`` reads defensively).
         related_model = cast("type[models.Model] | None", read_attr(field, "related_model", None))
         target_pk_name = _target_pk_name(related_model)
@@ -334,8 +328,7 @@ class FieldMeta:
         # poisoned value when the field POSITIVELY declares itself non-concrete
         # OR is many-to-many (no source-table column on any supported Django).
         # A duck-typed descriptor that omits ``concrete`` and is not M2M keeps
-        # its attname so resolver test doubles carrying only ``attname`` are
-        # unaffected.
+        # its attname.
         if is_relation and (getattr(field, "concrete", None) is False or is_m2m):
             attname = None
         content_type_field_name = relation_name(field, "content_type_field_name")
@@ -399,8 +392,7 @@ class FieldMeta:
 def _target_pk_name(model: type[models.Model] | None) -> str | None:
     """Return ``model``'s concrete primary-key field name, or ``None``.
 
-    ``FieldMeta`` is also built from fabricated field shapes on the resolver
-    path (``types/resolvers.py::_field_meta_for_resolver``), whose
+    ``FieldMeta.from_django_field`` accepts duck-typed descriptors, whose
     ``related_model`` may be a lightweight stand-in without ``_meta``. A
     missing ``_meta`` simply means "no resolvable target pk", which disables
     FK-id elision rather than raising.

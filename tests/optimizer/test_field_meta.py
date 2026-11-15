@@ -756,8 +756,6 @@ def test_from_django_field_non_string_attributes() -> None:
         # basedpyright: the non-str field name is the hostile input under test;
         # FieldMeta.from_django_field types the parameter as a Django field
         FieldMeta.from_django_field(non_str_name)  # pyright: ignore[reportArgumentType]
-    with pytest.raises(OptimizerError, match="expected a string field name"):
-        FieldMeta._from_field_shape(SimpleNamespace(), is_relation=True, field_name=123)
 
     # Non-string target_field name/attname and field attname
     fake_target = SimpleNamespace(name=123, attname=456)

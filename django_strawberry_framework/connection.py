@@ -2748,8 +2748,7 @@ def DjangoConnectionField(  # noqa: N802 - PascalCase for graphene-django parity
             "`relay.Node` to `Meta.interfaces` (or inherit `relay.Node` directly)"
         ),
     )
-    # The validator proved ``definition.origin is target_type``; the origin is the
-    # typed spelling of the same class.
+    # The registry keys each definition by its own class, so ``origin`` is ``target_type``.
     node_type = definition.origin
     # The field object stands in for the value it resolves to (see the docstring).
     return cast(

@@ -114,7 +114,6 @@ from django_strawberry_framework.list_field import (
     _is_model_default_ordering_active,
     _is_readable_order_node,
     _ListArguments,
-    _model_from_definition,
     _normalize_list_arguments,
     _order_normalization_scope,
     _orderset_class_from_definition,
@@ -245,8 +244,8 @@ def test_djangolistfield_rejects_djangotype_without_definition() -> None:
     ``__init_subclass__`` return early WITHOUT setting
     ``__django_strawberry_definition__`` (assigned by the
     ``cls.__django_strawberry_definition__ = definition`` line of the same method), so the
-    guard's ``getattr(..., None)`` read finds no definition and the target is
-    rejected as not registered.
+    registry holds no definition for it and the target is rejected as not
+    registered.
     """
 
     class AbstractBase(DjangoType):
@@ -289,9 +288,6 @@ class _ProbeTag:
     """A REAL directive instance for the pass-through positive control."""
 
     marker: str = "probe"
-
-
-_RAISING_CLASS_ERRORS = [RuntimeError, TypeError, KeyboardInterrupt]
 
 
 class _RaisingClassTarget(ClassReadRaisesBase):
@@ -1166,19 +1162,6 @@ def test_the_default_seed_and_both_visibility_seals_use_the_captured_model() -> 
     assert result.data is not None
     assert [json_at(row, "name") for row in json_list(result.data, "items")] == [target_item.name]
     assert services.DECOY_CATEGORY_NAME in decoy_names
-
-
-@pytest.mark.django_db
-def test_list_field_rejects_a_target_whose_definition_model_is_not_a_model() -> None:
-    """A non-model ``definition.model`` fails at the factory line."""
-    with pytest.raises(ConfigurationError) as exc_info:
-        # basedpyright: the definition whose model is a string is the hostile input under test;
-        # _model_from_definition types the parameter as DjangoTypeDefinition
-        _model_from_definition(SimpleNamespace(origin=None, model="Item"))  # pyright: ignore[reportArgumentType]
-    assert str(exc_info.value) == (
-        "DjangoListField target NoneType has a definition whose model is not a Django "
-        "model; got 'Item'."
-    )
 
 
 @pytest.mark.parametrize(

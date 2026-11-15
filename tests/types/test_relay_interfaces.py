@@ -1914,28 +1914,6 @@ def test_globalid_callable_non_string_return_raises(bad_return: object) -> None:
         _emitted_typename(CategoryNode)
 
 
-def test_globalid_callable_string_subclass_is_normalized() -> None:
-    """A callable encoder's ``str`` subclass return is handed on as an exact ``str``."""
-
-    class PayloadString(str):
-        pass
-
-    def encoder(_type_cls: type[DjangoType], _model: type[Model], _root: object) -> str:
-        return PayloadString("custom-payload")
-
-    class CategoryNode(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-            interfaces = (relay.Node,)
-            globalid_strategy = encoder
-
-    finalize_django_types()
-    emitted = _emitted_typename(CategoryNode)
-    assert emitted == "custom-payload"
-    assert type(emitted) is str
-
-
 def test_encode_typename_helper_dispatch() -> None:
     """``encode_typename`` computes the slot for each resolved strategy directly."""
 

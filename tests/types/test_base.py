@@ -56,7 +56,6 @@ from django.utils.functional import Promise, SimpleLazyObject
 from django.utils.translation import gettext_lazy
 from strawberry import relay
 from strawberry.types import get_object_definition
-from strawberry.types.auto import StrawberryAuto
 from typing_extensions import override
 
 import django_strawberry_framework
@@ -97,7 +96,6 @@ from tests._idioms import (
     ClassReadRaisesBase,
     declare_django_type,
     definition_raises,
-    is_object_dict,
 )
 from tests.optimizer import _link_models
 
@@ -654,90 +652,6 @@ def test_meta_model_that_is_a_lazy_proxy_of_a_model_is_the_typed_rejection() -> 
 
     with pytest.raises(ConfigurationError, match=r"^Meta\.model must be a Django model class$"):
         type("T", (DjangoType,), {"Meta": meta})
-
-
-def _inject_annotation_key(*keys: object) -> type[type]:
-    """A metaclass that adds each of ``keys`` to the class annotations before the class exists."""
-
-    class InjectAnnotationKeysMeta(type):
-        def __new__(
-            mcs,
-            name: str,
-            bases: tuple[type, ...],
-            namespace: dict[str, object],
-            **kwargs: object,
-        ) -> type:
-            namespace["__annotations__"] = dict.fromkeys(keys, str)
-            return super().__new__(mcs, name, bases, namespace, **kwargs)
-
-    return InjectAnnotationKeysMeta
-
-
-_NON_STRING_KEYS_TAIL = (
-    ". Annotation keys are field names; non-string keys cannot be synthesized or exposed."
-)
-
-
-@pytest.mark.parametrize(
-    ("keys", "shown"),
-    [
-        ((1,), "[1]"),
-        ((2, 1), "[1, 2]"),
-        ((_ClassReadRaises(RuntimeError),), "[<class-read-raises>]"),
-        ((_ClassReadRaises(KeyboardInterrupt),), "[<class-read-raises>]"),
-        ((_ClaimsClass(str),), "[<claims-class>]"),
-    ],
-    ids=[
-        "int",
-        "ints-sorted-by-repr",
-        "class-read-raises-runtime",
-        "class-read-raises-base-exception",
-        "class-claims-str",
-    ],
-)
-def test_non_string_annotation_key_is_rejected_whatever_its_class_or_repr(
-    keys: tuple[object, ...],
-    shown: str,
-) -> None:
-    """A metaclass-injected annotation key that is not really a ``str`` takes the typed rejection.
-
-    The keys are rendered through ``utils/truth.py::render`` and sorted by their rendering, and
-    the test asks the key's real type, so a key whose ``__class__`` raises or whose ``__class__``
-    claims ``str`` is reported alongside the honest ones.
-    """
-    with pytest.raises(ConfigurationError) as excinfo:
-
-        @definition_raises
-        class ProbeKeysType(DjangoType, metaclass=_inject_annotation_key(*keys)):
-            class Meta:
-                model = Category
-                fields = CATEGORY_SCALAR_FIELDS
-
-    assert str(excinfo.value) == (
-        f"ProbeKeysType: class annotations must have string names; got non-string keys {shown}"
-        + _NON_STRING_KEYS_TAIL
-    )
-
-
-def test_non_string_annotation_key_whose_repr_raises_propagates_the_repr_error() -> None:
-    """A non-string annotation key is rendered by its own ``__repr__``, whose error propagates.
-
-    The rejection renders each key through ``utils/truth.py::render``, which runs a
-    non-scalar key's ``__repr__`` as consumer behaviour.
-    """
-
-    class _ReprRaises:
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError("repr should not escape")
-
-    with pytest.raises(RuntimeError, match="repr should not escape"):
-
-        @definition_raises
-        class ProbeKeysType(DjangoType, metaclass=_inject_annotation_key(_ReprRaises())):
-            class Meta:
-                model = Category
-                fields = CATEGORY_SCALAR_FIELDS
 
 
 @pytest.mark.parametrize(
@@ -3615,42 +3529,6 @@ def test_package_auto_and_strawberry_auto_both_resolve_as_auto() -> None:
     assert PackageAutoType.__annotations__["name"] is str
     assert StrawberryAutoType.__annotations__["name"] is str
     finalize_django_types()
-
-
-def test_non_string_annotation_keys_raise_configuration_error() -> None:
-    """Metaclass-injected non-string annotation keys are rejected, not leaked.
-
-    Class-body syntax can only produce string keys, but a metaclass may
-    inject arbitrary keys before ``type.__new__`` runs; the collection
-    boundary must reject them instead of raising raw ``TypeError`` from the
-    ``sorted()`` calls over the auto-name sets. The ``metaclass=`` KEYWORD
-    is the only construction that applies the metaclass: a base-class
-    position leaves ``type()`` in charge (verified on 3.14).
-    """
-
-    class InjectAnnotationsMeta(type):
-        def __new__(
-            mcs,
-            name: str,
-            bases: tuple[type, ...],
-            namespace: dict[str, object],
-            **kwargs: object,
-        ) -> type:
-            declared = namespace.get("__annotations__", {})
-            assert is_object_dict(declared)
-            annotations = dict(declared)
-            annotations[1] = StrawberryAuto()
-            annotations["zz"] = StrawberryAuto()
-            namespace["__annotations__"] = annotations
-            return super().__new__(mcs, name, bases, namespace, **kwargs)
-
-    with pytest.raises(ConfigurationError, match="string names"):
-
-        @definition_raises
-        class ProbeNonStringKeysType(DjangoType, metaclass=InjectAnnotationsMeta):
-            class Meta:
-                model = Category
-                fields = ("id",)
 
 
 # ---------------------------------------------------------------------------

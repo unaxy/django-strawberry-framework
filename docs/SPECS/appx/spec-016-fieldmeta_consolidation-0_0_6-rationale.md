@@ -39,8 +39,8 @@ Bears on [Bounded exceptions to the single-source rule][spec-016-exceptions].
 The fallbacks in `types/resolvers.py::_field_meta_for_resolver` and
 `types/converters.py::resolved_relation_annotation` let unit tests exercise the cardinality branches
 without constructing a registered `DjangoType`. They stay honest because
-`FieldMeta._from_field_shape` is the canonical builder's own shape helper, so the fallback yields the
-value the canonical path would yield on the same descriptor. Production callers pass
+the resolver fallback is `FieldMeta.from_django_field` itself, so it yields the value the canonical
+path yields on the same descriptor. Production callers pass
 `parent_type=cls` and never reach them.
 
 ## Why the classifiers are called on raw descriptors

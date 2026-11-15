@@ -1982,7 +1982,7 @@ def test_unregister_refuses_a_connection_cache_that_is_not_an_identity_map(
 def test_unregister_tolerates_unimportable_connection_submodule(
     fresh_registry: TypeRegistry,
 ) -> None:
-    """``unregister``'s connection-cache ``except ImportError`` guard is best-effort.
+    """``unregister`` skips the connection cache when ``connection.py`` is not importable.
 
     With ``connection.py`` poisoned in ``sys.modules``, the registry's own maps are still
     cleaned.

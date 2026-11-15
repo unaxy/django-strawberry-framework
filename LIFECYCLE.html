@@ -253,7 +253,7 @@ const LIFECYCLE_DATA = {
           module: "types/finalizer.py::finalize_django_types",
           children: [
             { title: "Phase 1 — failure-atomic relation resolution",
-              detail: "Primary-ambiguity audit, then every PendingRelation classified (unresolved / consumer-authored / resolved) BEFORE any class is mutated; resolved annotations rewritten.",
+              detail: "Primary-ambiguity audit, then every PendingRelation classified (unresolved / resolved) BEFORE any class is mutated; resolved annotations rewritten.",
               errors: ["ConfigurationError — unresolved relation targets", "ConfigurationError — multi-type model without a declared primary"] },
             { title: "Phase 2 — resolver attachment",
               detail: "Relation resolvers and file/image resolvers attached per type; consumer-authored fields are skipped." },

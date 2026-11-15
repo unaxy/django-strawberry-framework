@@ -452,7 +452,6 @@
 "tests/test_list_field.py::test_list_argument_error_rejects_an_unknown_reason_and_renders_bools" = { reportArgumentType = 1 }
 "tests/test_list_field.py::test_list_arguments_immutability" = { reportAttributeAccessIssue = 3 }
 "tests/test_list_field.py::test_list_field_post_orderset_validator_zero_consumer_dispatch.PoisonAttr" = { reportAssignmentType = 1 }
-"tests/test_list_field.py::test_list_field_rejects_a_target_whose_definition_model_is_not_a_model" = { reportArgumentType = 1 }
 "tests/test_permissions.py::_CtTargetChild.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/test_permissions.py::test_fields_non_iterable_raises_configuration_error" = { reportArgumentType = 1 }
 "tests/test_permissions.py::test_fields_non_string_entry_raises_configuration_error" = { reportArgumentType = 1 }

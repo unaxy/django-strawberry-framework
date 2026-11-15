@@ -190,7 +190,7 @@ def _validate_djangotype_target(
 
     Raises ``ConfigurationError`` on failure; returns the canonical
     ``DjangoTypeDefinition`` when every guard passes, so the Relay validator
-    consumes the SAME read instead of reading the attribute a second time.
+    consumes the SAME read instead of a second registry read.
     The caller runs any factory-specific guards (e.g. the connection field's
     Relay-Node guard) AFTER this returns.
     """
@@ -1264,16 +1264,7 @@ def _model_from_definition(definition: DjangoTypeDefinition) -> type[models.Mode
     there is no second read through which another model could be substituted
     between the seed and the seal.
     """
-    model = definition.model
-    # The canonical definition records a model class, but it is a mutable record
-    # reachable from the target's public class attribute; the check fails loud if
-    # that invariant is ever broken instead of seeding a resolver over a non-model.
-    if not truth.is_subclass(model, models.Model):
-        raise ConfigurationError(
-            f"DjangoListField target {truth.name(definition.origin)} has a definition "
-            f"whose model is not a Django model; got {truth.render(model)}.",
-        )
-    return model
+    return definition.model
 
 
 def _orderset_class_from_definition(definition: DjangoTypeDefinition) -> type[OrderSet] | None:
@@ -1640,8 +1631,7 @@ def DjangoListField(  # noqa: N802 - PascalCase for graphene-django parity
     # signature, the SDL, the default seed, both visibility seals, and every
     # resolver dispatch below run on.
     definition = _validate_djangotype_target(target_type, resolver, field="DjangoListField")
-    # The validator proved ``definition.origin is target_type``; the origin is the
-    # typed spelling of the same class.
+    # The registry keys each definition by its own class, so ``origin`` is ``target_type``.
     node_type = definition.origin
     target_model = _model_from_definition(definition)
     orderset_class = _orderset_class_from_definition(definition)
