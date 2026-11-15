@@ -313,7 +313,7 @@ Shared mechanics:
 - Apps: `library` (primary acceptance: FK/reverse FK/O2O/M2M, Relay, optimizer hints, FilterSet/OrderSet on every type), `products` (canonical consumer app, TODAY.md; all mutation flavors), `scalars` (converter table, file/image, `Upload`), `accounts` (session auth), `kanban` + `glossary` (docs-as-data).
 - Commands: `seed_data`, `create_users`, `delete_data`, `delete_users`, `seed_shards` (products); `import_card_files --kind changed|predicted` (kanban); `import_spec_terms` (glossary).
 - `config/schema.py` composes all apps into one `DjangoSchema`. Change app list → sync every schema-module list harnesses carry (`schema_reload.py`, test READMEs).
-- `graphql_client.py` sync-only, no shared async helper; async suites drive `django_strawberry_framework.testing.AsyncTestClient` against their own `AsyncDjangoGraphQLView` mount + `django_db(transaction=True)` + registered types; a bare `AsyncClient` post owes a stated exemption.
+- `graphql_client.py` posts sync only; its `SchemaMount` mounts a module's own sync and `AsyncDjangoGraphQLView` routes over a schema read per request. Async suites drive `django_strawberry_framework.testing.AsyncTestClient` against such a mount + `django_db(transaction=True)` + registered types; a bare `AsyncClient` post owes a stated exemption.
 - Choices = `TextChoices` (`library/models.py`); text columns = `TextField`.
 
 ## Instruments that lie

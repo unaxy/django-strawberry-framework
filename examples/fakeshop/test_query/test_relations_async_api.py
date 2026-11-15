@@ -58,7 +58,6 @@ types rather than inventing throwaway ones.
 """
 
 from collections.abc import Callable
-from functools import wraps
 
 import pytest
 import strawberry
@@ -66,27 +65,20 @@ from apps.library import models
 from apps.library import schema as library_schema
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
-from django.http import HttpRequest
-from django.http.response import HttpResponseBase
-from django.test import override_settings
-from django.urls import clear_url_caches, path
-from graphql_client import JSONObject, RecordCompiledSql, json_at, json_list, response_json
+from graphql_client import (
+    JSONObject,
+    RecordCompiledSql,
+    SchemaMount,
+    json_at,
+    json_list,
+    response_json,
+)
 
 from django_strawberry_framework import DjangoOptimizerExtension, DjangoSchema, strawberry_config
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
-_CURRENT: dict[str, object | None] = {"schema": None}
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-async/", _async_graphql_view)]
+_MOUNT = SchemaMount(__name__, async_route="graphql-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _seed_loan_graph() -> models.Patron:
@@ -121,20 +113,10 @@ def _seed_card_graph() -> tuple[models.Patron, models.Patron]:
 
 async def _post_async(schema: strawberry.Schema, query: str) -> JSONObject:
     """POST ``query`` against ``schema`` over the live async mount, returning the payload."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            clear_url_caches()
-            res = await AsyncTestClient().query(
-                query,
-                assert_no_errors=False,
-                url="/graphql-async/",
-            )
-        assert res.response.status_code == 200
-        return response_json(res.response)
-    finally:
-        _CURRENT["schema"] = None
-        clear_url_caches()
+    with _MOUNT.serving(schema):
+        res = await AsyncTestClient().query(query, assert_no_errors=False, url="/graphql-async/")
+    assert res.response.status_code == 200
+    return response_json(res.response)
 
 
 @pytest.mark.django_db(transaction=True)

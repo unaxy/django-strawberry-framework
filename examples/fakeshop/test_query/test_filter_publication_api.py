@@ -15,7 +15,6 @@ import asyncio
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import wraps
 from typing import TYPE_CHECKING, Annotated
 
 import pytest
@@ -25,12 +24,12 @@ from apps.products import services
 from apps.products.models import Category
 from django import forms
 from django.db.models import IntegerField, Model, QuerySet, TextField
-from django.http import HttpRequest, HttpResponseBase
+from django.http import HttpRequest
 from django.test import override_settings
-from django.urls import path
 from django_filters import AllValuesFilter, BooleanFilter, CharFilter, Filter
 from graphql_client import (
     JSONObject,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -62,50 +61,20 @@ from django_strawberry_framework.filters import (
 )
 from django_strawberry_framework.orders import OrderSet
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._idioms import ModelSerializerBase, canonical_order, scrambled
 
 if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | strawberry.Schema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-#: The two schemas a generated-name clash is split across, one per mount.
-_PAIR: dict[str, DjangoSchema | strawberry.Schema | None] = {"first": None, "second": None}
-
-
-def _pair_view(side: str) -> Callable[[HttpRequest], HttpResponseBase]:
-    @wraps(DjangoGraphQLView.as_view())
-    def view(request: HttpRequest) -> HttpResponseBase:
-        schema = _PAIR[side]
-        assert schema is not None
-        return DjangoGraphQLView.as_view(schema=schema)(request)
-
-    return view
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-filter-publication/", _graphql_view),
-    path("graphql-filter-publication-async/", _async_graphql_view),
-    path("graphql-clash/first/", _pair_view("first")),
-    path("graphql-clash/second/", _pair_view("second")),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-filter-publication/",
+    async_route="graphql-filter-publication-async/",
+)
+#: The two mounts a generated-name clash is split across, one schema each.
+_PAIR = {side: SchemaMount(__name__, f"graphql-clash/{side}/") for side in ("first", "second")}
+urlpatterns = [*_MOUNT.urlpatterns, *_PAIR["first"].urlpatterns, *_PAIR["second"].urlpatterns]
 
 
 async def _async_post(document: str, variables: Mapping[str, object] | None) -> JSONObject:
@@ -126,20 +95,16 @@ def _post(
     *,
     transport: str = "sync",
 ) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if transport == "async":
-                return asyncio.run(
-                    _async_post(document, {"where": where} if where is not None else None),
-                )
-            return graphql_payload(
-                document,
-                variables={"where": where} if where is not None else None,
-                url="/graphql-filter-publication/",
+    with _MOUNT.serving(schema):
+        if transport == "async":
+            return asyncio.run(
+                _async_post(document, {"where": where} if where is not None else None),
             )
-    finally:
-        _CURRENT["schema"] = None
+        return graphql_payload(
+            document,
+            variables={"where": where} if where is not None else None,
+            url="/graphql-filter-publication/",
+        )
 
 
 def _raw_schema(
@@ -1306,8 +1271,8 @@ def test_a_generated_name_clash_split_across_two_schemas_builds_and_executes(
     """
     first, second = build()
     finalize_django_types()
-    _PAIR["first"] = _clash_schema(first, schema_class)
-    _PAIR["second"] = _clash_schema(second, schema_class)
+    _PAIR["first"].schema = _clash_schema(first, schema_class)
+    _PAIR["second"].schema = _clash_schema(second, schema_class)
     try:
         shapes = [_type_shape(side, name) for side in ("first", "second")]
         assert all(shapes), shapes
@@ -1319,5 +1284,5 @@ def test_a_generated_name_clash_split_across_two_schemas_builds_and_executes(
                 payload = graphql_payload(clash.operation, url=f"/graphql-clash/{side}/")
             assert "errors" not in payload, payload
     finally:
-        _PAIR["first"] = None
-        _PAIR["second"] = None
+        _PAIR["first"].schema = None
+        _PAIR["second"].schema = None

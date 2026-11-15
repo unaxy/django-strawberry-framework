@@ -14,7 +14,6 @@ the shipped schema, with the sync view's rows in its statements.
 
 import datetime
 from decimal import Decimal
-from functools import wraps
 from uuid import UUID
 
 import pytest
@@ -22,13 +21,12 @@ from apps.scalars import models
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
 from django.db import connection
-from django.http import HttpRequest, HttpResponseBase
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     batched_pk_lookup,
     json_at,
     json_list,
@@ -40,7 +38,6 @@ from graphql_client import (
 from graphql_client import post_graphql as _post_graphql
 
 from django_strawberry_framework.testing import AsyncTestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView
 
 # The production error policy masks any error carrying an originating
 # exception, and graphql-core reports a custom scalar's literal rejection that
@@ -1888,13 +1885,9 @@ def test_override_specimen_consumer_field_overrides_resolve_over_http() -> None:
     assert note_type["ofType"] == {"name": "String", "kind": "SCALAR"}
 
 
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_shipped_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    """The shipped schema behind ``AsyncDjangoGraphQLView``, mounted for this module only."""
-    return await AsyncDjangoGraphQLView.as_view(schema=config_schema.schema)(request)
-
-
-urlpatterns = [path("graphql-async/", _async_shipped_graphql_view)]
+#: The shipped schema behind ``AsyncDjangoGraphQLView``, mounted for this module only.
+_MOUNT = SchemaMount(__name__, async_route="graphql-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _seed_tagged_specimens() -> None:
@@ -1968,7 +1961,7 @@ async def test_async_plain_scalar_root_answers_as_the_sync_view(
     """
     await sync_to_async(_seed_tagged_specimens)()
     recorded = record_compiled_sql()
-    with override_settings(ROOT_URLCONF=__name__):
+    with _MOUNT.serving(config_schema.schema):
         result = await AsyncTestClient().query(
             document,
             assert_no_errors=False,

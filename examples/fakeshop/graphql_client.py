@@ -17,24 +17,31 @@ it on ``Response.response``), so call sites read ``.status_code`` /
 ``.json()`` directly. ``post_graphql_raw`` deliberately stays a
 raw ``client.post`` - its subject is the raw request envelope (malformed bodies,
 content-type negotiation), which ``TestClient`` exists to abstract away.
+:class:`SchemaMount` is the holder-schema mount a module builds its schema for.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
+from contextlib import contextmanager
+from functools import wraps
 from typing import TYPE_CHECKING, Protocol, TypeAlias
 
 from django.conf import settings
 from django.db import DatabaseError, connection, transaction
-from django.test import Client
+from django.test import Client, override_settings
+from django.urls import URLPattern, path
 from typing_extensions import TypeIs
 
 from django_strawberry_framework import DjangoMutation
 from django_strawberry_framework.testing import TestClient
+from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 if TYPE_CHECKING:
+    import strawberry
+    from django.http import HttpRequest, HttpResponseBase
     from django.test.client import _MonkeyPatchedASGIResponse, _MonkeyPatchedWSGIResponse
 
 #: A parsed GraphQL JSON object (response envelope, ``data``, or variables). Its members are
@@ -382,3 +389,65 @@ def assert_graphql_data(
     assert "errors" not in payload, payload
     assert payload.get("data") == expected
     return response
+
+
+class SchemaMount:
+    """A test module's own GraphQL routes, serving whichever schema the test sets.
+
+    ``SchemaMount(__name__, "graphql-x/", async_route="graphql-x-async/")`` builds a
+    ``DjangoGraphQLView`` route and an ``AsyncDjangoGraphQLView`` route; the module
+    publishes them as ``urlpatterns = _MOUNT.urlpatterns``. ``with
+    _MOUNT.serving(schema):`` sets the schema and points ``ROOT_URLCONF`` (plus any
+    other settings named) at the module; on exit it leaves the override, then clears
+    the schema. A test may also assign ``schema`` directly.
+
+    Each route is a function decorated with ``functools.wraps`` of the class's own
+    ``as_view()`` that builds ``View.as_view(schema=...)`` per request, the schema read
+    at call time. The copy carries the boundary marker, the CSRF exemption and
+    ``view_class``, which the debug toolbar reads to tag a GraphQL request, and an
+    empty ``view_initkwargs``, so ``middleware/request_body.py::_package_view_instance``
+    cannot build the class and declines the callback: the view built per request runs
+    its own boundary and CSRF check. A real ``as_view(schema=...)`` callback would be
+    recognized and moved to the chain-supplied ordering instead.
+    """
+
+    def __init__(
+        self,
+        module: str,
+        route: str | None = None,
+        *,
+        async_route: str | None = None,
+    ) -> None:
+        """Build the sync route at ``route`` and the async one at ``async_route``, if named."""
+        self.module = module
+        self.schema: strawberry.Schema | None = None
+        self.urlpatterns: list[URLPattern] = []
+        if route is not None:
+
+            @wraps(DjangoGraphQLView.as_view())
+            def sync_view(request: HttpRequest) -> HttpResponseBase:
+                return DjangoGraphQLView.as_view(schema=self._mounted())(request)
+
+            self.urlpatterns.append(path(route, sync_view))
+        if async_route is not None:
+
+            @wraps(AsyncDjangoGraphQLView.as_view())
+            async def async_view(request: HttpRequest) -> HttpResponseBase:
+                return await AsyncDjangoGraphQLView.as_view(schema=self._mounted())(request)
+
+            self.urlpatterns.append(path(async_route, async_view))
+
+    def _mounted(self) -> strawberry.Schema:
+        schema = self.schema
+        assert schema is not None, f"{self.module} posted to its mount with no schema set"
+        return schema
+
+    @contextmanager
+    def serving(self, schema: strawberry.Schema, **extra: object) -> Generator[None, None, None]:
+        """Serve ``schema`` with ``ROOT_URLCONF`` (and the ``extra`` settings) set for the block."""
+        self.schema = schema
+        try:
+            with override_settings(ROOT_URLCONF=self.module, **extra):
+                yield
+        finally:
+            self.schema = None

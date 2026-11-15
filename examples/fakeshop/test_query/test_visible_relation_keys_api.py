@@ -9,7 +9,6 @@ identity observations remain package-owned.
 """
 
 from collections.abc import Sequence
-from functools import wraps
 from typing import NamedTuple
 
 import pytest
@@ -17,14 +16,12 @@ import strawberry
 from apps.library import models
 from apps.library.filters import ModelChoiceInFilter
 from django.db import models as django_models
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
 from django_filters import CharFilter, ModelChoiceFilter, ModelMultipleChoiceFilter
 from graphql import GraphQLInputObjectType, get_named_type
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     graphql_payload,
     json_at,
     json_list,
@@ -53,21 +50,11 @@ from django_strawberry_framework.utils.typing import (
     graphql_input_fields,
     graphql_type_of,
 )
-from django_strawberry_framework.views import DjangoGraphQLView
 from tests._idioms import saved_pk
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-visible-keys/", _graphql_view)]
+_MOUNT = SchemaMount(__name__, "graphql-visible-keys/")
+urlpatterns = _MOUNT.urlpatterns
 
 
 def _post(schema: DjangoSchema, where: JSONObject) -> JSONObject:
@@ -75,12 +62,8 @@ def _post(schema: DjangoSchema, where: JSONObject) -> JSONObject:
         f"query($where: {_input(schema).name}!) {{ rows(filter: $where) {{ "
         "totalCount edges { node { id name } } } }"
     )
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(query, variables={"where": where}, url="/graphql-visible-keys/")
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(query, variables={"where": where}, url="/graphql-visible-keys/")
 
 
 def _input(schema: DjangoSchema) -> GraphQLInputObjectType:

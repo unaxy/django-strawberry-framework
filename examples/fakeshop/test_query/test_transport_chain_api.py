@@ -15,10 +15,12 @@ from django.middleware.csrf import CsrfViewMiddleware, get_token
 from django.test import AsyncClient, Client, RequestFactory, override_settings
 from django.test.client import encode_multipart
 from django.urls import URLPattern, path
+from graphql_client import SchemaMount
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoSchema
 from django_strawberry_framework._boundary_ordering import _BOUNDARY_MARKER
+from django_strawberry_framework.middleware.request_body import _package_view_instance
 from django_strawberry_framework.testing import AsyncTestClient, TestClient
 from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
@@ -65,6 +67,11 @@ def _partial_async(
 
 
 urlpatterns: list[URLPattern] = []
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-chain/sync-mount/",
+    async_route="graphql-chain/async-mount/",
+)
 
 
 class ProjectPolicyMiddleware(CsrfViewMiddleware):
@@ -186,6 +193,7 @@ def _mounted(chain: list[str]) -> Generator[None, None, None]:
             path(f"graphql-chain/marked-{route}/", callback)
             for route, callback in _MARKED_ROUTES.items()
         ),
+        *_MOUNT.urlpatterns,
     ]
     _POLICY_CALLS.clear()
     _UPLOAD_CALLS.clear()
@@ -213,6 +221,7 @@ async def _json_response(
     is_async: bool,
     shape: str = "marked",
     token: bool = False,
+    padding: int = 0,
 ) -> HttpResponse:
     url = _path(is_async=is_async, shape=shape)
     client = (
@@ -223,16 +232,11 @@ async def _json_response(
         csrf_token = get_token(RequestFactory().get(url))
         client.cookies["csrftoken"] = csrf_token
         headers["X-CSRFToken"] = csrf_token
+    body: dict[str, object] = {"query": "{ ping }" + " " * padding}
     if isinstance(client, AsyncClient):
-        response = await AsyncTestClient(path=url, client=client).request(
-            {"query": "{ ping }"},
-            headers=headers,
-        )
+        response = await AsyncTestClient(path=url, client=client).request(body, headers=headers)
     else:
-        response = TestClient(path=url, client=client).request(
-            {"query": "{ ping }"},
-            headers=headers,
-        )
+        response = TestClient(path=url, client=client).request(body, headers=headers)
     assert isinstance(response, HttpResponse)
     return response
 
@@ -389,3 +393,35 @@ def test_a_marked_callback_the_middleware_cannot_build_is_declined_not_crashed(
 
     assert response.status_code == 200
     assert response.content == _MARKED_ROUTES[route](RequestFactory().get("/")).content
+
+
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+async def test_a_schema_mount_is_declined_and_refuses_an_oversize_body_as_the_real_route(
+    *,
+    is_async: bool,
+) -> None:
+    """``graphql_client.py::SchemaMount`` routes stay view-local fallbacks under the full chain.
+
+    The ``functools.wraps`` copy carries the marker, the real ``view_class`` and an empty
+    ``view_initkwargs``, so ``middleware/request_body.py::_package_view_instance`` cannot
+    build the class and declines it; the view it builds per request still refuses a body
+    over the cap with the status the recognized ``as_view`` route gives.
+    """
+    callback = vars(_MOUNT.urlpatterns[int(is_async)].callback)
+    assert callback[_BOUNDARY_MARKER] is True
+    assert callback["view_class"] is (AsyncDjangoGraphQLView if is_async else DjangoGraphQLView)
+    assert callback["view_initkwargs"] == {}
+    assert _package_view_instance(_MOUNT.urlpatterns[int(is_async)].callback) is None
+    cap = {"MAX_REQUEST_BODY_BYTES": _CAP}
+    with (
+        _mounted([_BOUNDARY_ENTRY, _STOCK_CSRF_ENTRY]),
+        _MOUNT.serving(DjangoSchema(query=_Query), DJANGO_STRAWBERRY_FRAMEWORK=cap),
+    ):
+        mounted = await _json_response(
+            is_async=is_async,
+            shape="mount",
+            token=True,
+            padding=2 * _CAP,
+        )
+        real = await _json_response(is_async=is_async, token=True, padding=2 * _CAP)
+    assert mounted.status_code == real.status_code == 413

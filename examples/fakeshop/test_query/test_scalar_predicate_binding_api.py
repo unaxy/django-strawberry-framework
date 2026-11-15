@@ -23,7 +23,6 @@ import datetime
 import uuid
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from decimal import Decimal
-from functools import wraps
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import django_filters
@@ -37,15 +36,15 @@ from django.db import models as django_models
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.models import Count, F, FilteredRelation, QuerySet, Transform
 from django.db.models.expressions import Combinable
-from django.http import HttpRequest, HttpResponseBase
+from django.http import HttpRequest
 from django.test import override_settings
 from django.test.utils import register_lookup
-from django.urls import path
 from django.utils import timezone
 from django_filters import MultipleChoiceFilter
 from graphql_client import (
     JSONObject,
     RecordCompiledSql,
+    SchemaMount,
     assert_database_answer,
     database_answer,
     graphql_payload,
@@ -82,7 +81,6 @@ from django_strawberry_framework.filters import (
 from django_strawberry_framework.filters.base import _lookup_operand, _model_lookup_operand
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils.typing import object_result
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 from tests._cleaned_filter_sets import cleaned_specimen
 from tests._idioms import saved_pk
 
@@ -91,7 +89,12 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.usefixtures("private_registry")
 _M = TypeVar("_M", bound=django_models.Model)
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-scalar-predicates/",
+    async_route="graphql-scalar-predicates-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 _UNBINDABLE = [{"message": "Enter a value the database can represent.", "code": "invalid"}]
 _NAIVE_DATE_WARNING = pytest.mark.filterwarnings(
     "ignore:DateTimeField .* received a naive datetime:RuntimeWarning",
@@ -103,26 +106,6 @@ _BEFORE_YEAR_ONE = "0001-01-01T00:00:00+05:00"
 _MATCH = "2021-06-15T09:30:00+00:00"
 _PLUS_SIXTEEN = "2021-06-16T01:30:00+16:00"
 _MINUS_SIXTEEN = "2021-06-14T17:30:00-16:00"
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-scalar-predicates/", _graphql_view),
-    path("graphql-scalar-predicates-async/", _async_graphql_view),
-]
 
 
 def _holder(
@@ -182,16 +165,12 @@ def _post(
         variables.update(times)
         definitions += ", $clock: Time, $start: Time, $end: Time"
         arguments += ", clock: $clock, start: $start, end: $end"
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                f"query({definitions}) {{ rows({arguments}) {{ {selection} }} }}",
-                variables=variables,
-                url="/graphql-scalar-predicates/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            f"query({definitions}) {{ rows({arguments}) {{ {selection} }} }}",
+            variables=variables,
+            url="/graphql-scalar-predicates/",
+        )
 
 
 def _expected(labels: Sequence[str]) -> JSONObject:
@@ -668,16 +647,8 @@ def _post_typed_queryset_path(
         child = cleaned_specimen("child", kept=False)
         child.parent = kept
         child.save(update_fields=["parent"])
-    _CURRENT["schema"] = schema or _typed_queryset_path_holder()
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                document,
-                variables=variables,
-                url="/graphql-scalar-predicates/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema or _typed_queryset_path_holder()):
+        return graphql_payload(document, variables=variables, url="/graphql-scalar-predicates/")
 
 
 @pytest.mark.django_db
@@ -1483,24 +1454,20 @@ _NOT_A_NUMBER = [{"message": "Enter a number.", "code": "invalid"}]
 
 async def _post_served(schema: DjangoSchema, where: JSONObject, transport: str) -> JSONObject:
     """Send ``where`` to the served set over the sync view or the async one."""
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            if transport == "sync":
-                return await sync_to_async(graphql_payload)(
-                    _SERVED_LATE_ROWS,
-                    variables={"where": where},
-                    url="/graphql-scalar-predicates/",
-                )
-            result = await AsyncTestClient().query(
+    with _MOUNT.serving(schema):
+        if transport == "sync":
+            return await sync_to_async(graphql_payload)(
                 _SERVED_LATE_ROWS,
                 variables={"where": where},
-                assert_no_errors=False,
-                url="/graphql-scalar-predicates-async/",
+                url="/graphql-scalar-predicates/",
             )
-            return response_json(result.response)
-    finally:
-        _CURRENT["schema"] = None
+        result = await AsyncTestClient().query(
+            _SERVED_LATE_ROWS,
+            variables={"where": where},
+            assert_no_errors=False,
+            url="/graphql-scalar-predicates-async/",
+        )
+        return response_json(result.response)
 
 
 @pytest.mark.django_db(transaction=True)

@@ -6,7 +6,6 @@ probe stays outside the parent's form when only probe_min is named.
 """
 
 from collections.abc import Mapping
-from functools import wraps
 from typing import TypeVar
 
 import pytest
@@ -14,13 +13,11 @@ import strawberry
 from apps.library import models
 from django import forms
 from django.db.models import Model, QuerySet
-from django.http import HttpRequest, HttpResponseBase
-from django.test import override_settings
-from django.urls import path
+from django.http import HttpRequest
 from django_filters import CharFilter
 from django_filters import RangeFilter as DjangoRangeFilter
 from django_filters.widgets import SuffixedMultiWidget
-from graphql_client import JSONObject, graphql_payload
+from graphql_client import JSONObject, SchemaMount, graphql_payload
 from strawberry.scalars import JSON
 from typing_extensions import override
 
@@ -32,21 +29,11 @@ from django_strawberry_framework import (
     strawberry_config,
 )
 from django_strawberry_framework.filters import FilterSet, RelatedFilter
-from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
+_MOUNT = SchemaMount(__name__, "graphql-copy-keys/")
 _Model = TypeVar("_Model", bound=Model)
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-copy-keys/", _graphql_view)]
+urlpatterns = _MOUNT.urlpatterns
 
 
 class _DunderRangeWidget(SuffixedMultiWidget):
@@ -176,16 +163,12 @@ def _world() -> None:
 
 
 def _post(schema: DjangoSchema, where: JSONObject) -> JSONObject:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return graphql_payload(
-                "query($where: JSON!) { rows(where: $where) { name } allRows { name } }",
-                variables={"where": where},
-                url="/graphql-copy-keys/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        return graphql_payload(
+            "query($where: JSON!) { rows(where: $where) { name } allRows { name } }",
+            variables={"where": where},
+            url="/graphql-copy-keys/",
+        )
 
 
 def _expected(names: list[str]) -> JSONObject:

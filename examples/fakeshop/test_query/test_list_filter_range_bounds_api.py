@@ -18,7 +18,6 @@ annotates (``parentTwiceSpan``) keeps the rule: its cleaner, built from that que
 import datetime
 import uuid
 from decimal import Decimal
-from functools import wraps
 from typing import NamedTuple
 
 import pytest
@@ -28,11 +27,16 @@ from asgiref.sync import sync_to_async
 from django.db import connection
 from django.db.models import F, QuerySet
 from django.forms.utils import ErrorDict
-from django.http import HttpRequest, HttpResponseBase, QueryDict
-from django.test import override_settings
+from django.http import QueryDict
 from django.test.utils import CaptureQueriesContext
-from django.urls import path
-from graphql_client import JSONObject, graphql_payload, json_list, json_str, response_json
+from graphql_client import (
+    JSONObject,
+    SchemaMount,
+    graphql_payload,
+    json_list,
+    json_str,
+    response_json,
+)
 from strawberry import relay
 from strawberry.scalars import JSON
 from typing_extensions import override
@@ -48,30 +52,14 @@ from django_strawberry_framework import (
 from django_strawberry_framework.filters import FilterSet, ListFilter, RelatedFilter
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import require_instance
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
 
 pytestmark = pytest.mark.usefixtures("private_registry")
-_CURRENT: dict[str, DjangoSchema | None] = {"schema": None}
-
-
-@wraps(DjangoGraphQLView.as_view())
-def _graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-@wraps(AsyncDjangoGraphQLView.as_view())
-async def _async_graphql_view(request: HttpRequest) -> HttpResponseBase:
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return await AsyncDjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [
-    path("graphql-list-range-bounds/", _graphql_view),
-    path("graphql-list-range-bounds-async/", _async_graphql_view),
-]
+_MOUNT = SchemaMount(
+    __name__,
+    "graphql-list-range-bounds/",
+    async_route="graphql-list-range-bounds-async/",
+)
+urlpatterns = _MOUNT.urlpatterns
 
 #: Five rows, ``a`` .. ``e``, each column ordered as the labels are; two bounds keep ``b`` .. ``d``.
 _LABELS = [
@@ -158,16 +146,8 @@ _ROWS = "query($where: SpanFilterInputType) { rows(filter: $where) { edges { nod
 
 
 def _post(schema: DjangoSchema, query: str, variables: JSONObject) -> tuple[JSONObject, int]:
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__), CaptureQueriesContext(connection) as sql:
-            payload = graphql_payload(
-                query,
-                variables=variables,
-                url="/graphql-list-range-bounds/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema), CaptureQueriesContext(connection) as sql:
+        payload = graphql_payload(query, variables=variables, url="/graphql-list-range-bounds/")
     return payload, len(sql)
 
 
@@ -262,17 +242,13 @@ async def test_the_async_view_answers_two_bounds_and_refuses_any_other_count(
     await sync_to_async(_seed_specimens)()
     schema = _schema(_COLUMNS[column])
     values = list(_COLUMNS[column].bounds[:count])
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            result = await AsyncTestClient().query(
-                _ROWS,
-                variables={"where": {"span": {"range": values}}},
-                assert_no_errors=False,
-                url="/graphql-list-range-bounds-async/",
-            )
-    finally:
-        _CURRENT["schema"] = None
+    with _MOUNT.serving(schema):
+        result = await AsyncTestClient().query(
+            _ROWS,
+            variables={"where": {"span": {"range": values}}},
+            assert_no_errors=False,
+            url="/graphql-list-range-bounds-async/",
+        )
     payload = response_json(result.response)
 
     if count == 2:

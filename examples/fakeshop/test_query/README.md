@@ -281,34 +281,20 @@ private object identity and Python-only value protocols still belong in the pack
 **3. Holder schema beside fakeshop.** Subject = consumer-declared class no fakeshop app would plausibly ship (hostile `OrderSet` override, counting converter, second view mount w/ different body cap) → build schema in the test module, mount on own URL:
 
 ```python
-_CURRENT: dict[str, Any] = {"schema": None}
+from graphql_client import SchemaMount, graphql_payload
+
+_MOUNT = SchemaMount(__name__, "graphql-test/", async_route="graphql-test-async/")
+urlpatterns = _MOUNT.urlpatterns
 
 
-def _graphql_view(request: HttpRequest):
-    schema = _CURRENT["schema"]
-    assert schema is not None
-    return DjangoGraphQLView.as_view(schema=schema)(request)
-
-
-urlpatterns = [path("graphql-test/", _graphql_view)]
-
-
-def _post(
-    schema: DjangoSchema,
-    query: str,
-    *,
-    client: Client | None = None,
-    variables: Mapping[str, object] | None = None,
-):
-    _CURRENT["schema"] = schema
-    try:
-        with override_settings(ROOT_URLCONF=__name__):
-            return post_graphql(query, client=client, variables=variables, url="/graphql-test/")
-    finally:
-        _CURRENT["schema"] = None
+def _post(schema: DjangoSchema, query: str) -> JSONObject:
+    with _MOUNT.serving(schema):
+        return graphql_payload(query, url="/graphql-test/")
 ```
 
-Request still crosses the full HTTP pipeline. `override_settings(ROOT_URLCONF=...)` / `pytest.mark.urls` already clear resolver caches (Django's `setting_changed` receiver, both directions); call `clear_url_caches()` yourself only when the holder swaps its held schema WITHOUT changing `ROOT_URLCONF`. The reference impls below still call it inside their `override_settings` brackets; redundant, harmless, don't copy it into new mounts. What every holder mount DOES owe: resolve the schema at request time (`from config.schema import schema` INSIDE the view function, or the `_CURRENT` dict above). A schema captured at import is the pre-reload one and fails in a LATER module on the same worker, not yours. Holder types declared inside test body / fixture depending on the module reload, never at import; registry clear between modules would strand them (the autouse guard raises "Reloading the project schema shell mutated app registrations", naming the fixture, not your file). Mount path is the module's choice (`/graphql-test/`, `/graphql/` in own URLconf, `cap-misconfigured/`); function-level `@pytest.mark.urls("config.urls")` reaches the shipped endpoint from inside a holder module. Async mounts spelled longhand must carry `@_carrying_the_packages_csrf_mark(AsyncDjangoGraphQLView)` themselves. Reference impls: [`test_list_field_api.py`][test-list-field-api], [`test_products_visibility_api.py`][test-products-visibility-api], [`test_transport_api.py`][test-transport-api].
+`serving(schema, **extra)` sets the schema, enters `override_settings(ROOT_URLCONF=__name__, **extra)`, and on exit leaves the override, then clears the schema; a module that sets the schema elsewhere assigns `_MOUNT.schema`. Extra routes go beside it: `urlpatterns = [*_MOUNT.urlpatterns, path(...)]`.
+
+Request still crosses the full HTTP pipeline. `override_settings(ROOT_URLCONF=...)` / `pytest.mark.urls` already clear resolver caches (Django's `setting_changed` receiver, both directions); call `clear_url_caches()` yourself only when the holder swaps its held schema WITHOUT changing `ROOT_URLCONF`. The reference impls below still call it inside their `override_settings` brackets; redundant, harmless, don't copy it into new mounts. What every holder mount DOES owe: resolve the schema at request time (`SchemaMount` reads it per request; a hand-written view imports `from config.schema import schema` INSIDE the view function). A schema captured at import is the pre-reload one and fails in a LATER module on the same worker, not yours. Holder types declared inside test body / fixture depending on the module reload, never at import; registry clear between modules would strand them (the autouse guard raises "Reloading the project schema shell mutated app registrations", naming the fixture, not your file). Mount path is the module's choice (`/graphql-test/`, `/graphql/` in own URLconf, `cap-misconfigured/`); function-level `@pytest.mark.urls("config.urls")` reaches the shipped endpoint from inside a holder module. Each `SchemaMount` route is `@wraps(View.as_view())` around a per-request `View.as_view(schema=...)`, so it carries the package's marks and the middleware declines it (pinned in [`test_transport_chain_api.py`][test-transport-chain-api]); async mounts spelled longhand must carry `@_carrying_the_packages_csrf_mark(AsyncDjangoGraphQLView)` themselves. Reference impls: [`test_list_field_api.py`][test-list-field-api], [`test_products_visibility_api.py`][test-products-visibility-api], [`test_transport_api.py`][test-transport-api].
 
 A middleware-recognition or ordering claim needs the actual bound callback returned by `View.as_view(schema=schema, ...)` in its fixture URLconf. Build it after the schema reload and invoke that same callable. `wraps(View.as_view())` carries empty `view_initkwargs`; a view whose constructor requires `schema` cannot be prepared from those kwargs, so the middleware declines it and the view uses its fallback. A longhand dynamic holder is valid for query outcomes, but does not prove recognition, configured middleware policy, or reuse of a prepared view. The recognizer is `django_strawberry_framework/middleware/request_body.py::_package_view_instance`.
 
@@ -628,7 +614,7 @@ Module docstring = authoritative description; this = index. Read the docstring b
 | [`test_serializer_runtime_api.py`][test-serializer-runtime-api] | Save-time serializer error families and source names, writable alias conflicts, partial-write refusal, disappearing-row conflicts and non-identifier names outside the input. |
 | [`test_serializer_validator_bind_api.py`][test-serializer-validator-bind-api] | Live serializer uniqueness binds: read-only defaults versus actual writes, annotation and iterable lookups, signed integer versus positive storage bounds, PostgreSQL scalar/array and recoverable list binding, single/deep nested error paths, empty queries, validator ordering, instance fallback, eager date preparation, and installed DRF/Django conditional decisions. |
 | [`test_serializer_validator_bind_sharded_api.py`][test-serializer-validator-bind-sharded-api] | Behind `FAKESHOP_SHARDED=1`: conditional uniqueness on the pinned write alias for root create, update and nested validation, including default-only and shard-only duplicates. |
-| [`test_transport_chain_api.py`][test-transport-chain-api] | Configured middleware policy, actual bound callback recognition, partial-wrapper fallbacks, cap-before-parser ordering, and marked callbacks the middleware cannot build declined rather than crashed. |
+| [`test_transport_chain_api.py`][test-transport-chain-api] | Configured middleware policy, actual bound callback recognition, partial-wrapper fallbacks, cap-before-parser ordering, marked callbacks the middleware cannot build declined rather than crashed, and `SchemaMount` routes declined yet capped as the recognized route. |
 | [`test_transport_encoding_api.py`][test-transport-encoding-api] | Multipart UTF-8 aliases, declared/effective codec disagreement and middleware-assigned encoding refusals. |
 | [`test_filter_querysets_api.py`][test-filter-querysets-api] | Consumer queryset occurrence preservation, authored and method-owned distinctness, custom child filters, override providers and generated deep-loan predicates with cursor pagination. |
 | [`test_generated_relation_filters_api.py`][test-generated-relation-filters-api] | Generated foreign keys, ForeignObject carriers, to_field paths and rebased declared copies with native public inputs. |
