@@ -749,9 +749,8 @@ _VALIDATED_VALUES: dict[str, str] = {"file": "uploaded file", "relation": "relat
 def serializer_field_fits_kind(field: DRFField, kind: str) -> bool:
     """Return whether a serializer field validates the shape an input of ``kind`` carries.
 
-    The one reading of serializer-field / input-kind agreement, shared by the schema build
-    (``resolve_serializer_field``, which types a model-backed field by its column's kind) and
-    the per-request guard (``rest_framework/resolvers.py::_assert_field_agreement``). A file
+    The schema build's reading of serializer-field / input-kind agreement
+    (``resolve_serializer_field``, which types a model-backed field by its column's kind). A file
     input needs a ``FileField`` (``ImageField`` included); a scalar input refuses a nested
     serializer, a relation and a file field. A relation kind answers ``True``: the relation
     arms keep their own checks (a PK relation, its cardinality, its related model).
@@ -778,8 +777,8 @@ def _reject_kind_mismatch(field: DRFField, column: ModelField, kind: str) -> Non
     Two shapes, each with no correct write. Over a scalar column, DRF writes what it validates
     the field to (a related instance, an uploaded file) into the column ``source`` names, which
     cannot hold it: a relation or file field there, or a relation over a scalar primary key's
-    ``pk`` alias (depending on the shape, the per-request agreement guard refuses it, the
-    database rejects it, or a text column silently stores the related row's ``str()``). Over a
+    ``pk`` alias (depending on the shape, the database rejects it or a text column silently
+    stores the related row's ``str()``). Over a
     file column, the input is the column's ``Upload``, which anything but a ``FileField``
     cannot validate. Either fails loud at construction, naming the field, its class, its
     ``source``, the column and both kinds. The check reads the schema-time field, the input's

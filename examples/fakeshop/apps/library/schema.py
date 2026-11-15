@@ -2757,11 +2757,10 @@ class UpdateBookSubstitutingInstance(SerializerMutation):
     """A DELIBERATELY-misconfigured update whose hook substitutes the located instance.
 
     ``get_serializer_kwargs`` returns a DIFFERENT ``Book`` than the located, authorized row -
-    the exact "row A's authorization writes row B" bypass the framework refuses. Hooks never
-    receive the live instance at all (only ``hook_context.instance_pk``), so ANY
-    returned ``instance`` kwarg is framework-owned territory; the live test proves the
-    substitution is a top-level ``ConfigurationError`` over ``/graphql/`` and NEITHER row is
-    written.
+    the "row A's authorization writes row B" shape. Hooks never receive the live instance
+    (only ``hook_context.instance_pk``), and the framework sets the located row as
+    ``instance`` over the hook's return; the live test proves the authorized row is the one
+    written and the substituted row is untouched.
     """
 
     class Meta:
@@ -2878,7 +2877,6 @@ class ShelfHookKey(TextChoices):
     TENANT = "tenant"
     TOPIC = "topic"
     STAMP = "stamp"
-    PARTIAL = "partial"
 
 
 class CreateShelfViaSchemaHookSerializerByMember(CreateShelfViaSchemaHookSerializer):
@@ -2954,30 +2952,6 @@ class CreateShelfWithSaveKwargsByMember(CreateShelfWithSaveKwargs):
         hook_context: SerializerHookContext,
     ) -> dict[str, object]:
         return {ShelfHookKey.STAMP: "stamped-at-save"}
-
-
-class CreateShelfWithPartialKwargByMember(SerializerMutation):
-    """A DELIBERATELY-misconfigured create whose kwargs hook returns ``partial`` keyed by a member.
-
-    ``partial`` is framework-owned; ``ShelfHookKey.PARTIAL`` spells it, so the live test proves
-    the member is refused as the plain name is: a top-level ``ConfigurationError`` naming the
-    ``partial`` kwarg over ``/graphql/``, and no row written.
-    """
-
-    class Meta:
-        serializer_class = serializers.ShelfSerializer
-        operation = "create"
-        permission_classes = []
-
-    @override
-    def get_serializer_kwargs(
-        self,
-        info: Info[object, object],
-        *,
-        data: Mapping[str, object],
-        hook_context: SerializerHookContext,
-    ) -> dict[str, object]:
-        return {ShelfHookKey.PARTIAL: False}
 
 
 class UpdateBookWithInjectedStatus(SerializerMutation):
@@ -3535,8 +3509,7 @@ class Mutation:
     leaving DRF to enforce the omitted required field in-band.
     ``createShelfViaSchemaHookSerializerByMember``, ``createShelfWithInjectedTopicByMember`` and
     ``createShelfWithSaveKwargsByMember`` key their hook's return by a ``TextChoices`` member
-    and write what their plain-keyed twins write; ``createShelfWithPartialKwargByMember`` spells
-    the framework-owned ``partial`` by a member and is refused as the plain name is.
+    and write what their plain-keyed twins write.
     ``createPatronProfileViaSerializer`` / ``updatePatronProfileViaSerializer`` write the
     ``to_field`` key ``PatronProfile.favorite_genre`` (the column stores the genre name), as
     does ``createPatronProfileViaRenamedSerializer`` (the same key bound under the renamed
@@ -3665,9 +3638,6 @@ class Mutation:
     )
     create_shelf_with_save_kwargs_by_member = DjangoMutationField(
         CreateShelfWithSaveKwargsByMember,
-    )
-    create_shelf_with_partial_kwarg_by_member = DjangoMutationField(
-        CreateShelfWithPartialKwargByMember,
     )
     update_book_genres_via_serializer = DjangoMutationField(UpdateBookGenresViaSerializer)
     update_book_title_with_alias_validator = DjangoMutationField(

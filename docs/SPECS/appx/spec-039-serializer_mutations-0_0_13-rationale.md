@@ -210,9 +210,9 @@ the runtime serializer validates:
   over a scalar column, a relation over a scalar primary key's `pk` alias, anything but a
   `FileField` over a file column) is rejected, declared or not, because no write through it
   is correct. Over a scalar column, DRF writes the related instance or uploaded file it
-  validates into a column that cannot hold it: depending on the shape the runtime agreement
-  guard refuses it, the database rejects it, or a text column silently stores the related
-  row's `str()`, the degrade plain DRF ships. Over a file column, the input is the column's
+  validates into a column that cannot hold it: depending on the shape the database rejects
+  it, or a text column silently stores the related row's `str()`, the degrade plain DRF
+  ships. Over a file column, the input is the column's
   `Upload`, which only a `FileField` validates.
 - **Descriptor identity.** `rest_framework/inputs.py::SerializerInputShape` keys the cache
   on every value that shapes the emitted type (field specs, post-widening annotations,
@@ -283,8 +283,6 @@ converted, and catching outside the block is what clears the connection's
 each queryset-backed validator per serializer instance before pinning it to the write
 alias, because DRF shares validator objects across serializer instances and concurrent
 requests would otherwise reroute one another's validators.
-`_assert_runtime_write_source_ownership` runs on the instantiated serializer because
-schema discovery cannot see a context-dependent `get_fields()`.
 
 ### Alternatives considered (and rejected)
 
@@ -492,14 +490,9 @@ contract alone:
   so an opt-*out* is the shape that fails safe when a consumer says nothing. A per-flavor
   default was rejected because it would make one `Meta` key mean different things on
   three bases.
-- **Injected fields ride the input fields' walk.** Every top-level per-field discipline
-  (schema/runtime agreement, write-source ownership, queryset scoping) walks the one
-  `_write_surface_specs` list of input
-  fields plus `Meta.injected_fields`, so an injected field gets the same checks as an
-  input field by construction rather than through a parallel guard kept in step.
-- **The schema/runtime agreement guard fails closed.** A field carrying a requiredness or
-  annotation contract with no validated `Meta` snapshot raises rather than returning: a
-  guard that skips when its input is missing reports agreement it never checked.
+- **Injected fields ride the input fields' walk.** The relation queryset scoping walks one
+  list of input fields plus `Meta.injected_fields`, so an injected relation is scoped as an
+  input relation is by construction rather than through a parallel walk kept in step.
 - **Nested writes require the serializer's own `create()` / `update()`.** DRF's
   `ModelSerializer.create` / `.update` assert that no nested writable data is present
   unless overridden, a raw `AssertionError` that would escape the envelope, so

@@ -20462,31 +20462,6 @@ def test_serializer_hook_member_key_answers_like_its_plain_twin_over_http(
 
 
 @pytest.mark.django_db
-@override_settings(**_ERROR_POLICY_PASS_THROUGH)
-def test_serializer_kwargs_member_spelling_partial_is_rejected_over_http() -> None:
-    """A ``TextChoices`` member spelling the framework-owned ``partial`` is refused as the name is.
-
-    ``CreateShelfWithPartialKwargByMember`` returns ``{ShelfHookKey.PARTIAL: False}`` from
-    ``get_serializer_kwargs``. The member reads as the text ``partial``, so the reserved-name
-    check refuses it with the ``partial`` message and no row is
-    written. The ``ConfigurationError`` is masked by the spec-048 error policy, so
-    ``DEBUG=True`` opens its pass-through gate to read the message.
-    """
-    branch = models.Branch.objects.create(name="MemberPartialBranch", city="Boston")
-    response = _post_graphql(
-        "mutation($d: ShelfSerializerInput!) { createShelfWithPartialKwargByMember(data: $d) { "
-        "result { code } errors { field messages } } }",
-        variables={"d": {"code": "MemberPartialShelf", "branchId": branch.pk}},
-    )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert payload["data"] is None
-    assert json_at(payload, "errors", 0, "path") == ["createShelfWithPartialKwargByMember"]
-    assert "returned a `partial` kwarg" in json_str(payload, "errors", 0, "message")
-    assert not models.Shelf.objects.filter(code="MemberPartialShelf").exists()
-
-
-@pytest.mark.django_db
 def test_serializer_update_with_select_for_update_over_http() -> None:
     """An update serializer mutation with ``Meta.select_for_update = True`` updates cleanly over HTTP.
 
@@ -20677,20 +20652,13 @@ def test_serializer_update_invalid_or_hidden_genre_preserves_prior_set_over_http
 
 
 @pytest.mark.django_db
-@override_settings(**_ERROR_POLICY_PASS_THROUGH)
-def test_serializer_update_substituted_instance_is_rejected_without_writes_over_http() -> None:
-    """A hook substituting the located instance is a top-level error and NEITHER row is written.
+def test_serializer_update_substituted_instance_writes_only_the_authorized_row_over_http() -> None:
+    """A hook substituting the located instance still writes the located, authorized row.
 
     ``UpdateBookSubstitutingInstance.get_serializer_kwargs`` returns a DIFFERENT ``Book``
-    than the located, authorized row - the "row A's authorization writes row B" bypass.
-    ``instance`` is framework-owned, so the substitution is a ``ConfigurationError`` over
-    ``/graphql/`` and no write reaches either row.
-
-    That the failure names the ``instance`` kwarg is what distinguishes the bypass
-    being CLOSED from the write failing incidentally, and the spec-048 error policy
-    masks the ``ConfigurationError`` that carries it. ``DEBUG=True`` opens the
-    policy's pass-through gate for this live request; the two ``refresh_from_db``
-    assertions - the part that proves no row moved - are unaffected by the gate.
+    than the located, authorized row - the "row A's authorization writes row B" shape. The
+    framework sets the located row as ``instance`` over the hook's return, so the update
+    lands on the addressed row and the substituted row is untouched.
     """
     shelf = _seed_shelf()
     addressed = models.Book.objects.create(title="AddressedRow", shelf=shelf)
@@ -20706,12 +20674,12 @@ def test_serializer_update_substituted_instance_is_rejected_without_writes_over_
         },
     )
     assert response.status_code == 200
-    payload = response_json(response)
-    assert payload["data"] is None
-    assert "`instance` kwarg" in json_str(payload, "errors", 0, "message")
+    assert response_json(response) == {
+        "data": {"updateBookSubstitutingInstance": {"node": {"title": "Hijacked"}, "errors": []}},
+    }
     addressed.refresh_from_db()
     victim.refresh_from_db()
-    assert addressed.title == "AddressedRow"
+    assert addressed.title == "Hijacked"
     assert victim.title == "VictimRow"
 
 

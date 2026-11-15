@@ -102,7 +102,6 @@ from .inputs import (
     guard_create_required_serializer_fields,
     guard_nested_recursion,
     materialize_serializer_input_class,
-    normalize_nested_serializer_configs,
     raise_writable_source_ownership_errors,
     read_nested_serializer_fields,
     require_nested_fields_mapping,
@@ -372,7 +371,7 @@ def _validate_serializer_nested_fields(
             "framework decodes + validates the nested data but never auto-saves the relation), or "
             "remove Meta.nested_fields.",
         )
-    return normalize_nested_serializer_configs(normalized)
+    return normalized
 
 
 def _assert_schema_source_ownership(
@@ -464,10 +463,9 @@ class SerializerMutation(DjangoMutation):
     # ``data:`` ref resolves the serializer-derived input, not a model-column input.
     input_module_path: ClassVar[str] = SERIALIZER_INPUTS_MODULE_PATH
 
-    # The schema-time specs for ``Meta.injected_fields``, stashed at
-    # bind so the resolver holds each injected field to the SAME runtime-agreement
-    # contract (present / writable / source / kind / relation-model) an input field gets - not
-    # merely that its key is present in ``data``. ``[]`` when no fields are injected.
+    # The schema-time specs for ``Meta.injected_fields``, stashed at bind so the resolver
+    # scopes an injected relation's queryset as it scopes an input field's. ``[]`` when no
+    # fields are injected.
     if TYPE_CHECKING:
         _injected_field_specs: ClassVar[list[InputFieldSpec]]
     else:
@@ -808,8 +806,7 @@ class SerializerMutation(DjangoMutation):
         serializer_class = require(meta.serializer_class, _is_serializer_class)
         # Read the schema hook through the ONE guarded path, so the determinism
         # fingerprint is checked before the build reads it. Then stash the schema-time
-        # specs for ``Meta.injected_fields`` so the resolver can hold each injected field
-        # to the runtime-agreement contract.
+        # specs for ``Meta.injected_fields`` for the resolver's relation scoping.
         field_map = _checked_schema_field_map(cls, meta)
         cls._injected_field_specs = resolve_injected_field_specs(
             serializer_class,
@@ -829,7 +826,7 @@ class SerializerMutation(DjangoMutation):
         # the ONLY sanctioned path for narrowing away a required create field. The guard ALWAYS
         # runs, subtracting only the declared injected fields (a dropped required field NOT
         # declared injected raises), and the resolver builds the injection itself from
-        # ``get_serializer_injected_data`` (exact-match keys). The partial (update) shape is
+        # ``get_serializer_injected_data``. The partial (update) shape is
         # never create-required guarded (all optional).
 
         def _build() -> tuple[type[object], SerializerInputShape]:
@@ -888,21 +885,20 @@ class SerializerMutation(DjangoMutation):
         **``data``, ``instance``, ``partial``, ``context["request"]``, and
         ``context["write_alias"]`` are FRAMEWORK-OWNED.** The resolver's
         ``_serializer_kwargs`` builds the serializer data itself (decoded client data + the
-        ``get_serializer_injected_data`` injection), passes this hook a shallow copy, and
-        raises a ``ConfigurationError`` on a returned ``data`` that is not the exact copy the
-        hook received (an explicit ``data=None`` included), or on ANY ``instance`` or
-        ``partial`` key (the live located row never reaches hooks - ``hook_context`` carries
-        its ``instance_pk`` instead, and the framework injects the authorized row itself).
-        Omission or the identical pass-through (this default's shape) is accepted. The
-        framework then sets ``context["request"]`` to the framework request and
-        ``context["write_alias"]`` to the pipeline's pinned write alias so custom serializer
-        code routes any extra queries into the SAME transaction.
+        ``get_serializer_injected_data`` injection), passes this hook a shallow copy, and sets
+        ``data`` over the hook's return; on update it sets ``instance`` to the authorized row
+        and ``partial=True`` (the live located row never reaches hooks - ``hook_context``
+        carries its ``instance_pk`` instead). The framework then sets ``context["request"]``
+        to the framework request and ``context["write_alias"]`` to the pipeline's pinned
+        write alias so custom serializer code routes any extra queries into the SAME
+        transaction. A hook returning ``instance`` or ``partial`` on create is outside this
+        contract.
 
         ``hook_context`` is the frozen ``SerializerHookContext`` (``operation`` /
         ``write_alias`` / ``instance_pk``).
 
         **Narrowing away a required field: use ``Meta.injected_fields`` +
-        ``get_serializer_injected_data``.** Rewriting ``data`` here is refused (see
+        ``get_serializer_injected_data``.** A ``data`` returned here is replaced (see
         above).
         """
         del info, hook_context  # the default ignores them; an override may consult them.
@@ -921,9 +917,8 @@ class SerializerMutation(DjangoMutation):
         """Supply the ``Meta.injected_fields`` values merged into the serializer data.
 
         The SANCTIONED injection seam: the resolver builds the final serializer data as
-        decoded client data + THIS hook's return, and the returned keys must EXACTLY match
-        ``Meta.injected_fields`` (a missing declared field or an undeclared extra key is a
-        ``ConfigurationError`` - injection is an auditable, per-field contract, never a
+        decoded client data + THIS hook's return, whose keys are exactly the
+        ``Meta.injected_fields`` (injection is an auditable, per-field contract, never a
         blanket rewrite). An injected field must be narrowed OUT of the GraphQL input
         (enforced at class creation), so the merge can never overwrite a client value.
         ``data`` is a shallow copy of the decoded client data (uploads appear as the

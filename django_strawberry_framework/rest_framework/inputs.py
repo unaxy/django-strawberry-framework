@@ -54,7 +54,6 @@ The shape is the ``038`` form discipline adapted to DRF (spec-039 Decision 7):
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import GenericAlias
 from typing import TYPE_CHECKING
@@ -85,7 +84,6 @@ from django_strawberry_framework.utils.inputs import (
     resolve_effective_fields,
 )
 from django_strawberry_framework.utils.relations import is_row_key_column, written_model_field
-from django_strawberry_framework.utils.typing import object_result
 from django_strawberry_framework.write_mixins import require_model_class
 
 from .accessors import child_relation_of, choices_of
@@ -102,7 +100,7 @@ from .serializer_converter import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from django.db import models
     from typing_extensions import TypeIs
@@ -230,9 +228,6 @@ register_subsystem_clear(
 # of nested input types. Generous by default; most nested write APIs are one or two deep.
 _NESTED_MAX_DEPTH: int = 5
 
-# The mapping ids a nested-config normalization starts from: no mapping entered yet.
-_ROOT_MAPPING_PATH: frozenset[int] = frozenset()
-
 
 @dataclass(frozen=True)
 class NestedSerializerConfig:
@@ -275,73 +270,26 @@ class NestedSerializerConfig:
     optional_fields: object = None
     nested_fields: Mapping[str, NestedSerializerConfig] | None = None
 
+    def __post_init__(self) -> None:
+        """Store each selector as a tuple of names (``normalize_field_name_sequence``).
 
-def normalize_nested_serializer_configs(
-    nested_configs: Mapping[str, NestedSerializerConfig] | None,
-    *,
-    _mapping_path: frozenset[int] = _ROOT_MAPPING_PATH,
-) -> Mapping[str, NestedSerializerConfig] | None:
-    """Materialize every selector in a nested-config tree exactly once.
-
-    ``NestedSerializerConfig`` deliberately accepts the same flexible selector values as the
-    public ``Meta.fields`` / ``Meta.exclude`` keys.  The serializer input builder constructs both
-    create and partial shapes, and the mutation bind also fingerprints / validates nested maps
-    before building them.  A generator in a nested config would otherwise be consumed by the
-    first phase and make the second phase report a false empty input.  Rebuild each frozen config
-    with tuple selectors so every downstream phase sees the same declaration.
-
-    The mapping-path guard prevents a malicious self-referential mapping from making this
-    normalization recurse forever; ordinary repeated config mappings on separate branches are
-    still normalized independently.
-    """
-    if nested_configs is None:
-        return None
-    # The annotation is the contract; the check rejects a caller without a type checker (a
-    # consumer-built ``NestedSerializerConfig.nested_fields`` reaches here unvalidated), per
-    # GOAL.md "Trust boundary": configuration is validated at construction. The check's
-    # answer is read as a plain value, so the annotation cannot narrow the rejection away.
-    if not object_result(isinstance, nested_configs, Mapping):
-        raise ConfigurationError(
-            f"nested_configs must be a mapping of {{field_name: NestedSerializerConfig}}; "
-            f"got {truth.render(nested_configs)}.",
-        )
-    mapping_id = id(nested_configs)
-    if mapping_id in _mapping_path:
-        return nested_configs
-    normalized: dict[str, NestedSerializerConfig] = {}
-    next_path = _mapping_path | {mapping_id}
-    for field_name, config in nested_configs.items():
-        # basedpyright: trust boundary: ``NestedSerializerConfig.nested_fields`` is the public
-        # contract; a consumer-built config can nest any value, which
-        # ``require_nested_serializer_config`` rejects
-        if not isinstance(config, NestedSerializerConfig):  # pyright: ignore[reportUnnecessaryIsInstance]
-            normalized[field_name] = config
-            continue
-        normalized[field_name] = NestedSerializerConfig(
-            fields=normalize_field_name_sequence(
-                config.fields,
-                label="fields",
+        The selectors accept the same flexible values as the public ``Meta.fields`` /
+        ``Meta.exclude`` keys, and the input build reads them in several phases (create and
+        partial shapes, the fingerprint, the ownership walk): a generator would be drained by
+        the first. A bare string is refused here, when the config is constructed.
+        """
+        for attr, value, ordered in (
+            ("fields", self.fields, True),
+            ("exclude", self.exclude, False),
+            ("optional_fields", self.optional_fields, False),
+        ):
+            selector = normalize_field_name_sequence(
+                value,
+                label=attr,
                 flavor="SerializerMutation",
-                ordered=True,
-            ),
-            exclude=normalize_field_name_sequence(
-                config.exclude,
-                label="exclude",
-                flavor="SerializerMutation",
-                ordered=False,
-            ),
-            optional_fields=normalize_field_name_sequence(
-                config.optional_fields,
-                label="optional_fields",
-                flavor="SerializerMutation",
-                ordered=False,
-            ),
-            nested_fields=normalize_nested_serializer_configs(
-                config.nested_fields,
-                _mapping_path=next_path,
-            ),
-        )
-    return normalized
+                ordered=ordered,
+            )
+            object.__setattr__(self, attr, selector)
 
 
 def read_nested_serializer_fields(
@@ -353,25 +301,37 @@ def read_nested_serializer_fields(
     (``_resolve_nested_field``), the determinism fingerprint (``_fingerprint_nested``) and
     the schema-time ownership walk
     (``rest_framework/sets.py::_assert_schema_source_ownership``) all need the child's
-    bound field map. ``.fields`` runs the serializer's ``get_fields()`` at schema build,
-    where no request exists and the serializer context is empty, so a ``get_fields()``
-    reading ``self.context["request"]`` (or any other context key) raises ``KeyError``;
-    that is re-raised as a ``ConfigurationError`` naming the
-    ``get_serializer_for_schema()`` override, with the ``KeyError`` as its ``__cause__``.
-    Any other exception, a ``ConfigurationError`` from deeper in the nested tree
-    included, propagates unchanged.
+    bound field map, read through ``_schema_time_fields``.
+    """
+    return _schema_time_fields(
+        serializer,
+        f"Could not read .fields from nested serializer "
+        f"{truth.name(truth.class_of(serializer))!r} under no-arg construction",
+        "Nested serializer fields are read at schema build, where no request exists and the "
+        "serializer context is empty. A nested serializer opted in via Meta.nested_fields "
+        "must expose a stable, request-independent no-arg .fields (override "
+        "get_serializer_for_schema() on the mutation to return a stable field map).",
+    )
+
+
+def _schema_time_fields(
+    serializer: DRFSerializer,
+    failure: str,
+    remedy: str,
+) -> dict[str, DRFField]:
+    """Return ``serializer``'s bound ``.fields`` as a dict, read at schema build.
+
+    DRF builds ``.fields`` LAZILY by running the serializer's ``get_fields()``, here where
+    no request exists and the serializer context is empty, so a ``get_fields()`` reading
+    ``self.context["request"]`` (or any other context key) raises ``KeyError``; that is
+    re-raised as a ``ConfigurationError`` (``failure``, the ``KeyError``, then ``remedy``)
+    with the ``KeyError`` as its ``__cause__``. Any other exception propagates unchanged.
     """
     try:
         fields = serializer.fields
     except KeyError as exc:
         raise ConfigurationError(
-            f"Could not read .fields from nested serializer "
-            f"{truth.name(truth.class_of(serializer))!r} under no-arg construction: "
-            f"{truth.kind(exc)}: {truth.text(exc)}. Nested serializer fields are read at "
-            "schema build, where no request exists and the serializer context is empty. A "
-            "nested serializer opted in via Meta.nested_fields must expose a stable, "
-            "request-independent no-arg .fields (override get_serializer_for_schema() on the "
-            "mutation to return a stable field map).",
+            f"{failure}: {truth.kind(exc)}: {truth.text(exc)}. {remedy}",
         ) from exc
     return dict(fields)
 
@@ -423,13 +383,10 @@ def get_serializer_for_schema(
     NO args, then read ``.fields``. DRF builds ``.fields`` LAZILY (the field map is
     assembled on first access, not at construction) by running the serializer's
     ``get_fields()``, and discovery runs at schema build, where no request exists
-    and the serializer context is empty. A ``get_fields()`` reading
-    ``self.context["request"]`` (or any other context key) therefore raises
-    ``KeyError``, which is re-raised as a ``ConfigurationError`` naming the
-    ``get_serializer_for_schema()`` override, with the ``KeyError`` as its
-    ``__cause__``. Any other exception, from ``get_fields()`` or from a constructor
-    that requires kwargs, is the serializer's own behaviour and propagates
-    unchanged.
+    and the serializer context is empty (``_schema_time_fields``: a ``KeyError`` from a
+    ``get_fields()`` reading the context is a ``ConfigurationError`` naming the
+    ``get_serializer_for_schema()`` override). A constructor that requires kwargs raises
+    its own error unchanged.
 
     A serializer whose field set varies per request must override the
     ``get_serializer_for_schema()`` classmethod hook to return a stable,
@@ -438,19 +395,15 @@ def get_serializer_for_schema(
     ``source`` / ``source_attrs`` populated) - DRF binds them during ``.fields``
     materialization - which the converter's ``source``-axis resolution relies on.
     """
-    serializer = serializer_class()
-    try:
-        fields = serializer.fields
-    except KeyError as exc:
-        raise ConfigurationError(
-            f"Could not materialize the schema-time field set for serializer "
-            f"{truth.name(serializer_class)!r}: {truth.kind(exc)}: {truth.text(exc)}. The "
-            "default discovery constructs the serializer with no args and reads `.fields` at "
-            "schema build, where no request exists and the serializer context is empty; a "
-            "serializer whose get_fields() reads the request or other context must override "
-            "get_serializer_for_schema() to return a stable, request-independent field map.",
-        ) from exc
-    return dict(fields)
+    return _schema_time_fields(
+        serializer_class(),
+        "Could not materialize the schema-time field set for serializer "
+        f"{truth.name(serializer_class)!r}",
+        "The default discovery constructs the serializer with no args and reads `.fields` at "
+        "schema build, where no request exists and the serializer context is empty; a "
+        "serializer whose get_fields() reads the request or other context must override "
+        "get_serializer_for_schema() to return a stable, request-independent field map.",
+    )
 
 
 def _fingerprint_relation_target(field: DRFField) -> str | None:
@@ -991,25 +944,17 @@ def resolve_injected_field_specs(
     ``Meta.injected_fields`` names required schema-time fields a ``get_serializer_injected_data``
     override supplies (they are NARROWED OUT of the generated input, so their specs are NOT in
     ``_input_field_specs``). This resolves their schema-time specs from the SAME field map the
-    input build used, so the resolver can hold each injected field to the SAME
-    present / writable / source / kind / relation-model runtime-agreement contract an
-    input-exposed field gets - proving the runtime serializer will actually validate + save the
-    injected value, not merely that its key is present in ``data``. ``None`` / empty yields
+    input build used, so the resolver scopes an injected relation's queryset exactly as it
+    scopes an input-exposed one. ``None`` / empty yields
     ``[]``. Each name is already validated to exist in ``field_map`` at class creation; resolving
     an unsupported injected field here fails loud (the same fail-loud the input walk applies).
 
     ``operation_kind`` is the mutation's operation input kind (``CREATE`` / ``PARTIAL``): the
     field is resolved under the SAME provisional name the shape walk used for that operation
-    (``<Serializer>Input`` / ``<Serializer>PartialInput``) AND the runtime-agreement guard
-    re-derives the runtime annotation under. A serializer-only ``ChoiceField`` upgrades to a
-    generated enum whose GraphQL name is derived from that provisional
+    (``<Serializer>Input`` / ``<Serializer>PartialInput``). A serializer-only ``ChoiceField``
+    upgrades to a generated enum whose GraphQL name is derived from that provisional
     (``rest_framework/serializer_converter.py::_serializer_choice_enum``), so an
-    operation-blind provisional would record a create-named enum for an update mutation while
-    ``resolvers.py::_assert_field_agreement`` re-derives the runtime annotation under the
-    ``PartialInput`` provisional - a spurious requiredness/annotation disagreement raising on
-    EVERY invocation of a valid update declaration. The requiredness axis stays unset (the
-    injected value is present by construction, so only present / writable / source / kind /
-    relation-model are held to the agreement contract).
+    operation-blind provisional would build a create-named enum for an update mutation.
     """
     if not injected_fields:
         return []
@@ -1030,7 +975,7 @@ def resolve_injected_field_specs(
             model,
             provisional_name,
         )
-        specs.append(replace(spec, annotation_repr=repr(_annotation)))
+        specs.append(spec)
     return specs
 
 
@@ -1692,8 +1637,7 @@ def _resolve_nested_field(
 
     **The ``source`` axis.** A nested field with a DRF ``source=`` records
     the same normalized one-segment source scalar / relation fields do (``renamed =
-    ChildSerializer(source="actual")`` -> ``source="actual"``), so the runtime schema/runtime
-    agreement guard's source comparison matches instead of failing every invocation. A dotted
+    ChildSerializer(source="actual")`` -> ``source="actual"``). A dotted
     source / ``source="*"`` has no single write-back attribute for a nested write, so it fails
     loud via ``require_one_segment_source`` (the same detection the model-column path uses).
     """

@@ -170,59 +170,17 @@ def _frozenset_of_attr_names(value: Iterable[str] | None, *, parameter: str) -> 
 # The mutation-input namespace lifecycle trio, single-sited via
 # ``utils/inputs.py::make_input_namespace`` (spec-039 - the one-ledger shape
 # the mutation, form, and serializer flavors share). ``_materialized_names`` is
-# the ``name -> input_class`` ledger ``materialize_mutation_input_class`` writes;
-# ``registry.clear()`` routes through
-# ``clear_mutation_input_namespace`` to reset it. Module globals stay parked per
-# the shared parked-globals lifecycle. The public ``materialize_*`` / ``clear_*``
-# names below stay thin wrappers so callers + tests address them unchanged.
+# the ``name -> input_class`` ledger ``materialize_mutation_input_class`` writes
+# (called only by the phase-2.5 bind; ``owner`` names the ``DjangoMutation`` or auth
+# mutation the input belongs to); ``registry.clear()`` routes through
+# ``clear_mutation_input_namespace`` to reset it, leaving module globals parked per
+# the shared parked-globals lifecycle. Both public names are the factory's own callables.
 _materialized_names, _materialize_input, _clear_input_namespace = make_input_namespace(
     INPUTS_MODULE_PATH,
     "DjangoMutation",
 )
-
-
-def materialize_mutation_input_class(
-    name: str,
-    input_cls: type[WithStrawberryObjectDefinition],
-    owner: str | None = None,
-) -> None:
-    """Set ``input_cls`` as a real module global of ``mutations.inputs`` under ``name``.
-
-    Delegates to the ``make_input_namespace`` materializer. Two fields of a
-    merged input publishing one GraphQL name is refused per schema at build
-    (``schema.py::_refuse_field_name_collisions``), since a field without
-    ``name=``, generated or consumer-authored, is named by that schema's
-    ``NameConverter``. See the
-    materializer for the ``LazyType.resolve_type`` contract, the
-    idempotent ``(name, input_cls)`` clause, the distinct-class name collision
-    raise, and the cross-family type-name claim, whose collision message names
-    ``owner`` (the ``DjangoMutation`` or auth mutation the input belongs to).
-
-    Defined here; called only by the phase-2.5 bind.
-    """
-    _materialize_input(name, input_cls, owner)
-
-
-def clear_mutation_input_namespace() -> None:
-    """Reset the mutation-input ledger for a fresh build.
-
-    Clears ``_materialized_names`` (via the ``make_input_namespace`` clear) so
-    ``materialize_mutation_input_class`` re-emits on the next finalize.
-    **Materialized class objects are intentionally left parked** in
-    ``mutations.inputs.__dict__`` per the shared parked-globals lifecycle:
-    ``materialize_mutation_input_class`` overwrites the module global via
-    ``setattr`` on the next finalize, so a parked class is replaced in place once
-    the rebuild runs. Stripping it via ``delattr`` would break any
-    ``strawberry.lazy(...)`` LazyType held by a consumer module whose autouse-reload
-    fixture did NOT also reload the holder.
-
-    The one-ledger shape (``ledger.clear()``) is deliberately NOT
-    ``utils/inputs.py::clear_generated_input_namespace``: that helper resets an
-    arguments-factory cache and per-set ``_lifecycle`` binding state, and the
-    mutation subsystem has neither (input fields come from one model's columns,
-    not a related-set graph). The bind wires this into ``registry.clear()``.
-    """
-    _clear_input_namespace()
+materialize_mutation_input_class = _materialize_input
+clear_mutation_input_namespace = _clear_input_namespace
 
 
 # Register the mutation input-namespace clear as a canonical PRE-BIND clear:

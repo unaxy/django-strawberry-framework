@@ -309,10 +309,6 @@ if TYPE_CHECKING:
 _MUTATION_ASYNC_RECOURSE = sync_pipeline_recourse("DjangoMutation")
 
 
-# The model write step's decoded product is ``(target, m2m_assignments, exclude)``.
-_MODEL_DECODED_ARITY = 3
-
-
 @dataclass(frozen=True)
 class CleanExcludes:
     """The two ``exclude`` sets the model write validates a decoded row with (spec-036 Decision 8).
@@ -1386,23 +1382,15 @@ def _model_write_step(
     row a concurrent transaction deleted is the ``conflict`` envelope, never
     re-INSERTed).
 
-    ``decoded`` is the THREE-tuple contract exactly. ``_model_decode_step``
-    returns a four-tuple when the mutation's specs carry the ``EXCLUDED`` kind
-    (spec-040 Decision 6), but an excluded value is by definition one this generic
-    tail cannot write - only a flavor that knows what the value MEANS can. The
-    register flavor hashes its ``password`` and calls this with a re-packed
-    three-tuple (``auth/mutations.py::_register_write_step``). A four-tuple
-    therefore raises ``ValueError`` here: a bind that introduces an ``EXCLUDED``
-    spec without pairing it to a flavor write step fails loud instead of
-    silently discarding the excluded value.
+    ``decoded`` is read as ``(target, m2m_assignments, exclude)``. ``_model_decode_step``
+    appends the excluded values when the mutation's specs carry the ``EXCLUDED`` kind
+    (spec-040 Decision 6), but an excluded value is by definition one this generic tail
+    cannot write - only a flavor that knows what the value MEANS can. The register flavor
+    hashes its ``password`` and calls this with a re-packed three-tuple
+    (``auth/mutations.py::_register_write_step``); the model flavor's bind stashes no
+    ``EXCLUDED`` spec.
     """
-    if len(decoded) != _MODEL_DECODED_ARITY:
-        raise ValueError(
-            f"{truth.name(mutation_cls)}: the model write step takes the decoded "
-            "(target, m2m_assignments, exclude) three-tuple; a decode carrying "
-            "EXCLUDED values needs a flavor write step that consumes them.",
-        )
-    target, m2m_assignments, exclude = decoded
+    target, m2m_assignments, exclude, *_ = decoded
 
     # ``full_clean`` and a save-time ``ValidationError`` key through one map, built
     # only on a failure path.

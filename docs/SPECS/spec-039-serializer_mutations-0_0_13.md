@@ -578,7 +578,7 @@ live-first mandate, so the resolver's reachable lines are covered by a real
     `ImageField` value (an [`Upload`][glossary-upload-scalar]) is routed into the
     serializer's `data` like any other value (DRF serializers read files from `data`,
     unlike Django forms which split `files=`); **construct** the serializer with
-    **framework-built `data`** (decoded client input + the exact-match
+    **framework-built `data`** (decoded client input + the
     `Meta.injected_fields` values from
     `get_serializer_injected_data(self, info, *, data, hook_context)`), the
     **constructor-only** `get_serializer_kwargs(self, info, *, data, hook_context)` hook
@@ -1936,9 +1936,7 @@ The pipeline steps:
    constructor argument such as `tenant`), never a seam for reshaping the write.
    - **The framework composes `data`** as decoded client input plus the values
      `get_serializer_injected_data(self, info, *, data, hook_context)` supplies for the
-     `Meta.injected_fields` declaration; the hook's returned keys must match
-     that declaration **exactly** — a missing declared field or an undeclared extra key
-     is a [`ConfigurationError`][glossary-configurationerror].
+     `Meta.injected_fields` declaration, keyed by exactly those names.
    - **Consumer hooks never receive the live located instance.** Every hook
      (`get_serializer_kwargs`, `get_serializer_injected_data`,
      `get_serializer_save_kwargs`) takes a frozen
@@ -1946,28 +1944,26 @@ The pipeline steps:
      ([`rest_framework/hook_context.py`][rf-hook-context]) plus a **shallow copy** of the
      decoded data (`dict(...)`; an upload is the uploaded file itself). Each hook's
      mapping return is read with `dict(...)`; a `str` subclass key (a `TextChoices` or
-     `StrEnum` member) is a string to Python's `**` and to DRF, so a member spelling a
-     reserved or undeclared name is refused exactly as the plain name is.
+     `StrEnum` member) is a string to Python's `**` and to DRF.
    - **`data`, `instance`, `partial`, `context["request"]`, and `context["write_alias"]`
-     are framework-owned.** A returned `data` must be omitted or the **exact** copy the
-     hook received (identity, so an explicit `data=None` and a rebuilt-equal copy are
-     both refused), and **any** returned `instance` key is rejected outright, since the framework injects the
-     authorized row itself and hooks see only its pk via `hook_context.instance_pk`.
-     `partial` is the update contract, not a knob: the resolver sets `partial=True` for
-     `update` and never for `create`, and a hook returning a `partial` key **at all** —
-     whatever its value, on either operation — is a `ConfigurationError`. After merging the hook's other kwargs the framework
+     are framework-owned.** The framework sets `data` over whatever the hook returned, and
+     on `update` sets `instance` to the authorized row (hooks see only its pk via
+     `hook_context.instance_pk`) with `partial=True`; a hook returning `instance` or
+     `partial` on `create` is outside the hook's contract. After merging the hook's other kwargs the framework
      sets `context["request"] = request_from_info(info, family_label="SerializerMutation")`
      and `context["write_alias"]` **unconditionally**, overwriting any value the hook
      returned under those keys — the same request object the inherited
      `check_permission` / `permission_classes` seam already authorized against.
      Consumer-specific context belongs under **other** keys.
-   - **Post-construct, pre-`is_valid()`, the runtime serializer is proved to agree with
-     the schema** (`_assert_schema_runtime_agreement` → `_assert_field_agreement` /
-     `_assert_relation_agreement` / `_assert_nested_agreement`), and
-     `_assert_runtime_write_source_ownership` re-runs the writable-`source` uniqueness
-     rule against the **runtime**, context-dependent `get_fields()` at every nesting
-     depth — a serializer whose runtime field set feeds two writable inputs into one model
-     attribute is rejected there even though its schema-time field map was clean.
+   - **The runtime serializer is the one `get_serializer_for_schema()` describes**: the
+     hook's field map is the contract the schema and the decode are built from, so a
+     runtime field set that disagrees with it (a missing, read-only or re-sourced field, a
+     relation over another model, a context-dependent `get_fields()` feeding two writable
+     fields into one model attribute) is a consumer bug, not a refusal the pipeline makes,
+     with one exception: a runtime relation whose queryset is over another model than the
+     spec's `related_model` is a [`ConfigurationError`][glossary-configurationerror] before
+     `is_valid()` (`_scope_specs_over_serializer`), since scoping it by the recorded model's
+     visibility would link a row that visibility never saw.
    - **Every top-level and nested relation field's queryset is composed as author
      queryset ∩ target visibility** (`_scope_relation_querysets_to_visibility` /
      `_scope_specs_over_serializer`), pinned to the operation's write alias and
@@ -2076,11 +2072,10 @@ The pipeline steps:
      the operation's write alias, so a `UniqueTogetherValidator` (or any author validator)
      cannot read through a different connection than the write is pinned to.
 
-   The flattener itself is **iterative, cycle-rejecting, and budget-capped**: the error
+   The flattener itself is **iterative and budget-capped**: the error
    structure mirrors client-controlled input nesting,
-   so a pathological fan-out ends in one `"__all__"`-keyed `truncated` marker
-   (`_ERROR_FLATTEN_NODE_BUDGET`) instead of unbounded work, and a cyclic structure fails
-   loud rather than looping.
+   so a pathological fan-out (a cyclic structure included) ends in one `"__all__"`-keyed
+   `truncated` marker (`_ERROR_FLATTEN_NODE_BUDGET`) instead of unbounded work.
 6. **Write** via `serializer.save()`, **wrapped by the `036` `IntegrityError` → envelope
    mapper** (`utils/errors.py::integrity_error_field_errors` — no top-level error on a
    save-time race; a refusal over a `blank=True, null=False` input column the refused
@@ -2128,16 +2123,11 @@ The pipeline steps:
      apply (an explicit `[]` clears; duplicates collapse).
 
    **The save result is validated before the re-fetch** (`_checked_saved_result`): a
-   persisted row of the backing model (a non-null pk, not `_state.adding`); and on
-   **create**, a row the witness saw written with `created=True` (a custom `create()`
-   returning an existing row, such as a `get_or_create` keyed by a client value, is still
-   assigned to `self.instance` by DRF, so only the observed INSERT keeps a row the caller
-   cannot see out of the visibility-free re-fetch; signal-less bulk persistence fails
-   closed). A custom `create()` whose plain `save()` of a client-assigned key UPDATEs a row a
-   concurrent transaction committed under it witnesses no `created=True` write and fails
-   closed the same way; DRF's own `ModelSerializer.create` INSERTs (`QuerySet.create`),
-   so the stock create meets that race as the `IntegrityError` envelope. Before these
-   checks, an update whose save the witness saw INSERT (`created=True`) into the located
+   persisted row of the backing model (a non-null pk, not `_state.adding`). What a custom
+   `create()` returns is the consumer's: it must return the row it inserted. DRF's own
+   `ModelSerializer.create` INSERTs (`QuerySet.create`), so the stock create meets a
+   concurrent commit under a client-assigned key as the `IntegrityError` envelope. Before
+   this check, an update whose save the witness saw INSERT (`created=True`) into the located
    row's own table (`_meta.concrete_model`) under the `authorized_pk` on the pinned alias
    returns the in-band `conflict` envelope on `id`, rolled back with the inserted row
    (`_guarded_serializer_write`): DRF's `ModelSerializer.update` saves through Django's
@@ -2986,11 +2976,9 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   injected value could silently replace the client's; the package rejects it at class
   creation with a [`ConfigurationError`][glossary-configurationerror] naming the shared
   attribute and the two fields (an owner whose declared `source` differs is shown as
-  `'cat' (source 'category_id')`) rather than picking a winner. The rule is enforced **again at
-  runtime**, against the instantiated serializer's context-dependent `get_fields()` and at
-  every opted-in nesting depth
-  (`rest_framework/resolvers.py::_assert_runtime_write_source_ownership`), because
-  schema-time discovery cannot see a field set a serializer builds from its context. A
+  `'cat' (source 'category_id')`) rather than picking a winner. A field set a serializer
+  builds from its request context is outside what schema-time discovery sees, so it must
+  keep the same rule itself. A
   `read_only` field sharing a `source` with a writable one is **fine** (read-only fields
   are dropped from the input, Decision 7), so the common DRF read/write-split pattern is
   unaffected.
@@ -3531,7 +3519,7 @@ The completion contract.
    `036`'s model path and `038`'s form path enforce), and reduced to the pk
    before landing under the serializer field name; a hidden target → field-keyed
    `FieldError`; an [`Upload`][glossary-upload-scalar] value lands in `data`;
-   the framework builds `data` itself (decoded client input + the exact-match
+   the framework builds `data` itself (decoded client input + the
    `Meta.injected_fields` values from `get_serializer_injected_data`) and merges the
    **constructor-only** `get_serializer_kwargs(self, info, *, data, hook_context)` hook's
    non-reserved kwargs over the construction, then sets
@@ -3716,8 +3704,7 @@ auto-generated one (a `serializer_field_mapping` override can build a file field
 column) and one `get_fields()` adds. No write through such a field is correct. Over a scalar
 column, DRF writes what it validates a relation or file field to (a related instance, an
 uploaded file) into the column `source` names, which cannot hold it: depending on the shape
-the runtime agreement guard (below) refuses it, the database rejects it, or a text column
-stores the related row's `str()`. Over a file column, the input is the column's `Upload`,
+the database rejects it or a text column stores the related row's `str()`. Over a file column, the input is the column's `Upload`,
 which anything but a `FileField` cannot validate. A relation (`PrimaryKeyRelatedField`, `many=True`
 included) or file field (`FileField` / `ImageField`) over a scalar column, and any field other
 than a `FileField` over a file column, FAIL LOUD naming the field, its class, its `source`,
@@ -3729,8 +3716,7 @@ source of truth per
 [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth)),
 so a wrong-kind field there is refused even when the runtime
 `serializer_class` declares a matching one. The agreement reading is one predicate,
-`rest_framework/serializer_converter.py::serializer_field_fits_kind`, which the runtime
-guard's file and scalar arms share. Over a scalar column a declared field converts first,
+`rest_framework/serializer_converter.py::serializer_field_fits_kind`. Over a scalar column a declared field converts first,
 so a declared `SlugRelatedField` / `HyperlinkedRelatedField` there keeps the conversion's own
 "only PrimaryKeyRelatedField is supported" refusal. This is a class-creation / bind-time
 raise (an invalid configuration), so it is package-tested, not live.
@@ -3765,42 +3751,6 @@ bad fields fixes them all in one pass. The aggregate is a `ConfigurationError`, 
 canonical-name gate's `_default_full_shape_identity` swallows it (an unbuildable default
 shape simply does not reserve the canonical name).
 Package-tested (it is a configuration-time raise).
-
-### Runtime schema/runtime serializer agreement guard
-
-`rest_framework/resolvers.py::_assert_schema_runtime_agreement(mutation_cls, serializer)` runs
-in `_serializer_write_step` AFTER the runtime serializer is constructed and BEFORE
-`is_valid()`. It walks ONE unified list, `_write_surface_specs(mutation_cls)` — the generated
-GraphQL input specs plus the `Meta.injected_fields` specs — so an injected field is proved by
-exactly the same present / writable / `source` / kind / relation-model checks an input field
-receives, through the same `_assert_field_agreement` body. For every spec the runtime
-serializer must contain `spec.target_name`, have it WRITABLE (not `read_only`), bind the same
-`source`, keep a relation as `PrimaryKeyRelatedField` /
-`ManyRelatedField(PrimaryKeyRelatedField)` over the same `related_model`, and keep a file /
-scalar kind compatible (a scalar that became a relation or file, or vice versa, is a
-mismatch; `serializer_field_fits_kind`, the predicate the schema build refuses a kind
-mismatch by). It additionally holds two drift arms the coarse checks cannot see: the runtime
-field's **requiredness** must match what the schema emitted (given the operation and
-`Meta.optional_fields`), and its emitted **annotation `repr`** must match the one the
-descriptor recorded. Any divergence is a framework `ConfigurationError` at the boundary, NOT a
-silent DRF-ignores-the-unknown-key ambiguity — the schema hook is a VERIFIED contract rather
-than a trust point. A runtime serializer with EXTRA fields the schema omits is fine (never
-provided).
-
-**Reaching the requiredness / annotation arms without a validated `Meta` snapshot is itself a
-raise, not a stop.** Those arms need the operation and the normalized `optional_fields`, so
-any class reaching them must carry a `_mutation_meta` snapshot. Both incoherent spellings —
-the attribute absent, and the attribute present but `None` — raise one `ConfigurationError`
-naming the field; returning early there would be a fail-open (the guard would report
-agreement it never checked).
-
-A schema-only field the runtime serializer does not declare (decode-then-drop) is therefore
-forbidden. The fakeshop nullability fixture `NoteShelfSerializer(note_allow_null=...)`
-declares `note` as a REAL write-only runtime field (popped in `create()`), and each
-mutation's `get_serializer_kwargs` constructs it with the same `note_allow_null` its schema
-hook used, so schema and runtime agree while the two mutations still differ only in `note`'s
-emitted nullability. Happy path is live-covered (every serializer mutation passes the
-guard); the raise cases are package-tested.
 
 ### Golden SDL coverage for representative serializer inputs
 
@@ -3908,12 +3858,10 @@ key). The schema-time specs are stashed in `_injected_field_specs`.
 
 The framework builds serializer `data` itself from decoded client data plus the values supplied
 exclusively by `get_serializer_injected_data(self, info, *, data, hook_context)`, whose keys
-must exactly match `Meta.injected_fields`. Runtime acceptance rides the ONE unified
-`_write_surface_specs` walk through `_assert_schema_runtime_agreement`, so an injected field
-receives exactly the same present / writable / `source` / kind / relation-model checks an input
-field does. Live-tested (`createShelfWithInjectedTopic` narrows away a required `topic` and
-injects it); package-tested (subtraction / still-raise / writable class validation / exact keys
-/ runtime agreement).
+are exactly `Meta.injected_fields`. An injected relation's queryset is scoped to visibility
+exactly as an input relation's is. Live-tested (`createShelfWithInjectedTopic` narrows away a
+required `topic` and injects it); package-tested (subtraction / still-raise / writable class
+validation).
 
 ### Fingerprint `get_serializer_for_schema()` for determinism
 
@@ -3983,8 +3931,7 @@ contract:
   `SerializerMutation`) carries `fields` / `exclude` / `optional_fields` (narrow the nested
   input via the SAME machinery the top level uses) and a recursive `nested_fields` map (the
   deeper opt-in — each level names its own children). A nested field with a DRF `source=`
-  records the same normalized one-segment source axis scalar / relation fields do, so the
-  runtime schema/runtime agreement guard's source comparison matches; a dotted source /
+  records the same normalized one-segment source axis scalar / relation fields do; a dotted source /
   `source="*"` fails loud in `_resolve_nested_field` (via `require_one_segment_source`, the
   model-column path's detection).
 - **Recursively fingerprinted, scoped to the writable set, gated on the opt-in tree.**
@@ -4027,8 +3974,7 @@ contract:
   and rolls the write back. The serializer's own `create()` / `update()` fails a nested item
   the same way, by raising a DRF `serializers.ValidationError` in the nested shape (keyed to
   `shelves.<i>.code`); a Django `ValidationError` it raises names no nested item, so it keys
-  one level against the backing model (see the keying rule above). The runtime schema/runtime
-  agreement guard recurses into the nested serializer too.
+  one level against the backing model (see the keying rule above).
 
 The nested input dedupes on its `SerializerInputShape` descriptor (folded into the parent
 descriptor identity + the per-shape build cache, so two nested shapes never collide on one name)

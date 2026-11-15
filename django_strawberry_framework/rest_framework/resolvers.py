@@ -60,13 +60,11 @@ The serializer-specific invariants this module owns:
 - **The serializer is constructed via the CONSTRUCTOR-ONLY ``get_serializer_kwargs``
   hook + the framework merge** (spec-039 Decision 8). The framework
   builds the authoritative serializer ``data`` ITSELF - decoded client data plus the
-  ``get_serializer_injected_data`` injection (whose keys must EXACTLY match
-  ``Meta.injected_fields``) - then calls ``get_serializer_kwargs(info, data=<copy>,
-  hook_context=<context>)`` for constructor kwargs only. ``data``, ``instance``,
-  ``partial``, ``context["request"]``, and ``context["write_alias"]`` are
-  FRAMEWORK-OWNED: a returned ``data`` other than the copy the hook received, or any
-  ``instance`` or ``partial``, is a ``ConfigurationError``. ``partial=True`` is
-  injected for update (never create); ``context["request"]`` is set to the framework
+  ``get_serializer_injected_data`` injection of the ``Meta.injected_fields`` values -
+  then calls ``get_serializer_kwargs(info, data=<copy>, hook_context=<context>)`` for
+  constructor kwargs only. The framework sets ``data``, ``context["request"]`` and
+  ``context["write_alias"]`` over the hook's return, and for update the located row as
+  ``instance`` with ``partial=True``; ``context["request"]`` is set to the framework
   request (the actor the inherited ``check_permission`` seam authorized against);
   ``context["write_alias"]`` is set to the pipeline's pinned write alias so custom
   serializer code stays inside the one transaction.
@@ -151,6 +149,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import enum
+import functools
 import threading
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Final, TypeGuard, TypeVar, cast
@@ -204,11 +203,8 @@ from django_strawberry_framework.utils.errors import (
     unstorable_value,
 )
 from django_strawberry_framework.utils.inputs import (
-    FILE,
     RELATION_MULTI,
     RELATION_SINGLE,
-    SCALAR,
-    optional_input_field,
     published_input_specs,
 )
 from django_strawberry_framework.utils.permissions import request_from_info
@@ -256,17 +252,11 @@ from .accessors import (
 from .hook_context import SerializerHookContext
 from .inputs import (
     _is_serializer_class,
-    raise_writable_source_ownership_errors,
-    runtime_validated_data_fields,
-    serializer_canonical_input_name,
-    serializer_model,
 )
 from .serializer_converter import (
     NESTED_MULTI,
     NESTED_SINGLE,
     nested_serializer_child,
-    resolve_serializer_field,
-    serializer_field_fits_kind,
 )
 from .validator_guard import guard_uniqueness_validator
 
@@ -359,41 +349,16 @@ _OMITTED: Final = _Omitted.OMITTED
 _SERIALIZER_ASYNC_RECOURSE = sync_pipeline_recourse("serializer mutation")
 
 
-def _decode_relation_single(
-    value: object,
-    *,
-    graphql_name: str,
-    related_model: type[models.Model],
-    key_attname: str | None,
-    info: Info[object, object],
-) -> tuple[object, FieldError | None]:
-    """Decode ONE relation id to its visible pk (mirrors the ``038`` form single decoder).
-
-    The serializer coloring of the shared
-    ``utils/write_values.py::decode_visible_relation`` spine:
-    type-check + pk coercion -> visible object (a hidden / missing / wrong-model
-    / uncoercible id is the uniform field-keyed ``FieldError``, no existence
-    leak) -> the pk projection (what DRF's ``PrimaryKeyRelatedField`` expects). A
-    visible row whose ``to_field`` key (``key_attname``) is ``NULL`` is the same relation
-    error: the field would resolve it and the descriptor would store ``NULL``.
-
-    An explicit ``None`` is NOT an id to decode: it is a clear / no-value skipped
-    through unchanged so the serializer's own validation decides (a required
-    relation raises its field-keyed required error via ``is_valid()``, an optional
-    one clears). The generated GraphQL input field exposes only the one
-    strategy-dependent shape (spec-039 Decision 7), and the decode reads which one from
-    the target model, never from the value.
-    """
-    return decode_visible_relation(
-        value,
-        graphql_name=graphql_name,
-        related_model=related_model,
-        info=info,
-        async_recourse=_SERIALIZER_ASYNC_RECOURSE,
-        skip=lambda candidate: candidate is None,
-        project=pk_of,
-        key_attname=key_attname,
-    )
+# Decode ONE relation id to its visible pk (mirrors the ``038`` form single decoder): the
+# serializer coloring of the shared ``utils/write_values.py::decode_visible_relation`` spine.
+# An explicit ``None`` is a clear / no-value skipped through unchanged so the serializer's own
+# validation decides; a visible id projects to the pk DRF's ``PrimaryKeyRelatedField`` expects.
+_decode_relation_single = functools.partial(
+    decode_visible_relation,
+    async_recourse=_SERIALIZER_ASYNC_RECOURSE,
+    skip=lambda candidate: candidate is None,
+    project=pk_of,
+)
 
 
 def _decode_relation_multi(
@@ -423,13 +388,9 @@ def _decode_relation_multi(
         info=info,
         async_recourse=_SERIALIZER_ASYNC_RECOURSE,
         key_attname=key_attname,
-        project=_visible_pk,
+        # The pk a ``PrimaryKeyRelatedField`` resolves, not the key the relation stores.
+        project=lambda pk, _key: pk,
     )
-
-
-def _visible_pk(pk: object, _key: object) -> object:
-    """Answer the pk a ``PrimaryKeyRelatedField`` resolves, not the key the relation stores."""
-    return pk
 
 
 def _nested_specs_of(spec: InputFieldSpec) -> tuple[InputFieldSpec, ...]:
@@ -603,27 +564,22 @@ def serializer_errors_to_field_errors(errors: object, key_map: ErrorKeyMap) -> l
     re-keys with its OWN field map. A segment with no entry (a numeric index, the ``"__all__"``
     sentinel, or a non-mapped field) is kept verbatim.
 
-    **Iterative, cycle- and budget-aware**: the error structure mirrors a
+    **Iterative and budget-aware**: the error structure mirrors a
     client-controlled input (a deeply-nested ``JSONField`` payload reproduces its nesting in
     ``serializer.errors`` / a DRF ``ValidationError.detail``), so a recursive walk would let a
     deep payload crash the pipeline with a ``RecursionError`` at the ERROR path - the exact
     availability hole the iterative clone already closes on the data path. The walk is an
-    explicit stack; a CYCLIC detail structure (constructible only by author code raising a
-    hand-built ``ValidationError``) fails loud as a ``ConfigurationError``; and a node budget
-    caps pathological fan-out - when exceeded, the flattened list ends with one ``"__all__"``
-    ``truncated`` marker instead of unbounded work.
+    explicit stack, and a node budget caps pathological fan-out - when exceeded, the
+    flattened list ends with one ``"__all__"`` ``truncated`` marker instead of unbounded work.
     """
     children = _error_node_children(errors, key_map, "")
     if children is None:
         return [_error_leaf(errors, "")]
     flattened: list[FieldError] = []
     budget = _ERROR_FLATTEN_NODE_BUDGET
-    active: set[int] = {id(errors)}
-    frames: list[tuple[object, Iterator[tuple[object, ErrorKeyMap, str]]]] = [
-        (errors, iter(children)),
-    ]
+    frames: list[Iterator[tuple[object, ErrorKeyMap, str]]] = [iter(children)]
     while frames:
-        node, entries = frames[-1]
+        entries = frames[-1]
         descended = False
         for child, child_map, child_prefix in entries:
             budget -= 1
@@ -640,18 +596,10 @@ def serializer_errors_to_field_errors(errors: object, key_map: ErrorKeyMap) -> l
             if grand is None:
                 flattened.append(_error_leaf(child, child_prefix))
                 continue
-            if id(child) in active:
-                raise ConfigurationError(
-                    "SerializerMutation validation errors contain a CYCLIC detail structure "
-                    "(a dict or list that transitively contains itself); cyclic error details "
-                    "cannot be flattened. Break the cycle in the raised ValidationError.",
-                )
-            active.add(id(child))
-            frames.append((child, iter(grand)))
+            frames.append(iter(grand))
             descended = True
             break
         if not descended:
-            active.discard(id(node))
             _ = frames.pop()
     if not flattened:
         return [empty_validation_error()]
@@ -764,24 +712,13 @@ def _injected_serializer_data(
     authoritative data itself from the DECODED client data plus this hook's return - a
     ``get_serializer_kwargs`` override cannot replace or extend ``data``. The hook receives
     a shallow copy of the decoded client data plus the frozen ``SerializerHookContext`` -
-    never the live located instance - and its returned keys must EXACTLY match
-    ``Meta.injected_fields``: a missing declared field would silently fail validation, an
-    undeclared extra key would smuggle a value past the auditable contract - both are a
-    loud ``ConfigurationError``. Class validation already guarantees an injected field is
-    never also a GraphQL input field, so the merge can never overwrite a client value.
+    never the live located instance - and supplies the ``Meta.injected_fields`` values.
+    Class validation already guarantees an injected field is never also a GraphQL input
+    field, so the merge can never overwrite a client value.
     """
-    declared = frozenset(mutation_cls._mutation_meta.injected_fields or ())
-    injected = dict(
+    return dict(
         mutation_cls().get_serializer_injected_data(info, data=data, hook_context=hook_context),
     )
-    if frozenset(injected) != declared:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_injected_data returned "
-            f"key(s) {sorted(injected)!r}, but Meta.injected_fields declares "
-            f"{sorted(declared)!r}. The hook must supply EXACTLY the declared injected fields - "
-            "declare every supplied field in Meta.injected_fields and supply every declared one.",
-        )
-    return injected
 
 
 def _serializer_kwargs(
@@ -801,33 +738,15 @@ def _serializer_kwargs(
     rules:
 
     - ``data`` is the framework-built final data (decoded client data + declared
-      injection); the returned ``data`` must be omitted or the exact copy the hook
-      received, anything else (an explicit ``None`` included) is a ``ConfigurationError``.
-    - ``instance`` and ``partial`` are framework-owned: either key in the return is a
-      ``ConfigurationError``; the framework injects the located, authorized row and
-      ``partial=True`` for an UPDATE, never for create.
+      injection), set over whatever the hook returned.
+    - for an UPDATE the framework sets ``instance`` to the located, authorized row and
+      ``partial=True`` over the hook's return.
     - the override's ``context`` is merged, then ``context["request"]`` is set to the
       framework request and ``context["write_alias"]`` to the pipeline's pinned write
       alias.
     """
     data = dict(final_data)
     kwargs = dict(mutation_cls().get_serializer_kwargs(info, data=data, hook_context=hook_context))
-    for reserved in ("instance", "partial"):
-        if reserved in kwargs:
-            raise ConfigurationError(
-                f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_kwargs returned "
-                f"a `{reserved}` kwarg; `instance` and `partial` are framework-owned (the "
-                "framework injects the located, authorized row and partial=True for update, "
-                f"never for create). Remove `{reserved}` from the override.",
-            )
-    if kwargs.pop("data", data) is not data:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}.get_serializer_kwargs returned a "
-            "`data` value that is not the exact object the hook received; `data` is "
-            "framework-owned (decoded client input plus Meta.injected_fields injection), so "
-            "the hook must pass it through unchanged or omit it. Supply extra fields via "
-            "get_serializer_injected_data + Meta.injected_fields, not by rewriting `data`.",
-        )
     kwargs["data"] = final_data
     if instance is not None:
         kwargs["instance"] = instance
@@ -836,365 +755,6 @@ def _serializer_kwargs(
     context = require(kwargs.get("context") or {}, is_mapping)
     kwargs["context"] = {**context, "request": request, "write_alias": alias}
     return kwargs
-
-
-def _model_name_repr(model: object) -> str:
-    """``repr`` of a relation target's class name, or of the value itself when it is no class."""
-    return truth.render(truth.name(model) if truth.is_type(model) else model)
-
-
-def _relation_queryset_of(field: DRFField) -> object:
-    """Return the ``queryset`` a runtime relation field decodes against, or ``None``.
-
-    A single ``PrimaryKeyRelatedField`` carries it directly; a ``ManyRelatedField`` carries
-    it on ``field.child_relation``. Read as an ``object``: the schema/runtime agreement guard
-    is what proves its shape.
-    """
-    related = (
-        child_relation_of(field) if isinstance(field, serializers.ManyRelatedField) else field
-    )
-    return read_attr(related, "queryset", None)
-
-
-def _relation_model_of(field: DRFField) -> object:
-    """Return the target model a runtime relation field decodes against, or ``None``.
-
-    A single ``PrimaryKeyRelatedField`` carries ``field.queryset.model``; a
-    ``ManyRelatedField`` carries it on ``field.child_relation.queryset``. Used by the
-    schema/runtime agreement guard to confirm the runtime relation still points at the same
-    model the schema-time ``InputFieldSpec.related_model`` recorded.
-    """
-    return getattr(_relation_queryset_of(field), "model", None)
-
-
-def _assert_schema_runtime_agreement(
-    mutation_cls: type[SerializerMutation],
-    serializer: DRFSerializer,
-) -> None:
-    """Raise ``ConfigurationError`` if runtime disagrees with the schema write surface.
-
-    The schema-time field map (the ``get_serializer_for_schema()`` hook) drives the generated
-    GraphQL input + the bind-stashed reverse map (``mutation_cls._input_field_specs``); the
-    runtime write uses the REAL ``serializer_class``. If they diverge, DRF would silently
-    ignore an incoming key the GraphQL schema implied is writable. This turns the hook
-    into a VERIFIED contract: for every write-surface field spec (GraphQL input +
-    ``Meta.injected_fields`` - one walk via ``_write_surface_specs``), the runtime
-    ``serializer.fields`` must
-
-    - contain ``spec.target_name`` and have it WRITABLE (not ``read_only``);
-    - bind the SAME ``source`` the schema-time discovery recorded;
-    - for a relation, still be a ``PrimaryKeyRelatedField`` (single) / ``ManyRelatedField`` of
-      a ``PrimaryKeyRelatedField`` (multi) over the SAME ``related_model``;
-    - for a file / scalar, keep a compatible kind (a scalar that moved to a relation or file,
-      or vice versa, is a mismatch).
-
-    Injected fields ride the SAME per-field check: presence of an injected value is
-    guaranteed by construction, but the runtime serializer must still declare each injected
-    field writable with the recorded source / kind / relation-model, or DRF drops it.
-
-    Runs BEFORE ``is_valid()`` so a schema/runtime mismatch is a framework configuration
-    failure (a clear ``ConfigurationError`` at the boundary), never a serializer-validation
-    ambiguity. A runtime serializer with EXTRA fields the schema map omits is fine (they are
-    simply never provided); only the write-surface fields are held to the contract.
-    """
-    for spec in _write_surface_specs(mutation_cls):
-        _assert_field_agreement(mutation_cls, serializer, spec)
-
-
-def _assert_runtime_write_source_ownership(
-    mutation_cls: type[SerializerMutation],
-    serializer: DRFSerializer,
-    data: Mapping[str, object],
-    specs: Iterable[InputFieldSpec],
-    *,
-    path: str = "",
-) -> None:
-    """Reject runtime fields that can overwrite one another in ``validated_data``.
-
-    Schema discovery cannot see context-dependent fields returned by ``get_fields()``. Walk the
-    instantiated serializer immediately before validation, including every explicitly opted-in
-    nested serializer, so hidden/defaulted runtime fields cannot silently replace client or
-    injected values through DRF's last-write-wins source assignment. Sources are keyed by the
-    model field they resolve to on the serializer's own ``Meta.model``, so a runtime
-    ``source="category_id"`` collides with a client ``category``.
-    """
-    supplied_fields = set(data)
-    runtime_fields = runtime_validated_data_fields(
-        bound_fields(serializer),
-        supplied_fields=supplied_fields,
-        apply_defaults=mutation_cls._mutation_meta.operation == "create",
-    )
-    runtime_sources = {field_name: field.source for field_name, field in runtime_fields.items()}
-    raise_writable_source_ownership_errors(
-        truth.name(mutation_cls),
-        runtime_sources,
-        location=f"runtime serializer path {(path or '<root>')!r}",
-        model=serializer_model(type(serializer)),
-    )
-
-    for spec in specs:
-        if spec.kind not in (NESTED_SINGLE, NESTED_MULTI):
-            continue
-        runtime: DRFField = bound_fields(serializer)[spec.target_name]
-        child_serializer, many = nested_serializer_child(runtime)
-        raw_child = data.get(spec.target_name)
-        child_values = raw_child if many and is_list_or_tuple(raw_child) else [raw_child]
-        # A nested input's keys are its serializer field names; a key that is not a
-        # string names no field, so it can neither supply one nor collide with one.
-        child_data: dict[str, object] = {
-            key: item
-            for value in child_values
-            if is_mapping(value)
-            for key, item in value.items()
-            if isinstance(key, str)
-        }
-        child_path = f"{path}.{spec.target_name}" if path else spec.target_name
-        _assert_runtime_write_source_ownership(
-            mutation_cls,
-            child_serializer,
-            child_data,
-            list(_nested_specs_of(spec)),
-            path=child_path,
-        )
-
-
-def _assert_field_agreement(
-    mutation_cls: type[SerializerMutation],
-    serializer: DRFSerializer,
-    spec: InputFieldSpec,
-    *,
-    nested_path: tuple[str, ...] = (),
-) -> None:
-    """Assert ONE schema-time field spec agrees with the runtime serializer.
-
-    The per-field body of ``_assert_schema_runtime_agreement`` (which walks the one
-    ``_write_surface_specs`` list covering GraphQL input + ``Meta.injected_fields``): the
-    runtime ``serializer.fields`` must contain ``spec.target_name``, have it WRITABLE, bind
-    the SAME ``source``, keep a relation as a ``PrimaryKeyRelatedField`` /
-    ``ManyRelatedField(PrimaryKeyRelatedField)`` over the SAME ``related_model``, and keep a
-    file / scalar kind compatible (``serializer_field_fits_kind``, the reading the schema
-    build refuses a kind mismatch by). Any divergence is a framework ``ConfigurationError`` at
-    the boundary. ``nested_path`` locates this serializer level's normalized
-    configuration, so nested model resolution and optionality do not inherit the
-    root mutation's settings.
-    """
-    runtime_fields = bound_fields(serializer)
-    name = truth.name(type(serializer))
-    target = spec.target_name
-    runtime: DRFField | None = runtime_fields.get(target)
-    if runtime is None:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: the schema exposes field "
-            f"{target!r}, but the runtime serializer {name} does not declare it. DRF would "
-            "silently ignore the incoming value. Make get_serializer_for_schema() and the "
-            "runtime serializer_class agree (declare the field on the serializer, or drop it "
-            "from the schema field map).",
-        )
-    if runtime.read_only:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: the schema exposes writable field "
-            f"{target!r}, but the runtime serializer {name} declares it read_only; the "
-            "incoming value would be ignored. Make the runtime field writable or drop it "
-            "from the schema field map.",
-        )
-    schema_source = spec.source or target
-    runtime_source = runtime.source or target
-    if runtime_source != schema_source:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} binds source "
-            f"{runtime_source!r} at runtime but {schema_source!r} in the schema field map; "
-            "the write would target a different attribute than the schema implies. Align "
-            "the runtime serializer's source with get_serializer_for_schema().",
-        )
-    if spec.kind in (RELATION_SINGLE, RELATION_MULTI):
-        _assert_relation_agreement(mutation_cls, spec, runtime)
-    elif spec.kind in (NESTED_SINGLE, NESTED_MULTI):
-        _assert_nested_agreement(
-            mutation_cls,
-            spec,
-            runtime,
-            nested_path=(*nested_path, spec.target_name),
-        )
-    elif spec.kind == FILE:
-        if not serializer_field_fits_kind(runtime, FILE):
-            raise ConfigurationError(
-                f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} is a file input "
-                f"in the schema but {truth.name(type(runtime))} at runtime; the kind moved. Align "
-                "the runtime serializer field with get_serializer_for_schema().",
-            )
-    elif not serializer_field_fits_kind(runtime, SCALAR):
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} is a scalar in the "
-            f"schema but a relation / file / nested serializer ({truth.name(type(runtime))}) at "
-            "runtime; the kind moved. Align the runtime serializer field with "
-            "get_serializer_for_schema().",
-        )
-    if spec.required is None and spec.annotation_repr is None:
-        return
-    # Both incoherent spellings - the attribute missing and the attribute ``None`` (an
-    # abstract base) - normalize to one rejection: with no validated snapshot the
-    # requiredness / annotation answer is undeterminable, so it leaves the permit path
-    # instead of being coerced onto it. Every bound mutation carries the snapshot; the guard
-    # reads only the three attributes it compares, so any object carrying them answers.
-    meta = truth.static_attr(mutation_cls, "_mutation_meta")
-    if meta is None:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} carries a schema "
-            "requiredness or annotation contract, but the mutation has no validated Meta "
-            "snapshot, so agreement with the runtime field cannot be determined. A bound "
-            "mutation always carries one; reaching this guard without it is a framework "
-            "invariant violation, not a supported configuration.",
-        )
-    operation = read_attr(meta, "operation")
-    level_meta = meta
-    for name in nested_path:
-        level_meta = require(read_attr(level_meta, "nested_fields"), is_mapping)[name]
-    declared_optional = read_attr(level_meta, "optional_fields")
-    optional_fields = frozenset(list_of(declared_optional) if declared_optional else ())
-    runtime_required = (
-        False
-        if operation == "update"
-        else bool(
-            runtime.required and target not in optional_fields,
-        )
-    )
-    if spec.required is not None and runtime_required != spec.required:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: field {target!r} is "
-            f"{'required' if runtime_required else 'optional'} at runtime but "
-            f"{'required' if spec.required else 'optional'} in the schema input. Align "
-            "the runtime serializer's required/default declaration with "
-            "get_serializer_for_schema().",
-        )
-    if spec.annotation_repr is None:
-        return
-    if spec.kind in (NESTED_SINGLE, NESTED_MULTI):
-        # An opted-in nested field's annotation is the RECURSIVELY generated nested
-        # input type, which ``resolve_serializer_field`` cannot re-derive: it rejects
-        # every nested serializer by contract (nesting is opt-in only, and the input
-        # build routes an opted-in field to the recursive nested build instead of the
-        # flat converter). ``_assert_nested_agreement`` already held this field to the
-        # schema's nested shape and recursed into every child spec - each child's own
-        # annotation is checked there - so the container's annotation is covered by
-        # that walk plus the requiredness check above.
-        return
-    snapshot_model = (
-        serializer_model(type(serializer)) if nested_path else read_attr(meta, "model")
-    )
-    try:
-        _python_attr, runtime_annotation, _runtime_spec = resolve_serializer_field(
-            runtime,
-            None if snapshot_model is None else require(snapshot_model, is_model_class),
-            serializer_canonical_input_name(type(serializer), is_partial=operation == "update"),
-        )
-        runtime_annotation, _field_kwargs = optional_input_field(
-            runtime_annotation,
-            widen=(
-                bool(runtime.allow_null or not runtime_required)
-                if spec.required is not None
-                else False
-            ),
-        )
-    except ConfigurationError as exc:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: runtime field {target!r} "
-            "could not be resolved to the schema's generated input annotation; align "
-            "the runtime serializer with get_serializer_for_schema().",
-        ) from exc
-    if repr(runtime_annotation) != spec.annotation_repr:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: runtime field {target!r} "
-            f"resolves to annotation {runtime_annotation!r}, but the schema input "
-            f"resolves to {spec.annotation_repr}; align the runtime serializer field "
-            "with get_serializer_for_schema().",
-        )
-
-
-def _assert_relation_agreement(
-    mutation_cls: type[SerializerMutation],
-    spec: InputFieldSpec,
-    runtime: DRFField,
-) -> None:
-    """Confirm a runtime relation field matches the schema-time relation spec (helper).
-
-    A ``RELATION_SINGLE`` spec requires a runtime ``PrimaryKeyRelatedField``; a
-    ``RELATION_MULTI`` spec requires a ``ManyRelatedField`` wrapping a ``PrimaryKeyRelatedField``
-    (the only pk-decoding shapes). Either way the runtime relation must point at
-    the SAME ``related_model`` the schema-time ``InputFieldSpec`` recorded, so the id decoded
-    against the schema target is the id the runtime field validates against.
-    """
-    if spec.kind == RELATION_SINGLE:
-        ok_shape = isinstance(runtime, serializers.PrimaryKeyRelatedField)
-    else:
-        ok_shape = isinstance(runtime, serializers.ManyRelatedField) and isinstance(
-            child_relation_of(runtime),
-            serializers.PrimaryKeyRelatedField,
-        )
-    if not ok_shape:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: relation field {spec.target_name!r} is "
-            f"{truth.name(type(runtime))} at runtime, but the schema types it as a primary-key "
-            "relation; only PrimaryKeyRelatedField (single) / PrimaryKeyRelatedField(many=True) "
-            "decode a pk. Align the runtime serializer field with get_serializer_for_schema().",
-        )
-    runtime_model = _relation_model_of(runtime)
-    if runtime_model is not spec.related_model:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: relation field {spec.target_name!r} "
-            f"targets {_model_name_repr(runtime_model)} at runtime but "
-            f"{_model_name_repr(spec.related_model)} in the schema field "
-            "map; the decoded id would be validated against a different model. Align the runtime "
-            "relation's queryset with get_serializer_for_schema().",
-        )
-    runtime_queryset = _relation_queryset_of(runtime)
-    if not (is_manager(runtime_queryset) or isinstance(runtime_queryset, QuerySet)):
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: relation field {spec.target_name!r} "
-            f"holds a {truth.name(type(runtime_queryset))!r} queryset at runtime, but the schema "
-            "types it as a primary-key relation, which looks its id up in a QuerySet or a "
-            "Manager. Align the runtime relation's queryset with get_serializer_for_schema().",
-        )
-
-
-def _assert_nested_agreement(
-    mutation_cls: type[SerializerMutation],
-    spec: InputFieldSpec,
-    runtime: DRFField,
-    *,
-    nested_path: tuple[str, ...],
-) -> None:
-    """Confirm a runtime nested serializer field matches the schema-time nested spec.
-
-    A ``NESTED_MULTI`` spec requires a runtime ``ListSerializer`` (a ``many=True`` nested
-    serializer); a ``NESTED_SINGLE`` spec requires a plain nested ``Serializer`` (a
-    ``BaseSerializer`` that is NOT a ``ListSerializer``). Then the agreement RECURSES: each
-    schema-time nested field spec (``spec.nested_specs``) is held to the SAME present / writable /
-    source / kind / relation-model / deeper-nested contract against the runtime nested
-    serializer's own fields - so a nested shape that drifted between the schema-time hook and the
-    runtime serializer is a clear ``ConfigurationError`` at the boundary, at every depth.
-    """
-    if spec.kind == NESTED_MULTI:
-        ok_shape = isinstance(runtime, serializers.ListSerializer)
-    else:
-        ok_shape = isinstance(runtime, serializers.BaseSerializer) and not isinstance(
-            runtime,
-            serializers.ListSerializer,
-        )
-    if not ok_shape:
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: nested field {spec.target_name!r} is "
-            f"{truth.name(type(runtime))} at runtime, but the schema types it as a nested "
-            f"{'list of serializers' if spec.kind == NESTED_MULTI else 'serializer'}. Align the "
-            "runtime serializer field with get_serializer_for_schema().",
-        )
-    child_serializer, _many = nested_serializer_child(runtime)
-    for child_spec in _nested_specs_of(spec):
-        _assert_field_agreement(
-            mutation_cls,
-            child_serializer,
-            child_spec,
-            nested_path=nested_path,
-        )
 
 
 def _scope_relation_querysets_to_visibility(
@@ -1217,8 +777,7 @@ def _scope_relation_querysets_to_visibility(
     visibility check hid (a single ``pk__in`` subquery - no extra round trip). A relation whose
     target has no registered primary (a raw-pk relation with no visibility contract) keeps the
     author's own restriction but is STILL pinned to the write alias (and locked when the
-    operation locks). The agreement guard already ran, so every relation spec has a matching
-    writable runtime field over the recorded model (with a non-``None`` queryset).
+    operation locks).
     The rewrite is deliberately applied to ``serializer.fields``, whose declared fields DRF
     deep-copies for each serializer instance, never to the serializer class's shared
     ``_declared_fields``. Concurrent requests therefore receive independently scoped relation
@@ -1234,7 +793,11 @@ def _scope_relation_querysets_to_visibility(
     # Injected fields (``Meta.injected_fields``) are relation-capable too: their values reach
     # DRF's SAME second lookup, so their querysets need the SAME pin + visibility + lock
     # discipline as the GraphQL-input relations (the specs are disjoint by class validation).
-    _scope_specs_over_serializer(_write_surface_specs(mutation_cls), serializer, info)
+    _scope_specs_over_serializer(
+        [*mutation_cls._input_field_specs, *(mutation_cls._injected_field_specs or [])],
+        serializer,
+        info,
+    )
 
 
 def _reads_a_queryset(validator: object) -> TypeGuard[_QuerysetValidator]:
@@ -1542,10 +1105,9 @@ def _scope_specs_over_serializer(
     pipeline = require_write_pipeline()
     for spec in specs:
         if spec.kind in (NESTED_SINGLE, NESTED_MULTI):
-            nested_field: DRFField | None = bound_fields(serializer).get(spec.target_name)
-            if nested_field is None:  # pragma: no cover - the agreement guard already required it.
-                continue
-            child_serializer, _many = nested_serializer_child(nested_field)
+            child_serializer, _many = nested_serializer_child(
+                bound_fields(serializer)[spec.target_name],
+            )
             _scope_specs_over_serializer(
                 _nested_specs_of(spec),
                 child_serializer,
@@ -1554,22 +1116,28 @@ def _scope_specs_over_serializer(
             continue
         if spec.kind not in (RELATION_SINGLE, RELATION_MULTI):
             continue
-        field: DRFField | None = bound_fields(serializer).get(spec.target_name)
-        if field is None:  # pragma: no cover - the agreement guard already required it.
-            continue
-        # The agreement guard proved a relation spec's runtime field is a
-        # PrimaryKeyRelatedField, or a ManyRelatedField over one.
+        field = bound_fields(serializer)[spec.target_name]
+        # A relation spec records a PrimaryKeyRelatedField, or a ManyRelatedField over one,
+        # and ``get_serializer_for_schema()`` describes the runtime serializer's own fields.
         relation = cast(
             "serializers.PrimaryKeyRelatedField[models.Model]",
             child_relation_of(field) if isinstance(field, serializers.ManyRelatedField) else field,
         )
         # ``.all()`` normalizes a Manager to a QuerySet (preserving an explicit ``.using``);
         # the pin fails closed on a cross-alias author queryset BEFORE any validation runs.
-        # The schema/runtime agreement guard already rejected a relation whose queryset
-        # is neither a QuerySet nor a Manager over the recorded model; the assert only
-        # narrows what the guard proved.
         author_queryset = read_attr(relation, "queryset")
-        assert is_manager(author_queryset) or isinstance(author_queryset, QuerySet)  # noqa: S101 - _assert_relation_agreement already rejected any other queryset
+        assert is_manager(author_queryset) or isinstance(author_queryset, QuerySet)  # noqa: S101 - a writable primary-key relation looks its id up in a QuerySet or a Manager
+        # The decode resolved the id against the recorded model's visibility; a runtime
+        # queryset over another model would AND that model's rows with the recorded model's
+        # visible pks, linking a row the visibility query never saw.
+        if author_queryset.model is not spec.related_model:
+            raise ConfigurationError(
+                f"SerializerMutation: relation field {spec.target_name!r} targets "
+                f"{truth.name(author_queryset.model)} at runtime but "
+                f"{truth.name(spec.related_model)} in the schema field map; the decoded id "
+                "would be validated against a different model. Align the runtime relation's "
+                "queryset with get_serializer_for_schema().",
+            )
         scoped = pin_write_queryset(
             author_queryset.all(),
             pipeline.alias,
@@ -1602,16 +1170,6 @@ def _scope_specs_over_serializer(
         # basedpyright: drf-stubs types the slot's rows as the model; isinstance proves a QuerySet,
         # not its row type (a ``.values()`` queryset passes it)
         relation.queryset = scoped  # pyright: ignore[reportAttributeAccessIssue]
-
-
-def _write_surface_specs(mutation_cls: type[SerializerMutation]) -> list[InputFieldSpec]:
-    """Return the top-level write-surface specs: GraphQL input fields + ``Meta.injected_fields``.
-
-    The one list every top-level per-field discipline walks (schema/runtime agreement,
-    write-source ownership, queryset scoping): the two spec sets are disjoint by class
-    validation, so concatenation is exact.
-    """
-    return [*mutation_cls._input_field_specs, *(mutation_cls._injected_field_specs or [])]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1663,9 +1221,7 @@ def _write_witness(
     - a ``post_save`` recorder for the mutation's backing model: the yielded witness's
       ``written`` list collects
       ``(instance, pk_at_write, created, using)`` for every row the ORM actually wrote.
-      On CREATE the saved-result check (``_checked_saved_result``) requires the returned
-      row to be one of these INSERTs, so a ``create()`` returning an EXISTING row is
-      refused. On UPDATE, a ``created=True`` record of the located row's
+      On UPDATE, a ``created=True`` record of the located row's
       own table under the authorized pk is the update-else-insert re-INSERT of a row
       that vanished after the locate, which ``_guarded_serializer_write`` returns as
       the ``conflict`` envelope (``_inserted_authorized_row``).
@@ -1678,10 +1234,9 @@ def _write_witness(
     proxy model, of a sibling proxy, of a multi-table parent or of an unrelated model
     is not recorded.
 
-    Signal-less SAME-alias bulk writes are invisible to the recorder; for the create
-    witness that fails CLOSED (an unwitnessed create result is rejected - persist the
-    returned row via ``instance.save()``). Cross-alias writes cannot hide the same way:
-    the pipeline's statement guard sees them regardless of signals.
+    Signal-less SAME-alias bulk writes are invisible to the recorder. Cross-alias writes
+    cannot hide the same way: the pipeline's statement guard sees them regardless of
+    signals.
     """
     owner = threading.get_ident()
     written: list[_WrittenRow] = []
@@ -1758,22 +1313,11 @@ def _inserted_authorized_row(
     )
 
 
-def _checked_saved_result(
-    mutation_cls: type[SerializerMutation],
-    saved: object,
-    *,
-    creating: bool,
-    written: list[_WrittenRow],
-) -> models.Model:
+def _checked_saved_result(mutation_cls: type[SerializerMutation], saved: object) -> models.Model:
     """Validate the ``serializer.save()`` result before the pipeline re-fetches it.
 
     The result must be a persisted row of the mutation's backing model (a wrong-model or
-    unsaved return has no row to re-fetch). On CREATE it must also be a row the
-    ``_write_witness`` ``post_save`` record saw INSERTED: the skeleton re-fetches the saved
-    row without the visibility filter, so a ``create()`` returning an existing row (a
-    ``get_or_create`` keyed by a client value) would otherwise answer with a row the caller
-    cannot see. A ``create()`` that persists through a signal-less bulk path fails closed;
-    persist the returned row through ``instance.save()``.
+    unsaved return has no row to re-fetch).
     """
     model = backing_model_of(mutation_cls._mutation_meta)
     if not truth.is_instance(saved, model) or pk_of(saved) is None or saved._state.adding:
@@ -1781,12 +1325,6 @@ def _checked_saved_result(
             f"SerializerMutation {truth.name(mutation_cls)}: save() returned "
             f"{truth.render(saved)}; the serializer's create()/update() must persist and "
             f"return the written {truth.name(model)} row.",
-        )
-    if creating and not any(row is saved and created for row, _pk, created, _using in written):
-        raise ConfigurationError(
-            f"SerializerMutation {truth.name(mutation_cls)}: save() returned a "
-            f"{truth.name(model)} that was never observed being INSERTED during the save; a "
-            "create must persist and return the row it inserted, never an existing row.",
         )
     return saved
 
@@ -1848,8 +1386,8 @@ def _serializer_write_step(
     # The witness wraps the ENTIRE consumer-controlled phase (the data/kwargs hooks,
     # ``is_valid()`` with its author validators, the save-kwargs hook, and ``save()``):
     # a cross-alias ``Model.save()`` is blocked at ``pre_save`` with a serializer-specific
-    # error, and every actual write of the backing model is recorded so a create result
-    # can be PROVEN inserted. The statement-level cross-alias net
+    # error, and every actual write of the backing model is recorded for the update
+    # conflict check and the integrity diagnosis. The statement-level cross-alias net
     # (signal-less paths included) is the pipeline skeleton's ``pipeline_alias_guard``,
     # which spans this step and every other consumer-reachable phase.
     model = backing_model_of(mutation_cls._mutation_meta)
@@ -1981,9 +1519,8 @@ def _guarded_serializer_write(
     the same column; any other is the ``"__all__"`` ``constraint`` envelope. Create and
     update alike.
     """
-    written = witness.written
     # The framework builds the authoritative serializer data ITSELF:
-    # decoded client data + the exact-match ``Meta.injected_fields`` injection - a
+    # decoded client data + the ``Meta.injected_fields`` injection - a
     # ``get_serializer_kwargs`` override cannot replace or extend it.
     injected = _injected_serializer_data(
         mutation_cls,
@@ -2004,19 +1541,6 @@ def _guarded_serializer_write(
     # whose keyword set no static signature can check.
     serializer = call_forwarded(serializer_class, (), kwargs)
 
-    # PROVE the schema-time write surface (GraphQL input + Meta.injected_fields)
-    # and the runtime serializer AGREE before ``is_valid()`` runs, so a schema hook that
-    # exposed a field the runtime serializer does not actually declare (or declares with a
-    # different source / relation target / kind) - or a declared-but-unaccepted injected
-    # field - is a framework CONFIGURATION failure, not a silent DRF-ignores-the-unknown-key
-    # ambiguity. One walk over ``_write_surface_specs``.
-    _assert_schema_runtime_agreement(mutation_cls, serializer)
-    _assert_runtime_write_source_ownership(
-        mutation_cls,
-        serializer,
-        final_data,
-        _write_surface_specs(mutation_cls),
-    )
     # adapt each relation field's queryset to the SAME visibility-scoped queryset the
     # decode used - pinned to the write alias and locked when the operation locks - so DRF's
     # own ``is_valid()`` lookup is the VISIBILITY lookup inside the transaction rather than an
@@ -2130,17 +1654,12 @@ def _guarded_serializer_write(
         backing_model_of(mutation_cls._mutation_meta),
         authorized_pk,
         alias,
-        written,
+        witness.written,
     ):
         return StepFailure([conflict_error()])
     # The saved result is validated BEFORE the pipeline re-fetches it: a persisted row of the
-    # backing model, and on create a row the witness saw INSERTED.
-    return _checked_saved_result(
-        mutation_cls,
-        saved,
-        creating=authorized_pk is None,
-        written=written,
-    )
+    # backing model.
+    return _checked_saved_result(mutation_cls, saved)
 
 
 def _serializer_decode_step(

@@ -845,13 +845,9 @@ each over the already-narrowed set:
   `ModelSerializer`'s own, whose body calls `field.set(value)`. The guard is
   not re-run per request: the runtime serializer is the same
   `Meta.serializer_class` whose `create()` / `update()` the build read, and
-  `django_strawberry_framework/rest_framework/resolvers.py::_assert_field_agreement`
-  (which re-calls `resolve_serializer_field` per request only when
-  `spec.required` or `spec.annotation_repr` is set) holds every exposed
-  relation to its schema-time `source` and related model on every request,
-  so the column written is the column the build checked even when the
-  runtime field set differs from `get_serializer_for_schema()`'s; a
-  runtime-only field outside that map receives no client value.
+  `get_serializer_for_schema()` describes that serializer's fields, so the
+  column written is the column the build checked; a runtime-only field
+  outside that map receives no client value.
 
 The model flavor raises at class creation; the form and serializer flavors
 raise when their input binds inside `finalize_django_types`. Both precede the
@@ -908,8 +904,8 @@ on rows already stored. That collision is data-dependent and stays the
   `_reject_relation_cardinality_mismatch`) — the converter receives neither
   the serializer class nor the operation, so it cannot tell which of
   `create()` / `update()` the write reaches or whether it is overridden;
-  threading both in would widen a per-field converter that the runtime
-  agreement pass also calls, for a check only the build walk needs.
+  threading both in would widen a per-field converter that every field
+  resolution calls, for a check only the build walk needs.
 - *Guard only the model flavor* — the form and serializer flavors reach the
   same `.set()` (Django's `_save_m2m()` and `ModelSerializer.create` /
   `update`) when not overridden, so a single-flavor guard leaves two silent

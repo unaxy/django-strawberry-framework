@@ -1027,7 +1027,7 @@ def test_field_whose_kind_disagrees_with_its_column_is_refused(
     """A serializer field of another kind than the column it writes fails loud at build.
 
     The build would type the input as the column (a scalar, or ``Upload``) while DRF validates
-    the declared field, so the per-request agreement guard would refuse every write. The
+    the declared field, so no write could store what it validates. The
     refusal names the field, its class, its ``source``, the column and both kinds, for a
     relation over a scalar or file column (``many=True`` included), a relation over the
     scalar primary key by its name or the ``pk`` alias, a file field over a scalar column, and

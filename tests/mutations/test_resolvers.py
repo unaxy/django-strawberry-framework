@@ -131,7 +131,6 @@ if TYPE_CHECKING:
 
     from django_strawberry_framework.mutations.resolvers import (
         _ModelDecoded,
-        _ModelDecodedWithExcluded,
     )
 
     # Each field's descriptor types as django-stubs declares them (set type, get type), spelled
@@ -3015,22 +3014,6 @@ def test_assign_m2m_integrity_error_contained_in_envelope() -> None:
         assert len(errors) == 1
         assert errors[0].field == NON_FIELD_ERROR_KEY
         assert errors[0].codes == ["constraint"]
-
-
-def test_model_write_step_refuses_a_decode_carrying_excluded_values() -> None:
-    """A four-tuple decode (one carrying ``EXCLUDED`` values) raises ``ValueError``.
-
-    The shared model write tail cannot write an excluded value, so a bind that stashes an
-    ``EXCLUDED`` spec without a flavor write step consuming it fails loud.
-    """
-    decoded: _ModelDecodedWithExcluded = (
-        product_models.Item(),
-        [],
-        resolvers.CleanExcludes([], []),
-        {"password": "secret"},
-    )
-    with pytest.raises(ValueError, match=r"three-tuple; a decode carrying EXCLUDED values"):
-        resolvers._model_write_step(DjangoMutation, None, decoded, specs=())
 
 
 @pytest.mark.django_db

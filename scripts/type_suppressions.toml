@@ -94,7 +94,6 @@
 "django_strawberry_framework/rest_framework/accessors.py::declared_fields_of" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/rest_framework/accessors.py::list_child_of" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
 "django_strawberry_framework/rest_framework/accessors.py::serializer_errors" = { reportUnknownMemberType = 1, reportUnknownVariableType = 1 }
-"django_strawberry_framework/rest_framework/inputs.py::normalize_nested_serializer_configs" = { reportUnnecessaryIsInstance = 1 }
 "django_strawberry_framework/rest_framework/resolvers.py::_scope_specs_over_serializer" = { cast = 1, reportAttributeAccessIssue = 1 }
 "django_strawberry_framework/rest_framework/serializer_converter.py::DRFBaseSerializer" = { reportExplicitAny = 1 }
 "django_strawberry_framework/rest_framework/serializer_converter.py::DRFField" = { reportExplicitAny = 1 }
@@ -359,18 +358,11 @@
 "tests/rest_framework/test_converter.py::test_register_converter_rejects_non_callable" = { reportArgumentType = 1 }
 "tests/rest_framework/test_converter.py::test_register_converter_rejects_non_field_class" = { reportArgumentType = 1 }
 "tests/rest_framework/test_converter.py::test_registered_converter_malformed_return_is_configuration_error" = { reportArgumentType = 1 }
-"tests/rest_framework/test_inputs.py::_normalize_mapping" = { reportArgumentType = 1 }
 "tests/rest_framework/test_inputs.py::test_build_nested_serializer_spec_child_fields_configuration_error.BrokenChild.fields" = { reportIncompatibleVariableOverride = 1 }
 "tests/rest_framework/test_inputs.py::test_build_serializer_input_class_rejects_non_nested_config_items" = { reportArgumentType = 1 }
 "tests/rest_framework/test_inputs.py::test_generated_input_field_carries_drf_metadata_description.DescribedSer" = { reportAssignmentType = 1 }
-"tests/rest_framework/test_inputs.py::test_nested_config_normalizer_propagates_an_unreadable_value" = { reportArgumentType = 1 }
-"tests/rest_framework/test_inputs.py::test_nested_serializer_config_normalization_handles_cycles_and_passthrough_values" = { reportArgumentType = 2 }
-"tests/rest_framework/test_inputs.py::test_normalize_nested_serializer_configs_rejects_non_mapping" = { reportArgumentType = 1 }
 "tests/rest_framework/test_inputs.py::test_validate_nested_config_keys_not_a_mapping" = { reportArgumentType = 1 }
 "tests/rest_framework/test_resolvers.py::_as_serializer_mutation" = { reportReturnType = 1 }
-"tests/rest_framework/test_resolvers.py::_category_with_contextual_items.CategoryWithContextualItems.create" = { cast = 1 }
-"tests/rest_framework/test_resolvers.py::_reserved_kwarg_mutation.ReservedMutation" = { reportAssignmentType = 1 }
-"tests/rest_framework/test_resolvers.py::test_agreement_missing_field_honest_labels_are_byte_identical.ShelfSer.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/rest_framework/test_resolvers.py::test_hook_context_invariants" = { reportAttributeAccessIssue = 1 }
 "tests/rest_framework/test_resolvers.py::test_relation_decode_async_get_queryset_from_sync_raises_sync_misuse.GenreT.get_queryset" = { reportIncompatibleMethodOverride = 1 }
 "tests/rest_framework/test_resolvers.py::test_save_time_django_validation_error_reads_its_names_as_backing_model_fields.ItemRaisingCategorySerializer.create" = { cast = 1 }

@@ -1925,8 +1925,8 @@ def test_relation_over_a_scalar_column_fails_the_bind(operation: str) -> None:
     """A relation field written to a scalar column fails the bind on create and update alike.
 
     The input would be typed as the column's scalar while DRF validates a related instance, so
-    every write would fail the per-request agreement guard; ``finalize_django_types`` refuses
-    the mutation instead, the field named by the walk.
+    no write could store it; ``finalize_django_types`` refuses the mutation instead, the field
+    named by the walk.
     """
     _declare_products_primaries()
     mutation_meta = type(

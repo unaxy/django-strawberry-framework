@@ -1,4 +1,4 @@
-"""Live HTTP serializer tests for save errors, runtime field ownership and post-save conflicts."""
+"""Live HTTP serializer tests for save errors, runtime-only fields and post-save conflicts."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ from collections.abc import Callable, Mapping
 from functools import wraps
 from typing import TYPE_CHECKING, NoReturn
 
-import graphql
 import pytest
 import strawberry
 from apps.products import models as product_models
@@ -356,8 +355,6 @@ def test_serializer_error_after_a_real_partial_insert_leaves_no_partial_row(outc
 
 def _runtime_serializer(
     shape: str,
-    *,
-    writable: bool,
 ) -> type[ModelSerializerBase[product_models.Item] | ModelSerializerBase[product_models.Category]]:
     class ContextualAttnameSerializer(ModelSerializerBase[product_models.Item]):
         class Meta:
@@ -368,18 +365,10 @@ def _runtime_serializer(
         def get_fields(self) -> dict[str, DRFField]:
             fields = base_fields(super())
             if self.context.get("request") is not None:
-                if writable:
-                    fields["cat"] = serializers.PrimaryKeyRelatedField(
-                        source="category_id",
-                        queryset=product_models.Category.objects.all(),
-                        required=False,
-                        default=None,
-                    )
-                else:
-                    fields["cat"] = serializers.PrimaryKeyRelatedField(
-                        source="category_id",
-                        read_only=True,
-                    )
+                fields["cat"] = serializers.PrimaryKeyRelatedField(
+                    source="category_id",
+                    read_only=True,
+                )
             return fields
 
     if shape == "root":
@@ -414,18 +403,12 @@ def _runtime_serializer(
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("shape", ["root", "nested"])
-@pytest.mark.parametrize("ownership", ["writable", "read-only"])
-def test_runtime_fk_attname_alias_refuses_only_competing_writable_fields(
-    shape: str,
-    ownership: str,
-) -> None:
-    """A runtime writable alias fails before DML, while the same read-only source permits a real write."""
+def test_runtime_read_only_fk_attname_alias_permits_the_write(shape: str) -> None:
+    """A runtime read-only field over the relation's own column leaves the real write alone."""
     seed_data(0)
     (category,) = categories_from_seed(("Existing category", False))
-    writable = ownership == "writable"
-    serializer_class = _runtime_serializer(shape, writable=writable)
     schema, category_type, _item_type = _schema(
-        serializer_class,
+        _runtime_serializer(shape),
         nested_fields={"items": NestedSerializerConfig()} if shape == "nested" else None,
         expose_errors=True,
     )
@@ -437,46 +420,22 @@ def test_runtime_fk_attname_alias_refuses_only_competing_writable_fields(
     data = {"name": "Runtime parent", "items": [item_data]} if shape == "nested" else item_data
     with CaptureQueriesContext(connection) as captured:
         payload = _post(schema, document, {"d": data})
-    if writable:
-        path = "items" if shape == "nested" else "<root>"
-        message = (
-            f"SerializerMutation Write: runtime serializer path {path!r} has multiple writable "
-            "fields that bind one serializer source: source 'category' <- fields "
-            "['category', 'cat' (source 'category_id')]. DRF resolves a source collision "
-            "last-write-wins, so one field's validated value would silently overwrite another's "
-            "(including values from HiddenField or narrowed-out field defaults). Give every "
-            "runtime writable field a distinct source."
-        )
-        location = graphql.get_location(graphql.Source(document), document.index("write("))
-        assert payload == {
-            "data": None,
-            "errors": [
-                {
-                    "message": message,
-                    "locations": [{"line": location.line, "column": location.column}],
-                    "path": ["write"],
-                },
-            ],
-        }
-    else:
-        assert payload == {
-            "data": {
-                "write": {
-                    "node": {"name": "Runtime parent" if shape == "nested" else "Client item"},
-                    "errors": [],
-                },
+    assert payload == {
+        "data": {
+            "write": {
+                "node": {"name": "Runtime parent" if shape == "nested" else "Client item"},
+                "errors": [],
             },
-        }
-    assert list(product_models.Item.objects.values_list("name", "category_id")) == (
-        [] if writable else [("Client item", category.pk)]
-    )
+        },
+    }
+    assert list(product_models.Item.objects.values_list("name", "category_id")) == [
+        ("Client item", category.pk),
+    ]
     assert list(product_models.Category.objects.order_by("pk").values_list("name", flat=True)) == (
-        [category.name] if writable or shape == "root" else [category.name, "Runtime parent"]
+        [category.name] if shape == "root" else [category.name, "Runtime parent"]
     )
-    assert len(_writes(captured, product_models.Item)) == int(not writable)
-    assert len(_writes(captured, product_models.Category)) == int(
-        not writable and shape == "nested",
-    )
+    assert len(_writes(captured, product_models.Item)) == 1
+    assert len(_writes(captured, product_models.Category)) == int(shape == "nested")
 
 
 @pytest.mark.django_db

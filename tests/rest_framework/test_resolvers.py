@@ -94,7 +94,7 @@ from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, ClassVar, NoReturn, Protocol, cast, runtime_checkable
+from typing import TYPE_CHECKING, NoReturn, Protocol, cast, runtime_checkable
 
 import django
 import pytest
@@ -105,7 +105,6 @@ from apps.products import models as product_models
 from apps.products.serializers import RenamedRelationItemSerializer
 from apps.products.services import seed_data
 from apps.scalars.models import NullableScalarSpecimen, ScalarSpecimen
-from asgiref.sync import sync_to_async
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, connections, models, transaction
@@ -134,10 +133,6 @@ from django_strawberry_framework import (
     finalize_django_types,
 )
 from django_strawberry_framework.exceptions import ConfigurationError
-from django_strawberry_framework.mutations.inputs import (
-    CREATE,
-    PARTIAL,
-)
 from django_strawberry_framework.mutations.resolvers import StepFailure
 from django_strawberry_framework.optimizer.plans import OptimizationPlan
 from django_strawberry_framework.registry import registry
@@ -156,11 +151,9 @@ from django_strawberry_framework.rest_framework.hook_context import (
 )
 from django_strawberry_framework.rest_framework.inputs import (
     build_serializer_input_class,
-    resolve_injected_field_specs,
 )
 from django_strawberry_framework.rest_framework.serializer_converter import (
     NESTED_MULTI,
-    NESTED_SINGLE,
 )
 from django_strawberry_framework.testing.relay import global_id_for
 from django_strawberry_framework.types import relay as relay_module
@@ -182,7 +175,6 @@ from django_strawberry_framework.utils._queryset_private import (
 from django_strawberry_framework.utils.errors import NON_FIELD_ERROR_KEY, build_error_key_map
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import (
-    FILE,
     RELATION_MULTI,
     RELATION_SINGLE,
     SCALAR,
@@ -219,7 +211,6 @@ if TYPE_CHECKING:
     from django.db.models.expressions import Combinable
     from typing_extensions import TypeIs
 
-    from django_strawberry_framework.rest_framework.resolvers import _WrittenRow
     from django_strawberry_framework.rest_framework.serializer_converter import (
         DRFField,
         DRFRelatedField,
@@ -1721,67 +1712,6 @@ def test_serializer_kwargs_merges_override_context_keys_keeping_framework_reques
 
 
 @pytest.mark.django_db
-def test_serializer_kwargs_override_returning_partial_is_configuration_error() -> None:
-    """A `get_serializer_kwargs` override returning `partial` itself is a `ConfigurationError`."""
-
-    class PartialReturningMutation(SerializerMutation):
-        class Meta:
-            serializer_class = _basic_item_serializer()
-            operation = "update"
-
-        @override
-        def get_serializer_kwargs(
-            self,
-            info: strawberry.Info,
-            *,
-            data: Mapping[str, object],
-            hook_context: SerializerHookContext,
-        ) -> dict[str, object]:
-            kwargs = super().get_serializer_kwargs(info, data=data, hook_context=hook_context)
-            kwargs["partial"] = False
-            return kwargs
-
-    class CategoryT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Category
-            fields = ("id", "name")
-            primary = True
-
-    class ItemT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Item
-            fields = ("id", "name", "category")
-            primary = True
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
-    class Mutation:
-        write_item = DjangoMutationField(PartialReturningMutation)
-
-    finalize_django_types()
-    DjangoSchema(query=Query, mutation=Mutation)
-    del CategoryT, ItemT
-
-    request = HttpRequest()
-    request.user = User(username="u")
-    info = make_info(context=SimpleNamespace(request=request))
-    with pytest.raises(ConfigurationError, match="partial"):
-        serializer_resolvers._serializer_kwargs(
-            PartialReturningMutation,
-            info,
-            final_data={"name": "X"},
-            instance=product_models.Category(pk=1),
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-@pytest.mark.django_db
 def test_serializer_kwargs_bare_httprequest_info_context_fallback() -> None:
     """`request_from_info` resolves a bare `HttpRequest` `info.context` (the no-`.request` fallback)."""
     mutation_cls = _bind_item_serializer_mutation(_basic_item_serializer())
@@ -1898,101 +1828,6 @@ def test_relation_decode_async_get_queryset_from_sync_raises_sync_misuse() -> No
         )
 
 
-@pytest.mark.django_db(transaction=True)
-async def test_async_entry_rejects_data_rewriting_hook_too() -> None:
-    """The reserved-kwarg checks fire through the ASYNC entry point as well.
-
-    The async surface runs the SAME sync body under one ``sync_to_async`` worker, so a
-    ``get_serializer_kwargs`` override rewriting ``data`` is the same ``ConfigurationError``
-    there - the checks cannot be dodged by choosing the async resolver.
-    """
-    await sync_to_async(seed_data)(0)
-
-    class CategoryT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Category
-            fields = ("id", "name")
-            primary = True
-
-    class ItemT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Item
-            fields = ("id", "name", "category")
-            primary = True
-
-    class _AllowAll:
-        def has_permission(
-            self,
-            _info: object,
-            _mutation: type[object],
-            _op: str,
-            _data: object,
-            _instance: object = None,
-        ) -> bool:
-            return True
-
-    class RewritingItemSerializer(ModelSerializerBase[product_models.Item]):
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
-
-    class CreateItemRewriting(SerializerMutation):
-        class Meta:
-            serializer_class = RewritingItemSerializer
-            operation = "create"
-            permission_classes = [_AllowAll]
-
-        @override
-        def get_serializer_kwargs(
-            self,
-            info: strawberry.Info,
-            *,
-            data: Mapping[str, object],
-            hook_context: SerializerHookContext,
-        ) -> dict[str, object]:
-            return {"data": {**data, "smuggled": "value"}}
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
-    class Mutation:
-        write_item = DjangoMutationField(CreateItemRewriting)
-
-    finalize_django_types()
-    DjangoSchema(query=Query, mutation=Mutation)
-    del CategoryT, ItemT
-
-    (category,) = await sync_to_async(categories_from_seed)(("AsyncRewriteCat", False))
-    gid = strawberry.ID(
-        str(relay.GlobalID(type_name="products.category", node_id=str(saved_pk(category)))),
-    )
-
-    @strawberry.input
-    class _Data:
-        name: str
-        category_id: strawberry.ID = strawberry.field(name="categoryId")
-
-    request = HttpRequest()
-    request.user = User(username="async-u")
-    info = make_info(context=SimpleNamespace(request=request))
-    data = _Data(name="AsyncRewriteItem", category_id=gid)
-
-    with managed_write_transaction("default"):
-        pending = CreateItemRewriting.resolve_async(info, data=data, id=None)
-        assert inspect.isawaitable(pending)
-        with pytest.raises(ConfigurationError, match="not the exact object the hook received"):
-            await pending
-    # The refused write never happened.
-    exists = await sync_to_async(
-        product_models.Item.objects.filter(name="AsyncRewriteItem").exists,
-    )()
-    assert exists is False
-
-
 # ===========================================================================
 # Structured error codes + paths
 # ===========================================================================
@@ -2045,419 +1880,6 @@ def test_flattener_bare_error_detail_preserves_code() -> None:
     (fe,) = flat
     assert fe.codes == ["invalid"]
     assert fe.path == ["name"]
-
-
-# ===========================================================================
-# Schema/runtime serializer agreement guard
-# ===========================================================================
-
-
-class _AgreementFake:
-    """The bound-mutation spec slots the schema/runtime agreement guard reads."""
-
-    _input_field_specs: ClassVar[list[InputFieldSpec]] = []
-    _injected_field_specs: ClassVar[list[InputFieldSpec]] = []
-
-
-class _AgreementFakeWithMeta(_AgreementFake):
-    """An agreement fake that also carries a ``_mutation_meta`` snapshot."""
-
-    _mutation_meta: ClassVar[object] = None
-
-
-def _agreement_spec(**overrides: object) -> InputFieldSpec:
-    """A single ``InputFieldSpec`` (defaults to a scalar ``code``) for the guard tests."""
-    base = InputFieldSpec(input_attr="code", graphql_name="code", target_name="code", kind=SCALAR)
-    return dataclasses.replace(base, **overrides)
-
-
-def _agreement_specs(**overrides: object) -> type[_AgreementFake]:
-    """Build a fake mutation carrying one ``_agreement_spec`` and no ``_mutation_meta``."""
-    spec = _agreement_spec(**overrides)
-
-    class FakeMut(_AgreementFake):
-        _input_field_specs: ClassVar[list[InputFieldSpec]] = [spec]
-
-    return FakeMut
-
-
-def _shelf_model_serializer() -> ModelSerializerBase[library_models.Shelf]:
-    """A ``ModelSerializer`` over ``Shelf`` (``code`` scalar + ``branch`` PK relation)."""
-
-    class ShelfSer(ModelSerializerBase[library_models.Shelf]):
-        class Meta:
-            model = library_models.Shelf
-            fields = ("code", "branch")
-
-    return ShelfSer(data={})
-
-
-def test_agreement_guard_raises_when_runtime_lacks_schema_field() -> None:
-    """A schema field the runtime serializer does not declare fails loud."""
-    fake = _agreement_specs(input_attr="ghost", graphql_name="ghost", target_name="ghost")
-    with pytest.raises(ConfigurationError, match="does not declare it"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _shelf_model_serializer(),
-        )
-
-
-def test_agreement_guard_raises_when_runtime_field_read_only() -> None:
-    """A schema field the runtime declares read_only fails loud (the value would be ignored)."""
-
-    class ROSer(ModelSerializerBase[library_models.Shelf]):
-        code = serializers.CharField(read_only=True)
-
-        class Meta:
-            model = library_models.Shelf
-            fields = ("code", "branch")
-
-    with pytest.raises(ConfigurationError, match="read_only"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(_agreement_specs()),
-            ROSer(data={}),
-        )
-
-
-def test_agreement_guard_raises_on_source_mismatch() -> None:
-    """A runtime field binding a different source than the schema recorded fails loud."""
-    # Schema recorded source "topic"; runtime "code" binds source "code".
-    fake = _agreement_specs(source="topic")
-    with pytest.raises(ConfigurationError, match="binds source"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _shelf_model_serializer(),
-        )
-
-
-def test_agreement_guard_raises_on_relation_wrong_model() -> None:
-    """A runtime relation over a DIFFERENT model than the schema recorded fails loud."""
-    fake = _agreement_specs(
-        input_attr="branch_id",
-        graphql_name="branchId",
-        target_name="branch",
-        kind=RELATION_SINGLE,
-        related_model=library_models.Patron,  # runtime branch targets Branch, not Patron.
-    )
-    with pytest.raises(ConfigurationError, match="different model"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _shelf_model_serializer(),
-        )
-
-
-def test_agreement_guard_rejects_a_relation_queryset_that_is_no_row_source() -> None:
-    """A relation whose ``queryset`` names the right model without being a row source fails loud."""
-
-    class BranchSer(serializers.Serializer[object]):
-        branch: _PkRelation[library_models.Branch] = serializers.PrimaryKeyRelatedField(
-            queryset=library_models.Branch.objects.all(),
-        )
-
-    class RowSourceStandIn:
-        model = library_models.Branch
-
-    serializer = BranchSer()
-    object.__setattr__(bound_fields(serializer)["branch"], "queryset", RowSourceStandIn())
-    fake = _agreement_specs(
-        input_attr="branch",
-        graphql_name="branch",
-        target_name="branch",
-        kind=RELATION_SINGLE,
-        related_model=library_models.Branch,
-    )
-    with pytest.raises(
-        ConfigurationError,
-        match=r"SerializerMutation FakeMut: relation field 'branch' holds a 'RowSourceStandIn' "
-        r"queryset at runtime, but the schema types it as a primary-key relation, which looks "
-        r"its id up in a QuerySet or a Manager\.",
-    ):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            serializer,
-        )
-
-
-def test_agreement_guard_raises_when_scalar_became_relation() -> None:
-    """A schema scalar that is a relation at runtime fails loud (the kind moved)."""
-    # Schema types "branch" as a SCALAR, but the runtime serializer declares it a relation.
-    fake = _agreement_specs(target_name="branch", input_attr="branch", graphql_name="branch")
-    with pytest.raises(ConfigurationError, match="scalar in the schema but a relation"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _shelf_model_serializer(),
-        )
-
-
-def test_agreement_guard_raises_when_file_became_scalar() -> None:
-    """A schema file input that is scalar at runtime fails loud (the kind moved)."""
-
-    class FileDriftSer(serializers.Serializer[object]):
-        upload = serializers.CharField()
-
-    fake = _agreement_specs(
-        target_name="upload",
-        input_attr="upload",
-        graphql_name="upload",
-        kind=FILE,
-    )
-    with pytest.raises(ConfigurationError, match="file input"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            FileDriftSer(data={}),
-        )
-
-
-def test_agreement_guard_raises_when_relation_shape_wrong() -> None:
-    """A schema relation the runtime declares as a scalar fails loud."""
-    fake = _agreement_specs(
-        target_name="code",
-        input_attr="code_id",
-        graphql_name="codeId",
-        kind=RELATION_SINGLE,
-        related_model=library_models.Branch,
-    )
-    with pytest.raises(ConfigurationError, match="primary-key relation"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _shelf_model_serializer(),
-        )
-
-
-def _agreement_specs_with_meta(meta: object, **overrides: object) -> type[_AgreementFakeWithMeta]:
-    """``_agreement_specs`` plus a ``_mutation_meta``, for the requiredness/annotation tail."""
-    spec = _agreement_spec(**overrides)
-
-    class FakeMut(_AgreementFakeWithMeta):
-        _input_field_specs: ClassVar[list[InputFieldSpec]] = [spec]
-        _mutation_meta: ClassVar[object] = meta
-
-    return FakeMut
-
-
-def test_agreement_guard_rejects_a_missing_mutation_meta_snapshot() -> None:
-    """A spec carrying a requiredness contract with NO ``_mutation_meta`` fails loud.
-
-    Whether the runtime field's requiredness agrees with the schema's is
-    undeterminable without the validated snapshot, and an undeterminable answer
-    leaves the permit path rather than being coerced onto it.
-    """
-    fake = _agreement_specs(required=True)
-    assert not hasattr(fake, "_mutation_meta")
-
-    with pytest.raises(ConfigurationError, match="no validated Meta snapshot"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _shelf_model_serializer(),
-        )
-
-
-def test_agreement_guard_rejects_a_none_mutation_meta_snapshot() -> None:
-    """A ``_mutation_meta`` present but ``None`` is the SAME undeterminable answer.
-
-    The abstract-base spelling reaches the tail through a different route than an
-    absent attribute; both leave the permit path through the one rejection.
-    """
-    fake = _agreement_specs_with_meta(None, required=True)
-    assert fake._mutation_meta is None
-
-    with pytest.raises(ConfigurationError, match="no validated Meta snapshot"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _shelf_model_serializer(),
-        )
-
-
-def test_agreement_guard_rejects_a_missing_snapshot_on_the_annotation_axis() -> None:
-    """The rejection covers the annotation axis, not only requiredness.
-
-    A spec recording an ``annotation_repr`` with no requiredness still needs the
-    snapshot's model and operation to re-derive the runtime annotation, so it is
-    the same undeterminable answer.
-    """
-    fake = _agreement_specs(required=None, annotation_repr=repr(str))
-    assert not hasattr(fake, "_mutation_meta")
-
-    with pytest.raises(ConfigurationError, match="no validated Meta snapshot"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _shelf_model_serializer(),
-        )
-
-
-def test_agreement_guard_raises_on_requiredness_drift() -> None:
-    """A field required at runtime but optional in the schema fails loud.
-
-    GraphQL would let the client omit it, then DRF would raise its own required
-    error -- an in-band validation failure for a field the schema advertised as
-    omittable. The boundary catches the drift instead.
-    """
-    fake = _agreement_specs_with_meta(
-        SimpleNamespace(operation="create", model=library_models.Shelf, optional_fields=()),
-        required=False,  # runtime ``Shelf.code`` is required.
-    )
-    with pytest.raises(ConfigurationError, match="required at runtime but optional"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _shelf_model_serializer(),
-        )
-
-
-def test_agreement_guard_stops_when_no_annotation_recorded() -> None:
-    """A spec carrying requiredness but no annotation stops after the requiredness check.
-
-    ``Meta.injected_fields`` specs and the nested reverse map record only part
-    of the axis set; an absent ``annotation_repr`` means "nothing to compare",
-    not "compare against None".
-    """
-    fake = _agreement_specs_with_meta(
-        SimpleNamespace(operation="create", model=library_models.Shelf, optional_fields=()),
-        required=True,  # matches the runtime field, so the check above passes.
-        annotation_repr=None,
-    )
-
-    serializer_resolvers._assert_schema_runtime_agreement(
-        _as_serializer_mutation(fake),
-        _shelf_model_serializer(),
-    )
-
-
-def test_agreement_guard_wraps_an_unresolvable_runtime_field() -> None:
-    """A runtime field the converter cannot type is reported against the schema build.
-
-    ``resolve_serializer_field`` raises its own field-level error; rethrowing it
-    verbatim would name the converter's vocabulary rather than the actual
-    problem, which is that the runtime serializer drifted from
-    ``get_serializer_for_schema()``.
-    """
-
-    class _UnconvertibleField(serializers.Field[object, object, object, object]):
-        @override
-        def to_internal_value(self, data: object) -> object:
-            return data
-
-        @override
-        def to_representation(self, value: object) -> object:
-            return value
-
-    class MysterySer(serializers.Serializer[object]):
-        # Not a Shelf column, so the converter falls through to the
-        # model-less table - which has no entry for this field type.
-        mystery = _UnconvertibleField()
-
-    fake = _agreement_specs_with_meta(
-        SimpleNamespace(operation="create", model=library_models.Shelf, optional_fields=()),
-        input_attr="mystery",
-        graphql_name="mystery",
-        target_name="mystery",
-        annotation_repr="str",
-    )
-    with pytest.raises(ConfigurationError, match="could not be resolved"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            MysterySer(data={}),
-        )
-
-
-def test_agreement_guard_passes_when_schema_and_runtime_agree() -> None:
-    """The happy path: matching scalar + relation specs pass (no raise)."""
-    fake = type(
-        "OkMut",
-        (),
-        {
-            "_input_field_specs": [
-                InputFieldSpec(
-                    input_attr="code",
-                    graphql_name="code",
-                    target_name="code",
-                    kind=SCALAR,
-                ),
-                InputFieldSpec(
-                    input_attr="branch_id",
-                    graphql_name="branchId",
-                    target_name="branch",
-                    kind=RELATION_SINGLE,
-                    related_model=library_models.Branch,
-                ),
-            ],
-            "_injected_field_specs": [],
-        },
-    )
-    # No raise.
-    serializer_resolvers._assert_schema_runtime_agreement(
-        _as_serializer_mutation(fake),
-        _shelf_model_serializer(),
-    )
-
-
-def test_agreement_guard_rejects_scalar_annotation_drift() -> None:
-    """A scalar schema annotation that changes at runtime fails before validation."""
-
-    class RuntimeSer(serializers.Serializer[object]):
-        code = serializers.IntegerField()
-
-    fake = type(
-        "ScalarDriftMut",
-        (),
-        {
-            "_mutation_meta": SimpleNamespace(
-                model=None,
-                operation="create",
-                optional_fields=(),
-            ),
-            "_input_field_specs": [
-                InputFieldSpec(
-                    input_attr="code",
-                    graphql_name="code",
-                    target_name="code",
-                    kind=SCALAR,
-                    annotation_repr=repr(str),
-                    required=True,
-                ),
-            ],
-            "_injected_field_specs": [],
-        },
-    )
-    with pytest.raises(ConfigurationError, match="annotation"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            RuntimeSer(data={}),
-        )
-
-
-def test_agreement_guard_rejects_injected_scalar_annotation_drift() -> None:
-    """Injected fields use the same runtime scalar contract as generated inputs."""
-
-    class RuntimeSer(serializers.Serializer[object]):
-        stamp = serializers.IntegerField()
-
-    fake = type(
-        "InjectedScalarDriftMut",
-        (),
-        {
-            "_mutation_meta": SimpleNamespace(
-                model=None,
-                operation="create",
-                optional_fields=(),
-                injected_fields=("stamp",),
-            ),
-            "_input_field_specs": [],
-            "_injected_field_specs": [
-                InputFieldSpec(
-                    input_attr="stamp",
-                    graphql_name="stamp",
-                    target_name="stamp",
-                    kind=SCALAR,
-                    annotation_repr=repr(str),
-                ),
-            ],
-        },
-    )
-    with pytest.raises(ConfigurationError, match="annotation"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            RuntimeSer(data={}),
-        )
 
 
 # ===========================================================================
@@ -2555,205 +1977,6 @@ def test_serializer_refetch_introduces_no_projection() -> None:
 
 
 # ===========================================================================
-# Explicit injection contract runtime verification
-# ===========================================================================
-
-
-def _topic_shelf_serializer_class() -> type[ModelSerializerBase[library_models.Shelf]]:
-    """A ``Shelf`` serializer declaring a required ``topic`` (the injected-field fixture)."""
-
-    class ShelfSer(ModelSerializerBase[library_models.Shelf]):
-        topic = serializers.CharField(required=True)
-
-        class Meta:
-            model = library_models.Shelf
-            fields = ("code", "branch", "topic")
-
-    return ShelfSer
-
-
-def _injected_topic_mut(specs: list[InputFieldSpec] | None = None) -> type[object]:
-    """A fake mutation declaring ``injected_fields=("topic",)`` + its stashed schema-time spec."""
-    topic_spec = InputFieldSpec(
-        input_attr="topic",
-        graphql_name="topic",
-        target_name="topic",
-        kind=SCALAR,
-    )
-    return type(
-        "InjectMut",
-        (),
-        {
-            "_mutation_meta": SimpleNamespace(injected_fields=("topic",)),
-            "_input_field_specs": [],
-            "_injected_field_specs": [topic_spec] if specs is None else specs,
-        },
-    )
-
-
-def test_declared_injected_field_dropped_by_runtime_serializer_raises() -> None:
-    """An injected field the RUNTIME serializer does not declare fails loud (not just presence)."""
-    # ``_shelf_model_serializer`` has NO ``topic``; the write-surface agreement check catches
-    # it even though the framework-built data would carry the key.
-    serializer = _shelf_model_serializer()
-    with pytest.raises(ConfigurationError, match="does not declare it"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(_injected_topic_mut()),
-            serializer,
-        )
-
-
-def test_supplied_injected_field_passes_runtime_check() -> None:
-    """A declared injected field the runtime serializer accepts passes (happy path)."""
-    serializer = _topic_shelf_serializer_class()(
-        data={"code": "X", "branch": 1, "topic": "supplied"},
-    )
-    # No raise: ``topic`` is a writable runtime field on the write surface.
-    serializer_resolvers._assert_schema_runtime_agreement(
-        _as_serializer_mutation(_injected_topic_mut()),
-        serializer,
-    )
-
-
-def test_injected_serializer_choice_field_agrees_on_update_operation() -> None:
-    """An UPDATE mutation's injected serializer-only ``ChoiceField`` spec agrees with the runtime.
-
-    A serializer-only ``ChoiceField`` upgrades to a generated enum whose GraphQL name is
-    derived from the provisional type name (``_serializer_choice_enum``). The injected spec is
-    resolved under the OPERATION's provisional (``<Ser>PartialInput`` for an update), the SAME
-    provisional ``_assert_field_agreement`` re-derives the runtime annotation under - so the
-    two sides resolve the SAME enum and a perfectly valid update declaration agrees instead of
-    raising a spurious requiredness/annotation disagreement on every invocation (the
-    create-side provisional would record ``<Ser>Input<Status>Enum`` while the runtime guard
-    re-derives ``<Ser>PartialInput<Status>Enum``).
-    """
-
-    class StatusShelfSer(ModelSerializerBase[library_models.Shelf]):
-        status = serializers.ChoiceField(
-            choices=[("active", "Active"), ("retired", "Retired")],
-            required=True,
-            write_only=True,
-        )
-
-        class Meta:
-            model = library_models.Shelf
-            fields = ("code", "branch", "status")
-
-    field_map = dict(bound_fields(StatusShelfSer()))
-    update_specs = resolve_injected_field_specs(
-        StatusShelfSer,
-        field_map,
-        ("status",),
-        operation_kind=PARTIAL,
-    )
-    # The injected spec's enum is named off the PARTIAL provisional - the SAME provisional the
-    # runtime agreement re-derives for an update - so the injected enum identity matches.
-    assert update_specs[0].annotation_repr is not None
-    assert "PartialInput" in update_specs[0].annotation_repr
-    fake_update = type(
-        "UpdateInjectedChoiceMut",
-        (),
-        {
-            "_mutation_meta": SimpleNamespace(
-                model=library_models.Shelf,
-                operation="update",
-                optional_fields=(),
-                injected_fields=("status",),
-            ),
-            "_input_field_specs": [],
-            "_injected_field_specs": update_specs,
-        },
-    )
-    # No raise: the schema-side injected spec and the runtime re-derivation agree.
-    serializer_resolvers._assert_schema_runtime_agreement(
-        _as_serializer_mutation(fake_update),
-        StatusShelfSer(),
-    )
-
-    # The create provisional still records the create-named enum (and agrees on create).
-    create_specs = resolve_injected_field_specs(
-        StatusShelfSer,
-        field_map,
-        ("status",),
-        operation_kind=CREATE,
-    )
-    assert create_specs[0].annotation_repr is not None
-    assert "PartialInput" not in create_specs[0].annotation_repr
-    fake_create = type(
-        "CreateInjectedChoiceMut",
-        (),
-        {
-            "_mutation_meta": SimpleNamespace(
-                model=library_models.Shelf,
-                operation="create",
-                optional_fields=(),
-                injected_fields=("status",),
-            ),
-            "_input_field_specs": [],
-            "_injected_field_specs": create_specs,
-        },
-    )
-    serializer_resolvers._assert_schema_runtime_agreement(
-        _as_serializer_mutation(fake_create),
-        StatusShelfSer(),
-    )
-
-
-def test_write_surface_agreement_with_no_injected_fields_walks_input_only() -> None:
-    """A mutation with an empty injected surface still agrees on its GraphQL input specs."""
-    serializer_resolvers._assert_schema_runtime_agreement(
-        _as_serializer_mutation(_agreement_specs()),
-        _shelf_model_serializer(),
-    )  # no raise
-
-
-def _hookable_injected_mut(
-    injected_fields: tuple[str, ...] | None,
-    hook_return: object,
-) -> type[object]:
-    """A fake mutation whose ``get_serializer_injected_data`` returns ``hook_return``."""
-
-    class FakeInjectMut:
-        _mutation_meta = SimpleNamespace(injected_fields=injected_fields)
-
-        def get_serializer_injected_data(
-            self,
-            _info: object,
-            *,
-            data: Mapping[str, object],
-            **_kwargs: object,
-        ) -> object:
-            del data
-            return hook_return
-
-    return FakeInjectMut
-
-
-def test_injected_data_hook_missing_declared_key_raises() -> None:
-    """``get_serializer_injected_data`` omitting a declared injected field fails loud."""
-    fake = _hookable_injected_mut(("topic",), {})
-    with pytest.raises(ConfigurationError, match="EXACTLY the declared injected fields"):
-        serializer_resolvers._injected_serializer_data(
-            _as_serializer_mutation(fake),
-            info=unread_info(),
-            data={"code": "X"},
-            hook_context=_hook_ctx(),
-        )
-
-
-def test_injected_data_hook_undeclared_extra_key_raises() -> None:
-    """``get_serializer_injected_data`` returning an UNDECLARED key fails loud."""
-    fake = _hookable_injected_mut(None, {"topic": "smuggle"})
-    with pytest.raises(ConfigurationError, match="EXACTLY the declared injected fields"):
-        serializer_resolvers._injected_serializer_data(
-            _as_serializer_mutation(fake),
-            info=unread_info(),
-            data={"code": "X"},
-            hook_context=_hook_ctx(),
-        )
-
-
-# ===========================================================================
 # Batched multi-relation visibility internals (SQL batching + hidden member
 # envelopes are live in ``test_library_api.py``).
 # ===========================================================================
@@ -2801,6 +2024,50 @@ def test_relation_queryset_scope_pins_unregistered_raw_pk_relation_without_visib
     assert queryset_db(pinned) == "default"
     assert not pinned.query.where
     assert pinned.query.select_for_update is False
+
+
+@pytest.mark.django_db
+def test_runtime_relation_over_another_model_is_refused_before_any_write() -> None:
+    """A runtime relation queryset over another model than the schema recorded is refused.
+
+    The schema-time ``category`` relates to ``Category``; the request-time ``get_fields()``
+    swaps its queryset to ``Entry``. Scoping that queryset by ``Category`` visibility would
+    link an ``Entry`` row by a coinciding pk, so the write step refuses before validation.
+    """
+    seed_data(1)
+
+    class SwappedRelationSerializer(ModelSerializerBase[product_models.Item]):
+        class Meta:
+            model = product_models.Item
+            fields = ("name", "category")
+
+        @override
+        def get_fields(self) -> dict[str, DRFField]:
+            fields: dict[str, DRFField] = base_fields(super())
+            if self.context.get("request") is not None:
+                fields["category"] = serializers.PrimaryKeyRelatedField(
+                    queryset=product_models.Entry.objects.all(),
+                )
+            return fields
+
+    mutation_cls = _bind_item_serializer_mutation(SwappedRelationSerializer)
+    (category,) = categories_from_seed(("SwappedCat", False))
+    request = HttpRequest()
+    request.user = User(username="u")
+    info = make_info(context=SimpleNamespace(request=request))
+    items_before = product_models.Item.objects.count()
+    with (
+        pytest.raises(ConfigurationError, match="targets Entry at runtime but Category"),
+        write_pipeline("default", lock=False),
+    ):
+        serializer_resolvers._serializer_write_step(
+            mutation_cls,
+            info,
+            None,
+            {"name": "SwappedItem", "category": saved_pk(category)},
+            specs=mutation_cls._input_field_specs,
+        )
+    assert product_models.Item.objects.count() == items_before
 
 
 def test_relation_queryset_scope_locks_when_pipeline_locks() -> None:
@@ -3203,130 +2470,10 @@ def test_save_kwargs_hook_validation_error_maps_to_field_error_envelope() -> Non
 # ===========================================================================
 
 
-def _reserved_kwarg_mutation(hook: Callable[..., object]) -> type[SerializerMutation]:
-    """Bind an Item serializer mutation whose ``get_serializer_kwargs`` is ``hook``."""
-
-    class ReservedSer(ModelSerializerBase[product_models.Item]):
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
-
-    class ReservedMutation(SerializerMutation):
-        class Meta:
-            serializer_class = ReservedSer
-            operation = "create"
-
-        # basedpyright: some hooks return a non-mapping on purpose; the test proves the resolver rejects it
-        get_serializer_kwargs = hook  # pyright: ignore[reportAssignmentType]
-
-    class CategoryT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Category
-            fields = ("id", "name")
-            primary = True
-
-    class ItemT(DjangoType, relay.Node):
-        class Meta:
-            model = product_models.Item
-            fields = ("id", "name", "category")
-            primary = True
-
-    @strawberry.type
-    class Query:
-        @strawberry.field
-        def ping(self) -> int:
-            return 1
-
-    @strawberry.type
-    class Mutation:
-        write_item = DjangoMutationField(ReservedMutation)
-
-    finalize_django_types()
-    DjangoSchema(query=Query, mutation=Mutation)
-    del CategoryT, ItemT
-    return ReservedMutation
-
-
 def _info_with_request() -> strawberry.Info[object, object]:
     request = HttpRequest()
     request.user = User(username="u")
     return make_info(context=SimpleNamespace(request=request))
-
-
-@pytest.mark.django_db
-def test_serializer_kwargs_hook_rewriting_data_is_configuration_error() -> None:
-    """A ``get_serializer_kwargs`` returning a DIFFERENT ``data`` fails loud (data is framework-owned)."""
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return {"data": {**data, "smuggled": "value"}}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    with pytest.raises(ConfigurationError, match="not the exact object the hook received"):
-        serializer_resolvers._serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=None,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-@pytest.mark.django_db
-def test_serializer_kwargs_hook_equal_data_is_tolerated() -> None:
-    """A hook returning the (unmodified) data copy is tolerated (the default's pass-through)."""
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return {"data": data}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    kwargs = serializer_resolvers._serializer_kwargs(
-        mutation_cls,
-        _info_with_request(),
-        final_data={"name": "X"},
-        instance=None,
-        alias="default",
-        hook_context=_hook_ctx(),
-    )
-    assert kwargs["data"] == {"name": "X"}
-
-
-@pytest.mark.django_db
-def test_serializer_kwargs_hook_substituting_instance_is_configuration_error() -> None:
-    """A hook returning a DIFFERENT ``instance`` than the located row fails loud (the bypass)."""
-    substituted = SimpleNamespace(pk=999)
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return {"data": data, "instance": substituted}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    with pytest.raises(ConfigurationError, match="`instance` kwarg"):
-        serializer_resolvers._serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=product_models.Category(pk=1),
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
 
 
 @pytest.mark.django_db
@@ -3342,77 +2489,6 @@ def test_serializer_kwargs_sets_write_alias_in_context() -> None:
         hook_context=_hook_ctx(),
     )
     assert _serializer_context(kwargs)["write_alias"] == "default"
-
-
-def test_serializer_kwargs_hook_equal_but_not_identical_data_is_configuration_error() -> None:
-    """An EQUAL data copy is rejected: the contract is identity with the received clone.
-
-    Equality would require a deep comparison of two independently cloned structures
-    (which recurses on deep valid payloads - an availability hole) and cannot prove the
-    hook did not rebuild the structure; only omission or the exact received object passes.
-    """
-
-    def hook(
-        _self: SerializerMutation,
-        _info: object,
-        *,
-        data: Mapping[str, object],
-        **_kwargs: object,
-    ) -> dict[str, object]:
-        return {"data": dict(data)}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    with pytest.raises(ConfigurationError, match="not the exact object the hook received"):
-        serializer_resolvers._serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=None,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-def test_serializer_kwargs_hook_explicit_none_data_is_configuration_error() -> None:
-    """An explicit ``data=None`` return is NOT omission: ``None`` is not the received copy."""
-
-    def hook(_self: SerializerMutation, _info: object, **_kwargs: object) -> dict[str, object]:
-        return {"data": None}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    with pytest.raises(ConfigurationError, match="not the exact object the hook received"):
-        serializer_resolvers._serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=None,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
-
-
-@pytest.mark.django_db
-def test_serializer_kwargs_hook_explicit_none_instance_on_update_is_configuration_error() -> None:
-    """On update, an explicit ``instance=None`` return is rejected."""
-    seed_data(1)
-
-    def hook(_self: SerializerMutation, _info: object, **_kwargs: object) -> dict[str, object]:
-        return {"instance": None}
-
-    mutation_cls = _reserved_kwarg_mutation(hook)
-    (category,) = categories_from_seed(("SentinelCat", False))
-    (item,) = items_from_seed(category, ("SentinelItem", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(item)]).delete()
-    product_models.Entry.objects.filter(item_id__in=[saved_pk(item)]).delete()
-    with pytest.raises(ConfigurationError, match="`instance` kwarg"):
-        serializer_resolvers._serializer_kwargs(
-            mutation_cls,
-            _info_with_request(),
-            final_data={"name": "X"},
-            instance=item,
-            alias="default",
-            hook_context=_hook_ctx(),
-        )
 
 
 def _saved_result_fixture() -> type[object]:
@@ -3432,8 +2508,6 @@ def test_saved_result_wrong_model_is_configuration_error() -> None:
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
             object(),
-            creating=True,
-            written=[],
         )
 
 
@@ -3446,8 +2520,6 @@ def test_saved_result_unsaved_instance_is_configuration_error() -> None:
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
             unsaved,
-            creating=True,
-            written=[],
         )
 
 
@@ -3465,117 +2537,6 @@ def test_saved_result_spoofed_pk_on_never_persisted_instance_is_configuration_er
         serializer_resolvers._checked_saved_result(
             _as_serializer_mutation(fake),
             spoofed,
-            creating=True,
-            written=[],
-        )
-
-
-@pytest.mark.django_db
-def test_saved_result_create_without_witnessed_insert_is_configuration_error() -> None:
-    """A create result that was never OBSERVED being inserted fails loud.
-
-    A custom ``create()`` returning an existing row is still assigned to ``self.instance`` by
-    DRF's ``save()``; only the ``post_save`` witness record proves the returned row was
-    INSERTED inside this save.
-    """
-    seed_data(1)
-    fake = _saved_result_fixture()
-    (category,) = categories_from_seed(("LaunderCat", False))
-    (existing,) = items_from_seed(category, ("PreExisting", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(existing)]).delete()
-    product_models.Entry.objects.filter(item_id__in=[saved_pk(existing)]).delete()
-    with pytest.raises(ConfigurationError, match="never observed being INSERTED"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            existing,
-            creating=True,
-            written=[],  # no witnessed insert of this row
-        )
-    # A witnessed UPDATE of the row (created=False) is not an insert either.
-    with pytest.raises(ConfigurationError, match="never observed being INSERTED"):
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            existing,
-            creating=True,
-            written=[
-                (
-                    existing,
-                    saved_pk(existing),
-                    False,
-                    "default",
-                ),
-            ],
-        )
-
-
-@pytest.mark.django_db
-def test_saved_result_create_with_witnessed_insert_passes() -> None:
-    """A create result matched by a witnessed ``created=True`` write passes."""
-    seed_data(1)
-    fake = _saved_result_fixture()
-    (category,) = categories_from_seed(("WitnessCat", False))
-    (item,) = items_from_seed(category, ("WitnessItem", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(item)]).delete()
-    product_models.Entry.objects.filter(item_id__in=[saved_pk(item)]).delete()
-    written: list[_WrittenRow] = [
-        (
-            item,
-            saved_pk(item),
-            True,
-            "default",
-        ),
-    ]
-    assert (
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            item,
-            creating=True,
-            written=written,
-        )
-        is item
-    )
-
-
-@pytest.mark.django_db
-def test_write_step_create_returning_existing_row_is_configuration_error() -> None:
-    """A custom ``create()`` returning an EXISTING row through normal DRF bookkeeping fails loud.
-
-    DRF's ``save()`` assigns whatever ``create()`` returns to ``self.instance``, so identity
-    alone cannot distinguish a real insert from an existing row laundered as "created"; the
-    ``post_save`` witness never saw an INSERT of the returned row, so the write step rejects
-    it before the visibility-free re-fetch could leak it.
-    """
-    seed_data(1)
-
-    class LaunderingSerializer(ModelSerializerBase[product_models.Item]):
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
-
-        @override
-        def create(self, validated_data: dict[str, object]) -> product_models.Item:
-            # No insert at all: hand back a pre-existing row (e.g. someone else's).
-            return product_models.Item.objects.get(name="PreyRow")
-
-    (category,) = categories_from_seed(("PreyCat", False))
-    (_seeded_preexisting,) = items_from_seed(category, ("PreyRow", False))
-    product_models.Item.objects.exclude(pk__in=[saved_pk(_seeded_preexisting)]).delete()
-    product_models.Entry.objects.filter(item_id__in=[saved_pk(_seeded_preexisting)]).delete()
-    mutation_cls = _bind_item_serializer_mutation(LaunderingSerializer)
-    request = HttpRequest()
-    request.user = User(username="u")
-    info = make_info(context=SimpleNamespace(request=request))
-
-    with (
-        write_pipeline("default", lock=False),
-        pytest.raises(ConfigurationError, match="never observed being INSERTED"),
-    ):
-        serializer_resolvers._serializer_write_step(
-            mutation_cls,
-            info,
-            None,
-            {"name": "Fresh", "category": saved_pk(category)},
-            specs=mutation_cls._input_field_specs,
         )
 
 
@@ -3845,23 +2806,7 @@ def test_saved_result_happy_path_returns_saved() -> None:
     (item,) = items_from_seed(category, ("OkItem", False))
     product_models.Item.objects.exclude(pk__in=[saved_pk(item)]).delete()
     product_models.Entry.objects.filter(item_id__in=[saved_pk(item)]).delete()
-    written: list[_WrittenRow] = [
-        (
-            item,
-            saved_pk(item),
-            False,
-            "default",
-        ),
-    ]
-    assert (
-        serializer_resolvers._checked_saved_result(
-            _as_serializer_mutation(fake),
-            item,
-            creating=False,
-            written=written,
-        )
-        is item
-    )
+    assert serializer_resolvers._checked_saved_result(_as_serializer_mutation(fake), item) is item
 
 
 def test_validator_querysets_are_recursively_pinned_to_write_alias() -> None:
@@ -4003,230 +2948,6 @@ def test_list_field_child_validator_querysets_are_pinned_and_isolated() -> None:
     assert _validator_queryset_db(shard_validator) == "shard_b"
     assert _validator_queryset_db(default_validator) == "default"
     assert _validator_queryset_db(shared) is None
-
-
-def test_runtime_context_field_source_collision_fails_before_validation() -> None:
-    """Context-dependent hidden fields absent from schema discovery still fail loud."""
-
-    class ContextualSerializer(serializers.Serializer[object]):
-        name = serializers.CharField()
-
-        @override
-        def get_fields(self) -> dict[str, DRFField]:
-            fields: dict[str, DRFField] = base_fields(super())
-            if self.context.get("inject_hidden"):
-                fields["hidden_name"] = serializers.HiddenField(default="server", source="name")
-            return fields
-
-    mutation_cls = type(
-        "ContextualMutation",
-        (),
-        {
-            "_mutation_meta": SimpleNamespace(operation="create"),
-        },
-    )
-    serializer = ContextualSerializer(
-        data={"name": "client"},
-        context={"inject_hidden": True},
-    )
-
-    with pytest.raises(ConfigurationError, match="runtime serializer path '<root>'"):
-        serializer_resolvers._assert_runtime_write_source_ownership(
-            _as_serializer_mutation(mutation_cls),
-            serializer,
-            {"name": "client"},
-            [],
-        )
-
-
-def test_runtime_nested_source_ownership_handles_omitted_child_data() -> None:
-    """An omitted nested value still audits the child serializer with empty data."""
-
-    class ChildSerializer(serializers.Serializer[object]):
-        name = serializers.CharField(required=False)
-
-    class ParentSerializer(serializers.Serializer[object]):
-        child = ChildSerializer(required=False)
-
-    mutation_cls = type(
-        "NestedOwnershipMutation",
-        (),
-        {
-            "_mutation_meta": SimpleNamespace(operation="update"),
-        },
-    )
-    nested_spec = InputFieldSpec(
-        input_attr="child",
-        graphql_name="child",
-        target_name="child",
-        kind=NESTED_SINGLE,
-        nested_specs=(),
-    )
-
-    serializer_resolvers._assert_runtime_write_source_ownership(
-        _as_serializer_mutation(mutation_cls),
-        ParentSerializer(data={}),
-        {},
-        [nested_spec],
-    )
-
-
-def test_runtime_context_star_source_field_is_rejected_before_validation() -> None:
-    """A context-dependent ``source="*"`` runtime field is rejected before validation runs.
-
-    Such a field never reaches the schema-time column converter (it only exists at runtime),
-    yet DRF would merge its returned mapping into validated_data and could overwrite the
-    client's ``name``. The runtime ownership guard rejects any writable star field.
-    """
-
-    class ContextualStarSerializer(serializers.Serializer[object]):
-        name = serializers.CharField()
-
-        @override
-        def get_fields(self) -> dict[str, DRFField]:
-            fields: dict[str, DRFField] = base_fields(super())
-            if self.context.get("inject_star"):
-                # A defaulted whole-object field genuinely contributes to validated_data
-                # at runtime (it needs no client value), so it can overwrite ``name``.
-                fields["whole"] = serializers.HiddenField(
-                    default={"name": "server"},
-                    source="*",
-                )
-            return fields
-
-    mutation_cls = type(
-        "ContextualStarMutation",
-        (),
-        {
-            "_mutation_meta": SimpleNamespace(operation="create"),
-        },
-    )
-    serializer = ContextualStarSerializer(
-        data={"name": "client"},
-        context={"inject_star": True},
-    )
-
-    with pytest.raises(ConfigurationError, match="source='\\*'"):
-        serializer_resolvers._assert_runtime_write_source_ownership(
-            _as_serializer_mutation(mutation_cls),
-            serializer,
-            {"name": "client"},
-            [],
-        )
-
-
-def _contextual_attname_item_serializer() -> type[
-    serializers.ModelSerializer[product_models.Item]
-]:
-    """An ``Item`` serializer whose ``get_fields()`` adds a defaulted FK ``attname`` alias per request.
-
-    ``cat`` (``source="category_id"``, ``default=None``) exists only when a request is in
-    context, so class creation never sees it.
-    """
-
-    class ContextualAttnameSerializer(ModelSerializerBase[product_models.Item]):
-        class Meta:
-            model = product_models.Item
-            fields = ("name", "category")
-
-        @override
-        def get_fields(self) -> dict[str, DRFField]:
-            fields: dict[str, DRFField] = base_fields(super())
-            if self.context.get("request") is not None:
-                fields["cat"] = serializers.PrimaryKeyRelatedField(
-                    source="category_id",
-                    queryset=product_models.Category.objects.all(),
-                    required=False,
-                    default=None,
-                )
-            return fields
-
-    return ContextualAttnameSerializer
-
-
-def _category_with_contextual_items() -> type[
-    serializers.ModelSerializer[product_models.Category]
-]:
-    """A ``Category`` serializer nesting the contextual ``Item`` serializer as ``items``."""
-
-    class CategoryWithContextualItems(ModelSerializerBase[product_models.Category]):
-        items = _contextual_attname_item_serializer()(many=True)
-
-        class Meta:
-            model = product_models.Category
-            fields = ("name", "items")
-
-        @override
-        def create(self, validated_data: dict[str, object]) -> product_models.Category:
-            items = cast("list[dict[str, object]]", validated_data.pop("items"))
-            category = product_models.Category.objects.create(**validated_data)
-            for item in items:
-                product_models.Item.objects.create(**item)
-            return category
-
-    return CategoryWithContextualItems
-
-
-def _root_attname_data(category_pk: int) -> dict[str, object]:
-    """Client data for the root ``Item`` create: ``name`` + the FK ``category``."""
-    return {"name": "RuntimeAliasClient", "category": category_pk}
-
-
-def _nested_attname_data(category_pk: int) -> dict[str, object]:
-    """Client data for the ``Category`` create nesting one ``Item`` with its FK ``category``."""
-    return {
-        "name": "RuntimeAliasParent",
-        "items": [{"name": "RuntimeAliasClient", "category": category_pk}],
-    }
-
-
-@pytest.mark.parametrize(
-    ("serializer_factory", "nested_fields", "data_factory"),
-    [
-        pytest.param(
-            _contextual_attname_item_serializer,
-            None,
-            _root_attname_data,
-            id="root",
-        ),
-        pytest.param(
-            _category_with_contextual_items,
-            {"items": NestedSerializerConfig()},
-            _nested_attname_data,
-            id="nested",
-        ),
-    ],
-)
-@pytest.mark.django_db
-def test_runtime_attname_collision_retains_configuration_error_class(
-    serializer_factory: Callable[[], type[DRFSerializer]],
-    nested_fields: Mapping[str, NestedSerializerConfig] | None,
-    data_factory: Callable[[int], dict[str, object]],
-) -> None:
-    """Runtime serializer source collisions retain the private ConfigurationError class."""
-    seed_data(0)
-
-    (category,) = categories_from_seed(("RuntimeAliasCat", False))
-
-    mutation_cls = _bind_item_serializer_mutation(
-        serializer_factory(),
-        nested_fields=nested_fields,
-    )
-
-    request = HttpRequest()
-
-    request.user = User(username="u")
-
-    info = make_info(context=SimpleNamespace(request=request))
-
-    with pytest.raises(ConfigurationError), write_pipeline("default", lock=False):
-        serializer_resolvers._serializer_write_step(
-            mutation_cls,
-            info,
-            None,
-            data_factory(saved_pk(category)),
-            specs=mutation_cls._input_field_specs,
-        )
 
 
 def test_validator_queryset_explicitly_routed_elsewhere_fails_closed() -> None:
@@ -4382,124 +3103,6 @@ def test_decode_nested_explicit_none_passes_through() -> None:
     provided, error = serializer_resolvers._decode_input_object(specs, data, info=unread_info())
     assert error is None
     assert provided == {"detail": None}
-
-
-def _nested_agreement_fake(
-    *,
-    kind: str = NESTED_SINGLE,
-    nested_specs: tuple[InputFieldSpec, ...] | None = None,
-) -> type[object]:
-    """Build a fake mutation carrying ONE nested ``InputFieldSpec`` (with nested_specs)."""
-    child_specs = (
-        nested_specs
-        if nested_specs is not None
-        else (
-            InputFieldSpec(
-                input_attr="code",
-                graphql_name="code",
-                target_name="code",
-                kind=SCALAR,
-            ),
-        )
-    )
-    spec = InputFieldSpec(
-        input_attr="detail",
-        graphql_name="detail",
-        target_name="detail",
-        kind=kind,
-        nested_specs=child_specs,
-    )
-    return type("FakeMut", (), {"_input_field_specs": [spec], "_injected_field_specs": []})
-
-
-def _child_single_serializer() -> serializers.Serializer[object]:
-    class Child(serializers.Serializer[object]):
-        code = serializers.CharField()
-
-    class ParentSingle(serializers.Serializer[object]):
-        detail = Child()
-
-    return ParentSingle(data={})
-
-
-def _child_many_serializer() -> serializers.Serializer[object]:
-    class Child(serializers.Serializer[object]):
-        code = serializers.CharField()
-
-    class ParentMany(serializers.Serializer[object]):
-        detail = Child(many=True)
-
-    return ParentMany(data={})
-
-
-def test_nested_agreement_multi_spec_over_single_runtime_raises() -> None:
-    """A schema nested-MULTI field that is a single serializer at runtime fails loud."""
-    fake = _nested_agreement_fake(kind=NESTED_MULTI)
-    with pytest.raises(ConfigurationError, match="nested list of serializers"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _child_single_serializer(),
-        )
-
-
-def test_nested_agreement_single_spec_over_many_runtime_raises() -> None:
-    """A schema nested-SINGLE field that is a ``ListSerializer`` at runtime fails loud."""
-    fake = _nested_agreement_fake(kind=NESTED_SINGLE)
-    with pytest.raises(ConfigurationError, match="nested serializer"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _child_many_serializer(),
-        )
-
-
-def test_nested_agreement_recurses_into_child_specs() -> None:
-    """A nested field's child spec is held to the SAME agreement contract (recursion)."""
-    ghost_child = (
-        InputFieldSpec(
-            input_attr="ghost",
-            graphql_name="ghost",
-            target_name="ghost",
-            kind=SCALAR,
-        ),
-    )
-    fake = _nested_agreement_fake(nested_specs=ghost_child)
-    # The runtime nested ``Child`` declares ``code``, not ``ghost``.
-    with pytest.raises(ConfigurationError, match="does not declare it"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            _child_single_serializer(),
-        )
-
-
-def test_agreement_scalar_field_that_became_nested_serializer_raises() -> None:
-    """A schema SCALAR field that is a nested serializer at runtime fails loud (the kind moved)."""
-
-    class Child(serializers.Serializer[object]):
-        x = serializers.CharField()
-
-    class Runtime(serializers.Serializer[object]):
-        detail = Child()
-
-    fake = type(
-        "M",
-        (),
-        {
-            "_input_field_specs": [
-                InputFieldSpec(
-                    input_attr="detail",
-                    graphql_name="detail",
-                    target_name="detail",
-                    kind=SCALAR,
-                ),
-            ],
-            "_injected_field_specs": [],
-        },
-    )
-    with pytest.raises(ConfigurationError, match="nested serializer"):
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            Runtime(data={}),
-        )
 
 
 def test_decode_nested_single_error_short_circuits() -> None:
@@ -4686,14 +3289,6 @@ def test_flattener_survives_error_depth_beyond_the_recursion_limit() -> None:
     flattened = serializer_resolvers.serializer_errors_to_field_errors(errors, {})
     assert len(flattened) == 1
     assert flattened[0].messages == ["boom"]
-
-
-def test_flattener_rejects_a_cyclic_error_structure() -> None:
-    """A CYCLIC detail structure (author-built ValidationError) fails loud, never loops."""
-    cyclic: dict[str, object] = {"name": ["msg"]}
-    cyclic["self"] = cyclic
-    with pytest.raises(ConfigurationError, match="CYCLIC detail structure"):
-        serializer_resolvers.serializer_errors_to_field_errors(cyclic, {})
 
 
 def test_flattener_truncates_past_the_node_budget() -> None:
@@ -4994,49 +3589,6 @@ def test_serializer_decode_step_returns_field_errors_on_decode_failure() -> None
     assert len(res.errors) == 1
     assert res.errors[0].field == NON_FIELD_ERROR_KEY
     assert res.errors[0].messages == ["Invalid input object."]
-
-
-# ===========================================================================
-# Class labels in diagnostics are the real class names
-# ===========================================================================
-# Every `ConfigurationError` the resolver raises names the mutation and serializer
-# classes through `utils/truth.py`, which reads the interpreter's own class name,
-# never a metaclass `__name__`; an ordinary class renders byte-identically.
-# Direct-called throughout: no wire query can declare a class.
-
-
-def test_agreement_missing_field_honest_labels_are_byte_identical() -> None:
-    """The honest missing-field message names the honest mutation and serializer."""
-    fake = type(
-        "HonestMut",
-        (),
-        {
-            "_input_field_specs": [
-                InputFieldSpec(
-                    input_attr="ghost",
-                    graphql_name="ghost",
-                    target_name="ghost",
-                    kind=SCALAR,
-                ),
-            ],
-            "_injected_field_specs": [],
-        },
-    )
-
-    class ShelfSer(serializers.ModelSerializer[library_models.Shelf]):
-        # basedpyright: DRF stubs declare ModelSerializer.Meta; the runtime class has none to subclass
-        class Meta:  # pyright: ignore[reportIncompatibleVariableOverride]
-            model = library_models.Shelf
-            fields = ("code", "branch")
-
-    with pytest.raises(ConfigurationError) as exc_info:
-        serializer_resolvers._assert_schema_runtime_agreement(
-            _as_serializer_mutation(fake),
-            ShelfSer(data={}),
-        )
-    message = str(exc_info.value)
-    assert message.startswith("SerializerMutation HonestMut: the schema exposes field 'ghost'")
-    assert "the runtime serializer ShelfSer does not declare it" in message
 
 
 # ===========================================================================

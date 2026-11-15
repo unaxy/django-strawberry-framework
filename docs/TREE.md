@@ -862,7 +862,7 @@ examples/fakeshop/test_query/    # Live GraphQL HTTP tests for fakeshop's consum
 ├── test_scalars_filter_api.py    # Live GraphQL HTTP tests for scalar filtering, ordering, and related-queryset behavior.
 ├── test_scalars_mutation_api.py  # Live GraphQL HTTP tests for model input normalization and database storability.
 ├── test_schema_composition_api.py  # Live ``/graphql/`` proof that fakeshop's composed project schema publishes every app's surface.
-├── test_serializer_runtime_api.py  # Live HTTP serializer tests for save errors, runtime field ownership and post-save conflicts.
+├── test_serializer_runtime_api.py  # Live HTTP serializer tests for save errors, runtime-only fields and post-save conflicts.
 ├── test_serializer_validator_bind_api.py  # Live HTTP coverage for the values DRF uniqueness validators actually bind.
 ├── test_serializer_validator_bind_sharded_api.py  # Live sharded HTTP checks for conditional DRF uniqueness on the write alias.
 ├── test_single_parent_fastpath_api.py  # Live GraphQL HTTP tests for the single-parent windowed-prefetch fast path.

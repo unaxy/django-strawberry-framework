@@ -73,7 +73,6 @@ from django_strawberry_framework.rest_framework.inputs import (
     get_serializer_for_schema,
     guard_create_required_serializer_fields,
     materialize_serializer_input_class,
-    normalize_nested_serializer_configs,
     raise_writable_source_ownership_errors,
     require_nested_fields_mapping,
     require_nested_serializer_config,
@@ -200,7 +199,6 @@ def _build_serializer_inputs(
         flavor="SerializerMutation",
         ordered=False,
     )
-    normalized_nested_configs = normalize_nested_serializer_configs(nested_configs)
     effective = resolve_effective_serializer_fields(
         serializer_class,
         fields=normalized_fields,
@@ -221,7 +219,7 @@ def _build_serializer_inputs(
             exclude=normalized_exclude,
             optional_fields=normalized_optional,
             field_map=field_map,
-            nested_configs=normalized_nested_configs,
+            nested_configs=nested_configs,
         )
         for operation_kind in (CREATE, PARTIAL)
     ]
@@ -1849,41 +1847,12 @@ def test_nested_serializer_config_sorts_unordered_name_keys_and_refuses_unordere
         ),
     )
 
-    normalized = normalize_nested_serializer_configs(
-        {"child": NestedSerializerConfig(exclude=declared, optional_fields=declared)},
-    )
+    config = NestedSerializerConfig(exclude=declared, optional_fields=declared)
 
-    assert normalized is not None
-    assert normalized["child"].exclude == tuple(canonical_order(declared))
-    assert normalized["child"].optional_fields == tuple(canonical_order(declared))
+    assert config.exclude == tuple(canonical_order(declared))
+    assert config.optional_fields == tuple(canonical_order(declared))
     with pytest.raises(ConfigurationError, match="ordered sequence of field name strings"):
-        normalize_nested_serializer_configs({"child": NestedSerializerConfig(fields=declared)})
-
-
-def test_nested_serializer_config_normalization_handles_cycles_and_passthrough_values() -> None:
-    """Normalization materializes one-shot selectors, leaves a self-referential map alone.
-
-    A ``nested_fields`` map that contains itself must not recurse forever, and a
-    non-``NestedSerializerConfig`` value the consumer parked in the map passes
-    through by identity.
-    """
-    nested: dict[str, object] = {}
-    nested["child"] = NestedSerializerConfig(
-        fields=(name for name in ("name",)),
-        # basedpyright: the non-config value parked in the map is the hostile input under test;
-        # NestedSerializerConfig types nested_fields as Mapping[str, NestedSerializerConfig]
-        nested_fields=nested,  # pyright: ignore[reportArgumentType]
-    )
-    nested["consumer"] = object()
-
-    # basedpyright: the non-config value parked in the map is the hostile input under test;
-    # normalize_nested_serializer_configs types the parameter as Mapping[str, NestedSerializerConfig]
-    normalized = normalize_nested_serializer_configs(nested)  # pyright: ignore[reportArgumentType]
-
-    assert normalized is not None
-    assert normalized["child"].fields == ("name",)
-    assert normalized["child"].nested_fields is nested
-    assert normalized["consumer"] is nested["consumer"]
+        NestedSerializerConfig(fields=declared)
 
 
 def test_nested_single_field_builds_recursive_input() -> None:
@@ -2505,14 +2474,6 @@ def test_nested_serializer_non_key_error_propagates_from_build_and_fingerprint()
         )
 
 
-def test_normalize_nested_serializer_configs_rejects_non_mapping() -> None:
-    """normalize_nested_serializer_configs raises ConfigurationError on non-mapping values."""
-    with pytest.raises(ConfigurationError, match="nested_configs must be a mapping"):
-        # basedpyright: the non-mapping config is the hostile input under test;
-        # normalize_nested_serializer_configs types the parameter as Mapping[str, NestedSerializerConfig]
-        normalize_nested_serializer_configs(["invalid"])  # pyright: ignore[reportArgumentType]
-
-
 def _require_mapping(value: object) -> object:
     return require_nested_fields_mapping("M", value)
 
@@ -2521,15 +2482,10 @@ def _require_config(value: object) -> object:
     return require_nested_serializer_config("M", "child", value)
 
 
-def _normalize_mapping(value: object) -> object:
-    # basedpyright: the hostile value is the input under test; the parameter is typed as a mapping
-    return normalize_nested_serializer_configs(value)  # pyright: ignore[reportArgumentType]
-
-
 @pytest.mark.parametrize(
     "check",
-    [_require_mapping, _require_config, _normalize_mapping],
-    ids=["nested-fields-mapping", "nested-config-value", "nested-configs-normalizer"],
+    [_require_mapping, _require_config],
+    ids=["nested-fields-mapping", "nested-config-value"],
 )
 @pytest.mark.parametrize("escape", [RuntimeError, KeyboardInterrupt])
 def test_nested_config_class_read_that_raises_propagates(
@@ -2543,15 +2499,6 @@ def test_nested_config_class_read_that_raises_propagates(
     """
     with pytest.raises(escape, match="hostile __class__ boom"):
         check(ClassReadRaises(escape, "hostile __class__ boom"))
-
-
-def test_nested_config_normalizer_propagates_an_unreadable_value() -> None:
-    """The normalizer's per-entry class test propagates a ``__class__`` read that raises."""
-    hostile = ClassReadRaises(message="hostile __class__ boom")
-    with pytest.raises(RuntimeError, match="hostile __class__ boom"):
-        # basedpyright: the hostile entry is the input under test; the parameter is typed as a
-        # mapping of NestedSerializerConfig values
-        normalize_nested_serializer_configs({"child": hostile})  # pyright: ignore[reportArgumentType]
 
 
 def test_nested_config_checks_accept_faithful_lazy_proxies() -> None:
