@@ -200,7 +200,6 @@ from django_strawberry_framework.utils.write_transaction import (
     reject_substituted_row,
     require_write_pipeline,
     rows_visible_after_lock,
-    snapshot_target_state,
 )
 from django_strawberry_framework.utils.write_values import (
     attempted_saves,
@@ -368,7 +367,6 @@ def run_write_pipeline_sync(
     decode_step: Callable[[models.Model | None], _DecodedT | StepFailure],
     write_step: Callable[[models.Model | None, _DecodedT], _SavedT | StepFailure],
     tail_step: Callable[[_SavedT], object] | None = None,
-    snapshot_target: bool = False,
 ) -> object:
     """Run the shared write orchestration every mutation flavor rides.
 
@@ -422,12 +420,6 @@ def run_write_pipeline_sync(
     A step that already answered ``conflict`` is not probed again, a create has no
     located row (its ``DoesNotExist`` propagates unprobed), and a success runs no
     probe.
-
-    ``snapshot_target`` captures the located row's ``target_state``
-    (``snapshot_target_state``) right after the locate. Only the serializer flavor
-    passes it: it is the one flavor whose write step checks the row for in-memory
-    drift, and the capture deep-copies field values, which runs a value type's own
-    ``__deepcopy__`` / ``__eq__``.
     """
     # The cooperative deadline (spec-047 Decision 9) BEFORE the pipeline's own transaction
     # opens: a write pipeline locates, locks, and writes rows, so an operation
@@ -503,8 +495,6 @@ def run_write_pipeline_sync(
         # the live ``instance.pk`` a hook could have re-pointed.
         authorized_pk = None if instance is None else pk_of(instance)
         pipeline_context.authorized_pk = authorized_pk
-        if snapshot_target and instance is not None:
-            pipeline_context.target_state = snapshot_target_state(instance)
 
         # The auth machinery (lazy user, permission set) may legitimately read a
         # DIFFERENT alias than the write alias under a divergent read/write

@@ -1856,22 +1856,13 @@ The pipeline steps:
    (a miss / hidden row → a not-found `FieldError` on `id`, no existence leak). `create`
    has no instance lookup. This is the **only** decode that precedes authorization, and
    it is a `GlobalID` decode of the mutation's *own* `id:` argument — never a relation
-   visibility probe. **The pipeline skeleton snapshots the authorized pk and the located
-   row's loaded concrete field values immediately after the locate** — before the
-   permission hook, the first consumer-controlled code, can touch the mutable located
-   instance — and publishes them on the write-pipeline context
-   ([`utils/write_transaction.py`][utils-write-transaction]`::WriteAliasContext.authorized_pk`
-   / `.target_state`); the field-value snapshot is taken for the serializer pipeline only
-   (`run_write_pipeline_sync(..., snapshot_target=True)`), the one flavor that checks it.
-   The snapshot captures each field independently of the live object: containers and
-   buffers (`JSONField` / `ArrayField` / a `BinaryField` `memoryview`) as iterative
-   structural fingerprints, a `FieldFile` by its database-relevant `name` string, and
-   every other value by a deep copy compared with `==`, so an in-place mutation on the
-   same object (`instance.data["x"] = …`, `instance.file.name = …`,
-   `instance.geom.transform(…)`) is still caught as drift. A value type with neither
-   value equality nor a working copy protocol (identity `__eq__`, an ambiguous or
-   non-reflexive `__eq__`, an uncopyable or too-deep object) is checked for replacement
-   only. Pk equality everywhere goes through the model pk field's own `to_python`
+   visibility probe. **The pipeline skeleton snapshots the authorized pk immediately after
+   the locate** — before the permission hook, the first consumer-controlled code, can
+   touch the mutable located instance — and publishes it on the write-pipeline context
+   ([`utils/write_transaction.py`][utils-write-transaction]`::WriteAliasContext.authorized_pk`).
+   The located row's other field values are not snapshotted: a permission method, hook or
+   validator that mutates the instance is trusted application code, and DRF's `update()`
+   saves the instance as it finds it. Pk equality everywhere goes through the model pk field's own `to_python`
    canonicalization (`::pks_match`), never a `str()` comparison — a `UUID` pk spells the
    same row several ways, and a forged pk of the wrong shape must read as a mismatch.
    `Meta.select_for_update` governs whether the locate takes a row lock.
@@ -2011,17 +2002,6 @@ The pipeline steps:
    and returns a null-object payload. `serializer.errors` is **not** the flat
    `field → [messages]` dict the `036` `validation_error_to_field_errors` handles — the
    flattener is spelled out below. Three guards bracket the validation:
-   - **A relation-intent ledger.** `_instrument_relation_intent` wraps every (top-level
-     and nested) relation field's `run_validation()` after the queryset scoping and
-     before `is_valid()`, recording the exact resolved objects — one entry per `many=True`
-     list item, with custom `pk_field` implementations still supported, since the ledger
-     records the relation object DRF finally resolves. `_assert_relation_intent` then
-     requires the final `validated_data` to carry them **by identity**, still carrying the
-     pk, alias and stored key captured at run_validation (a key re-pointed in place is a
-     substitution): renamed sources, injected fields, single relations, lists (length plus
-     pairwise identity, so duplicate and explicit-empty-list set semantics pass through),
-     and nested paths alike. A validator may reject a supplied relation but never pop,
-     substitute, or inject one.
    - **A storability check.** Each writable bound field whose `source` is a top-level
      `validated_data` key naming a concrete column
      (`utils/relations.py::written_model_field`;
@@ -2033,7 +2013,7 @@ The pipeline steps:
      (`django_strawberry_framework/rest_framework/resolvers.py::_hold_serializer_values`).
      DRF then runs its original serializer validators in their original order, with
      actual uniqueness query operations guarded as described below; a `validate_<field>`
-     hook's changed value reaches those actual queries. After the relation-intent proof,
+     hook's changed value reaches those actual queries. After `is_valid()`,
      `_unstorable_value_errors` checks the final `validated_data` for root writes changed
      by either hook or later validators. Read-only defaults merged by DRF for validation
      are operands, not root writes. A
@@ -2144,17 +2124,7 @@ The pipeline steps:
    field-keyed `null` error, as in the model and `ModelForm` flavors:
    `django_strawberry_framework/rest_framework/resolvers.py::_attempted_row_integrity_errors`); `serializer.save()` runs `create()` / `update()` and handles M2M
    assignment internally (DRF's `ModelSerializer.save()` writes the instance + its
-   relations). Five guards bracket the write, in order:
-   - **In-memory target drift is rejected immediately before `serializer.save()`**
-     (`assert_no_target_drift`, against the step-1 `target_state` snapshot). DRF's
-     `update()` saves the whole instance, so a `setattr` by a permission method, hook, or
-     validator would otherwise ride into the write unvalidated. A flavor-independent
-     backstop separately rejects an update result whose pk drifted from the
-     `authorized_pk` snapshot, and a delete whose instance pk drifts during authorization
-     fails the same way.
-   - **A pre-save M2M membership snapshot** (`_m2m_membership_snapshot`) is taken at
-     write-step entry — strictly **after** authorization, so no relation-membership query
-     ever runs pre-auth, and before any consumer hook.
+   relations). Three guards bracket the write, in order:
    - **A thread-scoped write witness** (`_write_witness`) records the backing model's
      actual writes through `post_save`, **with a pk snapshot taken at the signal**,
      because the model object is mutable and identity alone is forgeable; a `pre_save`
@@ -2171,16 +2141,11 @@ The pipeline steps:
      `created=True`).
    - **`get_serializer_save_kwargs` runs inside the same value-preserving, error-mapped
      closure as `save()` itself**.
-   - **After the save the returned top-level row is attested against the database**
-     (`_attest_saved_relations`): every supplied FK / OneToOne column is read back in one
-     `values()` query and must hold the validated target's key captured at run_validation
-     (`ForeignKey.target_field`: the related pk, or the `to_field` column), compared through
-     the key's own `to_python`, every supplied M2M must equal the validated pk
-     **set** (an explicit `[]` clears; duplicates collapse per DRF `.set()` semantics),
-     and every omitted partial-update M2M on the write surface must equal its pre-save
-     membership snapshot. A custom `create()` / `update()` that ignored or replaced
-     validated relations is a loud [`ConfigurationError`][glossary-configurationerror];
-     arbitrary same-alias behavior inside custom write code otherwise remains trusted.
+   - **A flavor-independent pk backstop** rejects an update result whose pk drifted from
+     the `authorized_pk` snapshot, and a delete whose instance pk drifts during
+     authorization fails the same way. What a custom `create()` / `update()` writes to the
+     relations it was handed is trusted application code: DRF's own `.set()` semantics
+     apply (an explicit `[]` clears; duplicates collapse).
 
    **The save result is validated before the re-fetch** (`_checked_saved_result`):
    correct model; identity with `serializer.instance` (DRF's `save()` bookkeeping — a
@@ -2681,7 +2646,7 @@ held by the identity ratchet where a symbol is shared:
 | **Non-delete operation set** | `NON_DELETE_WRITE_OPERATIONS` plus its reject message `non_delete_operation_error` in `mutations/operations.py` (the `{create, update, delete}` superset is `_VALID_OPERATIONS` there), reached from both flavors through `write_mixins.py::require_non_delete_operation` | Call `require_non_delete_operation`; the "no serializer/form delete" message is single-sited | [Decision 10](#decision-10--operations-create--update-no-serializer-delete) + Slice 2 `_validate_meta` |
 | **Shape-build cache** | `utils/inputs.py::make_shape_build_cache()`, returning the per-flavor dict + a `clear()` registered through `register_subsystem_clear` (the model flavor's `_shape_build_cache`, the form flavor's `_form_shape_build_cache` and the serializer's cache are three instances) | The `SerializerInputShape` descriptor identity is serializer-specific; only the cache **+ clear plumbing** is shared | [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth) + Slice 2 finalizer-reset checklist |
 | **Converter dispatch skeleton** | `(field, isinstance_prechecks, scalar_registry, fallthrough_error_factory) → conversion` in `utils/converters.py` (`convert_with_mro`, `make_kind_converter`, `make_scalar_converter`, `finish_field_conversion`), with the shared conversion base `FieldConversionBase` + `InputFieldSpec` in [`utils/inputs.py`][utils-inputs]; [`forms/converter.py`][forms-converter] rides it too | `convert_serializer_field` supplies only its precheck table + scalar registry; the **GOAL-mandated fail-loud contract** (no silent `String` catch-all) is single-sited across both converters | [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth) (converter) + [Decision 4](#decision-4--module-and-test-locations-rest_framework-subpackage-mirroring-forms) (skeleton home) + Slice 1 |
-| **Sync write-pipeline skeleton** | `run_write_pipeline_sync(...)` in [`mutations/resolvers.py`][mutations-resolvers] — owning atomicity, the create-vs-update branch, the locate→authorize preamble, **authorization before `decode_step`**, and the `refetch_optimized → build_payload` tail, with a `tail_step` seam for delete's snapshot payload and a no-primary-type `{ ok: true }` tail for the model-less plain form, so **every** flavor rides it | The serializer supplies only `decode_step(ctx) -> decoded \| StepFailure` and `write_step(ctx, decoded) -> saved \| StepFailure` (construct / `is_valid()` / `save()`), plus `snapshot_target=True` (the post-locate field-value snapshot its drift check reads); it does **not** re-spell the atomic block or the **authorize-before-decode security ordering** (a security invariant, not just a shape) | [Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload) + Slice 3 resolver checklist |
+| **Sync write-pipeline skeleton** | `run_write_pipeline_sync(...)` in [`mutations/resolvers.py`][mutations-resolvers] — owning atomicity, the create-vs-update branch, the locate→authorize preamble, **authorization before `decode_step`**, and the `refetch_optimized → build_payload` tail, with a `tail_step` seam for delete's snapshot payload and a no-primary-type `{ ok: true }` tail for the model-less plain form, so **every** flavor rides it | The serializer supplies only `decode_step(ctx) -> decoded \| StepFailure` and `write_step(ctx, decoded) -> saved \| StepFailure` (construct / `is_valid()` / `save()`); it does **not** re-spell the atomic block or the **authorize-before-decode security ordering** (a security invariant, not just a shape) | [Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload) + Slice 3 resolver checklist |
 | **Subsystem-clear registration seam** | `register_subsystem_clear(clear, *, owner, before_bind=False)` in [`registry.py`][registry], feeding **one** canonical registry that **both** the [`finalize_django_types`][types-finalizer] pre-bind reset (`iter_subsystem_clears(before_bind=True)`) and `registry.clear()` iterate | `clear_serializer_input_namespace` is registered as a **zero-argument callable with a stable `owner`**, `before_bind=True`, from the module that owns the ledger (a string reference is rejected); because only an imported owner can register, a DRF-absent build needs no import-guarded clear, and a rename fails loudly at the owner's own import. Invariant: a subsystem with clearable state has by definition been imported + registered | [Decision 6](#decision-6--base-class-strategy-serializermutation-rides-the-djangomutation-base-modelserializer-driven) + Slice 2 finalizer-reset checklist |
 | **Build / stash / name seam** | `cached_build_input(shape_key, *, guard, build_fn) -> (input_cls, field_specs)` (the per-pass lookup + the **guard-before-lookup** ordering) and `build_and_stash_input(cls, *, build, materialize, specs_of)` in [`write_mixins.py`][write-mixins]; both form bases ride them | The serializer supplies only its generator, materialize fn, and shape descriptor, and rides `build_and_stash_input` (materialize-then-stash). It does **not** ride `cached_build_input`: that helper looks its key up BEFORE building, but the serializer's key is the `SerializerInputShape` descriptor, only knowable AFTER the build, so the helper would build the shape twice. The descriptor-keyed dedupe stays an inline lookup-or-store keyed on the post-build descriptor, while the per-declaration guard-before-dedupe ordering is preserved directly | [Decision 6](#decision-6--base-class-strategy-serializermutation-rides-the-djangomutation-base-modelserializer-driven) / [Decision 7](#decision-7--serializer-field--strawberry-input-mapping-the-serializer-is-the-input-source-of-truth) + Slice 2 `sets.py` checklist |
 
@@ -2759,9 +2724,7 @@ Pin as named import obligations (Slice DoD lines): `utils/inputs.py::predicted_i
 `utils/permissions.py::request_from_info(family_label="SerializerMutation")`;
 `mutations/inputs.py::{annotate_queryset_relation, model_column_write_annotation,
 model_column_write_kind}` (the **backing** model-relation read the converter does via
-`source`, not re-derived from DRF's `many` / `source` flags) plus
-`utils/relations.py::{is_forward_many_to_many, is_single_column_foreign_key}` on the
-resolver's attestation path; the
+`source`, not re-derived from DRF's `many` / `source` flags); the
 `utils/querysets.py::{model_for, initial_queryset, apply_type_visibility_sync,
 apply_type_visibility_async, visibility_scoped_related_queryset, reject_async_in_sync_context}`
 locate + relation-visibility + async-guard substrate (a re-spell here is a data-leak risk,
@@ -2805,7 +2768,7 @@ the Slice-1 DRY bullet enumerates, and that one is executable
 | [`serializer_converter.py`][rf-converter] | `exceptions`, `registry`, `scalars`, `mutations/inputs.py`, `types/converters.py`, `utils/converters.py`, `utils/inputs.py` | the shared fail-loud dispatch skeleton, the shared conversion base + field spec, the four input-kind constants, the read-side scalar / enum core (`convert_scalar`, `scalar_for_field`, `build_enum_from_choices`, `choice_enum_name`), the model-column relation classifiers (`model_column_write_kind`, `model_column_write_annotation`, `annotate_queryset_relation`), the [`Upload`][glossary-upload-scalar] scalar, `predicted_input_field_name`, the `register_subsystem_clear` seam |
 | [`inputs.py`][rf-inputs] | `exceptions`, `registry`, `mutations/inputs.py`, `utils/inputs.py`, `.serializer_converter` | the input-namespace one-ledger trio, the shape-build cache pair, `build_strawberry_input_class`, `generated_input_type_name`, `guard_dropped_required`, `iter_input_field_collisions`, `optional_input_field`, `resolve_effective_fields`, `normalize_field_name_sequence`, `pascalize_token`, `InputFieldSpec`, `predicted_input_field_name`, the `CREATE` / `PARTIAL` kinds, the `register_subsystem_clear` seam |
 | [`sets.py`][rf-sets] | `exceptions`, `mutations/inputs.py`, `mutations/operations.py`, `mutations/sets.py`, `utils/inputs.py`, `write_mixins.py`, `.inputs`, `.serializer_converter` | `DjangoMutation`, `_ValidatedMutationMeta`, `_validate_permission_classes`, `reject_unknown_meta_keys`, `MODEL_BACKED_WRITE_META_KEYS`, `NON_DELETE_OPERATION_INPUT_KIND` + `require_non_delete_operation`, `build_and_stash_input`, `construction_kwargs`, `normalize_meta_field_selection`, `own_backing_class`, `require_backing_class` / `require_subclass`, `resolve_backed_model_or_raise` (the no-model raise + `require_model_class`) / `resolve_meta_model`, `resolver_seams`, `validate_select_for_update`, `normalize_field_name_sequence` |
-| [`resolvers.py`][rf-resolvers] | `exceptions`, `mutations/inputs.py`, `mutations/resolvers.py`, `utils/errors.py`, `utils/inputs.py`, `utils/permissions.py`, `utils/querysets.py`, `utils/relations.py`, `utils/write_transaction.py`, `utils/write_values.py`, `.hook_context`, `.inputs`, `.serializer_converter` | the shared sync-pipeline skeleton `run_write_pipeline_sync` + `make_resolver_entries`, the shared decode primitives in `utils/write_values.py` — `decode_visible_relation`, `decode_visible_relation_ids`, `decode_provided_fields`, `decode_field_handlers`, `decoded_into` — the shared leaf-error constructors in `utils/errors.py`, the `NON_FIELD_ERROR_KEY` sentinel and `FieldError`, the write-transaction substrate (`require_write_pipeline`, `pipeline_write_phase`, `pin_write_queryset`, `base_locked_queryset`, `assert_no_target_drift`, `pks_match`, `column_values_match`, `make_cross_alias_save_guard`), `related_visibility_queryset`, `request_from_info` |
+| [`resolvers.py`][rf-resolvers] | `exceptions`, `mutations/inputs.py`, `mutations/resolvers.py`, `utils/errors.py`, `utils/inputs.py`, `utils/permissions.py`, `utils/querysets.py`, `utils/relations.py`, `utils/write_transaction.py`, `utils/write_values.py`, `.hook_context`, `.inputs`, `.serializer_converter` | the shared sync-pipeline skeleton `run_write_pipeline_sync` + `make_resolver_entries`, the shared decode primitives in `utils/write_values.py` — `decode_visible_relation`, `decode_visible_relation_ids`, `decode_provided_fields`, `decode_field_handlers`, `decoded_into` — the shared leaf-error constructors in `utils/errors.py`, the `NON_FIELD_ERROR_KEY` sentinel and `FieldError`, the write-transaction substrate (`require_write_pipeline`, `pipeline_write_phase`, `pin_write_queryset`, `base_locked_queryset`, `pks_match`, `make_cross_alias_save_guard`), `related_visibility_queryset`, `request_from_info` |
 | [`__init__.py`][rf-init] | `utils/imports.py` | the shared `require_optional_module` core behind `require_drf()` (Decision 12) |
 | [`hook_context.py`][rf-hook-context] | nothing | — (two frozen dataclasses, no framework dependency) |
 

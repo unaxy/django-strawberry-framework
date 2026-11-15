@@ -79,7 +79,6 @@ SQLite ``PRAGMA query_only`` reentrancy argument, which is unique to
 
 from __future__ import annotations
 
-import copy
 import threading
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
@@ -87,9 +86,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 from django.core.exceptions import ValidationError
 from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, router, transaction
-from django.db.models.fields.files import FieldFile
 from django.db.models.signals import pre_save
-from typing_extensions import override
 
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.utils.errors import FIELD_ERROR_CODE_CONFLICT, field_error
@@ -97,14 +94,10 @@ from django_strawberry_framework.utils.errors import FIELD_ERROR_CODE_CONFLICT, 
 from . import truth
 from ._narrowing import (
     call_method,
-    is_set_or_frozenset,
     list_of,
     pk_of,
-    read_attr,
-    require,
 )
 from ._queryset_private import queryset_db, queryset_fetch_mode, set_queryset_fetch_mode
-from .canonical import base_container_values, canonical_sort_key
 from .typing import object_result
 
 if TYPE_CHECKING:
@@ -195,13 +188,6 @@ class WriteAliasContext:
     their saved result against THIS value, never against the live
     ``instance.pk`` a hook could have re-pointed.
 
-    ``target_state`` is the companion snapshot of the located instance's LOADED
-    concrete field values (``snapshot_target_state``), captured at the same
-    immediately-after-locate moment for the serializer flavor only, which rejects
-    in-memory target drift against it before saving (a permission method / hook /
-    validator that ``setattr``-ed the located row cannot smuggle unvalidated values
-    into the write); ``None`` for every other flavor and for create.
-
     ``id_name`` is the wire name the executing schema published for the update /
     delete ``id`` argument (``utils/typing.py::published_argument_wire_name``), set by
     the pipeline skeleton as the pipeline opens; the default ``"id"`` stands for
@@ -237,7 +223,6 @@ class WriteAliasContext:
         "authorized_pk",
         "id_name",
         "lock",
-        "target_state",
         "write_phase",
     )
 
@@ -246,7 +231,6 @@ class WriteAliasContext:
         self.alias: str = alias
         self.lock: bool = lock
         self.authorized_pk: object = None
-        self.target_state: dict[str, _ValueSnapshot] | None = None
         self.id_name: str = "id"
         self.write_phase: bool = False
         self.auth_phase: bool = False
@@ -870,400 +854,6 @@ def reject_substituted_row(
     """
     if not pks_match(model, actual_pk, authorized_pk):
         raise ConfigurationError(message)
-
-
-# The field-value types the target-state snapshot FINGERPRINTS (JSONField -> dict /
-# list, ArrayField -> list, BinaryField -> bytearray / memoryview, and so on): the
-# fingerprint is an iterative structural walk read through each type's base slots,
-# so a deep, cyclic, or self-misreporting value is handled without trusting its own
-# ``__deepcopy__`` / ``__eq__``. A ``FieldFile`` is snapshotted by its
-# database-relevant ``name`` string (see ``_FileNameSnapshot``). Every other value is
-# deep-copied and compared with ``==`` (see ``_snapshot_field_value``).
-_MUTABLE_SNAPSHOT_TYPES = (
-    dict,
-    list,
-    set,
-    frozenset,
-    tuple,
-    bytearray,
-    memoryview,
-)
-# The containers the fingerprint walks through their base iterators.
-_FINGERPRINT_CONTAINER_TYPES = (
-    dict,
-    list,
-    tuple,
-    set,
-    frozenset,
-)
-
-
-class _ValueSnapshot:
-    """Base for a captured field value that knows how to re-compare itself.
-
-    Every value ``snapshot_target_state`` captures is one of these, so
-    ``assert_no_target_drift`` asks each one ``matches(current)`` and nothing else.
-    The kinds, in capture order: ``_FileNameSnapshot`` (a ``FieldFile`` by its
-    ``name``), ``_FieldFingerprint`` (a container / buffer by structural digest),
-    ``_CopiedValueSnapshot`` (any other value by a deep copy compared with ``==``),
-    and ``_ReferenceSnapshot`` (a value with neither value equality nor a working
-    copy protocol, checked for replacement only).
-
-    The capture side and the drift side are two halves of one security check,
-    so the compare half is a method on each snapshot kind rather than a second,
-    independent ladder over the same kinds written in the opposite direction.
-    A snapshot
-    kind added to one and missed in the other is not a cosmetic bug: miss it on
-    the capture side and a mutable value is aliased, so the
-    drift check compares an object to ITSELF and passes; miss it on the compare
-    side and the wrapper is compared to a live value, so it never matches and
-    every write fails. A silent fail-open or a total fail-closed, decided by
-    which half was edited.
-
-    Making the comparison a method on the wrapper closes the compare side: a new
-    kind is a subclass plus one arm in ``_snapshot_field_value``, and
-    ``assert_no_target_drift`` needs no edit at all.
-
-    Deliberately NOT ``__eq__``: identity/equality short-circuiting on a mutable
-    live object is the exact trap these wrappers exist to avoid, so the
-    comparison has to be a name a reader sees at the call site.
-    """
-
-    __slots__: tuple[str, ...] = ()
-
-    def matches(self, _current: object, /) -> bool:
-        """Return whether the current value still holds the value this snapshot captured."""
-        raise NotImplementedError
-
-
-class _FileNameSnapshot(_ValueSnapshot):
-    """A ``FieldFile``'s database-relevant value (its ``name``), captured by value.
-
-    ``FieldFile`` is a MUTABLE descriptor: a permission method / hook / validator can
-    assign ``instance.<file>.name = ...`` in place, leaving the snapshot and the live
-    attribute the same object so an identity/``==`` drift check short-circuits and DRF's
-    whole-instance save persists the unauthorized file-column change. Snapshotting the
-    immutable ``name`` string instead makes that drift detectable.
-    """
-
-    __slots__: tuple[str, ...] = ("name",)
-
-    def __init__(self, name: str | None) -> None:
-        self.name: str | None = name
-
-    @override
-    def matches(self, current: object) -> bool:
-        """Compare the database-relevant ``name``, not the descriptor object.
-
-        A hook that mutates ``instance.<file>.name`` in place keeps the SAME
-        descriptor, so an identity / ``==`` check on the descriptor would miss
-        it. A hook that replaced the attribute with a non-``FieldFile`` (decided
-        by its real class) is drift too, so the raw value is compared in that
-        case; the replacement's own ``__eq__`` is consumer code and whatever it
-        raises propagates.
-        """
-        current_name = current.name if truth.is_instance(current, FieldFile) else current
-        return current_name == self.name
-
-
-# The node budget for one field value's structural fingerprint. Consumer-
-# controlled JSON / array data is walked ITERATIVELY (no recursion, so a
-# pathologically deep value cannot raise ``RecursionError`` mid-pipeline); a
-# value with more nodes than this is rejected loudly rather than walked unbounded.
-_SNAPSHOT_NODE_BUDGET = 100_000
-
-
-class _SnapshotClose:
-    """A structural close-marker on the fingerprint stack (distinct from any field value).
-
-    ``container_id`` is set only on a marker that closes a CONTAINER, so popping
-    it also pops that container off the active-path set the cycle guard keeps.
-    A separator marker (the fixed key/value divider inside a dict) carries
-    ``None``.
-    """
-
-    __slots__: tuple[str, ...] = ("container_id", "token")
-
-    def __init__(self, token: str, container_id: int | None = None) -> None:
-        self.token: str = token
-        self.container_id: int | None = container_id
-
-
-class _FieldFingerprint(_ValueSnapshot):
-    """A field value's iterative structural fingerprint (compared by digest, never deep-walked)."""
-
-    __slots__: tuple[str, ...] = ("digest",)
-
-    def __init__(self, digest: str) -> None:
-        self.digest: str = digest
-
-    @override
-    def matches(self, current: object) -> bool:
-        """Compare the RECOMPUTED fingerprint: a flat digest, never a deep walk."""
-        return _field_fingerprint(current) == self.digest
-
-
-class _CopiedValueSnapshot(_ValueSnapshot):
-    """Any other field value, captured as a deep copy that compared equal to it.
-
-    A GeoDjango geometry, a dataclass from a custom ``to_python``, or any other
-    value with value equality can be mutated IN PLACE (``geom.transform(...)``),
-    so keeping the live object would alias it and the drift check would compare it
-    with itself. The copy is independent of the live value; it is kept only when
-    it compares equal to the original at capture, so an unmutated value matches.
-    """
-
-    __slots__: tuple[str, ...] = ("copy",)
-
-    def __init__(self, copied: object) -> None:
-        self.copy: object = copied
-
-    @override
-    def matches(self, current: object) -> bool:
-        """Compare the captured copy with the current value through ``==``.
-
-        The current value's own ``__eq__`` / ``__bool__`` is consumer code (it may be a
-        value the code the check polices planted), so what it raises propagates.
-        """
-        return bool(self.copy == current)
-
-
-class _ReferenceSnapshot(_ValueSnapshot):
-    """A value with neither value equality nor a working copy protocol, kept by reference.
-
-    The residual ``_snapshot_field_value`` falls back to when a deep copy raises
-    or does not compare equal to its original (identity equality, an ambiguous
-    or non-reflexive ``__eq__``, an uncopyable or too-deep object). Such a value
-    is checked for REPLACEMENT only: an in-place mutation of the same object is
-    not observable through it.
-    """
-
-    __slots__: tuple[str, ...] = ("value",)
-
-    def __init__(self, value: object) -> None:
-        self.value: object = value
-
-    @override
-    def matches(self, current: object) -> bool:
-        """Match the same object, or one comparing equal through its own ``==`` (which propagates)."""
-        return current is self.value or bool(current == self.value)
-
-
-def _leaf_token(item: object) -> str:
-    """Render one non-container leaf of the fingerprint without trusting consumer code.
-
-    Two tiers. The immutable BUILT-IN atoms (whose base repr is a complete
-    function of their persisted content) are rendered through the BASE type's
-    unbound slot: a ``str`` / ``int`` subclass's lying ``__repr__`` never runs,
-    the byte strings are read through the buffer (never ``bytes(item)``, whose
-    constructor dispatches a subclass ``__bytes__``), and the tag names the base
-    type that defined the read - not the subclass's claimed ``__name__``.
-    Everything else is opaque: its repr is joined with the type's and
-    the value's IDENTITY, so a constant ``__repr__`` cannot collapse two
-    distinct objects onto one fingerprint. Identity is sound here because a
-    fingerprint is request-scoped - the digest is recomputed from the same live
-    objects within one drift check, never persisted or cached.
-    """
-    if item is None:
-        return "NoneType:None"
-    if truth.is_instance(item, bool):
-        return f"bool:{item}"  # bool cannot be subclassed; str() is the content
-    if truth.is_instance(item, int):
-        return f"int:{int.__repr__(item)}"
-    if truth.is_instance(item, float):
-        return f"float:{float.__repr__(item)}"
-    if truth.is_instance(item, str):
-        return f"str:{str.__repr__(item)}"
-    if (
-        truth.is_instance(item, bytes)
-        or truth.is_instance(item, bytearray)
-        or truth.is_instance(item, memoryview)
-    ):
-        # Content-addressed and type-insensitive: bytes, bytearray and a memoryview
-        # of one content are one value to the database write, so they are one leaf here.
-        try:
-            content = memoryview(item).tobytes()
-        except ValueError:
-            # A released memoryview has no content left to read; its fixed token
-            # differs from every content token, so a release after capture is drift.
-            return "memoryview:released"
-        return f"b:{content!r}"
-    return f"{truth.kind(item)}:{truth.render(item)}:{id(type(item))}:{id(item)}"
-
-
-def _field_fingerprint(value: object) -> str:
-    """Canonically serialize a mutable container value to a token string, ITERATIVELY.
-
-    An explicit stack (never recursion) walks nested dict / list / tuple / set /
-    bytes, so a JSONField / ArrayField value deeper than Python's recursion limit
-    is fingerprinted without a ``RecursionError``; a node budget caps total work
-    (a value exceeding it is a loud ``ConfigurationError``, not an unbounded walk).
-    Dict entries and set members are emitted in a deterministic order so
-    structurally equal values fingerprint identically.
-
-    The walk trusts no consumer-controlled read on the way through, because its
-    output IS a security check (the drift digest):
-
-    - Every container is read through its BASE iterator and every unordered one
-      is ordered by the canonical sort key (``utils/canonical.py``) - a subclass that
-      reports different contents per call, or a ``__repr__`` that returns a
-      constant, cannot decide what the walk sees.
-    - A dict KEY is walked as a node in its own right (the fixed ``=v`` token
-      separates key from value), so a tuple / frozenset / lying-atom key gets
-      the same treatment as any value - never a ``repr`` label a
-      lying key could forge.
-    - Every leaf is rendered by ``_leaf_token``: content-honest through the
-      base slots for the built-in atoms, identity-discriminated for opaque
-      objects, so two structurally different values can never fingerprint the
-      same.
-    """
-    parts: list[str] = []
-    stack: list[object] = [value]
-    active: set[int] = set()
-    nodes = 0
-    while stack:
-        item = stack.pop()
-        if type(item) is _SnapshotClose:
-            parts.append(item.token)
-            if item.container_id is not None:
-                active.discard(item.container_id)
-            continue
-        nodes += 1
-        if nodes > _SNAPSHOT_NODE_BUDGET:
-            raise ConfigurationError(
-                "A located row's field value is too large to fingerprint for pre-save "
-                "drift detection (exceeded the node budget). Reject rather than risk an "
-                "unbounded walk of consumer-controlled data.",
-            )
-        if not truth.is_one_of(item, _FINGERPRINT_CONTAINER_TYPES):
-            # Bytes / bytearray / memoryview land here too (they are not
-            # containers): the leaf renderer reads their buffer, never ``bytes(item)``.
-            parts.append(_leaf_token(item))
-            continue
-        container_id = id(item)
-        if container_id in active:
-            raise ConfigurationError(
-                "A located row's field value contains a reference cycle and cannot be "
-                "fingerprinted for pre-save drift detection. Reject rather than walk "
-                "consumer-controlled data whose structure has no end.",
-            )
-        active.add(container_id)
-        # Each branch reads its own container, so a ``dict`` answers its ``(key, value)`` pairs.
-        if truth.is_instance(item, dict):
-            parts.append("{")
-            stack.append(_SnapshotClose("}", container_id))
-            for key, member in sorted(
-                base_container_values(item),
-                key=lambda pair: canonical_sort_key(pair[0]),
-                reverse=True,
-            ):
-                stack.append(member)
-                stack.append(_SnapshotClose("=v"))
-                stack.append(key)
-        elif truth.is_instance(item, list) or truth.is_instance(item, tuple):
-            parts.append("[")
-            stack.append(_SnapshotClose("]", container_id))
-            stack.extend(reversed(base_container_values(item)))
-        else:
-            # The container check above leaves a ``set`` / ``frozenset`` as the only kind here.
-            members = require(item, is_set_or_frozenset)
-            parts.append("s{")
-            stack.append(_SnapshotClose("}s", container_id))
-            stack.extend(
-                sorted(base_container_values(members), key=canonical_sort_key, reverse=True),
-            )
-    return "".join(parts)
-
-
-def _snapshot_field_value(value: object) -> _ValueSnapshot:
-    """Capture one field value independently of the live object it was read from.
-
-    A ``FieldFile`` by its ``name``; a container or buffer by its structural
-    fingerprint; any other value by a deep copy, kept when the copy compares equal
-    to the original. A value whose copy raises (``TypeError`` / ``ValueError`` /
-    ``ArithmeticError`` / ``RecursionError`` / ``copy.Error``: an uncopyable or
-    too-deep object, an ambiguous ``__eq__``, a signalling-NaN ``Decimal``) or does
-    not compare equal (identity equality, a non-reflexive ``__eq__``) has neither
-    value equality nor a working copy protocol, so it is kept by reference and
-    checked for replacement only.
-    """
-    if truth.is_instance(value, FieldFile):
-        return _FileNameSnapshot(value.name)
-    if truth.is_one_of(value, _MUTABLE_SNAPSHOT_TYPES):
-        return _FieldFingerprint(_field_fingerprint(value))
-    try:
-        copied = copy.deepcopy(value)
-        equal = bool(copied == value)
-    except (
-        TypeError,
-        ValueError,
-        ArithmeticError,
-        RecursionError,
-        copy.Error,
-    ):
-        return _ReferenceSnapshot(value)
-    return _CopiedValueSnapshot(copied) if equal else _ReferenceSnapshot(value)
-
-
-def snapshot_target_state(instance: models.Model) -> dict[str, _ValueSnapshot]:
-    """Snapshot the located instance's LOADED concrete field values (pre-consumer-code).
-
-    Captured by the pipeline skeleton at the same immediately-after-locate moment
-    as ``authorized_pk`` - before the permission hook, the first
-    consumer-controlled code, can touch the mutable instance. Only fields the
-    locate actually LOADED are captured (a deferred field would lazy-load on
-    ``getattr``, and its absence from the snapshot must not read as drift);
-    the mutation locate never defers, so in practice this is every concrete
-    non-M2M column. Each value is captured independently of the live instance
-    (``_snapshot_field_value``), so consumer code that mutates one IN PLACE
-    (``instance.data["x"] = ...``, ``instance.geom.transform(...)``) reads as drift
-    instead of aliasing the object the drift check reads back. Container and
-    buffer values (a ``JSONField`` dict / list, an ``ArrayField`` list, a
-    ``BinaryField`` memoryview) are captured as an ITERATIVE structural FINGERPRINT
-    (``_FieldFingerprint``), so the drift check is a flat digest compare, never a
-    recursive structural walk that could ``RecursionError`` on deep data. A
-    ``FieldFile`` is captured by its ``name``; every other value by a deep copy
-    compared with ``==``. A value type with neither value equality nor a working
-    copy protocol is checked for replacement only.
-    """
-    deferred = instance.get_deferred_fields()
-    return {
-        field.attname: _snapshot_field_value(read_attr(instance, field.attname))
-        for field in instance._meta.concrete_fields
-        if field.attname not in deferred
-    }
-
-
-def assert_no_target_drift(owner: str, instance: models.Model) -> None:
-    """Reject in-memory drift of the located target before the write (fail closed).
-
-    Compares the instance's CURRENT loaded concrete field values against the
-    pipeline's post-locate ``target_state`` snapshot. Consumer code between the
-    locate and the save (a permission method, a serializer hook, a validator)
-    must treat the located row as read-only: an attribute it re-pointed would
-    otherwise ride into ``serializer.save()`` as an unvalidated write (DRF's
-    ``update()`` saves the WHOLE instance, not just ``validated_data``). Called
-    by the serializer flavor immediately before ``serializer.save()``; the model
-    / form flavors legitimately mutate the instance inside their own write steps
-    and do not use this check.
-    """
-    context = require_write_pipeline()
-    snapshot = context.target_state
-    if snapshot is None:
-        return
-    deferred = instance.get_deferred_fields()
-    for attname, value in snapshot.items():
-        if attname in deferred:
-            continue
-        # Each captured value owns its own re-comparison, so this check cannot
-        # fall out of step with ``_snapshot_field_value``'s capture ladder.
-        if not value.matches(read_attr(instance, attname)):
-            raise ConfigurationError(
-                f"{owner}: the located, authorized row was mutated in memory before the "
-                f"write ({truth.name(type(instance))}.{attname} changed between the locate "
-                "and the save). Permission methods, hooks, and validators must not write "
-                "to the target instance; changes go through the validated serializer data.",
-            )
 
 
 def base_locked_queryset(

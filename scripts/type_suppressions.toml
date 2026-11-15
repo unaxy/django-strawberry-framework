@@ -324,9 +324,6 @@
 "tests/mutations/test_write_transaction.py::_HygieneWebsocketCommunicator.receive_output" = { reportArgumentType = 1, reportUnknownVariableType = 1 }
 "tests/mutations/test_write_transaction.py::_HygieneWebsocketCommunicator.send_input" = { reportUnknownMemberType = 1 }
 "tests/mutations/test_write_transaction.py::_with_fake_barrier_connection" = { reportArgumentType = 1 }
-"tests/mutations/test_write_transaction.py::test_assert_no_target_drift_propagates_a_planted_eq_error" = { reportAttributeAccessIssue = 1 }
-"tests/mutations/test_write_transaction.py::test_field_fingerprint_reads_hostile_containers_through_their_base_slots._LyingDict.items" = { reportIncompatibleMethodOverride = 1 }
-"tests/mutations/test_write_transaction.py::test_field_fingerprint_reads_hostile_containers_through_their_base_slots._LyingDict.keys" = { reportIncompatibleMethodOverride = 1 }
 "tests/optimizer/test_extension.py::_DetonatingEqObject.__hash__" = { reportAssignmentType = 1 }
 "tests/optimizer/test_extension.py::_as_partial_resolve_info" = { reportReturnType = 1 }
 "tests/optimizer/test_extension.py::test_check_schema_skips_unreachable_and_missing_field_map" = { reportArgumentType = 1 }

@@ -505,8 +505,8 @@ contract alone:
   a model field; save kwargs carry only non-model arguments a custom `create()` /
   `update()` consumes.
 - **Injected fields ride the input fields' walk.** Every top-level per-field discipline
-  (schema/runtime agreement, write-source ownership, queryset scoping, the relation-intent
-  ledger, the post-save attestation) walks the one `_write_surface_specs` list of input
+  (schema/runtime agreement, write-source ownership, queryset scoping) walks the one
+  `_write_surface_specs` list of input
   fields plus `Meta.injected_fields`, so an injected field gets the same checks as an
   input field by construction rather than through a parallel guard kept in step.
 - **The schema/runtime agreement guard fails closed.** A field carrying a requiredness or

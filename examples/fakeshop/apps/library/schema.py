@@ -3216,50 +3216,11 @@ class UpdateCirculationDeskHoldViaSerializer(SerializerMutation):
         permission_classes = []
 
 
-class CreatePatronProfileReplacingGenre(SerializerMutation):
-    """A DELIBERATELY-misbehaving create whose ``create()`` links a genre the client never chose.
-
-    The live test proves the post-save relation attestation refuses the replaced ``to_field``
-    key over ``/graphql/`` and no profile is written.
-    """
-
-    class Meta:
-        serializer_class = serializers.GenreReplacingPatronProfileSerializer
-        operation = "create"
-        permission_classes = []
-
-
 class CreatePatronProfileViaRenamedSerializer(SerializerMutation):
     """``CreatePatronProfileViaSerializer`` over the renamed spelling ``fav`` (``favId``)."""
 
     class Meta:
         serializer_class = serializers.RenamedPatronProfileSerializer
-        operation = "create"
-        permission_classes = []
-
-
-class CreatePatronProfileReplacingGenreRenamed(SerializerMutation):
-    """``CreatePatronProfileReplacingGenre`` over the renamed spelling ``fav`` (``favId``).
-
-    The live test proves the post-save relation attestation reads the column through the
-    renamed field's source and refuses the replaced ``to_field`` key; no profile is written.
-    """
-
-    class Meta:
-        serializer_class = serializers.GenreReplacingRenamedPatronProfileSerializer
-        operation = "create"
-        permission_classes = []
-
-
-class CreatePatronProfileRepointingGenre(SerializerMutation):
-    """A DELIBERATELY-misbehaving create whose field validator re-points the chosen genre's key.
-
-    The live test proves the relation-intent walk refuses the in-place ``to_field`` key change
-    over ``/graphql/`` before the save, so no profile is written.
-    """
-
-    class Meta:
-        serializer_class = serializers.GenreRepointingPatronProfileSerializer
         operation = "create"
         permission_classes = []
 
@@ -3674,12 +3635,9 @@ class Mutation:
     and ``createShelfWithPartialKwargByMember`` spell a model field and the framework-owned
     ``partial`` by a member and are refused as the plain names are.
     ``createPatronProfileViaSerializer`` / ``updatePatronProfileViaSerializer`` write the
-    ``to_field`` key ``PatronProfile.favorite_genre`` (the column stores the genre name) and
-    are attested against that name, as is ``createPatronProfileViaRenamedSerializer`` (the
-    same key bound under the renamed field ``fav``); ``createPatronProfileReplacingGenre`` and
-    ``createPatronProfileReplacingGenreRenamed`` (a custom ``create()`` re-pointing the
-    validated genre, own-name and renamed) and ``createPatronProfileRepointingGenre``
-    (a field validator renaming the validated genre in place) are refused.
+    ``to_field`` key ``PatronProfile.favorite_genre`` (the column stores the genre name), as
+    does ``createPatronProfileViaRenamedSerializer`` (the same key bound under the renamed
+    field ``fav``).
     ``updatePatronProfileGenreViaSerializer`` narrows that update by ``Meta.fields``, so its
     input takes a descriptor-derived name while ``favoriteGenreId`` stays a ``GenreType``
     ``GlobalID``.
@@ -3837,17 +3795,8 @@ class Mutation:
     update_circulation_desk_hold_via_serializer = DjangoMutationField(
         UpdateCirculationDeskHoldViaSerializer,
     )
-    create_patron_profile_replacing_genre = DjangoMutationField(
-        CreatePatronProfileReplacingGenre,
-    )
-    create_patron_profile_repointing_genre = DjangoMutationField(
-        CreatePatronProfileRepointingGenre,
-    )
     create_patron_profile_via_renamed_serializer = DjangoMutationField(
         CreatePatronProfileViaRenamedSerializer,
-    )
-    create_patron_profile_replacing_genre_renamed = DjangoMutationField(
-        CreatePatronProfileReplacingGenreRenamed,
     )
     create_printing = DjangoMutationField(CreatePrinting)
     update_printing = DjangoMutationField(UpdatePrinting)

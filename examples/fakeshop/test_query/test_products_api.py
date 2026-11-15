@@ -7194,11 +7194,10 @@ def test_serializer_mutation_response_keeps_relation_with_bounded_query_count() 
     assert json_at(result, "errors") == []
     assert json_at(result, "node") == {"name": "SerG2Widget", "category": {"name": category.name}}
 
-    # Bounded count = 17, DERIVED from a real run (BUILD.md forbids guessing it;
+    # Bounded count = 16, DERIVED from a real run (BUILD.md forbids guessing it;
     # the serializer flavor differs from the model flavor by composition - no
     # `full_clean`, instead DRF's `is_valid()` runs the FK re-fetch + the unique
-    # validator - plus the serializer save's savepoint and post-save FK
-    # attestation). Per-query breakdown:
+    # validator - plus the serializer save's savepoint). Per-query breakdown:
     #   BEGIN + COMMIT                                       = 2 (the DjangoSchema
     #                                                            completion-spanning
     #                                                            transaction - mutation atomicity)
@@ -7221,16 +7220,13 @@ def test_serializer_mutation_response_keeps_relation_with_bounded_query_count() 
     #                                                            failure converts to
     #                                                            the FieldError envelope)
     #   INSERT products_item                                 = 1
-    #   post-save FK attestation: products_item values()     = 1 (the DATABASE column
-    #                                                            must hold the
-    #                                                            validated target's pk)
     #   post-write re-fetch: products_item                   = 1 (optimizer-planned)
     #   the `category` relation: products_category           = 1 (select_related /
     #                                                            prefetch; no N+1, no
     #                                                            lazy refetch)
     # plus, where rows lock, the decode's post-lock re-read of products_category.
     sql = [query["sql"] for query in captured]
-    assert len(captured) == 17 + post_lock_rereads(1), sql
+    assert len(captured) == 16 + post_lock_rereads(1), sql
     # The load-bearing property (NOT a column-exact snapshot - that is the package
     # mirror's job): the re-fetch reads the item once (the `SELECT 1` EXISTS is the
     # unique validator, not a row read) and the relation through select_related /
@@ -7244,17 +7240,15 @@ def test_serializer_mutation_response_keeps_relation_with_bounded_query_count() 
         for s in sql
         if "products_category" in s.lower() and s.strip().upper().startswith("SELECT")
     ]
-    # TWO real products_item SELECTs (the `SELECT 1` unique EXISTS excluded): the
-    # post-save FK attestation's single-column ``values()`` read plus the ONE
+    # ONE real products_item SELECT (the `SELECT 1` unique EXISTS excluded): the
     # optimizer-planned re-fetch; no deferred-field lazy refetch fires.
-    assert len([s for s in item_selects if "select 1" not in s.lower()]) == 2, sql
+    assert len([s for s in item_selects if "select 1" not in s.lower()]) == 1, sql
     # THREE real category SELECTs: the relation-id visibility decode, DRF's FK
     # validation re-fetch in is_valid(), and the post-write re-fetch relation -
     # none an N+1 / lazy refetch - plus the decode's post-lock re-read where rows lock.
     category_reads = [s for s in category_selects if "select 1" not in s.lower()]
     assert len(category_reads) == 3 + post_lock_rereads(1), sql
-    # The post-write re-fetch is the LAST real `products_item` SELECT; the other one
-    # is the post-save FK attestation's single-column `values()` read above it.
+    # The post-write re-fetch is the one real `products_item` SELECT.
     refetch_select = [s for s in item_selects if "select 1" not in s.lower()][-1]
     # No `.only(...)` projection (a mutation plan introduces none): the operation
     # selects `node { name category { name } }`, so a deferred-column projection would

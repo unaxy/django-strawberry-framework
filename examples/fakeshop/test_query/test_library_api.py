@@ -19770,7 +19770,7 @@ _NON_ASCII_ISBN = "978\U0001f600"
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("flavor", "statements"),
-    [("model", 11), ("form", 13), ("serializer", 16)],
+    [("model", 11), ("form", 13), ("serializer", 14)],
 )
 def test_non_ascii_text_keyed_relation_ids_are_written_over_http(
     flavor: str,
@@ -21140,22 +21140,6 @@ _PROFILE_CREATE_SPELLINGS = {
     ),
 }
 
-#: The same two spellings of the create whose custom ``create()`` re-points the genre.
-_PROFILE_REPLACING_SPELLINGS = {
-    "own": _ProfileSpelling(
-        "createPatronProfileReplacingGenre",
-        "GenreReplacingPatronProfileSerializerInput",
-        "favoriteGenreId",
-        "favorite_genre",
-    ),
-    "renamed": _ProfileSpelling(
-        "createPatronProfileReplacingGenreRenamed",
-        "GenreReplacingRenamedPatronProfileSerializerInput",
-        "favId",
-        "fav",
-    ),
-}
-
 
 def _profile_genre_column(patron: models.Patron) -> list[str | None]:
     """The stored ``favorite_genre_id`` column (the genre NAME) of ``patron``'s profile, if any."""
@@ -21174,13 +21158,12 @@ def test_serializer_to_field_relation_create_stores_the_target_key_over_http(
     value: str,
     spelling: str,
 ) -> None:
-    """A create through a ``to_field`` key stores the chosen genre's NAME and attests it.
+    """A create through a ``to_field`` key stores the chosen genre's NAME.
 
     ``PatronProfile.favorite_genre`` is ``ForeignKey(Genre, to_field="name")``; the input
-    names the genre by ``GlobalID`` (its id) and the saved column holds its name. The
-    post-save relation attestation compares that column with the validated genre's
-    captured name, so a correct write succeeds and a null or omitted relation stays null,
-    whether the field is declared under the relation's own name or renamed onto it.
+    names the genre by ``GlobalID`` (its id) and the saved column holds its name; a null or
+    omitted relation stays null, whether the field is declared under the relation's own
+    name or renamed onto it.
     """
     shape = _PROFILE_CREATE_SPELLINGS[spelling]
     genre = models.Genre.objects.create(name="ToFieldFiction")
@@ -21278,7 +21261,7 @@ def test_serializer_to_field_relation_update_stores_the_target_key_over_http(
     """An update through a ``to_field`` key replaces, clears or keeps the stored genre NAME.
 
     A supplied genre replaces the stored name with the new genre's, an explicit null clears
-    it, and an omitted relation (``partial=True``) keeps it; each is attested against the
+    it, and an omitted relation (``partial=True``) keeps it; each is read back from the
     database column in the key's own domain (the genre name, never the genre id).
     """
     old = models.Genre.objects.create(name="ToFieldOld")
@@ -21352,87 +21335,6 @@ def test_narrowed_serializer_update_over_relay_target_writes_the_genre_over_http
     assert result["errors"] == []
     assert json_at(result, "node", "secondaryAddress") == "Suite 9"
     assert _profile_genre_column(patron) == [expected]
-
-
-@pytest.mark.django_db
-@override_settings(**_ERROR_POLICY_PASS_THROUGH)
-@pytest.mark.parametrize("spelling", ["own", "renamed"])
-def test_serializer_to_field_relation_replaced_by_custom_create_is_rejected_over_http(
-    spelling: str,
-) -> None:
-    """A custom ``create()`` linking a genre the client never chose is refused, nothing written.
-
-    ``GenreReplacingPatronProfileSerializer.create`` (and its renamed twin over ``fav``,
-    ``source="favorite_genre"``) renames the validated genre in memory to the first other
-    genre's name, so the saved column links that other genre. The other genre is NAMED like
-    the chosen genre's id, so comparing the saved name column with the chosen genre's id
-    would read the swap as intact, and so would comparing it with the live object's name;
-    the attestation reads the column through the field's source and compares it with the
-    name captured at validation.
-    """
-    shape = _PROFILE_REPLACING_SPELLINGS[spelling]
-
-    swapped_in = models.Genre.objects.create(name="ToFieldPlaceholder")
-    chosen = models.Genre.objects.create(name="ToFieldChosen")
-    swapped_in.name = str(chosen.pk)
-    swapped_in.save(update_fields=["name"])
-    patron = models.Patron.objects.create(name="ToFieldReplacedPatron")
-
-    response = _post_graphql(
-        f"mutation($d: {shape.input_type}!) {{ "
-        f"{shape.mutation}(data: $d) {{ {_PROFILE_SELECTION} }} }}",
-        variables={
-            "d": {
-                "patronId": patron.pk,
-                shape.input_key: global_id_for(library_schema.GenreType, chosen.pk),
-            },
-        },
-    )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert payload["data"] is None
-    message = json_str(payload, "errors", 0, "message")
-    assert f"the database column for relation {shape.relation!r} holds" in message
-    assert "ignored or replaced a validated relation" in message
-    assert _profile_genre_column(patron) == []
-
-
-@pytest.mark.django_db
-@override_settings(**_ERROR_POLICY_PASS_THROUGH)
-def test_serializer_to_field_relation_key_repointed_by_validator_is_rejected_over_http() -> None:
-    """A field validator re-pointing the chosen genre's key in place is refused before the save.
-
-    ``GenreRepointingPatronProfileSerializer.validate_favorite_genre`` renames the resolved
-    genre in memory to another genre's name and returns the same object, so its identity and
-    pk are intact while the stored ``to_field`` column would link the other genre. The
-    relation-intent walk compares the genre's name with the one captured when the field
-    validated and refuses the write: no profile is written and no genre is renamed.
-    """
-    other = models.Genre.objects.create(name="ToFieldRepointTarget")
-    chosen = models.Genre.objects.create(name="ToFieldRepointChosen")
-    patron = models.Patron.objects.create(name="ToFieldRepointedPatron")
-
-    response = _post_graphql(
-        "mutation($d: GenreRepointingPatronProfileSerializerInput!) { "
-        f"createPatronProfileRepointingGenre(data: $d) {{ {_PROFILE_SELECTION} }} }}",
-        variables={
-            "d": {
-                "patronId": patron.pk,
-                "favoriteGenreId": global_id_for(library_schema.GenreType, chosen.pk),
-            },
-        },
-    )
-    assert response.status_code == 200
-    payload = response_json(response)
-    assert payload["data"] is None
-    message = json_str(payload, "errors", 0, "message")
-    assert "'favorite_genre' is not the exact object(s) the field's run_validation" in message
-    assert "replaced a visibility-checked relation" in message
-    assert _profile_genre_column(patron) == []
-    assert sorted(models.Genre.objects.values_list("pk", "name")) == [
-        (other.pk, "ToFieldRepointTarget"),
-        (chosen.pk, "ToFieldRepointChosen"),
-    ]
 
 
 _MODEL_PROFILE_UPDATE = (

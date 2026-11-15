@@ -160,9 +160,8 @@ import threading
 import uuid
 from contextlib import contextmanager
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, TypeGuard, TypeVar, cast, overload
+from typing import TYPE_CHECKING, Final, TypeGuard, TypeVar, cast, overload
 
-from django.core.exceptions import FieldDoesNotExist
 from django.core.files import File
 from django.db import transaction
 from django.db.models import Field, QuerySet
@@ -186,9 +185,7 @@ from django_strawberry_framework.mutations.resolvers import (
 )
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
-    dict_of,
     is_dict,
-    is_frozenset,
     is_list,
     is_list_or_tuple,
     is_mapping,
@@ -230,16 +227,12 @@ from django_strawberry_framework.utils.querysets import (
     sync_pipeline_recourse,
 )
 from django_strawberry_framework.utils.relations import (
-    is_forward_many_to_many,
     is_model_class,
-    is_single_column_foreign_key,
     written_model_field,
 )
 from django_strawberry_framework.utils.typing import call_forwarded
 from django_strawberry_framework.utils.write_transaction import (
-    assert_no_target_drift,
     base_locked_queryset,
-    column_values_match,
     conflict_error,
     make_cross_alias_save_guard,
     pin_write_queryset,
@@ -299,16 +292,11 @@ if TYPE_CHECKING:
     )
     from django_strawberry_framework.utils.errors import ErrorKeyMap
     from django_strawberry_framework.utils.inputs import InputFieldSpec
-    from django_strawberry_framework.utils.typing import ForeignKeyField, ModelField
     from django_strawberry_framework.utils.write_values import AttemptedSave
 
     from .serializer_converter import DRFField, DRFSerializer
     from .sets import SerializerMutation
 
-    # One relation's ``run_validation``-time capture: (object, pk, database alias, link key).
-    _RelationIdentity: TypeAlias = tuple[object, object, object, object]
-    # A single relation's capture, or one capture per row of a many relation.
-    _RelationSnapshot: TypeAlias = _RelationIdentity | list[_RelationIdentity]
     # One ``post_save`` witness record: (instance, pk at write, created, alias).
     _WrittenRow: TypeAlias = tuple[models.Model, object, bool, str | None]
     # A container the frozen hook view descends into (``_FROZEN_VIEW_CONTAINERS``), and the
@@ -328,11 +316,6 @@ if TYPE_CHECKING:
         """A bound serializer as far as ``save()`` goes: it returns what ``create()`` / ``update()`` did."""
 
         def save(self, **kwargs: object) -> object: ...
-
-    class _RunValidation(Protocol):
-        """A field's ``run_validation``, as the relation-intent recording wraps it."""
-
-        def __call__(self, data: object = ...) -> object: ...
 
     class _DateTimeToInternal(Protocol):
         """A ``DateTimeField``'s ``to_internal_value``, as the overflow translation wraps it."""
@@ -2074,578 +2057,10 @@ def _write_surface_specs(mutation_cls: type[SerializerMutation]) -> list[InputFi
     """Return the top-level write-surface specs: GraphQL input fields + ``Meta.injected_fields``.
 
     The one list every top-level per-field discipline walks (schema/runtime agreement,
-    write-source ownership, queryset scoping, the relation-intent ledger, the M2M snapshot,
-    the post-save attestation): the two spec sets are disjoint by class validation, so
-    concatenation is exact.
+    write-source ownership, queryset scoping): the two spec sets are disjoint by class
+    validation, so concatenation is exact.
     """
     return [*mutation_cls._input_field_specs, *(mutation_cls._injected_field_specs or [])]
-
-
-class _RelationIntentLedger:
-    """The per-write record of the EXACT objects each relation field resolved.
-
-    ``records`` maps a dotted spec path (``category`` / ``shelves.branch``) to the ordered
-    list of values that field's ``run_validation()`` returned - one entry per call, so a
-    nested ``many=True`` child (whose ONE field instance validates every list item) records
-    one entry per item, in item order. ``consume`` reads the entries back in the same order
-    during the post-``is_valid()`` identity walk; ``counters`` keeps nested items aligned.
-    """
-
-    __slots__: tuple[str, ...] = ("counters", "records")
-
-    def __init__(self) -> None:
-        self.records: dict[str, list[_RelationSnapshot]] = {}
-        self.counters: dict[str, int] = {}
-
-    def record(self, path: str, value: _RelationSnapshot) -> None:
-        self.records.setdefault(path, []).append(value)
-
-    def consume(self, path: str) -> _RelationSnapshot | Literal[_Omitted.OMITTED]:
-        """Return the next recorded value for ``path``, or ``_OMITTED`` when none is pending."""
-        index = self.counters.get(path, 0)
-        entries = self.records.get(path)
-        if entries is None or index >= len(entries):
-            return _OMITTED
-        self.counters[path] = index + 1
-        return entries[index]
-
-    def assert_fully_consumed(self, mutation_cls: type[SerializerMutation]) -> None:
-        """Every recorded relation resolution must have been consumed by the intent walk.
-
-        A record left unconsumed means a relation field validated (resolving a
-        visibility-scoped object) but its value never reached the compared
-        ``validated_data`` - a parent / list validator nulled the nested value,
-        removed it, or dropped list items, silently discarding the client's
-        relation intent. The direct top-level pop is caught inline in the walk;
-        this backstop catches the NESTED and dropped-list-item cases the recursion
-        skips (it cannot recurse into a value that is gone). Fail closed.
-        """
-        for path, entries in self.records.items():
-            if self.counters.get(path, 0) != len(entries):
-                raise ConfigurationError(
-                    f"SerializerMutation {truth.name(mutation_cls)}: relation {path!r} was "
-                    "supplied by the client and resolved by the field, then removed from "
-                    "validated_data before the write (a nested value was nulled or dropped, "
-                    "or list items were removed); the client's relation intent would be "
-                    "silently discarded. Validators may reject a supplied relation, never "
-                    "drop it.",
-                )
-
-
-def _relation_object_identity(obj: object, key_attname: str | None = None) -> _RelationIdentity:
-    """Immutable ``(object, pk, alias, link key)`` capture of one resolved relation row.
-
-    The pk, database alias and link key are copied out BY VALUE at
-    ``run_validation`` time (immutable primitives), alongside the object reference
-    the identity check needs. The link key is the value the saved relation's
-    column must hold: ``key_attname`` names the related model's column the
-    relation stores (``ForeignKey.target_field``, the related pk unless the key
-    declares ``to_field``), and the key is the pk when no column is attested.
-    ``(None, None, None, None)`` for a null relation.
-    """
-    if obj is None:
-        return (
-            None,
-            None,
-            None,
-            None,
-        )
-    state = getattr(obj, "_state", None)
-    pk = getattr(obj, "pk", None)
-    key = pk if key_attname is None else getattr(obj, key_attname)
-    return (
-        obj,
-        pk,
-        getattr(state, "db", None),
-        key,
-    )
-
-
-def _relation_intent_snapshot(value: object, key_attname: str | None = None) -> _RelationSnapshot:
-    """Snapshot what a relation field's ``run_validation`` resolved, immutably.
-
-    Captured BEFORE any object-level validator runs (the ledger records at field
-    ``run_validation`` time), so a validator that mutates a resolved relation
-    object's ``pk`` / ``_state.db`` / link key (the column value the relation
-    stores, e.g. a ``to_field`` name) IN PLACE - leaving object identity intact,
-    so a bare ``is`` check would miss it - is caught by the post-``is_valid()``
-    comparison against these captured primitives. A list relation snapshots one
-    ``(object, pk, alias, pk)`` tuple per row, in order (``key_attname`` names a
-    single relation's attested column only).
-    """
-    if is_list(value):
-        return [_relation_object_identity(item) for item in value]
-    return _relation_object_identity(value, key_attname)
-
-
-def _relation_identity_intact(
-    value: object,
-    snapshot: _RelationIdentity,
-    key_attname: str | None = None,
-) -> bool:
-    """``value`` must BE the recorded object AND still carry its recorded pk, alias and link key.
-
-    ``key_attname`` is the column a single relation's key stores (``_link_key_attname``):
-    a ``to_field`` key writes that column, not the pk, so an in-place change to it
-    re-points the write as surely as a pk change does.
-    """
-    recorded_obj, recorded_pk, recorded_db, recorded_key = snapshot
-    if value is not recorded_obj:
-        return False
-    if value is None:
-        return recorded_pk is None and recorded_db is None
-    state = getattr(value, "_state", None)
-    return (
-        getattr(value, "pk", None) == recorded_pk
-        and getattr(state, "db", None) == recorded_db
-        and (key_attname is None or getattr(value, key_attname, None) == recorded_key)
-    )
-
-
-def _instrument_relation_intent(
-    mutation_cls: type[SerializerMutation],
-    serializer: DRFSerializer,
-) -> _RelationIntentLedger:
-    """Wrap every (top-level and nested) relation field's ``run_validation`` to record its return.
-
-    Installed AFTER the queryset scoping (the recorded objects are the visibility-scoped,
-    alias-pinned resolutions) and BEFORE ``is_valid()`` - so the record is what DRF's OWN
-    field produced, captured before any field-level or object-level validator could replace
-    it. The wrap is applied to the per-instance field objects (DRF deep-copies declared
-    fields per serializer instance), never to shared class state; a custom
-    ``PrimaryKeyRelatedField.pk_field`` stays fully supported - whatever transformation it
-    applies, the ledger records the RELATION OBJECT the field finally resolved, which is the
-    identity the intent walk and the attestation verify. Walks the one write-surface spec
-    list (``_write_surface_specs``) so GraphQL-input and ``Meta.injected_fields`` relations
-    cannot drift apart on instrumentation coverage.
-    """
-    ledger = _RelationIntentLedger()
-    _instrument_intent_specs(_write_surface_specs(mutation_cls), serializer, ledger, path="")
-    return ledger
-
-
-def _instrument_intent_specs(
-    specs: Iterable[InputFieldSpec],
-    serializer: DRFSerializer,
-    ledger: _RelationIntentLedger,
-    *,
-    path: str,
-) -> None:
-    """Instrument one serializer level's relation fields, recursing into nested serializers."""
-    for spec in specs:
-        field: DRFField | None = bound_fields(serializer).get(spec.target_name)
-        if field is None:  # pragma: no cover - the agreement guard already required it.
-            continue
-        field_path = join_error_path(path, spec.target_name)
-        if spec.kind in (NESTED_SINGLE, NESTED_MULTI):
-            child_serializer, _many = nested_serializer_child(field)
-            _instrument_intent_specs(
-                _nested_specs_of(spec),
-                child_serializer,
-                ledger,
-                path=field_path,
-            )
-            continue
-        if spec.kind not in (RELATION_SINGLE, RELATION_MULTI):
-            continue
-        _record_field_intent(
-            field,
-            ledger,
-            field_path,
-            key_attname=(
-                _link_key_attname(serializer, field, spec)
-                if spec.kind == RELATION_SINGLE
-                else None
-            ),
-        )
-
-
-def _record_field_intent(
-    field: DRFField,
-    ledger: _RelationIntentLedger,
-    path: str,
-    *,
-    key_attname: str | None,
-) -> None:
-    """Shadow ``field.run_validation`` with a recording wrapper (per-instance, never shared)."""
-    field.run_validation = _recording_validation(field.run_validation, ledger, path, key_attname)
-
-
-def _recording_validation(
-    original: _RunValidation,
-    ledger: _RelationIntentLedger,
-    path: str,
-    key_attname: str | None,
-) -> _RunValidation:
-    """Return ``original`` wrapped to record what each call returns under ``path``."""
-
-    def _recording(data: object = serializers.empty) -> object:
-        value = original(data)
-        ledger.record(path, _relation_intent_snapshot(value, key_attname))
-        return value
-
-    return _recording
-
-
-def _assert_relation_intent(
-    mutation_cls: type[SerializerMutation],
-    serializer: DRFSerializer,
-    ledger: _RelationIntentLedger,
-) -> dict[str, object]:
-    """Prove ``validated_data`` still carries the ledger-recorded relation objects BY IDENTITY.
-
-    Runs immediately after ``is_valid()``: for every relation the write surface knows -
-    renamed sources (compared under the runtime field's ``source``), ``Meta.injected_fields``
-    relations, single relations, lists (length + pairwise identity, so DRF's duplicate and
-    explicit-empty-list semantics pass through untouched), and nested paths (each list item
-    consumes its own record, in item order) - the value in the final ``validated_data`` must
-    be the EXACT object (or exact object list) the field's ``run_validation`` produced AND
-    still carry the pk + database alias captured at that moment, plus, for a single
-    relation, the link key (the column value the relation stores: the target's
-    ``to_field`` value or its pk). A field-level or object-level validator that REPLACED a
-    resolved row (the hidden-row-substitution attack: resolve visible row A, swap in hidden
-    row B) fails closed; one that MUTATED a resolved object's pk / alias / link key in place
-    (identity intact) fails closed on the captured-primitive comparison; one that POPPED a
-    supplied relation fails closed (silently dropping explicit client intent is not allowed -
-    only rejection is); one that INJECTED a relation value the field never produced fails
-    closed too. A relation the client never sent produces no record and is left to omitted
-    semantics (the omitted-M2M attestation still holds).
-
-    Returns the post-save attestation manifest: for each TOP-LEVEL relation source the
-    client supplied, the link key (single: the value the FK / OneToOne column stores, the
-    target's ``to_field`` value or its pk, ``None`` for a null relation) or frozenset of pks
-    (multi) CAPTURED at ``run_validation`` time - immutable primitives, not live objects.
-    ``_attest_saved_relations`` compares the saved database state against these, so a custom
-    ``save()`` that mutates a validated relation object's pk or key in place cannot forge
-    both the database value and the expected value from the same mutable object.
-    """
-    manifest: dict[str, object] = {}
-    _assert_intent_specs(
-        mutation_cls,
-        _write_surface_specs(mutation_cls),
-        serializer,
-        validated_data_of(serializer),
-        ledger,
-        path="",
-        manifest=manifest,
-    )
-    # Every recorded relation must have been consumed: an unconsumed record is a
-    # relation whose validated value was removed before the write (the nested /
-    # list-item pop the inline direct-pop guard cannot see).
-    ledger.assert_fully_consumed(mutation_cls)
-    return manifest
-
-
-def _assert_intent_specs(
-    mutation_cls: type[SerializerMutation],
-    specs: Iterable[InputFieldSpec],
-    serializer: DRFSerializer,
-    validated_data: object,
-    ledger: _RelationIntentLedger,
-    *,
-    path: str,
-    manifest: dict[str, object],
-) -> None:
-    """Run the per-level body of the intent walk (one serializer level, recursing into nested).
-
-    Populates ``manifest`` at the TOP level only (``path == ""``): the captured link key
-    (single) or pk set (multi) per supplied relation source, for the post-save attestation.
-    """
-    if not is_dict(validated_data):  # pragma: no cover - DRF yields dicts here.
-        return
-    for spec in specs:
-        field: DRFField | None = bound_fields(serializer).get(spec.target_name)
-        if field is None:  # pragma: no cover - the agreement guard already required it.
-            continue
-        source = field.source or spec.target_name
-        field_path = join_error_path(path, spec.target_name)
-        if spec.kind in (NESTED_SINGLE, NESTED_MULTI):
-            value = validated_data.get(source)
-            if value is None:
-                continue
-            child_serializer, _many = nested_serializer_child(field)
-            # A ``many=True`` child validates to a list. Anything else a validator put there
-            # has no items to walk; a relation record its items made stays unconsumed, which
-            # ``_RelationIntentLedger.assert_fully_consumed`` refuses.
-            items: list[object] | tuple[object, ...] = (
-                (value if is_list_or_tuple(value) else ())
-                if spec.kind == NESTED_MULTI
-                else [value]
-            )
-            for item in items:
-                _assert_intent_specs(
-                    mutation_cls,
-                    _nested_specs_of(spec),
-                    child_serializer,
-                    item,
-                    ledger,
-                    path=field_path,
-                    manifest=manifest,
-                )
-            continue
-        if spec.kind not in (RELATION_SINGLE, RELATION_MULTI):
-            continue
-        # Consume in walk order even when the key was popped, so nested list
-        # items stay aligned with their own records.
-        recorded = ledger.consume(field_path)
-        if source not in validated_data:
-            if recorded is _OMITTED:
-                # Genuinely omitted by the client: the field never validated, so
-                # it produced no record - there is no intent to write, nothing to
-                # compare (the post-save attestation still holds the
-                # omitted-M2M-unchanged line).
-                continue
-            # The field DID validate (the client supplied the relation), then a
-            # validator POPPED it out of validated_data: explicit client intent
-            # would be silently discarded (the relation dropped on create, or a
-            # replaced relation preserved on update). Fail closed.
-            raise ConfigurationError(
-                f"SerializerMutation {truth.name(mutation_cls)}: relation {field_path!r} was "
-                "supplied by the client and resolved by the field, then removed from "
-                "validated_data by a validator; the client's relation intent would be "
-                "silently dropped. Validators may reject a supplied relation, never pop it.",
-            )
-        value = validated_data[source]
-        if recorded is _OMITTED:
-            raise ConfigurationError(
-                f"SerializerMutation {truth.name(mutation_cls)}: validated_data carries relation "
-                f"{field_path!r} with a value the field's run_validation never produced; a "
-                "validator injected a relation object around the visibility-scoped field "
-                "lookup. Relation values must come from the field's own validation.",
-            )
-        # A single relation records one identity and a list relation one per row
-        # (``_relation_intent_snapshot``); a record of the other shape is no match.
-        single = recorded if isinstance(recorded, tuple) else None
-        rows = recorded if isinstance(recorded, list) else None
-        if spec.kind == RELATION_SINGLE:
-            intact = single is not None and _relation_identity_intact(
-                value,
-                single,
-                _link_key_attname(serializer, field, spec),
-            )
-        else:
-            intact = (
-                is_list(value)
-                and rows is not None
-                and len(value) == len(rows)
-                and all(
-                    _relation_identity_intact(item, expected)
-                    for item, expected in zip(value, rows, strict=True)
-                )
-            )
-        if not intact:
-            raise ConfigurationError(
-                f"SerializerMutation {truth.name(mutation_cls)}: validated_data's relation "
-                f"{field_path!r} is not the exact object(s) the field's run_validation "
-                "resolved; a validator replaced a visibility-checked relation value. "
-                "Validators may reject a relation, never substitute it.",
-            )
-        if path == "":
-            # Record the CAPTURED link key / pk set for the top-level post-save
-            # attestation - immutable primitives from the run_validation snapshot,
-            # NOT the live object (whose pk or key a custom save() could mutate).
-            if single is not None:
-                manifest[spec.target_name] = single[3]
-            elif rows is not None:
-                manifest[spec.target_name] = frozenset(snap[1] for snap in rows)
-
-
-def _m2m_membership_snapshot(
-    mutation_cls: type[SerializerMutation],
-    instance: models.Model | None,
-    alias: str,
-) -> dict[str, frozenset[object]]:
-    """Snapshot the target's CURRENT memberships for every write-surface direct M2M (update only).
-
-    Taken at write-step entry - strictly AFTER authorization (an unauthorized caller must
-    never make the pipeline query relation membership) and BEFORE any consumer hook or the
-    save. Scoped to the top-level ``RELATION_MULTI`` specs whose source is a forward
-    (writable, direct) M2M on the backing model; the post-save attestation compares an
-    OMITTED partial-update M2M against this snapshot to prove a custom ``update()`` left it
-    untouched. ``{}`` on create (no memberships exist yet).
-    """
-    if instance is None:
-        return {}
-    model = backing_model_of(mutation_cls._mutation_meta)
-    snapshot: dict[str, frozenset[object]] = {}
-    for spec, model_field, source in _attestable_m2m_fields(mutation_cls, model):
-        del spec
-        del model_field
-        snapshot[source] = _related_pks(instance, source, alias)
-    return snapshot
-
-
-def _related_pks(instance: models.Model, source: str, alias: str) -> frozenset[object]:
-    """Return the pks ``instance``'s ``source`` many-to-many accessor holds on ``alias``."""
-    manager = require(read_attr(instance, source), is_manager)
-    return frozenset(manager.all().using(alias).values_list("pk", flat=True))
-
-
-def _attestable_m2m_fields(
-    mutation_cls: type[SerializerMutation],
-    model: type[models.Model],
-) -> list[tuple[InputFieldSpec, ModelField, str]]:
-    """Yield ``(spec, model_field, source)`` for each top-level direct-M2M write-surface spec."""
-    entries: list[tuple[InputFieldSpec, ModelField, str]] = []
-    for spec in _write_surface_specs(mutation_cls):
-        if spec.kind != RELATION_MULTI:
-            continue
-        source = spec.source or spec.target_name
-        try:
-            model_field = model._meta.get_field(source)
-        except FieldDoesNotExist:
-            continue  # A serializer-only relation: nothing on the row to attest.
-        if not is_forward_many_to_many(model_field):
-            continue
-        entries.append((spec, model_field, source))
-    return entries
-
-
-def _attested_foreign_key(
-    model: type[models.Model],
-    field: DRFField | None,
-    spec: InputFieldSpec,
-) -> ForeignKeyField | None:
-    """Return the single-column FK / OneToOne a single relation writes on ``model``.
-
-    The source is the runtime field's (a renamed field binds the relation it names),
-    else the spec's. ``None`` for a serializer-only source (no model field) and for any
-    model field that is not one forward key column: a scalar, a reverse relation, an
-    M2M, a multi-column ``ForeignObject`` - nothing on the row the attestation can
-    read as one column. The run_validation capture, the intent walk and the post-save
-    read resolve through this one function, so the captured key and the read column
-    cannot name different relations.
-    """
-    source = (field.source if field is not None and field.source else None) or (
-        spec.source or spec.target_name
-    )
-    try:
-        model_field = model._meta.get_field(source)
-    except FieldDoesNotExist:
-        return None  # A serializer-only relation: nothing on the row to attest.
-    return model_field if is_single_column_foreign_key(model_field) else None
-
-
-def _link_key_attname(
-    serializer: DRFSerializer,
-    field: DRFField | None,
-    spec: InputFieldSpec,
-) -> str | None:
-    """Return the related column a single relation's key stores (``ForeignKey.target_field``).
-
-    Resolved against the serializer level's own ``Meta.model``: the related pk's
-    attname for a plain key, the ``to_field`` column's for a ``to_field`` key. ``None``
-    for a model-less serializer and for a source that is not one forward key column
-    (``_attested_foreign_key``), whose identity is its pk alone.
-    """
-    model = serializer_model(type(serializer))
-    if model is None:
-        return None
-    model_field = _attested_foreign_key(model, field, spec)
-    return None if model_field is None else model_field.target_field.attname
-
-
-def _attest_saved_relations(
-    mutation_cls: type[SerializerMutation],
-    serializer: DRFSerializer,
-    saved: models.Model,
-    *,
-    alias: str,
-    m2m_before: dict[str, frozenset[object]],
-    relation_keys: dict[str, object],
-) -> None:
-    """Attest the saved row's TOP-LEVEL FK / OneToOne / M2M database state against the intent.
-
-    Custom ``create()`` / ``update()`` (and custom nested persistence) remain trusted
-    application code for arbitrary same-alias behavior - but the RETURNED top-level row is
-    attested against the intent-walk's ``relation_keys`` manifest (the link key or pk set
-    CAPTURED at ``run_validation`` time, keyed by ``spec.target_name``), NOT the live
-    ``validated_data`` objects - a custom ``save()`` can mutate a validated object's pk or
-    key in place, forging both the persisted column and a live comparison; the captured
-    primitives cannot be mutated after the fact:
-
-    - every supplied FK / OneToOne column must hold the captured link key - the validated
-      target's value of the column the key references (``ForeignKey.target_field``: the
-      related pk, or the ``to_field`` column) - read back from the DATABASE in one
-      ``values()`` query and compared canonically through the key's own ``to_python``;
-    - every supplied M2M must match the captured pk SET (DRF's ``.set()`` semantics: an
-      explicit empty list means cleared, duplicate inputs collapse - set comparison preserves
-      exactly those semantics);
-    - every OMITTED partial-update M2M on the write surface must equal its pre-save snapshot
-      (a custom ``update()`` must not silently rewrite memberships the client never sent).
-
-    A divergence is a loud ``ConfigurationError`` (a configuration/trust failure of the
-    consumer's custom write code), never a plausible success payload.
-
-    If the saved row itself vanished between the save and this read (a concurrent
-    delete this transaction could not see), there is no database state left to
-    attest: the check returns without attesting and the pipeline tail reports the
-    vanished row as the in-band ``conflict`` envelope.
-    """
-    model = backing_model_of(mutation_cls._mutation_meta)
-    name = truth.name(type(serializer))
-
-    fk_checks: list[tuple[str, ForeignKeyField, object]] = []
-    for spec in _write_surface_specs(mutation_cls):
-        if spec.kind != RELATION_SINGLE or spec.target_name not in relation_keys:
-            continue
-        model_field = _attested_foreign_key(
-            model,
-            bound_fields(serializer).get(spec.target_name),
-            spec,
-        )
-        if model_field is not None:
-            fk_checks.append((spec.target_name, model_field, relation_keys[spec.target_name]))
-
-    if fk_checks:
-        try:
-            row = dict_of(
-                model._base_manager.using(alias)
-                .values(*[model_field.attname for _, model_field, _ in fk_checks])
-                .get(pk=pk_of(saved)),
-            )
-        except model.DoesNotExist:
-            return
-        for target_name, model_field, expected_key in fk_checks:
-            db_value = row[model_field.attname]
-            if expected_key is None:
-                intact = db_value is None
-            else:
-                intact = db_value is not None and column_values_match(
-                    model_field,
-                    db_value,
-                    expected_key,
-                )
-            if not intact:
-                raise ConfigurationError(
-                    f"SerializerMutation {truth.name(mutation_cls)}: after {name}.save(), the "
-                    f"database column for relation {target_name!r} holds {db_value!r}, not "
-                    f"the validated target's {model_field.target_field.attname!r} value "
-                    f"{expected_key!r}; the custom create()/update() ignored or replaced a "
-                    "validated relation. The saved row must reflect the validated intent.",
-                )
-
-    m2m_fields = _attestable_m2m_fields(mutation_cls, model)
-    for spec, model_field, source in m2m_fields:
-        del model_field
-        current = _related_pks(saved, source, alias)
-        if spec.target_name in relation_keys:
-            expected = relation_keys[spec.target_name]
-            if current != expected:
-                raise ConfigurationError(
-                    f"SerializerMutation {truth.name(mutation_cls)}: after {name}.save(), the "
-                    f"M2M relation {spec.target_name!r} holds pk set {sorted(map(str, current))!r}, "
-                    "not the validated set "
-                    f"{sorted(map(str, require(expected, is_frozenset)))!r}; the custom "
-                    "create()/update() ignored or replaced a validated relation set.",
-                )
-        elif source in m2m_before and current != m2m_before[source]:
-            raise ConfigurationError(
-                f"SerializerMutation {truth.name(mutation_cls)}: after {name}.save(), the "
-                f"OMITTED partial-update M2M relation {spec.target_name!r} changed from its "
-                "pre-save membership; a custom update() must not rewrite memberships the "
-                "client never sent.",
-            )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3102,13 +2517,6 @@ def _guarded_serializer_write(
     update alike.
     """
     written = witness.written
-    # The pre-save M2M membership snapshot (update only), taken at write-step
-    # entry - strictly AFTER authorization (relation membership is data an
-    # unauthorized caller must never make the pipeline query) and strictly
-    # BEFORE any consumer hook or ``serializer.save()`` could touch it. The
-    # post-save attestation proves an OMITTED partial-update M2M field is
-    # byte-identical to this snapshot.
-    m2m_before = _m2m_membership_snapshot(mutation_cls, instance, alias)
     # The frozen view of the decoded client data the consumer hooks receive
     # (immutable containers; uploads as metadata) - built once, shared by the
     # injected-data and save-kwargs hooks.
@@ -3165,10 +2573,6 @@ def _guarded_serializer_write(
     # A value the pinned alias cannot store, or a DRF uniqueness validator at any level
     # cannot bind in its query, fails its field before the validator binds it.
     _hold_unstorable_values(serializer, backing_model_of(mutation_cls._mutation_meta))
-    # The relation-intent ledger: record the EXACT objects
-    # each relation field's ``run_validation()`` resolves - top-level AND nested -
-    # BEFORE field-level or object-level validators get a chance to replace them.
-    ledger = _instrument_relation_intent(mutation_cls, serializer)
 
     if not serializer.is_valid():
         return StepFailure(
@@ -3178,11 +2582,6 @@ def _guarded_serializer_write(
             ),
         )
 
-    # PROVE the final ``validated_data`` still carries the ledger-recorded objects
-    # by IDENTITY (renamed sources, injected fields, single relations, lists, and
-    # nested paths alike): a validator that swapped a visible row for a hidden one
-    # after the scoped field lookup is a loud ``ConfigurationError``, never a write.
-    relation_keys = _assert_relation_intent(mutation_cls, serializer, ledger)
     # A date, datetime, time, duration or decimal DRF validated (or a ``validate_<field>``
     # hook set) but the pinned alias cannot store (or, on PostgreSQL, read back) is the
     # field's ``invalid`` error before any write.
@@ -3225,15 +2624,6 @@ def _guarded_serializer_write(
         )
         _assert_save_kwargs_no_shadow(mutation_cls, serializer, save_kwargs)
         _assert_save_kwargs_not_model_fields(mutation_cls, save_kwargs)
-        # The last read-only-phase act: reject in-memory drift of the located
-        # target (a permission method / hook / validator that ``setattr``-ed the
-        # row would otherwise ride into ``serializer.save()`` as an unvalidated
-        # write - DRF's ``update()`` saves the WHOLE instance).
-        if instance is not None:
-            assert_no_target_drift(
-                f"SerializerMutation {truth.name(mutation_cls)}",
-                instance,
-            )
         # The write phase opens for exactly ``serializer.save()``; everything
         # before this point was database-read-only under the phased alias guard.
         with pipeline_write_phase():
@@ -3294,21 +2684,7 @@ def _guarded_serializer_write(
     # The saved result is validated BEFORE the pipeline re-fetches / trusts it: correct model,
     # DRF save-bookkeeping identity, non-null pk, pinned alias, witnessed pk-snapshotted
     # INSERT on create, and - on update - the pre-hook authorized-pk snapshot.
-    saved = _checked_saved_result(mutation_cls, serializer, saved, authorized_pk, alias, written)
-    # Post-save relation attestation: the DATABASE state of every top-level
-    # FK / OneToOne / M2M the client supplied must match the ledger-verified
-    # intent, and an OMITTED partial-update M2M must be unchanged - a custom
-    # ``create()`` / ``update()`` that ignored or replaced the validated
-    # relations is a loud ``ConfigurationError``, never a plausible payload.
-    _attest_saved_relations(
-        mutation_cls,
-        serializer,
-        saved,
-        alias=alias,
-        m2m_before=m2m_before,
-        relation_keys=relation_keys,
-    )
-    return saved
+    return _checked_saved_result(mutation_cls, serializer, saved, authorized_pk, alias, written)
 
 
 def _serializer_decode_step(
@@ -3364,9 +2740,6 @@ def _run_serializer_pipeline_sync(
             decoded,
             specs=specs,
         ),
-        # The serializer write step checks the located row for in-memory drift
-        # against this snapshot (``assert_no_target_drift``).
-        snapshot_target=True,
     )
 
 

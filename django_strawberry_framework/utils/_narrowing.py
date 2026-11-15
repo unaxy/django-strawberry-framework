@@ -99,10 +99,6 @@ if TYPE_CHECKING:
         """Return whether the value is a ``tuple`` (subclasses included)."""
         ...
 
-    def is_frozenset(_value: object, /) -> TypeIs[frozenset[object]]:
-        """Return whether the value is a ``frozenset`` (subclasses included)."""
-        ...
-
     def is_abstract_set(_value: object, /) -> TypeIs[AbstractSet[object]]:
         """Return whether the value is a ``collections.abc.Set`` (registered virtual subclasses included)."""
         ...
@@ -256,7 +252,6 @@ else:
     is_dict = dict.__instancecheck__
     is_list = list.__instancecheck__
     is_tuple = tuple.__instancecheck__
-    is_frozenset = frozenset.__instancecheck__
     is_mapping = Mapping.__instancecheck__
     is_iterable = Iterable.__instancecheck__
     is_abstract_set = AbstractSet.__instancecheck__
@@ -312,7 +307,6 @@ __all__ = (
     "is_exact_set_or_frozenset",
     "is_exact_tuple",
     "is_exact_tuple_or_frozenset",
-    "is_frozenset",
     "is_identity_map",
     "is_iterable",
     "is_list",

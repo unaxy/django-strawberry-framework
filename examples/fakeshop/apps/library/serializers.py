@@ -16,10 +16,7 @@ consumer-visible behaviors end to end:
   subclass must validate against its OWN serializer, not an inherited parent snapshot);
 * ``PatronProfileSerializer`` / ``RenamedPatronProfileSerializer`` write the ``to_field`` key
   ``PatronProfile.favorite_genre`` through a declared ``PrimaryKeyRelatedField`` under its
-  own name or renamed (the column stores the genre name), while
-  ``GenreReplacingPatronProfileSerializer`` / ``GenreReplacingRenamedPatronProfileSerializer``
-  and ``GenreRepointingPatronProfileSerializer`` re-point the validated genre in a custom
-  ``create()`` and in a field validator (the relation-attestation live rows).
+  own name or renamed (the column stores the genre name).
 * ``PrintingSerializer`` writes the ``edition`` FK and the ``bound_with`` M2M into the
   text-keyed ``Edition``, so both raw-pk relation inputs carry ISBN text;
   ``EditionImprintSerializer`` updates an ``Edition`` located by that text.
@@ -836,63 +833,6 @@ class RenamedPatronProfileSerializer(ModelSerializerBase[PatronProfile]):
     class Meta:
         model = PatronProfile
         fields: tuple[str, ...] = ("patron", "address_2", "fav")
-
-
-def _repoint_to_another_genre(genre: object) -> None:
-    """Rename ``genre`` IN MEMORY to the first other genre's name (the object stays the same)."""
-    if not isinstance(genre, Genre):
-        raise TypeError(f"expected the validated favorite_genre, got {type(genre).__name__}")
-    other = Genre.objects.exclude(name=genre.name).order_by("pk").first()
-    if other is not None:
-        genre.name = other.name
-
-
-class GenreReplacingPatronProfileSerializer(PatronProfileSerializer):
-    """A DELIBERATELY-wrong ``create()`` that re-points the validated genre at another genre.
-
-    The custom ``create()`` renames the validated ``favorite_genre`` object IN MEMORY to the
-    first other genre's name before saving, so the stored ``to_field`` column names a genre
-    the client never chose while the live object still claims to be the validated one. The
-    post-save relation attestation must refuse it: it compares the column with the genre
-    name CAPTURED when the field validated, not with the live object.
-    """
-
-    @override
-    def create(self, validated_data: dict[str, object]) -> PatronProfile:
-        _repoint_to_another_genre(validated_data["favorite_genre"])
-        return super().create(validated_data)
-
-
-class GenreReplacingRenamedPatronProfileSerializer(RenamedPatronProfileSerializer):
-    """``GenreReplacingPatronProfileSerializer`` over the renamed spelling ``fav``.
-
-    ``validated_data`` carries the relation under its source ``favorite_genre``; the custom
-    ``create()`` re-points that validated genre in memory, and the post-save attestation
-    must refuse the saved column through the renamed field's source.
-    """
-
-    @override
-    def create(self, validated_data: dict[str, object]) -> PatronProfile:
-        _repoint_to_another_genre(validated_data["favorite_genre"])
-        return super().create(validated_data)
-
-
-class GenreRepointingPatronProfileSerializer(PatronProfileSerializer):
-    """A DELIBERATELY-wrong field validator that re-points the validated genre's key IN PLACE.
-
-    ``validate_favorite_genre`` renames the resolved genre object in memory to the first
-    other genre's name and returns the SAME object, so its identity and pk are intact while
-    the ``to_field`` column it would write names a genre the client never chose. The
-    relation-intent walk must refuse it before the save: the genre's name is the key the
-    relation stores, and the walk compares it with the name captured when the field
-    validated.
-    """
-
-    def validate_favorite_genre(self, value: Genre | None) -> Genre | None:
-        """Rename the validated genre to another genre's name, keeping the object."""
-        if value is not None:
-            _repoint_to_another_genre(value)
-        return value
 
 
 class PrintingSerializer(ModelSerializerBase[Printing]):
