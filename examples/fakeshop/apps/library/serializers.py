@@ -126,12 +126,10 @@ class ShelfSerializer(ModelSerializerBase[Shelf]):
 class SaveKwargsShelfSerializer(ModelSerializerBase[Shelf]):
     """A ``Shelf`` serializer whose ``create()`` consumes a NON-model save kwarg.
 
-    Save kwargs may only carry non-model custom arguments (model-field injection goes
-    through ``Meta.injected_fields``), so the DRF-native ``serializer.save(stamp=...)``
-    pattern is proven with a custom argument the author's ``create()`` consumes: ``stamp``
-    is popped off ``validated_data`` (where DRF merges save kwargs) and recorded on the
-    written row's ``topic`` - observable over HTTP without ever passing a model field
-    through the save-kwargs channel.
+    The DRF-native ``serializer.save(stamp=...)`` pattern is proven with a custom argument
+    the author's ``create()`` consumes: ``stamp`` is popped off ``validated_data`` (where
+    DRF merges save kwargs) and recorded on the written row's ``topic`` - observable over
+    HTTP without ever passing a model field through the save-kwargs channel.
     """
 
     class Meta:

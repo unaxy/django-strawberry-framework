@@ -390,8 +390,8 @@ def _window_edge_class(cls: type[_ConnectionT]) -> type[relay.Edge[relay.Node]]:
 
     ``get_object_definition`` -> ``edges`` field -> ``resolve_type`` -> unwrap
     the ``StrawberryContainer`` (``list[Edge[Node]]``) down to the concrete
-    ``Edge`` subclass via the bounded ``peel_strawberry_containers`` (-
-    the container-scoped, Power-of-Ten-capped peel), so the fast path builds
+    ``Edge`` subclass via the bounded, container-scoped
+    ``peel_strawberry_containers`` (Power-of-Ten capped), so the fast path builds
     edges through Strawberry's own edge type (cursor PREFIX + base64 stay owned
     there - the fast path passes only the integer offset).
     """
@@ -1446,10 +1446,9 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
 
         Serves the opted ``totalCount`` shape too (``_resolves_total_count``).
         The count-selection inspection sits in the ``_consume_window`` argument
-        list, so it runs only AFTER the guard and AFTER the selected-fields
-        prime below - a malformed pagination request answers with the guard's
-        ``PaginationArgumentError`` before the deadline check or the selected-fields
-        prime runs (only the ``relay_max_results`` / ``max_page_size`` clamp runs first;
+        list, so it runs only AFTER the guard - a malformed pagination request
+        answers with the guard's ``PaginationArgumentError`` before the deadline
+        check runs (only the ``relay_max_results`` / ``max_page_size`` clamp runs first;
         ``test_first_and_last_guard_on_generated_subclass``), and the bare shape
         short-circuits it away entirely. The window branch then runs BEFORE the
         count work, so the ``_WindowedConnectionRows`` marker - which is NOT a
@@ -1513,7 +1512,7 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
             max_results=max_results,
             # ``and`` short-circuits: the bare shape never calls the selection
             # walk at all, and the opted shape only reaches it here, past the
-            # guard and the prime.
+            # guard.
             want_count=cls._resolves_total_count and _total_count_requested(info),
             **kwargs,
         )

@@ -36,7 +36,6 @@ from django_strawberry_framework import (
     DjangoFormMutation,
     DjangoListField,
     DjangoModelFormMutation,
-    DjangoModelPermission,
     DjangoMutation,
     DjangoMutationField,
     DjangoNodeField,
@@ -2753,18 +2752,12 @@ class UpdateBookGenresViaSerializer(SerializerMutation):
     pinned, visibility-scoped relation queryset.
 
     Default ``permission_classes = []`` isolates the list-relation contract from write-auth.
-    ``FAKESHOP_TEST_BOOK_GENRES_REQUIRE_PERM`` swaps in ``DjangoModelPermission`` so a live
-    row can prove an unauthorized update never snapshots M2M membership.
     """
 
     class Meta:
         serializer_class = serializers.BookGenresSerializer
         operation = "update"
-        permission_classes = (
-            (DjangoModelPermission,)
-            if getattr(settings, "FAKESHOP_TEST_BOOK_GENRES_REQUIRE_PERM", False)
-            else ()
-        )
+        permission_classes = []
 
 
 class UpdateBookTitleWithAliasValidator(SerializerMutation):
@@ -2814,7 +2807,7 @@ class CreateShelfWithSaveKwargs(SerializerMutation):
 
     ``SaveKwargsShelfSerializer`` accepts ``code`` + ``branch``; ``get_serializer_save_kwargs``
     supplies a server-side ``stamp`` at SAVE time (NOT a client input, NOT a constructor
-    kwarg, NOT a model field - model-field injection goes through ``Meta.injected_fields``).
+    kwarg, NOT a model field).
     The serializer's own ``create()`` consumes ``stamp`` and records it on ``topic``, so the
     live test posts ``{code, branchId}`` and reads the save-time-stamped ``topic`` back off
     the written ``Shelf``.

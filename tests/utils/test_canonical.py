@@ -231,8 +231,8 @@ def test_canonical_sort_key_totally_orders_mutually_unorderable_types() -> None:
 def test_canonical_sort_key_keeps_identical_reprs_distinct() -> None:
     """A constant ``__repr__`` cannot collapse two values onto one key.
 
-    That collapse is the fail-open the key exists to prevent: on the drift path
-    two structurally different values sharing a key share a fingerprint.
+    Without the identity parts, two structurally different values sharing a key
+    would sort as equal.
     """
     left = _ConstantRepr()
     right = _ConstantRepr()

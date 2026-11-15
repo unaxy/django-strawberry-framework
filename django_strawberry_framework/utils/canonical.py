@@ -6,18 +6,17 @@ halves of that read are where a walk stops being trustworthy:
 
 * **Iteration.** ``for x in value`` on a ``dict`` / ``list`` / ``set`` SUBCLASS
   dispatches the subclass's own ``__iter__`` / ``items`` / ``keys``. A value that
-  reports different contents on different calls makes a fingerprint compare
-  itself to a lie, which on the drift path means an unauthorized in-memory change
-  passes the check. The five built-in containers are read through their base
-  slots; a value outside that set has no base slot to read, so it is refused with
-  a typed ``ConfigurationError`` rather than iterated on the consumer's terms.
-* **Ordering.** Unordered containers must be sorted to fingerprint
+  reports different contents on different calls would hand the walk a different
+  container each time it reads. The five built-in containers are read through
+  their base slots; a value outside that set has no base slot to read, so it is
+  refused with a typed ``ConfigurationError`` rather than iterated on the
+  consumer's terms.
+* **Ordering.** Unordered containers must be sorted to canonicalize
   deterministically, and a bare ``repr`` sort key that returns a CONSTANT
-  collapses distinct values onto one sort key - and, for the drift path, onto
-  one fingerprint.
+  collapses distinct values onto one sort key.
 
-Both defects are fail-OPEN on a security check, which is why the reads live here
-rather than being spelled per walk.
+The consumer is ``utils/inputs.py``, which canonicalizes ``Meta`` field-name
+declarations through both reads rather than spelling them per walk.
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ def base_container_values(value: object) -> tuple[object, ...]:
     own ``__iter__``, which is the exact escape this module exists to close:
     containing the exception it raises would not help, because the worse failure
     is the silent one - an ``__iter__`` that returns DIFFERENT members per call
-    fingerprints a lie without raising anything. There is no base slot to read
+    hands the walk a lie without raising anything. There is no base slot to read
     for a type the interpreter does not define, so the honest answer is a typed
     refusal. Every caller gates on the five built-in types before arriving here,
     so the refusal fires only for a future caller that widened its gate without
@@ -94,7 +93,6 @@ def canonical_sort_key(value: object) -> tuple[str, int, int]:
     identity, then the value's identity. The last two make the key total - two
     values whose reprs collide still order deterministically - which is what a
     bare ``repr`` key cannot promise: a ``__repr__`` returning a constant would
-    otherwise let structurally different values sort as equal, and a
-    fingerprint built on that ordering would collide.
+    otherwise let structurally different values sort as equal.
     """
     return (truth.render(value), id(type(value)), id(value))

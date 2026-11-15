@@ -110,8 +110,6 @@ if TYPE_CHECKING:
     from django_strawberry_framework.utils.errors import FieldError
     from django_strawberry_framework.write_mixins import WriteMutationClass
 
-    from .typing import ConcreteField
-
     #: The ``execute`` callable a connection hands an ``execute_wrapper``: the
     #: statement parameters, the context and the result are passed through untouched.
     _Execute: TypeAlias = Callable[
@@ -808,35 +806,23 @@ def check_instance_write_alias(
         )
 
 
-def column_values_match(field: ConcreteField, first: object, second: object) -> bool:
-    """Compare two values of ONE column canonically through ``field.to_python`` (fail closed).
-
-    The column-equality primitive the pipeline compares captured snapshots
-    with: ``str()`` comparison is NOT canonical for every column type (a
-    ``UUIDField`` value may surface as a dashed, un-dashed, or ``UUID``-typed
-    value that stringifies differently while naming the SAME row), so equality
-    goes through the column field's OWN ``to_python`` conversion. A
-    ``ForeignKey`` converts through its ``target_field`` (the related pk, or
-    the ``to_field`` column), so a relation column compares in the domain it
-    stores. ``True`` only when BOTH values coerce and the canonical forms are
-    equal; an uncoercible side (a forged value of the wrong shape: the field's
-    ``ValidationError``, or the ``TypeError`` / ``ValueError`` a field's
-    ``to_python`` raises directly) is a mismatch, never an exception the caller
-    must handle.
-    """
-    try:
-        return object_result(field.to_python, first) == object_result(field.to_python, second)
-    except (ValidationError, TypeError, ValueError):
-        return False
-
-
 def pks_match(model: type[models.Model], first: object, second: object) -> bool:
     """Compare two pk values canonically through ``model``'s pk field (fail closed).
 
-    ``column_values_match`` over ``model._meta.pk``: ``True`` only when both values
-    coerce through the pk field's ``to_python`` and the canonical forms are equal.
+    ``str()`` comparison is NOT canonical for every pk type (a ``UUIDField`` value
+    may surface as a dashed, un-dashed, or ``UUID``-typed value that stringifies
+    differently while naming the SAME row), so equality goes through the pk
+    field's OWN ``to_python`` conversion. ``True`` only when BOTH values coerce
+    and the canonical forms are equal; an uncoercible side (a forged value of the
+    wrong shape: the field's ``ValidationError``, or the ``TypeError`` /
+    ``ValueError`` a field's ``to_python`` raises directly) is a mismatch, never
+    an exception the caller must handle.
     """
-    return column_values_match(model._meta.pk, first, second)
+    to_python = model._meta.pk.to_python
+    try:
+        return object_result(to_python, first) == object_result(to_python, second)
+    except (ValidationError, TypeError, ValueError):
+        return False
 
 
 def reject_substituted_row(

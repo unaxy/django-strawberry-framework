@@ -4,7 +4,7 @@ Completion-spanning transaction internals: concurrent async windows on their
 own connections, ``BaseException`` unwind, the async window's private thread
 (another socket's connection hygiene, client cancellation, an outer
 ``ThreadSensitiveContext``), the closed-connection failure rule in both modes, the
-zero-row ``conflict`` probe, and fingerprint helpers. Live HTTP (sync ``/graphql/``
+zero-row ``conflict`` probe. Live HTTP (sync ``/graphql/``
 and async ``/graphql-async/``, the plain-``strawberry.Schema`` refusal included) is
 ``examples/fakeshop/test_query/test_mutation_atomicity.py``; a vanished post-write
 re-fetch and a visibility hook switching aliases are refused over HTTP in
@@ -1587,7 +1587,7 @@ def test_forced_update_integrity_error_race_maps_to_the_constraint_envelope() ->
 
 
 # ---------------------------------------------------------------------------
-# The phased alias guard + canonical pk equality + target-state drift
+# The phased alias guard + canonical pk equality
 # ---------------------------------------------------------------------------
 
 

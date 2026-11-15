@@ -1011,8 +1011,8 @@ def test_consume_window_unservable_window_runs_the_sync_fallback() -> None:
     conn = _consume_window(
         connection_cls,
         window,
-        # The shipped pipeline probes ``info.selected_fields`` for the
-        # edges-resolution shortcut; an empty selection list is enough.
+        # The shipped pipeline walks the converted selections off
+        # ``field_nodes`` for the edges-resolution shortcut; an empty selection is enough.
         info=make_info(),
         before=None,
         after=None,

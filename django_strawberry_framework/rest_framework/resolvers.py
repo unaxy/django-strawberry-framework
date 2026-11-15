@@ -340,12 +340,10 @@ else:
 _ValidatorT = TypeVar("_ValidatorT")
 
 
-# The omission sentinel the reserved serializer-kwarg checks use: it keeps an
-# explicit ``data=None`` / ``instance=None`` return distinguishable from a hook
-# that simply omitted the key (a ``pop(..., None)`` default would conflate the
-# two, silently forgiving an explicit ``None``).
+# The default ``truth.static_attr`` returns for an absent attribute, distinct from
+# any value the attribute could hold.
 class _Omitted(enum.Enum):
-    """The omission sentinel's type: one member, so an ``is _OMITTED`` test narrows it away."""
+    """The absent-attribute default's type: one member, so an ``is _OMITTED`` test narrows it away."""
 
     OMITTED = enum.auto()
 

@@ -33,14 +33,14 @@ Rules of the road:
 
 ## Status
 
-Measured 2026-11-11 on the tree after 21cc9c7f, basedpyright 1.40.2 (pyright 1.1.414).
+Measured 2026-11-15 on the tree after 2567a406, basedpyright 1.40.2 (pyright 1.1.414).
 
 | | Count |
 | --- | --- |
 | Errors, main and floor passes | 0 / 0 |
 | Rules locked (on everywhere, no suppression left) | 67 |
-| Ignore comments (rule hits) | 698, on 646 lines in 157 files (1,897 at the start of the 0.0.15 sweep) |
-| `typing.cast` calls | 103 (432 at the start of the cast work) |
+| Ignore comments (rule hits) | 680, on 628 lines in 154 files (1,897 at the start of the 0.0.15 sweep) |
+| `typing.cast` calls | 101 (432 at the start of the cast work) |
 | Public API type completeness (`check_public_types.py`) | 100% |
 
 ## Coverage by area
@@ -50,10 +50,11 @@ holds. The density is the number of suppressions (ignore lines plus casts) per 1
 
 | Area | Files | Lines | Rules relaxed | Ignore lines | Casts | Per 1k lines |
 | --- | --- | --- | --- | --- | --- | --- |
-| Package (`django_strawberry_framework/`) | 131 | 115,070 | none | 116 | 70 | 1.62 |
-| tests/ | 217 | 257,748 | `reportUnannotatedClassAttribute`, `reportUnusedCallResult` | 472 | 22 | 1.92 |
-| examples/ | 266 | 202,432 | `reportUnannotatedClassAttribute`; `reportUnusedCallResult` in its test folders | 55 | 0 | 0.27 |
-| scripts/ | 46 | 45,205 | none | 3 | 11 | 0.31 |
+| Package (`django_strawberry_framework/`) | 129 | 114,039 | none | 114 | 68 | 1.60 |
+| tests/ | 219 | 262,927 | `reportUnannotatedClassAttribute`, `reportUnusedCallResult` | 456 | 22 | 1.82 |
+| examples/ | 272 | 207,549 | `reportUnannotatedClassAttribute`; `reportUnusedCallResult` in its test folders | 55 | 0 | 0.26 |
+| scripts/ | 43 | 41,120 | none | 3 | 11 | 0.34 |
+| docs/fleet/scripts/ | 7 | 13,005 | none | 0 | 0 | 0 |
 | Root (`conftest.py`, `line_count.py`, `docs/dry/export_dry_review.py`) | 3 | 2,254 | none | 0 | 0 | 0 |
 
 Rules relaxed in every area are listed under [Rules off](#rules-off).
@@ -62,19 +63,19 @@ Rules relaxed in every area are listed under [Rules off](#rules-off).
 
 | Part | Files | Lines | Ignore lines | Casts | Per 1k lines |
 | --- | --- | --- | --- | --- | --- |
-| top-level modules | 28 | 22,356 | 27 | 16 | 1.92 |
-| `utils/` | 28 | 21,571 | 26 | 13 | 1.81 |
-| `filters/` | 6 | 18,529 | 22 | 9 | 1.67 |
-| `optimizer/` | 14 | 13,128 | 4 | 16 | 1.52 |
-| `rest_framework/` | 9 | 8,663 | 11 | 3 | 1.62 |
-| `types/` | 8 | 8,674 | 4 | 2 | 0.69 |
-| `forms/` | 5 | 5,725 | 4 | 2 | 1.05 |
-| `mutations/` | 7 | 5,111 | 5 | 1 | 1.17 |
-| `extensions/` | 5 | 4,431 | 4 | 2 | 1.35 |
+| `utils/` | 29 | 21,733 | 26 | 13 | 1.79 |
+| top-level modules | 26 | 21,674 | 25 | 14 | 1.80 |
+| `filters/` | 6 | 19,458 | 22 | 9 | 1.59 |
+| `optimizer/` | 14 | 13,130 | 4 | 16 | 1.52 |
+| `types/` | 8 | 8,676 | 4 | 2 | 0.69 |
+| `rest_framework/` | 8 | 7,138 | 11 | 3 | 1.96 |
+| `forms/` | 5 | 5,808 | 4 | 2 | 1.03 |
+| `mutations/` | 7 | 5,151 | 5 | 1 | 1.16 |
+| `extensions/` | 5 | 4,430 | 4 | 2 | 1.35 |
 | `orders/` | 5 | 2,141 | 2 | 0 | 0.93 |
-| `auth/` | 4 | 2,084 | 3 | 5 | 3.84 |
-| `testing/` | 4 | 1,049 | 1 | 1 | 1.91 |
-| `management/` | 5 | 876 | 1 | 0 | 1.14 |
+| `auth/` | 4 | 2,071 | 3 | 5 | 3.86 |
+| `testing/` | 4 | 1,025 | 1 | 1 | 1.95 |
+| `management/` | 5 | 872 | 1 | 0 | 1.15 |
 | `middleware/` | 3 | 732 | 2 | 0 | 2.73 |
 
 Where the package suppressions sit:
@@ -90,27 +91,27 @@ From the ledger. Lines naming two rules count once per rule.
 
 | Rule | Hits | Package | Tests | Examples | Scripts |
 | --- | --- | --- | --- | --- | --- |
-| `reportArgumentType` | 252 | 20 | 220 | 12 | 0 |
-| `reportAttributeAccessIssue` | 103 | 21 | 81 | 1 | 0 |
+| `reportArgumentType` | 251 | 20 | 219 | 12 | 0 |
+| `reportAttributeAccessIssue` | 96 | 19 | 76 | 1 | 0 |
 | `reportIncompatibleVariableOverride` | 63 | 8 | 47 | 8 | 0 |
-| `reportIncompatibleMethodOverride` | 52 | 7 | 41 | 4 | 0 |
+| `reportIncompatibleMethodOverride` | 50 | 7 | 39 | 4 | 0 |
 | `reportAny` | 36 | 10 | 10 | 16 | 0 |
-| `reportExplicitAny` | 28 | 26 | 0 | 1 | 1 |
 | `reportAssignmentType` | 28 | 0 | 25 | 1 | 2 |
+| `reportExplicitAny` | 28 | 26 | 0 | 1 | 1 |
 | `reportUnknownMemberType` | 23 | 19 | 4 | 0 | 0 |
-| `reportReturnType` | 21 | 0 | 20 | 1 | 0 |
+| `reportReturnType` | 20 | 0 | 19 | 1 | 0 |
 | `reportUnknownVariableType` | 19 | 17 | 2 | 0 | 0 |
-| `reportUnsafeMultipleInheritance` | 12 | 6 | 4 | 2 | 0 |
 | `reportUnknownArgumentType` | 12 | 3 | 2 | 7 | 0 |
+| `reportUnsafeMultipleInheritance` | 12 | 6 | 4 | 2 | 0 |
 | `reportCallIssue` | 11 | 1 | 9 | 1 | 0 |
-| `reportIndexIssue` | 10 | 0 | 10 | 0 | 0 |
 | `reportInvalidTypeArguments` | 5 | 1 | 4 | 0 | 0 |
 | `reportPropertyTypeMismatch` | 5 | 5 | 0 | 0 | 0 |
 | `reportUndefinedVariable` | 5 | 0 | 5 | 0 | 0 |
 | `reportGeneralTypeIssues` | 4 | 0 | 4 | 0 | 0 |
+| `reportIndexIssue` | 4 | 0 | 4 | 0 | 0 |
 | `reportMissingSuperCall` | 3 | 2 | 0 | 1 | 0 |
 | `reportUnnecessaryIsInstance` | 2 | 2 | 0 | 0 | 0 |
-| `reportDeprecated` | 2 | 1 | 1 | 0 | 0 |
+| `reportDeprecated` | 1 | 1 | 0 | 0 | 0 |
 | `reportFunctionMemberAccess` | 1 | 1 | 0 | 0 | 0 |
 | `reportIncompatibleUnannotatedOverride` | 1 | 1 | 0 | 0 | 0 |
 
@@ -128,7 +129,6 @@ exists to send. The package's `reportExplicitAny` / `reportAny` lines are `Any`s
 | --- | --- |
 | `tests/utils/test_querysets.py` | 51 |
 | `tests/test_resource_policy.py` | 20 |
-| `tests/rest_framework/test_resolvers.py` | 16 |
 | `tests/test_list_field.py` | 16 |
 | `django_strawberry_framework/utils/_queryset_private.py` | 15 |
 | `tests/optimizer/test_hints.py` | 15 |
@@ -136,6 +136,9 @@ exists to send. The package's `reportExplicitAny` / `reportAny` lines are `Any`s
 | `tests/filters/test_sets.py` | 14 |
 | `tests/optimizer/test_extension.py` | 13 |
 | `django_strawberry_framework/filters/sets.py` | 12 |
+| `tests/auth/test_mutations.py` | 12 |
+| `tests/filters/test_inputs.py` | 12 |
+| `tests/optimizer/test_field_meta.py` | 12 |
 
 ## Rules off
 

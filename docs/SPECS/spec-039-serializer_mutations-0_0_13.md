@@ -2839,10 +2839,9 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   **cannot change the request actor**: the framework sets
   `context["request"] = request_from_info(info, …)` after merging — the **same** object the
   inherited write-auth seam already authorized — so the serializer's request-aware
-  validators see the same user / tenant the permission check saw. An override that supplies a
-  **different** `context["request"]` is a [`ConfigurationError`][glossary-configurationerror]
-  (it would let permission and validation disagree about the actor); the same object is
-  tolerated. Consumer context belongs under other keys
+  validators see the same user / tenant the permission check saw. An override's
+  `context["request"]` is overwritten, so permission and validation cannot disagree about
+  the actor. Consumer context belongs under other keys
   ([Decision 8](#decision-8--resolver-pipeline-instantiate--is_valid--serializererrors--save--optimizer-re-fetch--payload)
   step 4).
 - **`read_only` / `HiddenField` fields.** Dropped from the input (graphene's
@@ -2921,11 +2920,7 @@ co-clear block) — `clear_serializer_input_namespace` registers through the
   backend without `FOR UPDATE`) is re-inserted by DRF's update-else-insert save; the
   write witness's `created=True` of the located row's own table under the
   `authorized_pk` returns the null-object + `conflict` `FieldError` envelope on `id`
-  with the transaction rolled back, never a top-level `ConfigurationError`. A
-  multi-table child an `update()` saves over the located row reports `created=True` for
-  its own table only: the located row was UPDATEd, so it is no re-INSERT, and with no
-  UPDATE of the returned row observed the result is the `ConfigurationError` "never
-  observed being UPDATED".
+  with the transaction rolled back, never a top-level `ConfigurationError`.
 - **Validation-time disappearing row.** A located row removed before the decode or
   `serializer.is_valid()` finished (deleted, or cascaded away with a row it references)
   can fail them first: a named relation that vanished with the row is the relation's
@@ -3119,11 +3114,9 @@ same transport, different app.
   table ([`test_library_inheritance_api.py`][test-library-inheritance-api]`::test_lending_desk_update_of_a_row_deleted_after_authorization_is_conflict_over_http`).
   A custom `create()` / `update()` saving a proxy or multi-table child row of the
   serializer's model answers its payload, a child saved over a stored parent row on
-  create included, while one over the located row on update is never observed being
-  UPDATED and an INSERT through the concrete base under a proxy model is no re-INSERT
+  create included, and an INSERT through the concrete base under a proxy model is no re-INSERT
   ([`test_library_inheritance_api.py`][test-library-inheritance-api]`::test_a_serializer_returning_a_row_of_its_models_family_answers_the_payload`,
   `::test_a_create_promoting_a_stored_venue_to_a_child_is_its_insert`,
-  `::test_an_update_promoting_its_located_venue_to_a_child_is_refused`,
   `::test_an_update_restoring_its_row_through_a_class_outside_the_family_answers_the_payload`);
   such a row's refused save names its `None` column, a parent-table or a child-table
   one, and a refused save of the concrete base, a multi-table parent or an unrelated

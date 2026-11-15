@@ -33,7 +33,7 @@ from apps.products.services import create_users
 from asgiref.sync import sync_to_async
 from config import schema as config_schema
 from django import forms
-from django.contrib.auth.models import Permission, User
+from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import SynchronousOnlyOperation
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -44,7 +44,7 @@ from django.db.models.functions import RowNumber, Upper
 from django.db.models.signals import post_init, pre_save
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
-from django.test import Client, override_settings
+from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import path
 from django.utils.functional import SimpleLazyObject
@@ -20680,7 +20680,7 @@ def test_serializer_kwargs_member_spelling_partial_is_rejected_over_http() -> No
 
     ``CreateShelfWithPartialKwargByMember`` returns ``{ShelfHookKey.PARTIAL: False}`` from
     ``get_serializer_kwargs``. The member reads as the text ``partial``, so the reserved-name
-    check refuses it with the ``partial`` message - not a key-type refusal - and no row is
+    check refuses it with the ``partial`` message and no row is
     written. The ``ConfigurationError`` is masked by the spec-048 error policy, so
     ``DEBUG=True`` opens its pass-through gate to read the message.
     """
@@ -20790,88 +20790,6 @@ def test_serializer_update_omitted_genres_leaves_relation_unchanged_over_http() 
     )
     # The omitted M2M is unchanged.
     assert list(book.genres.values_list("name", flat=True)) == ["KeptGenre"]
-
-
-@pytest.mark.django_db
-def test_unauthorized_book_genres_update_never_queries_m2m_membership_over_http(
-    project_schema_override: Callable[[], None],
-) -> None:
-    """An unauthorized ``updateBookGenresViaSerializer`` never snapshots ``library_book_genres``.
-
-    ``FAKESHOP_TEST_BOOK_GENRES_REQUIRE_PERM`` installs ``DjangoModelPermission``. The
-    pre-save M2M membership snapshot runs at write-step entry, after authorize. An
-    anonymous title-only update is refused with ``data: null`` and issues no
-    through-table query. On the granted half the snapshot DOES run, and its first
-    through-table statement comes after the first permission read, so the ordering
-    (authorize, then snapshot) is pinned from both sides rather than only by the
-    absence of a query on the denied one.
-    """
-    create_users(1)
-    shelf = _seed_shelf()
-    kept = models.Genre.objects.create(name="AuthOrderKept")
-    book = models.Book.objects.create(title="AuthOrderBook", shelf=shelf)
-    book.genres.set([kept])
-    through_table = models.Book.genres.through._meta.db_table
-    mutation = (
-        "mutation($id: ID!, $d: BookGenresSerializerPartialInput!) { "
-        "updateBookGenresViaSerializer(id: $id, data: $d) { "
-        "node { title } errors { field messages } } }"
-    )
-
-    with override_settings(FAKESHOP_TEST_BOOK_GENRES_REQUIRE_PERM=True):
-        project_schema_override()
-
-        book_id = global_id_for(library_schema.BookType, book.pk)
-        variables = {"id": book_id, "d": {"title": "DeniedTitle"}}
-        with CaptureQueriesContext(connection) as captured:
-            response = _post_graphql(mutation, variables=variables)
-        payload = response_json(response)
-        assert payload.get("data") is None, payload
-        assert payload.get("errors"), payload
-        assert "Not authorized" in json_str(payload, "errors", 0, "message")
-        membership_sql = [
-            entry["sql"] for entry in captured.captured_queries if through_table in entry["sql"]
-        ]
-        assert membership_sql == [], membership_sql
-
-        user = User.objects.get(username="regular_1")
-        perm = Permission.objects.get(
-            codename="change_book",
-            content_type__app_label="library",
-        )
-        user.user_permissions.add(perm)
-        user = User.objects.get(username="regular_1")
-        client = Client()
-        client.force_login(user)
-        with CaptureQueriesContext(connection) as granted_captured:
-            allowed = _post_graphql(
-                mutation,
-                client=client,
-                variables={"id": book_id, "d": {"title": "AllowedTitle"}},
-            )
-        allowed_payload = response_json(allowed)
-        assert "errors" not in allowed_payload, allowed_payload
-        assert json_at(allowed_payload, "data", "updateBookGenresViaSerializer", "errors") == []
-        assert json_at(
-            allowed_payload,
-            "data",
-            "updateBookGenresViaSerializer",
-            "node",
-            "title",
-        ) == ("AllowedTitle")
-        granted_sqls = [q["sql"] for q in granted_captured.captured_queries]
-        through_indices = [i for i, sql in enumerate(granted_sqls) if through_table in sql]
-        auth_indices = [
-            i
-            for i, sql in enumerate(granted_sqls)
-            if "auth_permission" in sql or "auth_user_user_permissions" in sql
-        ]
-        assert len(through_indices) >= 1
-        assert len(auth_indices) >= 1
-        assert through_indices[0] > auth_indices[0]
-    book.refresh_from_db()
-    assert book.title == "AllowedTitle"
-    assert list(book.genres.values_list("name", flat=True)) == ["AuthOrderKept"]
 
 
 @pytest.mark.django_db

@@ -238,7 +238,7 @@ const LIFECYCLE_DATA = {
           detail: "Eager subpackage imports make DjangoType.__init_subclass__, field factories, DjangoSchema, strawberry_config available and register subsystem-clear callbacks.",
           module: "django_strawberry_framework/__init__.py" },
         { title: "AppConfig.ready() applies upstream patches",
-          detail: "apply_django() → apply_strawberry() → apply_cross_web(); gated by APPLY_UPSTREAM_PATCHES (default on), idempotent under repeated ready().",
+          detail: "apply_strawberry(); gated by APPLY_UPSTREAM_PATCHES (default on), idempotent under repeated ready().",
           module: "apps.py::DjangoStrawberryFrameworkConfig.ready",
           errors: ["ConfigurationError — malformed APPLY_UPSTREAM_PATCHES shape"] },
         { title: "Type collection (per DjangoType subclass)",

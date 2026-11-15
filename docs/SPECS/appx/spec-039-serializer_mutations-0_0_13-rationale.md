@@ -113,8 +113,8 @@ Spec: [Decision 5 — Public surface: `SerializerMutation` exported from the roo
 
 Reusing the field factory + error type rather than a parallel factory keeps one
 exposure idiom and one error contract across the write family. `SerializerMutation` is
-the one name a consumer must import to declare a mutation; the other six lazy exports are
-the surfaces the improvement contracts and the hook contract expose. All seven stay out
+the one name a consumer must import to declare a mutation; the other five lazy exports are
+the surfaces the improvement contracts and the hook contract expose. All six stay out
 of `__all__` because a star import binds every `__all__` name through the root
 `__getattr__`, so a DRF-guarded name there would make a star import raise for a
 DRF-absent consumer who never writes a serializer mutation.

@@ -16,8 +16,6 @@ branch is earned LIVE; this file holds the genuinely-unreachable internals:
   (`test_serializer_m2m_alt_branches_visibility_is_one_batched_query_over_http`,
   `test_nested_shelf_alt_branches_visibility_is_one_batched_query_over_http`,
   `test_serializer_m2m_relation_visibility_over_http`);
-- unauthorized M2M membership SQL is live
-  (`test_unauthorized_book_genres_update_never_queries_m2m_membership_over_http`);
 - the value-preserving `save()`-called-once capture (a save spy);
 - the private runtime source-collision exception class and the `IntegrityError`
   diagnosis branch;
@@ -3376,7 +3374,7 @@ def test_serializer_kwargs_hook_equal_but_not_identical_data_is_configuration_er
 
 
 def test_serializer_kwargs_hook_explicit_none_data_is_configuration_error() -> None:
-    """An explicit ``data=None`` return is NOT omission: the sentinel keeps it rejected."""
+    """An explicit ``data=None`` return is NOT omission: ``None`` is not the received copy."""
 
     def hook(_self: SerializerMutation, _info: object, **_kwargs: object) -> dict[str, object]:
         return {"data": None}
@@ -3395,7 +3393,7 @@ def test_serializer_kwargs_hook_explicit_none_data_is_configuration_error() -> N
 
 @pytest.mark.django_db
 def test_serializer_kwargs_hook_explicit_none_instance_on_update_is_configuration_error() -> None:
-    """On update, an explicit ``instance=None`` return is rejected (sentinel, not ``pop`` default)."""
+    """On update, an explicit ``instance=None`` return is rejected."""
     seed_data(1)
 
     def hook(_self: SerializerMutation, _info: object, **_kwargs: object) -> dict[str, object]:
