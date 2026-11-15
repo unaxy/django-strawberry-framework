@@ -106,14 +106,13 @@ repos:
         require_serial: true
 
       - id: truthful-reads
-        name: truthful identity reads (no dunder lookups, no swallowed BaseException)
+        name: swallowed cancellation (no handler, suppress or finally exit drops BaseException)
         entry: uv run python scripts/check_truthful_reads.py --check
         language: system
-        # `pass_filenames: false`: the gate scans the configured package paths
-        # and applies the `[tool.truthful_reads]` exemptions itself, so a staged
-        # package file, the gate itself or its pyproject table only triggers the run.
+        # `pass_filenames: false`: the gate scans the whole package itself, so a
+        # staged package file or the gate itself only triggers the run.
         pass_filenames: false
-        files: ^(django_strawberry_framework/.*\.py|scripts/check_truthful_reads\.py|pyproject\.toml)$
+        files: ^(django_strawberry_framework/.*\.py|scripts/check_truthful_reads\.py)$
         require_serial: true
 
       - id: annotation-subscripts

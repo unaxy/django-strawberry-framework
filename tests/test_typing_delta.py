@@ -380,7 +380,6 @@ def test_ledger_growth_is_flagged_and_a_clear_is_listed() -> None:
 def test_channel_counts_reads_markers_codes_and_orphan_reasons() -> None:
     """A reason line counts as orphan only when its next logical line has no ignore."""
     source = (
-        "a = f()  # truth: ok identity read\n"
         "b = f()  # noqa: ANN401, PLC0415\n"
         "# basedpyright: covered on a later line of the statement\n"
         "c = f(\n"
@@ -389,11 +388,9 @@ def test_channel_counts_reads_markers_codes_and_orphan_reasons() -> None:
         "# basedpyright: nothing below\n"
         "# continues\n"
         "d = f()\n"
-        's = "# truth: ok in a string"\n'
     )
 
     assert td.channel_counts(source) == {
-        "truth: ok": 1,
         "noqa ANN401": 1,
         "noqa PLC0415": 1,
         "basedpyright reason without ignore": 1,
@@ -401,9 +398,9 @@ def test_channel_counts_reads_markers_codes_and_orphan_reasons() -> None:
 
 
 def test_channel_rises_flag_only_typing_channels() -> None:
-    """A new ``truth: ok`` or ``ANN`` code is flagged; another ``noqa`` code is listed."""
+    """A new ``ANN`` code is flagged; another ``noqa`` code is listed."""
     before = "a = 1  # noqa: PLC0415\n"
-    after = "a = 1  # truth: ok why\nb = 2  # noqa: ANN401\nc = 3  # noqa: S608\n"
+    after = "b = 2  # noqa: ANN401\nc = 3  # noqa: S608\n"
 
     report = _report({f"{_PKG}/a.py": before}, {f"{_PKG}/a.py": after})
 
@@ -411,7 +408,6 @@ def test_channel_rises_flag_only_typing_channels() -> None:
         (True, "noqa ANN401: 0 -> 1 (+1)"),
         (False, "noqa PLC0415: 1 -> 0 (-1)"),
         (False, "noqa S608: 0 -> 1 (+1)"),
-        (True, "truth: ok: 0 -> 1 (+1)"),
     ]
 
 
@@ -421,14 +417,14 @@ def test_channel_rises_flag_only_typing_channels() -> None:
 def test_text_lists_flagged_rows_first_and_ends_with_the_summary() -> None:
     """Each section prints flagged rows before the rest; the last line counts every flag."""
     before = "a = 1  # noqa: S608\n"
-    after = "a = 1  # truth: ok why\n"
+    after = "a = 1  # noqa: ANN401\n"
 
     report = _report({f"{_PKG}/a.py": before}, {f"{_PKG}/a.py": after})
     lines = report.text().splitlines()
 
     section = lines.index("== 5. Other suppression channels: 2 count(s) moved")
     assert lines[section + 1 : section + 3] == [
-        "FLAG truth: ok: 0 -> 1 (+1)",
+        "FLAG noqa ANN401: 0 -> 1 (+1)",
         "     noqa S608: 1 -> 0 (-1)",
     ]
     assert lines[-1] == "typing-delta base..head: 1 flagged"

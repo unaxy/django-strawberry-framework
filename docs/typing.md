@@ -179,7 +179,7 @@ Do the items in order; each lands as its own commit.
   - Write each missing reason with its real cause, and add the gate's rows to
     `tests/test_check_type_suppressions.py`. The ledger counts do not move.
 - [ ] 47. Gates for what the ledger cannot see. `typing_delta.py` reports these today; the gates would refuse them:
-  - a truthful-reads rule refusing a `getattr` default on a declared attribute;
+  - a gate refusing a `getattr` default on a declared attribute;
   - a ledger kind for parameterized predicate claims (`TypeIs[...]` / `TypeGuard[...]` over a generic, 43 sites).
 - [ ] 48. Re-measure the pre-commit hooks, every hook with today's scope and timing (the last table was
   4ce779e1, nine hooks). Do it after items 42 and 45, which change hook scope.

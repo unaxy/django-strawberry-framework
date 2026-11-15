@@ -5702,7 +5702,10 @@ GATE_HINTS = (
     ("basedpyright", "fix the diagnostics it names"),
     ("check_public_types.py", "type or document the public symbols it names"),
     ("check_trailing_commas.py", "python scripts/check_trailing_commas.py --fix <paths>"),
-    ("check_truthful_reads.py", "read the fact it names through utils/truth.py"),
+    (
+        "check_truthful_reads.py",
+        "re-raise what the handler caught; leave a finally by falling out of it",
+    ),
     ("check_annotation_subscripts.py", "move the subscript into an `if TYPE_CHECKING:` alias"),
     ("check_citations.py", "fix the citations it names"),
     (

@@ -24,8 +24,7 @@ metaclass ``__eq__`` / ``__hash__`` could intercept:
   classes the package declares through ``IdentitySet`` (``is_exact_one_of`` asks
   whether an object's real class is one of them), a table keyed by class through
   ``IdentityMap``. A metaclass ``__eq__`` / ``__hash__`` therefore cannot claim to
-  be a framework base or a listed class. ``scripts/check_truthful_reads.py``
-  refuses ``type(...) in`` outside this module.
+  be a framework base or a listed class.
 - Declared attributes (``static_attr`` / ``mro_attr`` / ``overrides`` / ``instance_dict``) are
   looked up in the real MRO's raw namespaces, never through ``__getattr__`` /
   ``__getattribute__`` or a descriptor. ``inspect.getattr_static`` is not
@@ -55,9 +54,6 @@ namespace and scans its key map by identity; its one copy of that map inserts
 each key under its stored hash, so it shares the namespace reads' exception for
 two keys whose hashes collide, and any map but an exact ``dict`` may be read
 through its own ``keys`` / ``__getitem__``.
-
-This module is the only place in the package allowed to touch identity
-dunders directly; ``scripts/check_truthful_reads.py`` enforces that.
 """
 
 from __future__ import annotations

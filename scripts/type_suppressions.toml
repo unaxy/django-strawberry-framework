@@ -206,7 +206,6 @@
 "scripts/_kanban_lib.py::fetch_dashboard_data" = { cast = 4 }
 "scripts/build_glossary_md.py::fetch_glossary_data" = { cast = 2 }
 "scripts/build_tree_md.py::fetch_planned_paths" = { cast = 1 }
-"scripts/check_truthful_reads.py::_scan_node" = { reportAssignmentType = 2 }
 "scripts/workspace.py::_admit" = { cast = 1 }
 "scripts/workspace.py::_load_state" = { cast = 1 }
 "tests/_connection_field_schemas.py::_HostileConnQuerySet.__getitem__" = { reportIncompatibleMethodOverride = 1 }

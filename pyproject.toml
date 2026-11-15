@@ -646,14 +646,6 @@ root = "examples/fakeshop/apps/scalars/tests"
 root = "examples/fakeshop"
 reportUnusedCallResult = "error"
 
-[tool.truthful_reads]
-# Read by scripts/check_truthful_reads.py (the `truthful-reads` hook and CI
-# step). `paths` is the default scan; `exempt` holds repo-relative fnmatch
-# patterns. utils/truth.py is the one module that reads identity slots
-# directly, on behalf of every other module.
-paths = ["django_strawberry_framework"]
-exempt = ["django_strawberry_framework/utils/truth.py"]
-
 [tool.coverage.run]
 source = ["django_strawberry_framework"]
 

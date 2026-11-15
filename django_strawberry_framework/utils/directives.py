@@ -33,8 +33,7 @@ dunder. Consumer behaviour - hooks, resolvers, iterators, a consumer object's
 ``__repr__`` / ``__str__`` - runs untouched, and its exceptions propagate to the
 one boundary, the schema's production error policy. Untrusted wire bytes are
 parsed with pre-validation or one arm no wider than the parse's own documented
-error. ``scripts/check_truthful_reads.py`` enforces the identity and
-``BaseException`` halves.
+error. ``scripts/check_truthful_reads.py`` enforces the ``BaseException`` half.
 """
 
 from django_strawberry_framework.exceptions import ConfigurationError

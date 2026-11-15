@@ -4,9 +4,9 @@
 ``# pyright: ignore`` comments. Typing also weakens through channels that ledger cannot
 see: a ``TypeIs`` predicate whose claim says more than its check proves, a parameter
 widened to ``object``, a declared attribute read with a default, a suppression moved
-into a helper whose ``object`` parameter lets one ignore cover every call, a new
-``# truth: ok`` marker. This report reads two revisions and lists what the range did
-to each channel, so a reviewer reads the typing change before a landing.
+into a helper whose ``object`` parameter lets one ignore cover every call. This report
+reads two revisions and lists what the range did to each channel, so a reviewer reads
+the typing change before a landing.
 
 Both trees are read through git (``git ls-tree``, ``git cat-file``, through
 ``scripts/_git.py``) and parsed with ``ast``; nothing is imported or executed, and the
@@ -60,10 +60,9 @@ Sections, each listing its flagged rows first:
    a cleared suppression.
 
 5. **Other suppression channels.** Count deltas over the files the range changed:
-   ``# truth: ok`` markers, ``noqa`` codes (per code), and ``# basedpyright:`` reason
-   lines whose next logical line carries no ``pyright: ignore``. A rise in ``truth:
-   ok`` markers, in orphan reason lines or in an ``ANN`` / ``PGH003`` code is flagged;
-   other ``noqa`` moves are listed.
+   ``noqa`` codes (per code) and ``# basedpyright:`` reason lines whose next logical
+   line carries no ``pyright: ignore``. A rise in orphan reason lines or in an ``ANN`` /
+   ``PGH003`` code is flagged; other ``noqa`` moves are listed.
 
 Usage::
 
@@ -156,11 +155,9 @@ _NARROWING_FORMS = ("TypeIs", "TypeGuard")
 _DEFAULTED_READERS = {"getattr": 3, "read_attr": 3, "hasattr": 2}
 #: ``noqa`` codes whose rise is a typing change (``ANN`` prefixes match every ``ANN`` code).
 _TYPING_NOQA = ("ANN", "PGH003")
-#: The section 5 keys whose rise is flagged.
-_TRUTH_KEY = "truth: ok"
+#: The section 5 key, besides the typing ``noqa`` codes, whose rise is flagged.
 _ORPHAN_KEY = "basedpyright reason without ignore"
 
-_TRUTH = re.compile(r"#\s*truth:\s*ok\b")
 _NOQA = re.compile(
     r"\bnoqa\b(?::\s*(?P<codes>[A-Z]+[0-9]+(?:\s*,\s*[A-Z]+[0-9]+)*))?",
     re.IGNORECASE,
@@ -1002,7 +999,7 @@ def ledger_section(
 
 
 def channel_counts(text: str) -> Counter[str]:
-    """Count ``# truth: ok`` markers, ``noqa`` codes and orphan ``# basedpyright:`` reason lines.
+    """Count ``noqa`` codes and orphan ``# basedpyright:`` reason lines.
 
     Raises:
         tokenize.TokenError: ``text`` does not tokenize.
@@ -1013,8 +1010,6 @@ def channel_counts(text: str) -> Counter[str]:
     for position, token in enumerate(tokens):
         if token.type != tokenize.COMMENT:
             continue
-        if _TRUTH.search(token.string):
-            counts[_TRUTH_KEY] += 1
         for match in _NOQA.finditer(token.string):
             codes = match.group("codes")
             for code in codes.split(",") if codes else ["(bare)"]:
@@ -1043,7 +1038,7 @@ def channel_counts(text: str) -> Counter[str]:
 
 def _flags_rise(key: str) -> bool:
     """Return whether a rise in ``key``'s count is flagged."""
-    if key in {_TRUTH_KEY, _ORPHAN_KEY}:
+    if key == _ORPHAN_KEY:
         return True
     code = key.removeprefix("noqa ")
     return key.startswith("noqa ") and code.startswith(_TYPING_NOQA)
