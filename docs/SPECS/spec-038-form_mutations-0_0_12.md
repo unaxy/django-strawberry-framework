@@ -341,8 +341,8 @@ package-internal; Slice 4 is the live consumer surface.
     so a JSON string is stored as that string); **bind**
     each value under the keys its widget reads
     (`form.add_prefix`, a multi-key widget's own keys; a list longer than a
-    `SplitArrayWidget`'s `size` → that field's `max_length` error; a value a
-    `MultiWidget`'s `decompress` cannot split → a `ConfigurationError` before
+    `SplitArrayWidget`'s `size` → that field's `max_length` error; a
+    `MultiWidget`'s `decompress` answering no list → a `ConfigurationError` before
     `is_valid()`, nothing written; a datetime `SplitDateTimeWidget.decompress` cannot
     convert to the current time zone's wall clock → that field's `invalid` error "Enter a
     value the current time zone can represent.", nothing written); **validate** via
@@ -1579,10 +1579,10 @@ write flavor rides.
    `SplitArrayWidget` gets one element per index, padded to its `size` with `None`, so an
    empty list is bound and never read as omitted); a `files` mapping is re-keyed under the
    prefix alone. `decompress` takes the field's value, which Django assumes valid (a
-   `datetime` for `SplitDateTimeWidget`), so a value it cannot split (it raises, or answers
-   no list or tuple), such as the text a hook or a form's `__init__` rebinds for a
-   datetime, is a `ConfigurationError` naming the key and the widget's part keys, raised
-   while the form is bound, before `is_valid()`, with nothing written; a `ValidationError`
+   `datetime` for `SplitDateTimeWidget`), so an answer that is no list or tuple is a
+   `ConfigurationError` naming the key and the widget's part keys, raised while the form is
+   bound, before `is_valid()`, with nothing written, and what it raises propagates (the
+   `AttributeError` for the text a hook or a form's `__init__` rebinds for a datetime); a `ValidationError`
    it raises stays that field's error, and an `OverflowError` (a datetime whose wall clock
    in the current time zone leaves years 1..9999, which `to_current_timezone` cannot
    convert) is that field's `invalid` error "Enter a value the current time zone can
@@ -2463,8 +2463,8 @@ Rationale companion: [Decision 14][rationale-d14].
   `<field>_0` / `<field>_1` keys, and keep the stored value when omitted. A
   `get_form_kwargs` / `get_form` hook or a form `__init__` that rebinds the values as
   their text (a `QueryDict` of each value's `str()`, as a browser posts it) hands
-  `decompress` text it cannot split: a `ConfigurationError` naming the key and the part
-  keys, before `is_valid()`, masked on the wire, nothing written (created, updated, or an
+  `decompress` text it cannot split: the `AttributeError` it raises propagates before
+  `is_valid()`, masked on the wire, nothing written (created, updated, or an
   update omitting the field, whose stored value is bound); a hook keeps the package's
   values (a `QueryDict` built with `setlist`) or binds the parts under the widget's keys,
   and a one-key `DateTimeField` parses the text. A datetime whose wall clock in the
@@ -3181,13 +3181,13 @@ behavior reachable through `/graphql/`, package tests own internals.
     keeps it when omitted, unprefixed, under the form's prefix and beside a `get_form`'s
     own prefixed copy
     (`examples/fakeshop/test_query/test_scalars_mutation_api.py::test_split_datetime_form_field_writes_the_datetime_sent`),
-    and a `get_form_kwargs` binding each value's text is the masked `ConfigurationError`
+    and a `get_form_kwargs` binding each value's text is the masked `AttributeError`
     with nothing written through it on create, update and an update omitting it
-    (`::test_posted_text_over_a_split_datetime_widget_is_a_masked_configuration_error`)
+    (`::test_posted_text_over_a_split_datetime_widget_is_a_masked_decompress_error`)
     while the same hook over the one-key `DateTimeField` stores the datetime
     (`::test_posted_text_over_a_one_key_datetime_widget_is_parsed_and_stored`); a filter
     form `__init__` doing the same over nested split widgets is the same masked error
-    (`examples/fakeshop/test_query/test_filter_widget_binding_api.py::test_split_datetime_widgets_bound_to_their_text_are_a_masked_configuration_error`);
+    (`examples/fakeshop/test_query/test_filter_widget_binding_api.py::test_split_datetime_widgets_bound_to_their_text_are_a_masked_decompress_error`);
     a datetime whose wall clock in the current time zone leaves years 1..9999 is the
     split field's `invalid` error with nothing written on create, update and an update
     omitting it over such a stored value, sync and async
@@ -3210,8 +3210,7 @@ behavior reachable through `/graphql/`, package tests own internals.
     `::test_disabled_split_widget_field_keeps_its_stored_value_past_size`,
     `::test_omitted_initial_binds_under_the_split_widget_keys`), and the key and entry
     walk on its own in `tests/utils/test_widgets.py` (with a `decompress` that answers
-    no list, the text of a datetime, any other exception it raises, a `decompress`
-    `ValidationError` kept, its `OverflowError` over an aware datetime the value's `invalid`
+    no list, a `decompress` `ValidationError` kept, its `OverflowError` over an aware datetime the value's `invalid`
     refusal and over any other value the `ConfigurationError`); a value refused before
     model validation inside `is_valid()` converts or binds it: a `clean_<field>`'s beside
     a form error, a bounded decimal past `numeric` under a two-field and a conditional
@@ -3437,7 +3436,7 @@ The completion contract.
    re-keyed under the keys each field's widget reads (`form.add_prefix`, and a
    `MultiWidget`'s or `SplitArrayWidget`'s own keys, a split list padded to `size`), a list
    longer than a `SplitArrayWidget`'s `size` being that field's `max_length` error before
-   `is_valid()` and a value a `MultiWidget`'s `decompress` cannot split a
+   `is_valid()` and a `MultiWidget`'s `decompress` answering no list a
    `ConfigurationError` before `is_valid()`, nothing written, while a datetime
    `SplitDateTimeWidget.decompress` cannot convert to the current time zone's wall clock is
    that field's `invalid` error. `form.errors` maps

@@ -41,8 +41,8 @@ widget reads a date key and a time key: the datetime sent is stored on create an
 and kept when omitted, unprefixed, under the form's prefix and beside a ``get_form``'s own
 prefixed copy. The ``ViaPosted`` pairs' ``get_form_kwargs`` binds each value as its text:
 the temporal form's one-key ``DateTimeField`` parses and stores it, while the split
-widget's ``decompress`` cannot split the text of a datetime, a ``ConfigurationError``
-naming its keys before ``is_valid()``, masked on the wire, with nothing written on
+widget's ``decompress`` cannot split the text of a datetime: the ``AttributeError`` it
+raises propagates before ``is_valid()``, masked on the wire, with nothing written on
 create, update or an update omitting ``occurredAt``. A datetime whose wall clock in the
 current time zone leaves years 1..9999 cannot be split either: the split form answers the
 ``occurredAt`` ``invalid`` ``FieldError`` ("Enter a value the current time zone can
@@ -151,7 +151,6 @@ from django.urls import path
 from django.utils import timezone
 from graphql_client import JSONObject, json_at, post_graphql, response_json
 
-from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.testing import AsyncTestClient
 from django_strawberry_framework.utils._narrowing import is_dict, is_list_or_tuple
 from django_strawberry_framework.utils.typing import object_result
@@ -1097,21 +1096,20 @@ def test_posted_text_over_a_one_key_datetime_widget_is_parsed_and_stored(operati
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("operation", ["create", "update", "update-omitted"])
-def test_posted_text_over_a_split_datetime_widget_is_a_masked_configuration_error(
+def test_posted_text_over_a_split_datetime_widget_is_a_masked_decompress_error(
     operation: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The text of a datetime has no parts ``SplitDateTimeWidget.decompress`` can split.
 
-    ``decompress`` takes the field's value, a ``datetime``: the hook's posted text for
-    ``occurred_at`` (the datetime sent, or on an update omitting it the stored one) is a
-    ``ConfigurationError`` naming ``occurred_at`` and the widget's ``occurred_at_0`` /
-    ``occurred_at_1``, never the value's text, raised while the form is bound, before
-    ``is_valid()``. The client gets the error policy's masked top-level error and
-    nothing is written: no row created, the updated row's label and datetime kept.
+    ``decompress`` takes the field's value, a ``datetime``: on the hook's posted text for
+    ``occurred_at`` (the datetime sent, or on an update omitting it the stored one) it
+    raises ``AttributeError`` while the form is bound, before ``is_valid()``. The client
+    gets the error policy's masked top-level error and nothing is written: no row created,
+    the updated row's label and datetime kept.
     """
     caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
-    root, document, payload, bound = _posted_write("split", operation)
+    root, document, payload, _bound = _posted_write("split", operation)
     correlation_id = json_at(payload, "errors", 0, "extensions", "correlationId")
 
     assert isinstance(correlation_id, str), payload
@@ -1131,14 +1129,7 @@ def test_posted_text_over_a_split_datetime_widget_is_a_masked_configuration_erro
         for record in caplog.records
         if record.name == "django_strawberry_framework" and record.exc_info is not None
     ]
-    assert isinstance(logged[1], ConfigurationError), logged
-    message = str(logged[1])
-    assert message.startswith(
-        "SplitDateTimeWidget.decompress cannot split the str bound under 'occurred_at' "
-        "into the parts the widget reads ('occurred_at_0', 'occurred_at_1'): it raised "
-        "AttributeError",
-    ), message
-    assert str(bound) not in message, message
+    assert isinstance(logged[1], AttributeError), logged
     rows = list(models.ScalarSpecimen.objects.values_list("label", "occurred_at"))
     assert rows == ([] if operation == "create" else [("stored", _STORED_AT)])
 

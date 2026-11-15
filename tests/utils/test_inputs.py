@@ -175,13 +175,6 @@ def test_builder_rejects_non_string_name_and_description(kwargs: dict[str, objec
         build_strawberry_input_class("NonStringKwargInput", [("field", int, kwargs)])
 
 
-def test_builder_rejects_malformed_field_kwargs_with_configuration_error() -> None:
-    with pytest.raises(ConfigurationError, match="field kwargs must be a mapping"):
-        # basedpyright: the non-mapping field kwargs is the hostile input under test;
-        # build_strawberry_input_class types each triple's kwargs as Mapping[str, object] | None
-        build_strawberry_input_class("MalformedFieldKwargsInput", [("name", int, object())])  # pyright: ignore[reportArgumentType]
-
-
 # ---------------------------------------------------------------------------
 # is_input_attribute_name
 # ---------------------------------------------------------------------------

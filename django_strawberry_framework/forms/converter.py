@@ -63,7 +63,6 @@ from django_strawberry_framework.utils.converters import (
     convert_with_mro,
     finish_field_conversion,
     make_kind_converter,
-    make_scalar_converter,
 )
 from django_strawberry_framework.utils.imports import import_attr_if_importable
 
@@ -178,17 +177,8 @@ def _null_boolean_converter(field: forms.Field) -> FormFieldConversion:
     return FormFieldConversion(annotation=annotation, kind=SCALAR, required=required)
 
 
-def _scalar_converter(annotation: object) -> FormFieldConverter:
-    """Return a form scalar-table converter (``form_field_required`` for requiredness)."""
-    return make_scalar_converter(
-        FormFieldConversion,
-        annotation,
-        required_of=form_field_required,
-    )
-
-
 def _kind_converter(kind: str, annotation: object = None) -> FormFieldConverter:
-    """Return a form kind-precheck converter (``form_field_required`` for requiredness)."""
+    """Return a form kind or scalar-table converter (``form_field_required`` for requiredness)."""
     return make_kind_converter(
         FormFieldConversion,
         kind,
@@ -251,9 +241,11 @@ def form_field_scalar(field: object) -> object | None:
 
 
 # ``FORM_FIELD_SCALARS`` as ``convert_form_field``'s scalar registry: each class -> a
-# ``make_scalar_converter`` callable, ``NullBooleanField``'s requiredness-matched.
+# ``SCALAR`` ``make_kind_converter`` callable, ``NullBooleanField``'s requiredness-matched.
 _SCALAR_FORM_FIELDS: dict[type[forms.Field], FormFieldConverter] = {
-    cls: _null_boolean_converter if cls is forms.NullBooleanField else _scalar_converter(scalar)
+    cls: _null_boolean_converter
+    if cls is forms.NullBooleanField
+    else _kind_converter(SCALAR, scalar)
     for cls, scalar in FORM_FIELD_SCALARS.items()
 }
 
@@ -304,7 +296,7 @@ def convert_form_field(field: forms.Field) -> FormFieldConversion:
     Dispatch rides the shared ``utils/converters.py::convert_with_mro``
     skeleton (ordered prechecks, then the scalar registry MRO walk, then a
     raising fallthrough) with ``finish_field_conversion`` invoking a
-    ``make_scalar_converter`` registry hit. It is NOT a
+    ``make_kind_converter`` registry hit. It is NOT a
     ``functools.singledispatch`` with a ``forms.Field`` -> ``str`` catch-all
     (which would shadow the raise so every custom field silently became
     ``String`` - spec-038 Decision 7):

@@ -43,7 +43,6 @@ SHARED_BINDINGS = (
     (serializer_inputs, "predicted_input_field_name", utils_inputs),
     (serializer_converter, "convert_with_mro", utils_converters),
     (serializer_converter, "make_kind_converter", utils_converters),
-    (serializer_converter, "make_scalar_converter", utils_converters),
     (serializer_converter, "finish_field_conversion", utils_converters),
     (serializer_converter, "FieldConversionBase", utils_inputs),
     (serializer_converter, "InputFieldSpec", utils_inputs),

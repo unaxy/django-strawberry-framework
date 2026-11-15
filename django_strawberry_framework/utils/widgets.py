@@ -206,24 +206,21 @@ def _decompressed(
     Django's ``MultiWidget.decompress`` takes the field's compressed value, which it "can
     be assumed to be valid" (a ``datetime`` for ``SplitDateTimeWidget``): the value the
     package decodes and binds. Django calls it on an initial it renders or compares, never
-    on form data. A value it cannot split (it raises, or answers no list or tuple), such as
-    a ``datetime`` a ``get_form`` / ``get_form_kwargs`` hook or a form's ``__init__`` rebinds
-    as its text, has no parts the widget would read: a ``ConfigurationError`` naming the
-    key and the widget's part keys, raised while the form is bound, before ``is_valid()``.
-    A ``ValidationError`` it raises is that value's own refusal and propagates unchanged.
-    An ``OverflowError`` splitting an aware ``datetime`` is that value's refusal too: its
+    on form data. A value it answers no list or tuple for has no parts the widget would
+    read: a ``ConfigurationError`` naming the key and the widget's part keys, raised while
+    the form is bound, before ``is_valid()``. Anything else ``decompress`` raises propagates
+    unchanged, a ``ValidationError`` as that value's own refusal.
+    An ``OverflowError`` splitting an aware ``datetime`` is that value's refusal: its
     wall clock in the current time zone leaves years 1..9999, which
     ``SplitDateTimeWidget.decompress`` cannot convert (``to_current_timezone``), whether or
     not the database could store it, so it is raised as the ``invalid`` ``ValidationError``
     ``UNREPRESENTABLE_IN_ZONE_MESSAGE``, chained to it. An ``OverflowError`` splitting any
-    other value is the widget's own and is the ``ConfigurationError`` above.
+    other value is the widget's own: the same ``ConfigurationError``.
     """
     try:
         parts = call_method(widget, "decompress", value)
-    except ValidationError:
-        raise
-    except Exception as error:
-        if truth.is_instance(error, OverflowError) and _is_aware_datetime(value):
+    except OverflowError as error:
+        if _is_aware_datetime(value):
             raise ValidationError(
                 UNREPRESENTABLE_IN_ZONE_MESSAGE,
                 code=FIELD_ERROR_CODE_INVALID,

@@ -63,7 +63,6 @@ from django_strawberry_framework.registry import register_subsystem_clear
 from . import truth
 from ._narrowing import (
     call_method,
-    dict_items,
     is_mapping,
     is_real_collection,
     is_str,
@@ -404,8 +403,7 @@ class FieldConversionBase:
     can return a conversion without importing the kind
     constant; the internal relation / file constructions pass ``kind``
     explicitly. Flavor tables do not construct this shape by hand: they store
-    ``utils/converters.py::make_scalar_converter`` /
-    ``make_kind_converter`` callables so the VALUE shape stays one site.
+    ``utils/converters.py::make_kind_converter`` callables so the VALUE shape stays one site.
     """
 
     __slots__: tuple[str, ...] = ("annotation", "kind", "required")
@@ -1470,17 +1468,7 @@ def build_strawberry_input_class(
                 f"(python_attr, annotation, field_kwargs) triples; entry {index} is "
                 f"{truth.kind(field_spec)}.",
             ) from exc
-        try:
-            kwargs: dict[str, object] = (
-                dict(dict_items(raw_kwargs))
-                if truth.is_mapping_dict(raw_kwargs)
-                else ({} if raw_kwargs is None else dict(raw_kwargs))
-            )
-        except (TypeError, ValueError) as exc:
-            raise ConfigurationError(
-                "Generated input field kwargs must be a mapping; "
-                f"entry {index} contains {truth.kind(raw_kwargs)}.",
-            ) from exc
+        kwargs: dict[str, object] = {} if raw_kwargs is None else dict(raw_kwargs)
         if python_attr in annotations:
             raise ConfigurationError(
                 f"Generated input {name!r} declares input attribute {python_attr!r} more than "

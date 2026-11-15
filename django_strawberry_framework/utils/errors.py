@@ -109,18 +109,15 @@ from . import truth
 from ._array_field import array_leaf_field
 from ._narrowing import (
     call_method,
-    dict_items,
     is_dict,
     is_iterable,
     is_list,
     is_list_or_tuple,
     is_text_atom,
-    list_iter,
     list_of,
     read_attr,
     require,
     require_instance,
-    tuple_iter,
 )
 from .lazy import unwrap_lazy_object
 from .relations import written_model_field
@@ -352,11 +349,11 @@ def _str_list(value: object) -> list[str]:
     or any other non-iterable becomes a one-element list (never iterated
     char-by-char into per-character leaves); any other iterable (a DRF
     ``ErrorDetail`` list, a tuple) is materialized with each element rendered by
-    ``truth.text``.
+    ``str``.
     """
     if is_text_atom(value) or not is_iterable(value):
-        return [truth.text(value)]
-    return [truth.text(item) for item in value]
+        return [str(value)]
+    return [str(item) for item in value]
 
 
 def _leaf_codes(error: ValidationError) -> list[object]:
@@ -367,11 +364,9 @@ def _leaf_codes(error: ValidationError) -> list[object]:
     code is dropped.
     """
     # ``ValidationError.__init__`` stores every non-dict error's leaves as ``error_list``.
-    leaves = [
-        require_instance(leaf, ValidationError)
-        for leaf in list_of(truth.static_attr(error, "error_list", ()))
-    ]
-    return [leaf.code for leaf in leaves if leaf.code]
+    if not hasattr(error, "error_list"):
+        return []
+    return [leaf.code for leaf in error.error_list if leaf.code]
 
 
 def empty_validation_error(path: str = "") -> FieldError:
@@ -708,17 +703,15 @@ def unstorable_text(path: str, value: object) -> UnstorableText | None:
     (``tags.1``, ``attributes.color``, ``rows.0.name``) through ``join_error_path``;
     an unstorable dict KEY answers the dict's own path, since a segment holding the
     key would echo the refused text. A Django lazy proxy (``SimpleLazyObject``) is
-    read as the object it stands for, and containers and strings through their base
-    ``list`` / ``tuple`` / ``dict`` / ``str`` slots, so a subclass's overridden iteration or
-    conversion cannot hide a leaf. Any other leaf (an int, ``None``, an enum member,
-    an upload) is storable here.
+    read as the object it stands for. Any other leaf (an int, ``None``, an enum
+    member, an upload) is storable here.
     """
     pending: list[tuple[str, object]] = [(path, value)]
     while pending:
         current_path, popped = pending.pop()
         current = unwrap_lazy_object(popped)
-        if truth.is_instance(current, str):
-            refusal = _unstorable_leaf(current_path, truth.text(current))
+        if isinstance(current, str):
+            refusal = _unstorable_leaf(current_path, current)
             if refusal is not None:
                 return refusal
         elif is_list_or_tuple(current):
@@ -726,9 +719,7 @@ def unstorable_text(path: str, value: object) -> UnstorableText | None:
                 reversed(
                     [
                         (join_error_path(current_path, str(index)), element)
-                        for index, element in enumerate(
-                            list_iter(current) if is_list(current) else tuple_iter(current),
-                        )
+                        for index, element in enumerate(current)
                     ],
                 ),
             )
@@ -738,10 +729,10 @@ def unstorable_text(path: str, value: object) -> UnstorableText | None:
                 reversed(
                     [
                         entry
-                        for key, item in dict_items(current)
+                        for key, item in current.items()
                         for entry in (
                             (current_path, key),
-                            (join_error_path(current_path, truth.text(key)), item),
+                            (join_error_path(current_path, str(key)), item),
                         )
                     ],
                 ),
@@ -750,7 +741,7 @@ def unstorable_text(path: str, value: object) -> UnstorableText | None:
 
 
 def _unstorable_leaf(path: str, text: str) -> UnstorableText | None:
-    """Answer one exact-``str`` text leaf's refusal keyed to ``path``, or ``None`` if storable."""
+    """Answer one ``str`` text leaf's refusal keyed to ``path``, or ``None`` if storable."""
     try:
         _ = text.encode("utf-8")
     except UnicodeEncodeError:

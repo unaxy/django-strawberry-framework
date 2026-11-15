@@ -213,10 +213,6 @@
 "tests/auth/test_mutations.py::test_the_logout_teardown_holds_both_locks_in_the_documented_order.observing_logout" = { reportArgumentType = 1 }
 "tests/auth/test_queries.py::test_a_raising_is_authenticated_propagates_to_the_error_policy" = { reportAttributeAccessIssue = 1 }
 "tests/auth/test_queries.py::test_async_gated_me_forces_the_lazy_user_inside_the_one_sync_boundary" = { reportAttributeAccessIssue = 1 }
-"tests/auth/test_queries.py::test_awaitable_is_authenticated_is_closed_and_read_as_anonymous" = { reportAttributeAccessIssue = 1 }
-"tests/auth/test_queries.py::test_custom_awaitable_is_authenticated_is_refused_without_dispatching_close" = { reportAttributeAccessIssue = 1 }
-"tests/auth/test_queries.py::test_future_is_authenticated_is_cancelled_and_read_as_anonymous" = { reportAttributeAccessIssue = 1 }
-"tests/auth/test_queries.py::test_legacy_callable_returning_an_awaitable_is_closed_and_read_as_anonymous" = { reportAttributeAccessIssue = 1 }
 "tests/auth/test_queries.py::test_me_is_null_not_a_crash_when_the_request_user_is_absent" = { reportAttributeAccessIssue = 2 }
 "tests/base/test_conf.py::test_normalize_rejection_skips_raising_metaclass_name" = { reportArgumentType = 1 }
 "tests/base/test_conf.py::test_settings_reload_rejects_non_mapping_value" = { reportArgumentType = 1 }
@@ -501,7 +497,6 @@
 "tests/utils/test_input_values.py::test_active_field_configuration_reads_propagate_and_related_reads_are_truthful" = { reportArgumentType = 2 }
 "tests/utils/test_input_values.py::test_field_name_asks_the_real_type_and_refuses_a_key_that_is_not_one" = { reportArgumentType = 1 }
 "tests/utils/test_input_values.py::test_iter_active_fields_propagates_a_hostile_config_related_attr_read" = { reportArgumentType = 1 }
-"tests/utils/test_inputs.py::test_builder_rejects_malformed_field_kwargs_with_configuration_error" = { reportArgumentType = 1 }
 "tests/utils/test_inputs.py::test_input_builder_rejects_malformed_field_specifications" = { reportArgumentType = 1 }
 "tests/utils/test_inputs.py::test_input_field_spec_carries_five_axes_and_optional_source" = { reportAttributeAccessIssue = 1 }
 "tests/utils/test_inputs.py::test_lazy_annotation_and_factory_subclass_messages_are_pinned" = { reportArgumentType = 1 }

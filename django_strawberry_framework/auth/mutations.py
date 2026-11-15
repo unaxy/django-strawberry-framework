@@ -89,10 +89,7 @@ from django_strawberry_framework.utils.execution_mode import async_execution
 from django_strawberry_framework.utils.input_values import UNSET
 from django_strawberry_framework.utils.inputs import published_input_specs
 from django_strawberry_framework.utils.permissions import ChannelsRequestAdapter, request_from_info
-from django_strawberry_framework.utils.querysets import (
-    _disposed_awaitable,
-    run_in_one_sync_boundary,
-)
+from django_strawberry_framework.utils.querysets import run_in_one_sync_boundary
 from django_strawberry_framework.utils.sessions import actor_transition
 from django_strawberry_framework.utils.write_values import unstorable_text_error
 from django_strawberry_framework.write_mixins import (
@@ -556,44 +553,18 @@ def _authenticated_actor_or_none(request: object) -> _User | None:
     attribute, and a falsy ``is_authenticated``. ``getattr``'s default reads an
     ``AttributeError`` from either attribute read as the attribute being absent.
 
-    ``is_authenticated`` is the consumer user model's own attribute. The legacy
-    callable form (pre-1.10 ``is_authenticated()``) is called and its result
-    classifies, because a bound method is always truthy and would otherwise
-    authenticate every caller. A pending awaitable, read directly or returned by
-    that call, is neither true nor false: it is disposed through the package's
-    one awaitable disposal (``utils/querysets.py::_disposed_awaitable`` - a
-    coroutine is closed so no "never awaited" warning leaks out of the resolver,
-    a future is cancelled, any other awaitable has no cleanup protocol) and read
-    as anonymous, the fail-closed answer. Anything else the attribute reads, the
-    call, or the truthiness test raises propagates to the schema's error policy
-    like any other consumer behaviour, and never classifies the request as
-    anonymous.
+    ``is_authenticated`` is read as Django's own ``AbstractBaseUser`` /
+    ``AnonymousUser`` property. Anything else the attribute read or the
+    truthiness test raises propagates to the schema's error policy like any other
+    consumer behaviour, and never classifies the request as anonymous.
     """
     user: object = getattr(request, "user", None)
     if user is None:
         return None
     is_authenticated: object = getattr(user, "is_authenticated", False)
-    if callable(is_authenticated):
-        is_authenticated = is_authenticated()
-    if _disposed_awaitable(is_authenticated):
-        return None
     # The auth middleware's ``user`` is the ``AUTH_USER_MODEL`` instance or
     # ``AnonymousUser``; only the former reports itself authenticated.
     return cast("_User", user) if is_authenticated else None
-
-
-def _failed_login_payload(payload_cls: type[object], slot: str) -> object:
-    """Build the ONE undifferentiated failed-login envelope (spec-040 Decision 5).
-
-    ``node``/``result`` is ``None`` and ``errors`` carries a single non-field-keyed
-    entry - the ``field_error("", ...)`` empty-path leaf owns the ``"__all__"``
-    sentinel (no ``"__all__"`` literal here). No error code, deliberately: the public
-    failed-login contract is ``field: "__all__"`` + the one message ONLY, so both
-    wrong-password / unknown-user / inactive-under-``ModelBackend`` / unstorable
-    credential collapse to a byte-identical payload (the enumeration guard).
-    """
-    error = field_error("", _INCORRECT_CREDENTIALS_MESSAGE)
-    return resolvers.build_payload(payload_cls, slot, None, [error])
 
 
 def _transport_prologue(
@@ -631,9 +602,17 @@ def _login_result_payload(payload_cls: type[object], slot: str, user: _User | No
     the failed envelope is a pure construction with no session mutation, so callers
     build the payload here and THEN early-return on the failed case, preserving both
     the failed-login early return and the payload-before-mutation ordering.
+
+    The failed envelope is the ONE undifferentiated one (spec-040 Decision 5):
+    ``node``/``result`` is ``None`` and ``errors`` carries a single non-field-keyed
+    entry - the ``field_error("", ...)`` empty-path leaf owns the ``"__all__"``
+    sentinel. No error code, deliberately: wrong-password / unknown-user /
+    inactive-under-``ModelBackend`` / unstorable credential collapse to a
+    byte-identical payload (the enumeration guard).
     """
     if user is None:
-        return _failed_login_payload(payload_cls, slot)
+        error = field_error("", _INCORRECT_CREDENTIALS_MESSAGE)
+        return resolvers.build_payload(payload_cls, slot, None, [error])
     return resolvers.build_payload(payload_cls, slot, user, [])
 
 
@@ -668,7 +647,7 @@ def _login_authenticate(
 
     Returns ``(request, transport, session, payload_cls, slot, user)``; ``user`` is
     ``None`` for both the unstorable and the failed-authentication cases (the caller
-    maps either to ``_failed_login_payload`` without touching the session). This is
+    maps either to ``_login_result_payload``'s failed envelope without touching the session). This is
     sync-only so BOTH the native sync body and the native async body (inside its one
     ``sync_to_async`` boundary) reuse it without duplicating the state machine.
     """
@@ -1334,10 +1313,7 @@ def _password_input_name(specs: Sequence[InputFieldSpec]) -> str:
     The register bind stashes ``password`` as an ``EXCLUDED`` spec; a bind without one
     cannot register a user (``_register_decode_step`` refuses it).
     """
-    for spec in specs:
-        if spec.input_attr == "password":
-            return spec.graphql_name
-    raise ValueError("The register input specs carry no password field to key its errors to.")
+    return next(spec.graphql_name for spec in specs if spec.input_attr == "password")
 
 
 def _run_register_pipeline_sync(

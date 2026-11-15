@@ -36,9 +36,8 @@ separately-invoked run of this same file, not a separate test.
 
 The multipart delegates are pinned on the same mounts: every structurally invalid
 ``map`` a client can send is Strawberry's controlled ``400``, while a consumer view's
-own JSON-hook failure and a traversal-typed server bug outside the upload utility
-reach the server as raised (sync and async), and a batched ``operations`` list keeps
-its batch on a batching holder.
+own JSON-hook failure of a non-traversal type reaches the server as raised, and a
+batched ``operations`` list keeps its batch on a batching holder.
 
 The wire contract's encoding rejections add one more async row. The strict UTF-8
 wire contract (Decision 9) is enforced in
@@ -538,37 +537,6 @@ class _FailingJsonHookView(DjangoGraphQLView):
         raise RuntimeError("consumer decode hook failed")
 
 
-class _ServerBugJsonHookView(DjangoGraphQLView):
-    """A consumer view whose JSON hook has a server-side bug of a TRAVERSAL type."""
-
-    @override
-    def parse_json(self, data: str | bytes) -> object:
-        raise TypeError("server-side bug before the upload traversal")
-
-
-class _ServerBugJsonHookAsyncView(AsyncDjangoGraphQLView):
-    """The async twin of ``_ServerBugJsonHookView``."""
-
-    @override
-    def parse_json(self, data: str | bytes) -> object:
-        raise TypeError("server-side bug before the upload traversal")
-
-
-@_carrying_the_packages_csrf_mark(AsyncDjangoGraphQLView)
-async def _async_server_bug_multipart_view(
-    request: HttpRequest,
-    *args: object,
-    **kwargs: object,
-) -> HttpResponseBase:
-    """``_ServerBugJsonHookAsyncView`` with uploads on, for the async parser-exception row."""
-    view = _ServerBugJsonHookAsyncView.as_view(
-        schema=config_schema.schema,
-        max_request_body_bytes=_ROOMY_CAP,
-        multipart_uploads_enabled=True,
-    )
-    return await view(request, *args, **kwargs)
-
-
 @strawberry.type
 class _UploadEchoQuery:
     """The batching holder's query root: one field, since a schema needs one."""
@@ -634,11 +602,6 @@ urlpatterns = [
         "multipart-failing-hook/",
         _capped_view(_FailingJsonHookView, _ROOMY_CAP, uploads=True),
     ),
-    path(
-        "multipart-server-bug/",
-        _capped_view(_ServerBugJsonHookView, _ROOMY_CAP, uploads=True),
-    ),
-    path("async-multipart-server-bug/", _async_server_bug_multipart_view),
     path("multipart-batching/", _batching_multipart_view),
 ]
 
@@ -2502,43 +2465,17 @@ def test_a_multipart_control_field_that_is_no_envelope_is_refused(
 def test_a_multipart_consumer_json_hook_failure_is_not_downgraded_to_a_400() -> None:
     """A consumer ``parse_json`` raising its own exception reaches the server as raised.
 
-    The multipart delegates translate only a traversal failure the upload utility
-    raised. A view's JSON hook runs inside the same delegated parse, and a failure
-    of its own - not a malformed client document - must surface as the server
-    fault it is rather than as Strawberry's client ``400``.
+    The multipart delegates translate only the exception types a malformed
+    ``operations`` / ``map`` pair raises in the upload utility. A view's JSON hook
+    runs inside the same delegated parse, and a failure of another type - not a
+    malformed client document - surfaces as the server fault it is rather than as
+    Strawberry's client ``400``.
     """
     with (
         override_settings(ROOT_URLCONF=__name__),
         pytest.raises(RuntimeError, match="consumer decode hook failed"),
     ):
         _post_multipart(Client(), "/multipart-failing-hook/", _multipart_fields("map", b"{}"))
-
-
-def test_a_traversal_typed_server_bug_outside_the_upload_utility_stays_a_server_error() -> None:
-    """A ``TypeError`` raised before the upload traversal is never translated to a ``400``.
-
-    It shares the traversal's exception type, so only the translation's provenance
-    scoping - the traceback must pass through the upload utility's own frame -
-    keeps it from being reported as a client error.
-    """
-    with (
-        override_settings(ROOT_URLCONF=__name__),
-        pytest.raises(TypeError, match="server-side bug before the upload traversal"),
-    ):
-        _post_multipart(Client(), "/multipart-server-bug/", _multipart_fields("map", b"{}"))
-
-
-async def test_the_async_view_keeps_a_traversal_typed_server_bug_a_server_error() -> None:
-    """The async multipart delegate scopes the translation to the upload utility identically."""
-    with (
-        override_settings(ROOT_URLCONF=__name__),
-        pytest.raises(TypeError, match="server-side bug before the upload traversal"),
-    ):
-        await _post_multipart(
-            AsyncClient(),
-            "/async-multipart-server-bug/",
-            _multipart_fields("map", b"{}"),
-        )
 
 
 @pytest.mark.django_db

@@ -3,8 +3,8 @@
 ``widget_keys`` / ``widget_entries`` answer, for one widget, every key it reads and the
 entries binding a value under them; the form flavors bind through them
 (``tests/forms/test_resolvers.py`` drives that end to end, on PostgreSQL for the real
-``SplitArrayField``). These rows pin the recursion, the ``decompress`` split (a value it
-cannot split is a ``ConfigurationError``, its ``ValidationError`` kept, its ``OverflowError``
+``SplitArrayField``). These rows pin the recursion, the ``decompress`` split (an answer
+that is no list or tuple is a ``ConfigurationError``, its ``ValidationError`` kept, its ``OverflowError``
 over an aware datetime the value's ``invalid`` ``ValidationError``), the padding and the
 ``size`` refusal on their own, PostgreSQL's ``SplitArrayWidget`` through its
 driver-free double (``tests/_postgres_fields.py::FakeSplitArrayWidget``) and, on the
@@ -56,25 +56,6 @@ class _TupleSplitWidget(forms.MultiWidget):
     def decompress(self, value: object) -> object:
         """Answer the value itself."""
         return value
-
-
-class _ValueErrorSplitWidget(forms.MultiWidget):
-    """A widget whose ``decompress`` raises ``ValueError`` for every value."""
-
-    def __init__(self) -> None:
-        super().__init__((forms.TextInput, forms.TextInput))
-
-    @override
-    def decompress(self, value: object) -> list[object]:
-        """Refuse the value as no Django refusal."""
-        raise ValueError("unsplittable")
-
-
-class _UndecompressingWidget(forms.MultiWidget):
-    """A ``MultiWidget`` declaring no ``decompress``: Django's raises ``NotImplementedError``."""
-
-    def __init__(self) -> None:
-        super().__init__((forms.TextInput, forms.TextInput))
 
 
 class _DayPairWidget(forms.MultiWidget):
@@ -169,59 +150,16 @@ def test_a_decompress_answering_no_list_or_tuple_raises() -> None:
     ), caught.value
 
 
-@pytest.mark.parametrize(
-    "tz_settings",
-    [{"USE_TZ": True}, {"USE_TZ": False}],
-    ids=["aware", "naive"],
-)
-def test_a_datetime_bound_as_text_is_a_configuration_error_naming_the_keys(
-    tz_settings: dict[str, object],
-) -> None:
-    """``SplitDateTimeWidget.decompress`` takes a ``datetime``: its text has no parts to bind.
+def test_a_widgets_own_overflow_is_a_configuration_error_chained_to_it() -> None:
+    """An ``OverflowError`` is the value's refusal only where it splits an aware ``datetime``.
 
-    The message names the key and the part keys the widget reads, never the value's text.
-    """
-    with override_settings(**tz_settings), pytest.raises(ConfigurationError) as caught:
-        widget_entries(forms.SplitDateTimeWidget(), "stamp", str(_STAMP))
-
-    message = str(caught.value)
-    assert message.startswith(
-        "SplitDateTimeWidget.decompress cannot split the str bound under 'stamp' into the "
-        "parts the widget reads ('stamp_0', 'stamp_1'): it raised AttributeError: ",
-    ), message
-    assert str(_STAMP) not in message, message
-    assert isinstance(caught.value.__cause__, AttributeError)
-
-
-@pytest.mark.parametrize(
-    ("widget", "value", "cause"),
-    [
-        pytest.param(_ValueErrorSplitWidget(), "whole", ValueError, id="value-error"),
-        pytest.param(_UndecompressingWidget(), "whole", NotImplementedError, id="no-decompress"),
-        pytest.param(_ValueErrorSplitWidget(), _STAMP, ValueError, id="value-error-on-aware"),
-        pytest.param(
-            _DayPairWidget(),
-            datetime.date(9999, 12, 31),
-            OverflowError,
-            id="overflow-on-a-date",
-        ),
-    ],
-)
-def test_another_exception_from_decompress_is_a_configuration_error_chained_to_it(
-    widget: forms.MultiWidget,
-    value: object,
-    cause: type[Exception],
-) -> None:
-    """Any other exception ``decompress`` raises is the same ``ConfigurationError``.
-
-    An ``OverflowError`` is the value's refusal only where it splits an aware ``datetime``;
-    a widget's own overflow on another value (the day after ``9999-12-31``) is its own.
+    A widget's own overflow on another value (the day after ``9999-12-31``) is its own.
     """
     with pytest.raises(ConfigurationError) as caught:
-        widget_entries(widget, "f", value)
+        widget_entries(_DayPairWidget(), "f", datetime.date(9999, 12, 31))
 
-    assert f"('f_0', 'f_1'): it raised {cause.__name__}" in str(caught.value), caught.value
-    assert type(caught.value.__cause__) is cause
+    assert "('f_0', 'f_1'): it raised OverflowError" in str(caught.value), caught.value
+    assert type(caught.value.__cause__) is OverflowError
 
 
 def test_an_overflow_from_decompress_is_the_value_s_invalid_refusal() -> None:

@@ -2029,18 +2029,6 @@ _PASSWORD_SPECS = (
 )
 
 
-def test_register_write_step_refuses_specs_without_a_password_field() -> None:
-    """A write step handed specs with no ``password`` field raises before any validation."""
-    decoded: _RegisterDecoded = (
-        User(username="testuser"),
-        [],
-        CleanExcludes(fields=[], checks=[]),
-        "secret",
-    )
-    with pytest.raises(ValueError, match="carry no password field"):
-        _register_write_step(DjangoMutation, None, decoded, specs=())
-
-
 def test_register_write_step_none_password_defense_in_depth() -> None:
     """_register_write_step safely rejects None password without crashing validate_password."""
     user = User(username="testuser")

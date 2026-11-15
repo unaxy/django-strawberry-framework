@@ -431,44 +431,6 @@ def test_decode_scalar_leaf_checks_choice_value_after_unwrapping() -> None:
     assert error.field == "statuses.0"
 
 
-class _HidingList(list[object]):
-    """A list whose own iteration hides every element behind one valid string."""
-
-    @override
-    def __iter__(self) -> Iterator[object]:
-        return iter(["fine"])
-
-
-class _HidingDict(dict[object, object]):
-    """A dict whose own ``items`` refuses to be read."""
-
-    @override
-    def items(self) -> NoReturn:
-        raise AssertionError("the walk must not dispatch the override")
-
-
-@pytest.mark.parametrize(
-    ("value", "error_field"),
-    [
-        (_HidingList(["ok", "\ud800"]), "tags.1"),
-        ({"rows": _HidingList(["\ud800"])}, "tags.rows.0"),
-        (_HidingDict({"color": "\ud800"}), "tags.color"),
-        ([_HidingDict({"\ud800": "red"})], "tags.0"),
-        (_HidingList(["ok", "a\x00"]), "tags.1"),
-        (_HidingDict({"color": "\x00"}), "tags.color"),
-        ([_HidingDict({"co\x00lor": "red"})], "tags.0"),
-    ],
-)
-def test_unstorable_text_error_reads_containers_through_the_base_slots(
-    value: object,
-    error_field: str,
-) -> None:
-    """A list / dict subclass's overridden iteration cannot hide an unstorable leaf."""
-    error = unstorable_text_error("tags", value)
-    assert error is not None
-    assert error.field == error_field
-
-
 def test_unstorable_text_error_walks_nesting_deeper_than_the_recursion_limit() -> None:
     """The walk keeps an explicit stack, so a deeply nested ``JSON`` value cannot overflow it."""
     depth = sys.getrecursionlimit() * 2

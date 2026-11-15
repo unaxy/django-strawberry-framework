@@ -17,8 +17,8 @@ stay strictly separate; this module imports neither ``django.forms`` nor
 fallthrough error factory (the package's ``ConfigurationError`` either way).
 
 The scalar-table VALUE shape is also single-sited here, without merging those
-key spaces: ``make_scalar_converter`` / ``make_kind_converter`` build the
-``FieldConversionBase`` callables both registries store, and
+key spaces: ``make_kind_converter`` builds the ``FieldConversionBase``
+callables both registries store, and
 ``finish_field_conversion`` is the post-walk invoke both ``convert_*_field``
 callers share (prechecks return a finished instance; registry hits return a
 callable that still needs ``field``).
@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, final
 from typing_extensions import override
 
 from . import truth
-from .inputs import SCALAR, FieldConversionBase
+from .inputs import FieldConversionBase
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -42,7 +42,6 @@ __all__ = [
     "convert_with_mro",
     "finish_field_conversion",
     "make_kind_converter",
-    "make_scalar_converter",
 ]
 
 
@@ -123,7 +122,7 @@ def convert_with_mro(
        ``IntegerField`` they subclass; a supported field's UNregistered
        subclass resolves to its parent's scalar - ``EmailField`` under
        ``CharField``). The registry VALUE is returned as-is: the two write
-       converters store ``make_scalar_converter`` callables and invoke them via
+       converters store ``make_kind_converter`` callables and invoke them via
        ``finish_field_conversion``; tests of this skeleton may store any value
        (including a bare string).
 
@@ -167,26 +166,6 @@ def make_kind_converter(
     return _convert
 
 
-def make_scalar_converter(
-    conversion_cls: type[_ConversionT],
-    annotation: object,
-    *,
-    required_of: Callable[[_FlagFieldT], bool] | None = None,
-) -> Callable[[_FlagFieldT], _ConversionT]:
-    """Return a converter emitting a ``SCALAR``-kind conversion for a fixed annotation.
-
-    Convenience over ``make_kind_converter`` for the scalar-table rows: kind is
-    always ``SCALAR``, and ``annotation`` is required (the Python / Strawberry
-    scalar the flavor's field class maps to).
-    """
-    return make_kind_converter(
-        conversion_cls,
-        SCALAR,
-        annotation=annotation,
-        required_of=required_of,
-    )
-
-
 def finish_field_conversion(
     result: _ConversionT | Callable[[_FieldT], _ConversionT],
     field: _FieldT,
@@ -194,7 +173,7 @@ def finish_field_conversion(
     """Turn a ``convert_with_mro`` result into a ``FieldConversionBase`` instance.
 
     Precheck handlers return a finished conversion; scalar-table entries are
-    ``make_scalar_converter`` callables that still need ``field``. Both write
+    ``make_kind_converter`` callables that still need ``field``. Both write
     converters share this split so the skeleton can stay value-agnostic (its
     tests pin non-callable registry values).
     """

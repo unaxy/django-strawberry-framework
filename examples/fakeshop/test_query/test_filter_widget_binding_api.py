@@ -3,7 +3,7 @@
 Ordinary consumer JSON and DateTime arguments enter public FilterSet.apply_sync.
 The form's actual widgets, constructor edits and physical data keys own cleaning.
 A form rebinding each value as its text keeps a one-key widget's value, while a split
-date/time widget cannot split a datetime's text: a masked ``ConfigurationError``. A nested
+date/time widget cannot split a datetime's text: its masked ``AttributeError``. A nested
 split range bound whose wall clock in the current time zone leaves years 1..9999 is the
 field's ``FILTER_INVALID`` refusal, an empty-permitted form cleaning itself in ``__init__``
 included. A consumer form cleaned again over new data is asked about that data alone.
@@ -44,7 +44,6 @@ from django_strawberry_framework import (
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.filters import FilterSet
 from django_strawberry_framework.registry import registry
 from django_strawberry_framework.utils._narrowing import (
@@ -1001,15 +1000,14 @@ def test_a_one_key_widget_bound_to_its_text_filters_by_it() -> None:
 
 
 @pytest.mark.django_db
-def test_split_datetime_widgets_bound_to_their_text_are_a_masked_configuration_error(
+def test_split_datetime_widgets_bound_to_their_text_are_a_masked_decompress_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A nested ``SplitDateTimeWidget`` cannot split the text of a datetime bound.
 
     The form ``__init__`` rebinds each bound value as its text, so ``span_0`` holds the
     text of the start bound, which ``decompress`` (taking a ``datetime``) cannot split:
-    a ``ConfigurationError`` naming ``span_0`` and the widget's ``span_0_0`` /
-    ``span_0_1``, never the value's text, before the form cleans. The client gets the
+    its ``AttributeError`` propagates before the form cleans. The client gets the
     error policy's masked top-level error and no rows.
     """
     caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
@@ -1046,13 +1044,7 @@ def test_split_datetime_widgets_bound_to_their_text_are_a_masked_configuration_e
         for record in caplog.records
         if record.name == "django_strawberry_framework" and record.exc_info is not None
     ]
-    assert isinstance(logged[1], ConfigurationError), logged
-    message = str(logged[1])
-    assert message.startswith(
-        "SplitDateTimeWidget.decompress cannot split the str bound under 'span_0' into "
-        "the parts the widget reads ('span_0_0', 'span_0_1'): it raised AttributeError",
-    ), message
-    assert "2024-01-02" not in message, message
+    assert isinstance(logged[1], AttributeError), logged
 
 
 @pytest.mark.django_db

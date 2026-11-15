@@ -24,7 +24,6 @@ from django_strawberry_framework.utils.converters import (
     convert_with_mro,
     finish_field_conversion,
     make_kind_converter,
-    make_scalar_converter,
 )
 from django_strawberry_framework.utils.inputs import FILE, SCALAR, FieldConversionBase
 from django_strawberry_framework.utils.typing import object_result
@@ -296,7 +295,7 @@ def test_registry_walk_scans_a_snapshot_not_a_live_items_view() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scalar-table VALUE shape (make_scalar_converter / finish_field_conversion)
+# Scalar-table VALUE shape (make_kind_converter / finish_field_conversion)
 # ---------------------------------------------------------------------------
 
 
@@ -311,9 +310,9 @@ class _FlagField:
     required: bool
 
 
-def test_make_scalar_converter_defaults_to_field_required() -> None:
+def test_make_kind_converter_defaults_to_field_required() -> None:
     """Omitted ``required_of`` reads ``field.required`` (the serializer default)."""
-    convert: Callable[[_FlagField], _Conv] = make_scalar_converter(_Conv, str)
+    convert: Callable[[_FlagField], _Conv] = make_kind_converter(_Conv, SCALAR, annotation=str)
     result = convert(_FlagField(required=True))
     assert isinstance(result, _Conv)
     assert result.annotation is str
@@ -321,11 +320,12 @@ def test_make_scalar_converter_defaults_to_field_required() -> None:
     assert result.required is True
 
 
-def test_make_scalar_converter_uses_required_of_when_given() -> None:
+def test_make_kind_converter_uses_required_of_when_given() -> None:
     """``required_of`` is the form NullBoolean seam: it wins over ``field.required``."""
-    convert: Callable[[_FlagField], _Conv] = make_scalar_converter(
+    convert: Callable[[_FlagField], _Conv] = make_kind_converter(
         _Conv,
-        bool | None,
+        SCALAR,
+        annotation=bool | None,
         required_of=lambda _f: False,
     )
     result = convert(_FlagField(required=True))
@@ -368,14 +368,14 @@ def test_finish_field_conversion_returns_instance_or_invokes_callable() -> None:
     assert called == [sentinel]
 
 
-def test_form_and_serializer_scalar_tables_ride_make_scalar_converter() -> None:
-    """Both write-flavor CharField rows are ``make_scalar_converter`` closures.
+def test_form_and_serializer_scalar_tables_ride_make_kind_converter() -> None:
+    """Both write-flavor CharField rows are ``make_kind_converter`` closures.
 
     The KEY spaces stay separate (``forms.CharField`` vs
     ``serializers.CharField``); the VALUE shape is the one factory, so a
     requiredness / annotation-construction fix lands once.
     """
-    shared = make_scalar_converter(FieldConversionBase, str).__code__
+    shared = make_kind_converter(FieldConversionBase, SCALAR, annotation=str).__code__
     assert form_converter._SCALAR_FORM_FIELDS[forms.CharField].__code__ is shared
     assert ser_converter._BUILTIN_SCALAR_CONVERTERS[serializers.CharField].__code__ is shared
 
@@ -395,10 +395,3 @@ def test_form_and_serializer_file_prechecks_ride_make_kind_converter() -> None:
     shared = make_kind_converter(FieldConversionBase, FILE).__code__
     assert form_converter._CONVERT_FILE.__code__ is shared
     assert ser_converter._CONVERT_FILE.__code__ is shared
-    assert (
-        form_converter._CONVERT_FILE.__code__
-        is make_scalar_converter(
-            FieldConversionBase,
-            str,
-        ).__code__
-    )

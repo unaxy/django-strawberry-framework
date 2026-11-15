@@ -88,7 +88,6 @@ from cross_web import DjangoHTTPRequestAdapter, HTTPException
 from django.utils.decorators import classonlymethod
 from django.views.decorators.csrf import csrf_protect
 from strawberry.django.views import AsyncGraphQLView, GraphQLView
-from strawberry.file_uploads.utils import replace_placeholders_with_files
 from strawberry.http.typevars import Context, RootValue
 from typing_extensions import override
 
@@ -534,28 +533,6 @@ def _boundary_view(upstream_view: Callable[..., object]) -> Callable[..., object
     return view
 
 
-def _is_operation_batch(parsed: object) -> bool:
-    """Whether ``parsed`` is a JSON array whose every element is an object."""
-    return is_list(parsed) and all(is_dict(item) for item in parsed)
-
-
-def _raised_inside_the_upload_utility(exc: BaseException) -> bool:
-    """Whether ``exc``'s traceback passes through ``replace_placeholders_with_files``.
-
-    ``parse_multipart`` covers more than that traversal - the request adapter's
-    form handling, the view's ``parse_json`` - and a server-side bug in either
-    can share the traversal's exception types. Scoping by the utility's own frame
-    keeps such a bug the ``500`` it is instead of a client ``400``.
-    """
-    code = replace_placeholders_with_files.__code__
-    traceback = exc.__traceback__
-    while traceback is not None:
-        if traceback.tb_frame.f_code is code:
-            return True
-        traceback = traceback.tb_next
-    return False
-
-
 class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
     """The package's raw-request-body boundary, shared by both package views.
 
@@ -579,8 +556,7 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
     ``500``: a document nested past the parser's C stack, and a body that parses
     but is not a GraphQL-over-HTTP envelope (see ``parse_json``); the two
     ``parse_multipart`` overrides answer a malformed multipart ``map`` with
-    Strawberry's own :data:`_MULTIPART_PARSE_REASON` ``400``, scoped by
-    :func:`_raised_inside_the_upload_utility`.
+    Strawberry's own :data:`_MULTIPART_PARSE_REASON` ``400``.
 
     They belong together because they are the same boundary read twice: the cap
     decides which bytes reach the parse, and the parse decides how those exact
@@ -933,7 +909,9 @@ class _RequestBodyBoundaryMixin(_BoundaryMixinBase):
             parsed = object_result(super().parse_json, data)
         except RecursionError as exc:
             raise HTTPException(400, _JSON_PARSE_REASON) from exc
-        if self._parsing_query_params or is_dict(parsed) or _is_operation_batch(parsed):
+        if self._parsing_query_params or is_dict(parsed):
+            return parsed
+        if is_list(parsed) and all(is_dict(item) for item in parsed):
             return parsed
         raise HTTPException(400, _ENVELOPE_REASON)
 
@@ -1234,8 +1212,6 @@ class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValu
         try:
             return super().parse_multipart(request)
         except _MULTIPART_TRAVERSAL_ERRORS as exc:
-            if not _raised_inside_the_upload_utility(exc):
-                raise
             raise HTTPException(400, _MULTIPART_PARSE_REASON) from exc
 
 
@@ -1326,6 +1302,4 @@ class AsyncDjangoGraphQLView(_RequestBodyBoundaryMixin, AsyncGraphQLView[Context
         try:
             return await super().parse_multipart(request)
         except _MULTIPART_TRAVERSAL_ERRORS as exc:
-            if not _raised_inside_the_upload_utility(exc):
-                raise
             raise HTTPException(400, _MULTIPART_PARSE_REASON) from exc

@@ -8,8 +8,7 @@ one-declaration conflict error, the sync/async dispatch counting, the
 mapping-context request shape, the absent-user arms (the Channels adapter
 shape, a lazy ``None``, a custom actor), the bare-string ``directives``
 rejection, the gated-anonymous ``GraphQLError`` and its exact denial string,
-the legacy callable and awaitable ``is_authenticated`` forms plus a raising
-one's propagation, and the async lazy-user forcing inside the one
+a raising ``is_authenticated``'s propagation, and the async lazy-user forcing inside the one
 ``sync_to_async`` boundary. The live ``me`` behavior (authenticated /
 anonymous / no-``AuthenticationMiddleware`` / hide-everyone ``get_queryset``
 skip / ``me: UserType`` SDL / unplanned relation under ``strictness="raise"``)
@@ -19,10 +18,7 @@ is earned in
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Callable, Coroutine, Iterable, Iterator
-from contextlib import AbstractContextManager
-from unittest import mock
+from collections.abc import Callable, Iterable, Iterator
 
 import pytest
 import strawberry
@@ -295,171 +291,6 @@ def test_a_raising_is_authenticated_propagates_to_the_error_policy() -> None:
     assert res.errors is not None
     assert res.errors[0].message == "An unexpected error occurred."
     assert res.errors[0].path == ["me"]
-
-
-def _legacy_callable_user(outcome: Callable[[], object]) -> AbstractContextManager[object]:
-    """Patch the concrete user model's ``is_authenticated`` into a pre-1.10 CALLABLE.
-
-    ``mock.patch.object`` deletes the shadowing attribute on exit because the
-    real one is inherited from ``AbstractBaseUser``, so the model class is left
-    exactly as found. Patching the real model (rather than substituting a duck
-    object) keeps the authenticated arm serializable: the ``me`` field's return
-    type is the concrete ``UserT``.
-    """
-
-    def _is_authenticated(_self: object) -> object:
-        return outcome()
-
-    return mock.patch.object(User, "is_authenticated", _is_authenticated)
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("outcome", "expected"),
-    [(True, {"username": "legacy"}), (False, None)],
-    ids=["true-authenticates", "false-is-anonymous"],
-)
-def test_legacy_callable_is_authenticated_is_called_and_its_result_classifies(
-    *,
-    outcome: bool,
-    expected: dict[str, str] | None,
-) -> None:
-    """A legacy ``is_authenticated()`` is called; a bound method's truthiness never classifies."""
-    create_users(1)
-    user = User.objects.get(username="regular_1")
-    user.username = "legacy"
-    user.set_password("pw")
-    user.save(update_fields=["username", "password"])
-    schema = _me_schema()
-    req = RequestFactory().post("/graphql/")
-    req.user = User.objects.get(username="legacy")
-
-    with _legacy_callable_user(lambda: outcome):
-        res = schema.execute_sync(_ME_Q, context_value=req)
-
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["me"] == expected
-
-
-@pytest.mark.django_db
-def test_awaitable_is_authenticated_is_closed_and_read_as_anonymous() -> None:
-    """A NON-callable awaitable ``is_authenticated`` is closed and read as anonymous.
-
-    A pending coroutine is neither true nor false (and is truthy, so reading it
-    as a flag would authenticate); leaving it unawaited would also leak a
-    "never awaited" warning out of the resolver.
-    """
-
-    async def _pending() -> bool:  # closed, never awaited
-        return True
-
-    coro = _pending()
-
-    class _AwaitableIsAuth:
-        is_authenticated = coro
-
-    schema = _me_schema()
-    req = RequestFactory().post("/graphql/")
-    # basedpyright: the non-user object planted on request.user is the hostile input under
-    # test; django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    req.user = _AwaitableIsAuth()  # pyright: ignore[reportAttributeAccessIssue]
-    res = schema.execute_sync(_ME_Q, context_value=req)
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["me"] is None
-    # Closed by the helper: resuming a closed coroutine is a RuntimeError.
-    with pytest.raises(RuntimeError):
-        coro.send(None)
-
-
-@pytest.mark.django_db
-def test_legacy_callable_returning_an_awaitable_is_closed_and_read_as_anonymous() -> None:
-    """A legacy ``is_authenticated()`` returning a coroutine is closed, not awaited."""
-    captured: list[Coroutine[object, object, bool]] = []
-
-    class _AsyncCallableIsAuth:
-        def is_authenticated(self) -> Coroutine[object, object, bool]:
-            async def _pending() -> bool:  # closed, never awaited
-                return True
-
-            coro = _pending()
-            captured.append(coro)
-            return coro
-
-    schema = _me_schema()
-    req = RequestFactory().post("/graphql/")
-    # basedpyright: the non-user object planted on request.user is the hostile input under
-    # test; django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    req.user = _AsyncCallableIsAuth()  # pyright: ignore[reportAttributeAccessIssue]
-    res = schema.execute_sync(_ME_Q, context_value=req)
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["me"] is None
-    assert len(captured) == 1
-    with pytest.raises(RuntimeError):
-        captured[0].send(None)
-
-
-@pytest.mark.django_db
-def test_future_is_authenticated_is_cancelled_and_read_as_anonymous() -> None:
-    """A Future ``is_authenticated`` is cancelled and read as anonymous.
-
-    The seam composes the package's one awaitable disposal
-    (``utils/querysets.py::_disposed_awaitable``): a coroutine is closed (the
-    rows above), a future is cancelled rather than left pending, and the
-    request classifies anonymous either way.
-    """
-    loop = asyncio.new_event_loop()
-    future = loop.create_future()
-
-    class _FutureIsAuth:
-        is_authenticated = future
-
-    try:
-        schema = _me_schema()
-        req = RequestFactory().post("/graphql/")
-        # basedpyright: the non-user object planted on request.user is the input under test;
-        # django-stubs types the slot as AbstractBaseUser | AnonymousUser
-        req.user = _FutureIsAuth()  # pyright: ignore[reportAttributeAccessIssue]
-        res = schema.execute_sync(_ME_Q, context_value=req)
-        assert res.errors is None, res.errors
-        assert res.data is not None
-        assert res.data["me"] is None
-        assert future.cancelled() is True
-    finally:
-        loop.close()
-
-
-@pytest.mark.django_db
-def test_custom_awaitable_is_authenticated_is_refused_without_dispatching_close() -> None:
-    """An exotic awaitable ``is_authenticated`` is anonymous; its ``close`` never runs.
-
-    The shared disposal releases only coroutines and futures - a custom
-    awaitable's ``close`` is consumer code the refusal must not run.
-    """
-    closed: list[bool] = []
-
-    class _CustomAwaitable:
-        def __await__(self) -> Iterator[None]:
-            return iter(())
-
-        def close(self) -> None:
-            closed.append(True)
-
-    class _CustomAwaitableIsAuth:
-        is_authenticated = _CustomAwaitable()
-
-    schema = _me_schema()
-    req = RequestFactory().post("/graphql/")
-    # basedpyright: the non-user object planted on request.user is the input under test;
-    # django-stubs types the slot as AbstractBaseUser | AnonymousUser
-    req.user = _CustomAwaitableIsAuth()  # pyright: ignore[reportAttributeAccessIssue]
-    res = schema.execute_sync(_ME_Q, context_value=req)
-    assert res.errors is None, res.errors
-    assert res.data is not None
-    assert res.data["me"] is None
-    assert closed == []
 
 
 def test_current_user_bare_string_directives_raise_configuration_error() -> None:

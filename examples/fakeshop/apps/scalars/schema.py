@@ -42,8 +42,8 @@ datetime whose wall clock in the current time zone leaves years 1..9999 is the f
 ``invalid`` error there. The ``ViaPosted`` pairs bind a ``get_form_kwargs``
 mapping holding each value as its text (``forms.as_posted_text``): over the temporal form's
 one-key ``DateTimeField`` (``PostedForm``) the text is parsed and stored, while the split
-widget's ``decompress`` cannot split the text of a datetime (``PostedSplitForm``), a
-``ConfigurationError`` before ``is_valid()``. The ``NullableScalarSpecimen`` ``ViaForm``
+widget's ``decompress`` cannot split the text of a datetime (``PostedSplitForm``), the
+``AttributeError`` it raises propagating before ``is_valid()``. The ``NullableScalarSpecimen`` ``ViaForm``
 pair writes the ``null=True`` ``flag`` column through
 ``forms.NullableScalarSpecimenFlagForm``'s checkbox and the ``null=True`` ``payload`` JSON
 and ``score`` float columns through its ``CharField``, so an explicit ``null``, or a create

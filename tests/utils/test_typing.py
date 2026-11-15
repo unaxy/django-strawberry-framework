@@ -71,6 +71,7 @@ def test_typing_exports_all() -> None:
         "strawberry_schema_from_info",
         "strawberry_schema_from_schema",
         "unwrap_non_null",
+        "wrapped_resolver",
     )
 
 

@@ -104,7 +104,6 @@ from django_strawberry_framework.utils.converters import (
     convert_with_mro,
     finish_field_conversion,
     make_kind_converter,
-    make_scalar_converter,
 )
 
 # The decode kinds the reverse-map record carries. The four base kinds are
@@ -190,14 +189,14 @@ SerializerFieldConverter = Callable[["DRFField"], SerializerFieldConversion]
 def _scalar_converter(annotation: object) -> SerializerFieldConverter:
     """Return a converter emitting a ``SCALAR``-kind conversion for a fixed annotation.
 
-    Thin flavor wrapper around ``make_scalar_converter``: requiredness is
+    Thin flavor wrapper around ``make_kind_converter``: requiredness is
     ``field.required`` (the serializer default). The form table passes
     ``required_of=form_field_required`` instead (NullBoolean). The built-in
     scalar entries are CONVERTERS (not bare annotations) so the ONE registry
     the MRO walk consults holds a uniform ``field -> SerializerFieldConversion``
     shape for both built-in and consumer-registered fields.
     """
-    return make_scalar_converter(SerializerFieldConversion, annotation)
+    return make_kind_converter(SerializerFieldConversion, SCALAR, annotation=annotation)
 
 
 def _model_field_converter(field: DRFField) -> SerializerFieldConversion:
