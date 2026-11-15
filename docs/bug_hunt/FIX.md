@@ -59,7 +59,7 @@ Each phase finishes completely (every agent it dispatched has reported) before t
    diff stays inside one module, and the repro grid is a handful of rows. When in doubt, it is not easy. Each round of
    one item keeps the verifier type it started with. On FIX, rule on each finding
    and send the list to the same implementer, then send the delta back to the same verifier. Repeat until LAND.
-   A change that narrows what worked at the parent commit for a feasible shape is a FIX finding, never a LAND.
+   A change narrowing what worked at the parent commit for a supported feasible shape is a FIX finding, never a LAND.
    A docs-only last fix may be checked by the coordinator instead of a new verifier round.
 8. **Land.** `work.py land fix-i<N>-<slug>` applies the copy's content to the shared working tree as one
    `git diff --binary` (new files included); it refuses unless the patch applies cleanly and every path it touches

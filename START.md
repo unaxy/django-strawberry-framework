@@ -411,14 +411,12 @@ Editing it: dense. No blank lines, no periods, no code blocks.
 
 ## Past mistakes
 
-- **Don't pre-populate `conf.py` w/ future settings.** The maintainer trimmed it hard. Key lands with its feature.
 - **Don't restore deleted files on assumption.** Ask. (Restored `schema.py` + `test_schema_smoke.py` the maintainer had removed on purpose.)
 - **Don't add example-app coverage to the gate.** Rolled back once. Package = 100%; example exercises via real flows, doesn't gate.
 - **Don't second-guess `field_name` patterns** in files translated from `django-graphene-filters`. Mirror old shape.
 - **Don't over-harden a rule after context loss.** *No auto-commit* ≠ *never commit*. Re-read AGENTS.md when a rule seems to forbid what the maintainer asks.
 - **Don't auto-revert a live-tree regression.** No-revert rule covers DIRTY files you didn't author; regression in COMMITTED code → root-cause fix, not checkout.
-- **No defer-the-real-fix sequencing.** No test-only fix when prod code is the wrong abstraction, no `pragma: no cover` workaround, no follow-up card as substitute.
-- **Rule w/o gate rots.** Repairing a forbidden form → root-cause fix = the missing gate, not the sites. Gate fails open one level up at every level: corpus silently empty (`git ls-files` in ignored dir exits 0, empty stdout), required-file list shrinks, region bounds unpinned. Ask for the next level up before the reviewer does.
+- **Rule w/o gate rots.** Repairing a forbidden form → root-cause fix = the missing gate, not the sites; one gate, not a tower of gates over it.
 - **Item routed forward w/o NAMED owner dies.** Home every deferred finding on a specific card, in DB, before closing.
 - **Surface w/ no owning spec silently inverts the specs describing it.** Spec heading rewrite strands every prose citation.
 - **Reconciliation slice introduces contradictions it can't see.** Integration pass owes the divergence INVENTORY, not the consistency of the discharging text.
@@ -428,7 +426,7 @@ Editing it: dense. No blank lines, no periods, no code blocks.
 - Package rebuilds the overlap of `graphene-django` ∩ `strawberry-graphql-django`, DRF-shaped. Both provide it = foundational. One = optional, later spec.
 - Behavior ← `strawberry-graphql-django` (esp. optimizer's downgrade-to-`Prefetch` when target type has custom `get_queryset`). Surface ← `django-graphene-filters` Meta API. Be honest which side a decision falls.
 - Build in slices; fork a subsystem to its own spec when a slice passes ~one module. Mechanics: [docs/builder/BUILD.md][build].
-- Resist scope creep. Early versions of this file deferred filters, orders, aggregates, permissions, full connection field; each later shipped in its own slice. That's the point. What's still deferred = board's job. No "while I'm here".
+- Resist scope creep. A fix restores the documented contract with the smallest change; making a new shape work, guarding a private upstream body, or a second code path for a rare shape is scope growth: the verifier BLOCKs and the maintainer rules; the default is a refusal naming the supported spelling. What's deferred = board's job. No "while I'm here".
 - Coverage is a feature. Line uncoverable via the example = smell (too-clever code / wrong abstraction).
 - Security: cancel request ≠ termination protocol; lock private to one layer ≠ synchronization contract. Boundary is transactional, not lexical; wrapper must PERMIT, not filter.
 

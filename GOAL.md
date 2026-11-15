@@ -10,7 +10,7 @@
 
 1. Learn the repo: [`AGENTS.md`][agents] (law), [`START.md`][start] (context), [`docs/README.md`][docs-readme] (how consumers use it), [`docs/TREE.md`][tree] (where things live).
 2. Pick the next card: the first `To Do` card in version order on [`KANBAN.md`][kanban]. Spec and slice mechanics are in [`docs/builder/BUILD.md`][build]; shipped behavior folds into the glossary, tree, and board in the closing slice.
-3. Judge every card against this file before building it: it must move the `astronomy` app below closer to running verbatim, satisfy a success criterion, and violate no non-goal. A card that fails that test is a question for the maintainer, not a build.
+3. Judge every card, and every fix a review proposes, against this file before building it: it must move the `astronomy` app below closer to running verbatim, satisfy a success criterion, and violate no non-goal. A card that fails that test is a question for the maintainer, not a build.
 4. Stop when the board is empty and the definition of done below holds.
 
 ## Definition of done
@@ -489,7 +489,7 @@ An unregistered relation target raises at `finalize_django_types()` here, where 
 
 ### Coming from DRF + `django-filter`
 
-An existing `django_filters.FilterSet` migrates with a one-line parent-class swap: the package's `FilterSet` **is** a `django_filters.filterset.BaseFilterSet` subclass, so every `Filter` / `FilterMethod` / form-cleaning primitive carries over unchanged. An existing `ModelSerializer` or `ModelForm` becomes a mutation by naming it in `Meta`, and all three mutation flavors share one `FieldError` envelope.
+An existing `django_filters.FilterSet` migrates with a one-line parent-class swap: the package's `FilterSet` **is** a `django_filters.filterset.BaseFilterSet` subclass, so its documented `Filter`, `method=` and form-cleaning spellings carry over; behaviour django-filter leaves undefined is refused, not emulated. An existing `ModelSerializer` or `ModelForm` that keeps the contract [`docs/README.md`][docs-readme] states becomes a mutation by naming it in `Meta`, and all three mutation flavors share one `FieldError` envelope.
 
 ```python
 from django_strawberry_framework.filters import FilterSet
@@ -541,7 +541,7 @@ The project misses the goal if users must routinely hand-build the same schema m
 
 ## Trust boundary
 
-The package sits on Django, Strawberry and graphql-core and is no more secure than they are. The wire is untrusted: every bound in the production security profile exists for the document, variables, headers and uploads a request carries. Configuration is validated at construction, then trusted. Declared visibility rules are configuration, validated term by term at construction; the predicate compiled from them is package code, so a row set that disagrees with the declaration is a package defect. The actor those rules read is the user Django's authentication attached to the request. Application Python - resolvers, `get_queryset` hooks, sidecar overrides, project `QuerySet` classes, extension factories - is trusted: the package validates what it can establish mechanically about their results and states the contract each must keep, and does not promise to contain code running inside its own process. Django's security policy is the model: a defect must be reachable through code that could feasibly exist in a project using supported public API. What this package guarantees beyond upstream - a bounded raw list, per-operation isolation of its own extensions, an error masked for the right operation - the docs state as its own.
+The package sits on Django, Strawberry and graphql-core and is no more secure than they are. The wire is untrusted: every bound in the production security profile exists for the document, variables, headers and uploads a request carries. Configuration is validated at construction, then trusted. Declared visibility rules are configuration, validated term by term at construction; the predicate compiled from them is package code, so a row set that disagrees with the declaration is a package defect. The actor those rules read is the user Django's authentication attached to the request. Application Python - resolvers, `get_queryset` hooks, sidecar overrides, project `QuerySet` classes, extension factories - is trusted: the package validates, where the docs state a contract, what it can establish mechanically about their results and states the contract each must keep, and does not promise to contain code running inside its own process. Django's security policy is the model: a defect must be reachable through code that could feasibly exist in a project using supported public API: a spelling the docs or glossary present as public, never a private hook, an upstream internal or an undocumented override. What this package guarantees beyond upstream - a bounded raw list, per-operation isolation of its own extensions, an error masked for the right operation - the docs state as its own.
 
 ## Non-goals
 
@@ -553,8 +553,7 @@ This package should not become:
 - a decorator-first framework
 - an ORM abstraction layer that hides Django querysets (a restricted rule language that compiles to `Q`, with `get_queryset` kept as the escape hatch, is not such a layer)
 - a system that silently weakens rich relations into generic placeholders
-
-The destination is a Django-native, Strawberry-powered framework that makes rich GraphQL schemas easy to build and efficient to execute.
+- a framework that supports every shape Python permits: a shape no success criterion or documented contract needs is refused or documented as a limit
 
 ## Target examples
 
