@@ -49,8 +49,8 @@ if TYPE_CHECKING:
 
     #: One variable value frozen for the plan-cache key
     #: (``extension.py::_hashable_variable_value``): a ``(tag, type id, payload)``
-    #: triple whose payload is a library-owned scalar, a nested frozen structure,
-    #: or an opaque ``object()`` token.
+    #: triple whose payload is the hashable value itself, a nested frozen
+    #: structure, or an opaque ``object()`` token.
     FrozenVariableValue: TypeAlias = tuple[str, int, object]
     #: The operation-constant plan-cache-key parts: the rendered document key, the
     #: frozen ``(variable name, value)`` pairs that can change a plan, the effective

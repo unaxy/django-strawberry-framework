@@ -1064,14 +1064,6 @@ def test_merge_aliased_selections_preserves_different_fields() -> None:
     assert len(merged) == 2
 
 
-def test_merge_aliased_selections_passes_fragments_through() -> None:
-    """Fragment nodes pass through without merging."""
-    frag = _inline_fragment("CategoryType", selections=[_sel("items")])
-    sel = _sel("name")
-    merged = _merge_aliased_selections([frag, sel])
-    assert len(merged) == 2
-
-
 def test_merge_runtime_prefixes_adopts_then_unions_connection_prefixes() -> None:
     """Connection-carried runtime prefixes are adopted, then order-preserving unioned.
 

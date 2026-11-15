@@ -74,7 +74,6 @@ from .selections import (
     PYTHON_NAME_ATTR,
     RUNTIME_PREFIXES_ATTR,
     included_field_selections,
-    is_fragment,
     python_arguments,
     response_key,
     response_keys,
@@ -653,7 +652,7 @@ def _walk_selections(
     ``plan_optimizations`` so the resolver's actual Strawberry return
     type drives the root ``_resolve_field_map`` lookup. Recursive
     nested calls (``_plan_select_relation`` and
-    ``_build_prefetch_child_queryset`` below) intentionally omit it so
+    ``_build_prefetch_child_queryset_from_base`` below) intentionally omit it so
     nested relation targets keep routing through ``registry.get(model)``
     and resolve to the primary type.
 
@@ -1000,15 +999,19 @@ def _plan_prefetch_relation(
     # and adds no query whether or not this prefetch survives, so it must
     # never be stripped.
     prior_planned = frozenset(plan.planned_resolver_keys)
-    child_queryset = _build_prefetch_child_queryset(
+    child_queryset = _build_prefetch_child_queryset_from_base(
         sel,
         django_field,
-        target_type,
-        target_definition,
         plan,
         info,
         runtime_paths,
-        has_custom_get_queryset=has_custom_get_queryset,
+        base_queryset=_build_child_queryset(
+            django_field,
+            target_type,
+            info,
+            has_custom_qs=has_custom_get_queryset,
+            target_definition=target_definition,
+        ),
     )
     nested_keys = tuple(k for k in plan.planned_resolver_keys if k not in prior_planned)
     _record_prefetch_path_keys(plan, lookup_path, (*resolver_identities, *nested_keys))
@@ -1120,35 +1123,6 @@ def _record_relation_carriers(
     append_unique_many(
         plan.only_fields,
         [f"{prefix}{attname}" for attname in django_field.source_link_attnames],
-    )
-
-
-def _build_prefetch_child_queryset(
-    sel: FieldSelection,
-    django_field: FieldMeta,
-    target_type: type[DjangoType] | None,
-    target_definition: DjangoTypeDefinition | None,
-    parent_plan: OptimizationPlan,
-    info: GraphQLResolveInfo[object] | None,
-    runtime_paths: tuple[tuple[str, ...], ...],
-    *,
-    has_custom_get_queryset: bool,
-) -> QuerySet[models.Model]:
-    """Build and optimize the child queryset for a generated ``Prefetch``."""
-    base_queryset = _build_child_queryset(
-        django_field,
-        target_type,
-        info,
-        has_custom_qs=has_custom_get_queryset,
-        target_definition=target_definition,
-    )
-    return _build_prefetch_child_queryset_from_base(
-        sel,
-        django_field,
-        parent_plan,
-        info,
-        runtime_paths,
-        base_queryset=base_queryset,
     )
 
 
@@ -1628,9 +1602,9 @@ class _MergedSelection(SimpleNamespace):
 def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[FieldSelection]:
     """Merge same-field selections while preserving all represented response keys.
 
-    The main walker path passes fragment-inlined field selections here, so
-    duplicate relation branches are combined before planning. The fragment
-    passthrough below is retained for defensive direct helper use.
+    The walker passes fragment-inlined field selections here
+    (``included_field_selections``), so duplicate relation branches are
+    combined before planning.
 
     Fast path: when no two selections share an exact GraphQL field name (the
     overwhelmingly common query shape - each field selected once), there is
@@ -1638,14 +1612,10 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
     rebuilding it into per-selection ``SimpleNamespace`` clones. Downstream
     readers (``_response_keys`` / ``_selection_runtime_prefixes`` /
     ``_aliased_arguments_diverge``) all ``getattr``-default the ``_optimizer_*``
-    markers a raw selection lacks, so the passthrough is shape-compatible. Any
-    fragment defensively forces the slow path (fragments cannot be deduped by
-    name and are passed through by the merge loop below unchanged).
+    markers a raw selection lacks, so the passthrough is shape-compatible.
     """
     seen_names: set[str] = set()
     for sel in selections:
-        if is_fragment(sel):
-            break
         key = sel.name
         if key in seen_names:
             break
@@ -1655,9 +1625,6 @@ def _merge_aliased_selections(selections: Sequence[FieldSelection]) -> Sequence[
     seen: dict[str, _MergedSelection] = {}
     result: list[FieldSelection] = []
     for sel in selections:
-        if is_fragment(sel):
-            result.append(sel)
-            continue
         key = sel.name
         if key in seen:
             merged = seen[key]

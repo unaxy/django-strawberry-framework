@@ -37,7 +37,6 @@ from graphql_client import (
 )
 from strategy_schemas import build_strategy_schema, make_django_type
 from strawberry import relay
-from typing_extensions import override
 
 from django_strawberry_framework import (
     DjangoListField,
@@ -166,91 +165,6 @@ def test_auto_strategy_picks_the_vendor_body_and_pages_truthfully_over_http() ->
     else:
         assert "PARTITION BY" in windowed[0], book_sql
         assert "LATERAL" not in windowed[0], book_sql
-
-
-@pytest.fixture
-def install_hashable_scalar_cache_schema(
-    private_registry: None,
-) -> Iterator[DjangoOptimizerExtension]:
-    """Install a live schema whose custom scalar returns hostile hashable values."""
-    del private_registry  # The dependency clears before holder declarations.
-    registry.clear()
-
-    class CacheCategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    class EqualityBomb:
-        @override
-        def __hash__(self) -> int:
-            return 1
-
-        @override
-        def __eq__(self, _other: object) -> bool:
-            raise RuntimeError("custom scalar equality must not run in cache lookup")
-
-    def _serialize_bomb(_value: object) -> str:
-        return "ok"
-
-    def _parse_bomb(_value: object) -> EqualityBomb:
-        return EqualityBomb()
-
-    BombValue = NewType("BombValue", object)
-    bomb_scalar = strawberry.scalar(
-        name="BombValue",
-        serialize=_serialize_bomb,
-        parse_value=_parse_bomb,
-    )
-
-    @strawberry.type
-    class Misc:
-        @strawberry.field
-        def logs(self, after: BombValue) -> list[str]:
-            return [type(after).__name__]
-
-    @strawberry.type
-    class Query:
-        objs: list[CacheCategoryType] = DjangoListField(CacheCategoryType)
-
-        @strawberry.field
-        def misc(self) -> Misc:
-            return Misc()
-
-    finalize_django_types()
-    optimizer = DjangoOptimizerExtension()
-    _current["schema"] = DjangoSchema(
-        query=Query,
-        config=strawberry_config(extra_scalar_map={BombValue: bomb_scalar}),
-        extensions=[lambda: optimizer],
-    )
-    yield optimizer
-    _current["schema"] = None
-
-
-@pytest.mark.django_db
-@pytest.mark.usefixtures("private_registry")
-def test_repeated_live_query_survives_hashable_custom_scalar_equality(
-    install_hashable_scalar_cache_schema: DjangoOptimizerExtension,
-) -> None:
-    """A hostile custom scalar cannot abort a repeated optimizer cache lookup."""
-    services.seed_data(1)
-    query = """
-        query Q($value: BombValue!) {
-          objs { name }
-          misc { logs(after: $value) }
-        }
-    """
-
-    first = TestClient().query(query, variables={"value": "marker"})
-    second = TestClient().query(query, variables={"value": "marker"})
-
-    assert first.data is not None
-    assert second.data is not None
-    assert first.data["misc"]["logs"] == ["EqualityBomb"]
-    assert second.data["misc"]["logs"] == ["EqualityBomb"]
-    assert install_hashable_scalar_cache_schema.cache_info().misses == 2
-    assert install_hashable_scalar_cache_schema.cache_info().hits == 0
 
 
 @pytest.fixture

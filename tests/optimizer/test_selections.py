@@ -5,7 +5,6 @@ selections are not request-observable. Cache-key and window behavior through a r
 ``examples/fakeshop/test_query/test_library_api.py``.
 """
 
-import dataclasses
 from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated
@@ -18,7 +17,6 @@ from graphql.language.ast import (
     DocumentNode,
     FieldNode,
     FragmentDefinitionNode,
-    FragmentSpreadNode,
     OperationDefinitionNode,
     SelectionNode,
 )
@@ -148,7 +146,7 @@ def test_stamp_refuses_a_selection_node_the_parser_never_builds() -> None:
 
 
 def test_resolve_unvisited_fragment_resolves_once_then_dedups() -> None:
-    """A spread resolves to its definition once; a second visit and misses return ``None``."""
+    """A spread resolves to its definition once; a second visit and a non-spread return ``None``."""
     doc = parse("query { ...F } fragment F on T { x }")
     operation, fragment_def = doc.definitions
     assert isinstance(operation, OperationDefinitionNode)
@@ -157,30 +155,20 @@ def test_resolve_unvisited_fragment_resolves_once_then_dedups() -> None:
     fragments = {"F": fragment_def}
     visited: set[FragmentVisitKey] = set()
 
-    assert resolve_unvisited_fragment(spread, fragments, visited) is fragment_def
-    assert visited == {"F"}
+    assert resolve_unvisited_fragment(spread, fragments, visited, depth=0) is fragment_def
     # Already visited -> None (the cycle / sibling-spread guard).
-    assert resolve_unvisited_fragment(spread, fragments, visited) is None
+    assert resolve_unvisited_fragment(spread, fragments, visited, depth=0) is None
     # A non-spread node -> None.
     field = fragment_def.selection_set.selections[0]
-    assert resolve_unvisited_fragment(field, fragments, set()) is None
-    # A spread for an undefined fragment -> None (defensive).
-    assert resolve_unvisited_fragment(spread, {}, set()) is None
-    # A spread whose ``name`` is falsy -> None (defensive; graphql-core
-    # validation would normally reject a nameless spread before the optimizer).
-    nameless = dataclasses.replace(spread, name=None)
-    assert isinstance(nameless, FragmentSpreadNode)
-    assert resolve_unvisited_fragment(nameless, fragments, set()) is None
+    assert resolve_unvisited_fragment(field, fragments, set(), depth=0) is None
 
 
 def test_resolve_unvisited_fragment_depth_keys_visits_per_spread_site() -> None:
-    """With ``depth=``, the visit key is ``(name, depth)`` so each depth resolves once.
+    """The visit key is ``(name, depth)`` so each depth resolves once.
 
     The cache-relevant-variable walk needs this: a fragment spread at root depth
     must not suppress a later nested spread of the same fragment (Decision 7
-    nested pagination variables). Name-only visits stay independent of depth
-    keys - the two keying modes do not share a visited set in production, but
-    the pin here proves the depth axis is ``(name, depth)`` not name alone.
+    nested pagination variables).
     """
     doc = parse("query { ...F } fragment F on T { x }")
     operation, fragment_def = doc.definitions
@@ -210,14 +198,6 @@ def test_directive_variable_names_collects_skip_include_vars_only() -> None:
     doc2 = parse("query Q($y: Boolean!) { b @include(if: $y) }")
     field_b = _operation(doc2).selection_set.selections[0]
     assert directive_variable_names(field_b) == {"y"}
-
-
-def test_directive_variable_names_ignores_non_directive_objects() -> None:
-    """A ``directives`` collection carrying a non-``DirectiveNode`` is skipped."""
-    node = SimpleNamespace(directives=[object()])
-    # basedpyright: a stand-in node carrying only the slots the code under test reads;
-    # directive_variable_names types the parameter as Node
-    assert directive_variable_names(node) == set()  # pyright: ignore[reportArgumentType]
 
 
 # ---------------------------------------------------------------------------

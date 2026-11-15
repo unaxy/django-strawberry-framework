@@ -99,8 +99,6 @@ from django_strawberry_framework.optimizer.extension import (
     _collect_cache_var_families,
     _collect_schema_reachable_types,
     _hashable_variable_value,
-    _named_children,
-    _node_children_with_runtime_prefix,
     _resolve_model_from_return_type,
     _stash_on_context,
     _walk_cache_relevant_vars,
@@ -113,7 +111,11 @@ from django_strawberry_framework.optimizer.plans import (
     PlannedWindow,
     PrefetchSeal,
 )
-from django_strawberry_framework.optimizer.selections import PYTHON_NAME_ATTR
+from django_strawberry_framework.optimizer.selections import (
+    PYTHON_NAME_ATTR,
+    named_children,
+    node_children_with_runtime_prefix,
+)
 from django_strawberry_framework.permissions import apply_cascade_permissions
 from django_strawberry_framework.registry import iter_subsystem_clears, registry
 from django_strawberry_framework.types.resolvers import (
@@ -140,14 +142,12 @@ from django_strawberry_framework.utils.typing import graphql_fields, graphql_typ
 from tests._catalog_data import categories_from_seed, items_from_seed
 from tests._definition import make_definition
 from tests._idioms import (
-    STR_SUBCLASS_KINDS,
     ClaimsClassBase,
     ClassReadRaisesBase,
     definition_raises,
     is_object_dict,
     is_object_list,
     saved_pk,
-    str_subclass_name,
 )
 from tests._info import make_info, raw_info_of, response_path
 
@@ -1782,29 +1782,6 @@ def test_directive_var_family_ignores_non_directive_vars() -> None:
     assert names == frozenset()
 
 
-def test_walk_cache_relevant_vars_ignores_non_directive_objects() -> None:
-    """Directive collection skips defensive non-DirectiveNode entries."""
-    operation = parse("query Q($v: Boolean!) { items @skip(if: $v) { name } }").definitions[0]
-    assert isinstance(operation, OperationDefinitionNode)
-    field = operation.selection_set.selections[0]
-
-    directive_names: set[str] = set()
-    pagination_names: set[str] = set()
-    node = SimpleNamespace(directives=[object(), *(field.directives or ())], selection_set=None)
-    _walk_cache_relevant_vars(
-        # basedpyright: a stand-in node carrying only the slots the code under test reads;
-        # _walk_cache_relevant_vars types the parameter as Node
-        node,  # pyright: ignore[reportArgumentType]
-        {},
-        set(),
-        0,
-        directive_names,
-        pagination_names,
-        _DEFAULT_PAGINATION_WIRE_NAMES,
-    )
-    assert directive_names == {"v"}
-
-
 def test_walk_cache_relevant_vars_visits_each_fragment_once_across_sibling_spreads() -> None:
     """Sibling spreads of the same fragment do not re-walk the fragment subtree."""
     doc = parse(
@@ -1833,26 +1810,6 @@ def test_walk_cache_relevant_vars_visits_each_fragment_once_across_sibling_sprea
     # spread sites sit at the same response-path depth (inside an ``items`` field),
     # so the depth-aware ``(name, depth)`` guard dedupes them to a single entry.
     assert visited == {("F", 1)}
-
-
-def test_walk_cache_relevant_vars_handles_unresolved_fragment_name() -> None:
-    """A spread referencing an unknown fragment name is skipped silently."""
-    doc = parse("query Q { items { ...Missing } }")
-    operation = doc.definitions[0]
-    directive_names: set[str] = set()
-    pagination_names: set[str] = set()
-    visited: set[FragmentVisitKey] = set()
-    _walk_cache_relevant_vars(
-        operation,
-        {},
-        visited,
-        0,
-        directive_names,
-        pagination_names,
-        _DEFAULT_PAGINATION_WIRE_NAMES,
-    )
-    assert directive_names == set()
-    assert visited == set()
 
 
 def test_directive_var_family_ignores_other_directives() -> None:
@@ -2068,60 +2025,19 @@ def test_hashable_variable_value_builds_typed_structural_identity() -> None:
     assert isinstance(hash(_hashable_variable_value({"k": [1, {"x": 2}]})), int)
 
 
-def test_hashable_variable_value_safely_degrades_for_opaque_and_cyclic_values() -> None:
-    """Unknown custom-scalar values avoid both crashes and unsafe cache hits."""
+def test_hashable_variable_value_keys_an_unhashable_custom_value_opaquely() -> None:
+    """A value of an unhashable consumer class keys as a fresh opaque token."""
 
     class Opaque:
-        # Defining ``__eq__`` without ``__hash__`` makes the class unhashable (that is the
-        # input under test).
+        # A ``__hash__`` raising ``TypeError`` is what an unhashable class answers.
         @override
-        def __eq__(self, other: object) -> bool:
-            return self is other
-
-        # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-        __hash__ = None  # pyright: ignore[reportAssignmentType]
+        def __hash__(self) -> NoReturn:
+            raise TypeError("unhashable type: 'Opaque'")
 
     first = _hashable_variable_value(Opaque())
     second = _hashable_variable_value(Opaque())
     assert isinstance(hash(first), int)
     assert first != second
-
-    cyclic: list[object] = []
-    cyclic.append(cyclic)
-    assert isinstance(hash(_hashable_variable_value(cyclic)), int)
-
-
-def test_hashable_custom_scalar_equality_cannot_abort_cache_key_lookup() -> None:
-    """Hostile hashable custom scalars become opaque cache identities.
-
-    Live HTTP:
-    ``examples/fakeshop/test_query/test_optimizer_auto_api.py::test_repeated_live_query_survives_hashable_custom_scalar_equality``.
-    This row is the freezer unit: opaque identities compare unequal without
-    running consumer ``__eq__``.
-    """
-
-    class EqualityBomb:
-        @override
-        def __hash__(self) -> int:
-            return 1
-
-        @override
-        def __eq__(self, _other: object) -> NoReturn:
-            raise RuntimeError("custom scalar equality must not run in cache lookup")
-
-    first = _hashable_variable_value(EqualityBomb())
-    second = _hashable_variable_value(EqualityBomb())
-
-    assert first != second
-    assert isinstance(hash(first), int)
-    assert isinstance(hash(second), int)
-    document = "query Q($value: Int!) { parents { child(first: $value) { value } } }"
-
-    def _key(value: object) -> "PlanCacheKey":
-        info = raw_info_of(make_info(document=document, variables={"value": value}))
-        return DjangoOptimizerExtension._build_cache_key(info, Category)
-
-    assert _key(EqualityBomb()) != _key(EqualityBomb())
 
 
 @pytest.mark.parametrize(
@@ -2166,63 +2082,28 @@ def test_unequal_standard_scalar_values_keep_different_cache_keys(
     assert _hashable_variable_value(left) != _hashable_variable_value(right)
 
 
-def test_a_standard_scalar_subclass_uses_opaque_cache_identity() -> None:
-    """A subclass's project-owned equality is excluded from stdlib scalar value keying."""
-
-    class SneakyDate(datetime.date):
-        @override
-        def __eq__(self, _other: object) -> NoReturn:
-            raise RuntimeError("subclass equality must not run in cache lookup")
-
-        __hash__ = datetime.date.__hash__
-
-    assert _hashable_variable_value(SneakyDate(2026, 8, 17))[0] == "opaque"
-
-
 def test_freezer_lets_cancellation_propagate_rather_than_caching_it() -> None:
-    """A ``BaseException`` from hostile type inspection is not absorbed into a key.
+    """A ``BaseException`` from a value's own hash is not absorbed into a key.
 
     Cancellation and process-control signals are not cache outcomes -- swallowing
-    one would convert an interrupted request into a silent cache miss.
+    one would convert an interrupted request into a silent cache miss. Only the
+    ``TypeError`` of an unhashable value keys opaquely.
     """
 
-    class CancellingMeta(type):
+    class Cancelling:
         @override
-        def __hash__(cls) -> NoReturn:
+        def __hash__(self) -> NoReturn:
             raise asyncio.CancelledError
 
-    class Cancelling(metaclass=CancellingMeta):
-        pass
-
-    class InterruptingMeta(type):
+    class Interrupting:
         @override
-        def __hash__(cls) -> NoReturn:
+        def __hash__(self) -> NoReturn:
             raise KeyboardInterrupt
 
-    class Interrupting(metaclass=InterruptingMeta):
-        pass
-
-    # The safe-scalar test compares ``type(value)`` by identity, but the container
-    # classification (``utils/_narrowing.py::is_mapping``, an ABC instance check)
-    # hashes it, so a hostile metaclass ``__hash__`` is reachable and propagates.
     with pytest.raises(asyncio.CancelledError):
         _hashable_variable_value(Cancelling())
     with pytest.raises(KeyboardInterrupt):
-        _hashable_variable_value(Interrupting())
-
-
-@pytest.mark.parametrize("nested", [False, True], ids=["scalar", "nested"])
-def test_hashable_variable_value_never_hashes_a_custom_value(*, nested: bool) -> None:
-    """A custom-scalar value keys as an opaque token without calling its hash at any nesting."""
-
-    class ExplodingHash:
-        @override
-        def __hash__(self) -> NoReturn:
-            raise RuntimeError("hash boom")
-
-    value = [ExplodingHash()] if nested else ExplodingHash()
-    frozen = _hashable_variable_value(value)
-    assert isinstance(hash(frozen), int)
+        _hashable_variable_value([Interrupting()])
 
 
 def test_hashable_variable_value_container_iteration_error_propagates() -> None:
@@ -2486,52 +2367,6 @@ def test_strictness_invalid_value_raises() -> None:
 _END_DETONATION = "hostile dunder detonated"
 
 
-class _DetonatingEqStr(str):
-    @override
-    def __eq__(self, other: object) -> NoReturn:
-        raise RuntimeError(_END_DETONATION)
-
-    @override
-    def __hash__(self) -> int:
-        return str.__hash__(self)
-
-
-class _DetonatingReprStr(str):
-    @override
-    def __repr__(self) -> str:
-        raise RuntimeError(_END_DETONATION)
-
-
-class _DetonatingEqObject:
-    @override
-    def __eq__(self, other: object) -> NoReturn:
-        raise RuntimeError(_END_DETONATION)
-
-    # basedpyright: None is the runtime marker for unhashable; typeshed types the slot as a method
-    __hash__ = None  # pyright: ignore[reportAssignmentType]
-
-
-@pytest.mark.parametrize(
-    "hostile",
-    [_DetonatingEqStr("bogus"), _DetonatingEqObject()],
-    ids=["eq-str-subclass", "eq-object"],
-)
-def test_strictness_hostile_dunder_values_raise_typed_valueerror(hostile: object) -> None:
-    """A strictness value's ``__eq__`` never decides the typed rejection.
-
-    The strictness boundary is construction-time consumer configuration with a
-    promised ``ValueError``. The membership read compares ``str`` candidates
-    through the base ``str`` slot and rejects non-``str`` candidates without an
-    equality probe, so a raising ``__eq__`` (reached through reflected
-    comparison for a plain object) never runs.
-    """
-    with pytest.raises(ValueError, match="strictness must be") as exc_info:
-        # basedpyright: the non-str strictness is the hostile input under test;
-        # DjangoOptimizerExtension types the parameter as str
-        DjangoOptimizerExtension(strictness=hostile)  # pyright: ignore[reportArgumentType]
-    assert _END_DETONATION not in str(exc_info.value)
-
-
 class _StrictnessClaimsStr(ClaimsClassBase):
     """A non-``str`` strictness value whose ``__class__`` claims ``str``."""
 
@@ -2570,90 +2405,6 @@ def test_strictness_non_str_lookalikes_raise_typed_valueerror(
         _ = DjangoOptimizerExtension(strictness=make())  # pyright: ignore[reportArgumentType]
     assert str(exc_info.value).startswith("strictness must be 'off', 'warn', or 'raise', got <")
     assert _END_DETONATION not in str(exc_info.value)
-
-
-def test_strictness_rejection_renders_the_value_through_its_own_repr() -> None:
-    """Rendering a rejected ``str`` subclass runs its own ``__repr__``, which propagates."""
-    with pytest.raises(RuntimeError, match=_END_DETONATION):
-        DjangoOptimizerExtension(strictness=_DetonatingReprStr("bogus"))
-
-
-def test_strictness_accepts_content_equal_str_subclass() -> None:
-    """A benign str subclass with valid CONTENT keeps being accepted.
-
-    The base-slot comparison classifies by content, so a ``str`` subclass is
-    not over-blocked by the hostility guard (mirroring the strategy resolver's
-    content-equality convention).
-    """
-
-    class ContentRaise(str):
-        @override
-        def __repr__(self) -> str:
-            raise RuntimeError(_END_DETONATION)
-
-    extension = DjangoOptimizerExtension(strictness=ContentRaise("raise"))
-    assert type(extension.strictness) is str
-    assert extension.strictness == "raise"
-
-
-@pytest.mark.django_db
-@pytest.mark.parametrize("mode", ["warn", "raise"])
-@pytest.mark.parametrize("kind", STR_SUBCLASS_KINDS)
-def test_str_subclass_strictness_arms_the_guard_as_its_text(
-    kind: str,
-    mode: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A ``str`` subclass spelling ``"warn"`` / ``"raise"`` arms exactly that mode.
-
-    The extension stores the vocabulary's own constant, so every request compares
-    a plain ``str`` the package owns: a subclass whose ``__eq__`` never matches
-    still warns or raises on an unplanned relation, one whose comparison raises
-    never turns a request into an error of its own, and none of its dunders run
-    after construction.
-    """
-    services.seed_data(1)
-
-    class CategoryType(DjangoType):
-        class Meta:
-            model = Category
-            fields = ("id", "name")
-
-    assert registry.get(Category) is CategoryType
-
-    class ItemType(DjangoType):
-        class Meta:
-            model = Item
-            fields = ("id", "name", "category")
-            optimizer_hints = {"category": OptimizerHint.SKIP}
-
-    @strawberry.type
-    class Query:
-        def _projected_items(self) -> QuerySet[Item]:
-            return Item.objects.order_by("id").only("name")
-
-        projected_items: QuerySet[Item] = strawberry.field(
-            resolver=_projected_items,
-            graphql_type=list[ItemType],
-        )
-
-    finalize_django_types()
-    calls: list[str] = []
-    optimizer = DjangoOptimizerExtension(strictness=str_subclass_name(kind, mode, calls))
-    assert type(optimizer.strictness) is str
-    assert optimizer.strictness == mode
-    schema = strawberry.Schema(query=Query, extensions=[lambda: optimizer])
-
-    caplog.set_level("WARNING", logger="django_strawberry_framework")
-    result = schema.execute_sync("{ projectedItems { name category { name } } }")
-
-    if mode == "raise":
-        assert result.errors is not None
-        assert [error.message for error in result.errors] == ["Unplanned N+1: category"]
-    else:
-        assert result.errors is None
-        assert any("Potential N+1 on category" in r.message for r in caplog.records)
-    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -3592,7 +3343,7 @@ def test_named_children_skips_excluded_and_recurses_through_fragments() -> None:
     plain = SimpleNamespace(name="edges", alias=None, directives={}, selections=[], **edges)
     container = SimpleNamespace(selections=[skipped, fragment, plain])
 
-    result = _named_children(container, "edges")
+    result = named_children(container, "edges")
 
     # ``skipped`` excluded; the fragment's inner ``edges`` is inlined; ``plain`` kept.
     assert result == [inner_edges, plain]
@@ -3606,7 +3357,7 @@ def test_node_children_with_runtime_prefix_skips_excluded_and_clones_fragments()
     node = SimpleNamespace(selections=[skipped, fragment, plain])
     prefixes = (("items", "edges", "node"),)
 
-    result = _node_children_with_runtime_prefix(node, runtime_prefixes=prefixes)
+    result = node_children_with_runtime_prefix(node, runtime_prefixes=prefixes)
 
     # ``skipped`` excluded; fragment cloned (carries its type condition); plain
     # cloned carrying the connection-aware runtime prefix for the walker.
@@ -4691,17 +4442,12 @@ def test_singleton_factory_extensions_form_emits_no_deprecation_warning() -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_hint_is_skip_handles_sentinel_record_and_unknown_shapes() -> None:
+def test_hint_is_skip_handles_sentinel_and_record_shapes() -> None:
     """``hint_is_skip`` returns the documented bool for every supported shape."""
     assert hint_is_skip(None) is False
     assert hint_is_skip(OptimizerHint.SKIP) is True
     assert hint_is_skip(OptimizerHint(skip=True)) is True
     assert hint_is_skip(OptimizerHint.select_related()) is False
-    # Unknown shape with no ``.skip`` attribute must not raise - the
-    # schema audit's "never raises" contract depends on this.
-    # basedpyright: the unknown hint shape is the hostile input under test; hint_is_skip types
-    # the parameter as OptimizerHint | None
-    assert hint_is_skip(object()) is False  # pyright: ignore[reportArgumentType]
 
 
 # ---------------------------------------------------------------------------

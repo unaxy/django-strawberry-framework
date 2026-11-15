@@ -17,10 +17,8 @@ from typing_extensions import override
 from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.optimizer.hints import OptimizerHint, hint_is_skip
 from django_strawberry_framework.optimizer.nested_fetch import (
-    WINDOWED_STRATEGY,
     NestedConnectionStrategy,
     WindowedPrefetchStrategy,
-    resolve_strategy,
 )
 from django_strawberry_framework.utils.typing import object_result
 from tests._idioms import ClaimsClassBase, ClassReadRaisesBase, HostileNameMeta
@@ -229,13 +227,10 @@ class TestStrategyFactory:
             # types the parameter as StrategySelection
             OptimizerHint.strategy(WindowedPrefetchStrategy)  # pyright: ignore[reportArgumentType]
 
-    def test_strategy_str_subclass_selection_values_match_by_content(self) -> None:
-        """A ``str`` subclass selection value is matched by content, rendered by its own repr.
+    def test_strategy_str_subclass_selection_values_render_by_their_repr(self) -> None:
+        """An unknown ``str`` subclass selection value is rendered by its own repr.
 
-        The typed contract is owned by ``resolve_strategy`` itself: the
-        ``__eq__`` check reads through the base ``str`` slot and the registry is
-        scanned without hashing, so neither override decides the verdict. A
-        ``__repr__`` override is the consumer's own rendering and what it raises
+        A ``__repr__`` override is the consumer's own rendering and what it raises
         propagates.
         """
 
@@ -244,25 +239,6 @@ class TestStrategyFactory:
             def __repr__(self) -> str:
                 raise RuntimeError("hostile repr")
 
-        class HostileEq(str):
-            @override
-            def __eq__(self, other: object) -> NoReturn:
-                raise RuntimeError("eq should never run")
-
-            @override
-            def __hash__(self) -> int:
-                return str.__hash__(self)
-
-        class HostileHash(str):
-            @override
-            def __hash__(self) -> NoReturn:
-                raise RuntimeError("hash should never run")
-
-        # An unknown name raises the typed rejection; a ``__hash__`` override never runs.
-        with pytest.raises(ConfigurationError, match="Unknown nested_connection_strategy"):
-            OptimizerHint.strategy(HostileHash("winowed"))
-        with pytest.raises(ConfigurationError, match="Unknown nested_connection_strategy"):
-            OptimizerHint(nested_strategy=HostileHash("winowed"))
         # Rendering the unknown name runs the value's own ``__repr__``, which propagates.
         with pytest.raises(RuntimeError, match="hostile repr"):
             OptimizerHint.strategy(HostileRepr("winowed"))
@@ -285,28 +261,17 @@ class TestStrategyFactory:
         # A consumer strategy's ``plan`` read runs untouched; what it raises propagates.
         with pytest.raises(RuntimeError, match="plan read failed"):
             OptimizerHint.strategy(HostilePlan())
-        # Content decides through the base ``str`` slot: a hostile ``__eq__``
-        # can neither force a false AUTO_STRATEGY match nor break a valid name.
-        # (Even the assertion reads through the base slot - ``==`` on the
-        # carried instance would dispatch back into the hostile override.)
-        carried = OptimizerHint.strategy(HostileEq("windowed")).nested_strategy
-        assert isinstance(carried, str)
-        assert str.__eq__(carried, "windowed") is True
-        assert resolve_strategy(HostileEq("windowed")) is WINDOWED_STRATEGY
 
     def test_strategy_hostile_rejection_is_raised_directly(self) -> None:
-        """The typed rejection needs no containment chain: nothing escapes first."""
+        """An unhashable ``str`` subclass name raises the registry lookup's ``TypeError`` unwrapped."""
 
-        class HostileHash(str):
+        class Unhashable(str):
             @override
             def __hash__(self) -> NoReturn:
-                raise RuntimeError("hash should never run")
+                raise TypeError("unhashable name")
 
-        with pytest.raises(
-            ConfigurationError,
-            match="Unknown nested_connection_strategy",
-        ) as exc_info:
-            OptimizerHint.strategy(HostileHash("winowed"))
+        with pytest.raises(TypeError, match="unhashable name") as exc_info:
+            OptimizerHint.strategy(Unhashable("winowed"))
         assert exc_info.value.__cause__ is None
 
     @pytest.mark.parametrize(
@@ -493,13 +458,10 @@ class TestSkipPredicate:
     """``hint_is_skip`` answers the skip directive for every hint shape."""
 
     def test_skip_shapes(self) -> None:
-        """``None`` and a shape without ``.skip`` are not skips; ``SKIP`` is."""
+        """``None`` and a non-skip hint are not skips; ``SKIP`` is."""
         assert hint_is_skip(None) is False
         assert hint_is_skip(OptimizerHint.SKIP) is True
         assert hint_is_skip(OptimizerHint.select_related()) is False
-        # basedpyright: a shape without ``.skip`` is the input under test; hint_is_skip types
-        # the parameter as OptimizerHint | None
-        assert hint_is_skip(object()) is False  # pyright: ignore[reportArgumentType]
 
     def test_hostile_skip_shapes_propagate(self) -> None:
         """A hint whose ``skip`` read or truth test raises lets that error through."""

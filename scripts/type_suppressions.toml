@@ -278,16 +278,11 @@
 "tests/mutations/test_write_transaction.py::_HygieneWebsocketCommunicator.receive_output" = { reportArgumentType = 1, reportUnknownVariableType = 1 }
 "tests/mutations/test_write_transaction.py::_HygieneWebsocketCommunicator.send_input" = { reportUnknownMemberType = 1 }
 "tests/mutations/test_write_transaction.py::_with_fake_barrier_connection" = { reportArgumentType = 1 }
-"tests/optimizer/test_extension.py::_DetonatingEqObject.__hash__" = { reportAssignmentType = 1 }
 "tests/optimizer/test_extension.py::_as_partial_resolve_info" = { reportReturnType = 1 }
 "tests/optimizer/test_extension.py::test_check_schema_skips_unreachable_and_missing_field_map" = { reportArgumentType = 1 }
 "tests/optimizer/test_extension.py::test_extension_rejects_unknown_kwargs_at_construction" = { reportCallIssue = 1 }
-"tests/optimizer/test_extension.py::test_hashable_variable_value_safely_degrades_for_opaque_and_cyclic_values.Opaque" = { reportAssignmentType = 1 }
-"tests/optimizer/test_extension.py::test_hint_is_skip_handles_sentinel_record_and_unknown_shapes" = { reportArgumentType = 1 }
 "tests/optimizer/test_extension.py::test_relation_is_optimizer_scoped_unhashable_fail_closed" = { reportArgumentType = 4 }
-"tests/optimizer/test_extension.py::test_strictness_hostile_dunder_values_raise_typed_valueerror" = { reportArgumentType = 1 }
 "tests/optimizer/test_extension.py::test_strictness_non_str_lookalikes_raise_typed_valueerror" = { reportArgumentType = 1 }
-"tests/optimizer/test_extension.py::test_walk_cache_relevant_vars_ignores_non_directive_objects" = { reportArgumentType = 1 }
 "tests/optimizer/test_field_meta.py::_as_field" = { reportReturnType = 1 }
 "tests/optimizer/test_field_meta.py::test_field_meta_is_frozen" = { reportAttributeAccessIssue = 1 }
 "tests/optimizer/test_field_meta.py::test_from_django_field_rejects_non_django_input" = { reportArgumentType = 1 }
@@ -300,7 +295,6 @@
 "tests/optimizer/test_hints.py::TestInvalidStatesRejected.test_prefetch_obj_rejects_hostile_type_name_safely" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::TestInvalidStatesRejected.test_prefetch_obj_rejects_non_prefetch_value" = { reportArgumentType = 2 }
 "tests/optimizer/test_hints.py::TestPrefetchFactory.test_none_rejected" = { reportArgumentType = 1 }
-"tests/optimizer/test_hints.py::TestSkipPredicate.test_skip_shapes" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::TestStrategyFactory.test_none_rejected" = { reportArgumentType = 1 }
 "tests/optimizer/test_hints.py::TestStrategyFactory.test_strategy_non_str_lookalikes_stay_typed" = { reportArgumentType = 2 }
 "tests/optimizer/test_hints.py::TestStrategyFactory.test_strategy_rejects_class_with_clean_name" = { reportArgumentType = 1 }
@@ -317,7 +311,6 @@
 "tests/optimizer/test_nested_index_advisory.py::_IdxMtiTag.Meta" = { reportIncompatibleVariableOverride = 1 }
 "tests/optimizer/test_plans.py::TestDeterministicOrder.test_ends_in_unique_column_defensive_for_non_model" = { reportArgumentType = 2 }
 "tests/optimizer/test_plans.py::TestLookupPaths.test_ignores_unknown_prefetch_like_entries" = { reportArgumentType = 1 }
-"tests/optimizer/test_selections.py::test_directive_variable_names_ignores_non_directive_objects" = { reportArgumentType = 1 }
 "tests/optimizer/test_walker.py::_as_definitionless_django_type" = { reportReturnType = 1 }
 "tests/optimizer/test_walker.py::_as_partial_resolve_info" = { reportReturnType = 1 }
 "tests/optimizer/test_walker.py::test_child_builder_spends_the_passed_definition_not_a_class_reread" = { reportAssignmentType = 1 }

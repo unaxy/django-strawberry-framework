@@ -1,8 +1,8 @@
 """Selection-tree traversal substrate - the AST and converted-selection adapters.
 
 The optimizer reads GraphQL selections in two shapes: graphql-core **AST** nodes
-(``optimizer/extension.py`` - plan-cache key construction, reachable-fragment
-collection, cache-relevant variable extraction) and Strawberry's **converted**
+(``optimizer/extension.py`` - plan-cache key construction, cache-relevant
+variable extraction) and Strawberry's **converted**
 selection objects (``optimizer/walker.py`` + the connection optimizer seam -
 plan building, nested connection windows). Both shapes repeat the same
 concepts: child-selection iteration, fragment descent, ``@skip`` / ``@include``
@@ -19,10 +19,8 @@ contracts cannot drift:
 
 - **AST adapter** (``ast_child_selections`` / ``resolve_unvisited_fragment`` /
   ``directive_variable_names``) - operates on graphql-core AST nodes for
-  ``optimizer/extension.py``. ``resolve_unvisited_fragment`` accepts optional
-  ``depth`` so the reachable-fragment walk (name key) and the
-  cache-relevant-variable walk (``(name, depth)`` key) share one resolve
-  guard.
+  ``optimizer/extension.py``. ``resolve_unvisited_fragment`` keys its visits
+  on ``(name, depth)`` for the depth-sensitive cache-relevant-variable walk.
 - **Converted-selection adapter** (``should_include`` / ``is_fragment`` /
   ``response_key`` / ``response_keys`` / ``included_field_selections`` /
   ``named_children`` / ``with_runtime_prefix`` /
@@ -76,7 +74,7 @@ from django_strawberry_framework.utils.typing import (
 from ._context import converted_selections_memo
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
     from typing import TypeAlias
 
     from graphql.language.ast import (
@@ -97,9 +95,8 @@ if TYPE_CHECKING:
     #: A converted FIELD selection (never a fragment): Strawberry's
     #: ``SelectedField`` or the walker's field-shaped ``SimpleNamespace`` clone.
     FieldSelection: TypeAlias = SelectedField | SimpleNamespace
-    #: A ``resolve_unvisited_fragment`` visit key: the fragment name, or
-    #: ``(name, depth)`` for the depth-sensitive walk.
-    FragmentVisitKey: TypeAlias = str | tuple[str, int]
+    #: A ``resolve_unvisited_fragment`` visit key: ``(fragment name, spread-site depth)``.
+    FragmentVisitKey: TypeAlias = tuple[str, int]
 
 # ---------------------------------------------------------------------------
 # AST -> converted-selection adapter - Strawberry's ``convert_selections``, stamped
@@ -318,10 +315,9 @@ def ast_child_selections(node: Node) -> tuple[SelectionNode, ...]:
     """Return the AST node's selection-set children as a tuple, or ``()``.
 
     Centralizes the ``getattr(node, "selection_set", None)`` plus
-    ``selections or ()`` shape so the AST walkers
-    (``_walk_cache_relevant_vars``, ``_walk_reachable_fragment_definitions``,
-    and by extension ``_collect_reachable_fragment_definitions``) share
-    one "iterate children" implementation. ``FragmentSpreadNode`` has
+    ``selections or ()`` shape for the AST cache-key walk
+    (``optimizer/extension.py::_walk_cache_relevant_vars``).
+    ``FragmentSpreadNode`` has
     no ``selection_set``, so this returns ``()`` and the caller's
     per-child loop becomes a no-op.
     """
@@ -338,38 +334,29 @@ def resolve_unvisited_fragment(
     fragments: Mapping[str, FragmentDefinitionNode],
     visited_fragments: set[FragmentVisitKey],
     *,
-    depth: int | None = None,
+    depth: int,
 ) -> FragmentDefinitionNode | None:
     """Resolve a ``FragmentSpreadNode`` to its definition, once per visit key.
 
     Returns the matching ``FragmentDefinitionNode`` and marks the visit key
     so a sibling or cyclic spread in the same walk is a no-op. The visit key
-    is the fragment name when ``depth`` is omitted (reachable-fragment
-    collection for the plan-cache document key) and ``(name, depth)`` when
-    ``depth`` is supplied (depth-sensitive cache-relevant-variable walk: the
-    same fragment spread at two response-path depths must be walked once per
-    depth so nested pagination variables are not dropped). Returns ``None``
-    when ``node`` is not a fragment spread, when the spread has no name, when
-    the visit key is already present, or when the document does not define
-    the named fragment (defensive - graphql-core's validation would normally
-    reject the operation before the optimizer sees it). Mutates
+    is ``(name, depth)``: the cache-relevant-variable walk must walk the same
+    fragment spread at two response-path depths once per depth so nested
+    pagination variables are not dropped. Returns ``None``
+    when ``node`` is not a fragment spread or when the visit key is already
+    present. The walk runs on a validated document, where graphql-core has
+    already refused a spread of an undefined fragment. Mutates
     ``visited_fragments`` on success so callers share one cycle-detection set
     across recursive descents.
     """
     if not isinstance(node, FragmentSpreadNode):
         return None
-    # graphql-core types ``name`` non-optional; a node built without ``name=`` holds None
-    frag_name = node.name.value if node.name else None
-    if frag_name is None:
-        return None
-    visit_key: FragmentVisitKey = frag_name if depth is None else (frag_name, depth)
+    frag_name = node.name.value
+    visit_key: FragmentVisitKey = (frag_name, depth)
     if visit_key in visited_fragments:
         return None
-    frag_def = fragments.get(frag_name)
-    if frag_def is None:
-        return None
     visited_fragments.add(visit_key)
-    return frag_def
+    return fragments[frag_name]
 
 
 def directive_variable_names(node: Node) -> set[str]:
@@ -377,20 +364,14 @@ def directive_variable_names(node: Node) -> set[str]:
 
     Only variables inside the ``if`` argument of ``@skip`` / ``@include`` affect
     the selection tree (and therefore the plan cache); every other variable is
-    excluded. Defensive against a ``directives`` collection carrying a
-    non-``DirectiveNode`` object (pinned by
-    ``test_walk_cache_relevant_vars_ignores_non_directive_objects``). The single
+    excluded. The single
     directive-variable extraction the AST cache-key walk shares, so the
     ``("skip", "include")`` membership and the ``VariableNode`` check live once.
     """
     names: set[str] = set()
-    directives: Iterable[object] = getattr(node, "directives", ()) or ()
+    directives: Iterable[DirectiveNode] = getattr(node, "directives", ()) or ()
     for directive in directives:
-        if not isinstance(directive, DirectiveNode):
-            continue
-        # graphql-core types ``name`` non-optional; a node built without ``name=`` holds None
-        d_name = directive.name.value if directive.name else None
-        if d_name not in ("skip", "include"):
+        if directive.name.value not in ("skip", "include"):
             continue
         for arg in directive.arguments or ():
             if isinstance(arg.value, VariableNode):
@@ -517,29 +498,37 @@ def included_field_selections(
     return result
 
 
-def named_children(selection: ConvertedSelection, name: str) -> list[FieldSelection]:
-    """Return included direct children selecting the field Python-named ``name``, through fragments.
+def _direct_children_named(
+    members: Iterable[ConvertedSelection],
+    name: str,
+) -> Iterator[ConvertedSelection]:
+    """Yield the included members Python-named ``name``, descending fragment wrappers only.
 
-    A child matches by ``selection_python_name``: the name the selected field was
-    declared under, whatever wire name the schema's ``NameConverter`` published it as.
+    The one direct-child walk ``named_children`` and ``direct_child_selected``
+    share. A member matches by ``selection_python_name``: the name the selected
+    field was declared under, whatever wire name the schema's ``NameConverter``
+    published it as. Recursion enters fragment wrappers (``is_fragment``) and
+    never a field's own sub-selections, so a same-named field deeper in the tree
+    does not match. Every member is gated on ``should_include``: converted
+    selections carry live, already-evaluated ``@skip`` / ``@include`` args, so a
+    directive-excluded field never matches and an excluded fragment shell prunes
+    its whole subtree. Lazy, so a caller asking only whether a match exists stops
+    at the first one.
     """
-    children: list[FieldSelection] = []
+    for member in members:
+        if not should_include(member):
+            continue
+        if is_fragment(member):
+            yield from _direct_children_named(getattr(member, "selections", None) or [], name)
+        elif selection_python_name(member) == name:
+            yield member
+
+
+def named_children(selection: ConvertedSelection, name: str) -> list[FieldSelection]:
+    """Return included direct children selecting the field Python-named ``name``, through fragments."""
     members: Iterable[ConvertedSelection] = getattr(selection, "selections", None) or []
-    for child in members:
-        if not should_include(child):
-            continue
-        if is_fragment(child):
-            # Recurse into the fragment directly: its own ``selections`` are the
-            # children to search, so re-entering ``named_children`` on the
-            # fragment iterates them (and descends nested fragments) with the
-            # same ``should_include`` / name-match rules, with no throwaway
-            # single-child shell allocated per fragment child.
-            children.extend(named_children(child, name))
-            continue
-        if selection_python_name(child) == name:
-            # ``is_fragment`` rejected it, so it is a field selection.
-            children.append(cast("FieldSelection", child))
-    return children
+    # ``_direct_children_named`` yields only members ``is_fragment`` rejected: field selections.
+    return cast("list[FieldSelection]", list(_direct_children_named(members, name)))
 
 
 #: Attribute naming the runtime-path prefixes a walker clone carries:
@@ -646,32 +635,12 @@ def connection_node_children(
 def direct_child_selected(selection_roots: Iterable[ConvertedSelection], name: str) -> bool:
     """Return whether the field Python-named ``name`` is a direct child, through fragments only.
 
-    A selection matches by ``selection_python_name``, never by its wire name.
-    Recurses ONLY through fragment wrappers (``is_fragment``), NOT into a regular
-    field's sub-selections, so a field named ``name`` nested deeper in the tree
-    does NOT count: a fragment-wrapped direct child matches, while a same-named
-    field deep inside ``edges { node { ... } }`` (a nested connection's
-    ``totalCount``) does not trip the outer connection's predicate. The
-    fragment test is ``is_fragment``, so the "recurse through fragments only"
-    rule cannot drift from the selection planning.
-
-    Gated on ``should_include`` like ``included_field_selections`` and
-    ``named_children``: converted selections carry live, already-evaluated
-    ``@skip`` / ``@include`` args, so a ``totalCount @skip(if: true)`` (or a
-    ``@skip``-ped fragment wrapping it) must NOT fire the connection ``COUNT``.
-    A directive-excluded field returns ``False`` even on a name match, and an
-    excluded fragment shell prunes its whole subtree.
+    A same-named field deep inside ``edges { node { ... } }`` (a nested
+    connection's ``totalCount``) does not trip the outer connection's predicate,
+    and a ``totalCount @skip(if: true)`` (or a ``@skip``-ped fragment wrapping it)
+    does not fire the connection ``COUNT`` (``_direct_children_named``).
     """
-
-    def _check(selection: ConvertedSelection) -> bool:
-        if not should_include(selection):
-            return False
-        if is_fragment(selection):
-            members: Iterable[ConvertedSelection] = getattr(selection, "selections", None) or []
-            return any(_check(child) for child in members)
-        return selection_python_name(selection) == name
-
-    return any(_check(child) for child in selection_roots)
+    return next(_direct_children_named(selection_roots, name), None) is not None
 
 
 def connection_total_count_selected(selection: ConvertedSelection) -> bool:

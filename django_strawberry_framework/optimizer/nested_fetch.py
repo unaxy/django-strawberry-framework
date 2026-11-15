@@ -242,7 +242,7 @@ class NestedConnectionRequest:
 
     Built only AFTER every strategy-independent refusal arm has been ruled out:
     ``django_field`` is the RAW Django relation field/rel (the planner's
-    ``_meta.get_field`` read, not a ``FieldMeta`` - strategies may need
+    ``model._meta.get_field`` read, not a ``FieldMeta`` - strategies may need
     ``remote_field`` / through metadata only the raw descriptor carries),
     ``child_queryset`` already carries the child plan (``only`` /
     ``select_related`` / nested prefetches / visibility hook), ``join`` is
@@ -455,35 +455,18 @@ def resolve_strategy(value: object) -> NestedConnectionStrategy:
     consumer-authored backend). ``None`` reads the
     ``NESTED_CONNECTION_STRATEGY`` setting, defaulting to ``"windowed"``.
 
-    A selection is consumer-supplied, so the decision reads only what the
-    interpreter knows: its kind (a name, a class) reads the real class
+    The selection's kind (a name, a class) reads the real class
     (``truth.is_instance`` / ``truth.is_type``, neither of which reads
-    ``__class__``), and name matching is content equality through the base
-    ``str`` slot (no ``dict`` lookup, whose hash and reflected comparison would
-    dispatch into a ``str`` subclass), so an override can never force a false
-    match. A ``__class__`` that raises or claims ``str``, and a lazy proxy of a
-    name (``SimpleLazyObject``), is not a ``str`` and has no ``plan``, so it
-    takes the typed rejection. The rejection message renders through
-    ``truth.render``.
+    ``__class__``), so a ``__class__`` that raises or claims ``str``, and a lazy
+    proxy of a name (``SimpleLazyObject``), is not a ``str`` and has no ``plan``,
+    and takes the typed rejection. A name is looked up in the registry. The
+    rejection message renders through ``truth.render``.
     """
     if value is None:
         value = nested_connection_strategy_setting()
     if truth.is_instance(value, str):
-        # The base ``str`` slot bypasses a subclass's ``__eq__`` override; the
-        # C-level content comparison cannot dispatch back into the subclass.
-        if str.__eq__(value, "auto") is True:
-            return AUTO_STRATEGY
-        # Content equality against the registry, scanned linearly: a ``dict``
-        # lookup would hash the value and compare the STORED key against it
-        # through the subclass's reflected ``__eq__`` - both subclass-
-        # controlled. The registry has two module-owned plain-str keys, so
-        # the scan is construction-time cheap and dispatch-free.
         registry = _builtin_strategies()
-        strategy = None
-        for candidate_name, candidate in registry.items():
-            if str.__eq__(value, candidate_name) is True:
-                strategy = candidate
-                break
+        strategy = AUTO_STRATEGY if value == "auto" else registry.get(value)
         if strategy is None:
             raise ConfigurationError(
                 f"Unknown nested_connection_strategy {truth.render(value)}; expected "

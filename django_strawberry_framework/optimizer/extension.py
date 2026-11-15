@@ -29,9 +29,6 @@ root-gate pattern, same per-execution state lifecycle, same recursive
 type-tracing through graphql-core wrappers.
 """
 
-import datetime
-import decimal
-import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
@@ -40,6 +37,7 @@ from weakref import WeakKeyDictionary
 
 from django.db import models
 from graphql.language.ast import (
+    DocumentNode,
     FieldNode,
     VariableNode,
 )
@@ -50,6 +48,7 @@ from graphql.type.definition import (
     GraphQLUnionType,
     get_named_type,
 )
+from graphql.utilities.separate_operations import separate_operations
 
 # basedpyright: Strawberry annotates ``info`` as graphql-core's bare generic ``GraphQLResolveInfo``
 from strawberry.types.nodes import get_variable_values  # pyright: ignore[reportUnknownVariableType]
@@ -65,14 +64,12 @@ from django_strawberry_framework.extensions.operation_state import (
 from django_strawberry_framework.registry import register_subsystem_clear, registry
 from django_strawberry_framework.utils import truth
 from django_strawberry_framework.utils._narrowing import (
-    is_abstract_set,
     is_awaitable,
-    is_iterable,
-    is_mapping,
+    is_dict,
+    is_list_or_tuple,
     is_set_or_frozenset,
     is_str,
     read_attr,
-    require,
 )
 from django_strawberry_framework.utils.connections import resolve_relay_max_results
 from django_strawberry_framework.utils.execution_mode import operation_is_async
@@ -182,49 +179,12 @@ if TYPE_CHECKING:
 
 _M = TypeVar("_M", bound=models.Model)
 
-# The selection-traversal primitives live in ``optimizer/selections.py``.
-# The underscore aliases keep this module's bodies - and the tests
-# that import ``_named_children`` / ``_node_children_with_runtime_prefix`` from
-# ``optimizer.extension`` - working. ``extension`` does not import the
-# converted-selection helpers back from ``walker`` (that would be a reverse
-# dependency); both modules source them from ``selections``.
-_child_selections = ast_child_selections
-_unvisited_fragment_definition = resolve_unvisited_fragment
-_named_children = named_children
-_node_children_with_runtime_prefix = node_children_with_runtime_prefix
-_response_key = response_key
-
 _MAX_PLAN_CACHE_SIZE = 256
 
-#: The strictness vocabulary ``DjangoOptimizerExtension`` accepts. A module
-#: constant so the validator and the rejection message cannot drift apart.
-_STRICTNESS_MODES = ("off", "warn", "raise")
-
-
-def _matched_strictness(strictness: object) -> str | None:
-    """Return the vocabulary constant ``strictness`` names by content, or ``None``.
-
-    The answer is the module's own constant, never the candidate, so what the
-    extension stores - and what every request then compares against ``"off"`` /
-    ``"warn"`` / ``"raise"`` - is a plain ``str`` the package owns: a ``str``
-    subclass with the right content (an enum member, a hostile ``__eq__``) is
-    accepted by content and then plays no further part.
-
-    The match never dispatches into the candidate value's dunders: a ``str``
-    candidate is compared through the base ``str`` slot (content decides, the
-    same slot discipline ``nested_fetch.resolve_strategy`` documents), and a
-    non-``str`` candidate is rejected without any equality probe. Whether the
-    candidate is a ``str`` is asked of its real type (``utils/_narrowing.py::is_str``),
-    so a ``__class__`` property can neither claim ``str`` nor raise. A hostile
-    ``__class__`` or ``__eq__`` can therefore neither force a false match nor
-    replace the typed ``ValueError`` with its own exception.
-    """
-    if not is_str(strictness):
-        return None
-    for mode in _STRICTNESS_MODES:
-        if str.__eq__(strictness, mode) is True:
-            return mode
-    return None
+#: The strictness vocabulary ``DjangoOptimizerExtension`` accepts, keyed by name so a
+#: match answers with the module's own constant and the validator and the rejection
+#: message cannot drift apart.
+_STRICTNESS_MODES = {mode: mode for mode in ("off", "warn", "raise")}
 
 
 # The Python names of the Relay pagination arguments whose variable-supplied
@@ -299,41 +259,6 @@ def _schema_cache_record(schema: "GraphQLSchema") -> _SchemaCacheRecord:
     )
 
 
-# Only exact immutable scalar types whose equality/hash is *library* code have a
-# contract the cache boundary can rely on. Custom scalar parsers may return
-# arbitrary hashable objects whose ``__eq__`` or ``__hash__`` raises; storing
-# those objects directly in a plan-cache key lets a later lookup execute consumer
-# code, so they get opaque identities instead.
-#
-# The set spans the Python built-ins AND the stdlib types Strawberry's own
-# built-in scalars parse to (``Date`` -> ``datetime.date``, ``DateTime`` ->
-# ``datetime.datetime``, ``Time`` -> ``datetime.time``, ``Decimal`` ->
-# ``decimal.Decimal``, ``UUID`` -> ``uuid.UUID``; ``Void`` -> ``NoneType``).
-# Omitting those would make an ordinary schema pay the opaque-identity penalty:
-# the pagination collector over-collects by argument NAME, so a field such as
-# ``logs(after: $timestamp)`` typed ``DateTime`` would never share a plan-cache
-# key between two requests sending the same instant, and every request would
-# insert a fresh key that evicts live plans from the bounded LRU. Membership is
-# tested with exact ``type()``, so subclasses (which may override equality) are
-# still excluded.
-_SAFE_CACHE_SCALAR_TYPES: truth.IdentitySet[type[object]] = truth.IdentitySet(
-    (
-        type(None),
-        bool,
-        int,
-        float,
-        complex,
-        str,
-        bytes,
-        datetime.date,
-        datetime.datetime,
-        datetime.time,
-        datetime.timedelta,
-        decimal.Decimal,
-        uuid.UUID,
-    ),
-)
-
 # ``_stash_on_context`` is ``utils/context.py::stash_on_context`` (re-exported
 # through ``optimizer/_context.py``) under an underscore-prefixed name. The
 # shared read / write / delete dispatch lives in ``utils/context.py``; resolvers
@@ -406,7 +331,7 @@ def _walk_cache_relevant_vars(
     # A field node deepens the response path for its children; a fragment
     # wrapper does not, so its body inherits the field node's depth here.
     child_depth = depth + 1 if isinstance(node, FieldNode) else depth
-    for child in _child_selections(node):
+    for child in ast_child_selections(node):
         # Recurse into the child first so directives attached to the child
         # itself are collected (a FragmentSpreadNode has no ``selection_set``,
         # so this tail is just the directive sweep for spread-node directives).
@@ -495,138 +420,41 @@ def _collect_cache_relevant_var_names(
 
 
 def _hashable_variable_value(value: object) -> "FrozenVariableValue":
-    """Return a hashable, collision-resistant cache identity for a variable value.
+    """Return a hashable cache identity for one variable value.
 
     ``_build_cache_key`` stores cache-relevant ``(name, value)`` pairs in a
-    ``frozenset``. GraphQL lists and input objects arrive as unhashable Python
-    containers, and custom scalar parsers may legally return any Python value,
-    including sets or user-defined unhashable objects. This matters even when a
-    value cannot affect a plan: the nested-pagination collector deliberately
-    over-collects by argument name, so a plain nested field such as
-    ``logs(after: $values)`` can put any input type on this cache boundary.
+    ``frozenset``. GraphQL lists and input objects arrive as unhashable builtin
+    containers, and a custom scalar parser may return any Python value; the
+    nested-pagination collector over-collects by argument name, so a plain
+    nested field such as ``logs(after: $values)`` can put any input type on
+    this cache boundary.
 
-    Standard containers receive tagged structural identities before any direct
-    hash/equality operation on the container itself. Tags preserve distinctions
-    such as list versus tuple and bool versus int; unordered containers remain
-    deterministic through their recursively frozen members. Exact immutable
-    scalar types whose equality is library-owned (``_SAFE_CACHE_SCALAR_TYPES``,
-    which covers the built-ins and the stdlib types Strawberry's own scalars
-    parse to) are safe to retain structurally, so two requests sending the same
-    date or decimal share one plan-cache key. Every other value, including a
-    custom scalar that happens to be hashable, receives a fresh opaque token:
-    that request may miss the cross-request plan cache, but it cannot invoke
-    consumer-defined equality/hash code or collide with another value and serve
-    the wrong plan. A cyclic container a custom scalar returns terminates on its
-    ``cycle`` token.
+    Builtin ``dict`` / ``set`` / ``frozenset`` / ``list`` / ``tuple`` values are
+    frozen member by member; any other hashable value keys as itself. Every
+    identity is tagged with its value's type, so ``1`` and ``True``, or a list
+    and a tuple, never share a key, and unordered containers stay deterministic
+    through their frozen members. A value of an unhashable class keys as a fresh
+    opaque token: that request misses the cross-request plan cache.
     """
-    return _freeze_variable_value(value, set())
-
-
-def _freeze_variable_value(value: object, active_containers: set[int]) -> "FrozenVariableValue":
-    """Recursive implementation for ``_hashable_variable_value``."""
     value_type_id = id(type(value))
-    if truth.is_exact_one_of(value, _SAFE_CACHE_SCALAR_TYPES):
-        return ("scalar", value_type_id, value)
-    value_is_mapping = is_mapping(value)
-    value_is_set = is_abstract_set(value)
-    value_is_sequence = issubclass(truth.class_of(value), (list, tuple))
-
-    if not (value_is_mapping or value_is_set or value_is_sequence):
-        # Do not probe ``hash(value)`` here. A custom scalar's hash/equality
-        # implementation is consumer code and is not part of this boundary;
-        # an opaque identity is the safe fallback for both hashable and
-        # unhashable custom values.
-        return ("opaque", value_type_id, object())
-
-    container_id = id(value)
-    if container_id in active_containers:
-        return ("cycle", value_type_id, object())
-    active_containers.add(container_id)
-    try:
-        # A container a custom scalar parser returned is iterated on its own
-        # terms; whatever its iteration raises is the parser's behaviour and
-        # propagates. The three flags hold the verdicts taken once above.
-        if value_is_mapping:
-            mapping = value
-            return (
-                "mapping",
-                value_type_id,
-                frozenset(
-                    (
-                        _freeze_variable_value(key, active_containers),
-                        _freeze_variable_value(item, active_containers),
-                    )
-                    for key, item in mapping.items()
-                ),
-            )
-        # A ``collections.abc.Set`` or a ``list`` / ``tuple`` subclass is iterable.
-        members = require(value, is_iterable)
-        if value_is_set:
-            return (
-                "set",
-                value_type_id,
-                frozenset(_freeze_variable_value(item, active_containers) for item in members),
-            )
+    if is_dict(value):
         return (
-            "list" if truth.is_instance(value, list) else "tuple",
+            "mapping",
             value_type_id,
-            tuple(_freeze_variable_value(item, active_containers) for item in members),
+            frozenset(
+                (_hashable_variable_value(key), _hashable_variable_value(item))
+                for key, item in value.items()
+            ),
         )
-    finally:
-        active_containers.remove(container_id)
-
-
-def _collect_reachable_fragment_definitions(
-    node: "Node",
-    fragments: "Mapping[str, FragmentDefinitionNode]",
-) -> "tuple[FragmentDefinitionNode, ...]":
-    """Return every named fragment definition reachable from ``node``.
-
-    Walks the AST in selection-set order, deterministically, so the
-    same operation + fragment map produces the same tuple on every
-    call. Each fragment definition is included once (via the
-    visited-fragments cycle guard inside
-    ``_unvisited_fragment_definition``). The returned tuple feeds
-    ``_print_operation_with_reachable_fragments`` so the plan-cache
-    key includes the fragment bodies the planner will actually expand,
-    closing the ``query Q { ...F } fragment F { ... }`` cache-key gap:
-    without them, two operations differing only in a fragment body share
-    one cache key.
-    """
-    reachable: list[FragmentDefinitionNode] = []
-    _walk_reachable_fragment_definitions(node, fragments, set(), reachable)
-    return tuple(reachable)
-
-
-def _walk_reachable_fragment_definitions(
-    node: "Node",
-    fragments: "Mapping[str, FragmentDefinitionNode]",
-    visited_fragments: "set[FragmentVisitKey]",
-    reachable: "list[FragmentDefinitionNode]",
-) -> None:
-    """Recursive workhorse for ``_collect_reachable_fragment_definitions``.
-
-    For each child selection: if the child is an unvisited fragment
-    spread, append its definition to ``reachable`` and recurse into
-    the definition so transitively-spread fragments are also
-    collected; then recurse into the child itself so inline-fragment
-    children and regular field children contribute their nested
-    spreads. The "always recurse into child" tail is a no-op for
-    ``FragmentSpreadNode`` children because ``_child_selections``
-    returns ``()`` for them, so the duplicate recursion is harmless
-    rather than worth a special-case branch.
-    """
-    for child in _child_selections(node):
-        frag_def = _unvisited_fragment_definition(child, fragments, visited_fragments)
-        if frag_def is not None:
-            reachable.append(frag_def)
-            _walk_reachable_fragment_definitions(
-                frag_def,
-                fragments,
-                visited_fragments,
-                reachable,
-            )
-        _walk_reachable_fragment_definitions(child, fragments, visited_fragments, reachable)
+    if is_set_or_frozenset(value):
+        return ("set", value_type_id, frozenset(map(_hashable_variable_value, value)))
+    if is_list_or_tuple(value):
+        return ("sequence", value_type_id, tuple(map(_hashable_variable_value, value)))
+    try:
+        _ = hash(value)
+    except TypeError:
+        return ("opaque", value_type_id, object())
+    return ("scalar", value_type_id, value)
 
 
 def _print_operation_with_reachable_fragments(
@@ -635,23 +463,18 @@ def _print_operation_with_reachable_fragments(
 ) -> str:
     """Render the plan-cache document key.
 
-    Concatenates ``print_ast(operation)`` with the printed AST of
-    every fragment definition reachable from the operation, joined by
-    newlines. This is the load-bearing distinction from a bare
-    ``print_ast(operation)``: two operations with identical bodies
-    but different reachable fragment bodies render to different
-    strings, so they never share a cached plan that was built for
-    the wrong fragment shape. Order is deterministic (selection-set
-    order with a visited guard), so the same operation + fragments
-    always produce the same string and the cache key is stable across
-    requests.
+    Prints the operation together with every fragment definition reachable
+    from it, as graphql-core's ``separate_operations`` selects them (document
+    order). This is the load-bearing distinction from a bare
+    ``print_ast(operation)``: two operations with identical bodies but
+    different reachable fragment bodies render to different strings, so they
+    never share a cached plan built for the wrong fragment shape, while an
+    unreachable fragment leaves the key unchanged.
     """
-    parts = [print_ast(operation)]
-    parts.extend(
-        print_ast(fragment)
-        for fragment in _collect_reachable_fragment_definitions(operation, fragments)
-    )
-    return "\n".join(parts)
+    (separated,) = separate_operations(
+        DocumentNode(definitions=(operation, *fragments.values())),
+    ).values()
+    return print_ast(separated)
 
 
 _MAX_DOC_KEY_CACHE_SIZE = 256
@@ -811,10 +634,10 @@ def mutation_payload_child_selections(slot: str) -> SelectionExtractor:
         node_children: list[SimpleNamespace] = []
         root_path = runtime_path_from_info(info)
         for field_selection in selections:
-            for slot_selection in _named_children(field_selection, slot):
-                slot_path = (*root_path, _response_key(slot_selection))
+            for slot_selection in named_children(field_selection, slot):
+                slot_path = (*root_path, response_key(slot_selection))
                 node_children.extend(
-                    _node_children_with_runtime_prefix(
+                    node_children_with_runtime_prefix(
                         slot_selection,
                         runtime_prefixes=(slot_path,),
                     ),
@@ -1021,7 +844,11 @@ class DjangoOptimizerExtension(_OperationBoundExtension[_OptimizerOperationState
         # at construction so typos (``strict=True``) surface at the call site
         # rather than being silently absorbed.
         self.execution_context: ExecutionContext | None = execution_context
-        accepted_strictness = _matched_strictness(strictness)
+        # The stored mode is the vocabulary's own constant, never the candidate.
+        # Whether the candidate is a ``str`` is asked of its real type
+        # (``utils/_narrowing.py::is_str``), so a ``__class__`` property can
+        # neither claim ``str`` nor raise.
+        accepted_strictness = _STRICTNESS_MODES.get(strictness) if is_str(strictness) else None
         if accepted_strictness is None:
             msg = f"strictness must be 'off', 'warn', or 'raise', got {truth.render(strictness)}"
             raise ValueError(msg)

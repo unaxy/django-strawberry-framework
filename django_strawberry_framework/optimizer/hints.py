@@ -271,18 +271,15 @@ def hint_is_skip(hint: OptimizerHint | None) -> bool:
     """Return ``True`` if ``hint`` represents a "skip this relation" directive.
 
     Centralises the hint-shape contract so callers (the walker, the
-    schema audit) never duplicate the ``hint is OptimizerHint.SKIP or
-    hint.skip`` dispatch. A hint shape that does not carry ``.skip`` reads as
-    ``False`` rather than raising ``AttributeError``.
+    schema audit) never duplicate the ``hint is not None and hint.skip``
+    dispatch. Every hint map holds only ``OptimizerHint`` values:
+    ``Meta.optimizer_hints`` refuses any other value at construction
+    (``types/base.py::_validate_optimizer_hints``).
     """
     # The walker fetches per name via ``hints_map.get``; the schema audit
     # probes ``hints.get(field_name)`` for every exposed relation, so ``None``
     # is a normal "no hint configured" path.
-    if hint is None:
-        return False
-    if hint is OptimizerHint.SKIP:
-        return True
-    return bool(read_attr(hint, "skip", False))
+    return hint is not None and bool(hint.skip)
 
 
 # Sentinel instance - must be created after the class body so the

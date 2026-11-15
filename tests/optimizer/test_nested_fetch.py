@@ -162,37 +162,11 @@ def test_resolve_strategy_rejects_hostile_type_and_class_name() -> None:
         resolve_strategy(WindowedPrefetchStrategy)
 
 
-def test_resolve_strategy_str_subclass_matches_by_content_and_renders_by_its_repr() -> None:
-    """A ``str`` subclass matches by content; the rejection renders it through its own repr.
+def test_resolve_strategy_str_subclass_rejection_renders_by_its_repr() -> None:
+    """The rejection renders a ``str`` subclass through its own repr.
 
-    Matching is content equality through the base ``str`` slot (no ``__eq__``,
-    no ``__hash__`` from a registry lookup), so those overrides never decide the
-    verdict. A subclass that overrides ``__repr__`` is rendered by it: that is
-    the consumer's own behaviour, and what it raises propagates.
+    That is the consumer's own behaviour, and what it raises propagates.
     """
-
-    class HostileEq(str):
-        @override
-        def __eq__(self, other: object) -> NoReturn:
-            raise RuntimeError("hostile eq")
-
-        @override
-        def __hash__(self) -> int:
-            return str.__hash__(self)
-
-    # A hostile ``__eq__`` cannot force a false AUTO_STRATEGY match either:
-    # the comparison reads through the base ``str`` slot, so content decides.
-    assert resolve_strategy(HostileEq("auto")) is AUTO_STRATEGY
-    with pytest.raises(ConfigurationError, match="Unknown nested_connection_strategy"):
-        resolve_strategy(HostileEq("correlated"))
-
-    class HostileHash(str):
-        @override
-        def __hash__(self) -> NoReturn:
-            raise RuntimeError("hostile hash")
-
-    with pytest.raises(ConfigurationError, match="Unknown nested_connection_strategy"):
-        resolve_strategy(HostileHash("correlated"))
 
     class HostileRepr(str):
         @override

@@ -997,7 +997,7 @@ what the target's `get_queryset` hid (privilege escalation), and no seal —
 integrity, model, routing — can prove a returned queryset is a subset of
 its input. Predicate composition removes the entire class: the framework
 only ever *filters* the visibility-scoped queryset it already holds. Both plan-time consumers flow through that one builder — the
-plain `Prefetch` (`walker.py::_build_prefetch_child_queryset`) and the
+plain `Prefetch` (`walker.py::_plan_prefetch_relation`) and the
 nested-connection window (`nested_planner.py`'s injected
 `build_child_queryset` callable) — so composing there covers both. The
 composed child queryset lands in the ordinary accessor-keyed `Prefetch` the
@@ -1014,7 +1014,7 @@ no owner today and `field.model` is refused as a substitute (a secondary
 type over the same model would resolve to the primary — Decision 6). The
 owner travels as `type_cls` (the `nested_planner` vocabulary) through
 `_walk_selections` → `_dispatch_single_relation` → `_plan_prefetch_relation`
-→ `_build_prefetch_child_queryset` → `_build_child_queryset`, and joins the
+→ `_build_child_queryset`, and joins the
 injected `build_child_queryset` callable signature.
 
 No path may fail open:
