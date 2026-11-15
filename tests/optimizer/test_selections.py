@@ -46,7 +46,6 @@ from django_strawberry_framework.optimizer.selections import (
     is_fragment,
     named_children,
     node_children_with_runtime_prefix,
-    prime_selected_fields,
     python_arguments,
     resolve_unvisited_fragment,
     response_key,
@@ -66,13 +65,6 @@ def _operation(doc: DocumentNode) -> OperationDefinitionNode:
     operation = doc.definitions[0]
     assert isinstance(operation, OperationDefinitionNode)
     return operation
-
-
-def _as_strawberry_info(stand_in: object) -> Info[object, object]:
-    """Hand a duck-typed info to the priming hook that takes a Strawberry info."""
-    # basedpyright: a stand-in info carrying only the slots the code under test reads;
-    # prime_selected_fields types info as a concrete Strawberry Info
-    return stand_in  # pyright: ignore[reportReturnType]
 
 
 def _field_nodes(selections: Iterable[object]) -> list[FieldNode]:
@@ -426,7 +418,7 @@ def test_direct_child_selected_ignores_nested_field_selections() -> None:
 def test_ast_to_converted_selections_memoized_per_execution() -> None:
     """The converted-selection tree is reused within one installed memo lifecycle.
 
-    A nested fallback connection primes ``info.selected_fields`` once per parent
+    A nested fallback connection converts its selections once per parent
     row, each time with the SAME field-node group (graphql-core's subfields
     cache guarantees identity across rows). With the per-execution memo
     installed (``on_execute`` does this in production), the conversion runs once
@@ -682,50 +674,6 @@ def test_ast_to_converted_selections_converts_anonymous_and_named_fragments() ->
     assert len(spread.selections) == 1
     assert isinstance(spread.selections[0], SelectedField)
     assert spread.selections[0].name == "penName"
-
-
-def test_prime_selected_fields_lifecycle() -> None:
-    """``prime_selected_fields`` populates ``info.__dict__['selected_fields']`` idempotently."""
-    # 1. No _raw_info -> no-op
-    bare_info = SimpleNamespace()
-    prime_selected_fields(_as_strawberry_info(bare_info))
-    assert "selected_fields" not in bare_info.__dict__
-
-    # 2. _raw_info has no field_nodes -> no-op
-    empty_raw = SimpleNamespace(_raw_info=SimpleNamespace(field_nodes=None))
-    prime_selected_fields(_as_strawberry_info(empty_raw))
-    assert "selected_fields" not in empty_raw.__dict__
-
-    # 3. Existing selected_fields in __dict__ is never overwritten
-    pre_existing = ["sentinel"]
-    existing_info = SimpleNamespace(
-        _raw_info=SimpleNamespace(
-            field_nodes=[_operation(parse("{ x }")).selection_set.selections[0]],
-            fragments={},
-            variable_values={},
-        ),
-        selected_fields=pre_existing,
-    )
-    assert existing_info.__dict__["selected_fields"] is pre_existing
-    prime_selected_fields(_as_strawberry_info(existing_info))
-    assert existing_info.__dict__["selected_fields"] is pre_existing
-
-    # 4. Valid unpopulated info -> primed with converted selections
-    doc = parse("{ item { name } }")
-    field_node = _operation(doc).selection_set.selections[0]
-    raw_info = SimpleNamespace(
-        field_nodes=[field_node],
-        fragments={},
-        variable_values={},
-        parent_type=None,
-    )
-    info_to_prime = SimpleNamespace(_raw_info=raw_info)
-    prime_selected_fields(_as_strawberry_info(info_to_prime))
-    assert "selected_fields" in info_to_prime.__dict__
-    primed = require(read_attr(info_to_prime, "selected_fields"), is_list)
-    assert len(primed) == 1
-    assert isinstance(primed[0], SelectedField)
-    assert primed[0].name == "item"
 
 
 def test_connection_total_count_and_has_next_page_selected_direct() -> None:

@@ -97,7 +97,6 @@ from strawberry.http.base import BaseView
 from typing_extensions import override
 
 import django_strawberry_framework
-from django_strawberry_framework import _cross_web_patches as cross_web_patches
 from django_strawberry_framework import _strawberry_patches as patches
 from django_strawberry_framework import views as views_module
 from django_strawberry_framework._boundary_ordering import (
@@ -2374,25 +2373,19 @@ def _json_request(raw: bytes) -> WSGIRequest:
     return RequestFactory().post("/graphql/", data=raw, content_type="application/json")
 
 
-def test_the_sync_view_hands_parse_json_raw_bytes_in_every_patch_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_sync_view_hands_parse_json_raw_bytes() -> None:
     """The sync transport's body source is the package view's own.
 
     ``parse_json`` can only enforce the strict decode over bytes it is given, and
     on the sync transport upstream's request adapter decides that: its ``body``
     property returns ``self.request.body.decode()``, so an undecodable body raises
     ``UnicodeDecodeError`` inside a *property* - unreachable by ``dispatch``'s
-    ``except HTTPException`` - and ``parse_json`` never sees bytes at all. With
-    ``APPLY_UPSTREAM_PATCHES = False`` that made the mounted sync view answer
-    ``500`` rather than the contract's ``400``, measured, while async answered
-    ``400``.
+    ``except HTTPException`` - and ``parse_json`` never sees bytes at all.
 
     The package view therefore sets upstream's own ``request_adapter_class`` seam
     to a one-property subclass. This row is the attribution the live rows cannot
-    make: with upstream's eagerly-decoding getter reinstalled - exactly the
-    patches-off state - the package adapter still yields the untouched bytes while
-    upstream's own adapter raises on the identical request. The subclass check is
+    make: the package adapter yields the untouched bytes while upstream's own
+    eagerly-decoding adapter raises on the identical request. The subclass check is
     what keeps it a one-property override rather than a fork of the other ten
     adapter members.
     """
@@ -2400,13 +2393,6 @@ def test_the_sync_view_hands_parse_json_raw_bytes_in_every_patch_state(
 
     assert DjangoGraphQLView.request_adapter_class is _RawBodyRequestAdapter
     assert issubclass(_RawBodyRequestAdapter, DjangoHTTPRequestAdapter)
-
-    monkeypatch.setattr(
-        DjangoHTTPRequestAdapter,
-        "body",
-        property(cross_web_patches._original_body_fget),
-    )
-    assert cross_web_patches._patch_is_installed() is False
 
     body = _RawBodyRequestAdapter(_json_request(raw)).body
     with pytest.raises(UnicodeDecodeError):

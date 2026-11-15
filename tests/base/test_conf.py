@@ -253,16 +253,9 @@ def test_upstream_patches_enabled_false_when_set_false(
 def test_upstream_patches_enabled_mapping_opts_out_per_dependency(
     settings: pytest_django.Settings,
 ) -> None:
-    """A mapping disables exactly the named dependency; missing names stay on.
-
-    The per-dependency escape hatch: ``{"django": False}`` silences the
-    test-only Django patch without dropping the production request-hardening
-    patches (``strawberry`` / ``cross_web``).
-    """
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"django": False}}
-    assert upstream_patches_enabled("django") is False
-    assert upstream_patches_enabled("strawberry") is True
-    assert upstream_patches_enabled("cross_web") is True
+    """A mapping disables the named dependency."""
+    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"strawberry": False}}
+    assert upstream_patches_enabled("strawberry") is False
 
 
 @pytest.mark.parametrize("dependency", _PATCH_DEPENDENCIES, ids=_PATCH_DEPENDENCIES)
@@ -283,7 +276,6 @@ def test_upstream_patches_enabled_mapping_accepts_non_dict_mappings(
         "APPLY_UPSTREAM_PATCHES": MappingProxyType({"strawberry": False}),
     }
     assert upstream_patches_enabled("strawberry") is False
-    assert upstream_patches_enabled("django") is True
 
 
 def test_upstream_patches_enabled_rejects_unknown_mapping_name(
@@ -296,16 +288,16 @@ def test_upstream_patches_enabled_rejects_unknown_mapping_name(
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"stawberry": False}}
     with pytest.raises(ConfigurationError, match="stawberry"):
-        upstream_patches_enabled("django")
+        upstream_patches_enabled("strawberry")
 
 
 def test_upstream_patches_enabled_rejects_non_bool_mapping_value(
     settings: pytest_django.Settings,
 ) -> None:
-    """``{"django": "false"}`` must fail loud, not silently invert intent."""
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"django": "false"}}
+    """``{"strawberry": "false"}`` must fail loud, not silently invert intent."""
+    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"strawberry": "false"}}
     with pytest.raises(ConfigurationError, match="must be a bool"):
-        upstream_patches_enabled("django")
+        upstream_patches_enabled("strawberry")
 
 
 def test_upstream_patches_enabled_rejects_non_string_mapping_key(
@@ -321,7 +313,7 @@ def test_upstream_patches_enabled_rejects_non_string_mapping_key(
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {1: False, "x": False}}
     with pytest.raises(ConfigurationError, match="dependency name strings"):
-        upstream_patches_enabled("django")
+        upstream_patches_enabled("strawberry")
 
 
 @pytest.mark.parametrize(
@@ -352,7 +344,7 @@ def test_upstream_patches_enabled_rejects_non_bool_non_mapping_value(
     """
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": value}
     with pytest.raises(ConfigurationError, match="bool or a mapping"):
-        upstream_patches_enabled("django")
+        upstream_patches_enabled("strawberry")
 
 
 def test_upstream_patches_enabled_rejects_unknown_dependency_argument() -> None:
@@ -483,7 +475,7 @@ def test_delattr_clears_stale_cache_and_restores_defaults(
         "ERROR_POLICY": {"enabled": False},
     }
     assert conf.settings.FILTER_KEY == "x"
-    assert upstream_patches_enabled("django") is False
+    assert upstream_patches_enabled("strawberry") is False
     assert nested_connection_strategy_setting() == "eager"
     assert single_parent_fast_path_setting() is False
     assert testing_endpoint_setting() == "/custom/"
@@ -499,7 +491,7 @@ def test_delattr_clears_stale_cache_and_restores_defaults(
     assert conf.settings.user_settings == {}
     with pytest.raises(AttributeError, match="Invalid setting: `FILTER_KEY`"):
         _ = conf.settings.FILTER_KEY
-    assert upstream_patches_enabled("django") is True
+    assert upstream_patches_enabled("strawberry") is True
     assert nested_connection_strategy_setting() == "windowed"
     assert single_parent_fast_path_setting() is True
     assert testing_endpoint_setting() == "/graphql/"
@@ -660,7 +652,7 @@ def test_explicit_settings_instance_ignores_django_delattr(
         ),
         pytest.param(
             "value",
-            "`APPLY_UPSTREAM_PATCHES['django']` must be a bool; got str.",
+            "`APPLY_UPSTREAM_PATCHES['strawberry']` must be a bool; got str.",
             id="dependency-value",
         ),
         pytest.param(
@@ -680,9 +672,9 @@ def test_setting_rejection_messages_are_pinned(
     if case == "mapping":
         operation = partial(conf._normalize_user_settings, "bad")
     else:
-        value = {"django": "no"} if case == "value" else {1: False}
+        value = {"strawberry": "no"} if case == "value" else {1: False}
         settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": value}
-        operation = partial(upstream_patches_enabled, "django")
+        operation = partial(upstream_patches_enabled, "strawberry")
     with pytest.raises(ConfigurationError) as error:
         operation()
     assert str(error.value) == message
@@ -771,7 +763,7 @@ def test_upstream_patches_enabled_liar_bool_is_not_bool() -> None:
 
     with mock.patch.object(conf, "settings", s):
         # Empty liar mapping -> defensive copy is {} -> defaults to True (not disabled)
-        assert upstream_patches_enabled("django") is True
+        assert upstream_patches_enabled("strawberry") is True
 
     class LiarScalar(ClaimsClassBase):
         claimed = bool
@@ -787,7 +779,7 @@ def test_upstream_patches_enabled_liar_bool_is_not_bool() -> None:
         mock.patch.object(conf, "settings", s2),
         pytest.raises(ConfigurationError, match="bool or a mapping"),
     ):
-        upstream_patches_enabled("django")
+        upstream_patches_enabled("strawberry")
 
 
 def test_upstream_patches_mapping_iteration_error_propagates() -> None:
@@ -811,7 +803,7 @@ def test_upstream_patches_mapping_iteration_error_propagates() -> None:
         mock.patch.object(conf, "settings", s),
         pytest.raises(RuntimeError, match="iteration boom"),
     ):
-        upstream_patches_enabled("django")
+        upstream_patches_enabled("strawberry")
 
 
 def test_upstream_patches_enabled_hostile_key_isinstance_becomes_configurationerror() -> None:
@@ -829,7 +821,7 @@ def test_upstream_patches_enabled_hostile_key_isinstance_becomes_configurationer
         mock.patch.object(conf, "settings", s),
         pytest.raises(ConfigurationError, match="dependency name strings"),
     ):
-        upstream_patches_enabled("django")
+        upstream_patches_enabled("strawberry")
 
 
 def test_normalize_rejection_skips_raising_metaclass_name() -> None:
@@ -869,7 +861,7 @@ def test_upstream_patches_toggle_rejection_skips_raising_metaclass_name() -> Non
         mock.patch.object(conf, "settings", s),
         pytest.raises(ConfigurationError, match="bool or a mapping"),
     ):
-        upstream_patches_enabled("django")
+        upstream_patches_enabled("strawberry")
 
 
 def test_upstream_patches_mapping_value_rejection_skips_raising_metaclass_name() -> None:
@@ -880,10 +872,10 @@ def test_upstream_patches_mapping_value_rejection_skips_raising_metaclass_name()
 
     evil = Evil()
 
-    s = Settings({"APPLY_UPSTREAM_PATCHES": {"django": evil}})
+    s = Settings({"APPLY_UPSTREAM_PATCHES": {"strawberry": evil}})
 
     with (
         mock.patch.object(conf, "settings", s),
         pytest.raises(ConfigurationError, match="must be a bool"),
     ):
-        upstream_patches_enabled("django")
+        upstream_patches_enabled("strawberry")

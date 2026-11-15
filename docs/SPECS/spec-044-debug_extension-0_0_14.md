@@ -1089,7 +1089,7 @@ Alternatives considered (and rejected):
   quartet at the price of package-owned monkey-patching of
   `connection.cursor` (with the attendant unwrap-ordering hazards the
   package already defends *against* elsewhere — the
-  [Django Trac #37064 hardening][glossary-django-trac-37064] exists because
+  [`safe_wrap_connection_method`][glossary-safe-wrap-connection-method] helper exists because
   cursor/connection wrapping goes wrong in the wild), a thread-local state
   module, and a per-vendor conditional block. The fidelity delta serves a
   minority diagnostic need; the follow-on path stays open (the capture core
@@ -2371,6 +2371,7 @@ through these gets its own targeted unit — named owner, never a blanket claim.
 
 <!-- docs/ -->
 [docs-readme]: ../README.md
+[glossary-safe-wrap-connection-method]: ../GLOSSARY.md#safe_wrap_connection_method
 [glossary]: ../GLOSSARY.md
 [glossary-async-sql-capture-boundary]: ../GLOSSARY.md#async-sql-capture-boundary
 [glossary-bounded-query-log-rollover]: ../GLOSSARY.md#bounded-query-log-rollover
@@ -2385,7 +2386,6 @@ through these gets its own targeted unit — named owner, never a blanket claim.
 [glossary-debug-toolbar-middleware]: ../GLOSSARY.md#debug-toolbar-middleware
 [glossary-developer-only-debug-posture]: ../GLOSSARY.md#developer-only-debug-posture
 [glossary-django-debug-cursor-capture]: ../GLOSSARY.md#django-debug-cursor-capture
-[glossary-django-trac-37064]: ../GLOSSARY.md#django-trac-37064-hardening
 [glossary-djangodebugextension]: ../GLOSSARY.md#djangodebugextension
 [glossary-djangographqlprotocolrouter]: ../GLOSSARY.md#djangographqlprotocolrouter
 [glossary-djangooptimizerextension]: ../GLOSSARY.md#djangooptimizerextension

@@ -86,7 +86,6 @@ if TYPE_CHECKING:
         SelectionSetNode,
     )
     from graphql.type.definition import GraphQLField, GraphQLNamedType, GraphQLResolveInfo
-    from strawberry.types.info import Info
     from strawberry.types.nodes import SelectedField, Selection
 
     from ._context import ConvertedMemoKey
@@ -200,21 +199,22 @@ def _published_field(parent: GraphQLNamedType | None, name: str) -> GraphQLField
 
 
 # Per-execution memo for the converted-selection tree, keyed by the field
-# nodes' ids. ``prime_selected_fields`` runs the full AST -> ``SelectedField``
-# conversion on every connection resolution, and a nested FALLBACK connection
-# resolves once per parent row with a fresh Strawberry ``Info`` each time - but
-# graphql-core's executor caches collected sub-fields per execution
-# (``ExecutionContext._subfields_cache``), so every row's ``info.field_nodes``
-# is the SAME node group, and the conversion depends only on per-execution
-# constants (``info.fragments`` / ``info.variable_values``). Reusing the first
-# row's converted list collapses N per-row conversions to one. The key mirrors
-# graphql-core's own subfields-cache shape (the ids of the individual field
-# nodes, NOT the id of the wrapping list, which may be rebuilt or reused): AST
-# node ids are stable for the memo's whole lifetime because the document is
-# owned by the execution context that spans the same ``on_execute`` lifecycle.
-# The memo belongs to the execution frame ``DjangoOptimizerExtension.on_execute``
-# opens (``_context.py::_ExecutionFrame``), so it ends when that execution does
-# and a task that copied the binding reads nothing. ``None`` outside a managed
+# nodes' ids. ``connection.py::_connection_field_requested`` runs the full AST
+# -> ``SelectedField`` conversion on every connection resolution, and a nested
+# FALLBACK connection resolves once per parent row with a fresh Strawberry
+# ``Info`` each time - but graphql-core's executor caches collected sub-fields
+# per execution (``ExecutionContext._subfields_cache``), so every row's
+# ``info.field_nodes`` is the SAME node group, and the conversion depends only
+# on per-execution constants (``info.fragments`` / ``info.variable_values``).
+# Reusing the first row's converted list collapses N per-row conversions to
+# one. The key mirrors graphql-core's own subfields-cache shape (the ids of the
+# individual field nodes, NOT the id of the wrapping list, which may be rebuilt
+# or reused): AST node ids are stable for the memo's whole lifetime because the
+# document is owned by the execution context that spans the same ``on_execute``
+# lifecycle. The memo belongs to the execution frame
+# ``DjangoOptimizerExtension.on_execute`` opens
+# (``_context.py::_ExecutionFrame``), so it ends when that execution does and a
+# task that copied the binding reads nothing. ``None`` outside a managed
 # execution disables the memo, so direct / test callers see unchanged behavior.
 # Consumers treat the converted list as read-only (the walker clones before
 # mutating; Strawberry's ``selected_fields`` readers only iterate), so sharing
@@ -228,23 +228,21 @@ def ast_to_converted_selections(
     """Convert ``field_nodes`` with Strawberry's ``convert_selections``, stamped by Python name.
 
     The list is Strawberry's own - its ``SelectedField`` / ``FragmentSpread`` /
-    ``InlineFragment`` dataclasses, a typeless inline fragment (``... { f }``)
-    carrying ``type_condition=None`` - so it is what ``Info.selected_fields`` holds,
-    and ``prime_selected_fields`` can seed that slot with it. ``_stamp`` then walks
-    it beside the AST it came from, tracking the GraphQL type each selection set is
-    read on (the resolver's ``parent_type`` at the top, a field's named type below
+    ``InlineFragment`` dataclasses, a typeless inline fragment (``... { f }``) carrying
+    ``type_condition=None`` - the shape ``Info.selected_fields`` holds. ``_stamp`` then
+    walks it beside the AST it came from, tracking the GraphQL type each selection set
+    is read on (the resolver's ``parent_type`` at the top, a field's named type below
     it, a fragment's type condition inside it), and gives each field selection the
-    schema publishes the Python name of its field (``PYTHON_NAME_ATTR``, read
-    through ``selection_python_name``) and its arguments by Python name, coerced
-    by graphql-core (``PYTHON_ARGUMENTS_ATTR``, read through ``python_arguments``).
-    Both markers sit beside the dataclass fields, so what Strawberry's own readers
-    see is unchanged.
+    schema publishes the Python name of its field (``PYTHON_NAME_ATTR``, read through
+    ``selection_python_name``) and its arguments by Python name, coerced by graphql-core
+    (``PYTHON_ARGUMENTS_ATTR``, read through ``python_arguments``). Both markers sit
+    beside the dataclass fields, so what Strawberry's own readers see is unchanged.
 
     Memoized per execution on the execution frame (see the comment above):
     within one ``on_execute`` lifecycle the same field-node group converts once,
-    so the per-parent-row ``prime_selected_fields`` calls of a fallback
-    connection pipeline reuse the first row's list instead of re-running the
-    conversion for every parent.
+    so the per-parent-row ``connection.py::_connection_field_requested`` calls
+    of a fallback connection pipeline reuse the first row's list instead of
+    re-running the conversion for every parent.
     """
     memo = converted_selections_memo()
     memo_key: ConvertedMemoKey | None = None
@@ -309,61 +307,6 @@ def _stamp(
                     )
                 below = get_named_type(graphql_type_of(field_def))
             _stamp(info, selection.selections, ast_child_selections(field_node), below)
-
-
-def prime_selected_fields(info: Info[object, object]) -> None:
-    """Seed Strawberry ``Info.selected_fields`` with the execution's stamped conversion.
-
-    ``Info.selected_fields`` is a ``functools.cached_property`` over Strawberry's
-    ``convert_selections``. Seeding its slot with ``info_selections`` makes every
-    later read of it - Strawberry's own ``relay.utils.should_resolve_list_connection_edges``
-    on the connection resolve path, a consumer extension - share the one memoized
-    list the package's readers walk, each field selection stamped, instead of
-    converting a second time. Idempotent and a no-op when the info has no field
-    nodes or the cache is already populated (so a consumer that legitimately read
-    ``selected_fields`` first is never overwritten).
-
-    Must run BEFORE any ``info.selected_fields`` read on the connection path - the
-    cached property computes once on first read, so priming only wins if it lands
-    first. ``connection.py::DjangoConnection.resolve_connection`` calls this immediately
-    after the ``first`` + ``last`` guard, ahead of both the ``_total_count_requested``
-    inspection and ``super().resolve_connection``.
-
-    NOTE - this COUPLES to two Strawberry internals: the raw info living at
-    ``Info._raw_info`` and ``Info.selected_fields`` being a ``functools.cached_property``
-    backed by the ``info.__dict__["selected_fields"]`` slot. Both hold across the
-    supported Strawberry range. Were ``_raw_info`` renamed (or the dict-slot cache
-    dropped), this would SILENTLY no-op - ``getattr(info, "_raw_info", None)``
-    returns ``None`` and nothing is seeded - and the slot's readers would convert
-    unstamped on their own; ``tests/optimizer/test_selections.py``'s priming rows
-    pin the slot.
-    """
-    # Strawberry's own ``cached_property`` slot on the Info it handed us.
-    namespace = info.__dict__  # truth: ok seeds Strawberry Info's cache slot, not an identity read
-    if "selected_fields" in namespace:
-        return
-    selections = info_selections(info)
-    if selections:
-        namespace["selected_fields"] = selections
-
-
-def info_selections(info: Info[object, object]) -> list[Selection]:
-    """Return a resolver ``info``'s own field selections, converted and stamped.
-
-    ``ast_to_converted_selections`` over the field nodes of the graphql-core info
-    Strawberry wraps, so every field selection carries ``PYTHON_NAME_ATTR`` /
-    ``PYTHON_ARGUMENTS_ATTR`` whoever read ``info.selected_fields`` first (a
-    consumer extension reading it before ``prime_selected_fields`` leaves
-    Strawberry's unstamped list in that slot). Memoized per execution like every
-    conversion. Empty when ``info`` carries no field nodes.
-    """
-    # Strawberry's ``Info`` keeps the graphql-core info at ``_raw_info``, whose
-    # ``field_nodes`` is a list of ``FieldNode``s.
-    raw_info: GraphQLResolveInfo[object] | None = getattr(info, "_raw_info", None)
-    field_nodes: list[FieldNode] | None = getattr(raw_info, "field_nodes", None)
-    if raw_info is None or not field_nodes:
-        return []
-    return ast_to_converted_selections(raw_info, field_nodes)
 
 
 # ---------------------------------------------------------------------------

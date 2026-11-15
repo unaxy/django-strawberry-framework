@@ -247,13 +247,11 @@ body.
   multi-encoding request bodies. A security policy a consumer can switch off by accident is
   not a policy, and the extra reach over upstream-mounted views is not the package's to
   claim.
-- **Decode inside `_patched_body`.** Rejected: it re-creates the unhandled-`500`
-  path the patch module exists to close, and it would only fix the sync transport.
-- **Let `_patched_body` be the package view's sync body source.** One patched property
-  already hands raw bytes to both mounts, so the package view would need no adapter of its
-  own and the decode would be reached for free. Rejected for the *same* reason the decode
-  is not in the patch module: the patch is gated, so the sync half of the wire contract
-  would ride `APPLY_UPSTREAM_PATCHES` while the other half did not. With the gate off,
+- **Patch upstream's sync adapter `body` property process-wide to hand raw bytes to every
+  mount.** The package view would need no adapter of its own and the decode would be
+  reached for free. Rejected for the *same* reason the decode is not in the patch module:
+  a patch is gated, so the sync half of the wire contract would ride
+  `APPLY_UPSTREAM_PATCHES` while the other half did not. With the gate off,
   upstream's sync property decodes first and `parse_json` is never entered with bytes, so a
   BOM'd UTF-16 or UTF-32 body on a mounted sync package view would answer `500` instead of
   the contracted `400`. A decode the bytes never reach is not an enforcement.

@@ -11041,11 +11041,10 @@ def test_anonymous_inline_fragment_under_connection_field_resolves() -> None:
 
     ``... { f }`` converts to an ``InlineFragment`` with ``type_condition=None``, the
     one shell that names no type. The package's conversion
-    (``ast_to_converted_selections``, primed into ``info.selected_fields`` before the
-    connection resolver runs) carries that shell through the fragment-aware
-    substrate, so both shapes - the anonymous fragment directly under the connection
-    field and one nested down at the ``node`` level - resolve and return the seeded
-    genre names.
+    (``ast_to_converted_selections``, which the connection resolver walks) carries
+    that shell through the fragment-aware substrate, so both shapes - the anonymous
+    fragment directly under the connection field and one nested down at the
+    ``node`` level - resolve and return the seeded genre names.
     """
     _seed_genres("Alpha", "Beta", "Gamma")
     expected = ["Alpha", "Beta", "Gamma"]
@@ -11094,7 +11093,7 @@ def test_anonymous_inline_fragment_with_total_count_resolves() -> None:
     """``totalCount`` alongside an anonymous inline fragment resolves and counts.
 
     The ``totalCount`` read and the page read both walk the one stamped conversion
-    ``DjangoConnection.resolve_connection`` primes into ``info.selected_fields``, so
+    the execution memoizes for the connection's field nodes, so
     a connection query carrying an anonymous inline fragment AND ``totalCount``
     resolves: the count still fires (== 3) and the edges still resolve.
     """

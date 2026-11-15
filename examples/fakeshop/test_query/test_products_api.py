@@ -4397,12 +4397,12 @@ def test_cascade_composes_with_filter_and_order_live() -> None:
 
 # ---------------------------------------------------------------------------
 # Malformed request bodies and the strict UTF-8 wire contract. Two owners, both
-# on this route. The framework's upstream patches for Strawberry
-# (`BaseView.parse_json`) and cross_web (`DjangoHTTPRequestAdapter.body`) are
-# applied at app load and fix upstream *defects*: without them the sync
-# `GraphQLView` raises a raw `UnicodeDecodeError` while decoding the body, before
-# GraphQL parsing runs -> an unhandled 500. The package's own strict UTF-8 wire
-# contract (spec-046 Decision 9) is *not* one of those patches - it lives on the
+# on this route. The framework's upstream patch for Strawberry
+# (`BaseView.parse_json`) is applied at app load and fixes an upstream *defect*:
+# without it an over-nested body escapes upstream's `except` as an unhandled 500.
+# The sync view's own request adapter (`views.py::_RawBodyRequestAdapter`) keeps
+# upstream's `UnicodeDecodeError` out of the body property. The package's own strict UTF-8 wire
+# contract (spec-046 Decision 9) is *not* that patch - it lives on the
 # mounted view, in `views.py::_RequestBodyBoundaryMixin.parse_json`, so it holds
 # whatever `APPLY_UPSTREAM_PATCHES` says. The sync adapter hands the raw bytes to
 # that view method, which decodes them once with strict UTF-8: the success set is

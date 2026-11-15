@@ -2,9 +2,7 @@
 
 System-under-test:
 :func:`django_strawberry_framework.testing.safe_wrap_connection_method` -
-the wrap-time half of the package's Django Trac #37064 defense-in-depth
-(the unwrap-time half lives in :mod:`django_strawberry_framework._django_patches`
-and is tested in ``tests/test_django_patches.py``). No GraphQL request can
+the wrap-time guard against Django Trac #37064. No GraphQL request can
 observe whether a connection method was wrapped or declined; that is
 connection-object identity, not a wire shape. There is no live sibling.
 
@@ -17,19 +15,16 @@ from unittest import mock
 import pytest
 from django.db import connections
 from django.db.backends.utils import CursorWrapper
-from django.test.testcases import TransactionTestCase
+from django.test.testcases import TransactionTestCase, _DatabaseFailure
 from typing_extensions import override
 
-from django_strawberry_framework import _django_patches
 from django_strawberry_framework.testing import safe_wrap_connection_method
 from django_strawberry_framework.utils._narrowing import read_attr
 from tests._idioms import call_remove_databases_failures
 
 
 def _database_failure(wrapped: object) -> object:
-    if _django_patches._DatabaseFailure is None:
-        pytest.skip("Django private _DatabaseFailure symbol is unavailable.")
-    return _django_patches._DatabaseFailure(wrapped, "test message")
+    return _DatabaseFailure(wrapped, "test message")
 
 
 def test_safe_wrap_connection_method_installs_wrapper_when_no_database_failure() -> None:
@@ -77,29 +72,6 @@ def test_safe_wrap_connection_method_declines_when_database_failure_in_place(
         connection.cursor = original_cursor
 
 
-def test_safe_wrap_connection_method_installs_when_database_failure_symbol_missing() -> None:
-    """Future-Django private-symbol drift must not break the public test helper.
-
-    ``_DatabaseFailure`` is a private Django symbol. If Django renames
-    or removes it, ``safe_wrap_connection_method`` should still be
-    importable and should behave like the normal "no Django wrapper is
-    visible" path.
-    """
-    connection = connections["default"]
-    original_cursor = connection.cursor
-
-    consumer_wrapper = mock.Mock(name="consumer_wrapper")
-
-    try:
-        with mock.patch.object(_django_patches, "_DatabaseFailure", None):
-            installed = safe_wrap_connection_method(connection, "cursor", consumer_wrapper)
-
-        assert installed is True
-        assert connection.cursor is consumer_wrapper
-    finally:
-        connection.cursor = original_cursor
-
-
 def test_safe_wrap_connection_method_works_on_arbitrary_method_names() -> None:
     """Helper works for any disallowed-connection method, not just ``cursor``.
 
@@ -123,35 +95,36 @@ def test_safe_wrap_connection_method_works_on_arbitrary_method_names() -> None:
         connection.chunked_cursor = original
 
 
-def test_safe_wrap_connection_method_pairs_with_unwrap_time_patch_for_defense_in_depth(
+def test_safe_wrap_connection_method_leaves_djangos_teardown_a_clean_unwrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end composition of the helper with Django's setup/teardown pair.
 
-    When a consumer uses :func:`safe_wrap_connection_method` AND Django's
-    setup/teardown pair runs, the package's unwrap-time patch
-    (:func:`_django_patches._patched_remove_databases_failures`)
-    unwraps Django's wrapper, restoring the original method, without any
-    work from the consumer.
+    When a consumer uses :func:`safe_wrap_connection_method` while Django's
+    ``_DatabaseFailure`` is in place, the helper declines, so Django's own
+    ``_remove_databases_failures`` still finds its wrapper and restores the
+    original method without any work from the consumer.
 
-    The test wires up the full sequence: install a ``_DatabaseFailure``
-    on the connection (simulating ``_add_databases_failures``), have
-    the consumer call ``safe_wrap_connection_method`` (which declines
-    because the ``_DatabaseFailure`` is in place), then exercise the
-    package's patched teardown method. The wrapper is unwrapped
-    exactly as upstream would do - proving the two halves compose.
+    The test wires up the full sequence: install a ``_DatabaseFailure`` on
+    every method Django disallows (simulating ``_add_databases_failures``), have
+    the consumer call ``safe_wrap_connection_method`` (which declines because
+    the ``_DatabaseFailure`` is in place), then run Django's teardown method,
+    which unwraps every one of them.
     """
     connection = connections["default"]
     original_cursor = connection.cursor
 
     sentinel_original = read_attr(mock.sentinel, "untouched_original")
 
-    # Simulate Django's setUpClass installing the ``_DatabaseFailure``.
+    # Simulate Django's setUpClass installing its ``_DatabaseFailure`` wrappers.
+    for name, _ in connection.features.disallowed_simple_test_case_connection_methods:
+        if name != "cursor":
+            monkeypatch.setattr(connection, name, _database_failure(read_attr(connection, name)))
     django_wrapper = _database_failure(sentinel_original)
     monkeypatch.setattr(connection, "cursor", django_wrapper)
 
     # The consumer attempts to wrap and is correctly declined - Django
-    # already wrapped first. Wrap-time half of defense-in-depth fires.
+    # already wrapped first.
     installed = safe_wrap_connection_method(
         connection,
         "cursor",
@@ -160,11 +133,11 @@ def test_safe_wrap_connection_method_pairs_with_unwrap_time_patch_for_defense_in
     assert installed is False
     assert connection.cursor is django_wrapper  # Django's wrapper intact
 
-    # Now exercise the package's patched ``_remove_databases_failures``
-    # (the unwrap-time half) against a synthetic narrow-allow-list
-    # test class. Should restore the original cursor cleanly.
+    # Now run Django's ``_remove_databases_failures`` against a synthetic
+    # test class that disallows only ``default``. It restores the original
+    # cursor cleanly.
     class _NarrowTest(TransactionTestCase):
-        databases = set()  # exclude every alias including default
+        databases = set(connections) - {"default"}
 
     try:
         call_remove_databases_failures(_NarrowTest)

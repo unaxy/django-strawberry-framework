@@ -57,11 +57,10 @@ through exactly one complete CSRF check.
 
 The wire contract needs one thing the mixin cannot provide, which is why it has a
 second owner here: upstream's sync adapter decodes inside its own ``body``
-property, so the mixin's strict decode would never see the bytes at all whenever
-the ``APPLY_UPSTREAM_PATCHES`` workarounds are off. ``_RawBodyRequestAdapter``
-supplies the raw-bytes body source through upstream's own
-``request_adapter_class`` seam, so the decode is reached in every patch state - a
-decode the bytes never reach is not an enforcement. The async view needs no
+property, so the mixin's strict decode would never see the bytes at all.
+``_RawBodyRequestAdapter`` supplies the raw-bytes body source through upstream's
+own ``request_adapter_class`` seam, so the decode is reached - a decode the bytes
+never reach is not an enforcement. The async view needs no
 counterpart, because upstream's async adapter already hands over bytes; that
 asymmetry is deliberate and pinned by test.
 
@@ -387,22 +386,14 @@ class _RawBodyRequestAdapter(DjangoHTTPRequestAdapter):
     contract: raw bytes, handed to the one method that can answer a bad body with
     a response.
 
-    **Why this is not the ``cross_web`` patch again.** The two fix the same
-    upstream defect at deliberately different scopes.
-    ``_cross_web_patches.py::_patched_body`` replaces the property on upstream's
-    class for the whole process, so that a consumer who mounts *Strawberry's own*
-    view also gets a controlled ``400``; it is a workaround for someone else's
-    bug, so it is gated by ``APPLY_UPSTREAM_PATCHES`` and it retires when upstream
-    stops decoding eagerly. This class is the package view's own body source, and
-    it is what makes the wire contract hold on a package mount in **every** patch
-    state - including the broad ``APPLY_UPSTREAM_PATCHES = False``, where upstream's sync
-    adapter answers ``500`` for a BOM'd UTF-16 / UTF-32 body. Ownership follows
-    lifecycle here exactly as it does for the decode itself: permanent package policy must not
-    be reachable only through a switchable workaround.
+    This class is the package view's own body source, scoped to the package
+    view: a consumer who mounts *Strawberry's own* view keeps upstream's adapter,
+    which answers ``500`` for a BOM'd UTF-16 / UTF-32 body. The wire contract
+    holds on a package mount in every state of ``APPLY_UPSTREAM_PATCHES``, because
+    nothing here is gated by it: permanent package policy must not be reachable
+    only through a switchable workaround.
 
-    Subclassing rather than copying keeps every other adapter member upstream's,
-    and means the patch state cannot matter to a package view even by install
-    order: this property shadows the class attribute by identity, patched or not.
+    Subclassing rather than copying keeps every other adapter member upstream's.
 
     The async view needs no counterpart - upstream's
     ``AsyncDjangoHTTPRequestAdapter.get_body`` already returns
@@ -1106,8 +1097,8 @@ class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValu
 
         Beyond those it overrides upstream's ``request_adapter_class``, with a subclass
         that hands the raw body bytes to ``parse_json`` instead of decoding them inside
-        a property. That is the sync half of the wire contract's independence from
-        ``APPLY_UPSTREAM_PATCHES``; see :class:`_RawBodyRequestAdapter`.
+        a property, so the strict decode is reached on the sync transport; see
+        :class:`_RawBodyRequestAdapter`.
 
     The ordering half of the body boundary - the ``csrf_exempt`` mark on the
         callback ``as_view`` returns - comes from the shared mixin, so it cannot
@@ -1116,9 +1107,8 @@ class DjangoGraphQLView(_RequestBodyBoundaryMixin, GraphQLView[Context, RootValu
     """
 
     #: The package's own body source (see :class:`_RawBodyRequestAdapter`), so
-    #: the strict decode below is reached on this transport whatever the
-    #: upstream-patch setting says. The async twin needs no override: upstream's
-    #: async adapter already hands over raw bytes.
+    #: the strict decode below is reached on this transport. The async twin needs
+    #: no override: upstream's async adapter already hands over raw bytes.
     request_adapter_class: type[DjangoHTTPRequestAdapter] = _RawBodyRequestAdapter
 
     @classonlymethod

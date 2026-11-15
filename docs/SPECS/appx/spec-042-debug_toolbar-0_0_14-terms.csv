@@ -22,4 +22,3 @@ only() projection,only-projection,part of the optimizer plan the SQL panel makes
 FK-id elision,fk-id-elision,part of the optimizer plan the SQL panel makes visible (Problem statement)
 request_from_info,request_from_info,"Helper-reuse D-N2 non-reuse: the middleware is a Django HTTP middleware on the raw request/response pair, not a resolver-context surface - the helper's single-siting rule does not apply here"
 Upload,upload-scalar,"edge case: a multipart upload request's consumed body degrades the operationName sniff to None (inject normally) - degradation identical to upstream, not breakage"
-Django Trac #37064 hardening,django-trac-37064-hardening,"cited as the existing reason consumers already list the package in INSTALLED_APPS - the same install step the template resolution relies on"

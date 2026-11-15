@@ -1,27 +1,19 @@
 """Cooperative connection-method wrapping for consumer test instrumentation.
 
-The wrap-time half of the defense-in-depth against Django Trac #37064.
-Consumers (or third-party libraries) that need to replace a method on
+Guards against Django Trac #37064 at wrap time. Consumers (or
+third-party libraries) that need to replace a method on
 ``django.db.connections[alias]`` between ``setUpClass`` and
 ``tearDownClass`` use :func:`safe_wrap_connection_method` to install
 their wrapper. The helper refuses to wrap when Django's
 ``_DatabaseFailure`` is already in place - mirroring the pattern
 ``django-debug-toolbar`` ships in
 :func:`debug_toolbar.panels.sql.tracking.wrap_cursor`.
-
-See :mod:`django_strawberry_framework._django_patches` for the full
-defense-in-depth framing, the upstream Trac ticket reference, and the
-unwrap-time backstop the package's ``AppConfig.ready`` installs
-unconditionally. This module is the consumer-facing wrap-time half;
-the patch module is the package-internal unwrap-time half. Both halves
-share the same private ``_DatabaseFailure`` predicate so a future
-Django private-symbol move degrades the helper instead of making the
-public ``django_strawberry_framework.testing`` import crash.
 """
 
 from typing import TYPE_CHECKING
 
-from django_strawberry_framework._django_patches import _is_database_failure
+from django.test.testcases import _DatabaseFailure
+
 from django_strawberry_framework.utils._narrowing import read_attr
 
 if TYPE_CHECKING:
@@ -73,20 +65,8 @@ def safe_wrap_connection_method(
     (Django Trac #37064, closed ``wontfix`` -
     <https://code.djangoproject.com/ticket/37064>).
 
-    Using this helper is the wrap-time half of the package's
-    defense-in-depth against that fragility:
-
-    * **Wrap time** (this helper): declines to clobber Django's
-      wrapper in the first place.
-    * **Unwrap time** (the package's ``_django_patches`` patch,
-      applied automatically at ``AppConfig.ready``): hardens Django's
-      teardown loop so a clobber by any code path that DIDN'T use
-      this helper still doesn't crash.
-
-    Consumers who use this helper are auto-protected at both ends.
-    Consumers who don't are still auto-protected at the unwrap end.
-
-    Mirror precedent: ``django-debug-toolbar``'s
+    This helper declines to clobber Django's wrapper in the first
+    place. Mirror precedent: ``django-debug-toolbar``'s
     :func:`debug_toolbar.panels.sql.tracking.wrap_cursor` ships the
     same isinstance check at its own wrap site. See
     <https://github.com/django-commons/django-debug-toolbar/blob/main/debug_toolbar/panels/sql/tracking.py>.
@@ -120,9 +100,9 @@ def safe_wrap_connection_method(
                     self._connection.cursor = self._original_cursor
                 super().tearDown()
 
-    The package's unwrap-time backstop (Trac #37064 patch) makes
-    omitting the ``tearDown`` restoration non-fatal - but restoring
-    on your own is still good hygiene and lets debug-toolbar-style
+    Omitting the ``tearDown`` restoration leaves ``wrapper`` in place
+    over the slot Django's teardown unwraps, which crashes there
+    (Trac #37064); restoring also lets debug-toolbar-style
     wrap-time-isinstance checks in OTHER libraries find a clean slot
     on the next ``setUpClass``.
 
@@ -152,7 +132,7 @@ def safe_wrap_connection_method(
     """
     _require_callable_wrapper(wrapper)
     current = read_attr(connection, method_name)
-    if _is_database_failure(current):
+    if isinstance(current, _DatabaseFailure):
         return False
     setattr(connection, method_name, wrapper)
     return True

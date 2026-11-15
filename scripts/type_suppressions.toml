@@ -3,10 +3,6 @@
 # calls (`cast`) and the ignore comments per rule it holds; a count may only fall.
 
 "django_strawberry_framework/__init__.py::__getattr__" = { reportAny = 1, reportExplicitAny = 1 }
-"django_strawberry_framework/_cross_web_patches.py::_captured_upstream_body_getter" = { cast = 1 }
-"django_strawberry_framework/_cross_web_patches.py::apply" = { reportAttributeAccessIssue = 1 }
-"django_strawberry_framework/_django_patches.py::_disallowed_connection_methods" = { cast = 1 }
-"django_strawberry_framework/_django_patches.py::apply" = { reportAttributeAccessIssue = 1 }
 "django_strawberry_framework/_request_body.py::_measured_by_bounded_read" = { reportAttributeAccessIssue = 1 }
 "django_strawberry_framework/_strawberry_patches.py::_original_async_parse_multipart" = { cast = 1 }
 "django_strawberry_framework/_strawberry_patches.py::_original_parse_json" = { cast = 1 }
@@ -372,7 +368,6 @@
 "tests/optimizer/test_plans.py::TestDeterministicOrder.test_ends_in_unique_column_defensive_for_non_model" = { reportArgumentType = 2 }
 "tests/optimizer/test_plans.py::TestLookupPaths.test_ignores_unknown_prefetch_like_entries" = { reportArgumentType = 1 }
 "tests/optimizer/test_plans.py::TestReverseOrderBy.test_unreversible_term_raises_instead_of_serving_the_wrong_end" = { reportArgumentType = 1 }
-"tests/optimizer/test_selections.py::_as_strawberry_info" = { reportReturnType = 1 }
 "tests/optimizer/test_selections.py::test_directive_variable_names_ignores_non_directive_objects" = { reportArgumentType = 1 }
 "tests/optimizer/test_walker.py::_as_definitionless_django_type" = { reportReturnType = 1 }
 "tests/optimizer/test_walker.py::_as_partial_resolve_info" = { reportReturnType = 1 }

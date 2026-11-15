@@ -164,7 +164,7 @@ _NO_KEYS: frozenset[object] = frozenset()
 #:   ``id(operation)``. Reusing one frozenset also means its hash is computed
 #:   once, which keeps the per-row plan-cache key cheap.
 #: - ``converted`` memoizes the converted-selection tree by field-node ids, so
-#:   the per-parent-row ``prime_selected_fields`` calls of a fallback connection
+#:   the per-parent-row selection checks of a fallback connection
 #:   convert once. AST node ids are stable for the frame's whole lifetime
 #:   because the document belongs to the execution the frame belongs to.
 #: - ``stashes`` is the operation's own optimizer stash store, and the one

@@ -160,8 +160,9 @@ Each top-level item maps to one commit / PR.
   - [ ] `django_strawberry_framework/views.py::_RawBodyRequestAdapter` — a one-property
         subclass of `cross_web.DjangoHTTPRequestAdapter` returning raw bytes, installed as
         `DjangoGraphQLView.request_adapter_class` through upstream's own per-view seam — so
-        the sync transport's bytes reach that decode undecoded in **every** patch state; the
-        async view needs no counterpart and a row pins that asymmetry
+        the sync transport's bytes reach that decode undecoded whatever
+        `APPLY_UPSTREAM_PATCHES` says; the async view needs no counterpart and a row pins
+        that asymmetry
         ([Decision 9](#decision-9--the-strict-utf-8-wire-contract-is-enforced-by-the-package-view-its-own-body-source-one-strict-decode)).
   - [ ] `_RequestBodyBoundaryMixin.decode_json` and the package consumer's `decode_json`
         re-raise the interpreter's integer digit-limit `ValueError` out of upstream's
@@ -175,13 +176,10 @@ Each top-level item maps to one commit / PR.
         `400`
         ([Decision 9](#decision-9--the-strict-utf-8-wire-contract-is-enforced-by-the-package-view-its-own-body-source-one-strict-decode)).
   - [ ] `_strawberry_patches.py::_patched_parse_json` decodes nothing and keeps its
-        `UnicodeDecodeError` translation, which is an upstream bug fix; both patch modules'
-        `APPLY_UPSTREAM_PATCHES` docstring paragraphs state that the gate covers upstream
-        *defects* only, scope the per-half consequence of disabling it **per mount**, and name
-        the two view-owned halves that carry the wire contract whatever the setting says.
-  - [ ] `_cross_web_patches.py::_patched_body` returns raw bytes; its docstring states the
-        contract and the mount it serves (Strawberry's own view — a package view never reaches
-        that getter).
+        `UnicodeDecodeError` translation, which is an upstream bug fix; the patch module's
+        `APPLY_UPSTREAM_PATCHES` docstring paragraph states that the gate covers upstream
+        *defects* only, scopes the consequence of disabling it **per mount**, and names the
+        two view-owned halves that carry the wire contract whatever the setting says.
   - [ ] The multipart control-document guard: each view overrides upstream's
         `parse_multipart` with a thin delegate over one shared mixin helper — two statements
         on the sync view, three on the async one, whose request adapter's form data must be
@@ -193,8 +191,8 @@ Each top-level item maps to one commit / PR.
   - [ ] A UTF-8 BOM is **rejected** with the same controlled `400`
         ([Decision 10](#decision-10--a-utf-8-bom-is-rejected)).
   - [ ] The UTF-16/32/BOM rows in `examples/fakeshop/test_query/test_products_api.py` assert
-        `400`, and the raw-bytes contract tests in `tests/test_cross_web_patches.py` follow
-        those bytes into the package view that refuses them.
+        `400`, and `tests/test_views.py` follows those bytes from the view's own adapter into
+        the package view that refuses them.
 - [ ] **Slice 4 — WebSocket actor revalidation through an injection seam**
   - [ ] `websocket_consumer_class=` injection on the router; an injected factory's calling
         convention **and** its returned application are validated before anything is
@@ -1169,25 +1167,20 @@ body source: `views.py::_RawBodyRequestAdapter`, a one-property subclass of that
 adapter returning raw `self.request.body`, installed through `request_adapter_class` —
 upstream's own per-view seam, the class attribute every integration sets, and the single
 place `strawberry.http.sync_base_view` decides who answers `request_adapter.body`.
-Subclassing keeps every other adapter member upstream's, and the property shadows the
-(patched or unpatched) class attribute by identity, so neither the patch state nor the
-install order can reach a package mount. The async view needs no counterpart —
+Subclassing keeps every other adapter member upstream's, and nothing in it rides
+`APPLY_UPSTREAM_PATCHES`. The async view needs no counterpart —
 `AsyncDjangoHTTPRequestAdapter.get_body` already hands over the raw bytes, which is exactly
 the contract the sync subclass reproduces — and a test pins that asymmetry so it cannot
 silently become a gap.
 
-`_cross_web_patches.py::_patched_body` **returns raw `self.request.body` bytes**, and the
-mount it serves is the *other* one. It replaces
-the property on upstream's class process-wide, so a consumer who mounts **Strawberry's
-own** view also gets the raise moved out of a property and into a scope that can answer it
-with a controlled `400`; a package view never reaches that getter at all.
+A consumer who mounts **Strawberry's own** sync view keeps upstream's adapter, so an
+undecodable body is upstream's unhandled `500` there.
 `_strawberry_patches.py::_patched_parse_json` decodes nothing and keeps its own
-`UnicodeDecodeError` translation, which remains reachable on that same upstream-mounted
-path (`json.loads(bytes)` raises it whenever the bytes are undecodable under the encoding
-`detect_encoding` picks) and is a genuine upstream bug fix. The patch pair jointly owns the
-malformed-body contract: the `cross_web` half for Strawberry's own view, the Strawberry half
-for *both* mounts, whose body-envelope guard a package view reaches through
-`super().parse_json`. The one malformed-input refusal it does not own is the integer
+`UnicodeDecodeError` translation, which remains reachable on Strawberry's own async view
+(`json.loads(bytes)` raises it whenever the bytes are undecodable under the encoding
+`detect_encoding` picks) and is a genuine upstream bug fix. The patch owns the
+malformed-body contract on *both* mounts, whose body-envelope guard a package view reaches
+through `super().parse_json`. The one malformed-input refusal it does not own is the integer
 digit limit below, which is view-owned. The *success* set narrows on the package view.
 
 **The declared half: a `charset` this endpoint will not honour is refused at the boundary.**
@@ -1220,9 +1213,9 @@ this endpoint does not serve is refused with `400` before method routing decides
 upstream would have answered `405`. The direction is stricter and the reason string is shared,
 which is why the scope agrees with the cap's rather than being widened to enumerate methods.
 
-**Ownership follows lifecycle, so the gate does not carry the policy.** Both patches install
+**Ownership follows lifecycle, so the gate does not carry the policy.** The patch installs
 from `apps.py::DjangoStrawberryFrameworkConfig.ready` at Django app load, the
-[Django `AppConfig`][glossary-django-appconfig] seam, behind their shared
+[Django `AppConfig`][glossary-django-appconfig] seam, behind the
 `APPLY_UPSTREAM_PATCHES` gate, which governs **upstream bug workarounds and
 nothing else**. The wire contract is permanent package policy, so it does not ride a
 temporary workaround's kill switch: a consumer who disables the patches (or a future
@@ -1231,38 +1224,29 @@ every package view. That is a claim about **both** halves, which is why both are
 view-owned: a policy is only as ungated as the least-owned step on the path to it, and the
 path to the decode runs through the body source. Deletability is the other half of the same
 property: because the patch module holds no permanent policy, it can be removed outright when
-both upstream bugs retire. A consumer who deliberately mounts
+the upstream bugs retire. A consumer who deliberately mounts
 `strawberry.django.views.GraphQLView` instead keeps upstream's own RFC 8259 `bytes`
 semantics — their choice to make, not made for them by an unrelated setting; a test pins
 that upstream behavior as a *requirement*, so the ownership split cannot silently collapse
 into one site.
 
-**Which docs, by surface.** The code documentation sits in four places, one per owner, plus
+**Which docs, by surface.** The code documentation sits in three places, one per owner, plus
 `_json_decode.py`'s module docstring for the digit-limit refusal.
 `views.py`'s
 `parse_json` docstring carries the decode itself, including why it lives there;
 `_RawBodyRequestAdapter`'s docstring carries the other half — what upstream's
-property-scoped decode costs, why `request_adapter_class` is the seam, and why this class
-is not the `cross_web` patch under another name. The
-`APPLY_UPSTREAM_PATCHES` paragraph of **both** patch module docstrings —
-`_strawberry_patches.py` and `_cross_web_patches.py` — states that the gate covers upstream
-*defects* only, and names the per-half consequence of disabling it **per mount**, because the
-two halves do not reach the same mounts. The `cross_web` half reaches Strawberry's own view
-alone — without it an undecodable body is an unhandled `500` there, while a package mount is
-untouched, since `_RawBodyRequestAdapter` shadows the patched property by identity. The
-Strawberry half reaches **both** mounts: the mixin's `parse_json` delegates with `super()`
+property-scoped decode costs, why `request_adapter_class` is the seam, and why the class
+is scoped to the package view. The `APPLY_UPSTREAM_PATCHES` paragraph of the
+`_strawberry_patches.py` module docstring states that the gate covers upstream *defects*
+only, and names the consequence of disabling it **per mount**. The patch reaches **both**
+mounts: the mixin's `parse_json` delegates with `super()`
 into `BaseView.parse_json`, which is the very attribute that patch assigns, so with the gate
 off a scalar or non-object-batch body (`b"42"`, `b"[1,2]"`) comes back out of a real
 `DjangoGraphQLView` unguarded and reaches the same unhandled `500` it reaches on upstream's
 view. What rides the gate on neither mount is the **wire contract**: the strict decode and
-the body source are view-owned code, and both docstrings name those two halves as carrying it
-whatever the setting says. Naming both is the point: a consumer who reads only the module they
-disabled still learns exactly what they gave up, and what they did not.
-
-**`_patched_body` serves the Django view path.** It patches
-`cross_web.DjangoHTTPRequestAdapter`, the **Django view's** sync request adapter — the path
-the protocol split makes authoritative — not anything Channels-owned, so a consumer who
-mounts Strawberry's own Django view is served by it.
+the body source are view-owned code, and the docstring names those two halves as carrying it
+whatever the setting says, so a consumer who reads the module they disabled learns exactly
+what they gave up, and what they did not.
 
 **An integer past the interpreter's digit limit is answered through upstream's decode seam,
 on the view.** `json.loads` refuses an integer literal longer than CPython's integer string
@@ -1601,12 +1585,11 @@ consumer-mounted Channels HTTP consumer
 (`::test_post_utf16_json_body_is_rejected_as_400`,
 `::test_post_utf16_le_json_body_is_rejected_as_400`,
 `::test_post_utf8_bom_json_body_is_rejected_as_400`) assert `400`.
-`tests/test_cross_web_patches.py`'s raw-bytes contract tests
-(`::test_body_returns_raw_bytes_for_utf8_bom`,
-`::test_body_returns_raw_bytes_for_utf16_le_without_bom`) pin that the adapter returns raw
-bytes and follow those bytes into the package view, which is what refuses them. For the BOM
-row that distinction is load-bearing — `json.loads` on `bytes` detects `utf-8-sig` and strips
-the BOM itself, so a patch-module-only assertion would record that body as *accepted*.
+`tests/test_views.py::test_the_sync_view_hands_parse_json_raw_bytes` pins that the view's
+own adapter returns raw bytes, and the package view's `parse_json` is what refuses them. For
+the BOM row that distinction is load-bearing — `json.loads` on `bytes` detects `utf-8-sig`
+and strips the BOM itself, so an adapter-only assertion would record that body as
+*accepted*.
 
 **The revocation, ordering, Host and probe contracts.**
 
@@ -2397,7 +2380,7 @@ wants a different Host policy configures `ALLOWED_HOSTS`, exactly as they would 
 |---|---|---|---|
 | 1 | `routers.py`, `views.py`, `examples/fakeshop/config/urls.py`, `tests/test_routers.py`, `tests/test_views.py`, live tier | protocol split; required `django_application`; `websocket_url_pattern`; the package view; live middleware / Host / CSRF / header / cache / routing proofs | **HIGH** — the breaking change; every later slice builds on the shape |
 | 2 | `views.py`, `_request_body.py`, `middleware/request_body.py`, `_boundary_ordering.py`, `conf.py`, live tier, `tests/test_views.py` | cumulative cap pre-parse, measured not materialized; the one private-attribute compatibility helper and its **three** probe outcomes ([Decision 7](#decision-7--the-app-level-body-cap-lives-in-the-package-django-view-counted-not-declared)); the two CSRF-ordering arrangements so the gate precedes `MultiPartParser` ([Decision 18](#decision-18--the-body-gate-runs-before-djangos-multipart-parser)); `MAX_REQUEST_BODY_BYTES` + view kwarg; the regression matrix incl. the py3.10 / Django 5.2.x floor | MED-HIGH — the measurement pins private Django internals whose seekability shape differs by interpreter, the CSRF re-entry reorders a security middleware, and multipart interaction with the [`Upload`][glossary-upload-scalar] path is the sharp edge |
-| 3 | `views.py` (the mixin's `parse_json`, the charset and multipart guards, `_RawBodyRequestAdapter`), both patch modules' docstrings, `_strawberry_patches.py`, `test_products_api.py`, `test_transport_api.py`, `tests/test_cross_web_patches.py`, `tests/test_views.py` | strict UTF-8 decode on the view's `parse_json`, fed by the view's own `request_adapter_class`; the declared-`charset` refusal; the multipart control-document encoding + loss guard ([Decision 17](#decision-17--multipart-control-fields-stay-django-parsed-behind-a-strict-loss-detection-guard)); the patch gate scoped to upstream defects; the kill-switch matrix in both opt-out spellings | LOW-MED — the JSON-body half is measured behavior with one rejection branch; the multipart half adds a second boundary on a path Django decodes first |
+| 3 | `views.py` (the mixin's `parse_json`, the charset and multipart guards, `_RawBodyRequestAdapter`), the patch module's docstring, `_strawberry_patches.py`, `test_products_api.py`, `test_transport_api.py`, `tests/test_views.py` | strict UTF-8 decode on the view's `parse_json`, fed by the view's own `request_adapter_class`; the declared-`charset` refusal; the multipart control-document encoding + loss guard ([Decision 17](#decision-17--multipart-control-fields-stay-django-parsed-behind-a-strict-loss-detection-guard)); the patch gate scoped to upstream defects; the kill-switch matrix in both opt-out spellings | LOW-MED — the JSON-body half is measured behavior with one rejection branch; the multipart half adds a second boundary on a path Django decodes first |
 | 4 | `routers.py`, `consumers.py` (WS consumer + 2 handler pre-hooks + the derived outbound-frame adapter + the private Host validator), `utils/sessions.py`, `exceptions.py`, `auth/sessions.py`, `tests/test_routers.py` | injection seam with a validated factory contract; the shared revalidation decision function; the adapter-level outbound-frame gate, its connection-scoped actor lease and its one close code ([Decision 16](#decision-16--revocation-is-connection-scoped-and-gated-at-the-websocket-adapters-outbound-frame-seam)); `DjangoWebSocketHostValidator` ([Decision 19](#decision-19--a-django-backed-websocket-host-boundary-beside-channels-origin-check)); window kwarg and its typed domain; the shared value-describer; the multi-yield revoke-mid-subscription matrix on both protocols | **HIGH** — async, per-frame, communicator-driven, and the lease is held across a send |
 | 5 | `docs/`, glossary DB, kanban DB | migration note; transport guidance; GLOSSARY + TREE regen; card wrap | mechanical breadth; **no version literal, no `CHANGELOG.md`** |
 
@@ -2897,7 +2880,7 @@ Maintainer-invoked gates only, per [`AGENTS.md`][agents].
 21. Malformed UTF-8 → `400`.
 22. UTF-8 BOM → `400`.
 23. Sync and async transports behave identically.
-24. `_patched_body` still returns raw bytes, and the rejection is attributable to the strict
+24. The rejection is attributable to the strict
     decode on the package view's `parse_json` — reached through the view's own body source,
     which is pinned structurally as well as behaviorally:
     `DjangoGraphQLView.request_adapter_class` **is** `_RawBodyRequestAdapter`, that adapter
@@ -2905,17 +2888,14 @@ Maintainer-invoked gates only, per [`AGENTS.md`][agents].
     `AsyncDjangoGraphQLView` stays on upstream's async adapter so a "symmetrization"
     cannot take those bytes away. `_patched_parse_json` is proven to leave
     upstream's own `bytes` semantics alone, so the ownership split cannot collapse back into
-    one site. **And the contract survives the kill switch, in both of its spellings**: the
-    same matrix on both package views with
-    `APPLY_UPSTREAM_PATCHES = {"strawberry": False}` **and** with the broad `False` that
-    opts the `cross_web` half out too, live as well as package-tier. In that same opted-out
-    state the upstream bug workarounds the gate *does* own are proven to stop hardening (a
-    JSON-scalar body reaches the unhandled `500` it would reach without the patch) — so the
-    requirement cannot be satisfied by quietly moving everything somewhere ungated — while
-    with the patches **on**, a mount of Strawberry's own view is proven to keep upstream's
-    RFC 8259 auto-detection, answering `200` to the BOM'd UTF-16 body the package mount
-    refuses. Four answers across two mounts and two patch states; only the package mount is
-    constant. An integer literal one digit past the interpreter's default limit, in every
+    one site. **And the contract survives the kill switch**: the same matrix on both package
+    views with `APPLY_UPSTREAM_PATCHES = {"strawberry": False}`, live as well as
+    package-tier. In that same opted-out state the upstream bug workarounds the gate *does*
+    own are proven to stop hardening (a JSON-scalar body reaches the unhandled `500` it would
+    reach without the patch) — so the requirement cannot be satisfied by quietly moving
+    everything somewhere ungated — while with the patch **on**, upstream's own `parse_json`
+    is proven to keep RFC 8259 auto-detection for the `bytes` a Strawberry-owned mount hands
+    it. An integer literal one digit past the interpreter's default limit, in every
     position a document can carry it (an unused variable, `extensions`, `operationName`, a
     nested negative, a batch element, a bare scalar body, a GET parameter, a multipart
     control document), gets upstream's own `400` and literal on both views, live, with the
@@ -3336,14 +3316,12 @@ Every generated doc is regenerated from its source, never hand-edited.
       multipart parsing (no copy, no subclass, no monkeypatch, no second parser).
 - [ ] The wire contract is enforced by the package view itself — its own body source
       (`_RawBodyRequestAdapter`, installed as `request_adapter_class`) feeding one strict
-      decode — and holds with `APPLY_UPSTREAM_PATCHES` disabled in either spelling, while
+      decode — and holds with `APPLY_UPSTREAM_PATCHES` disabled, while
       the upstream bug workarounds that gate does own still respect their opt-out.
 - [ ] An integer literal past the interpreter's digit limit, in any JSON document a package
       view parses or any frame the package consumer reads, gets upstream's own refusal
       (`400` and literal; `4400` non-JSON close, or the legacy drop), in every patch state,
       and a consumer `decode_json`'s own `ValueError` is not reported as the client's.
-- [ ] `_cross_web_patches.py::_patched_body` returns raw bytes, and its docstring names the
-      mount it serves and the wire contract it does not carry.
 - [ ] A WebSocket consumer-class/factory injection seam exists; an injected factory's calling
       convention and returned application are validated at construction; the injected class
       still sits inside all three router-applied wrappers —

@@ -1,6 +1,6 @@
 # django-strawberry-framework Kanban
 
-Last refreshed: 2026-11-11
+Last refreshed: 2026-11-15
 
 This board summarizes what is shipped, what has recently landed, and what remains to finish based on the current code, tests, docs, and release-readiness notes. It is intentionally written as a project-management view: each card has a status, priority, scope, and a practical definition of done.
 
@@ -597,7 +597,7 @@ Documentation-consistency debt accumulated across the alpha line, split off the 
 - The spellings outside the `AGENTS.md` source-refs rule left by the spec-016 consolidation outside the boundary-hardening WP files are converted to `path::Symbol`: `django_strawberry_framework/registry.py`'s module docstring cites `types/converters.py::resolved_relation_annotation` and `types/converters.py::convert_choices_to_enum`, `django_strawberry_framework/types/converters.py::convert_scalar` cites `types/base.py::_build_annotations`, and `django_strawberry_framework/filters/inputs.py` no longer carries the dotted `types.converters.convert_choices_to_enum` spelling.
 - The `DONE-017-0.0.6` card body states the Strawberry class-direct-to-`scalar()` `DeprecationWarning` suppression in the past tense: `CardItem` 703 and 715 say it was suppressed at `0.0.6` and that `DONE-025-0.0.7` replaced it, `CardItem` 713 describes its guard test as pinning the warning-free import surface, and `CardReference` 62 matches 715 with its card-reference placeholder intact. `django_strawberry_framework/scalars.py` defines `BigInt` as a bare `NewType` registered through `_PACKAGE_SCALAR_MAP` behind `django_strawberry_framework/scalars.py::strawberry_config`.
 - The `DONE-018-0.0.6` card body names the private symbol: `CardItem` 723 reads "`finalize_django_types()` runs `_audit_primary_ambiguity()` first", matching `django_strawberry_framework/types/finalizer.py::_audit_primary_ambiguity`.
-- `DONE-020-0.0.7`'s `#### Package files` lists `django_strawberry_framework/__init__.py` and `django_strawberry_framework/list_field.py`; `django_strawberry_framework/apps.py` is no longer linked to this card and stays on `DONE-021-0.0.7` (its subject) and `DONE-024-0.0.7` (whose `ready()` installs the Trac #37064 patch). No card-files JSON is checked into the repo, so no stored input re-applies the old link; a future hand-authored JSON for card 20 must not list `apps.py`.
+- `DONE-020-0.0.7`'s `#### Package files` lists `django_strawberry_framework/__init__.py` and `django_strawberry_framework/list_field.py`; `django_strawberry_framework/apps.py` is no longer linked to this card and stays on `DONE-021-0.0.7` (its subject) and `DONE-024-0.0.7` (which also changed it). No card-files JSON is checked into the repo, so no stored input re-applies the old link; a future hand-authored JSON for card 20 must not list `apps.py`.
 - `docs/GLOSSARY.md`'s `## Schema introspection management command` entry states its selector-rejection contract: an empty module path and a relative, leading-`.` module path are each rejected by the shared `_imports` selector validator (`django_strawberry_framework/management/commands/_imports.py::_validate_absolute_module_path`) on both import routes, labelled a schema selector for `--schema` and a dotted object path for a dotted `type` argument, in the same phrasing the `## Schema export management command` entry uses.
 - `scripts/check_citations.py --substrings` is part of the gate: the `.pre-commit-config.yaml` `check-citations` hook and the `.github/workflows/django.yml` `--check` run both pass it, so a dead `#"substring"` pinpoint, including one into a script-rendered document (`docs/TREE.md`, `KANBAN.md`, `docs/GLOSSARY.md`), fails the build and an ambiguous one warns. Pinned by `tests/test_check_citations.py::test_substrings_flag_fails_the_run_and_warns_on_ambiguity`.
 - `CHANGELOG.md`'s `[0.0.7]` entry for `DONE-026-0.0.7` carries no test counts: it names all six `tests/types/test_converters.py` tests commit `a5c89c98` removed (the three `big_integer` / `positive_big_integer` ones and the three `json_field` ones), its enumeration of `examples/fakeshop/test_query/test_scalars_api.py` lists all nine tests the ship commit `2701eb88` carried, including `test_scalar_specimen_introspects_json_scalar_in_both_shapes`, and it no longer claims the paired-model layout exercises surfaces no other example app touches.
@@ -2318,7 +2318,7 @@ Security-audit remediation program, card 1 of 4. Amends spec-041 (channels_route
 
 - S1: redesign the router protocol split (required Django-ASGI HTTP ownership; remove direct Channels HTTP; exact WebSocket routing via websocket_url_pattern).
 - S2: package-owned cumulative request-body cap on the GraphQL HTTP path + documented proxy/server cap.
-- S9: strict UTF-8 wire decode before json.loads; translate UnicodeDecodeError to the controlled 400; invert UTF-16/32/BOM success tests to 400; decide and document the UTF-8-BOM policy; reconcile _cross_web_patches._patched_body against the new HTTP path.
+- S9: strict UTF-8 wire decode before json.loads; translate UnicodeDecodeError to the controlled 400; invert UTF-16/32/BOM success tests to 400; decide and document the UTF-8-BOM policy; reconcile the sync request adapter's raw-bytes body against the new HTTP path.
 - S11: WebSocket consumer-class/factory injection seam + actor revalidation at TWO checkpoints (operation admission and every information-bearing outbound operation frame), so a revoked actor can neither admit another operation nor emit another next/data/error frame; revocation is connection-scoped and closes the whole socket (4403 Forbidden); optional explicit bounded revalidation window.
 - S12 (transport slice only): migration note (old vs new asgi.py + the required urlpatterns entry) + transport deployment guidance (CSRF, cache/Vary, security headers, IDE/GET controls). The broader S12 deployment-contract docs belong to the later cards' doc slices.
 
@@ -2345,7 +2345,7 @@ Security-audit remediation program, card 1 of 4. Amends spec-041 (channels_route
 - S1 (Blocker): routers.py wires the HTTP branch as AuthMiddlewareStack(URLRouter([re_path(url_pattern, GraphQLHTTPConsumer.as_asgi(...))])). That turns the session cookie into an authenticated actor but bypasses Django's MIDDLEWARE entirely -- SecurityMiddleware, CsrfViewMiddleware, CommonMiddleware / ALLOWED_HOSTS, and all consumer tenant/rate-limit/audit/cache/security-header middleware. Confirmed by source and a probe (POST Host: evil.example -> 200).
 - S1 route overmatch: url_pattern default '^graphql' is a prefix regex, so /graphql-admin and /graphqlanything are claimed by the GraphQL consumer before the Django fallback -- a path the deployment believes Django owns.
 - S2 (Blocker): the routed AsyncHttpConsumer buffers the whole body via b''.join(self.body) with no application cap; DATA_UPLOAD_MAX_MEMORY_SIZE is never consulted because Django's ASGI handler is bypassed. Unauthenticated memory amplification before JSON parsing or schema execution.
-- S9 (Medium): _cross_web_patches._patched_body returns raw bytes so json.loads auto-detects UTF-16/32; RFC 8259 requires UTF-8 on the wire. Accepting other encodings creates a proxy/WAF/access-log parser differential.
+- S9 (Medium): a raw-bytes body reaching json.loads is auto-detected as UTF-16/32; RFC 8259 requires UTF-8 on the wire. Accepting other encodings creates a proxy/WAF/access-log parser differential.
 - S11 (Medium): the WebSocket scope user is captured at handshake and never revalidated; a logout/password-reset/disable/revocation from another request or admin action is not reflected on the established connection.
 - S1 and S2 block moving off the current 'not production' alpha posture; a framework's secure architecture cannot depend on every consumer independently discovering these gaps.
 
@@ -3380,7 +3380,7 @@ planned; three independent slices that ship in any order. Card body counts as co
 
 #### Package files
 
-- [`django_strawberry_framework/_django_patches.py`](django_strawberry_framework/_django_patches.py)
+- `django_strawberry_framework/_django_patches.py` (historical)
 - [`django_strawberry_framework/apps.py`](django_strawberry_framework/apps.py)
 - `django_strawberry_framework/test/__init__.py` (historical)
 - `django_strawberry_framework/test/_wrap.py` (historical)
@@ -4144,7 +4144,6 @@ Enforcement: `scripts/check_alpha_parity.py` fails if any non-`internal` Alpha c
 <!-- docs/ -->
 [docs-readme]: docs/README.md
 [glossary-bigint-scalar]: docs/GLOSSARY.md#bigint-scalar
-[glossary-django-trac-37064-hardening]: docs/GLOSSARY.md#django-trac-37064-hardening
 [glossary-filterset]: docs/GLOSSARY.md#filterset
 [glossary-metafilterset_class]: docs/GLOSSARY.md#metafilterset_class
 [glossary-metaorderset_class]: docs/GLOSSARY.md#metaorderset_class
@@ -4167,7 +4166,6 @@ Enforcement: `scripts/check_alpha_parity.py` fails if any non-`internal` Alpha c
 <!-- django_strawberry_framework/ -->
 [apps]: django_strawberry_framework/apps.py
 [converters]: django_strawberry_framework/types/converters.py
-[django-patches]: django_strawberry_framework/_django_patches.py
 [filters]: django_strawberry_framework/filters/
 [orders]: django_strawberry_framework/orders/
 [plans]: django_strawberry_framework/optimizer/plans.py

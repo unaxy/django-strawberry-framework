@@ -1,4 +1,4 @@
-"""Django ``AppConfig`` - registers the package and applies its upstream patches at app load."""
+"""Django ``AppConfig`` - registers the package and applies its Strawberry patches at app load."""
 
 from typing import TYPE_CHECKING
 
@@ -19,34 +19,26 @@ class DjangoStrawberryFrameworkConfig(AppConfig):
 
     @override
     def ready(self) -> None:
-        """Apply the package's defensive upstream patches at app-load time.
+        """Apply the package's defensive Strawberry patches at app-load time.
 
-        Three patch modules, one per third-party dependency:
-        :mod:`django_strawberry_framework._django_patches` (Django),
-        :mod:`django_strawberry_framework._strawberry_patches`
-        (Strawberry), and
-        :mod:`django_strawberry_framework._cross_web_patches`
-        (``cross_web``). Each module's own docstring is the single
-        source of truth for exactly which upstream bugs it hardens;
-        this dispatcher deliberately repeats none of that inventory.
+        :mod:`django_strawberry_framework._strawberry_patches` is the one
+        patch module; its own docstring is the single source of truth for
+        exactly which upstream bugs it hardens, and this dispatcher
+        deliberately repeats none of that inventory.
 
-        All three are gated by the ``APPLY_UPSTREAM_PATCHES`` setting
-        (default on); each ``apply()`` self-gates, so a consumer who
-        sets ``DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES":
-        False}`` gets none of them.
+        It is gated by the ``APPLY_UPSTREAM_PATCHES`` setting (default
+        on); ``apply()`` self-gates, so a consumer who sets
+        ``DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": False}``
+        gets none of the patches.
 
         ``ready()`` is the canonical place to perform one-time setup
         that depends on Django being fully configured. Consumers get
         the patches automatically by having
         ``"django_strawberry_framework"`` in ``INSTALLED_APPS`` - no
-        opt-in boilerplate is required. Each ``apply()`` is idempotent
-        and self-healing, so a repeated ``ready()`` (some Django test
+        opt-in boilerplate is required. ``apply()`` is idempotent and
+        self-healing, so a repeated ``ready()`` (some Django test
         runners fire it more than once) is safe.
         """
-        from django_strawberry_framework._cross_web_patches import apply as apply_cross_web  # noqa: PLC0415 - patches load once Django is configured
-        from django_strawberry_framework._django_patches import apply as apply_django  # noqa: PLC0415 - patches load once Django is configured
         from django_strawberry_framework._strawberry_patches import apply as apply_strawberry  # noqa: PLC0415 - patches load once Django is configured
 
-        apply_django()
         apply_strawberry()
-        apply_cross_web()

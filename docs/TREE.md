@@ -195,14 +195,12 @@ Source: `django_strawberry_framework/`
 django_strawberry_framework/    # Public API of django-strawberry-framework, a DRF-inspired Django integration for Strawberry GraphQL.
 ├── _boundary_ordering.py         # The marks and the method name the request-body boundary's ordering rests on.
 ├── _completion.py                # Join graphql-core-owned concurrent completion before returning to its owner.
-├── _cross_web_patches.py         # Defensive patches for upstream ``cross_web`` bugs, applied at app load.
-├── _django_patches.py            # Defensive patches for upstream Django bugs, applied at app load.
 ├── _json_decode.py               # Strawberry's JSON decode seam, answered for every document a client can send.
 ├── _logger.py                    # The package logger, in a leaf module so the package ``__init__`` imports it like any name.
 ├── _multipart.py                 # GraphQL multipart request wire vocabulary, owned once for both transports.
 ├── _request_body.py              # The one place the package touches Django's private request-body internals.
 ├── _strawberry_patches.py        # Defensive patches for upstream Strawberry bugs, applied at app load.
-├── apps.py                       # Django ``AppConfig`` - registers the package and applies its upstream patches at app load.
+├── apps.py                       # Django ``AppConfig`` - registers the package and applies its Strawberry patches at app load.
 ├── conf.py                       # Package settings, read from the host project's ``DJANGO_STRAWBERRY_FRAMEWORK`` dict.
 ├── connection.py                 # ``DjangoConnection[T]`` + ``DjangoConnectionField`` - the Relay cursor-pagination surface.
 ├── consumers.py                  # The WebSocket Host boundary, the GraphQL consumer, and its two revalidation checkpoints.
@@ -339,14 +337,12 @@ Source: `django_strawberry_framework/ (+ planned card paths)`
 django_strawberry_framework/    # Public API of django-strawberry-framework, a DRF-inspired Django integration for Strawberry GraphQL.
 ├── _boundary_ordering.py         # The marks and the method name the request-body boundary's ordering rests on.
 ├── _completion.py                # Join graphql-core-owned concurrent completion before returning to its owner.
-├── _cross_web_patches.py         # Defensive patches for upstream ``cross_web`` bugs, applied at app load.
-├── _django_patches.py            # Defensive patches for upstream Django bugs, applied at app load.
 ├── _json_decode.py               # Strawberry's JSON decode seam, answered for every document a client can send.
 ├── _logger.py                    # The package logger, in a leaf module so the package ``__init__`` imports it like any name.
 ├── _multipart.py                 # GraphQL multipart request wire vocabulary, owned once for both transports.
 ├── _request_body.py              # The one place the package touches Django's private request-body internals.
 ├── _strawberry_patches.py        # Defensive patches for upstream Strawberry bugs, applied at app load.
-├── apps.py                       # Django ``AppConfig`` - registers the package and applies its upstream patches at app load.
+├── apps.py                       # Django ``AppConfig`` - registers the package and applies its Strawberry patches at app load.
 ├── conf.py                       # Package settings, read from the host project's ``DJANGO_STRAWBERRY_FRAMEWORK`` dict.
 ├── connection.py                 # ``DjangoConnection[T]`` + ``DjangoConnectionField`` - the Relay cursor-pagination surface.
 ├── consumers.py                  # The WebSocket Host boundary, the GraphQL consumer, and its two revalidation checkpoints.
@@ -538,9 +534,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
 ├── test_consumers.py             # Construction-time and handshake-projection units for the WebSocket consumer.
 ├── test_count_queries.py         # Script tests for the N+1 detector's verdict and comparison logic.
-├── test_cross_web_patches.py     # Tests for the ``cross_web`` non-UTF-8 request-body patch.
 ├── test_definition_builder.py    # Smoke test proving the shared ``tests/_definition.py`` builder hands out what it promises.
-├── test_django_patches.py        # Django patch tests for DB connection wrapping and multi-database safety.
 ├── test_error_policy.py          # ``ErrorPolicy`` construction, precedence, and install position.
 ├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.
@@ -939,9 +933,7 @@ tests/    # Package, integration, and repository-tool tests for django_strawberr
 ├── test_consumer_base_check.py   # The revalidating consumer factory proves its bases carry the hooks it overrides.
 ├── test_consumers.py             # Construction-time and handshake-projection units for the WebSocket consumer.
 ├── test_count_queries.py         # Script tests for the N+1 detector's verdict and comparison logic.
-├── test_cross_web_patches.py     # Tests for the ``cross_web`` non-UTF-8 request-body patch.
 ├── test_definition_builder.py    # Smoke test proving the shared ``tests/_definition.py`` builder hands out what it promises.
-├── test_django_patches.py        # Django patch tests for DB connection wrapping and multi-database safety.
 ├── test_error_policy.py          # ``ErrorPolicy`` construction, precedence, and install position.
 ├── test_exceptions.py            # Exception hierarchy: inheritance, GraphQL translation, typed-message renders.
 ├── test_execution.py             # Smoke tests proving the shared ``tests/_execution.py`` builder hands out what it promises.

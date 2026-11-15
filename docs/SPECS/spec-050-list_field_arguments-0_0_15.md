@@ -1714,11 +1714,11 @@ Beside that upstream completion the package owns two things, and neither is an
 `APPLY_UPSTREAM_PATCHES` gate: the list field's own async-only adapter (Decision 5), and the
 generated-mutation field/list cancellation and drain, mandatory inside their owned completion
 window (`django_strawberry_framework/_completion.py`).
-`django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready` dispatches patch
-modules for Django, Strawberry and `cross_web` only, and
+`django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready` dispatches the
+Strawberry patch module only, and
 `django_strawberry_framework/conf.py #"UPSTREAM_PATCH_DEPENDENCIES = frozenset("` names no
 graphql-core key. A graphql-core defect that needs a workaround gets its own patch module and
-dependency key beside those three, separate from Strawberry's HTTP-view patch module, and a
+dependency key beside it, separate from Strawberry's HTTP-view patch module, and a
 sentinel test that calls the captured upstream method on the bug shape, so an
 upstream fix fails the sentinel and the workaround is removed without disturbing another
 dependency's patches. See the [rationale][rationale-d12] for the rejected shared-gate design

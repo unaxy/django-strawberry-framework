@@ -38,6 +38,6 @@ Multi-database cooperation,multi-database-cooperation,per-alias capture makes th
 only() projection,only-projection,visible in the captured sql strings (scenario 2)
 ConfigurationError,configurationerror,raised by the constructor for a non-bool allow_unsafe_production (spec-048 Decision 5)
 get_queryset visibility hook,get_queryset-visibility-hook,the payload is a read-only window over what visibility hooks emitted
-Django Trac #37064 hardening,django-trac-37064-hardening,the cursor-wrapping hazard precedent in Decision 4's rejection
+safe_wrap_connection_method,safe_wrap_connection_method,the cursor-wrapping hazard precedent in Decision 4's rejection
 finalize_django_types,finalize_django_types,appears in the User-facing API code example
 strawberry_config,strawberry_config,appears in the User-facing API code example

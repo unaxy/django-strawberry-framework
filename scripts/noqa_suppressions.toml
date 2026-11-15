@@ -14,7 +14,7 @@
 "django_strawberry_framework/_strawberry_patches.py::_patched_list_connection_resolve_connection" = { S101 = 4 }
 "django_strawberry_framework/_strawberry_patches.py::_patched_list_connection_resolve_connection.resolver" = { S101 = 2 }
 "django_strawberry_framework/_strawberry_patches.py::_validate_relay_upstream_shape" = { TRY004 = 1 }
-"django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready" = { PLC0415 = 3 }
+"django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready" = { PLC0415 = 1 }
 "django_strawberry_framework/auth/mutations.py::_channels_http_login_establish" = { B904 = 1, BLE001 = 1, PLC0415 = 1 }
 "django_strawberry_framework/auth/mutations.py::_channels_logout" = { PLC0415 = 1 }
 "django_strawberry_framework/auth/mutations.py::_django_http_login_establish" = { B904 = 1, BLE001 = 1 }

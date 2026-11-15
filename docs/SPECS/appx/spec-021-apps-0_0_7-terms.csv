@@ -11,4 +11,4 @@ Debug-toolbar middleware,debug-toolbar-middleware,`DONE-042-0.0.14`; listed in O
 Response-extensions debug middleware,response-extensions-debug-middleware,`DONE-044-0.0.14`; listed in Out of scope.
 TestClient,testclient,`DONE-043-0.0.14`; listed in Out of scope.
 GraphQLTestCase,graphqltestcase,`DONE-043-0.0.14`; listed in Out of scope.
-Upstream patches,upstream-patches,The app-load patch mechanism whose four appliers (Django / Strawberry / `cross_web` / `graphql-core`) Decision 4's `ready()` dispatches.
+Upstream patches,upstream-patches,The app-load patch mechanism whose Strawberry applier Decision 4's `ready()` dispatches.

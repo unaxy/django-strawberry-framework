@@ -1,39 +1,30 @@
-# Spec: [Django Trac #37064 hardening][glossary-django-trac-37064-hardening] + [`safe_wrap_connection_method`][glossary-safe-wrap-connection-method]
+# Spec: Django Trac #37064 and [`safe_wrap_connection_method`][glossary-safe-wrap-connection-method]
 
 Target release: `0.0.7` (per the [`KANBAN.md`][kanban] card `DONE-024-0.0.7`).
 Status: shipped (`0.0.7`, 2026-05-27); archived. Each Decision's derivation and rejected alternatives live in [`spec-024-django_trac_37064_hardening-0_0_7-rationale.md`][spec-024-rationale].
 Owner: package maintainer.
-Predecessors: [`docs/GLOSSARY.md`][glossary] (entries [Django Trac #37064 hardening][glossary-django-trac-37064-hardening], [`safe_wrap_connection_method`][glossary-safe-wrap-connection-method], [Django `AppConfig`][glossary-django-appconfig]); [`KANBAN.md`][kanban] card `DONE-024-0.0.7`; sibling card spec [`docs/SPECS/spec-021-apps-0_0_7.md`][spec-021] (owns the `AppConfig` shape and the `ready()` dispatch site this card's applier is called from); sibling card spec [`docs/SPECS/spec-023-multi_db-0_0_7.md`][spec-023] (the multi-database cooperation contract whose consumers this bug reaches); joint-cut policy [`docs/SPECS/spec-020-list_field-0_0_7.md`][spec-020] ([Decision 10][spec-020-decision-10--joint-007-cut], reused in [Decision 11](#decision-11--joint-007-cut) here).
+Predecessors: [`docs/GLOSSARY.md`][glossary] (entry [`safe_wrap_connection_method`][glossary-safe-wrap-connection-method]); [`KANBAN.md`][kanban] card `DONE-024-0.0.7`; sibling card spec [`docs/SPECS/spec-023-multi_db-0_0_7.md`][spec-023] (the multi-database cooperation contract whose consumers this bug reaches); joint-cut policy [`docs/SPECS/spec-020-list_field-0_0_7.md`][spec-020] ([Decision 10][spec-020-decision-10--joint-007-cut], reused in [Decision 4](#decision-4--joint-007-cut) here).
 
 ## Key glossary references
 
-Skim these [`docs/GLOSSARY.md`][glossary] entries first — they anchor the vocabulary used throughout the spec:
+Skim this [`docs/GLOSSARY.md`][glossary] entry first — it anchors the vocabulary used throughout the spec:
 
-- [Django Trac #37064 hardening][glossary-django-trac-37064-hardening] — the unwrap-time half: the package's wrapper around `django.test.testcases.SimpleTestCase._remove_databases_failures`, installed automatically at app load.
-- [`safe_wrap_connection_method`][glossary-safe-wrap-connection-method] — the wrap-time half: the consumer-facing helper that declines to clobber Django's `_DatabaseFailure` wrapper.
-- [Django `AppConfig`][glossary-django-appconfig] — the app-load hook the unwrap-time half is applied from; the `AppConfig` shape itself belongs to [`docs/SPECS/spec-021-apps-0_0_7.md`][spec-021].
+- [`safe_wrap_connection_method`][glossary-safe-wrap-connection-method] — the consumer-facing helper that declines to clobber Django's `_DatabaseFailure` wrapper.
 
-The first two are this spec's project-specific terms; the companion [`docs/SPECS/appx/spec-024-django_trac_37064_hardening-0_0_7-terms.csv`][spec-024-terms] binds each to the `docs/GLOSSARY.md` heading above, and `scripts/check_spec_glossary.py` validates that this spec links both anchors.
+It is this spec's project-specific term; the companion [`docs/SPECS/appx/spec-024-django_trac_37064_hardening-0_0_7-terms.csv`][spec-024-terms] binds it to the `docs/GLOSSARY.md` heading above, and `scripts/check_spec_glossary.py` validates that this spec links the anchor.
 
 Project conventions to follow:
 
-- [`AGENTS.md`][agents] — #"Test placement:" (package tests live under `tests/`; live HTTP tests under `examples/fakeshop/test_query/`); #"Test through real usage, prefer the example project" (with the unreachable-from-a-query fallback this card takes, see [Decision 10](#decision-10--coverage-lives-in-the-package-test-tree)); #"Add a settings key only when the feature that needs it lands" (the condition [Decision 6](#decision-6--apply_upstream_patches-is-the-escape-hatch) satisfies); #"Source refs in docs and code comments use symbol paths never line numbers".
+- [`AGENTS.md`][agents] — #"Test placement:" (package tests live under `tests/`; live HTTP tests under `examples/fakeshop/test_query/`); #"Test through real usage, prefer the example project" (with the unreachable-from-a-query fallback this card takes, see [Decision 3](#decision-3--coverage-lives-in-the-package-test-tree)); #"Source refs in docs and code comments use symbol paths never line numbers".
 - [`KANBAN.md`][kanban] — card-ID format and the `DONE-024-0.0.7` card body.
-- [`docs/TREE.md`][tree] — rendered from module docstrings; the summary lines of all six of this card's surface modules are inputs to it — `django_strawberry_framework/_django_patches.py`, `django_strawberry_framework/apps.py`, `django_strawberry_framework/testing/_wrap.py`, `tests/test_django_patches.py`, `tests/testing/test_wrap.py`, and `tests/test_apps.py` — so a docstring edit to any of the six is followed by a regenerate.
+- [`docs/TREE.md`][tree] — rendered from module docstrings; the summary lines of this card's two surface modules are inputs to it — `django_strawberry_framework/testing/_wrap.py` and `tests/testing/test_wrap.py` — so a docstring edit to either is followed by a regenerate.
 
 ## Slice checklist
 
 Boxes are left unticked; the `Status:` line above is the source of truth for what shipped.
 
-- [ ] Slice 1: the unwrap-time half — `django_strawberry_framework/_django_patches.py` with `apply()`, `_patched_remove_databases_failures`, and the ecosystem-precedent rationale docstring ([Decision 1](#decision-1--a-private-patch-module-per-dependency-applied-from-ready), [Decision 2](#decision-2--the-patch-installs-on-simpletestcase), [Decision 3](#decision-3--the-replacement-re-wraps-foreign-replacements-then-delegates)).
-  - [ ] `django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready` calls the applier at app load.
-  - [ ] `tests/test_django_patches.py` pins install-target, inheritance, unwrap, non-wrapper skip, the class-level replacement left unshadowed, the unpatched crash, idempotence, and self-healing re-install.
-  - [ ] `tests/test_apps.py` permits `ready` on the `AppConfig` and pins its presence.
-- [ ] Slice 2: fail-closed validation — `_validate_upstream_shape` in three tiers, and the read helper that covers both homes of Django's method list ([Decision 4](#decision-4--fail-closed-upstream-validation-in-three-tiers), [Decision 5](#decision-5--two-homes-of-the-method-list-discriminated-by-the-feature-flag)).
-- [ ] Slice 3: the `APPLY_UPSTREAM_PATCHES` gate in both its bool and per-dependency-mapping forms ([Decision 6](#decision-6--apply_upstream_patches-is-the-escape-hatch)).
-- [ ] Slice 4: reload safety — the stamped owner/original attributes and `_captured_upstream_descriptor` ([Decision 7](#decision-7--idempotent-self-healing-and-reload-safe)).
-- [ ] Slice 5: the wrap-time half — `django_strawberry_framework/testing/_wrap.py::safe_wrap_connection_method`, exported from `django_strawberry_framework.testing`, with `tests/testing/test_wrap.py` ([Decision 8](#decision-8--the-wrap-time-half-degrades-where-the-unwrap-time-half-aborts), [Decision 9](#decision-9--the-helper-is-a-submodule-export-only)).
-- [ ] Slice 6: doc updates — [`docs/GLOSSARY.md`][glossary] entries for both halves plus the `Public exports` line for the `testing` subpackage; the [`KANBAN.md`][kanban] `DONE-024-0.0.7` card; the [`CHANGELOG.md`][changelog] entry for `0.0.7` ([Doc updates](#doc-updates)).
+- [ ] Slice 1: the helper — `django_strawberry_framework/testing/_wrap.py::safe_wrap_connection_method`, exported from `django_strawberry_framework.testing`, with `tests/testing/test_wrap.py` ([Decision 1](#decision-1--the-helper-declines-to-clobber-djangos-wrapper), [Decision 2](#decision-2--the-helper-is-a-submodule-export-only)).
+- [ ] Slice 2: doc updates — the [`docs/GLOSSARY.md`][glossary] entry plus the `Public exports` line for the `testing` subpackage; the [`KANBAN.md`][kanban] `DONE-024-0.0.7` card; the [`CHANGELOG.md`][changelog] entry for `0.0.7` ([Doc updates](#doc-updates)).
 
 ## Problem statement
 
@@ -45,30 +36,20 @@ If anything replaces `connection.<method>` between the two hooks — a consumer 
 AttributeError: 'function' object has no attribute 'wrapped'
 ```
 
-The test body itself passes; the crash is at class teardown and is unrecoverable. Django closed the ticket <https://code.djangoproject.com/ticket/37064> as `wontfix`, on the position that a third party which replaces Django's wrapper is responsible for restoring it.
-
-This package's whole posture is that consumers do not add project-local boilerplate to make the package work, and multi-database cooperation ([`docs/SPECS/spec-023-multi_db-0_0_7.md`][spec-023]) is a shipped contract whose users are exactly the ones Django wraps disallowed aliases for. So the package ships the fix itself.
+The test body itself passes; the crash is at class teardown and is unrecoverable. Django closed the ticket <https://code.djangoproject.com/ticket/37064> as `wontfix`, on the position that a third party which replaces Django's wrapper is responsible for restoring it. The package takes Django's position: it ships a cooperative wrap helper and leaves Django's teardown as Django ships it.
 
 ## Current state
 
-Both halves are shipped and installed by default:
-
-- `django_strawberry_framework/_django_patches.py::apply` replaces `SimpleTestCase._remove_databases_failures`, called from `django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready`.
-- `django_strawberry_framework/testing/_wrap.py::safe_wrap_connection_method` is exported from `django_strawberry_framework.testing`.
-
-Neither upstream integration library ships a Trac #37064 patch; this is defensive hardening unique to this package.
+`django_strawberry_framework/testing/_wrap.py::safe_wrap_connection_method` is exported from `django_strawberry_framework.testing`. Neither upstream integration library ships a cooperative connection-wrap helper.
 
 ## Goals
 
-1. A consumer with `"django_strawberry_framework"` in `INSTALLED_APPS` never sees the Trac #37064 teardown crash, with no `conftest.py` workaround, no base test class, and no required settings key.
-2. Well-behaved wrap sites have a cooperative helper that declines to clobber Django's wrapper in the first place, so the two guards compose.
-3. The package never runs on a Django whose private teardown shape it cannot read: dependency drift is a loud, targeted failure at app load with a named escape hatch, not a quietly dropped protection.
-4. The patch survives a repeated `ready()`, a third-party revert of the class attribute, and an in-process `importlib.reload()` of the patch module.
+1. Well-behaved wrap sites have a cooperative helper that declines to clobber Django's wrapper in the first place, so Django's own teardown finds the wrapper it installed.
 
 ## Non-goals
 
 1. Restoration on the consumer's behalf. `safe_wrap_connection_method` handles the wrap step only.
-2. Fixing the underlying multi-party monkey-patch design. The two guards mitigate the worst observable symptom at the two lifecycle sites this package can influence; they do not introduce an ordering protocol.
+2. Changing Django's teardown. A wrapper installed some other way and left in place crashes Django's `tearDownClass` exactly as it does without the package.
 3. Upstreaming. Already attempted and closed `wontfix`.
 4. Any consumer-facing pytest plugin or multi-database test-case base class.
 
@@ -76,7 +57,7 @@ Neither upstream integration library ships a Trac #37064 patch; this is defensiv
 
 ### From `strawberry-django` — no precedent to borrow
 
-It ships no Trac #37064 patch and no cooperative connection-wrap helper.
+It ships no cooperative connection-wrap helper.
 
 ### From `graphene-django` — no precedent to borrow
 
@@ -85,11 +66,10 @@ Same.
 ### Borrowed from `django-debug-toolbar`
 
 - **The wrap-time `isinstance` check.** `debug_toolbar.panels.sql.tracking.wrap_cursor` refuses to install its cursor wrapper when it finds a `_DatabaseFailure` already in place. `safe_wrap_connection_method` is the same check exposed as a consumer API.
-- **Not borrowed: the cache panel's owner-sentinel pattern.** Keeping a wrapper installed and toggling an owner sentinel works for a library that owns its own wrapper. This package does not own Django's `_DatabaseFailure`, so the pattern is unavailable for `_remove_databases_failures` itself. It remains the right shape for any future package-owned connection instrumentation.
 
 ### Explicitly do not borrow
 
-Widening `TransactionTestCase.databases` / `TestCase.databases` to `"__all__"` in a repo-root `conftest.py`. That suppresses the wrapping rather than hardening the unwrap, and it is project-local boilerplate every consumer would have to copy.
+Widening `TransactionTestCase.databases` / `TestCase.databases` to `"__all__"` in a repo-root `conftest.py`. That suppresses the wrapping rather than cooperating with it, and it is project-local boilerplate every consumer would have to copy.
 
 ## User-facing API
 
@@ -130,228 +110,85 @@ class _MyTest(TransactionTestCase):
         super().tearDown()
 ```
 
-The unwrap-time half has no consumer-facing API. Its `apply()` carries no leading underscore only so the package's own regression tests can drive the apply-and-revert cycle without a second `AppConfig`.
-
 ### Error shapes
 
-- `TypeError` — `safe_wrap_connection_method` received a non-callable `wrapper`. The message names the function and the condition and does **not** interpolate the object ([Decision 8](#decision-8--the-wrap-time-half-degrades-where-the-unwrap-time-half-aborts)).
-- `AttributeError` — `method_name` names no attribute on `connection` (the helper's plain `getattr`).
-- `RuntimeError` — `apply()` found upstream outside the shape it delegates to. Every such message names the `APPLY_UPSTREAM_PATCHES = {"django": False}` escape hatch ([Decision 4](#decision-4--fail-closed-upstream-validation-in-three-tiers)).
-- `ConfigurationError` — `APPLY_UPSTREAM_PATCHES` is configured in a shape that is neither a `bool` nor a `Mapping[str, bool]` over the known dependency names ([Decision 6](#decision-6--apply_upstream_patches-is-the-escape-hatch)).
+- `TypeError` — `safe_wrap_connection_method` received a non-callable `wrapper`. The message names the function and the condition and does **not** interpolate the object ([Decision 1](#decision-1--the-helper-declines-to-clobber-djangos-wrapper)).
+- `AttributeError` — `method_name` names no attribute on `connection`.
 
 ## Architectural decisions
 
-### Decision 1 — A private patch module per dependency, applied from ready()
+### Decision 1 — The helper declines to clobber Django's wrapper
 
-The Django patch lives in its own private module, `django_strawberry_framework/_django_patches.py`, not inlined in `apps.py`. The leading underscore is the signal: consumers never import it; the patch is a side effect of app loading.
+`safe_wrap_connection_method(connection, method_name, wrapper)` returns `True` when it installed `wrapper`, and `False` when Django's `_DatabaseFailure` was already at the named attribute and the wrap was declined (the connection method is left untouched). The check is an `isinstance` against `django.test.testcases._DatabaseFailure`, the same private class `django-debug-toolbar` checks. Any callable is accepted, including an instance with `__call__`. It raises `TypeError` when `wrapper` is not callable — validated at the wrap site so a typo (passing `connection.cursor()`, the cursor object, instead of a callable) surfaces there rather than as a delayed failure deep in Django's ORM machinery. The `TypeError` message does **not** interpolate `wrapper`: the object is consumer-supplied and a hostile or broken `__repr__` would replace the intended `TypeError` with whatever the repr raises.
 
-The organizing rule is **one patch module per third-party dependency**, each with its own `apply()` and its own name in `django_strawberry_framework/conf.py #"UPSTREAM_PATCH_DEPENDENCIES = frozenset("` (`{"cross_web", "django", "strawberry"}`). A further Django bug lands as another function inside `_django_patches.py`; a bug in another dependency gets its own module.
+Restoration is the consumer's. The helper handles the wrap step only; the docstring carries the worked `setUp` / `tearDown` shape. A wrapper the helper installed and the consumer never restored crashes Django's teardown (Trac #37064); restoring also leaves a clean slot for the next `setUpClass` and for other libraries' wrap-time checks.
 
-`django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready` dispatches the three appliers in order — Django, Strawberry, `cross_web` — behind function-local imports, so importing `apps` outside a configured Django project pulls in no patch module. This card owns the Django applier only; the dispatch site and the `AppConfig` shape belong to [`docs/SPECS/spec-021-apps-0_0_7.md`][spec-021], and each patch module's own docstring is the single source of truth for what it hardens. `ready()` deliberately repeats none of that inventory.
+Pinned by `tests/testing/test_wrap.py::test_safe_wrap_connection_method_installs_wrapper_when_no_database_failure`, `…::test_safe_wrap_connection_method_declines_when_database_failure_in_place`, `…::test_safe_wrap_connection_method_works_on_arbitrary_method_names`, `…::test_safe_wrap_connection_method_leaves_djangos_teardown_a_clean_unwrap`, `…::test_safe_wrap_connection_method_raises_on_non_callable_wrapper`, `…::test_safe_wrap_connection_method_keeps_type_error_boundary_for_hostile_repr`, `…::test_safe_wrap_connection_method_accepts_callable_class_instance`, and `…::test_safe_wrap_connection_method_raises_attribute_error_on_missing_method`.
 
-Rationale companion — the derivation and the rejected inline-in-`apps.py` alternative: [Decision 1][rationale-d1].
+Rationale companion — the rejected restoration-on-behalf and interpolated-message alternatives: [Decision 1][rationale-d1].
 
-### Decision 2 — The patch installs on `SimpleTestCase`
-
-`apply()` installs the replacement on `django.test.testcases.SimpleTestCase._remove_databases_failures` — the class where Django **defines** the method. `TransactionTestCase`, `TestCase`, and any direct `SimpleTestCase` subclass are covered through the MRO; a direct `SimpleTestCase` subclass with `TransactionTestCase` nowhere in its MRO is covered, and is pinned as such.
-
-Pinned by `tests/test_django_patches.py::test_patch_is_installed_on_simple_test_case`, `…::test_patch_is_inherited_by_transaction_test_case`, `…::test_patch_is_inherited_by_test_case`, and `…::test_patched_remove_databases_failures_covers_direct_simple_test_case_subclass`.
-
-Rationale companion — the rejected `TransactionTestCase` target: [Decision 2][rationale-d2].
-
-### Decision 3 — The replacement re-wraps foreign replacements, then delegates
-
-`django_strawberry_framework/_django_patches.py::_patched_remove_databases_failures` runs Django's own captured `_remove_databases_failures` and adds one step before it: every disallowed connection method that is not a `_DatabaseFailure` (tested the way `django_strawberry_framework/_django_patches.py::_is_database_failure` tests it) is wrapped in a `_DatabaseFailure` of the patch's own, so Django's unconditional `setattr(connection, name, method.wrapped)` puts the foreign replacement back instead of crashing.
-
-- When Django's wrapper is still in place the patch leaves it alone and Django unwraps it itself.
-- When it has been replaced, Django's unwrap restores the foreign replacement exactly as the patch found it. That mirrors Django's own contract that `_add_databases_failures` / `_remove_databases_failures` operate symmetrically on the methods **they** wrapped; the patch declines to crash on a method the pair never owned.
-- A foreign replacement that lives on the connection's class, not the instance (`mock.patch.object(BaseDatabaseWrapper, "cursor", ...)`), is read through the instance, so the re-wrap and Django's unwrap would leave an instance attribute shadowing it. The patch deletes each such instance attribute afterwards, in a `finally`, so the connection ends where it started.
-
-The `(name, operation)` pair list the patch re-wraps is read through `django_strawberry_framework/_django_patches.py::_disallowed_connection_methods`, which covers both homes Django has kept it in ([Decision 5](#decision-5--two-homes-of-the-method-list-discriminated-by-the-feature-flag)). The unwrap itself is Django's: an upstream body change flows through the delegated call, the way it does for the delegating sibling patch modules, so no upstream body text is pinned.
-
-Rationale companion — the derivation of the re-wrap, and the rejected reimplemented loop and owner-sentinel shapes: [Decision 3][rationale-d3].
-
-### Decision 4 — Fail-closed upstream validation in three tiers
-
-`apply()` is **fail-closed**. Before installing anything it calls `django_strawberry_framework/_django_patches.py::_validate_upstream_shape`, which raises `RuntimeError` unless:
-
-1. **Private symbols exist.** `django.test.testcases._DatabaseFailure` is importable, and the captured `_remove_databases_failures` is a `classmethod` descriptor with a `__func__`.
-2. **Call shape holds.** The function takes exactly one `POSITIONAL_OR_KEYWORD` parameter.
-3. **The method list has a home.** `BaseDatabaseFeatures.disallowed_simple_test_case_connection_methods` or `SimpleTestCase._disallowed_connection_methods` exists, so the patch can find the methods to re-wrap. Without either, the patch could re-wrap nothing and teardown would crash again on a foreign replacement.
-
-A missing private `_DatabaseFailure` symbol therefore **raises at app load**; it does not degrade, log, or no-op. Module *import* is still protected — the symbol import is wrapped in `try/except ImportError` so `apply()` can report the precise unsupported shape rather than dying at import — but the app does not boot until the consumer opts out.
-
-Every one of the three messages names the escape hatch, so the failure carries its own remedy.
-
-Pinned by `tests/test_django_patches.py::test_apply_fails_loudly_when_database_failure_symbol_missing`, `…::test_apply_fails_loudly_when_upstream_method_signature_changes`, and `…::test_apply_fails_loudly_when_disallowed_method_list_is_missing`.
-
-Rationale companion — the rejected graceful-degradation and body-pin alternatives: [Decision 4][rationale-d4].
-
-### Decision 5 — Two homes of the method list, discriminated by the feature flag
-
-Django has kept the `(name, operation)` list of disallowed connection methods in two places across the supported range:
-
-| Home | Django range |
-|---|---|
-| the `SimpleTestCase._disallowed_connection_methods` class attribute | `5.2.16` - `6.0.x` |
-| `connection.features.disallowed_simple_test_case_connection_methods`, read per connection | `6.1` |
-
-Both resolve to the same four `(name, operation)` pairs.
-
-**The discriminator is the feature flag's presence on the connection, never the class attribute's and never a version number.** `_disallowed_connection_methods` reads the flag off `connection.features` and falls back to the class attribute only when the flag is absent; an empty flag list is still the flag's answer. Preferring the legacy attribute off `cls` is **not** equivalent: a Django 6.1 subclass may still declare its own `_disallowed_connection_methods`, but upstream's `_add_databases_failures` ignores it and wraps the feature list, so cleanup must read that same feature list to stay symmetric. This is implementation-relevant, not commentary: the `hasattr(cls, …)` form looks equivalent and is not.
-
-Both reads, the empty-flag case included, are asserted in-suite by `tests/test_django_patches.py::test_disallowed_methods_read_follows_the_home_django_keeps_them_in`. Whichever Django is installed carries only one home, so the row stages each home synthetically.
-
-Rationale companion — the rejected class-attribute-first discriminator and version branch: [Decision 5][rationale-d5].
-
-### Decision 6 — `APPLY_UPSTREAM_PATCHES` is the escape hatch
-
-The unwrap-time half — and only that half — is gated by `DJANGO_STRAWBERRY_FRAMEWORK["APPLY_UPSTREAM_PATCHES"]`, read through `django_strawberry_framework/conf.py::upstream_patches_enabled`. Default is on; the key is an **opt-out**, never the delivery mechanism. A consumer still gets the backstop from `INSTALLED_APPS` alone.
-
-Two configured shapes are accepted:
-
-- **`bool`** — the global toggle. `False` stops the package monkey-patching any upstream dependency at startup.
-- **`Mapping[str, bool]`** keyed by `UPSTREAM_PATCH_DEPENDENCIES` (`{"cross_web", "django", "strawberry"}`) — per-dependency opt-out. `{"django": False}` disables this test-only patch while leaving every other dependency's patch, including the production request hardening, installed. Missing names default to `True`.
-
-Any other shape raises `ConfigurationError`: a non-bool / non-mapping value (a `"false"` string is truthy and would silently *enable* the patches), a non-string mapping key, an unknown mapping name (a typo must not silently keep patching), or a non-bool mapping value. The whole mapping is validated on every read, not just the dependency being asked about, so a typo fails at the first gate regardless of which patch module reads first.
-
-**The gate is `apply()`'s first statement, ahead of all validation.** That ordering is the contract, not an accident: it is what makes `{"django": False}` a working recovery path for a consumer who upgraded Django ahead of the package and is currently being refused at boot by [Decision 4](#decision-4--fail-closed-upstream-validation-in-three-tiers). A gate placed after validation would be unreachable in exactly the situation it exists for.
-
-Pinned by `tests/test_django_patches.py::test_apply_no_ops_when_toggle_disabled`, `…::test_apply_no_ops_when_django_dependency_opted_out`, and `…::test_django_dependency_opt_out_silences_missing_method_list_abort`.
-
-Rationale companion — why the key is needed, and the rejected no-key, bool-only and loose-coercion alternatives: [Decision 6][rationale-d6].
-
-### Decision 7 — Idempotent, self-healing, and reload-safe
-
-`apply()` decides whether to install from **actual state**, not from a first-call-wins flag. `django_strawberry_framework/_django_patches.py::_patch_is_installed` reads `SimpleTestCase.__dict__` and compares `__func__` identity against the replacement.
-
-- Re-entrant calls — `ready()` fires more than once under some Django test runners — are no-ops.
-- A third party that reverted the class attribute since the prior call gets the patch re-installed on the next `apply()`. The contract is idempotent **and** self-healing; a boolean flag delivers only the first half.
-
-**Reload safety is part of the contract.** `importlib.reload()` re-executes the module while `SimpleTestCase` still points at the previous replacement, so a naive re-capture would read the package's own function as "the original" and turn the next `ready()` into a false upstream-drift abort. Two module-level constants name the attributes stamped onto `_patched_remove_databases_failures` — `_PATCH_OWNER_ATTRIBUTE` (`"_django_strawberry_framework_patch_owner"`) and `_PATCH_ORIGINAL_ATTRIBUTE` (`"_django_strawberry_framework_original"`) — and a third, `_PATCH_OWNER` (`"django_strawberry_framework._django_patches"`), is the owner **value**, not an attribute name. `django_strawberry_framework/_django_patches.py::_captured_upstream_descriptor` compares the owner attribute against that value and, on a match, returns the stored original descriptor; otherwise it returns what it found. The recovery matters to the running patch too: the previous generation of the replacement, still installed on `SimpleTestCase`, delegates at teardown through the reloaded module's `_original_remove_databases_failures`, so a re-capture of the installed patch would make it delegate to itself instead of Django.
-
-Pinned by `tests/test_django_patches.py::test_apply_is_idempotent`, `…::test_apply_reinstalls_when_class_attribute_reverted`, `…::test_patch_is_installed_returns_false_when_attribute_absent_from_class_dict`, `…::test_reload_preserves_the_installed_patch_teardown`, and `tests/test_apps.py::test_ready_reinstalls_patches_after_their_modules_reload`, which reloads each patch module twice so the contract holds for a reload of a reload.
-
-Rationale companion — the rejected first-call-wins flag: [Decision 7][rationale-d7].
-
-### Decision 8 — The wrap-time half degrades where the unwrap-time half aborts
-
-`safe_wrap_connection_method(connection, method_name, wrapper)` returns `True` when it installed `wrapper`, and `False` when Django's `_DatabaseFailure` was already at the named attribute and the wrap was declined (the connection method is left untouched). Any callable is accepted, including an instance with `__call__`. It raises `TypeError` when `wrapper` is not callable — validated at the wrap site so a typo (passing `connection.cursor()`, the cursor object, instead of a callable) surfaces there rather than as a delayed failure deep in Django's ORM machinery. The `TypeError` message does **not** interpolate `wrapper`: the object is consumer-supplied and a hostile or broken `__repr__` would replace the intended `TypeError` with whatever the repr raises.
-
-**The asymmetry with `apply()` is deliberate.** When the private `_DatabaseFailure` symbol is absent, `apply()` raises ([Decision 4](#decision-4--fail-closed-upstream-validation-in-three-tiers)) but the helper **installs and returns `True`**. Both halves share the same `_is_database_failure` predicate, and the helper degrades to "no Django wrapper is present, so the slot is free" rather than making the public `django_strawberry_framework.testing` import crash. A public import that dies on a private-symbol move is a worse failure than a wrap that proceeds; and the degraded path is only reachable with the Django patch opted out, since otherwise `ready()` has already refused to boot.
-
-Restoration is the consumer's. The helper handles the wrap step only; the docstring carries the worked `setUp` / `tearDown` shape. The unwrap-time backstop makes omitting the restoration non-fatal, but restoring leaves a clean slot for the next `setUpClass` and for other libraries' wrap-time checks.
-
-Pinned by `tests/testing/test_wrap.py::test_safe_wrap_connection_method_installs_wrapper_when_no_database_failure`, `…::test_safe_wrap_connection_method_declines_when_database_failure_in_place`, `…::test_safe_wrap_connection_method_installs_when_database_failure_symbol_missing` (the asymmetry), `…::test_safe_wrap_connection_method_works_on_arbitrary_method_names`, `…::test_safe_wrap_connection_method_pairs_with_unwrap_time_patch_for_defense_in_depth`, `…::test_safe_wrap_connection_method_raises_on_non_callable_wrapper`, `…::test_safe_wrap_connection_method_keeps_type_error_boundary_for_hostile_repr`, `…::test_safe_wrap_connection_method_accepts_callable_class_instance`, and `…::test_safe_wrap_connection_method_raises_attribute_error_on_missing_method`.
-
-Rationale companion — why the helper does not follow `apply()` into fail-loud: [Decision 8][rationale-d8].
-
-### Decision 9 — The helper is a submodule export only
+### Decision 2 — The helper is a submodule export only
 
 `safe_wrap_connection_method` is exported from `django_strawberry_framework/testing/__init__.py` and is reachable at `django_strawberry_framework.testing`. It is **not** re-exported from the package root, and **no symbol from this card is in `django_strawberry_framework/__init__.py #"__all__ = ("`**.
 
 The public path is `django_strawberry_framework.testing`, never `django_strawberry_framework.test`: a `test` subpackage shadows the stdlib name and collides with test-collection tooling. The package's own coverage for the helper lives at `tests/testing/test_wrap.py`.
 
-Rationale companion — why a public surface is correct for this card, and the rejected root re-export and `test` name: [Decision 9][rationale-d9].
+Rationale companion — why a public surface is correct for this card, and the rejected root re-export and `test` name: [Decision 2][rationale-d2].
 
-### Decision 10 — Coverage lives in the package test tree
+### Decision 3 — Coverage lives in the package test tree
 
-All coverage for both halves sits in `tests/` — `tests/test_django_patches.py`, `tests/testing/test_wrap.py`, `tests/test_apps.py` — and none in `examples/fakeshop/test_query/`.
+All coverage sits in `tests/testing/test_wrap.py`, and none in `examples/fakeshop/test_query/`.
 
-That is the [`AGENTS.md`][agents] #"Test through real usage, prefer the example project" fallback, taken deliberately: the failure is Django test-class setup/teardown behaviour and is **not reachable through a live `/graphql/` query**. The example project remains useful as fixtures, but this bug sits below the GraphQL API layer.
+That is the [`AGENTS.md`][agents] #"Test through real usage, prefer the example project" fallback, taken deliberately: the helper acts on Django test-class setup/teardown state and is **not reachable through a live `/graphql/` query**.
 
-No `FAKESHOP_SHARDED=1` gate: the hardening protects every consumer, not only multi-database ones, so the tests run under the default single-database invocation. The sharded mode is the only one configuring more than one alias and is therefore a useful additional run of the same focused scope, not a separate suite.
+No `FAKESHOP_SHARDED=1` gate: the helper works on any alias, so the tests run under the default single-database invocation.
 
-Rationale companion — the rejected live-tier placement: [Decision 10][rationale-d10].
+Rationale companion — the rejected live-tier placement: [Decision 3][rationale-d3].
 
-### Decision 11 — Joint `0.0.7` cut
+### Decision 4 — Joint `0.0.7` cut
 
 The card ships in the joint `0.0.7` cut alongside its six siblings, under the policy [`docs/SPECS/spec-020-list_field-0_0_7.md`][spec-020] [Decision 10][spec-020-decision-10--joint-007-cut] establishes. No separate `0.0.8` cut for this card.
 
-Rationale companion — the rejected `0.0.8` alternative: [Decision 11][rationale-d11].
+Rationale companion — the rejected `0.0.8` alternative: [Decision 4][rationale-d4].
 
 ## Implementation plan
 
-One module, one helper, one dispatch line, three test modules:
-
-1. `django_strawberry_framework/_django_patches.py` — the module docstring (bug inventory, ecosystem precedent, the settings paragraph, the surface-visibility note), the guarded `_DatabaseFailure` import, the three `_PATCH_*` constants, the two method-list attribute names, `_captured_upstream_descriptor`, `_upstream_function`, `_validate_upstream_shape`, `_is_database_failure`, `_disallowed_connection_methods`, `_patched_remove_databases_failures` plus the two `setattr` stamps, `_patch_is_installed`, and `apply()`.
-2. `django_strawberry_framework/apps.py` — `ready()` calls the Django applier first of three, behind function-local imports.
-3. `django_strawberry_framework/conf.py` — `APPLY_UPSTREAM_PATCHES_KEY`, `UPSTREAM_PATCH_DEPENDENCIES`, and `upstream_patches_enabled`.
-4. `django_strawberry_framework/testing/_wrap.py` — `safe_wrap_connection_method`; re-exported from `django_strawberry_framework/testing/__init__.py`.
-5. `tests/test_django_patches.py`, `tests/testing/test_wrap.py`, `tests/test_apps.py` — see [Test plan](#test-plan).
+1. `django_strawberry_framework/testing/_wrap.py` — `safe_wrap_connection_method`; re-exported from `django_strawberry_framework/testing/__init__.py`.
+2. `tests/testing/test_wrap.py` — see [Test plan](#test-plan).
 
 ## Edge cases and constraints
 
-- **The patch runs in production processes.** `ready()` fires outside tests too. `apply()` imports `django.test.testcases`, runs `inspect.signature` on one function, and reads two class attributes — once per `ready()`, at app load, never per request. The replaced method is only ever called from `tearDownClass`. What a production deployment must know is that this path is **fail-closed**: on a Django without the private shape the patch reads, `ready()` raises and the process does not start until `APPLY_UPSTREAM_PATCHES` says otherwise.
-- **No body text is pinned.** An upstream edit to `_remove_databases_failures` that keeps the `(cls)` call shape and the `_DatabaseFailure.wrapped` unwrap flows through the delegated call: a comment or reflow changes nothing, and an upstream fix of Trac #37064 makes the re-wrap a harmless no-op. The trade is a third home for the method list: a Django that moves it again while keeping one of the two known homes populated would have the patch re-wrap from a stale list; the validation catches only the case where both known homes are gone.
-- **`connections[…]` state is mutated by the tests and restored.** The suite assigns `connections["default"].cursor`, patches `BaseDatabaseWrapper.cursor` on the class for the class-level row, and stages either home of the method list on `connections["default"].features` or `BaseDatabaseFeatures`, restoring in `try/finally` or through `monkeypatch`. The sentinel technique is the load-bearing part: `_DatabaseFailure(mock.sentinel.…)` for the happy path, a plain callable with no `.wrapped` for the bug path.
-- **Only one home executes per environment.** Whichever Django is installed carries only one home of the method list, so both reads are covered synthetically and the floor run is what gives the `5.2.16` end of the claimed range an executed point.
-- **`docs/TREE.md` is a downstream consumer** of the module summary lines of every one of this card's six surface modules — the three package modules `django_strawberry_framework/_django_patches.py`, `django_strawberry_framework/apps.py`, `django_strawberry_framework/testing/_wrap.py`, and the three test modules `tests/test_django_patches.py`, `tests/testing/test_wrap.py`, `tests/test_apps.py`. A docstring edit to any of the six is followed by a regenerate.
+- **`connections[…]` state is mutated by the tests and restored.** The suite assigns `connections["default"].cursor` and the other disallowed methods, restoring in `try/finally` or through `monkeypatch`. The sentinel technique is the load-bearing part: `_DatabaseFailure(mock.sentinel.…)` stands in for Django's own wrapper.
+- **`docs/TREE.md` is a downstream consumer** of the module summary lines of `django_strawberry_framework/testing/_wrap.py` and `tests/testing/test_wrap.py`. A docstring edit to either is followed by a regenerate.
 
 ## Test plan
 
-**This card owns 30 tests**, all in the package tree, all under the default single-database invocation: the whole of `tests/test_django_patches.py` (21 collected from 19 functions, the method-list read parametrized over three staged homes) and the whole of `tests/testing/test_wrap.py` (9). No test in `tests/test_apps.py` is claimed here.
-
-**The focused scope those three modules collect is wider — 44 tests** — because `tests/test_apps.py` runs whole, and all of its eight test functions (14 collected items once parametrized) belong to [`docs/SPECS/spec-021-apps-0_0_7.md`][spec-021]. 44 is the scope a run executes ([Floor verification](#floor-verification), [Definition of done](#definition-of-done) item 9); 30 is the population this card owns.
-
-### `tests/test_django_patches.py` — 21 tests
-
-- **Install and inheritance** — `test_patch_is_installed_on_simple_test_case`, `test_patch_is_inherited_by_transaction_test_case`, `test_patch_is_inherited_by_test_case`, `test_patched_remove_databases_failures_covers_direct_simple_test_case_subclass`.
-- **The fix proper** — `test_patched_remove_databases_failures_unwraps_a_real_wrapper` (a real `_DatabaseFailure` unwraps exactly as upstream does), `test_patched_remove_databases_failures_skips_non_wrapper_methods` (a plain callable is left alone and does not raise), and `test_patched_remove_databases_failures_leaves_a_class_level_replacement_unshadowed` (a class-level replacement leaves no instance attribute behind; fails without the patch's `finally` delete).
-- **The load-bearing negative** — `test_unpatched_remove_databases_failures_crashes_on_non_wrapper` reverts to the **live import-time capture** and asserts the crash still fires, having first asserted the captured descriptor's `__func__.__module__` is `django.test.testcases`. A hardcoded copy of some Django version's body could not deliver that signal: it would keep crashing regardless of what the installed Django ships, so it could never tell the maintainer the patch is retirable.
-- **Idempotence, self-healing, reload** — `test_apply_is_idempotent`, `test_apply_reinstalls_when_class_attribute_reverted`, `test_patch_is_installed_returns_false_when_attribute_absent_from_class_dict`, `test_reload_preserves_the_installed_patch_teardown` (the still-installed previous generation still delegates to Django after a reload).
-- **Fail-closed validation** — `test_apply_fails_loudly_when_database_failure_symbol_missing`, `test_apply_fails_loudly_when_upstream_method_signature_changes`, `test_apply_fails_loudly_when_disallowed_method_list_is_missing`.
-- **The method list's two homes** — `test_disallowed_methods_read_follows_the_home_django_keeps_them_in` (class attribute, feature flag, empty feature flag).
-- **The settings gate** — `test_apply_no_ops_when_toggle_disabled`, `test_apply_no_ops_when_django_dependency_opted_out`, `test_django_dependency_opt_out_silences_missing_method_list_abort`.
-
-### `tests/testing/test_wrap.py` — 9 tests
-
-The five contract clauses of [Decision 8](#decision-8--the-wrap-time-half-degrades-where-the-unwrap-time-half-aborts) — install into a free slot, decline on a `_DatabaseFailure`, install on private-symbol drift, work on an arbitrary method name, compose end-to-end with the unwrap-time patch — plus the two guarding the `TypeError` boundary (`…_raises_on_non_callable_wrapper`, `…_keeps_type_error_boundary_for_hostile_repr`), a callable class instance accepted as `wrapper` (`…_accepts_callable_class_instance`), and a missing `method_name` raising `AttributeError` (`…_raises_attribute_error_on_missing_method`).
-
-### `tests/test_apps.py` — collected whole, owned by the sibling card
-
-All six of the module's test functions belong to [`docs/SPECS/spec-021-apps-0_0_7.md`][spec-021]. Four pin the `AppConfig` shape — subclass, `name` / `verbose_name`, registry pickup, and the consolidated forbidden-attribute negative. The other two pin `ready()`'s dispatch, and they are that card's too: each asserts a contract over **all three** patch appliers — `_django_patches`, `_strawberry_patches` and `_cross_web_patches` — while this card ships only the first, so the contract they pin is the dispatcher's, specified at that spec's [Decision 4][spec-021-decision-4].
-
-They are described here because this card depends on them: they are the only deterministic proof that `ready()` installs this card's applier at all. `ready` is permitted on the `AppConfig` (it is required on this class, not forbidden) and the behavioral dispatch tests call it through Django's registered app config. `test_ready_dispatches_all_three_patch_appliers_and_refires_safely` pins the dispatch deterministically — a per-module installed-at-collection assertion is masked by earlier direct `apply()` calls on the same worker, so a dropped dispatch line would otherwise pass the gate. `test_ready_reinstalls_patches_after_their_modules_reload` pins [Decision 7](#decision-7--idempotent-self-healing-and-reload-safe)'s reload contract.
-
-### Floor verification
-
-The subject is a Django integration seam that delegates to a private classmethod and reads its private method list, so the focused scope re-runs at the supported floor ([`docs/builder/BUILD.md`][build] "Floor verification" carries the versions; Django `5.2.16` is the low end of the supported range) in an isolated venv. At the floor the class attribute is the home Django reads; in a newer environment the connection feature flag is. Without the floor run the `5.2.16` half of the claimed range is never executed by any real interpreter.
+**This card owns 8 tests**, all of `tests/testing/test_wrap.py`, under the default single-database invocation: the four contract clauses of [Decision 1](#decision-1--the-helper-declines-to-clobber-djangos-wrapper) — install into a free slot, decline on a `_DatabaseFailure`, work on an arbitrary method name, and leave Django's own teardown a clean unwrap after declining — plus the two guarding the `TypeError` boundary (`…_raises_on_non_callable_wrapper`, `…_keeps_type_error_boundary_for_hostile_repr`), a callable class instance accepted as `wrapper` (`…_accepts_callable_class_instance`), and a missing `method_name` raising `AttributeError` (`…_raises_attribute_error_on_missing_method`).
 
 ## Doc updates
 
-- [`docs/GLOSSARY.md`][glossary] — entries for [Django Trac #37064 hardening][glossary-django-trac-37064-hardening] and [`safe_wrap_connection_method`][glossary-safe-wrap-connection-method], plus the `Public exports` line for the `django_strawberry_framework.testing` subpackage.
+- [`docs/GLOSSARY.md`][glossary] — the [`safe_wrap_connection_method`][glossary-safe-wrap-connection-method] entry, plus the `Public exports` line for the `django_strawberry_framework.testing` subpackage.
 - [`KANBAN.md`][kanban] — the `DONE-024-0.0.7` card, with this spec as its `SpecDoc` target.
-- [`CHANGELOG.md`][changelog] — an entry for both halves under the `0.0.7` heading.
-- [`docs/TREE.md`][tree] — regenerated whenever any of the six surface modules' summary lines changes.
+- [`CHANGELOG.md`][changelog] — an entry under the `0.0.7` heading.
+- [`docs/TREE.md`][tree] — regenerated whenever either surface module's summary line changes.
 
 ## Risks and open questions
 
-- **A third home for the method list.** Django `6.1` moved the pairs off `SimpleTestCase._disallowed_connection_methods` onto the per-connection feature flag, which is why the read covers two homes ([Decision 5](#decision-5--two-homes-of-the-method-list-discriminated-by-the-feature-flag)). A further move that empties both known homes makes `ready()` raise until the read learns the new home, with the escape hatch ([Decision 6](#decision-6--apply_upstream_patches-is-the-escape-hatch)) for a consumer who cannot wait; a move that leaves a known home populated but unread by Django is not caught at app load.
-- **Retirement signal.** If upstream ever fixes Trac #37064, `tests/test_django_patches.py::test_unpatched_remove_databases_failures_crashes_on_non_wrapper` stops crashing, which is loud. The retirement decision is a maintainer's, not the patch's.
-- **The wrap-time half is advisory.** The package cannot force third-party wrappers to use it, which is exactly why the unwrap-time half exists and is not optional.
+- **The helper is advisory.** The package cannot force third-party wrappers to use it; a wrapper installed another way and left in place crashes Django's teardown, which is Django's documented `wontfix` position.
+- **A private class.** `_DatabaseFailure` is Django-private; a Django that renames it fails the `django_strawberry_framework.testing` import loudly rather than silently installing over Django's wrapper.
 
 ## Out of scope (explicitly tracked elsewhere)
 
 - A consumer-facing pytest plugin or multi-database test-case base class. The `django_strawberry_framework.testing` subpackage's test-client family and Relay helpers belong to other cards.
-- Patches for other Django `wontfix` bugs — one card each.
-- Patches for other dependencies — their own modules, their own cards, their own names in `UPSTREAM_PATCH_DEPENDENCIES`.
-- Upstreaming the patch.
+- Upstreaming a fix.
 
 ## Definition of done
 
-1. `django_strawberry_framework/_django_patches.py` ships `apply()`, `_patched_remove_databases_failures`, and the rationale docstring carrying the bug inventory and the ecosystem precedent.
-2. `django_strawberry_framework/apps.py::DjangoStrawberryFrameworkConfig.ready` calls the Django applier at app load.
-3. `apply()` is fail-closed across all three validation tiers and every message names the escape hatch.
-4. `_patched_remove_databases_failures` delegates to Django's own classmethod after re-wrapping foreign replacements, leaves a class-level replacement unshadowed, and `_disallowed_connection_methods` discriminates on the feature flag's presence.
-5. `APPLY_UPSTREAM_PATCHES` is honoured in both shapes, as `apply()`'s first statement, with `ConfigurationError` on any other shape.
-6. `apply()` is idempotent, self-healing, and reload-safe.
-7. `django_strawberry_framework/testing/_wrap.py::safe_wrap_connection_method` ships with the documented return contract, the non-interpolating `TypeError`, and the deliberate private-symbol-drift asymmetry; it is exported from `django_strawberry_framework.testing`.
-8. `django_strawberry_framework/__init__.py`'s `__all__` is unchanged by this card; no symbol from this work is re-exported from the package root.
-9. This card's 30 tests — all of `tests/test_django_patches.py` and all of `tests/testing/test_wrap.py` — are green under the default invocation, under `FAKESHOP_SHARDED=1`, and at the supported floor, as is the 44-test focused scope those three modules collect whole (see [Test plan](#test-plan)).
-10. No repo-root `conftest.py` workaround and no base test class is required of any consumer, at any point.
-11. `uv run ruff format --check .` and `uv run ruff check .` both pass.
-12. Docs updated per [Doc updates](#doc-updates); card `DONE-024-0.0.7` in `Done` at the joint `0.0.7` cut.
+1. `django_strawberry_framework/testing/_wrap.py::safe_wrap_connection_method` ships with the documented return contract and the non-interpolating `TypeError`; it is exported from `django_strawberry_framework.testing`.
+2. `django_strawberry_framework/__init__.py`'s `__all__` is unchanged by this card; no symbol from this work is re-exported from the package root.
+3. This card's 8 tests — all of `tests/testing/test_wrap.py` — are green under the default invocation, under `FAKESHOP_SHARDED=1`, and at the supported floor.
+4. `uv run ruff format --check .` and `uv run ruff check .` both pass.
+5. Docs updated per [Doc updates](#doc-updates); card `DONE-024-0.0.7` in `Done` at the joint `0.0.7` cut.
 
 <!-- LINK DEFINITIONS -->
 
@@ -362,33 +199,21 @@ The subject is a Django integration seam that delegates to a private classmethod
 
 <!-- docs/ -->
 [glossary]: ../GLOSSARY.md
-[glossary-django-appconfig]: ../GLOSSARY.md#django-appconfig
-[glossary-django-trac-37064-hardening]: ../GLOSSARY.md#django-trac-37064-hardening
 [glossary-safe-wrap-connection-method]: ../GLOSSARY.md#safe_wrap_connection_method
 [tree]: ../TREE.md
 
 <!-- docs/SPECS/ -->
-[rationale-d1]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-1--a-private-patch-module-per-dependency-applied-from-ready
-[rationale-d10]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-10--coverage-lives-in-the-package-test-tree
-[rationale-d11]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-11--joint-007-cut
-[rationale-d2]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-2--the-patch-installs-on-simpletestcase
-[rationale-d3]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-3--the-replacement-re-wraps-foreign-replacements-then-delegates
-[rationale-d4]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-4--fail-closed-upstream-validation-in-three-tiers
-[rationale-d5]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-5--two-homes-of-the-method-list-discriminated-by-the-feature-flag
-[rationale-d6]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-6--apply_upstream_patches-is-the-escape-hatch
-[rationale-d7]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-7--idempotent-self-healing-and-reload-safe
-[rationale-d8]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-8--the-wrap-time-half-degrades-where-the-unwrap-time-half-aborts
-[rationale-d9]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-9--the-helper-is-a-submodule-export-only
+[rationale-d1]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-1--the-helper-declines-to-clobber-djangos-wrapper
+[rationale-d2]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-2--the-helper-is-a-submodule-export-only
+[rationale-d3]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-3--coverage-lives-in-the-package-test-tree
+[rationale-d4]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md#decision-4--joint-007-cut
 [spec-020]: spec-020-list_field-0_0_7.md
 [spec-020-decision-10--joint-007-cut]: spec-020-list_field-0_0_7.md#decision-10--joint-007-cut
-[spec-021]: spec-021-apps-0_0_7.md
-[spec-021-decision-4]: spec-021-apps-0_0_7.md#decision-4--ready-applies-the-upstream-patches
 [spec-023]: spec-023-multi_db-0_0_7.md
 [spec-024-rationale]: appx/spec-024-django_trac_37064_hardening-0_0_7-rationale.md
 [spec-024-terms]: appx/spec-024-django_trac_37064_hardening-0_0_7-terms.csv
 
 <!-- docs/builder/ -->
-[build]: ../builder/BUILD.md
 
 <!-- django_strawberry_framework/ -->
 

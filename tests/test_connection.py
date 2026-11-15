@@ -113,11 +113,11 @@ def test_django_connection_is_listconnection_subclass() -> None:
 
 
 def test_first_and_last_guard_on_generated_subclass(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The guard answers before the deadline check or ``info.selected_fields`` priming runs.
+    """The guard answers before the deadline check runs.
 
     The wire answer is live (``test_connection_pagination_api.py::
-    test_live_first_and_last_together_is_graphql_error``); the order has no wire shape. Both
-    later steps raise here if reached, so the guard's ``GraphQLError`` proves it ran first.
+    test_live_first_and_last_together_is_graphql_error``); the order has no wire shape. The
+    later step raises here if reached, so the guard's ``GraphQLError`` proves it ran first.
     """
 
     def _ran_ahead_of_the_guard(*_args: object, **_kwargs: object) -> NoReturn:
@@ -125,10 +125,6 @@ def test_first_and_last_guard_on_generated_subclass(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(
         "django_strawberry_framework.connection.check_deadline",
-        _ran_ahead_of_the_guard,
-    )
-    monkeypatch.setattr(
-        "django_strawberry_framework.connection.prime_selected_fields",
         _ran_ahead_of_the_guard,
     )
     node_type = _make_node_type("GuardCountNode", total_count=True)

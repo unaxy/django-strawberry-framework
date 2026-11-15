@@ -1,8 +1,6 @@
 """Defensive patches for upstream Strawberry bugs, applied at app load.
 
-Companion to :mod:`django_strawberry_framework._django_patches`. Where
-that module hardens a Django test-runner bug, this module hardens
-Strawberry HTTP-view bugs that affect live request handling for every
+This module hardens Strawberry HTTP-view bugs that affect live request handling for every
 consumer of ``django-strawberry-framework``, plus two Relay bugs: the
 connection-page check that decides by wire name whether a
 ``ListConnection`` resolves its rows (see "The connection-page gap"
@@ -34,21 +32,15 @@ into an unhandled ``500`` there too - pinned on the wire, against the
 package mount, by
 ``examples/fakeshop/test_query/test_transport_api.py``'s
 ``test_the_upstream_bug_workaround_still_respects_its_own_opt_out``.
-Strawberry's own view additionally depends on the companion ``cross_web``
-patch to route its sync bytes into ``parse_json``, so disabling only one
-of the pair leaves its malformed-body hardening incomplete, and disabling
-both leaves an undecodable body an unhandled ``500`` there, exactly as it
-is with the package absent.
 
 What a **package** view keeps in every state of this setting is the
 strict UTF-8 **wire contract**, and by construction rather than by luck:
 it owns both halves (spec-046 Decision 9) - the decode, in
 ``views.py::_RequestBodyBoundaryMixin.parse_json``, and the *body source*
 that delivers undecoded bytes to it, in
-``views.py::_RawBodyRequestAdapter``. Owning only the decode was not
-enough: with the ``cross_web`` half off, upstream's sync adapter decodes
-inside its own property and the view's ``parse_json`` is never entered
-with bytes at all, which cost the sync transport its controlled ``400``. See
+``views.py::_RawBodyRequestAdapter``. Owning only the decode would not be
+enough: upstream's sync adapter decodes inside its own property, so the
+view's ``parse_json`` would never be entered with bytes at all. See
 :func:`django_strawberry_framework.conf.upstream_patches_enabled`.
 
 The decode-failure gap: undecodable and over-nested bodies
@@ -70,26 +62,24 @@ interpreters whose C-stack budget is smaller:
 
 - On the **sync** view *upstream* decodes in ``cross_web``'s request
   adapter, before ``parse_json`` is even entered - a raise inside a
-  property, where no ``except`` can translate it. The companion
-  :mod:`django_strawberry_framework._cross_web_patches` therefore makes
-  that adapter hand the raw bytes to ``parse_json`` instead of decoding
-  eagerly. Moving the raise, not decoding defensively, is that patch's
-  entire job.
+  property, where no ``except`` can translate it. The package's sync view
+  replaces that adapter with ``views.py::_RawBodyRequestAdapter``, which
+  hands the raw bytes to ``parse_json``; Strawberry's own sync view keeps
+  upstream's ``500``.
 - On the **async** view the raw bytes reach ``json.loads`` directly,
   which raises ``UnicodeDecodeError`` from *inside* ``parse_json``.
 
-``BaseView.parse_json`` is the single method both the sync and async
-views inherit, so widening its ``except`` to also catch
-``UnicodeDecodeError`` and ``RecursionError`` fixes both transports from
-one site. Combined with the ``cross_web`` patch (which routes the sync
-path's bytes through ``parse_json`` rather than decoding them eagerly),
-an undecodable or over-nested body becomes a clean ``400`` for every
-consumer of the installed Strawberry - including one who mounts
-Strawberry's own view. An integer literal past the interpreter's digit
-limit is not this module's: ``json.loads`` raises a plain ``ValueError``
-for it, which the package views and WebSocket consumer answer through
-upstream's ``decode_json`` seam (``_json_decode.py``), permanently and on
-both transports, while Strawberry's own view keeps upstream's ``500``.
+``BaseView.parse_json`` is the single method both the sync and async views
+inherit, so widening its ``except`` to also catch ``UnicodeDecodeError`` and
+``RecursionError`` fixes both transports from one site: an undecodable or
+over-nested body that reaches ``parse_json`` becomes a clean ``400`` on both
+package views and on Strawberry's own async view, and an over-nested one on
+Strawberry's own sync view too. An integer literal past the interpreter's
+digit limit is not this module's: ``json.loads`` raises a plain
+``ValueError`` for it, which the package views and WebSocket consumer answer
+through upstream's ``decode_json`` seam (``_json_decode.py``), permanently
+and on both transports, while Strawberry's own view keeps upstream's
+``500``.
 
 Where the strict UTF-8 wire contract lives (and why not here)
 -------------------------------------------------------------
@@ -242,7 +232,7 @@ to the same function; while the replacement is installed nothing calls that
 rebound global. The patched check answers by ``connection.py::_page_requested`` alone: the same two fields
 matched by the Python names they were declared under, as direct children of
 the connection through fragment wrappers, over the converted selections
-``optimizer/selections.py::info_selections`` reads. Asking upstream first
+``connection.py::_connection_field_requested`` reads. Asking upstream first
 cannot be kept, because its ``True`` for a fragment named ``edges`` comes
 before any fallback could answer.
 Three Strawberry-facing pieces therefore sit side by side, and only one of them
@@ -870,8 +860,7 @@ def _patched_parse_json(self: "_AnyBaseView", data: "str | bytes") -> object:
     to the ``cross_web`` request adapter instead would be worse still - a
     ``UnicodeDecodeError`` raised inside that adapter's ``body``
     *property* escapes this ``except`` entirely and surfaces as the
-    unhandled ``500`` that is the original upstream bug (see
-    :mod:`django_strawberry_framework._cross_web_patches`).
+    unhandled ``500`` that is the original upstream bug.
 
     The body-envelope guard is a request-*body* contract enforced from a
     generic JSON helper, so it fires at every upstream ``parse_json`` call

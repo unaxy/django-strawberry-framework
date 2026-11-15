@@ -1437,8 +1437,7 @@ deliberate *non*-reuse carries its reason (the [`spec-040`][spec-040] /
 - **The consumer must list the package in `INSTALLED_APPS`.** The template
   resolves through the app-dirs loader against the package's
   [`AppConfig`][glossary-django-appconfig] — already the package's documented
-  install step (and required for the [Trac #37064
-  hardening][glossary-django-trac-37064-hardening] to apply). A consumer who
+  install step. A consumer who
   skipped it gets `TemplateDoesNotExist` on the first GraphiQL page render
   with the toolbar enabled; the GLOSSARY body names the fix. A consumer with
   `APP_DIRS=False` and a bespoke loader configuration owns adding the
@@ -2126,7 +2125,6 @@ each is in the [rationale][rationale-risks].
 [glossary-configurationerror]: ../GLOSSARY.md#configurationerror
 [glossary-debug-toolbar-middleware]: ../GLOSSARY.md#debug-toolbar-middleware
 [glossary-django-appconfig]: ../GLOSSARY.md#django-appconfig
-[glossary-django-trac-37064-hardening]: ../GLOSSARY.md#django-trac-37064-hardening
 [glossary-djangographqlprotocolrouter]: ../GLOSSARY.md#djangographqlprotocolrouter
 [glossary-djangooptimizerextension]: ../GLOSSARY.md#djangooptimizerextension
 [glossary-eviction-simulated-absence]: ../GLOSSARY.md#eviction-simulated-absence

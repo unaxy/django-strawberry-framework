@@ -69,21 +69,18 @@ APPLY_UPSTREAM_PATCHES_KEY = "APPLY_UPSTREAM_PATCHES"
 
 # Canonical ``APPLY_UPSTREAM_PATCHES`` mapping keys - one name per patch
 # module, matching the package's one-module-per-dependency organizing rule.
-# ``strawberry`` and ``cross_web`` jointly own one fix (the malformed-body
-# ``400`` hardening a consumer gets on STRAWBERRY'S OWN view: the Strawberry
-# patch hardens both transports' body parse, the cross_web patch routes that
-# view's sync bytes into it), so disabling one of the pair alone is safe but
-# leaves upstream's sync view unfixed. A package view keeps the strict UTF-8
-# half of that hardening in every state of this setting - it owns both its
-# strict decode and its own body source (``views.py::_RawBodyRequestAdapter``)
-# - but it rides the gate for the body-envelope guard: with the ``strawberry``
-# half off, a scalar or non-object-batch body is an unhandled ``500`` on a
-# package mount too. ``strawberry`` also owns the Relay connection-page and async
-# row-elision workarounds. Disabling it at startup restores upstream's empty
-# renamed pages on package offset connections (the keyset page decides itself)
-# and unnecessary async offset row fetches for count-only/typename-only requests.
+# ``strawberry`` owns the malformed-body ``400`` hardening of both transports'
+# body parse. A package view keeps its strict UTF-8 decode in every state of
+# this setting - it owns both that decode and its own body source
+# (``views.py::_RawBodyRequestAdapter``) - but it rides the gate for the
+# body-envelope guard: with ``strawberry`` off, a scalar or non-object-batch
+# body is an unhandled ``500`` on a package mount too. ``strawberry`` also owns
+# the Relay connection-page and async row-elision workarounds. Disabling it at
+# startup restores upstream's empty renamed pages on package offset connections
+# (the keyset page decides itself) and unnecessary async offset row fetches for
+# count-only/typename-only requests.
 UPSTREAM_PATCH_DEPENDENCIES = frozenset(
-    {"cross_web", "django", "strawberry"},
+    {"strawberry"},
 )
 
 # Default nested-connection fetch strategy for ``DjangoOptimizerExtension``
@@ -422,16 +419,13 @@ def upstream_patches_enabled(dependency: str) -> bool:
     absent. Two configured shapes are accepted:
 
     - ``bool`` - the global toggle: ``False`` stops the framework from
-      monkey-patching any of its upstream dependencies (Django,
-      Strawberry, and ``cross_web``) at startup.
+      monkey-patching its upstream dependencies at startup.
     - ``Mapping[str, bool]`` keyed by ``UPSTREAM_PATCH_DEPENDENCIES``
-      names - per-dependency opt-out: ``{"django": False}`` disables
-      only the test-only Django teardown patch while the production
-      request-hardening patches (``strawberry`` / ``cross_web``) stay
-      installed. Missing names default to ``True`` (the opt-out stance
-      holds per dependency). ``strawberry`` and ``cross_web`` jointly
-      own the malformed-body hardening - see the
-      ``UPSTREAM_PATCH_DEPENDENCIES`` comment. ``strawberry`` also owns the Relay
+      names - per-dependency opt-out: ``{"strawberry": False}`` disables
+      the Strawberry patches. Missing names default to ``True`` (the
+      opt-out stance holds per dependency). ``strawberry`` owns the
+      malformed-body hardening - see the ``UPSTREAM_PATCH_DEPENDENCIES``
+      comment. It also owns the Relay
       connection-page and async row-elision fixes on both native and package
       connections. With it disabled at startup, renamed ``edges`` / ``pageInfo``
       can return empty offset pages (the keyset page decides itself), and async
@@ -444,11 +438,10 @@ def upstream_patches_enabled(dependency: str) -> bool:
     ENABLE the patches under bool coercion), a non-string mapping key
     (dependency names are strings; anything else is a wrong shape, not a
     candidate name), an unknown mapping name (a typo'd name must not
-    silently keep patching), or a non-bool mapping value (``{"django":
+    silently keep patching), or a non-bool mapping value (``{"strawberry":
     "false"}`` would silently invert intent). The whole mapping is
     validated on every read, not just ``dependency``'s entry, so a typo
-    fails loud at the first gate regardless of which patch module reads
-    first.
+    fails loud at the first gate.
 
     Internal API (not exported from the package ``__init__``): each patch
     module's ``apply()`` gates on its own canonical name; a ``dependency``

@@ -619,11 +619,6 @@ def _is_test_case_classmethod(
     return isinstance(value, classmethod)
 
 
-def remove_databases_failures_function(cls: type[SimpleTestCase]) -> object:
-    """The function behind ``cls._remove_databases_failures`` (``classmethod.__func__``)."""
-    return _remove_databases_failures_descriptor(cls).__func__
-
-
 def call_remove_databases_failures(cls: type[SimpleTestCase]) -> None:
     """Run ``cls._remove_databases_failures()``: the descriptor's function called with ``cls``."""
     _remove_databases_failures_descriptor(cls).__func__(cls)

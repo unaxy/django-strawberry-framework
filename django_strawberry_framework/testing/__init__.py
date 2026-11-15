@@ -19,15 +19,11 @@ Currently exports
   family: ``self.query(...)`` through the test case's own ``self.client``,
   plus the ``assertResponseNoErrors`` / ``assertResponseHasErrors`` helpers.
 - :func:`safe_wrap_connection_method` - cooperative wrap helper that
-  declines to clobber Django's ``_DatabaseFailure`` wrapper. The
-  wrap-time mirror of the unwrap-time backstop the package installs in
-  :mod:`django_strawberry_framework._django_patches`. Mirrors
+  declines to clobber Django's ``_DatabaseFailure`` wrapper, so Django
+  Trac #37064's ``AttributeError: 'function' object has no attribute
+  'wrapped'`` at ``tearDownClass`` cannot start from it. Mirrors
   ``django-debug-toolbar``'s wrap-time isinstance check at
-  :func:`debug_toolbar.panels.sql.tracking.wrap_cursor`. Together the
-  two checks form a defense-in-depth against Django Trac #37064's
-  ``AttributeError: 'function' object has no attribute 'wrapped'`` at
-  ``tearDownClass`` - see the patch module's docstring for the full
-  framing.
+  :func:`debug_toolbar.panels.sql.tracking.wrap_cursor`.
 - :func:`global_id_for` / :func:`decode_global_id` - the public Relay test
   helpers, importable at the dotted
   ``django_strawberry_framework.testing.relay`` submodule path (NOT

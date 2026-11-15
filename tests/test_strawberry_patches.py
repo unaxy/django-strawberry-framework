@@ -560,12 +560,7 @@ def test_apply_no_ops_when_strawberry_dependency_opted_out(
     settings: pytest_django.Settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``{"strawberry": False}`` disables only this module; ``{"django": False}`` does not.
-
-    The production half of the per-dependency opt-out contract: opting out of
-    the test-only Django patch alone leaves this request hardening
-    installing normally (each gate reads its own dependency name).
-    """
+    """``{"strawberry": False}`` disables this module's patches."""
     monkeypatch.setattr(BaseView, "parse_json", patches._original_parse_json)
     monkeypatch.setattr(BaseView, "parse_query_params", patches._original_parse_query_params)
     assert patches._patch_is_installed() is False
@@ -573,10 +568,6 @@ def test_apply_no_ops_when_strawberry_dependency_opted_out(
     settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"strawberry": False}}
     patches.apply()
     assert patches._patch_is_installed() is False
-
-    settings.DJANGO_STRAWBERRY_FRAMEWORK = {"APPLY_UPSTREAM_PATCHES": {"django": False}}
-    patches.apply()
-    assert patches._patch_is_installed() is True
 
 
 def test_the_gated_workarounds_really_stop_hardening_when_opted_out(

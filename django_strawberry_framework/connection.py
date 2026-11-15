@@ -88,7 +88,11 @@ from .keyset import (
 )
 from .list_field import _validate_relay_djangotype_target
 from .optimizer._context import planned_window
-from .optimizer.extension import apply_connection_optimization, apply_connection_optimization_async
+from .optimizer.extension import (
+    _raw_resolve_info,
+    apply_connection_optimization,
+    apply_connection_optimization_async,
+)
 from .optimizer.plans import (
     WINDOW_KEYSET_SEEK_COUNT,
     WINDOW_ROW_NUMBER,
@@ -103,11 +107,10 @@ from .optimizer.plans import (
     runtime_path_from_info,
 )
 from .optimizer.selections import (
+    ast_to_converted_selections,
     connection_has_next_page_selected,
     connection_page_selected,
     connection_total_count_selected,
-    info_selections,
-    prime_selected_fields,
 )
 from .registry import register_subsystem_clear, registry
 from .resource_policy import check_deadline
@@ -1300,12 +1303,14 @@ def _connection_field_requested(info: Info[object, object], selected: _Selection
 
     One ``any(...)`` walk so ``totalCount`` and ``hasNextPage`` resolve-time
     observers cannot drift in how they iterate the selections. They read
-    ``optimizer/selections.py::info_selections``, the converted selections that
-    carry each field's Python name, so the observers match the connection's
-    fields by the names they were declared under whatever wire names the schema
-    publishes and whoever read ``info.selected_fields`` first.
+    ``optimizer/selections.py::ast_to_converted_selections`` over the resolver's
+    own field nodes, the converted selections that carry each field's Python
+    name, so the observers match the connection's fields by the names they were
+    declared under whatever wire names the schema publishes.
     """
-    return any(selected(field) for field in info_selections(info))
+    raw_info = _raw_resolve_info(info)
+    selections = ast_to_converted_selections(raw_info, raw_info.field_nodes)
+    return any(selected(field) for field in selections)
 
 
 def _total_count_requested(info: Info[object, object]) -> bool:
@@ -1497,13 +1502,6 @@ class DjangoConnection(relay.ListConnection[NodeType], Generic[NodeType]):  # py
         # the count selection does - a malformed pagination request answers with
         # its own error rather than with whichever bound fired second.
         check_deadline(info)
-        # Seed ``info.selected_fields`` with the execution's one stamped conversion
-        # BEFORE Strawberry's own ``ListConnection.resolve_connection`` reads it, so
-        # a reader of that slot shares the memoized list instead of converting a
-        # second time. Runs AFTER the guard so a ``first`` + ``last`` error still
-        # short-circuits before ``info``'s selections are touched
-        # (``test_first_and_last_guard_on_generated_subclass``).
-        prime_selected_fields(info)
         return _consume_window(
             cls,
             nodes,
