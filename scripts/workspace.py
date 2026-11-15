@@ -3702,14 +3702,22 @@ def gate(layout: Layout, suites: Sequence[str]) -> int:
 
 
 def gate_env(layout: Layout, cell: str) -> tuple[dict[str, str], str | None]:
-    """Return the gate copy's environment for ``cell`` and its Postgres database, if any."""
+    """Return the gate copy's environment for ``cell`` and its Postgres database, if any.
+
+    The caller's ``SINCE`` and ``UNTIL`` are dropped (:data:`LINT_COMMANDS`): a gate run
+    walks no suppression range, whatever the shell that started it exported.
+    """
     if cell != "pg":
-        return cell_env(layout, "gate", cell)
-    database = layout.db_name("gate")
-    postgres = Postgres(layout.repo_root)
-    _ = postgres.ensure()
-    postgres.recreate(database)
-    return clean_env(FAKESHOP_PG_DSN=postgres.dsn(database)), database
+        env, database = cell_env(layout, "gate", cell)
+    else:
+        database = layout.db_name("gate")
+        postgres = Postgres(layout.repo_root)
+        _ = postgres.ensure()
+        postgres.recreate(database)
+        env = clean_env(FAKESHOP_PG_DSN=postgres.dsn(database))
+    for name in ("SINCE", "UNTIL"):
+        _ = env.pop(name, None)
+    return env, database
 
 
 def _append_gate_run(

@@ -6049,6 +6049,48 @@ def test_a_stopped_gate_runs_no_later_suite_and_ends_by_the_signal(
     assert list(json_object(result, "suites")) == ["lint"]
 
 
+@pytest.mark.parametrize(
+    "exported",
+    [{"SINCE": "HEAD~3"}, {"UNTIL": "HEAD"}, {"SINCE": "HEAD~3", "UNTIL": ""}],
+    ids=["since-alone", "until-alone", "both"],
+)
+def test_the_lint_suite_runs_without_the_callers_suppression_range(
+    exported: dict[str, str],
+    layout: workspace.Layout,
+    syncs: _Syncs,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shell exporting ``SINCE`` or ``UNTIL`` never reaches the suppression lines of the suite."""
+    for name in ("pyproject.toml", "uv.lock"):
+        _ = _write(layout.repo_root / name, f"{name}\n")
+    for name, value in exported.items():
+        monkeypatch.setenv(name, value)
+    seen: list[dict[str, str]] = []
+
+    def recording_stream(
+        _command: list[str],
+        env: dict[str, str],
+        log_path: Path,
+        header: str,
+        cwd: Path | None = None,
+        *,
+        holding: tuple[int, ...] = (),
+    ) -> workspace.Finished:
+        assert cwd == layout.gate_dir
+        assert holding
+        seen.append(env)
+        _ = _write(log_path, header)
+        return workspace.Finished(0, None)
+
+    monkeypatch.setattr(workspace, "uv_launch", _launch_as_given)
+    monkeypatch.setattr(workspace, "stream", recording_stream)
+
+    assert workspace.gate(layout, ["lint"]) == 0
+    assert syncs == [layout.gate_dir]
+    (env,) = seen
+    assert not {"SINCE", "UNTIL"} & set(env)
+
+
 def test_the_floor_suite_installs_and_runs_holding_the_locks_the_gate_holds(
     layout: workspace.Layout,
     syncs: _Syncs,

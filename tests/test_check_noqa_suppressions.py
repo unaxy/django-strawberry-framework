@@ -378,25 +378,30 @@ def _commit(
     return _git.run_git(root, "rev-parse", "HEAD", check=True).stdout.strip()
 
 
+@pytest.mark.parametrize("until", [[], ["--until", ""]], ids=["default", "empty"])
 def test_main_since_walks_the_noqa_ledger(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    until: list[str],
 ) -> None:
-    """A commit raising a noqa total needs the consent trailer; the type ledger is not read."""
+    """A commit raising a noqa total needs the consent trailer; the type ledger is not read.
+
+    An empty ``--until`` walks to ``HEAD`` as the default does.
+    """
     _ = _tree(tmp_path, monkeypatch, {"good.py": _REASONED})
     _ = _git.run_git(tmp_path, "init", "-q", check=True)
     base = _commit(tmp_path, "", "base")
     grown = _commit(tmp_path, '"good.py::f" = { A002 = 1 }\n', "grow")
 
-    assert cns.main(["--since", base]) == 1
+    assert cns.main(["--since", base, *until]) == 1
     assert capsys.readouterr().out.splitlines()[0] == (
         f"{cns.LEDGER}:1: {grown[:12]} raises `A002` from 0 to 1 without a "
         f"`{cts.TRAILER}:` trailer (the maintainer's consent)"
     )
 
     _ = _commit(tmp_path, '"good.py::f" = { A002 = 1 }\n', "still")
-    assert cns.main(["--since", grown]) == 0
+    assert cns.main(["--since", grown, *until]) == 0
 
 
 def test_the_tracked_tree_matches_its_ledger() -> None:

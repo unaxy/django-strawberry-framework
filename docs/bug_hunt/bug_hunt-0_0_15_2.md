@@ -3,7 +3,7 @@
 Every finding from the 0.0.15 hunt in the t3 worktree (never merged), plus bugs found while fixing them.
 Each one is verified on main, fixed at the root, checked by a second agent, landed, then deleted from t3.
 
-Progress: 527 done, 110 to do. The CHANGELOG entries filed here moved to
+Progress: 531 done, 111 to do. The CHANGELOG entries filed here moved to
 [`CHANGELOGTODO.md`][changelogtodo], numbers kept.
 
 ## Done
@@ -3202,6 +3202,42 @@ Progress: 527 done, 110 to do. The CHANGELOG entries filed here moved to
   `::test_one_optimizer_on_two_schemas_reads_each_schemas_published_names` (and `_async`),
   `::test_a_per_operation_resource_policy_plans_each_operations_window`. spec-004, spec-018, spec-023, spec-033,
   README, GLOSSARY Plan cache. CHANGELOG 958
+- [x] 959. fixed: the landing a later `land` / `commit` patches from is read off the copy's attributed `landed` +
+  `landed-copy` pins (`scripts/work.py::landing_recorded`, used by `earlier_landing` and `own_landing_paths`), the
+  `landed` marker only a flag that counts alone for notes older than the pin record, so a home a fleet handoff promoted
+  without the marker lands only its work since the landing, where an edit was refused or a landed deletion dropped; one
+  pin recorded alone, a missing, foreign or unreadable pin, or a marked note recording no landing pin refuses, naming
+  `--from-start`. `docs/fleet/scripts/fleet_sync.py::NOTE_CARRIED` and handoff promotion carry `LANDING_MARKER`.
+  Pinned by `tests/test_work.py::test_the_attributed_landing_pins_pick_the_patch_base_whatever_the_marker_holds`,
+  `::test_a_note_recording_one_landing_pin_alone_refuses`, `::test_a_legacy_note_without_the_marker_records_no_landing`,
+  `::test_a_marked_note_recording_no_landing_pin_refuses`,
+  `tests/test_fleet_sync.py::test_a_handed_off_copy_lands_its_work_since_its_landing_on_the_new_home`. START.md
+  "Concurrent sessions", "Private working copies", "Syncing the fleet". Filed 963
+- [x] 960. fixed: after the copy's `HEAD` moved along main, `land` patches from the `HEAD` tree with the `landed-copy`
+  entry at each landed path whose entry `HEAD` still holds from the landing's start (`scripts/work.py::_landed_since`
+  in `patch_base`), so a path only main changed is never read as the copy's work (no false "back at its start"
+  refusal, no "patch does not apply" for a later copy edit, main's revert not re-applied); a touched path whose earlier
+  landing main changed (the reverse of its per-path landing patch no longer applies, `_not_held`) is named "not
+  re-applied" (`PatchBase.undone`, `LandPlan.undone`). Pinned by
+  `tests/test_work.py::test_a_copy_whose_head_moved_after_a_landing_lands_only_its_own_work`,
+  `::test_a_copy_whose_head_moved_lands_a_later_edit_of_its_landed_path`,
+  `::test_a_landed_path_main_edited_after_the_copy_moved_onto_it_stays_mains`,
+  `::test_a_copy_edit_of_a_landed_path_main_edited_before_the_move_lands`,
+  `::test_a_later_hunk_beside_an_earlier_landing_names_a_landing_main_undid`,
+  `::test_a_moved_copys_landing_leaves_its_own_and_the_shared_index_untouched`,
+  `::test_a_binary_landed_path_edited_again_lands_with_no_note`,
+  `::test_three_landings_across_head_moves_commit_exactly_the_landed_bytes`. START.md "Concurrent sessions"
+- [x] 961. fixed: `scripts/workspace.py::gate_env` drops the caller's `SINCE` / `UNTIL`, and
+  `scripts/check_type_suppressions.py` / `scripts/check_noqa_suppressions.py` read an empty `--until` as `HEAD`, so a
+  caller's range no longer stops the lint suite with `git log ''`. Pinned by
+  `tests/test_workspace.py::test_the_lint_suite_runs_without_the_callers_suppression_range` and the `[empty]` rows of
+  `tests/test_check_type_suppressions.py::test_main_since_fails_on_an_unapproved_rise_and_passes_an_approved_one` /
+  `tests/test_check_noqa_suppressions.py::test_main_since_walks_the_noqa_ledger`
+- [x] 962. fixed: `land --from-start` names each path the last landing changed that it leaves as main holds it (a
+  landed new file the copy deleted since), where it kept it silently (`scripts/work.py::_left_from_start`,
+  `PatchBase.left`, `LandPlan.left`). Pinned by
+  `tests/test_work.py::test_from_start_names_a_landed_new_file_the_copy_deleted_since`,
+  `::test_from_start_names_nothing_for_a_copy_still_holding_its_landing`. START.md "Concurrent sessions"
 
 ## To do: found along the way
 
@@ -3354,7 +3390,10 @@ Progress: 527 done, 110 to do. The CHANGELOG entries filed here moved to
 - [ ] 956. A GlobalID decoded on the write side or in a filter may disagree with `node(id:)` on an id matched only
   through the key column's collation: `get(pk=...)` and `_resolve_real_pk`'s `.filter(...).first()` find the row
   through the collation, `_resolve_real_pks_batched` compares in Python and does not, and `node` / `nodes` answer null
-  (traced, not run). Found verifying 953
+  (traced, not run). Found verifying 953- [ ] 963. (robustness) `work.py gc` and `list` still read the `landed` marker where `land` and `own_landing_paths`
+  read the attributed pins (`landing_recorded`): a home promoted without the marker is kept by `gc` (the safe side).
+  Found verifying 959
+
 
 ## To do: holes found re-checking the fixes
 

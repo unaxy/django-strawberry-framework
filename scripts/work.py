@@ -254,15 +254,28 @@ Commands
         ``main`` (so no committed work in the copy is dropped); the shared
         ``HEAD`` must be ``refs/heads/main``. After a landing it is diffed
         against the ``landed-copy`` pin instead (the copy's whole content at
-        its last landing): only the copy's work since then lands, and a path
+        its last landing; where the copy's ``HEAD`` moved along main since,
+        the ``HEAD`` tree holding that pin's entry at each path the landing
+        changed that the ``HEAD`` still holds as the landing started it):
+        only the copy's work since then lands, and a path
         unchanged since is never re-applied, whatever main did to it. Such an
         earlier-landed path that neither the shared ``HEAD`` nor the shared
         working tree holds as landed (reverted, never committed, changed
-        since) is named in a note; ``--from-start`` diffs against the copy's
-        ``HEAD`` again to land it. Without ``--from-start`` a copy whose note
-        records a landing whose ``landed`` or ``landed-copy`` pin is missing,
-        another copy's or incomplete refuses, and so does a path the copy put
-        back at its ``HEAD`` entry (``reset --hard``, ``checkout --``) where
+        since) is named in a note, and so is a path the copy changed again
+        whose earlier landing the shared ``HEAD`` changed (the reverse of
+        that landing's own patch does not apply there), where
+        only the copy's change since lands; ``--from-start`` diffs against
+        the copy's ``HEAD`` again to land it, naming each path the last
+        landing changed that it leaves as main holds it (the copy holds its
+        ``HEAD`` entry there: a landed new file deleted, a path reset). A note
+        records a landing where it records publishing a ``landed`` or
+        ``landed-copy`` pin or carries the ``landed`` marker (a value read
+        only as a flag; a note older than the pin record, by the marker
+        alone). Without ``--from-start`` a copy whose note records a landing
+        whose ``landed`` or ``landed-copy`` pin is missing (one recorded
+        alone included), another copy's or incomplete refuses, and so does a
+        path the copy put back at its ``HEAD`` entry (``reset --hard``,
+        ``checkout --``) where
         its last landing held other content and the shared ``HEAD`` is not
         at that start entry (``--from-start`` lands the rest and leaves those
         paths as main holds them); a reset path main also has at the start
@@ -4613,6 +4626,8 @@ class LandPlan:
     expected: dict[str, State]
     unheld: list[str]
     rows: dict[str, list[_sqlite_rows.RowChange]] = dataclasses.field(default_factory=dict)
+    undone: list[str] = dataclasses.field(default_factory=list)
+    left: list[str] = dataclasses.field(default_factory=list)
 
 
 def _branch(repo: Path) -> str:
@@ -4653,6 +4668,21 @@ def _pin_readable(store: Path, commit: str, *, parent: bool) -> bool:
         and _git_ok(store, "ls-tree", "-r", "--full-tree", commit)
         and (not parent or _git_ok(store, "cat-file", "-e", f"{commit}^^{{commit}}"))
     )
+
+
+def landing_recorded(copy: Copy) -> bool:
+    """Return whether the copy's note records a landing.
+
+    A note holding :data:`PINS_NOTE` records one where it records publishing a
+    ``landed`` or ``landed-copy`` pin, or carries the landing marker (``landed``, whose
+    value is only a flag): a home a fleet handoff promoted may hold the pin record
+    without the marker. A note older than :data:`PINS_NOTE` records one only by the marker.
+    """
+    note = copy.note
+    if note.get("landed"):
+        return True
+    recorded = recorded_pins(note) if PINS_NOTE in note else {}
+    return LANDED_PIN in recorded or LANDED_COPY_PIN in recorded
 
 
 def _landing_pins(repo: Path, copy: Copy) -> tuple[Path | None, str, str, list[str]]:
@@ -4722,7 +4752,7 @@ def own_landing_paths(
         WorkError: ``pins.git`` or its refs cannot be read (:func:`_landing_pins`).
 
     """
-    if not paths or not copy.note.get("landed"):
+    if not paths or not landing_recorded(copy):
         return []
     store, _own, merged, problems = _landing_pins(repo, copy)
     if store is None or problems:
@@ -4745,19 +4775,19 @@ def own_landing_paths(
 def earlier_landing(repo: Path, copy: Copy, copy_root: Path) -> tuple[Path, str, str] | None:
     """Return ``(pins.git, landed-copy, landed)`` for the copy's last landing, else ``None``.
 
-    ``None`` only for a copy whose note records no landing. Only pins the note attributes
-    to this copy count (:func:`pin_belongs`), so another copy's landing under the name is
-    never a patch base. The ``landed-copy`` commit is fetched into the copy when its
-    objects are not there, so its tree can be diffed.
+    ``None`` only for a copy whose note records no landing (:func:`landing_recorded`).
+    Only pins the note attributes to this copy count (:func:`pin_belongs`), so another
+    copy's landing under the name is never a patch base. The ``landed-copy`` commit is
+    fetched into the copy when its objects are not there, so its tree can be diffed.
 
     Raises:
-        WorkError: the note records a landing but a landing pin is missing, is not this
-            copy's, or ``pins.git`` lacks its objects: patching from the start instead
-            could re-apply that landing over main without a word (``land --from-start``
-            is the explicit choice).
+        WorkError: the note records a landing but a landing pin is missing (one of the
+            two recorded alone included), is not this copy's, or ``pins.git`` lacks its
+            objects: patching from the start instead could re-apply that landing over
+            main without a word (``land --from-start`` is the explicit choice).
 
     """
-    if not copy.note.get("landed"):
+    if not landing_recorded(copy):
         return None
     store, own, merged, problems = _landing_pins(repo, copy)
     if store is None or problems:
@@ -4782,6 +4812,123 @@ class PatchBase:
     changes: list[Change]
     unheld: list[str]
     reset: list[str]
+    undone: list[str] = dataclasses.field(default_factory=list)
+    left: list[str] = dataclasses.field(default_factory=list)
+
+
+def _landed_since(copy_root: Path, own: str, base: str) -> str:
+    """Return the tree the copy's work since its last landing starts from, on its ``HEAD``.
+
+    The ``landed-copy`` pin ``own`` is the copy's whole content at that landing, on the
+    ``HEAD`` it had then. While the copy's ``HEAD`` is still ``own``'s parent, that is
+    ``own``'s tree. After the copy's ``HEAD`` moved along main, it is the ``HEAD`` tree
+    ``base`` holding ``own``'s entry at each path the landing changed from its own parent
+    where ``base`` still holds that parent's entry, so a path only main changed (which the
+    move brought, a landed path main edited after the landing included) is never the
+    copy's work.
+    """
+    if _resolve_commit(copy_root, f"{own}^") == base:
+        return _tree_of(copy_root, own)
+    landed = copy_changes(copy_root, f"{own}^", own)
+    paths = [change.path for change in landed]
+    then = _tree_states(copy_root, f"{own}^", paths)
+    now = _tree_states(copy_root, base, paths)
+    landed = [change for change in landed if now[change.path] == then[change.path]]
+    index = _git_path(copy_root, f"dsf-work-since-{_token()}")
+    env = {"GIT_INDEX_FILE": str(index)}
+    try:
+        _ = _git(copy_root, "read-tree", base, env=env)
+        for change in landed:
+            if change.state is None:
+                _ = _git(copy_root, "update-index", "--force-remove", "--", change.path, env=env)
+            else:
+                _ = _git(
+                    copy_root,
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    f"{change.mode},{change.blob},{change.path}",
+                    env=env,
+                )
+        return _git(copy_root, "write-tree", env=env).strip()
+    finally:
+        index.unlink(missing_ok=True)
+
+
+def _not_held(
+    repo: Path,
+    patch: Callable[[Sequence[str]], bytes],
+    paths: Sequence[str],
+) -> list[str]:
+    """Return which of ``paths`` the shared ``HEAD`` does not hold as ``patch`` changed them.
+
+    A path is held where the reverse of its own ``patch`` applies onto the shared ``HEAD``
+    (``git apply -R --check`` in a private index, nothing written): main kept that change,
+    whatever it changed elsewhere in the file.
+    """
+    if not paths:
+        return []
+    index = _git_path(repo, f"dsf-work-held-{_token()}")
+    env = {"GIT_INDEX_FILE": str(index)}
+
+    def reverts(names: Sequence[str]) -> bool:
+        try:
+            _ = _git_bytes(
+                repo,
+                "apply",
+                "--cached",
+                "-R",
+                "--check",
+                "--whitespace=nowarn",
+                "-",
+                env=env,
+                stdin=patch(names),
+            )
+        except WorkError:
+            return False
+        return True
+
+    try:
+        _ = _git(repo, "read-tree", "HEAD", env=env)
+        if reverts(paths):
+            return []
+        return [path for path in paths if not reverts([path])]
+    finally:
+        index.unlink(missing_ok=True)
+
+
+def _left_from_start(
+    repo: Path,
+    copy: Copy,
+    copy_root: Path,
+    changes: Sequence[Change],
+) -> list[str]:
+    """Return the paths ``land --from-start`` leaves as main holds them though a landing changed them.
+
+    Each is a path the copy's last landing changed from the copy's ``HEAD`` that the
+    copy now holds at its ``HEAD`` entry (a landed new file deleted, a path reset), so
+    the patch from the ``HEAD`` carries nothing there, and the shared ``HEAD`` holds
+    other content. Empty for a copy that never landed or whose landing pins cannot be
+    used (:func:`_landing_pins`).
+    """
+    if not landing_recorded(copy):
+        return []
+    _store, own, _merged, problems = _landing_pins(repo, copy)
+    if problems:
+        return []
+    if not _git_ok(copy_root, "cat-file", "-e", f"{own}^{{commit}}"):
+        fetch_pinned(repo, copy_root, own)
+    base = _head(copy_root)
+    since = _landed_since(copy_root, own, base)
+    patched = {change.path for change in changes}
+    landed = [
+        change.path
+        for change in copy_changes(copy_root, base, since)
+        if change.path not in patched
+    ]
+    at_head = _tree_states(repo, "HEAD", landed)
+    started = _tree_states(copy_root, base, landed)
+    return sorted(path for path in landed if at_head[path] != started[path])
 
 
 def patch_base(
@@ -4794,45 +4941,53 @@ def patch_base(
 ) -> PatchBase:
     """Return where the copy's patch to ``tree`` starts, and which changes it carries.
 
-    A copy that never landed, or ``from_start``, patches from its ``HEAD``. After a
-    landing the patch is the copy's work since then: ``landed-copy`` (the copy's whole
-    content at its last landing, so every earlier landing and every path skipped as
-    already there) to ``tree``; a copy whose note records a landing whose pins are
-    missing, not its own or incomplete is refused (:func:`earlier_landing`), never
-    patched from its start unasked. A path unchanged since that landing is never in the
-    patch, whatever main did to it. A path counts as held as landed where it is as the
-    copy held it then, or, for a path the last landing wrote, as that landing left it.
-    ``unheld`` names the untouched paths the copy's landings changed from its ``HEAD``
-    that neither the shared ``HEAD`` nor the shared working tree holds as landed, for
-    ``land`` to note; ``reset`` names the patch's paths the copy put back at its
-    ``HEAD`` entry (a ``reset --hard`` or ``checkout --`` in the copy) where its last
-    landing held other content and the shared ``HEAD`` is not at that start entry
-    either, which :func:`plan_landing` refuses rather than undo that landing on main
-    (also where main reverted it and edited the file since: ``land --from-start``
-    lands the rest and leaves those paths as main holds them). Where the shared
-    ``HEAD`` is at the start too, the patch
-    changes nothing there; a file the start lacks is never among them (neither command
-    puts it back, so deleting a landed new file is ordinary work). Only the whole-path
-    return to the start is guarded: an edit back to the start in part of a file lands
-    like any edit.
+    A copy that never landed, or ``from_start``, patches from its ``HEAD``; with
+    ``from_start``, ``left`` names the paths its last landing changed that the patch
+    leaves as main holds them (:func:`_left_from_start`), for ``land`` to note. After a
+    landing the patch is the copy's work since then: from ``landed-copy`` (the copy's
+    whole content at its last landing, so every earlier landing and every path skipped
+    as already there), carried onto the copy's current ``HEAD`` when that moved along
+    main since (:func:`_landed_since`: a landed path only where that ``HEAD`` still holds
+    the landing's starting entry), to ``tree``; a copy whose note records a landing
+    whose pins are missing, not its own or incomplete is refused
+    (:func:`earlier_landing`), never patched from its start unasked. A path unchanged
+    since that landing is never in the patch, whatever main did to it. A path counts as
+    held as landed where it is as the copy held it then, or, for a path the last landing
+    wrote, as that landing left it. ``unheld`` names the untouched paths the copy's
+    landings changed from its ``HEAD`` that neither the shared ``HEAD`` nor the shared
+    working tree holds as landed, for ``land`` to note; ``undone`` names the patch's
+    paths whose earlier landing the shared ``HEAD`` changed (the reverse of that landing's
+    own patch does not apply there, :func:`_not_held`: reverted, or edited beside or over
+    it), where only the copy's work since lands, for ``land`` to note too.
+    ``reset`` names the patch's paths the copy put back at its ``HEAD`` entry (a
+    ``reset --hard`` or ``checkout --`` in the copy) where its last landing held other
+    content and the shared ``HEAD`` is not at that start entry either, which
+    :func:`plan_landing` refuses rather than undo that landing on main (also where main
+    reverted it and edited the file since: ``land --from-start`` lands the rest and
+    leaves those paths as main holds them). Where the shared ``HEAD`` is at the start
+    too, the patch changes nothing there; a file the start lacks is never among them
+    (neither command puts it back, so deleting a landed new file is ordinary work). Only
+    the whole-path return to the start is guarded: an edit back to the start in part of
+    a file lands like any edit.
     """
     base = _head(copy_root)
-    landing = None if from_start else earlier_landing(repo, copy, copy_root)
+    if from_start:
+        changes = copy_changes(copy_root, base, tree)
+        left = _left_from_start(repo, copy, copy_root, changes)
+        return PatchBase(base, changes, [], [], left=left)
+    landing = earlier_landing(repo, copy, copy_root)
     if landing is None:
         return PatchBase(base, copy_changes(copy_root, base, tree), [], [])
     store, own, merged = landing
-    since = _tree_of(copy_root, own)
+    since = _landed_since(copy_root, own, base)
     changes = copy_changes(copy_root, since, tree)
     touched = [change.path for change in changes]
-    earlier = sorted(
-        change.path
-        for change in copy_changes(copy_root, base, since)
-        if change.path not in set(touched)
-    )
+    landed_paths = {change.path for change in copy_changes(copy_root, base, since)}
+    earlier = sorted(path for path in landed_paths if path not in set(touched))
     wrote = _landing_wrote(store, merged)
     paths = [*earlier, *touched]
     at_head = _tree_states(repo, "HEAD", paths)
-    owned = _tree_states(store, own, paths)
+    owned = _tree_states(copy_root, since, paths)
     landed = _tree_states(store, merged, paths)
     started = _tree_states(copy_root, base, touched)
 
@@ -4853,7 +5008,9 @@ def patch_base(
         and owned[change.path] != started[change.path]
         and at_head[change.path] != started[change.path]
     ]
-    return PatchBase(since, changes, unheld, reset)
+    relanded = [path for path in touched if path in landed_paths and path not in ROW_MERGED_PATHS]
+    undone = _not_held(repo, lambda names: _diff(copy_root, base, since, names), relanded)
+    return PatchBase(since, changes, unheld, reset, undone)
 
 
 def _diff(
@@ -5030,6 +5187,8 @@ def plan_landing(
         expected,
         start.unheld,
         {path: changed for path, changed in rows.items() if changed},
+        [path for path in start.undone if path in paths],
+        start.left,
     )
 
 
@@ -5432,6 +5591,19 @@ def _land(
             f"{', '.join(plan.unheld)} (reverted, never committed, or changed since), and "
             "the copy has not changed it since; `land --from-start` patches from the copy's "
             "start to land it again",
+        )
+    if plan.undone:
+        _say(
+            f"not re-applied: main changed the copy's earlier landing of "
+            f"{', '.join(plan.undone)} (reverted, or edited beside or over it), and only the "
+            "copy's change since lands there; `land --from-start` patches from the copy's "
+            "start to land it all again",
+        )
+    if plan.left:
+        _say(
+            f"left as main holds them: {', '.join(plan.left)}; the copy's earlier landing "
+            "changed them and the copy holds its start there now (a landed new file deleted, "
+            "a path reset), which a patch from the start does not carry",
         )
     for path in plan.skipped:
         _say(f"already there: {path}")

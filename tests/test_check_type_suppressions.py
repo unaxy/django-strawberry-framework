@@ -461,18 +461,23 @@ def test_growth_walk_has_no_range_without_a_known_base(
     assert list(cts.growth_violations(since, "HEAD")) == []
 
 
+@pytest.mark.parametrize("until", [[], ["--until", ""]], ids=["default", "empty"])
 def test_main_since_fails_on_an_unapproved_rise_and_passes_an_approved_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    until: list[str],
 ) -> None:
-    """``--since`` adds the walk to the check; consent on the commit clears it."""
+    """``--since`` adds the walk to the check; consent on the commit clears it.
+
+    An empty ``--until`` (a shell exporting ``SINCE`` alone) walks to ``HEAD`` as the default does.
+    """
     _ = _tree(tmp_path, monkeypatch, {"good.py": _CASTING})
     _repository(tmp_path, monkeypatch)
     base = _commit(tmp_path, "", "base")
     grown = _commit(tmp_path, '"good.py::f" = { cast = 1 }\n', "grow")
 
-    assert cts.main(["--since", base]) == 1
+    assert cts.main(["--since", base, *until]) == 1
     assert capsys.readouterr().out.splitlines()[0] == (
         f"{cts.LEDGER}:1: {grown[:12]} raises `cast` from 0 to 1 without a "
         f"`{cts.TRAILER}:` trailer (the maintainer's consent)"
@@ -491,7 +496,7 @@ def test_main_since_fails_on_an_unapproved_rise_and_passes_an_approved_one(
         _APPROVED,
         check=True,
     )
-    assert cts.main(["--since", base]) == 0
+    assert cts.main(["--since", base, *until]) == 0
 
 
 def test_the_tracked_tree_matches_its_ledger() -> None:

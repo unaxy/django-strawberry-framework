@@ -56,7 +56,9 @@ One writer per copy
     first syncs the copy fresh from its home and carries the home's pins under
     its name that ``M`` lacks (so the pin record the promotion writes names no pin
     ``M``'s store lacks), then marks the home's copy a replica of ``M`` and
-    promotes ``M``'s, then re-points every other replica it reaches. A replica
+    promotes ``M``'s (writing the old home's pin record and landing marker, so
+    ``M``'s next ``work.py land`` patches from the copy's last landing), then
+    re-points every other replica it reaches. A replica
     with commits or edits since its last sync while the home's copy did not
     change (content and ``HEAD``) is promoted as it is (its work is kept, nothing
     is overwritten). Each handoff writes its lineage into every note it
@@ -463,7 +465,10 @@ CLONE_GIT_EXCLUDES = (
 )
 #: A worktree's ``.git`` file names its own machine's repository.
 WORKTREE_GIT_EXCLUDES = ("/.git",)
-#: Note keys a replica carries over from its home's copy.
+#: Note keys a replica carries over from its home's copy. ``landed``, ``landedtree`` and
+#: ``landedat`` (the landing marker) only word ``work.py list`` / ``gc`` and the settle time:
+#: what a later ``land`` patches from is read off the attributed landing pins.
+LANDING_MARKER = ("landed", "landedtree", "landedat")
 NOTE_CARRIED = (
     "name",
     "form",
@@ -478,6 +483,7 @@ NOTE_CARRIED = (
     "adopted",
     "restoredfrom",
     work.PINS_NOTE,
+    *LANDING_MARKER,
 )
 IN_PROGRESS = (
     "MERGE_HEAD",
@@ -1862,7 +1868,7 @@ def agent_set_home(
     ``lineage`` (``generation``, ``formerhomes``), when given, is the handoff's, written too.
     A promotion writes the old home's pin record ``carried`` holds (``work.PINS_NOTE``), so the
     new home attributes every pin the old one published, a replica kept unrefreshed (its own
-    edits) included.
+    edits) included, and its landing marker (:data:`LANDING_MARKER`).
 
     Raises:
         FleetError: the content is not ``expect_tree`` or ``HEAD`` not ``expect_head``, a
@@ -1887,8 +1893,10 @@ def agent_set_home(
             msg = f"a promotion names this machine, not {home}"
             raise FleetError(msg)
         values = {"home": home, "replica": "false", **marks}
-        if carried is not None and work.PINS_NOTE in carried:
-            values[work.PINS_NOTE] = carried[work.PINS_NOTE]
+        if carried is not None:
+            values.update(
+                {key: carried[key] for key in (work.PINS_NOTE, *LANDING_MARKER) if key in carried},
+            )
         work.write_note(copy_root, copy.form, values)
         _unset_syncing(copy_root, copy.form)
         return {"tree": tree}

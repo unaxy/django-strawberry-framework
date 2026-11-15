@@ -1520,6 +1520,366 @@ def test_a_landing_pin_another_copy_left_under_the_name_is_never_a_patch_base(
     assert (repo / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 7\n"
 
 
+def _drop_marker(path: Path) -> None:
+    """Unset the copy's landing marker, leaving only its pin record."""
+    for key in ("landed", "landedtree", "landedat"):
+        _ = _git_out(path, "config", "--local", "--unset", f"{work.NOTE_SECTION}.{key}")
+
+
+@pytest.mark.parametrize(
+    "marker",
+    ["gone", "foreign value"],
+)
+@pytest.mark.parametrize("work_since", ["edit", "delete"])
+def test_the_attributed_landing_pins_pick_the_patch_base_whatever_the_marker_holds(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    marker: str,
+    work_since: str,
+) -> None:
+    path = _new("fix-marker")
+    _land_and_commit(repo, "fix-marker", path, "new.txt", "one\ntwo\n")
+    if marker == "gone":
+        _drop_marker(path)
+    else:
+        copy = work.locate(repo, "fix-marker")
+        work.write_note(path, copy.form, {"landed": "0" * 40, "landedtree": "0" * 40})
+    if work_since == "edit":
+        _ = _write(path / "new.txt", "one\nTWO\n")
+    else:
+        (path / "new.txt").unlink()
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-marker"]) == 0, capsys.readouterr().err
+    if work_since == "edit":
+        assert (repo / "new.txt").read_text(encoding="utf-8") == "one\nTWO\n"
+    else:
+        assert not (repo / "new.txt").exists()
+
+
+@pytest.mark.parametrize("leaf", [work.LANDED_PIN, work.LANDED_COPY_PIN])
+def test_a_note_recording_one_landing_pin_alone_refuses(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    leaf: str,
+) -> None:
+    path = _new("fix-one-pin")
+    _land_and_commit(repo, "fix-one-pin", path, "new.txt", "new\n")
+    _drop_marker(path)
+    copy = work.locate(repo, "fix-one-pin")
+    kept = {k: v for k, v in work.recorded_pins(copy.note).items() if k != leaf}
+    listed = ",".join(f"{key}={value}" for key, value in sorted(kept.items()))
+    work.write_note(path, copy.form, {work.PINS_NOTE: listed})
+    (path / "new.txt").unlink()
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-one-pin"]) == 1
+    assert f"refs/work/fix-one-pin/{leaf} is missing, not this copy's" in capsys.readouterr().err
+    assert (repo / "new.txt").read_text(encoding="utf-8") == "new\n"
+
+
+def test_a_legacy_note_without_the_marker_records_no_landing(repo: Path) -> None:
+    path = _new("fix-legacy")
+    _land_and_commit(repo, "fix-legacy", path, "new.txt", "new\n")
+    _drop_marker(path)
+    _ = _git_out(path, "config", "--local", "--unset", f"{work.NOTE_SECTION}.{work.PINS_NOTE}")
+    copy = work.locate(repo, "fix-legacy")
+    assert not work.landing_recorded(copy)
+    assert work.earlier_landing(repo, copy, path) is None
+    assert (
+        work.own_landing_paths(repo, copy, work._resolve_commit(repo, "HEAD"), ["new.txt"]) == []
+    )
+
+
+def _move_copy_head(path: Path) -> None:
+    """Move the copy's ``HEAD`` to main's tip, its uncommitted work carried by the checkout."""
+    _ = _git_out(path, "fetch", "-q", "parent", "main")
+    _ = _git_out(path, "checkout", "-q", "--merge", "--detach", "FETCH_HEAD")
+
+
+@pytest.mark.parametrize("main_then", ["edits", "reverts"])
+def test_a_copy_whose_head_moved_after_a_landing_lands_only_its_own_work(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    main_then: str,
+) -> None:
+    path = _new("fix-moved")
+    _land_and_commit(repo, "fix-moved", path, f"{PACKAGE}/core.py", "CORE = 3\n")
+    _ = _write(repo / PACKAGE / "__init__.py", "VALUE = 5\n")
+    _ = _git_out(repo, "commit", "-q", "-am", "another session")
+    _move_copy_head(path)
+    if main_then == "edits":
+        _ = _write(repo / PACKAGE / "__init__.py", "VALUE = 7\n")
+        _ = _git_out(repo, "commit", "-q", "-am", "another session again")
+    else:
+        _ = _git_out(repo, "revert", "--no-edit", "HEAD")
+    _ = _write(path / "gone.txt", "copy\n")
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-moved"]) == 0, capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "not re-applied" not in err
+    assert "does not hold" not in err
+    on_main = {"edits": "VALUE = 7\n", "reverts": "VALUE = 1\n"}[main_then]
+    assert (repo / PACKAGE / "__init__.py").read_text(encoding="utf-8") == on_main
+    assert (repo / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 3\n"
+    assert (repo / "gone.txt").read_text(encoding="utf-8") == "copy\n"
+
+
+def test_a_copy_whose_head_moved_lands_a_later_edit_of_its_landed_path(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-moved-edit")
+    _land_and_commit(repo, "fix-moved-edit", path, f"{PACKAGE}/core.py", "CORE = 3\n")
+    _ = _write(repo / PACKAGE / "__init__.py", "VALUE = 5\n")
+    _ = _git_out(repo, "commit", "-q", "-am", "another session")
+    _move_copy_head(path)
+    _ = _write(path / PACKAGE / "core.py", "CORE = 4\n")
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-moved-edit"]) == 0, capsys.readouterr().err
+    assert (repo / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 4\n"
+    assert (repo / PACKAGE / "__init__.py").read_text(encoding="utf-8") == "VALUE = 5\n"
+
+
+@pytest.mark.parametrize("main_then", ["stays", "edits again"])
+def test_a_landed_path_main_edited_after_the_copy_moved_onto_it_stays_mains(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    main_then: str,
+) -> None:
+    path = _new("fix-moved-twice")
+    _land_and_commit(repo, "fix-moved-twice", path, f"{PACKAGE}/core.py", "CORE = 3\n")
+    _move_copy_head(path)
+    _ = _write(repo / PACKAGE / "core.py", "CORE = 9\n")
+    _ = _git_out(repo, "commit", "-q", "-am", "another session edits the landed path")
+    _move_copy_head(path)
+    assert (path / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 9\n"
+    if main_then == "edits again":
+        _ = _write(repo / PACKAGE / "core.py", "CORE = 11\n")
+        _ = _git_out(repo, "commit", "-q", "-am", "and again")
+    _ = _write(path / "other.txt", "copy\n")
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-moved-twice"]) == 0, capsys.readouterr().err
+    assert "not re-applied" not in capsys.readouterr().err
+    on_main = "CORE = 11\n" if main_then == "edits again" else "CORE = 9\n"
+    assert (repo / PACKAGE / "core.py").read_text(encoding="utf-8") == on_main
+    assert (repo / "other.txt").read_text(encoding="utf-8") == "copy\n"
+
+
+def test_a_copy_edit_of_a_landed_path_main_edited_before_the_move_lands(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-moved-over")
+    _land_and_commit(repo, "fix-moved-over", path, f"{PACKAGE}/core.py", "CORE = 3\n")
+    _move_copy_head(path)
+    _ = _write(repo / PACKAGE / "core.py", "CORE = 9\n")
+    _ = _git_out(repo, "commit", "-q", "-am", "another session edits the landed path")
+    _move_copy_head(path)
+    _ = _write(path / PACKAGE / "core.py", "CORE = 10\n")
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-moved-over"]) == 0, capsys.readouterr().err
+    assert (repo / PACKAGE / "core.py").read_text(encoding="utf-8") == "CORE = 10\n"
+
+
+def test_a_moved_copys_landing_leaves_its_own_and_the_shared_index_untouched(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-moved-index")
+    _land_and_commit(repo, "fix-moved-index", path, f"{PACKAGE}/core.py", "CORE = 3\n")
+    _ = _write(repo / PACKAGE / "__init__.py", "VALUE = 5\n")
+    _ = _git_out(repo, "commit", "-q", "-am", "another session")
+    _move_copy_head(path)
+    _ = _write(path / PACKAGE / "core.py", "CORE = 4\n")
+    folders = [
+        Path(_git_out(root, "rev-parse", "--absolute-git-dir").strip()) for root in (path, repo)
+    ]
+    indexes = [(folder / "index").read_bytes() for folder in folders]
+    status = _git_out(path, "status", "--porcelain")
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-moved-index"]) == 0, capsys.readouterr().err
+    assert [(folder / "index").read_bytes() for folder in folders] == indexes
+    assert _git_out(path, "status", "--porcelain") == status
+    assert not [
+        entry.name
+        for folder in folders
+        for entry in folder.iterdir()
+        if entry.name.startswith("dsf-work-")
+    ]
+
+
+def test_a_binary_landed_path_edited_again_lands_with_no_note(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-binary")
+    (path / "blob.bin").write_bytes(b"\x00\x01binary\x00one")
+    assert work.main(["land", "fix-binary"]) == 0
+    _ = _git_out(repo, "add", "-A")
+    _ = _git_out(repo, "commit", "-q", "-m", "binary")
+    (path / "blob.bin").write_bytes(b"\x00\x01binary\x00two")
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-binary"]) == 0
+    assert "not re-applied" not in capsys.readouterr().err
+    assert (repo / "blob.bin").read_bytes() == b"\x00\x01binary\x00two"
+
+
+def test_three_landings_across_head_moves_commit_exactly_the_landed_bytes(
+    repo: Path,
+    committer: object,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert committer is not None
+    core, moved, init = f"{PACKAGE}/core.py", f"{PACKAGE}/moved.py", f"{PACKAGE}/__init__.py"
+    path = _new("fix-three")
+    _ = _write(path / core, "CORE = 3\n")
+    _gate("fix-three", path)
+    assert work.main(["land", "fix-three"]) == 0
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-three",
+                "-m",
+                "one",
+            ],
+        )
+        == 0
+    )
+    _move_copy_head(path)
+    _ = _write(repo / init, "VALUE = 5\n")
+    _ = _git_out(repo, "commit", "-q", "-am", "another session")
+    _move_copy_head(path)
+    _ = _write(repo / init, "VALUE = 6\n")
+    _ = _git_out(repo, "commit", "-q", "-am", "another session again")
+    _ = _write(path / core, "CORE = 4\n")
+    _ = _write(path / "new.txt", "new\n")
+    _gate("fix-three", path)
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-three"]) == 0, capsys.readouterr().err
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-three",
+                "-m",
+                "two",
+            ],
+        )
+        == 0
+    ), capsys.readouterr().err
+    shown = _git_out(repo, "show", "--no-renames", "--name-only", "--format=", "HEAD").split()
+    assert sorted(shown) == [core, "new.txt"]
+    (path / "new.txt").unlink()
+    _ = _git_out(path, "mv", core, moved)
+    _gate("fix-three", path)
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-three"]) == 0, capsys.readouterr().err
+    assert (
+        work.main(
+            [
+                "commit",
+                "fix-three",
+                "-m",
+                "three",
+            ],
+        )
+        == 0
+    ), capsys.readouterr().err
+    shown = _git_out(repo, "show", "--no-renames", "--name-only", "--format=", "HEAD").split()
+    assert sorted(shown) == [core, moved, "new.txt"]
+    assert _git_out(repo, "show", f"HEAD:{moved}") == "CORE = 4\n"
+    assert _git_out(repo, "show", f"HEAD:{init}") == "VALUE = 6\n"
+    assert _git_out(repo, "status", "--porcelain") == ""
+
+
+def test_a_marked_note_recording_no_landing_pin_refuses(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-no-pins")
+    _land_and_commit(repo, "fix-no-pins", path, "new.txt", "new\n")
+    copy = work.locate(repo, "fix-no-pins")
+    dropped = {work.LANDED_PIN, work.LANDED_COPY_PIN}
+    kept = {k: v for k, v in work.recorded_pins(copy.note).items() if k not in dropped}
+    listed = ",".join(f"{key}={value}" for key, value in sorted(kept.items()))
+    work.write_note(path, copy.form, {work.PINS_NOTE: listed})
+    (path / "new.txt").unlink()
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-no-pins"]) == 1
+    assert "fix-no-pins records a landing" in capsys.readouterr().err
+    assert (repo / "new.txt").read_text(encoding="utf-8") == "new\n"
+
+
+TWELVE = [f"line {n}\n" for n in range(1, 13)]
+UNDONE = "main changed the copy's earlier landing of long.txt"
+
+
+@pytest.mark.parametrize("main_then", ["reverts", "keeps it and edits elsewhere"])
+def test_a_later_hunk_beside_an_earlier_landing_names_a_landing_main_undid(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    main_then: str,
+) -> None:
+    _ = _write(repo / "long.txt", "".join(TWELVE))
+    _ = _git_out(repo, "add", "long.txt")
+    _ = _git_out(repo, "commit", "-q", "-m", "a long file")
+    path = _new("fix-hunks")
+    first = ["LINE 1\n", *TWELVE[1:]]
+    _land_and_commit(repo, "fix-hunks", path, "long.txt", "".join(first))
+    if main_then == "reverts":
+        _ = _git_out(repo, "revert", "--no-edit", "HEAD")
+        main_side = TWELVE
+    else:
+        main_side = [*first[:11], "LINE 12\n"]
+        _ = _write(repo / "long.txt", "".join(main_side))
+        _ = _git_out(repo, "commit", "-q", "-am", "main edits elsewhere")
+    _ = _write(path / "long.txt", "".join([*first[:5], "LINE 6\n", *first[6:]]))
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-hunks"]) == 0
+    err = capsys.readouterr().err
+    assert (UNDONE in err) is (main_then == "reverts")
+    expected = [*main_side[:5], "LINE 6\n", *main_side[6:]]
+    assert (repo / "long.txt").read_text(encoding="utf-8") == "".join(expected)
+
+
+LEFT = "left as main holds them:"
+
+
+@pytest.mark.parametrize("main_then", ["keeps it", "reverts it"])
+def test_from_start_names_a_landed_new_file_the_copy_deleted_since(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+    main_then: str,
+) -> None:
+    path = _new("fix-from-start")
+    _land_and_commit(repo, "fix-from-start", path, "new.txt", "new\n")
+    if main_then == "reverts it":
+        _ = _git_out(repo, "revert", "--no-edit", "HEAD")
+    (path / "new.txt").unlink()
+    _ = _write(path / "gone.txt", "copy\n")
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-from-start", "--from-start"]) == 0
+    err = capsys.readouterr().err
+    assert (f"{LEFT} new.txt;" in err) is (main_then == "keeps it")
+    assert (repo / "new.txt").exists() is (main_then == "keeps it")
+    assert (repo / "gone.txt").read_text(encoding="utf-8") == "copy\n"
+
+
+def test_from_start_names_nothing_for_a_copy_still_holding_its_landing(
+    repo: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = _new("fix-from-held")
+    _land_and_commit(repo, "fix-from-held", path, "new.txt", "new\n")
+    _ = _write(path / "gone.txt", "copy\n")
+    _ = capsys.readouterr()
+    assert work.main(["land", "fix-from-held", "--from-start"]) == 0
+    err = capsys.readouterr().err
+    assert LEFT not in err
+    assert "already there: new.txt" in err
+    assert (repo / "gone.txt").read_text(encoding="utf-8") == "copy\n"
+
+
 def test_a_path_skipped_as_already_there_lands_again_once_main_commits_it(
     repo: Path,
     capsys: pytest.CaptureFixture[str],

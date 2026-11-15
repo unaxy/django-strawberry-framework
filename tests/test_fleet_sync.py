@@ -1548,6 +1548,49 @@ def test_handoff_carries_a_home_save_no_sync_carried_to_the_promoted_machine(
     assert work.pins(fleet.repo_b)[NAME]["save-2"] == second
 
 
+def _land_commit_and_hand_off(fleet: Fleet) -> Path:
+    """Land a new file from a's copy, commit it on both mains, sync, and hand the copy to b."""
+    copy = _new()
+    _ = _write(copy / "landed.txt", "one\ntwo\nthree\n")
+    assert work.main(["land", NAME]) == 0
+    _ = _git_out(fleet.repo_a, "add", "landed.txt")
+    _ = _git_out(fleet.repo_a, "commit", "-q", "-m", "the maintainer commits the landing")
+    _ = _git_out(fleet.repo_b, "pull", "-q", "--ff-only", "origin", "main")
+    _age(copy)
+    assert fleet.run("sync", "--copy", NAME)[0] == 0
+    replica = fleet.repo_b / ".work" / "clones" / NAME
+    assert {key: _note(replica).get(key) for key in fleet_sync.LANDING_MARKER} == {
+        key: _note(copy)[key] for key in fleet_sync.LANDING_MARKER
+    }
+    code, document = fleet.run("handoff", NAME, "--to", "b")
+    assert code == 0, document
+    return replica
+
+
+@pytest.mark.parametrize("work_since", ["edit", "delete"])
+def test_a_handed_off_copy_lands_its_work_since_its_landing_on_the_new_home(
+    fleet: Fleet,
+    capsys: pytest.CaptureFixture[str],
+    work_since: str,
+) -> None:
+    home = _land_commit_and_hand_off(fleet)
+    note = _note(home)
+    assert (note["home"], note["replica"]) == ("b", "false")
+    assert note["landed"]
+    fleet.at_b()
+    if work_since == "edit":
+        _ = _write(home / "landed.txt", "one\nTWO\nthree\n")
+    else:
+        (home / "landed.txt").unlink()
+    _ = capsys.readouterr()
+    assert work.main(["land", NAME]) == 0, capsys.readouterr().err
+    landed = fleet.repo_b / "landed.txt"
+    if work_since == "edit":
+        assert landed.read_text(encoding="utf-8") == "one\nTWO\nthree\n"
+    else:
+        assert not landed.exists()
+
+
 def test_a_copy_older_than_its_pin_record_still_owns_its_saves(fleet: Fleet) -> None:
     copy = _new()
     _ = _write(copy / "saved.txt", "saved work\n")

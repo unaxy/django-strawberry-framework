@@ -546,7 +546,7 @@ def _parser() -> argparse.ArgumentParser:
     _ = parser.add_argument(
         "--until",
         default="HEAD",
-        help="the last commit --since walks to (default HEAD)",
+        help="the last commit --since walks to (default HEAD, also when empty)",
     )
     return parser
 
@@ -608,7 +608,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         violations.extend(drift)
         try:
-            violations.extend(_walk(args.since or "", args.until))
+            violations.extend(_walk(args.since or "", args.until or "HEAD"))
         except (
             OSError,
             subprocess.CalledProcessError,

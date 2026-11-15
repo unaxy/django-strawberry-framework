@@ -27,12 +27,12 @@ last suppression is cleared leaves the ledger and gains the ``# Locked`` marker 
 is on in every environment.
 
 ``--since REV`` (CI passes the pushed-over commit, or a pull request's base) also walks
-the first-parent commits after ``REV`` up to ``--until`` (default ``HEAD``) and refuses
-each one whose ledger raises the total of any kind (``cast`` or a rule) over its parent's,
-unless its message carries a ``Suppression-Growth-Approved: <reason>`` trailer: the
-maintainer's consent, never written without it. A suppression moved between sites keeps
-the totals and needs no trailer. An empty ``REV`` (a scheduled or manual run) or one
-absent from the history (a force push) has no range to walk.
+the first-parent commits after ``REV`` up to ``--until`` (default ``HEAD``, an empty one
+too) and refuses each one whose ledger raises the total of any kind (``cast`` or a rule)
+over its parent's, unless its message carries a ``Suppression-Growth-Approved: <reason>``
+trailer: the maintainer's consent, never written without it. A suppression moved between
+sites keeps the totals and needs no trailer. An empty ``REV`` (a scheduled or manual run)
+or one absent from the history (a force push) has no range to walk.
 
 Only comment tokens are read, so a docstring or string that quotes a comment is not a
 suppression; a ``cast`` call is one the AST resolves to ``typing.cast`` or
@@ -453,7 +453,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _ = parser.add_argument(
         "--until",
         default="HEAD",
-        help="the last commit --since walks to (default HEAD)",
+        help="the last commit --since walks to (default HEAD, also when empty)",
     )
     args = parser.parse_args(argv, namespace=_Args())
     ledger_path = REPO_ROOT / LEDGER
@@ -497,7 +497,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         violations.extend(drift)
         try:
-            violations.extend(growth_violations(args.since or "", args.until))
+            violations.extend(growth_violations(args.since or "", args.until or "HEAD"))
         except (
             OSError,
             subprocess.CalledProcessError,
