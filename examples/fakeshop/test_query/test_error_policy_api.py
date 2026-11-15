@@ -55,8 +55,7 @@ registry stale.
 object's validation and precedence ladder, the correlation-id format sampled
 from the generator, the extension's install position and what a directly
 supplied entry of its own kind declares, the standalone schema's absent policy
-attribute, teardown no-ops, and fail-closed degrades over objects no engine
-builds.
+attribute, and teardown no-ops.
 """
 
 from __future__ import annotations

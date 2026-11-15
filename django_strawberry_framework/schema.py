@@ -103,7 +103,6 @@ from .error_policy import _PACKAGE_ERROR_POLICY, ErrorPolicy, resolve_error_poli
 from .exceptions import ConfigurationError
 from .extensions.error_policy import (
     DjangoErrorPolicyExtension,
-    degraded_result,
     is_maskable_result,
     mask_execution_result,
     masking_is_active,
@@ -1286,28 +1285,11 @@ class DjangoSchema(strawberry.Schema):
         including an all-deliberate or empty list. Later engine appends cannot
         change what an awaiting HTTP result hook publishes. Debug and disabled
         policies retain their pass-through behavior.
-
-        **It fails closed**, exactly as the teardown does: a seam that cannot
-        decide whether to mask publishes the policy message alone rather than
-        whatever the result was carrying. ``mask_execution_result`` already
-        contains its own failures, so what is left for this guard is a policy
-        record or a gate that will not answer at all. The floor is built from the
-        package default until the schema's own policy has been read, because the
-        read is inside what is guarded and a degrade that had to read it again to
-        publish its message would be a floor that can raise.
         """
-        policy = _PACKAGE_ERROR_POLICY
-        try:
-            policy = _enforcement(self).error_policy
-            if not masking_is_active(policy) or not is_maskable_result(result):
-                return result
-            return mask_execution_result(result, policy, snapshot=True)
-        except Exception:
-            logger.exception(
-                "The error policy could not be applied to the returned execution result; "
-                "the response degrades to the policy message alone (fail closed).",
-            )
-            return degraded_result(policy)
+        policy = _enforcement(self).error_policy
+        if not masking_is_active(policy) or not is_maskable_result(result):
+            return result
+        return mask_execution_result(result, policy, snapshot=True)
 
     @override
     def _stream(

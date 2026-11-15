@@ -28,14 +28,8 @@ it matters. What is left here is the surface a request cannot express:
   observable behavior is that nothing happened, and the async
   ``PreExecutionError`` whose ``original_error is None`` the JSON envelope cannot
   show (the client-visible validation message is live);
-- the two fail-closed degrades, which need an error object and a result object no
-  engine builds;
-- the gate and the floor under inputs no engine produces: a ``DEBUG`` setting
-  that cannot be read at all, an ``ErrorPolicy`` subclass whose attribute reads
-  raise, a container that lies about its emptiness, and an error whose
-  ``original_error`` read raises - every read the policy cannot verify answers
-  toward MASKING, and the floor that everything degrades onto cannot itself
-  raise; and
+- an ``ErrorPolicy`` subclass whose attribute reads raise, which the exact-type
+  gate answers toward MASKING; and
 - ``mask_execution_result``'s copy contract - the property that lets the
   subscription seam mask an event without disturbing the originals an extension
   reads. What that seam does on the wire is pinned at the consumer tier in
@@ -44,15 +38,12 @@ it matters. What is left here is the surface a request cannot express:
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from types import SimpleNamespace
-from typing import NoReturn
 
 import pytest
 import pytest_django
 import strawberry
-from django.conf import settings as django_settings
 from graphql import GraphQLError
 from graphql.execution import ExecutionResult as GraphQLExecutionResult
 from strawberry.extensions import SchemaExtension
@@ -60,7 +51,6 @@ from strawberry.types.execution import ExecutionResult as StrawberryExecutionRes
 from typing_extensions import override
 
 from django_strawberry_framework import DjangoSchema
-from django_strawberry_framework import schema as schema_module
 from django_strawberry_framework.error_policy import (
     DEFAULT_ERROR_POLICY,
     ErrorPolicy,
@@ -71,17 +61,14 @@ from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.extensions.error_policy import (
     DjangoErrorPolicyExtension,
     mask_execution_result,
-    masking_is_active,
     schema_error_policy,
 )
 from django_strawberry_framework.extensions.resource_policy import DjangoResourcePolicyExtension
 from django_strawberry_framework.utils._narrowing import (
     read_attr,
-    require_instance,
 )
-from django_strawberry_framework.utils.typing import object_result
-from tests._execution import execution_result, make_execution_context
-from tests._idioms import ClassReadRaises, json_at
+from tests._execution import make_execution_context
+from tests._idioms import ClassReadRaises
 
 _SENSITIVE = "standalone schema secret /srv/private/standalone.key"
 
@@ -642,354 +629,16 @@ def test_an_absent_attribute_and_a_real_policy_are_both_read_correctly() -> None
 
 
 # ---------------------------------------------------------------------------
-# Masking degrades CLOSED
+# The per-event seam's contract with the extensions that read originals
 # ---------------------------------------------------------------------------
 
 
-class _HostileError(GraphQLError):
-    """A ``GraphQLError`` whose ``original_error`` raises when read.
-
-    Not reachable through a request - graphql-core builds every error on a result
-    - but reachable through a consumer extension that put its own object in
-    ``result.errors``, and the point of a fail-closed degrade is that it does not
-    depend on the object being well behaved.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(_SENSITIVE)
-
-    @override
-    def __getattribute__(self, name: str) -> object:
-        if name == "original_error":
-            raise RuntimeError(_SENSITIVE)
-        return object_result(super().__getattribute__, name)
-
-
-class _HostileResult(GraphQLExecutionResult):
-    """A graphql-core result whose ``errors`` cannot be read at all."""
-
-    def __init__(self) -> None:
-        super().__init__(data={"ping": 1})
-
-    @override
-    def __getattribute__(self, name: str) -> object:
-        if name == "errors":
-            raise RuntimeError(_SENSITIVE)
-        return object_result(super().__getattribute__, name)
-
-
-class _HostileStrawberryResult(StrawberryExecutionResult):
-    """An admitted result whose error list raises when read but accepts replacement."""
-
-    @property
-    @override
-    def errors(self) -> list[GraphQLError] | None:
-        raise RuntimeError(_SENSITIVE)
-
-    @errors.setter
-    # basedpyright: the hostile shape under test, an ``errors`` property whose read raises; the
-    # checker rejects any property overriding a base class attribute
-    def errors(self, value: list[GraphQLError] | None) -> None:  # pyright: ignore[reportIncompatibleVariableOverride]
-        self._replacement_errors = value
-
-
-class _WriteRejectingStrawberryResult(StrawberryExecutionResult):
-    """A stock-shape subclass that rejects adoption after construction."""
-
-    @override
-    def __setattr__(self, name: str, value: object) -> None:
-        if name == "data" and name in self.__dict__:
-            raise RuntimeError("result is frozen")
-        super().__setattr__(name, value)
-
-
-class _SneakyError(GraphQLError):
-    """A ``GraphQLError`` subclass whose ``original_error`` read raises ``AttributeError``.
-
-    The property shadows the instance attribute ``__init__`` sets, so every read
-    raises - exactly the ambiguity a defaulted ``getattr`` cannot resolve: it
-    would answer it as absence, taking the deliberate-delivery branch with the
-    error's own message left on the wire.
-    """
-
-    @property
-    @override
-    # basedpyright: the hostile shape under test, an ``original_error`` property whose read raises;
-    # the checker rejects any property overriding a base class attribute
-    def original_error(self) -> NoReturn:  # pyright: ignore[reportIncompatibleVariableOverride]
-        raise AttributeError("original_error is not available")
-
-
-class _LyingErrors(list[GraphQLError]):
-    """A populated container answering falsy, so a truthiness check skips it."""
-
-    def __bool__(self) -> bool:
-        return False
-
-
-class _UnreadableSettings:
-    """A wrapped-settings stand-in that admits no attribute reads at all.
-
-    One unreadable-``DEBUG`` shape: the wrapped holder answers
-    ``AttributeError`` to every read, which the gate must survive as surely
-    as a deleted ``DEBUG``.
-    """
-
-    def __getattr__(self, name: str) -> NoReturn:
-        raise AttributeError(f"No setting {name!r} exists on this holder.")
-
-
-@pytest.mark.parametrize(
-    "absence",
-    ["deleted", "unreadable-holder"],
-    ids=["LazySettings cache + _wrapped cleared", "_wrapped replaced by unreadable"],
-)
-def test_the_masking_gate_stays_active_when_debug_cannot_be_read(
-    monkeypatch: pytest.MonkeyPatch,
-    absence: str,
-) -> None:
-    """A masking question answered by exception is one that stays masking ON.
-
-    Deleting the attribute (both the proxy's cache and the wrapped holder,
-    through the proxy's ``__delattr__``), or replacing the wrapped holder with
-    one that raises ``AttributeError`` on attribute access, both make the read
-    raise. The gate catches the documented settings failures and defaults toward
-    masking: an unreadable ``DEBUG`` answer becomes not exactly ``True``.
-    """
-    if absence == "deleted":
-        monkeypatch.delattr(django_settings, "DEBUG")
-    else:
-        monkeypatch.setattr(django_settings, "_wrapped", _UnreadableSettings())
-
-    assert masking_is_active(DEFAULT_ERROR_POLICY) is True
-
-
-def test_a_teardown_with_unreadable_debug_masks_normally_and_keeps_data(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An unreadable ``DEBUG`` keeps masking AND the client's own data.
-
-    A gate answering by exception would escape the teardown instead of masking.
-    The gate catches the documented settings failures, so the mask simply runs -
-    policy message and correlation id on the errors, ``data`` untouched.
-    """
-    monkeypatch.setattr(django_settings, "_wrapped", _UnreadableSettings())
-    result = GraphQLExecutionResult(
-        data={"ping": 1},
-        errors=[GraphQLError(_SENSITIVE, original_error=ValueError(_SENSITIVE))],
-    )
-
-    _run_teardown(result)
-
-    assert result.data == {"ping": 1}
-    assert result.errors is not None
-    assert len(result.errors) == 1
-    assert result.errors[0].message == DEFAULT_ERROR_POLICY.message
-    assert _SENSITIVE not in result.errors[0].message
-    assert result.errors[0].extensions is not None
-    correlation_id = json_at(
-        result.errors[0].extensions,
-        DEFAULT_ERROR_POLICY.correlation_extension_key,
-    )
-    assert len(require_instance(correlation_id, str)) == 32
-
-
-def test_a_falsy_but_populated_errors_container_is_still_masked() -> None:
-    """Iteration, not the container's own truthiness, decides what is classified.
-
-    A populated container whose ``__bool__`` answers falsy would be waved
-    through an emptiness check unclassified, its messages intact. The list is
-    materialized before the check, so what is classified is what the container
-    actually carries, and order and arity survive the rewrite.
-    """
-    fine = GraphQLError("Deliberate.", original_error=GraphQLError("Deliberate."))
-    result = StrawberryExecutionResult(
-        data={"ping": 1},
-        errors=_LyingErrors(
-            [fine, GraphQLError(_SENSITIVE, original_error=ValueError(_SENSITIVE))],
-        ),
-    )
-
-    masked = mask_execution_result(result, DEFAULT_ERROR_POLICY)
-
-    assert masked is not result
-    assert masked.errors is not None
-    assert masked.errors[0] is fine
-    assert masked.errors[1].message == DEFAULT_ERROR_POLICY.message
-    assert masked.data == {"ping": 1}
-
-
 def test_a_genuinely_empty_error_list_is_still_a_no_op() -> None:
-    """Materializing before the emptiness check keeps the empty-list no-op."""
+    """An empty error list leaves nothing to mask, so the result itself comes back."""
     result = GraphQLExecutionResult(data={"ping": 1}, errors=[])
 
     assert mask_execution_result(result, DEFAULT_ERROR_POLICY) is result
     assert result.errors == []
-
-
-def test_an_original_error_read_that_raises_is_masked_not_trusted() -> None:
-    """An error the classifier cannot read behind is unexpected, not deliberate.
-
-    A defaulted ``getattr`` cannot tell an absent ``original_error`` - the parse
-    and validation case, which travels unchanged - from one whose read RAISES.
-    Answering a raise with "absent" would ship the error's own message as a
-    deliberate delivery. The direct read's failure lands on the per-entry
-    degrade instead: the policy-message floor, no location, nothing of the original.
-    """
-    error = _SneakyError.__new__(_SneakyError)
-    result = StrawberryExecutionResult(data={"ping": 1}, errors=[error])
-
-    masked = mask_execution_result(result, DEFAULT_ERROR_POLICY)
-
-    assert masked is not result
-    assert masked.errors is not None
-    assert masked.errors[0].message == DEFAULT_ERROR_POLICY.message
-    assert _SENSITIVE not in str(masked.errors[0].message)
-    assert masked.errors[0].original_error is None
-    assert masked.data == {"ping": 1}
-
-
-def test_one_error_that_cannot_be_masked_degrades_to_the_policy_message(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A masking failure is a disclosure risk, so it fails CLOSED, not open.
-
-    The tempting degrade - leave the entry as it was found - publishes exactly the
-    text the policy exists to withhold, and it publishes it on the one path nobody
-    tested. So the entry becomes the policy message with no location and no
-    correlation id (nothing may be read off the error that just failed to be
-    read), the failure is logged with its traceback, and every OTHER entry in the
-    same result is masked normally.
-    """
-    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
-    fine = GraphQLError("Deliberate.", original_error=GraphQLError("Deliberate."))
-    result = GraphQLExecutionResult(data=None, errors=[_HostileError(), fine])
-
-    masked = mask_execution_result(result, DEFAULT_ERROR_POLICY)
-
-    assert masked is not result
-    assert masked.errors is not None
-    assert masked.errors[0].message == DEFAULT_ERROR_POLICY.message
-    assert masked.errors[0].extensions in (None, {})
-    assert masked.errors[1] is fine
-    assert _SENSITIVE not in "".join(str(error.message) for error in masked.errors)
-    assert any(record.exc_info for record in caplog.records)
-
-
-def test_a_result_whose_errors_cannot_be_read_degrades_to_one_policy_message(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """The outer floor: an unreadable error list still answers something safe.
-
-    One policy-message error and no ``data``. Dropping ``data`` is deliberate - a
-    result this module could not read is a result it cannot vouch for - and it is
-    the only degrade that changes arity, which is why the per-entry degrade above
-    exists to keep the common case faithful.
-    """
-    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
-
-    masked = mask_execution_result(_HostileResult(), DEFAULT_ERROR_POLICY)
-
-    assert masked.data is None
-    assert masked.errors is not None
-    assert len(masked.errors) == 1
-    assert masked.errors[0].message == DEFAULT_ERROR_POLICY.message
-    assert any(record.exc_info for record in caplog.records)
-
-
-def test_the_extension_adopts_all_fields_of_the_outer_fail_closed_degrade(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """An unreadable result retains neither data nor extensions after the floor applies.
-
-    The degrade drops all three fields, so the adoption must overwrite the
-    populated ``extensions`` map too -- leaving it in place would publish
-    whatever the failed result carried there.
-    """
-    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
-    result = _HostileStrawberryResult(
-        data={"secret": _SENSITIVE},
-        errors=[],
-        extensions={"leak": _SENSITIVE},
-    )
-    extension = DjangoErrorPolicyExtension()
-    context = make_execution_context()
-    context.result = result
-    extension.execution_context = context
-
-    extension._process_result(result, DEFAULT_ERROR_POLICY)
-
-    assert result.data is None
-    assert result._replacement_errors is not None
-    assert result._replacement_errors[0].message == DEFAULT_ERROR_POLICY.message
-    assert result.extensions is None
-    assert any(record.exc_info for record in caplog.records)
-
-
-def test_the_extension_replaces_a_result_that_rejects_safe_field_adoption(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
-    result = _WriteRejectingStrawberryResult(
-        data={"secret": _SENSITIVE},
-        errors=[GraphQLError(_SENSITIVE, original_error=RuntimeError(_SENSITIVE))],
-    )
-    extension = DjangoErrorPolicyExtension()
-    context = make_execution_context()
-    context.result = result
-    extension.execution_context = context
-
-    extension._process_result(result, DEFAULT_ERROR_POLICY)
-
-    degraded = execution_result(context)
-    assert degraded is not result
-    assert isinstance(degraded, StrawberryExecutionResult)
-    assert degraded.data is None
-    assert degraded.errors is not None
-    assert degraded.errors[0].message == DEFAULT_ERROR_POLICY.message
-    assert any(record.exc_info for record in caplog.records)
-
-
-def test_a_non_graphql_error_with_none_original_error_is_masked_as_unexpected() -> None:
-    """Any non-GraphQLError object in errors is classified as unexpected and masked."""
-
-    class _CustomError:
-        message = _SENSITIVE
-        original_error = None
-
-    error = _CustomError()
-    # basedpyright: the non-GraphQLError entry is the hostile input under test; strawberry types
-    # the parameter as list[GraphQLError] | None
-    result = StrawberryExecutionResult(data={"data": 123}, errors=[error])  # pyright: ignore[reportArgumentType]
-    masked = mask_execution_result(result, DEFAULT_ERROR_POLICY)
-
-    assert masked.data == {"data": 123}
-    assert masked.errors is not None
-    assert len(masked.errors) == 1
-    assert masked.errors[0].message == DEFAULT_ERROR_POLICY.message
-    assert _SENSITIVE not in str(masked.errors[0].message)
-
-
-def test_a_generator_or_iterator_error_list_is_masked_preserving_data() -> None:
-    """An iterator or generator on result.errors is consumed safely without crashing zip."""
-    original = GraphQLError(_SENSITIVE, original_error=ValueError(_SENSITIVE))
-    result = StrawberryExecutionResult(
-        data={"safe_field": 42},
-        # basedpyright: the one-shot generator is the input under test; strawberry types the
-        # parameter as list[GraphQLError] | None
-        errors=(err for err in [original]),  # pyright: ignore[reportArgumentType]
-    )
-    masked = mask_execution_result(result, DEFAULT_ERROR_POLICY)
-
-    assert masked.data == {"safe_field": 42}
-    assert masked.errors is not None
-    assert len(masked.errors) == 1
-    assert masked.errors[0].message == DEFAULT_ERROR_POLICY.message
-
-
-# ---------------------------------------------------------------------------
-# The per-event seam's contract with the extensions that read originals
-# ---------------------------------------------------------------------------
 
 
 def test_masking_returns_the_same_object_when_nothing_needed_masking() -> None:
@@ -1054,39 +703,6 @@ def test_the_return_seam_snapshots_an_already_masked_result_without_remasking(
     assert snapshot.errors is not None
     assert snapshot.errors[0] is already_masked
     assert not caplog.records
-
-
-def test_the_return_seam_degrades_when_masking_itself_raises(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A seam that cannot decide what is safe publishes the floor, not the result.
-
-    ``mask_execution_result`` contains its own failures, so what is left for this
-    guard is a gate that will not answer at all - and the direction is the one the
-    whole policy takes: the response degrades to the policy message alone rather
-    than falling back to whatever the result was carrying.
-    """
-    caplog.set_level(logging.ERROR, logger="django_strawberry_framework")
-    schema = DjangoSchema(query=_Query)
-
-    def _unanswerable(_policy: ErrorPolicy) -> NoReturn:
-        raise RuntimeError("the masking gate cannot answer")
-
-    monkeypatch.setattr(schema_module, "masking_is_active", _unanswerable)
-    leaky = GraphQLError(_SENSITIVE, original_error=ValueError(_SENSITIVE))
-    degraded = schema._masked_return(
-        StrawberryExecutionResult(data={"leaky": None}, errors=[leaky]),
-    )
-
-    assert degraded.data is None
-    assert degraded.errors is not None
-    assert [error.message for error in degraded.errors] == [DEFAULT_ERROR_POLICY.message]
-    assert not degraded.errors[0].extensions  # no correlation id: nothing to resolve it to
-    assert any(
-        "could not be applied to the returned execution result" in record.message
-        for record in caplog.records
-    )
 
 
 def test_the_return_seam_is_a_no_op_when_the_policy_is_disabled() -> None:

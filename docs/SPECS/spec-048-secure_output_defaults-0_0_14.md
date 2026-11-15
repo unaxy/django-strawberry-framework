@@ -673,10 +673,9 @@ Four surfaces, each mirroring a resource-policy one:
   reader that validates nothing, exactly like `resource_policy_setting()`. `conf.py` stays a
   reader; the policy object owns every domain check.
 - **`extensions/error_policy.py::DjangoErrorPolicyExtension`** performing the masking, plus
-  the module-level helpers every seam shares: `mask_execution_result` (classify, replace,
-  degrade closed), `masking_is_active` (the `enabled` / `DEBUG` gate), `is_maskable_result`
-  (the shape gate), `degraded_result` (the whole-response floor), and `schema_error_policy`
-  (read a schema's policy). The policy read is **`isinstance`-guarded**, as
+  the module-level helpers every seam shares: `mask_execution_result` (classify, replace),
+  `masking_is_active` (the `enabled` / `DEBUG` gate), `is_maskable_result` (the shape gate),
+  and `schema_error_policy` (read a schema's policy). The policy read is **`isinstance`-guarded**, as
   `extensions/resource_policy.py::DjangoResourcePolicyExtension._resolved_policy` guards its
   own: a schema carrying something that is not an `ErrorPolicy` — or none, as a plain
   `strawberry.Schema` a consumer wired the extension into by hand — falls back to the
@@ -889,15 +888,13 @@ names, `subscribe` and `stream`, unconditionally and routes them through one sha
 wrapping step, so the two cannot diverge on what a result source is wrapped with; `execute`
 stays delegated because it returns one already-torn-down result and never loops. The seam
 masks each yielded result immediately before the transport renders it, through the same
-`mask_execution_result` the teardown uses: one classifier, one replacement builder, one
-degrade policy, two application sites. `stream`'s third element type — a raw graphql-core
+`mask_execution_result` the teardown uses: one classifier, one replacement builder, two
+application sites. `stream`'s third element type — a raw graphql-core
 incremental-delivery frame (`@defer` / `@stream`), whose errors are nested inside
 incremental payloads rather than on an `errors` attribute — is excluded by
-`is_maskable_result` and passes through untouched: masking it would produce the fail-closed
-degrade, whose value IS an `ExecutionResult`, precisely the shape upstream's transport
-tests for to decide a frame is unrenderable and the operation must be rejected. Excluding
-it by shape leaves that rejection intact and discloses nothing — the frame never reaches
-the wire at all. Two further properties are pinned:
+`is_maskable_result` and passes through untouched. Upstream's transport rejects a frame
+that is not an `ExecutionResult` as unrenderable; excluding the frame by shape leaves that
+rejection intact and discloses nothing — the frame never reaches the wire at all. Two further properties are pinned:
 
 - **Masking returns a masked COPY, never an in-place rewrite.** The object the engine
   assigned to `execution_context.result` keeps its originals, so
@@ -916,8 +913,7 @@ validation error carries no `original_error`.
 into a result inside the `except` behind its operation lifecycle, after every teardown has
 unwound over an execution context whose `result` was still `None`, so no extension can reach
 it. `DjangoSchema.execute` / `execute_sync` therefore mask the value they RETURN
-(`schema.py::DjangoSchema._masked_return`) through the same helpers and gates, failing
-closed to `degraded_result` when the policy cannot be applied. Masking twice preserves error identity by
+(`schema.py::DjangoSchema._masked_return`) through the same helpers and gates. Masking twice preserves error identity by
 construction: an already-masked error carries no `original_error`, so the classifier leaves
 it alone and no second id is minted. A plain `strawberry.Schema` carrying the exported
 extension has no such seam, so a hook failure is unmasked there.
@@ -1011,7 +1007,7 @@ constants look like they want a setting.
 | 2 | `extensions/debug.py` | `__init__(*, allow_unsafe_production=False)`; the operation-start `settings.DEBUG` gate and its single warning; the six caps, `_TRUNCATION_MARKER`, and the one shared truncation/admission helper called by `_serialize_sql_row` and `_serialize_exception` before `_build_payload` stashes. |
 | 3 | `error_policy.py` | `ErrorPolicy`, `DEFAULT_ERROR_POLICY`, `_PACKAGE_ERROR_POLICY`, `resolve_error_policy`, `new_correlation_id`. |
 | 3 | `conf.py` | `ERROR_POLICY_KEY` and `error_policy_setting()`, a thin reader that validates nothing. |
-| 3 | `extensions/error_policy.py` | `DjangoErrorPolicyExtension`: the teardown, the structural classifier, the replacement builder, the log call, the fail-closed degrades, and the shared `mask_execution_result` / `masking_is_active` / `is_maskable_result` / `degraded_result` / `schema_error_policy` helpers. |
+| 3 | `extensions/error_policy.py` | `DjangoErrorPolicyExtension`: the teardown, the structural classifier, the replacement builder, the log call, and the shared `mask_execution_result` / `masking_is_active` / `is_maskable_result` / `schema_error_policy` helpers. |
 | 3 | `consumers.py` | `_stop_aware_results` masks each streamed result through `mask_execution_result` (under the shared `is_maskable_result` gate) before the transport renders it; the stop-aware schema wrapper defines `subscribe` AND `stream` through one shared wrapping step and hands the real schema through so the policy is the executing schema's (Decision 11). |
 | 3 | `extensions/__init__.py`, `__init__.py` | Exports; the extension is root-exported because it is part of the default recipe. |
 | 3 | `schema.py` | `DjangoSchema(error_policy=…)` into `_SchemaEnforcement`, `schema.error_policy` (a per-read copy), `_admitted_chain` (the error policy first), `_consumer_extension_entries` (a supplied masker dropped, a subclass refused), and `_masked_return` on `execute` / `execute_sync`. |
@@ -1038,8 +1034,7 @@ constants look like they want a setting.
   teardown, by `consumers.py::_stop_aware_results`, and by
   `schema.py::DjangoSchema._masked_return`. No seam re-states the classification, the
   replacement shape, the correlation id, the `DEBUG` gate, or the shape gate — each calls
-  `masking_is_active` for the gate and `is_maskable_result` for the shape, and falls back to
-  `degraded_result` when it cannot answer.
+  `masking_is_active` for the gate and `is_maskable_result` for the shape.
 - **[`request_from_info`][glossary-request_from_info] is the only info-to-request seam** if
   the extension ever needs the request; it does not re-derive one.
 
@@ -1086,16 +1081,6 @@ constants look like they want a setting.
   would exceed the RUNNING total, which only a row with predecessors can do.
 - **An error with `original_error` set to a `GraphQLError` that itself wraps a plain
   exception** is untouched: someone deliberately wrapped it and chose the outer message.
-- **An error raised during masking itself** must not replace the response with an internal
-  failure, and must not fall back to the text it was masking either — leaving the entry as
-  it was found publishes exactly what the policy exists to withhold, on the one path nobody
-  exercised. So masking degrades CLOSED, at two levels: one error that cannot be classified
-  or replaced becomes the policy message alone (no location, no correlation id — nothing is
-  read off the error whose read just failed), and a result whose error list cannot be read at
-  all becomes a single policy-message error with no `data`. Both degrades log server-side
-  with a traceback, so the failure is diagnosable without being publishable. The per-entry
-  degrade is what keeps the common case faithful in order and arity; the outer one is the
-  floor.
 - **`policy.enabled = False`** leaves the extension in every operation's chain and its
   teardown a no-op, so the opt-out is a recorded decision rather than a missing extension.
 - **A schema constructed with `DEBUG=True` and executed with `DEBUG=False`** masks, because
@@ -1203,8 +1188,7 @@ precedence ladder; the settings-shape rejections; `resolve_error_policy` idempot
 instance; the classifier over each of the three structural cases directly; the replacement
 builder's field-for-field preservation and its `original_error=None`; the `None`-result and
 empty-errors no-ops; both `ExecutionResult` shapes; the `isinstance`-guarded policy read over
-every wrong attribute shape; both fail-closed degrades (an error object whose
-`original_error` raises, a result whose `errors` cannot be read);
+every wrong attribute shape;
 `mask_execution_result`'s default copy contract — same object when nothing was masked;
 explicit publication snapshots detach all-deliberate and empty lists too. Live
 `test_completion_lifecycle.py` covers managed final-return versus standalone teardown

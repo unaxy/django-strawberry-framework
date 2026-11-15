@@ -428,11 +428,7 @@
 "tests/test_consumer_base_check.py::test_base_whose_adapter_lacks_close_is_refused" = { reportArgumentType = 1 }
 "tests/test_consumer_base_check.py::test_base_with_every_hook_builds_the_consumer" = { reportArgumentType = 1 }
 "tests/test_consumers.py::test_host_validation_absent_headers_and_server_uses_defaults" = { reportArgumentType = 1 }
-"tests/test_error_policy.py::_HostileStrawberryResult.errors" = { reportIncompatibleVariableOverride = 1 }
-"tests/test_error_policy.py::_SneakyError.original_error" = { reportIncompatibleVariableOverride = 1 }
-"tests/test_error_policy.py::test_a_generator_or_iterator_error_list_is_masked_preserving_data" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::test_a_non_bool_enabled_is_rejected_at_construction" = { reportArgumentType = 1 }
-"tests/test_error_policy.py::test_a_non_graphql_error_with_none_original_error_is_masked_as_unexpected" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::test_a_non_mapping_policy_argument_is_rejected" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::test_a_non_string_or_empty_correlation_key_is_rejected_at_construction" = { reportArgumentType = 1 }
 "tests/test_error_policy.py::test_a_non_string_or_empty_message_is_rejected_at_construction" = { reportArgumentType = 1 }

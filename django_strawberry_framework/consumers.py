@@ -136,13 +136,11 @@ Masking is applied only to a value of execution-result SHAPE, gated on the
 extension module's own ``is_maskable_result`` so the seams cannot drift on the
 question. ``stream``'s third element type is a raw graphql-core incremental-delivery
 frame (``@defer`` / ``@stream``), which carries its errors nested inside incremental
-payloads rather than on an ``errors`` attribute. Masking one would degrade it - the
-policy fails closed on a result whose errors it cannot read - and the degraded value
-IS an ``ExecutionResult``, which is precisely the test upstream's transport uses to
-decide that a frame has no wire representation and the operation must be rejected. So
-a frame this policy cannot mask passes through untouched and meets that rejection
-instead of defeating it: nothing unmasked reaches the wire either way, because
-upstream refuses to render the shape at all.
+payloads rather than on an ``errors`` attribute. Upstream's transport rejects the
+operation when a frame is not an ``ExecutionResult``, because such a frame has no wire
+representation. So a frame this policy cannot mask passes through untouched and meets
+that rejection: nothing unmasked reaches the wire, because upstream refuses to render
+the shape at all.
 
 **The substitution is transparent by the only measure that matters.** ONLY the
 handler's own ``self.schema`` is replaced, and only ever with the connection's
@@ -1218,8 +1216,7 @@ async def _stop_aware_results(
     replacement builder, and the shape gate, ``is_maskable_result``, which is
     what lets a value the policy cannot rewrite
     (a raw incremental-delivery frame, on the upstream releases that stream one)
-    reach the transport's own refusal to render it rather than be degraded into a
-    shape that refusal no longer recognizes.
+    reach the transport's own refusal to render it.
 
     The masked value is a COPY when anything was masked, so the engine's own
     result object - the one ``execution_context.result`` holds and the one an

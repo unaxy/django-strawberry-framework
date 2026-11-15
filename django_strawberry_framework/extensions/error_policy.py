@@ -77,7 +77,6 @@ from __future__ import annotations
 import copy
 from typing import TYPE_CHECKING, TypeVar
 
-from django.core.exceptions import ImproperlyConfigured
 from graphql import GraphQLError
 from graphql.execution import ExecutionResult as GraphQLExecutionResult
 from strawberry.types.execution import ExecutionResult as StrawberryExecutionResult
@@ -107,20 +106,17 @@ _MaskableResultT = TypeVar(
 
 __all__ = [
     "DjangoErrorPolicyExtension",
-    "degraded_result",
     "is_maskable_result",
     "mask_execution_result",
     "masking_is_active",
 ]
 
 
-def _is_unexpected(error: object) -> bool:
+def _is_unexpected(error: GraphQLError) -> bool:
     """Whether ``error`` reached the wire by accident (spec-048 Decision 8).
 
     Three cases, in the order graphql-core produces them:
 
-    - non-``GraphQLError`` - any arbitrary error object or plain Python exception
-      present in ``errors``. Masked.
     - ``original_error is None`` on a ``GraphQLError`` - a parse, syntax, or
       validation error, or an error graphql-core constructed itself with
       nothing behind it. Nothing raised it; its message describes the client's
@@ -147,30 +143,18 @@ def _is_unexpected(error: object) -> bool:
     error whose ``original_error`` a consumer deliberately typed as a
     ``GraphQLError`` travels unchanged.
 
-    The ``original_error`` read is a DIRECT attribute access rather than a
-    defaulted ``getattr`` on purpose: a defaulted ``getattr`` cannot tell an
-    attribute that is ABSENT from one whose read RAISES, and "absent" is the
-    deliberate-delivery answer. An error object that will not let the rule read
-    behind it (a ``GraphQLError`` subclass whose ``original_error`` property
-    raises, reachable only from a consumer extension that put its own object in
-    the result's error list) is exactly an error the policy cannot vouch for, so
-    the read's failure is contained by the caller's per-entry degrade - the
-    fail-closed direction - instead of being answered as if it said "deliberate".
-
     The rule is structural rather than an allowlist of ``extensions.code``
     values on purpose: an allowlist must be extended by every future rejection
     site and fails OPEN when it is not, while this fails CLOSED for every new
     exception type the package or a consumer ever raises.
     """
-    if not isinstance(error, GraphQLError):
-        return True
     original = error.original_error
     if original is None:
         return False
     return not isinstance(original, GraphQLError)
 
 
-def _masked(error: object, policy: ErrorPolicy) -> GraphQLError:
+def _masked(error: GraphQLError, policy: ErrorPolicy) -> GraphQLError:
     """Return the client-safe replacement for one unexpected ``error``.
 
     The location information - ``nodes``, ``source``, ``positions``, and ``path``
@@ -181,74 +165,30 @@ def _masked(error: object, policy: ErrorPolicy) -> GraphQLError:
     the parts written by whatever raised.
     """
     correlation_id = new_correlation_id()
-    original_error = getattr(error, "original_error", None) or (
-        error if isinstance(error, Exception) else None
-    )
     logger.error(
         "Unhandled exception during GraphQL execution; the client received the "
         "policy message and correlation id %s.",
         correlation_id,
-        exc_info=original_error,
+        exc_info=error.original_error,
     )
     return GraphQLError(
         message=policy.message,
-        nodes=getattr(error, "nodes", None),
-        source=getattr(error, "source", None),
-        positions=getattr(error, "positions", None),
-        path=getattr(error, "path", None),
+        nodes=error.nodes,
+        source=error.source,
+        positions=error.positions,
+        path=error.path,
         original_error=None,
         extensions={policy.correlation_extension_key: correlation_id},
     )
 
 
-def _degraded(policy: ErrorPolicy) -> GraphQLError:
-    """Build the floor: the policy message alone, with no location and no correlation id.
-
-    Returned only when masking one error RAISED - a raising ``original_error``
-    property, an ``extensions`` map that misbehaves, an error object that is not
-    the shape it claims. Nothing is read off the offending error to build this,
-    because whatever was read is what failed; and no correlation id is minted,
-    because there is no exception this one could be resolved to in the log. The
-    server-side log record names the failure instead.
-
-    The policy's ``message`` is the one thing still worth reading - it is what
-    this floor exists to publish. Every policy reaching here is an exact
-    ``ErrorPolicy`` (``schema_error_policy`` admits nothing else), whose
-    ``message`` was validated as a non-empty exact ``str`` at construction.
-    """
-    return GraphQLError(message=policy.message)
-
-
-def degraded_result(policy: ErrorPolicy) -> StrawberryExecutionResult:
-    """Build the WHOLE-RESPONSE floor: the policy message alone, and no data.
-
-    Every seam that discovers it cannot produce a safe response lands here, and
-    there is one of these rather than one per seam so that a client meets the
-    same degraded shape whichever seam failed and no caller can drift on what
-    "fail closed" publishes. ``data`` is dropped along with the errors on
-    purpose: the seam that reached this could not certify what was on the result,
-    and publishing half of an uncertified response is the disclosure this exists
-    to prevent. The failure itself is logged by the caller, which is the one that
-    knows what it was doing.
-    """
-    return StrawberryExecutionResult(data=None, errors=[_degraded(policy)])
-
-
 def masking_is_active(policy: ErrorPolicy) -> bool:
     """Whether ``policy`` masks anything for the operation being answered now.
 
-    The ``DEBUG`` read fails toward MASKING, because this is the question the
-    mask asks: a read that raises ``AttributeError`` (the setting is absent) or
-    ``ImproperlyConfigured`` (no configured Django settings) is treated as a
-    ``DEBUG`` that is not exactly ``True``, so masking stays on rather than the
-    question being answered by exception. ``enabled`` is an exact
-    ``bool`` field of an exact ``ErrorPolicy`` and is read as stored.
+    Masking is off only under a ``DEBUG`` that is exactly ``True``. ``enabled``
+    is an exact ``bool`` field of an exact ``ErrorPolicy`` and is read as stored.
     """
-    try:
-        debug = django_setting("DEBUG")
-    except (AttributeError, ImproperlyConfigured):
-        debug = None
-    return policy.enabled and debug is not True
+    return policy.enabled and django_setting("DEBUG") is not True
 
 
 def is_maskable_result(
@@ -266,11 +206,9 @@ def is_maskable_result(
     operation-teardown seam meets a sync parse or validation early-return, which
     has nothing masked to begin with. The per-event seam meets a raw graphql-core
     incremental-delivery frame (``@defer`` / ``@stream``), whose errors are nested
-    inside incremental payloads: masking it would take the fail-closed degrade -
-    the policy cannot read its errors - and the degrade is an ``ExecutionResult``,
-    the shape the transport tests for to decide the frame is unrenderable and the
-    operation must be rejected. Excluding it by shape leaves that rejection intact,
-    which discloses nothing: the frame never reaches the wire at all.
+    inside incremental payloads and which carries no flat ``errors`` to read.
+    Excluding it by shape leaves the transport's own unrenderable-frame rejection
+    intact, which discloses nothing: the frame never reaches the wire at all.
     """
     return isinstance(value, (GraphQLExecutionResult, StrawberryExecutionResult))
 
@@ -299,7 +237,7 @@ def mask_execution_result(
     policy: ErrorPolicy,
     *,
     snapshot: bool = False,
-) -> _MaskableResultT | StrawberryExecutionResult:
+) -> _MaskableResultT:
     """Return the client-safe value for one completed or per-event ``result``.
 
     By default ``result`` itself is returned whenever nothing needed masking,
@@ -310,60 +248,19 @@ def mask_execution_result(
     ``execution_context.result`` keeps its originals, so an extension reading
     ``original_error`` after this ran still reads what was raised.
 
-    The error list is MATERIALIZED before the emptiness check: a container that
-    answers falsy while carrying entries (a lying ``__len__`` or ``__bool__``)
-    would otherwise be waved through unclassified - the truthiness test trusts
-    the container, iteration is what can be verified. The generator / iterator
-    error list a stock result never carries is consumed by the same
-    materialization, which is also what keeps ``zip``'s arity comparison honest.
-
     Order and arity are preserved - every error keeps its position whether it was
     masked or not, so a client matching errors to its document by index is
     unaffected.
-
-    **Masking FAILS CLOSED.** A masking failure is a disclosure risk, never a
-    reason to fall back to the original text: one error that cannot be masked
-    degrades to the policy message alone, and a result whose error list cannot
-    even be read degrades to a single policy-message error with no ``data``. Both
-    degrades are logged server-side with a traceback, so the failure is
-    diagnosable without being publishable.
     """
-    try:
-        errors = result.errors
-        if errors is None:
-            return result
-        errors_list = list(errors)
-        if not errors_list and not snapshot:
-            return result
-        replacements = [_replacement_for(error, policy) for error in errors_list]
-        if not snapshot and all(
-            new is old for new, old in zip(replacements, errors_list, strict=True)
-        ):
-            return result
-        masked = copy.copy(result)
-        masked.errors = replacements
-    except Exception:
-        logger.exception(
-            "The error policy could not read the execution result's errors; the response "
-            "degrades to the policy message alone (fail closed).",
-        )
-        return degraded_result(policy)
-    else:
-        return masked
-
-
-def _replacement_for(error: GraphQLError, policy: ErrorPolicy) -> GraphQLError:
-    """Classify and mask one error, degrading to the policy message if that raises."""
-    try:
-        if not _is_unexpected(error):
-            return error
-        return _masked(error, policy)
-    except Exception:
-        logger.exception(
-            "The error policy could not classify or mask one execution error; the entry "
-            "degrades to the policy message alone (fail closed).",
-        )
-        return _degraded(policy)
+    errors = result.errors
+    if errors is None:
+        return result
+    replacements = [_masked(error, policy) if _is_unexpected(error) else error for error in errors]
+    if not snapshot and all(new is old for new, old in zip(replacements, errors, strict=True)):
+        return result
+    masked = copy.copy(result)
+    masked.errors = replacements
+    return masked
 
 
 class DjangoErrorPolicyExtension(_OperationBoundExtension[OperationState]):
@@ -408,32 +305,11 @@ class DjangoErrorPolicyExtension(_OperationBoundExtension[OperationState]):
         """Adopt the masked result onto the value the transport will render.
 
         The masking itself belongs to ``mask_execution_result``, which the
-        subscription seam shares; this method is only the assignment. Assigning
-        the three result fields cannot fail for either stock shape reaching it -
-        both are mutable attribute holders and the caller's ``isinstance`` gate
-        admits nothing else. The complete assignment matters for the outer
-        fail-closed degrade: when an error list cannot be read, the replacement
-        deliberately drops ``data`` and ``extensions`` as well as the errors.
-        If a consumer-supplied result subclass makes one of those assignments
-        fail, replace the execution-context result itself with the safe stock
-        shape rather than leaving the original data on the wire.
+        subscription seam shares; this method is only the assignment.
         """
-        masked = mask_execution_result(
-            result,
-            policy,
-            snapshot=True,
-        )
+        masked = mask_execution_result(result, policy, snapshot=True)
         if masked is not result:
-            try:
-                result.data = masked.data
-                result.errors = masked.errors
-                result.extensions = masked.extensions
-            except Exception:
-                logger.exception(
-                    "The error policy could not adopt the safe execution result; the "
-                    "response is replaced with the policy message alone (fail closed).",
-                )
-                self._hook_context().result = degraded_result(policy)
+            result.errors = masked.errors
 
     @override
     def on_operation(self) -> Iterator[None]:

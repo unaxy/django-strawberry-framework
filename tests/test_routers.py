@@ -6240,8 +6240,7 @@ class _UnrenderableFrame:
     (``@defer`` / ``@stream``), whose errors are nested inside incremental payloads
     rather than on an ``errors`` attribute. The real shape is unreachable here - the
     schema refuses incremental execution - so the stand-in reproduces the one property
-    the gate turns on: reading ``errors`` off it raises, which is what would take the
-    policy's fail-closed degrade.
+    the gate turns on: it carries no readable flat ``errors``.
     """
 
     @property
@@ -6254,13 +6253,11 @@ async def test_a_streamed_value_the_policy_cannot_mask_reaches_the_transport_unc
 
     The seam covers ``schema.stream``, which yields more shapes than a
     subscription's events, and the failure this row exists to catch is a masking pass
-    that "succeeds" on one of them. ``mask_execution_result`` fails CLOSED on a result
-    whose errors it cannot read - by design - and its degraded value is an
-    ``ExecutionResult``. That is precisely the shape upstream's transport tests for to
-    decide a frame has no wire representation and the operation must be REJECTED, so
-    masking an unrenderable frame would convert a rejection into a malformed ``next``
-    payload. Identity, not equality, is the assertion: a copy would mean the policy
-    rewrote something.
+    that "succeeds" on one of them. Upstream's transport rejects a frame that is not an
+    ``ExecutionResult`` as having no wire representation, so a masking pass that
+    rewrote an unrenderable frame into an ``ExecutionResult`` would convert that
+    rejection into a malformed ``next`` payload. Identity, not equality, is the
+    assertion: a copy would mean the policy rewrote something.
 
     The maskable value beside it is what keeps the row honest - the gate has to
     exclude by shape rather than simply do nothing.
