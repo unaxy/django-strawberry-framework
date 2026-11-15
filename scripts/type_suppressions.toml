@@ -112,7 +112,6 @@
 "django_strawberry_framework/routers.py::_build_router_class_uncached.DjangoGraphQLProtocolRouter.__init__" = { reportArgumentType = 2, reportCallIssue = 1, reportUnknownArgumentType = 1 }
 "django_strawberry_framework/schema.py::DjangoSchema.__init__" = { reportArgumentType = 1, reportUnknownMemberType = 1 }
 "django_strawberry_framework/schema.py::DjangoSchema._stream" = { reportUnknownArgumentType = 1, reportUnknownMemberType = 1 }
-"django_strawberry_framework/schema.py::DjangoSchema.extensions" = { reportIncompatibleUnannotatedOverride = 1, reportPropertyTypeMismatch = 1 }
 "django_strawberry_framework/sets_mixins.py::expanded_once" = { cast = 1 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestClientBase._finish_response" = { cast = 1 }
 "django_strawberry_framework/testing/client.py::_GraphQLTestClientBase.request" = { reportArgumentType = 1 }
@@ -139,7 +138,6 @@
 "django_strawberry_framework/utils/connections.py::derive_connection_window_bounds" = { cast = 1 }
 "django_strawberry_framework/utils/converters.py::convert_with_mro" = { reportExplicitAny = 1 }
 "django_strawberry_framework/utils/inputs.py::promote_set_meta_fields" = { cast = 1 }
-"django_strawberry_framework/utils/private_state.py::PrivateMembership.recall" = { cast = 1 }
 "django_strawberry_framework/utils/querysets.py::_BOUND_VALUE_NORMALIZERS" = { reportExplicitAny = 1 }
 "django_strawberry_framework/utils/querysets.py::_built_queryset" = { cast = 1 }
 "django_strawberry_framework/utils/querysets.py::_expr_graph_defect" = { cast = 1 }
@@ -199,9 +197,6 @@
 "examples/fakeshop/drf_serializers.py::ModelSerializerBase.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_connection_pagination_api.py::_TenantScopedGenreQuerySet.query" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_debug_extension_api.py::install_probe_schema.Query.broken_non_null" = { reportReturnType = 1 }
-"examples/fakeshop/test_query/test_extension_isolation_api.py::_HybridAuthority" = { reportUnsafeMultipleInheritance = 1 }
-"examples/fakeshop/test_query/test_extension_isolation_api.py::_ladder_schema" = { reportArgumentType = 1 }
-"examples/fakeshop/test_query/test_extension_isolation_api.py::_rebuild_the_box" = { reportCallIssue = 1 }
 "examples/fakeshop/test_query/test_form_construction_api.py::test_request_scoped_form_queryset_controls_relation_acceptance.CategoryPickForm.__init__" = { reportMissingSuperCall = 1 }
 "examples/fakeshop/test_query/test_globalid_naming_api.py::shadowing_child_schema.ChildCategoryNode.Meta" = { reportIncompatibleVariableOverride = 1 }
 "examples/fakeshop/test_query/test_library_api.py::_unplanned_relation_holder_schema.HolderOwnLoanType.book" = { reportAny = 1 }
@@ -492,10 +487,6 @@
 "tests/test_schema.py::HybridPolicyExtension" = { reportUnsafeMultipleInheritance = 1 }
 "tests/test_schema.py::ReversedHybridPolicyExtension" = { reportIncompatibleVariableOverride = 1, reportUnsafeMultipleInheritance = 1 }
 "tests/test_schema.py::_unchecked_entries" = { reportReturnType = 1 }
-"tests/test_schema.py::test_a_refused_schema_streams_one_refusal_for_every_operation_name" = { reportArgumentType = 1 }
-"tests/test_schema.py::test_a_schema_that_cannot_be_hashed_is_still_constructible_and_bounded._UnhashableSchema" = { reportAssignmentType = 1 }
-"tests/test_schema.py::test_async_window_hostile_error_container_rolls_back_and_leaks_no_transaction" = { reportAttributeAccessIssue = 1 }
-"tests/test_schema.py::test_sync_window_hostile_error_container_rolls_back_and_leaks_no_transaction" = { reportAttributeAccessIssue = 1 }
 "tests/test_sets_mixins.py::test_a_longer_related_order_reaching_a_target_path_is_refused._ShelfOrder" = { reportArgumentType = 1 }
 "tests/test_sets_mixins.py::test_a_non_string_field_name_claims_no_relation._Owner" = { reportArgumentType = 2 }
 "tests/test_sets_mixins.py::test_resolve_lazy_class_owner_scope_matrix" = { reportArgumentType = 1 }

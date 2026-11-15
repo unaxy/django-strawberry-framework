@@ -444,52 +444,21 @@ calls the package's runner factory, so the guarantee would be a claim with nothi
 for a shared instance; a class entry and a fresh factory are operation-local there because the
 object is.
 
-### Decision 16 — a refused request's document, selector and transport policy are all package-owned
+### Decision 16 — a factory resolving to an authority raises out of extension resolution
 
 Spec: [Decision 16][spec-050-d16].
 
-*Rejected:* Publishing the refusal after the parse. It would make the claim true only of
-documents that happen to be well formed: a syntax error is raised out of the parse itself and
-upstream answers with it before any statement after the hook's `yield` runs.
+*Rejected:* Answering such a schema on the wire with a coded refusal. It needs a package-owned
+substitute document, operation selector and transport-policy snapshot, and a refusal chain of
+its own, all to contain a factory the deployment itself wrote; application Python is trusted
+(Decision 19), so the misconfiguration raises like any other.
 
-*Rejected:* Copying the requested operation name onto the substitute document when it matches
-GraphQL's `Name` grammar. That leaves the request's own name authoritative for upstream's
-lookup for every name that does not match - and for one that does but names no operation - so
-the refusal is replaced by an operation-lookup failure raised out of the synchronous API, or
-rendered into the first frame of a stream.
-
-*Rejected:* Parsing a fresh substitute document per refused request. The refusal exists so a
-broken deployment runs nothing; a parser it runs on its own constant is still a parser running,
-and nothing validates or executes the substitutes, so one object per operation type answers
-every refused request of that type.
-
-*Rejected:* Reading the transport policy where the substitute is selected and leaving the
-caller's object in place for upstream. `allowed_operation_types` is annotated
-`Iterable[OperationType]`, a generator is a valid value for it, and a healthy operation consumes
-it exactly once - so the refusal would be the second consumer and upstream would read an
-exhausted iterable.
-
-*Rejected:* `allowed = value or ()` as the normalization. Truthiness is a consumer-defined
-dunder invoked on the request path of a schema already known to be broken, and it contradicts
-the no-truthiness posture the accepted-entry reader takes one function away.
-
-### Decision 17 — the refusal is stable, and the transport's own policy is the one exception
+### Decision 17 — the configuration code stays exported
 
 Spec: [Decision 17][spec-050-d17].
 
-*Rejected:* Dropping the resource extension from the refused chain because "nothing runs
-anyway". The refusal is a statement about a document that already arrived; the pre-parse token
-and depth scan is the only thing between an unauthenticated caller and graphql-core's recursive
-parser, so a broken configuration would trade fail-closed for an endpoint with no ceiling.
-
-*Rejected:* Appending `QUERY` to an empty transport policy, substituting the default set, or
-catching the operation-type refusal. A transport that allows nothing is a deployment decision,
-and widening it would make a broken configuration the one shape that accepts what the transport
-forbids.
-
-*Rejected:* Interpolating the refused name, document text or factory exception into the
-published message. Those are consumer strings whose own `__repr__` is consumer code; the wire
-gets the stable code and the deployment's log gets the description.
+*Rejected:* Deleting the exported constant. It is root-exported public surface, and a consumer
+matching on it is not broken by the schema no longer emitting it.
 
 ### Decision 18 — execution mode is operation state; the ambient event loop is a different fact
 
@@ -542,9 +511,8 @@ import, monkeypatch and rebind any package name - so every check it motivates is
 adversary it imagines steps around, and each one costs a real consumer a refusal path to learn.
 
 *Rejected:* An architectural rewrite - one `ContextVar`, fresh adapters per operation, a
-separately shared optimizer cache, deletion of the membership and refusal machinery - judged by
-how much it deletes. The three operation-state modules (`extensions/operation_state.py`,
-`utils/private_state.py`, `utils/execution_mode.py`) each carry a
+separately shared optimizer cache - judged by how much it deletes. The operation-state modules
+(`extensions/operation_state.py`, `utils/execution_mode.py`) each carry a
 guarantee ordinary code needs (nesting, concurrency, streaming resumption, masking the right
 operation), the regression suite holds those guarantees, and a rewrite would spend the suite to
 reach a shape that is smaller by assertion rather than by evidence. Consolidation follows
@@ -634,8 +602,8 @@ carries the reasons.
 [spec-050-d13]: ../spec-050-list_field_arguments-0_0_15.md#decision-13--configuration-authority-is-schema-state-everything-per-request-is-operation-state
 [spec-050-d14]: ../spec-050-list_field_arguments-0_0_15.md#decision-14--an-enforcement-authority-is-a-declaration-never-an-extension-entry
 [spec-050-d15]: ../spec-050-list_field_arguments-0_0_15.md#decision-15--the-runner-owns-every-binding-for-the-operations-whole-lifetime
-[spec-050-d16]: ../spec-050-list_field_arguments-0_0_15.md#decision-16--a-refused-requests-document-selector-and-transport-policy-are-all-package-owned
-[spec-050-d17]: ../spec-050-list_field_arguments-0_0_15.md#decision-17--the-refusal-is-stable-and-the-transports-own-policy-is-the-one-exception
+[spec-050-d16]: ../spec-050-list_field_arguments-0_0_15.md#decision-16--a-factory-resolving-to-an-authority-raises-out-of-extension-resolution
+[spec-050-d17]: ../spec-050-list_field_arguments-0_0_15.md#decision-17--the-configuration-code-stays-exported
 [spec-050-d18]: ../spec-050-list_field_arguments-0_0_15.md#decision-18--execution-mode-is-operation-state-the-ambient-event-loop-is-a-different-fact
 [spec-050-d19]: ../spec-050-list_field_arguments-0_0_15.md#decision-19--application-code-is-trusted-the-wire-is-not-a-finding-is-admitted-by-reachability
 [spec-050-d2]: ../spec-050-list_field_arguments-0_0_15.md#decision-2--sidecar-conditional-orderby-is-the-only-truthful-meta-first-surface

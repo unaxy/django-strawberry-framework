@@ -112,9 +112,9 @@ Spec: [Decision 11][spec-047-d11].
 *Why enforcement is built by the schema rather than left to the consumer.* An endpoint whose
 only limiter is one a consumer remembered to install is an endpoint with no limiter. This is
 the same reasoning that rejected upstream's three-extensions shape in the Borrowing posture
-entry below. Building the extension from the schema's own record, rather than accepting it as
-an entry, is what keeps the object that bounds the next operation out of reach of
-`info.schema.extensions`.
+entry below. Building the extension from the schema's own policy, rather than accepting it as
+an entry, is what keeps the object that bounds the next operation out of the consumer's
+extension list.
 
 ### Decision 13 — What this policy does not bound, and why each boundary is deliberate
 

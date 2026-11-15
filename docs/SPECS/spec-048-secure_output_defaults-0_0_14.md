@@ -192,8 +192,7 @@ What this card builds on:
   policy dataclass, one thin settings reader, one resolve function with a three-level
   precedence ladder"; both policies delegate that contract to
   `utils/policies.py::resolve_policy`.
-- `schema.py::DjangoSchema` resolves both policies once at construction into a private
-  enforcement record (`schema.py::_SchemaEnforcement`) and builds the enforcement
+- `schema.py::DjangoSchema` resolves both policies once at construction and builds the enforcement
   extensions around the consumer's own on every operation (`DjangoSchema.get_extensions`).
 - Every framework-owned client rejection is raised as a `graphql.GraphQLError` — the
   GlobalID rejections, `ResourceLimitExceeded`, the connection / keyset / filter
@@ -681,8 +680,7 @@ Four surfaces, each mirroring a resource-policy one:
   being read for truthiness, which could silently disable masking.
 - **`schema.py::DjangoSchema.__init__`** takes
   `error_policy: ErrorPolicy | Mapping[str, object] | None = None`, resolves it once at
-  construction into the schema's private enforcement record (`schema.py::_SchemaEnforcement`),
-  and exposes it as `schema.error_policy` — a per-read copy, so a resolver writing to it
+  construction, and exposes it as `schema.error_policy` — a per-read copy, so a resolver writing to it
   changes only its own copy.
 
 **Resolved once at construction** so an invalid deployment fails at startup rather than on
@@ -692,14 +690,14 @@ idiom rather than two similar ones — a future third policy has an obvious shap
 reader who has understood one has understood all of them.
 
 **The masking authority is the schema's, never an `extensions=` entry.** `DjangoSchema`
-builds a fresh `DjangoErrorPolicyExtension` for every operation from its record
+builds a fresh `DjangoErrorPolicyExtension` for every operation from its error policy
 (`DjangoSchema.get_extensions`), so the opt-out has exactly one spelling,
 `DjangoSchema(error_policy={"enabled": False})`, which keeps the extension in the chain and
 makes its teardown a no-op. A `DjangoErrorPolicyExtension` class or instance supplied in
 `extensions=` declares the extension the schema installs anyway and is dropped, so there is
 still exactly one masker (a second would mint a second correlation id for an already-masked
 error); a subclass is refused at construction, and a factory that resolves to the masker
-refuses the operation with `SCHEMA_CONFIGURATION_UNAVAILABLE`, because a subclass or a
+raises `ConfigurationError` when the operation resolves it, because a subclass or a
 factory can override or swap the hook that does the masking while answering every check
 for it. The same rule governs
 [`DjangoResourcePolicyExtension`][glossary-djangoresourcepolicyextension] ([`spec-047`][spec-047]).
@@ -1007,7 +1005,7 @@ constants look like they want a setting.
 | 3 | `extensions/error_policy.py` | `DjangoErrorPolicyExtension`: the teardown, the structural classifier, the replacement builder, the log call, and the shared `mask_execution_result` / `masking_is_active` / `is_maskable_result` / `schema_error_policy` helpers. |
 | 3 | `consumers.py` | `_stop_aware_results` masks each streamed result through `mask_execution_result` (under the shared `is_maskable_result` gate) before the transport renders it; the stop-aware schema wrapper defines `subscribe` AND `stream` through one shared wrapping step and hands the real schema through so the policy is the executing schema's (Decision 11). |
 | 3 | `extensions/__init__.py`, `__init__.py` | Exports; the extension is root-exported because it is part of the default recipe. |
-| 3 | `schema.py` | `DjangoSchema(error_policy=…)` into `_SchemaEnforcement`, `schema.error_policy` (a per-read copy), `_admitted_chain` (the error policy first), `_consumer_extension_entries` (a supplied masker dropped, a subclass refused), and `_masked_return` on `execute` / `execute_sync`. |
+| 3 | `schema.py` | `DjangoSchema(error_policy=…)` resolved at construction, `schema.error_policy` (a per-read copy), `_admitted_chain` (the error policy first), `_consumer_extension_entries` (a supplied masker dropped, a subclass refused), and `_masked_return` on `execute` / `execute_sync`. |
 | 4 | `examples/fakeshop/test_query/`, `examples/fakeshop/apps/*/tests/`, `tests/` | The rows in [Test plan](#test-plan). |
 | 5 | `docs/GLOSSARY.md` (DB), `docs/README.md`, `docs/TREE.md`, `README.md`, `TODAY.md`, `KANBAN.md` (DB) | Fold-in and the migration note. |
 
@@ -1154,8 +1152,8 @@ surface has one live home, so the rows live there:
 - A custom `message` and a custom `correlation_extension_key` both reach the wire.
 - Sync/async parity: the sync and async mounts return byte-identical error entries apart
   from the id itself.
-- A factory entry resolving to the masker refuses the operation with
-  `SCHEMA_CONFIGURATION_UNAVAILABLE` rather than masking, minting no correlation id.
+- A factory entry resolving to the masker raises `ConfigurationError` when the operation
+  resolves it, before any consumer hook or resolver runs.
 - An exception escaping a consumer HOOK is masked like a resolver exception, on both
   execution colors, with exactly one masked entry and one log record (Decision 11's third
   seam); a hook raising its own `GraphQLError` is untouched.
@@ -1211,8 +1209,8 @@ synthetic rows: each string cut at its own limit and marked, the row-count caps 
 exactly the earliest rows, the shared budget admitting exceptions first and stopping at the
 first over-budget row, and both lists present when empty — the pure-function rows a live
 query cannot pin precisely. The consequence that a schema carrying a refused
-acknowledgement refuses the operation rather than disclosing is live:
-`examples/fakeshop/test_query/test_debug_extension_api.py::test_a_refused_acknowledgement_never_becomes_an_armed_extension`.
+acknowledgement raises rather than disclosing is live:
+`examples/fakeshop/test_query/test_debug_extension_api.py::test_a_refused_acknowledgement_on_a_plain_schema_raises_to_the_caller`.
 
 **Base tier.** `tests/base/test_init.py` pins the `ErrorPolicy` /
 `DjangoErrorPolicyExtension` / `DjangoFilePathType` / `DjangoImagePathType` exports;

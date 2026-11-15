@@ -356,49 +356,29 @@ these properties is load-bearing:
   advance that neither returns nor raises, and it does not claim to.
 
 Freezing is an accident guard, never an authority boundary: a frozen dataclass rejects
-`setattr` and admits `policy.__dict__[bound] = wider` and `object.__setattr__`. What holds
-the bound is that no consumer-visible name reaches the object a bound is read from. The
-schema is process-lived and `info.schema` is handed to every resolver in every operation,
-so a policy kept in an instance attribute would be reachable by assignment and through
-`schema.__dict__`, and one write would widen every later request the process served.
+`setattr` and admits `policy.__dict__[bound] = wider` and `object.__setattr__`. What keeps
+a write through a read from widening a later request is that every public read answers with
+a copy; application Python that writes the schema's private attributes is trusted code.
 
-- **The schema's record.** `schema.py::DjangoSchema` resolves both of its policies at
-  construction into one frozen `schema.py::_SchemaEnforcement` record, held in
-  `schema.py::_SCHEMA_ENFORCEMENT` (a `utils/private_state.py::PrivateAuthority`) and
-  answered by no attribute. `schema.py::DjangoSchema.resource_policy` and `error_policy`
-  answer every read with a copy (`copy.copy`). Re-running `__init__`
-  on a constructed schema is refused. `error_policy.py::ErrorPolicy` is held on exactly the
-  same terms, because a write to it would turn masking off and put raw exception text on
-  the wire.
+- **The schema's policies.** `schema.py::DjangoSchema` resolves both of its policies at
+  construction and keeps them on the schema. `schema.py::DjangoSchema.resource_policy` and
+  `error_policy` answer every read with a copy (`copy.copy`). `error_policy.py::ErrorPolicy`
+  is held on the same terms, because a write to it would turn masking off and put raw
+  exception text on the wire.
 - **The operation's copies.** The operation's own budget is a private snapshot taken at
   the arm point; the published context mirror is a second copy; and `policy_from_info`
   returns a copy of the snapshot. A resolver may write any of them and writes only its own
   duplicate.
 - **The enforcement extensions are not entries.** `schema.py::DjangoSchema.get_extensions`
-  builds both enforcement extensions fresh for every operation from the record
+  builds both enforcement extensions fresh for every operation from the schema's policies
   ([Decision 11](#decision-11--one-typed-rejection-and-no-per-transport-translation)), so
-  nothing reachable through `schema.extensions` decides what bounds or masks a request.
-  `schema.py::DjangoSchema.extensions` answers with the consumer entries construction
-  accepted, which `utils/private_state.py::PrivateMembership` holds as one piece of weak
-  evidence per ENTRY (the schema keeps the entries themselves, because they point back at
-  it and a module-global holding them strongly would keep every schema alive). Writing new
-  entries into the attribute does not make them configuration: each operation resolves
-  the entries the evidence points at. A later assignment to `schema.extensions` is
-  refused. A write that drops the last hold on an accepted entry leaves a configuration
-  that cannot be reconstructed, and `get_extensions` refuses the operation with
-  `SCHEMA_CONFIGURATION_UNAVAILABLE` rather than resolving a list it cannot vouch for or
-  falling back to a policy that may be wider. The refusal chain still runs the resource
-  extension, so the pre-parse scan still stands between the request and the parser.
+  the consumer entries in `schema.extensions` do not decide what bounds or masks a request.
 - **An extension instance on a plain `strawberry.Schema`.** Strawberry hands an instance
   entry back unchanged, so it stays reachable through `info.schema.extensions` and its
   policy is what the next operation arms. Its explicit policy is canonicalized at
   construction into an exact `ResourcePolicy` and read back as a copy
   (`extensions/resource_policy.py::DjangoResourcePolicyExtension._policy`); an extension
   built with no override enforces its schema's policy per operation.
-
-Both private stores file entries under `id()`, never the owner itself: a mapping that found
-entries by hash and equality would be finding them by methods a schema subclass may define,
-letting one schema's record answer for another that merely compares equal to it.
 
 The policy object a schema stores is also held to the EXACT class. `isinstance` admits a
 subclass, and a subclass's field reads are consumer code that `__post_init__` cannot speak
@@ -1049,8 +1029,8 @@ different envelope from the package's other typed failures.
 **`DjangoSchema` builds the extension; a consumer does not install it.**
 `schema.py::DjangoSchema.get_extensions` answers every operation with
 `schema.py::_admitted_chain`: a fresh `DjangoErrorPolicyExtension` first, the consumer's
-resolved extensions, a fresh `DjangoResourcePolicyExtension` reading the schema's private
-record (`schema.py::_SchemaEnforcement`), the package's admission guard, and the operation's
+resolved extensions, a fresh `DjangoResourcePolicyExtension` reading the schema's own
+policy, the package's admission guard, and the operation's
 executor-mode marker. The extension is fresh per operation because a shared instance would
 share one set of charge counters across concurrent requests, and it is last so it sets up
 last, with its budget armed around every consumer hook.
@@ -1060,16 +1040,15 @@ An extension entry cannot claim either enforcement role:
 - An exact `DjangoResourcePolicyExtension` in `extensions=` is read once at construction as
   a declaration (`schema.py::_consumer_extension_entries`) and never travels into the chain:
   a bare class declares nothing and is dropped, and an instance's `policy=` is folded into
-  the record as the schema's policy. So exactly one budget is armed per operation.
+  the schema's policy. So exactly one budget is armed per operation.
 - Declaring the policy twice — the `resource_policy=` argument and an entry, or two entries —
   is a `ConfigurationError`, because two declarations do not compose into one ceiling.
 - A subclass of either enforcement extension, as a class or an instance, is a
   `ConfigurationError` at construction (`schema.py::_declared_authority`): a subclass can
   override the hook that enforces while answering every check for it.
-- A factory cannot be identified without calling it, so a resolved member that is not a
-  `SchemaExtension` instance, or that claims either role (`schema.py::_claimed_authority`),
-  refuses the operation with `SCHEMA_CONFIGURATION_UNAVAILABLE`, as does a factory that
-  raises.
+- A factory cannot be identified without calling it, so a resolved member that claims
+  either role (`schema.py::_claimed_authority`) raises `ConfigurationError` when the
+  operation resolves it.
 
 The consumer's `extensions` iterable is **never consulted through truthiness**: a container
 whose `__bool__` answers `False` still has its entries read, because Strawberry reads them.
@@ -1204,7 +1183,7 @@ check runs rather than about how long anything takes.
 | 1 | `conf.py` | `RESOURCE_POLICY_KEY` and `resource_policy_setting()`, a thin reader that validates nothing. |
 | 2 | `extensions/resource_policy.py` (new) | `scan_document_text`, `charge_document`, `_DocumentBudget`, `_ValueBudget` (per-reference charging, `_closes_a_cycle` ancestor-path guard), introspection meta-fields resolved through graphql-core's `get_field_def`, `_is_connection_type` (full edge shape), [`DjangoResourcePolicyExtension`][glossary-djangoresourcepolicyextension], `AdmissionGuard`. |
 | 2 | `extensions/__init__.py`, `__init__.py` | Exports; the extension is root-exported for a plain `strawberry.Schema`, whose consumer installs it. |
-| 2 | `schema.py` | `DjangoSchema(resource_policy=…)`, `schema.resource_policy` (a copy per read), the private `_SchemaEnforcement` record, and the per-operation chain `get_extensions` / `_admitted_chain` build from it. |
+| 2 | `schema.py` | `DjangoSchema(resource_policy=…)`, `schema.resource_policy` (a copy per read), and the per-operation chain `get_extensions` / `_admitted_chain` build from the schema's policies. |
 | 3 | `list_field.py` | `max_rows` / `trusted_max_rows`, constructor-site validation, the bound applied after visibility. |
 | 3 | `types/resolvers.py` | The generated many-side relation resolver bounds both the prefetched and the manager path. |
 | 3 | `utils/connections.py`, `connection.py` | The policy ceiling over `relay_max_results`, resolved once per connection resolve. |
@@ -1227,10 +1206,8 @@ check runs rather than about how long anything takes.
 - `utils/inputs.py::RELATION_MULTI` — the bind-spec kind that classifies a relation list
   ahead of the `ID`-scalar test
   ([Decision 4](#decision-4--the-document-and-value-budgets-are-one-iterative-walk)).
-- `utils/policies.py::canonical_policy`, `copy.copy` and
-  `utils/private_state.py::PrivateAuthority` / `utils/private_state.py::PrivateMembership` —
-  the exact-class rebuild, the per-read copy, and the private stores the schema holds its
-  configuration in
+- `utils/policies.py::canonical_policy` and `copy.copy` — the exact-class rebuild and the
+  per-read copy
   ([Decision 1](#decision-1--one-immutable-frozen-dataclass-validated-at-construction)).
 
 ## Helper-reuse obligations (DRY)
@@ -1484,7 +1461,7 @@ rows in `examples/fakeshop/test_query/test_list_field_api.py`
 pins the schema-owned enforcement: a policy declared by an entry and by the argument, or by
 two entries, refused; an entry's policy becoming the schema's own; a subclass of either
 enforcement extension refused at construction; and a factory producing an enforcement
-authority refusing the operation.
+authority raising `ConfigurationError` when the operation resolves it.
 
 ## Doc updates
 
@@ -1555,8 +1532,8 @@ is in the [rationale][rationale].*
       `manage.py check` and `makemigrations --check --dry-run` all clean.
 - [x] Docs folded in; the release rides the `0.0.14` joint cut
       ([Decision 12](#decision-12--the-version-bump-belongs-to-the-0014-joint-cut)).
-- [x] `DjangoSchema` builds the enforcement extension into every operation from its private
-      record; an extension entry can declare the policy once and can never be an
+- [x] `DjangoSchema` builds the enforcement extension into every operation from its own
+      policy; an extension entry can declare the policy once and can never be an
       enforcement authority
       ([Decision 11](#decision-11--one-typed-rejection-and-no-per-transport-translation)).
 - [x] [`max_value_depth`][glossary-max_value_depth] has a glossary entry, and the

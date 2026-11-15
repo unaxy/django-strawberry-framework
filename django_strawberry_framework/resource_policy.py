@@ -31,13 +31,7 @@ REPLACING it; and the armed object is reachable from no consumer-visible name,
 so a resolver cannot widen it by MUTATING it either. Everything a resolver can
 reach - the schema attribute, the published mirror, whatever
 ``policy_from_info`` returns - is a ``copy.copy`` duplicate sharing no state with it.
-The policy those copies are taken from is not an attribute of the schema either
-(``schema.py::_SCHEMA_ENFORCEMENT``): ``info.schema`` is handed to every resolver
-in every operation, so an ordinary attribute would be reachable by assignment and
-through ``schema.__dict__`` past a property that has no setter. Being a frozen
-dataclass is not what makes any of it true: frozen rejects ``setattr``
-and admits ``__dict__`` writes, so on a process-lived object it would have been
-one write away from widening every later request on the process. The same call publishes the
+The same call publishes the
 policy and its derived deadline under ``DST_RESOURCE_POLICY`` /
 ``DST_RESOURCE_DEADLINE``, mirroring the optimizer's ``DST_OPTIMIZER_*`` context
 seam; those keys are a consumer-readable mirror, and no enforcement seam trusts

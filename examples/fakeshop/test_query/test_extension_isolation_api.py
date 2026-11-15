@@ -1,37 +1,21 @@
 """Live GraphQL HTTP tests for what one operation's extensions may be answered from.
 
-Four claims a package-only schema cannot make, each reached from a real request and read
-back off the wire:
+Two claims a package-only schema cannot make, each reached from a real request:
 
-- what enforces the NEXT request is the schema's own configuration, and nothing
-  a resolver can reach through ``info.schema`` - not the accepted entries, not
-  the objects the schema holds them in, and not the state a stateful factory
-  answers from - so the bound still bounds and the masking still masks;
-- a schema whose entries resolve into a second enforcement authority refuses
-  every request on the wire, including the ones that would not have parsed and
-  the ones asking for an operation name no document can carry, and still bounds
-  the document it is refusing;
-- a factory resolving to anything but an ordinary extension instance - one that
-  raises, returns a non-extension, a class or a lazily wrapped extension, or
-  returns an authority subclass or a hybrid of both - refuses every request with the
-  stable configuration code, and the reason reaches the deployment's log only;
+- a schema whose factory entry resolves to an enforcement authority raises
+  ``ConfigurationError`` when the request's operation resolves it;
 - the optimizer entry every deployment is documented to write - one module-level
   singleton behind a factory - keeps its published plan on the request it
   belongs to when a consumer extension runs an operation of its own.
 
-The mechanics of the carrier and of the runner's bindings are pinned in
-``tests/test_schema.py`` and ``tests/extensions/test_operation_state.py``. What
-this module owns is the consumer-visible outcome, because a resolver reaching
-``info.schema`` and a response reaching a client are both things only a request
-has.
+The mechanics of the runner's bindings are pinned in ``tests/test_schema.py``
+and ``tests/extensions/test_operation_state.py``. What this module owns is the
+consumer-visible outcome, because a response reaching a client is something only
+a request has.
 """
 
-import json
-import logging
-from collections.abc import Callable, Coroutine, Iterator
-from functools import partial, wraps
-from types import MethodType
-from typing import TYPE_CHECKING, NoReturn
+from collections.abc import Callable, Iterator
+from functools import wraps
 
 import pytest
 import strawberry
@@ -39,289 +23,42 @@ from apps.products import schema as products_schema
 from apps.products.services import seed_data
 from django.http import HttpRequest
 from django.http.response import HttpResponseBase
-from django.test import AsyncClient, Client
 from django.urls import include, path
-from django.utils.functional import SimpleLazyObject
-from graphql_client import (
-    JSONObject,
-    json_at,
-    json_list,
-    json_loads,
-    json_object,
-    json_str,
-    read_attr,
-    response_json,
-)
+from graphql_client import json_at, json_list, json_object, read_attr
 from strawberry.extensions.base_extension import SchemaExtension
-from typing_extensions import TypeIs, override
+from typing_extensions import override
 
 from django_strawberry_framework import (
-    RESOURCE_LIMIT_ERROR_CODE,
     DjangoOptimizerExtension,
     DjangoSchema,
     ResourcePolicy,
     finalize_django_types,
     strawberry_config,
 )
-from django_strawberry_framework.extensions import (
-    DjangoErrorPolicyExtension,
-    DjangoResourcePolicyExtension,
-)
+from django_strawberry_framework.exceptions import ConfigurationError
+from django_strawberry_framework.extensions import DjangoResourcePolicyExtension
 from django_strawberry_framework.optimizer._context import (
     DST_OPTIMIZER_KEYS,
     get_context_value,
 )
-from django_strawberry_framework.schema import SCHEMA_CONFIGURATION_ERROR_CODE
-from django_strawberry_framework.testing import AsyncTestClient, TestClient
-from django_strawberry_framework.views import AsyncDjangoGraphQLView, DjangoGraphQLView
-
-if TYPE_CHECKING:
-    from django.test.client import _MonkeyPatchedWSGIResponse
-
-
-async def _post_async(
-    client: AsyncClient,
-    document: str,
-    mount: str,
-    operation_name: str | None = None,
-) -> JSONObject:
-    """Post one document to an async mount and return the decoded payload."""
-    res = await AsyncTestClient(client=client).query(
-        document,
-        assert_no_errors=False,
-        operation_name=operation_name,
-        url=mount,
-    )
-    assert res.response.status_code == 200, res.response.content
-    return response_json(res.response)
-
-
-def _post_sync(
-    client: Client,
-    document: str,
-    mount: str,
-    operation_name: str | None = None,
-) -> "tuple[_MonkeyPatchedWSGIResponse, bytes]":
-    """Post one document to a sync mount and return ``(response, response body)``."""
-    res = TestClient(client=client).query(
-        document,
-        assert_no_errors=False,
-        operation_name=operation_name,
-        url=mount,
-    )
-    return res.response, res.response.content
-
+from django_strawberry_framework.testing import TestClient
+from django_strawberry_framework.views import DjangoGraphQLView
 
 pytestmark = pytest.mark.urls(__name__)
 
 
-def _is_tuple(value: object) -> TypeIs[tuple[object, ...]]:
-    """Whether ``value`` is a ``tuple``, its items typed ``object``."""
-    return isinstance(value, tuple)
-
-
-def _tuple_at(namespace: dict[str, object], key: str) -> tuple[object, ...]:
-    """Return the ``tuple`` stored under ``key``, failing on any other kind."""
-    found = namespace[key]
-    assert _is_tuple(found), f"expected a tuple at {key!r}, got {found!r}"
-    return found
-
-
-#: The exception message an unmasked error policy would put on the wire.
-SENTINEL = "the-resolver-said-this-out-loud"
-
-
-class _ConsumerExtension(SchemaExtension):
-    """An ordinary consumer extension: the thing an entry is still allowed to be."""
-
-
-class _AuthoritySubclass(DjangoResourcePolicyExtension):
-    """A consumer subclass of the bounding authority, which is not one."""
-
-
-class _MaskingAuthoritySubclass(DjangoErrorPolicyExtension):
-    """A consumer subclass of the masking authority, which is not one either."""
-
-
-# basedpyright: cooperative MRO: ``DjangoResourcePolicyExtension.__init__`` calls
-# ``super().__init__()``, which reaches ``_OperationBoundExtension.__init__`` exactly once
-# through ``DjangoErrorPolicyExtension`` (which defines none), so every base is initialized
-class _HybridAuthority(  # pyright: ignore[reportUnsafeMultipleInheritance]
-    DjangoResourcePolicyExtension,
-    DjangoErrorPolicyExtension,
-):
-    """One class answering to both authorities, of which it can dispatch one."""
-
-
-def _raise_sentinel() -> NoReturn:
-    """A factory whose own exception text must not reach the wire."""
-    raise RuntimeError(SENTINEL)
-
-
-#: The factory shapes short of an ordinary extension instance that this ladder
-#: mounts, and the reason the package logs for refusing each.
-_LADDER_FACTORIES = {
-    "raises": (_raise_sentinel, "raised"),
-    "not-an-extension": (partial(object), "not a SchemaExtension instance"),
-    "returns-the-class": (lambda: _ConsumerExtension, "not a SchemaExtension instance"),
-    "lazy-wrapped-extension": (
-        lambda: SimpleLazyObject(_ConsumerExtension),
-        "not a SchemaExtension instance",
-    ),
-    "authority-subclass": (partial(_AuthoritySubclass), "claims the resource-policy authority"),
-    "masking-authority-subclass": (
-        partial(_MaskingAuthoritySubclass),
-        "claims the error-policy authority",
-    ),
-    "hybrid": (partial(_HybridAuthority), "claims the resource-policy authority"),
-}
-
-_LADDER_IDS = sorted(_LADDER_FACTORIES)
-
-
-class _MutableConsumerFactory:
-    """A stateful accepted factory, whose returned object is chosen after acceptance.
-
-    The shape the attack needs: a resolver reaches this through
-    ``info.schema.extensions`` and writes it, so if an entry decided enforcement
-    the ceiling for every later request would be a resolver's to choose.
-    """
-
-    def __init__(self) -> None:
-        self.widened = False
-
-    def __call__(self) -> _ConsumerExtension:
-        return _ConsumerExtension()
-
-
-class _NarrowResourceFactory:
-    """The accepted entry: a factory whose layout admits no weak reference.
-
-    ``__slots__`` without ``__weakref__`` is an ordinary way to write a callable
-    and Strawberry runs it like any other factory, so the schema holds it in a
-    box and answers for it from that box alone.
-    """
-
-    __slots__ = ()
-
-    def __call__(self) -> DjangoResourcePolicyExtension:
-        return DjangoResourcePolicyExtension(policy=ResourcePolicy(max_aliases=1))
-
-
-class _AcceptedConsumerFactory:
-    """The accepted entry, in the layout that takes no weak reference."""
-
-    __slots__ = ()
-
-    def __call__(self) -> _ConsumerExtension:
-        return _ConsumerExtension()
-
-
-class _ReplacementConsumerFactory:
-    """The entry a resolver would rather the schema resolved, in the same layout."""
-
-    __slots__ = ()
-
-    def __call__(self) -> _ConsumerExtension:
-        return _ConsumerExtension()
-
-
-def _rebuild_the_box(box: MethodType, replacement: _ReplacementConsumerFactory) -> None:
-    # basedpyright: typeshed declares object.__init__ argument-free, but CPython's accepts
-    # arguments on a type overriding __new__, as MethodType does: the primitive aimed at here
-    box.__init__(replacement)  # pyright: ignore[reportCallIssue]
-
-
-#: Every way there is to aim at the binding inside the box the schema holds. A
-#: Python object's own ``__setattr__`` cannot refuse the last two - the
-#: primitive its constructor writes its slot with is one a resolver can call -
-#: which is why the box is the interpreter's own binding instead.
-TAMPERS: dict[str, Callable[[MethodType, _ReplacementConsumerFactory], None]] = {
-    "assign-the-binding": lambda box, replacement: setattr(box, "__self__", replacement),
-    "assign-past-the-descriptor": lambda box, replacement: object.__setattr__(
-        box,
-        "__self__",
-        replacement,
-    ),
-    "write-the-instance-dict": lambda box, replacement: box.__dict__.__setitem__(
-        "__self__",
-        replacement,
-    ),
-    "delete-the-binding": lambda box, _replacement: delattr(box, "__self__"),
-    "rebuild-the-box": _rebuild_the_box,
-}
-
-
-def _swap(
-    schema: strawberry.Schema,
-    tamper: str,
-    accepted_type: type[_AcceptedConsumerFactory],
-    replacement: _ReplacementConsumerFactory,
-) -> str:
-    """Aim one write at the box holding this schema's accepted entry, and say what happened."""
-    box = next(
-        (
-            held
-            for held in _tuple_at(vars(schema), "_django_extensions")
-            if isinstance(getattr(held, "__self__", None), accepted_type)
-        ),
-        None,
-    )
-    if box is None:
-        return "no box"
-    assert isinstance(box, MethodType), box
-    try:
-        TAMPERS[tamper](box, replacement)
-    except AttributeError:
-        return "refused"
-    return "ignored"
-
-
-@strawberry.type
-class _Nested:
-    """One level of nesting, so a depth bound has something to charge."""
-
-    @strawberry.field
-    def hello(self) -> str:
-        return "hi"
+def _narrow_resource_factory() -> DjangoResourcePolicyExtension:
+    """A factory resolving to the bounding authority the schema builds itself."""
+    return DjangoResourcePolicyExtension(policy=ResourcePolicy(max_aliases=1))
 
 
 @strawberry.type
 class _ResourceQuery:
-    """One scalar to charge aliases against, and every write that would widen them."""
+    """One scalar for the authority-factory schema to serve."""
 
     @strawberry.field
     def hello(self) -> str:
         return "hi"
-
-    @strawberry.field
-    def nested(self) -> _Nested:
-        return _Nested()
-
-    @strawberry.field
-    def widen(self, info: strawberry.Info, tamper: str) -> str:
-        """Try to make the next request resolve a wider configuration."""
-        for entry in info.schema.extensions:
-            if isinstance(entry, _MutableConsumerFactory):
-                entry.widened = True
-        return _swap(info.schema, tamper, _AcceptedConsumerFactory, _ReplacementConsumerFactory())
-
-
-@strawberry.type
-class _ErrorQuery:
-    """One raising field, and every write that would stop its message being masked."""
-
-    @strawberry.field
-    def boom(self) -> str:
-        raise RuntimeError(SENTINEL)
-
-    @strawberry.field
-    def unmask(self, info: strawberry.Info, tamper: str) -> str:
-        """Try to make the next request resolve a configuration that masks nothing."""
-        for entry in info.schema.extensions:
-            if isinstance(entry, _MutableConsumerFactory):
-                entry.widened = True
-        return _swap(info.schema, tamper, _AcceptedConsumerFactory, _ReplacementConsumerFactory())
 
 
 class _Nester(SchemaExtension):
@@ -371,49 +108,6 @@ def _published(context: object) -> dict[str, object]:
     return {key: get_context_value(context, key) for key in DST_OPTIMIZER_KEYS}
 
 
-def _resource_schema() -> DjangoSchema:
-    """The schema mounted behind the resource mounts, built once per process."""
-    return DjangoSchema(
-        query=_ResourceQuery,
-        resource_policy=ResourcePolicy(max_aliases=1),
-        extensions=[_AcceptedConsumerFactory(), _MutableConsumerFactory()],
-    )
-
-
-def _error_schema() -> DjangoSchema:
-    """The schema mounted behind the error mounts, built once per process."""
-    return DjangoSchema(
-        query=_ErrorQuery,
-        extensions=[_AcceptedConsumerFactory(), _MutableConsumerFactory()],
-    )
-
-
-_HELD: dict[str, object] = {}
-
-
-def _held(name: str, build: Callable[[], DjangoSchema]) -> object:
-    """One schema per mount, held for the life of the process.
-
-    A schema rebuilt per request would answer every tamper with a fresh
-    configuration, which is the opposite of what these rows ask: whether a write
-    made in one request reaches the NEXT one.
-    """
-    if name not in _HELD:
-        _HELD[name] = build()
-    return _HELD[name]
-
-
-def _view(name: str, build: Callable[[], DjangoSchema]) -> Callable[..., HttpResponseBase]:
-    """Mount the package's synchronous view over one held schema."""
-
-    @wraps(DjangoGraphQLView.as_view())
-    def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
-        built = DjangoGraphQLView.as_view(schema=_held(name, build))
-        return built(request, *args, **kwargs)
-
-    return view
-
-
 def _fresh_view(build: Callable[[], DjangoSchema]) -> Callable[..., HttpResponseBase]:
     """Mount the package's synchronous view over a schema built per request.
 
@@ -446,166 +140,16 @@ _OPTIMIZER = DjangoOptimizerExtension()
 _NESTER = _Nester()
 
 
-@strawberry.type
-class _ResourceMutation:
-    """A mutation root, so a refused mutation document names a field that exists."""
-
-    @strawberry.mutation
-    def plain_mutation(self) -> bool:
-        return True
-
-
-def _ambiguous_schema() -> DjangoSchema:
-    """An opaque factory resolving to an enforcement authority the schema owns.
-
-    Bounded narrowly on purpose: the refusal chain keeps the package's own
-    resource extension, so what a refused schema does to an oversized or deeply
-    nested document is part of what this mount answers.
-    """
-    return DjangoSchema(
-        query=_ResourceQuery,
-        mutation=_ResourceMutation,
-        resource_policy=ResourcePolicy(max_document_tokens=10, max_depth=1),
-        extensions=[_NarrowResourceFactory()],
-    )
-
-
-def _ladder_schema(factory: Callable[[], object]) -> DjangoSchema:
-    """A schema whose one entry is ``factory``, accepted at construction."""
-    # basedpyright: trust boundary: a factory the per-operation check refuses, built on purpose
-    return DjangoSchema(query=_ResourceQuery, extensions=[factory])  # pyright: ignore[reportArgumentType]
-
-
-def _held_async_view(
-    name: str,
-    build: Callable[[], DjangoSchema],
-) -> Callable[..., Coroutine[object, object, HttpResponseBase]]:
-    """Mount the asynchronous view over one held schema."""
-
-    @wraps(AsyncDjangoGraphQLView.as_view())
-    async def view(request: HttpRequest, *args: object, **kwargs: object) -> HttpResponseBase:
-        built = AsyncDjangoGraphQLView.as_view(schema=_held(name, build))
-        return await built(request, *args, **kwargs)
-
-    return view
+def _authority_factory_schema() -> DjangoSchema:
+    """A schema whose one entry is a factory resolving to an enforcement authority."""
+    return DjangoSchema(query=_ResourceQuery, extensions=[_narrow_resource_factory])
 
 
 urlpatterns = [
     path("", include("config.urls")),
-    path("iso-resource/", _view("resource", _resource_schema)),
-    path("iso-resource-async/", _held_async_view("resource", _resource_schema)),
-    path("iso-error/", _view("error", _error_schema)),
-    path("iso-error-async/", _held_async_view("error", _error_schema)),
     path("iso-nesting/", _fresh_view(_nesting_schema)),
-    path("iso-chain/", _view("chain", _ambiguous_schema)),
-    path("iso-chain-async/", _held_async_view("chain", _ambiguous_schema)),
-    *(
-        path(
-            f"iso-ladder-{shape}/",
-            _view(f"ladder-{shape}", lambda f=factory: _ladder_schema(f)),
-        )
-        for shape, (factory, _) in _LADDER_FACTORIES.items()
-    ),
+    path("iso-chain/", _fresh_view(_authority_factory_schema)),
 ]
-
-
-#: What each write spelling does to the interpreter's own binding. Two of them
-#: raise nothing at all - a ``__dict__`` write on a bound method lands on the
-#: function it wraps, and a second ``__init__`` is a no-op - which is the point
-#: of reading the NEXT request rather than the write's own return value.
-TAMPER_OUTCOMES = {
-    "assign-the-binding": "refused",
-    "assign-past-the-descriptor": "refused",
-    "write-the-instance-dict": "ignored",
-    "delete-the-binding": "refused",
-    "rebuild-the-box": "ignored",
-}
-
-
-@pytest.mark.parametrize("tamper", sorted(TAMPER_OUTCOMES), ids=sorted(TAMPER_OUTCOMES))
-def test_a_resolver_cannot_widen_the_next_requests_bound_through_the_accepted_entry(
-    tamper: str,
-) -> None:
-    """The bound the SCHEMA was configured with is the bound the next request is held to.
-
-    The resolver does everything a resolver can do to the configuration it can
-    reach: it writes the accepted stateful factory's own state and it aims one
-    write at the box holding the accepted slotted entry. The next request is
-    bounded exactly as the deployment configured it, because what enforces it is
-    the schema's record and not an object in that graph.
-
-    Parametrized over each write spelling with one node id apiece, because which
-    of them the binding survives is the whole claim.
-    """
-    client = TestClient(path="/iso-resource/")
-
-    wrote = client.query("query($t: String!) { widen(tamper: $t) }", {"t": tamper})
-    assert wrote.data is not None
-    assert wrote.data["widen"] == TAMPER_OUTCOMES[tamper]
-
-    refused = client.query("{ a: hello b: hello }", assert_no_errors=False)
-    assert refused.errors is not None
-    assert "extensions" in refused.errors[0]
-    assert refused.errors[0]["extensions"]["code"] == RESOURCE_LIMIT_ERROR_CODE
-    assert client.query("{ hello }").data == {"hello": "hi"}
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_a_resolver_cannot_widen_the_next_requests_bound_on_the_async_view() -> None:
-    """The same claim over the asynchronous view, which is a different request path."""
-    client = AsyncClient()
-
-    wrote = await _post_async(
-        client,
-        '{ widen(tamper: "assign-the-binding") }',
-        mount="/iso-resource-async/",
-    )
-    assert wrote["data"] == {"widen": "refused"}
-
-    refused = await _post_async(client, "{ a: hello b: hello }", mount="/iso-resource-async/")
-    assert refused["data"] is None
-    assert json_at(refused, "errors", 0, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE
-
-
-@pytest.mark.parametrize("tamper", sorted(TAMPER_OUTCOMES), ids=sorted(TAMPER_OUTCOMES))
-def test_a_resolver_cannot_unmask_the_next_requests_errors_through_the_accepted_entry(
-    tamper: str,
-) -> None:
-    """Masking is the amplifier: an unmasked response carries whatever was raised.
-
-    The masking extension is built per operation from the schema's own error
-    policy, so no entry a resolver can reach decides whether the next unexpected
-    exception reaches the client with its own message on it.
-    """
-    client = TestClient(path="/iso-error/")
-
-    wrote = client.query("query($t: String!) { unmask(tamper: $t) }", {"t": tamper})
-    assert wrote.data is not None
-    assert wrote.data["unmask"] == TAMPER_OUTCOMES[tamper]
-
-    masked = client.query("{ boom }", assert_no_errors=False)
-    assert masked.errors is not None
-    assert "message" in masked.errors[0]
-    assert "extensions" in masked.errors[0]
-    assert SENTINEL not in masked.errors[0]["message"]
-    assert "correlationId" in masked.errors[0]["extensions"]
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_a_resolver_cannot_unmask_the_next_requests_errors_on_the_async_view() -> None:
-    """The same claim over the asynchronous view."""
-    client = AsyncClient()
-
-    wrote = await _post_async(
-        client,
-        '{ unmask(tamper: "assign-the-binding") }',
-        mount="/iso-error-async/",
-    )
-    assert wrote["data"] == {"unmask": "refused"}
-
-    masked = await _post_async(client, "{ boom }", mount="/iso-error-async/")
-    assert SENTINEL not in json_str(masked, "errors", 0, "message")
-    assert "correlationId" in json_object(masked, "errors", 0, "extensions")
 
 
 @pytest.mark.django_db
@@ -636,228 +180,9 @@ def test_an_operation_a_consumer_extension_starts_leaves_the_request_its_optimiz
     assert nesting["changed"] == []
 
 
-@pytest.mark.parametrize(
-    "document",
-    [
-        "{ hello }",
-        "{ a: hello }",
-        "{",
-        "query Named { hello }",
-        "mutation { plainMutation }",
-    ],
-    ids=[
-        "valid",
-        "aliased",
-        "malformed",
-        "named-operation",
-        "mutation",
-    ],
-)
-def test_a_schema_whose_factory_claims_an_authority_refuses_every_request(document: str) -> None:
-    """A factory cannot be an enforcement authority, and the wire says so identically.
-
-    The factory is opaque until it runs, so what it produces is typed at
-    resolution - and an extension of an enforcement kind is a second authority
-    whichever object made it. The malformed row is the one that says "every"
-    literally: the refusal is published before the parse stage, so a document
-    that would not have parsed is answered with the same stable code.
-    """
+def test_a_schema_whose_factory_claims_an_authority_raises_on_the_request() -> None:
+    """A factory cannot be an enforcement authority; resolving it raises ``ConfigurationError``."""
     client = TestClient(path="/iso-chain/")
 
-    refused = client.query(document, assert_no_errors=False)
-
-    assert refused.data is None
-    assert refused.errors is not None
-    assert [error.get("extensions") for error in refused.errors] == [
-        {"code": SCHEMA_CONFIGURATION_ERROR_CODE},
-    ]
-    assert "message" in refused.errors[0]
-    assert "ResourcePolicy" not in refused.errors[0]["message"]
-    assert "max_aliases" not in refused.errors[0]["message"]
-
-
-@pytest.mark.parametrize("shape", _LADDER_IDS, ids=_LADDER_IDS)
-def test_a_factory_resolving_to_anything_but_an_ordinary_extension_refuses_every_request(
-    shape: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """What a factory returns is typed by its real type, and every miss is one refusal.
-
-    Upstream assigns ``execution_context`` on whatever came back, outside every
-    seam the package masks at, so a raising factory, a non-extension and a class
-    would each escape as the consumer's own error. A lazily wrapped extension
-    proxies ``__class__``, so ``isinstance`` would admit it while its real type
-    is the wrapper. An authority subclass or hybrid is a second authority. The
-    wire carries the
-    stable code and nothing the factory said; the reason goes to the log.
-    """
-    _, reason = _LADDER_FACTORIES[shape]
-    client = TestClient(path=f"/iso-ladder-{shape}/")
-
-    with caplog.at_level(logging.ERROR, logger="django_strawberry_framework"):
-        refused = client.query("{ hello }", assert_no_errors=False)
-
-    assert refused.data is None
-    assert refused.errors is not None
-    assert [error.get("extensions") for error in refused.errors] == [
-        {"code": SCHEMA_CONFIGURATION_ERROR_CODE},
-    ]
-    assert SENTINEL not in json.dumps(refused.errors)
-    assert any(reason in record.getMessage() for record in caplog.records), caplog.text
-
-
-@pytest.mark.parametrize(
-    "document",
-    ["{ a: hello b: hello c: hello }", "{ nested { hello } }"],
-    ids=["over-token-budget", "over-depth-budget"],
-)
-def test_a_refused_schema_still_bounds_the_document_it_refuses(document: str) -> None:
-    """A broken configuration is not the one shape with no parsing ceiling.
-
-    The refusal chain keeps the package's own resource extension, reading the
-    schema's private policy, so the pre-parse token and depth scan still runs.
-    Without it one bad factory would turn "every operation fails closed" into an
-    endpoint that lexes and nests whatever it is sent before saying no.
-    """
-    client = TestClient(path="/iso-chain/")
-
-    rejected = client.query(document, assert_no_errors=False)
-
-    assert rejected.data is None
-    assert rejected.errors is not None
-    assert "extensions" in rejected.errors[0]
-    assert rejected.errors[0]["extensions"]["code"] == RESOURCE_LIMIT_ERROR_CODE
-
-
-#: Every string ``operationName`` a client can put in a request body, including the
-#: ones no document can carry. A refused schema discarded the document the name
-#: was written against, so the name selects nothing and every one of these has
-#: to come back in the same envelope.
-_REFUSED_OPERATION_NAMES = {
-    "empty": "",
-    "invalid-punctuation": "bad-name",
-    "unicode": "\N{FIRE}",
-    "valid-but-absent": "Absent",
-}
-
-_REFUSED_NAME_IDS = sorted(_REFUSED_OPERATION_NAMES)
-
-
-def _assert_refused_envelope(response: HttpResponseBase, body: bytes) -> JSONObject:
-    """One JSON envelope carrying the configuration code, and nothing about the request."""
-    assert response.status_code == 200, body
-    assert response.headers["Content-Type"].startswith("application/json"), response.headers
-    payload = json_object(json_loads(body))
-    assert payload["data"] is None, payload
-    assert [json_at(error, "extensions") for error in json_list(payload, "errors")] == [
-        {"code": SCHEMA_CONFIGURATION_ERROR_CODE},
-    ]
-    return payload
-
-
-@pytest.mark.parametrize("name", _REFUSED_NAME_IDS, ids=_REFUSED_NAME_IDS)
-def test_a_refused_schema_answers_every_operation_name_the_same_way(name: str) -> None:
-    """A name no document can carry is refused like every other request.
-
-    Upstream selects the operation to run by looking the requested name up in
-    whatever document the parse stage left behind, and a refused request's
-    document is the package's own - so a name still belonging to the request is
-    a lookup that cannot succeed, raised over a refusal already published. What
-    a client saw instead was a plain-text 400 quoting its own operation name
-    back at it, from the one configuration that is supposed to answer
-    everything the same way.
-    """
-    requested = _REFUSED_OPERATION_NAMES[name]
-
-    response, body = _post_sync(Client(), "{ hello }", "/iso-chain/", operation_name=requested)
-
-    payload = _assert_refused_envelope(response, body)
-    assert "Unknown operation" not in json.dumps(payload), payload
-
-
-@pytest.mark.parametrize("name", _REFUSED_NAME_IDS, ids=_REFUSED_NAME_IDS)
-def test_a_refused_schema_still_bounds_a_document_sent_under_any_operation_name(name: str) -> None:
-    """The ceiling is charged before the name is looked at, and still outranks the refusal.
-
-    Normalizing the selector must not move the pre-parse scan: an oversized
-    document is rejected on its size whatever the request called the operation
-    it wanted.
-    """
-    requested = _REFUSED_OPERATION_NAMES[name]
-
-    response, body = _post_sync(
-        Client(),
-        "{ a: hello b: hello c: hello }",
-        "/iso-chain/",
-        operation_name=requested,
-    )
-
-    assert response.status_code == 200, body
-    payload = json_object(json_loads(body))
-    assert json_at(payload, "errors", 0, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("name", _REFUSED_NAME_IDS, ids=_REFUSED_NAME_IDS)
-async def test_a_refused_schema_answers_every_operation_name_asynchronously_too(name: str) -> None:
-    """The asynchronous view answers hostile request metadata identically.
-
-    Sync and async are separate code paths through the same schema, and the
-    escaped lookup raised out of both - so parity here is the claim, not a
-    restatement of the row above.
-    """
-    requested = _REFUSED_OPERATION_NAMES[name]
-
-    payload = await _post_async(
-        AsyncClient(),
-        "{ hello }",
-        mount="/iso-chain-async/",
-        operation_name=requested,
-    )
-
-    assert payload["data"] is None, payload
-    assert [json_at(error, "extensions") for error in json_list(payload, "errors")] == [
-        {"code": SCHEMA_CONFIGURATION_ERROR_CODE},
-    ]
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_a_refused_schema_answers_the_async_view_the_same_way() -> None:
-    """The refusal and its ceiling are the same over the asynchronous view."""
-    client = AsyncClient()
-
-    refused = await _post_async(client, "{ hello }", mount="/iso-chain-async/")
-    assert refused["data"] is None
-    assert json_at(refused, "errors", 0, "extensions") == {"code": SCHEMA_CONFIGURATION_ERROR_CODE}
-
-    rejected = await _post_async(
-        client,
-        "{ a: hello b: hello c: hello }",
-        mount="/iso-chain-async/",
-    )
-    assert json_at(rejected, "errors", 0, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE
-
-
-def test_a_refused_schema_answers_a_numeric_operation_name_over_http() -> None:
-    """A numeric JSON operationName reaches the same refusal as an ordinary string."""
-    # raw-envelope exemption: operationName is a number outside TestClient's annotated API.
-    response = Client().post(
-        "/iso-chain/",
-        data=json.dumps({"query": "{ hello }", "operationName": 0}),
-        content_type="application/json",
-    )
-
-    _assert_refused_envelope(response, response.content)
-
-
-@pytest.mark.django_db(transaction=True)
-async def test_a_refused_schema_answers_a_numeric_operation_name_over_async_http() -> None:
-    """The async parser also passes a numeric operationName to the schema's refusal."""
-    # raw-envelope exemption: operationName is a number outside AsyncTestClient's annotated API.
-    response = await AsyncClient().post(
-        "/iso-chain-async/",
-        data=json.dumps({"query": "{ hello }", "operationName": 0}),
-        content_type="application/json",
-    )
-
-    _assert_refused_envelope(response, response.content)
+    with pytest.raises(ConfigurationError, match="builds itself"):
+        client.query("{ hello }")

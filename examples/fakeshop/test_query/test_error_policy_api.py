@@ -37,8 +37,8 @@ retained ``path``, sync/async parity, the two ways out (``DEBUG=True`` and
 ``error_policy={"enabled": False}``), a ``DEBUG`` value that is set but is not
 the boolean ``True`` (still masked), a resolver that writes
 ``info.schema.error_policy`` (still masked: the attribute is a copy), and an
-extension entry that resolves to the masking authority (the request is refused
-with the configuration code rather than masked by consumer code), a directly
+extension entry that resolves to the masking authority (``ConfigurationError``
+when the operation resolves it, rather than masked by consumer code), a directly
 listed masking extension beside a debug factory (one masker, and debug still
 captures the original), and a hand-wired plain ``strawberry.Schema`` carrying the
 exported extension (masked by the package default it falls back to, while a hook
@@ -103,12 +103,12 @@ from typing_extensions import TypedDict, Unpack, override
 
 from django_strawberry_framework import (
     RESOURCE_LIMIT_ERROR_CODE,
-    SCHEMA_CONFIGURATION_ERROR_CODE,
     DjangoErrorPolicyExtension,
     DjangoSchema,
     strawberry_config,
 )
 from django_strawberry_framework.error_policy import DEFAULT_ERROR_POLICY
+from django_strawberry_framework.exceptions import ConfigurationError
 from django_strawberry_framework.extensions import DjangoDebugExtension
 from django_strawberry_framework.testing import AsyncTestClient, Response
 from django_strawberry_framework.testing.relay import global_id_for
@@ -304,7 +304,7 @@ class _FactoryHookWitness(SchemaExtension):
 
     @override
     def on_parse(self) -> Iterator[None]:
-        """Note the parse seam, which a refused request still passes through."""
+        """Note the parse seam."""
         _FactoryHookWitness.ran.append("parse")
         yield
 
@@ -661,13 +661,6 @@ urlpatterns = [
         "ep-factory/",
         _probe_view(extensions=[_error_policy_factory, _FactoryHookWitness]),
     ),
-    path(
-        "ep-factory-limits/",
-        _probe_view(
-            extensions=[_error_policy_factory],
-            resource_policy={"max_document_tokens": _MAX_TOKENS},
-        ),
-    ),
     path(HOOK_MOUNTS["sync"].lstrip("/"), _probe_view(extensions=[_HookFailure])),
     path(HOOK_MOUNTS["async"].lstrip("/"), _probe_async_view(extensions=[_HookFailure])),
     path(
@@ -842,40 +835,17 @@ def test_the_correlation_id_reaches_the_server_log_with_the_original_exception(
 
 
 @pytest.mark.django_db
-def test_a_factory_resolving_to_the_masker_refuses_the_request_instead_of_masking(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A factory cannot become the schema's masker; the schema refuses the operation.
+def test_a_factory_resolving_to_the_masker_raises_instead_of_masking() -> None:
+    """A factory cannot become the schema's masker; resolving it raises ``ConfigurationError``.
 
-    The masker is the schema's own, built per operation from the configuration
-    the schema was accepted with. A factory is opaque until it is called, so a
-    factory that resolves to one is a second masker arriving from consumer code
-    on a request that is already running - and what it would mask is exactly
-    what could not be established. The whole request is refused instead: the
-    stable configuration code, no resolver, no correlation id minted, and no
-    consumer hook past the seams the refusal itself passes through.
+    The masker is the schema's own, built per operation from its error policy. A
+    factory that resolves to one is refused when the operation resolves it, before
+    any consumer hook or resolver runs.
     """
-    caplog.set_level(logging.ERROR, logger=_PACKAGE_LOGGER)
     _FactoryHookWitness.ran.clear()
-    _, payload = _post("/ep-factory/", "{ boom }")
-    assert payload["data"] is None, payload
-    assert [json_at(error, "extensions", "code") for error in json_list(payload, "errors")] == [
-        SCHEMA_CONFIGURATION_ERROR_CODE,
-    ]
-    assert _SENSITIVE not in json.dumps(payload)
-    assert "correlationId" not in json.dumps(payload)
-    assert "execute" not in _FactoryHookWitness.ran, _FactoryHookWitness.ran
-    records = [
-        record
-        for record in caplog.records
-        if record.name == _PACKAGE_LOGGER and record.levelno == logging.ERROR
-    ]
-    assert records, caplog.records
-    assert all(
-        record.getMessage().startswith("Refusing every operation on this schema:")
-        for record in records
-    )
-    assert all(record.exc_info is None for record in records)
+    with pytest.raises(ConfigurationError, match="builds itself"):
+        _post("/ep-factory/", "{ boom }")
+    assert _FactoryHookWitness.ran == []
 
 
 @pytest.mark.django_db
@@ -1593,23 +1563,3 @@ def test_a_malformed_relation_id_is_the_relation_field_error_never_a_masked_erro
     }
     assert _package_error_records(caplog) == []
     assert not product_models.Item.objects.filter(name=marker).exists()
-
-
-@pytest.mark.django_db
-def test_a_refused_schema_still_bounds_an_over_budget_document_live() -> None:
-    """A refused schema answers an over-budget document with the resource code.
-
-    The refusal chain keeps the package's own resource extension, so the
-    pre-parse token scan still runs: a document past the ceiling is refused
-    with ``RESOURCE_LIMIT_EXCEEDED`` (bound detail included, no correlation
-    id) rather than with the configuration code a fitting document would get.
-    """
-    _, payload = _post("/ep-factory-limits/", "{ fine deliberate boomOther }")
-    assert json_at(payload, "data") is None, payload
-    assert len(json_list(payload, "errors")) == 1, payload
-    error = json_object(payload, "errors", 0)
-    assert json_at(error, "extensions", "code") == RESOURCE_LIMIT_ERROR_CODE, error
-    assert str(_MAX_TOKENS) in json_str(error, "message"), error
-    assert json_at(error, "extensions", "bound") == "max_document_tokens", error
-    assert json_at(error, "extensions", "limit") == _MAX_TOKENS, error
-    assert "correlationId" not in json_object(error, "extensions"), error

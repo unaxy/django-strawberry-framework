@@ -244,7 +244,7 @@ def test_the_policy_is_frozen_so_a_plain_assignment_raises() -> None:
     """Frozen rejects the accident, not the adversary: a plain assignment raises.
 
     The ``__dict__`` write frozen admits touches only the object held, never
-    the stored enforcement record.
+    the policy the schema stores.
     """
     with pytest.raises(Exception, match="cannot assign to field"):
         # basedpyright: the write to the frozen dataclass field is the mutation under test; the

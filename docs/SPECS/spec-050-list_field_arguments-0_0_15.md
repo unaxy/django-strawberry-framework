@@ -1720,34 +1720,22 @@ and for why upstream completion, not the optimizer, owns a queryset a resolver r
 
 Two kinds of state meet on every operation and never merge. **Configuration** - the resource
 policy a request is bounded by, the error policy it is masked by, and the extension entries a
-schema was accepted with - belongs to the schema and is read-only to every resolver.
+schema was constructed with - belongs to the schema.
 **Operation state** - the engine context, the armed budget, the optimizer's frame, the executor
 driving the request - belongs to the runner built for that one operation and is reachable only
 through a task-local binding while that runner owns it.
 
-The seam between them is what a resolver can reach. A resolver holds every shared extension
-through `info.schema.extensions` and can assign over its attributes, so an attribute is not
-where either kind of state can live. The two policies alone are canonicalized at construction
-into [`django_strawberry_framework/schema.py::_SchemaEnforcement`][schema], a frozen record of
-primitives held by
-[`django_strawberry_framework/utils/private_state.py::PrivateAuthority`][private-state] under
-the schema's identity and answered through `DjangoSchema.resource_policy` /
-`DjangoSchema.error_policy` as a copy per read. The consumer extension entries are not
-canonicalized: the schema holds them, and
-[`django_strawberry_framework/utils/private_state.py::PrivateMembership`][private-state] holds
-one piece of weak identity evidence per accepted entry
-(`django_strawberry_framework/schema.py #"_SCHEMA_EXTENSIONS: PrivateMembership"`), so each
-operation resolves the entries the evidence points at and an entry written over the attribute
-is never run. Operation state is held by
+The two policies are canonicalized at construction, held on the schema and answered through
+`DjangoSchema.resource_policy` / `DjangoSchema.error_policy` as a copy per read; the consumer
+extension entries are Strawberry's own `schema.extensions`. Operation state is held by
 [`django_strawberry_framework/extensions/operation_state.py::DjangoExtensionsRunner`][operation-state].
-A schema whose evidence no longer resolves cannot read its own configuration back and refuses
-the operation rather than falling back to a wider one. See the [rationale][rationale-d13] for
+See the [rationale][rationale-d13] for
 the rejected extension-attribute and engine-assignment designs.
 
 ### Decision 14 — an enforcement authority is a declaration, never an extension entry
 
 `DjangoSchema` installs its own error-policy and resource-policy extension on every operation,
-built from the construction record, and a consumer entry naming either kind is read once as a
+built from the schema's policies, and a consumer entry naming either kind is read once as a
 DECLARATION that does not travel into the chain. Identity evidence about an entry authenticates
 the object, not its future behavior, and the two authorities are the one place that difference
 is fatal: a factory, a closure over a mutable cell, a singleton selector and a subclass all keep
@@ -1757,16 +1745,14 @@ So the admission ladder is exact, and every rung is decided where it is actionab
 
 | Entry spelling | Where it is answered | Answer |
 |---|---|---|
-| exact class or exact instance of an authority | schema construction | what it declares (an exact resource-policy instance's own policy) is folded into the record; the entry is dropped |
+| exact class or exact instance of an authority | schema construction | what it declares (an exact resource-policy instance's own policy) is folded into the schema's policy; the entry is dropped |
 | subclass of an authority, as a class or as an instance | schema construction | `ConfigurationError` |
-| factory resolving to either authority, subclasses included | `get_extensions` | the operation is refused |
-| factory that raises, or resolves to anything that is not a `SchemaExtension` instance (a class included) | `get_extensions` | the operation is refused |
+| factory resolving to either authority, subclasses included | `get_extensions` | `ConfigurationError` |
 | any other class, instance or factory | unchanged | runs between the two authorities |
 
 A factory cannot be typed without calling it, and calling it at construction would break its
-fresh-per-operation lifecycle, so what a factory PRODUCES can only be admitted at resolution -
-which is why that boundary is one transaction: the factories run once, through upstream, and
-every check reads the members that came back. See the [rationale][rationale-d14] for the
+fresh-per-operation lifecycle, so what a factory PRODUCES can only be checked at resolution:
+the factories run once, through upstream, and the check reads the members that came back. See the [rationale][rationale-d14] for the
 rejected identity-deduplication, subclass-admission and construction-time factory-call designs.
 
 ### Decision 15 — the runner owns every binding, for the operation's whole lifetime
@@ -1783,55 +1769,20 @@ given: a class entry and a fresh factory are operation-local there because the o
 shared instance on a raw schema is outside the isolation guarantee. See the
 [rationale][rationale-d15] for the rejected bare-`ContextVar` and operation-scope-only designs.
 
-### Decision 16 — a refused request's document, selector and transport policy are all package-owned
+### Decision 16 — a factory resolving to an authority raises out of extension resolution
 
-A refusal runs nothing, and that has to include the parser: a document is arbitrary-length
-consumer input that graphql-core parses recursively, so a deployment whose configuration broke
-must not be the one shape that still lexes and nests whatever it is sent. The parse stage is
-therefore handed a package-owned document, parsed once at import, one per operation type.
+`DjangoSchema.get_extensions` raises `ConfigurationError` for a resolved member of either
+enforcement kind. Upstream calls `get_extensions` outside the block that turns an exception into
+a response, so the error reaches the caller of `execute`, `execute_sync` or `stream` (the
+package view answers it as a server error) before the request's document is parsed and before
+any consumer hook or resolver runs. A factory that raises, or returns something that is not an
+extension, is upstream's to answer. See the [rationale][rationale-d16] for the rejected
+wire-refusal design.
 
-Three values are replaced together, because replacing one leaves the others authoritative:
+### Decision 17 — the configuration code stays exported
 
-1. **The document.** The request's own text stays on the execution context as an inert
-   diagnostic and takes no further part in parsing, selection, validation or execution.
-2. **The operation selector.** Upstream picks the operation to run by looking the REQUESTED
-   name up in whatever document the parse stage left behind, so a substitute reached by a name
-   still belonging to the request is a second error over the published refusal. The substitute
-   carries one anonymous operation and the provided name is cleared, so the selector is the
-   package's own.
-3. **The transport policy.** `allowed_operation_types` is annotated `Iterable[OperationType]`
-   and upstream tests the settled operation against it ONCE, after parsing. It is read once
-   here, materialized into an exact built-in `tuple`, and that tuple is assigned back to the
-   execution context before the substitute is selected from it - so package selection and
-   upstream authorization read one immutable fact, and a one-shot iterable is not consumed
-   twice. It is never asked whether it is empty: truthiness is consumer code.
-
-See the [rationale][rationale-d16] for the rejected post-parse publication, name-copying,
-per-request parse, policy-read-at-selection, and truthiness-normalization designs.
-
-### Decision 17 — the refusal is stable, and the transport's own policy is the one exception
-
-Every refused request answers with the published `SCHEMA_CONFIGURATION_UNAVAILABLE` code and
-one of two fixed messages, one per cause:
-`django_strawberry_framework/schema.py #"_UNREADABLE_CONFIGURATION = ("` when the accepted
-extension entries can no longer be read back, and
-`django_strawberry_framework/schema.py #"_UNRESOLVED_CHAIN = ("` when they do not resolve into
-an admissible chain (a factory raised, returned something that is not a `SchemaExtension`
-instance, or returned an authority). The message depends on the schema's cause alone, never on
-the request: a malformed document, a name no document can carry (absent, invalid, empty,
-non-ASCII, or not a string), a one-shot transport policy, and a hostile container all get the
-same answer, and the failing object and any factory exception text go to the deployment's log
-rather than the wire. The refusal is PUBLISHED as a pre-execution error and restated where
-execution would begin, which is the pair of seams every transport renders - an exception out of
-a hook leaves a streamed operation with no frame at all.
-
-Two things still outrank it, and both are deliberate. The resource extension stays in the
-refused chain, so the pre-parse token and depth scan still bounds the document being refused.
-And a transport policy that genuinely allows nothing stays a policy that allows nothing:
-upstream refuses that operation type as it would on a healthy schema. Widening the policy,
-appending a default, or swallowing that refusal would make a broken configuration the one shape
-that accepts what the transport forbids. See the [rationale][rationale-d17] for the rejected
-unbounded-refusal, policy-widening and detail-interpolating designs.
+`schema.py #"SCHEMA_CONFIGURATION_ERROR_CODE = "` stays defined and root-exported as public
+surface; no package path emits it. See the [rationale][rationale-d17].
 
 ### Decision 18 — execution mode is operation state; the ambient event loop is a different fact
 
@@ -1845,7 +1796,7 @@ client would get a generic completion failure while the inner coroutines went un
 
 So the mode is carried rather than sampled.
 [`django_strawberry_framework/schema.py::DjangoSchema.get_extensions`][schema] receives the
-authoritative `sync` flag and puts it in both the admitted and the refused chain; the runner
+authoritative `sync` flag and puts it in the chain; the runner
 reads it once and binds it wherever it binds state.
 [`django_strawberry_framework/utils/execution_mode.py`][execution-mode] owns the one definition
 and answers two questions of it: `operation_is_async` states the fact for code with its own
@@ -1897,8 +1848,7 @@ ordinary configuration. Three trust levels follow.
 - **Untrusted: the wire.** Every GraphQL document, variable, header, upload and transport
   frame. Every bound in this spec and in [`spec-047`][spec-047] exists for that input.
 - **Validated, then trusted: configuration.** The two policies are canonicalized at
-  construction and read back as copies; the extension entries are held by per-entry identity
-  evidence; a configuration that cannot be read back is refused (Decision 13).
+  construction and read back as copies (Decision 13).
 - **Trusted: application Python.** A resolver, a `get_queryset` hook, an `OrderSet.apply_*`
   override, a project `QuerySet` class, an extension factory. The package validates what it
   can establish mechanically about their RESULTS - shape, model, routing, evaluation state -
@@ -1937,15 +1887,15 @@ same rule.
 
 **Enforcement is configured, not installed.** The resource and error policies are declared
 through `DjangoSchema(resource_policy=..., error_policy=...)`; the schema builds its own
-authority extension per operation from that record (Decision 14). An exact instance of an
+authority extension per operation from those policies (Decision 14). An exact instance of an
 authority in `extensions=[...]` is a package-specific compatibility reading - read once as a
 declaration, dropped from the chain before upstream sees it, so upstream's deprecation warning
 does not fire for it. A SUBCLASS of either authority is refused at schema construction with
 `ConfigurationError` - supplied as a class or as an instance, and whether or not it supplies a
 policy of its own, because what disqualifies it is the override it may carry on the hook that
 charges or masks. Only a factory is opaque until it is called, so a factory resolving to an
-authority, subclasses included, is the one spelling refused at the operation instead, with the
-stable `SCHEMA_CONFIGURATION_UNAVAILABLE` code (Decision 14's ladder). Moving such an instance
+authority, subclasses included, is the one spelling refused at the operation instead, with
+`ConfigurationError` (Decision 14's ladder). Moving such an instance
 into a factory is therefore NOT a migration; the migration is to the keyword argument, and the
 docs say so.
 
@@ -1961,9 +1911,9 @@ extension - one state per operation through the runner (Decision 15), so
 `extensions=[lambda: _optimizer]` is safe here where upstream says a shared instance is not.
 That guarantee is this package's own: stated in the docs as its own, tested here, and not a
 claim about upstream or about a third-party extension. A stranger's extension gets exactly
-upstream's lifecycle: the package records the entries it was constructed with and answers its
-configuration from that record (Decision 13), refuses an operation only where its own authority
-cannot be established (Decision 14), and does not make another author's mutable attributes
+upstream's lifecycle: the package passes the entries it was constructed with to upstream
+(Decision 13), raises only where an entry resolves to one of its own authorities
+(Decision 14), and does not make another author's mutable attributes
 thread-safe or claim to. See the [rationale][rationale-d20] for the rejected package-defined
 instance semantics.
 
@@ -3277,11 +3227,10 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
       writer's own duplicate and nothing a later request reads. A `ResourcePolicy` or
       `ErrorPolicy` SUBCLASS is read out once at schema construction and replaced by an exact
       instance. The extension that arms the budget is the schema's own, built per operation
-      from that construction record: an enforcement authority is never an extension ENTRY, so
-      no factory, closure, singleton selector or subclass a resolver can reach through
-      `info.schema` decides what a later request is bounded by. A subclass supplied directly,
-      as a class or as an instance, is refused with `ConfigurationError` at construction, and
-      an entry that RESOLVES into one refuses the operation instead.
+      from the schema's policies: an enforcement authority is never an extension ENTRY. A
+      subclass supplied directly, as a class or as an instance, is refused with
+      `ConfigurationError` at construction, and an entry that RESOLVES into one raises
+      `ConfigurationError` when the operation resolves it.
 - [ ] A bound stored on a `ResourcePolicy`, and a field's declared `max_rows`, is an exact
       built-in `int` (or `float` for the deadline); every numeric subclass is refused with a
       typed `ConfigurationError` before any comparison, arithmetic or formatting runs, so no
@@ -3391,14 +3340,8 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
 - [ ] Async queryset results complete over `AsyncDjangoGraphQLView` through an async-only
       adapter, with optimizer-on/off parity; no list-field async suite and no
       `tests/test_relay_connection.py` row sets `DJANGO_ALLOW_ASYNC_UNSAFE`.
-- [ ] A refused request is answered by the package end to end: the document it arrived with
-      reaches no parser, the operation selector is the package's own anonymous one, and the
-      transport policy is read ONCE into an exact built-in `tuple` that is put back on the
-      execution context before the substitute document is selected from it. A one-shot
-      iterable survives `execute_sync`, `execute` and `stream` with the stable configuration
-      code; a container with a hostile `__bool__` is never truth-tested; a policy that allows
-      nothing still gets upstream's operation-type refusal rather than a widened one
-      (Decisions 16 and 17, [`tests/test_schema.py`][test-schema]).
+- [ ] A factory entry resolving to an enforcement authority raises `ConfigurationError` when
+      the operation resolves it (Decision 16, [`tests/test_schema.py`][test-schema]).
 - [ ] Which GraphQL executor drives a resolver is carried from the entry point into the chain
       and bound by the runner for the operation, result collection, every streamed frame and
       every stream resume, restoring the enclosing operation's answer on the way out. Every
@@ -3515,8 +3458,8 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
 [rationale-d13]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-13--configuration-authority-is-schema-state-everything-per-request-is-operation-state
 [rationale-d14]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-14--an-enforcement-authority-is-a-declaration-never-an-extension-entry
 [rationale-d15]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-15--the-runner-owns-every-binding-for-the-operations-whole-lifetime
-[rationale-d16]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-16--a-refused-requests-document-selector-and-transport-policy-are-all-package-owned
-[rationale-d17]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-17--the-refusal-is-stable-and-the-transports-own-policy-is-the-one-exception
+[rationale-d16]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-16--a-factory-resolving-to-an-authority-raises-out-of-extension-resolution
+[rationale-d17]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-17--the-configuration-code-stays-exported
 [rationale-d18]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-18--execution-mode-is-operation-state-the-ambient-event-loop-is-a-different-fact
 [rationale-d19]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-19--application-code-is-trusted-the-wire-is-not-a-finding-is-admitted-by-reachability
 [rationale-d2]: appx/spec-050-list_field_arguments-0_0_15-rationale.md#decision-2--sidecar-conditional-orderby-is-the-only-truthful-meta-first-surface
@@ -3546,7 +3489,6 @@ Error rows assert the `extensions` fields the rejection carries (`code`, `reason
 [orders-init]: ../../django_strawberry_framework/orders/__init__.py
 [orders-sets]: ../../django_strawberry_framework/orders/sets.py
 [package-init]: ../../django_strawberry_framework/__init__.py
-[private-state]: ../../django_strawberry_framework/utils/private_state.py
 [querysets]: ../../django_strawberry_framework/utils/querysets.py
 [resource-policy]: ../../django_strawberry_framework/resource_policy.py
 [schema]: ../../django_strawberry_framework/schema.py

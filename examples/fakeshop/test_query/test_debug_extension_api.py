@@ -78,7 +78,6 @@ from strawberry.extensions import MaskErrors, SchemaExtension
 from typing_extensions import override
 
 from django_strawberry_framework import (
-    SCHEMA_CONFIGURATION_ERROR_CODE,
     DjangoOptimizerExtension,
     DjangoSchema,
     finalize_django_types,
@@ -1010,31 +1009,6 @@ async def test_an_async_validation_failure_with_a_raising_teardown_publishes_no_
 # ---------------------------------------------------------------------------
 # spec-048 Decision 5 - a non-bool acknowledgement never arms the disclosure.
 # ---------------------------------------------------------------------------
-
-
-@override_settings(DEBUG=False)
-def test_a_refused_acknowledgement_never_becomes_an_armed_extension(
-    install_probe_schema: _InstallProbeSchema,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A schema listing the misspelled acknowledgement refuses the operation, never discloses.
-
-    The refusal happens when the entry is built for the operation, so no operation
-    runs with it: the request is answered with the configuration code, no ``debug``
-    key, and the server log names the construction error.
-    """
-    install_probe_schema([_refused_acknowledgement])
-
-    with caplog.at_level(logging.ERROR, logger="django_strawberry_framework"):
-        res = TestClient().query("{ __typename }", assert_no_errors=False)
-
-    assert res.data is None
-    assert [error.get("extensions", {}).get("code") for error in res.errors or []] == [
-        SCHEMA_CONFIGURATION_ERROR_CODE,
-    ]
-    assert "debug" not in (res.extensions or {})
-    messages = [record.getMessage() for record in caplog.records]
-    assert any(_REFUSED_ACKNOWLEDGEMENT_MESSAGE in message for message in messages), messages
 
 
 @override_settings(DEBUG=False)
